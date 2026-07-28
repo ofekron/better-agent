@@ -4185,24 +4185,24 @@ def test_run_recovery_summarizes_repeated_skip_logs() -> None:
 
 
 def test_provider_start_run_is_off_loop_everywhere() -> None:
-    """provider.start_run is synchronous and does blocking session-manager
+    """prepare_and_start_run is synchronous and does blocking session-manager
     reads (get_fields via _build_input_payload), input.json writes, and a
     Popen. Running it on the asyncio event loop freezes the whole app for
     tens of seconds during worker delegations, recovery retries, and
     remote-node runs. Every call site MUST offload it via asyncio.to_thread
     — parity with turn_manager's top-level spawn path."""
     delegation = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                provider.start_run," in delegation
+    assert "await asyncio.to_thread(\n                    prepare_and_start_run," in delegation
     assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in delegation
     assert "\n            provider.start_run(" not in delegation
 
     recovery = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n        provider.start_run," in recovery
+    assert "await asyncio.to_thread(\n            start_prepared_run," in recovery
     assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in recovery
     assert "\n    provider.start_run(" not in recovery
 
     node_rpc = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n            provider.start_run," in node_rpc
+    assert "await asyncio.to_thread(\n                start_prepared_run," in node_rpc
     assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in node_rpc
     assert "\n        provider.start_run(" not in node_rpc
 

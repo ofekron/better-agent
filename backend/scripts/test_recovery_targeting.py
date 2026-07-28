@@ -11,12 +11,51 @@ _test_home.isolate("bc_test_retarget_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_recovery  # noqa: E402
+from execution_template import prepare_execution  # noqa: E402
 from provider_agy import AgyProvider  # noqa: E402
 from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
 failures: list[str] = []
+
+
+def _write_execution_artifact(
+    run_dir: Path,
+    run_id: str,
+    payload: dict,
+    *,
+    kind: str = "codex",
+) -> None:
+    prepared = prepare_execution(
+        {
+            "id": f"{kind}-provider",
+            "kind": kind,
+            "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
+            "revision": 2,
+        },
+        run_id=run_id,
+        prompt=payload.get("prompt", ""),
+        images=payload.get("images"),
+        files=payload.get("files"),
+        cwd=payload.get("cwd", "/tmp"),
+        model=payload.get("model"),
+        reasoning_effort=payload.get("reasoning_effort"),
+        session_id=payload.get("session_id"),
+        mode=payload.get("mode", "native"),
+        app_session_id="sid",
+        source=payload.get("source"),
+        backend_url=payload.get("backend_url"),
+        continuation_chain=payload.get("continuation_chain"),
+        provider_run_config=payload.get("provider_run_config"),
+        capability_contexts=payload.get("capability_contexts"),
+        resolved_harness_run_config=payload.get("resolved_harness_run_config"),
+        target_message_id=payload.get("target_message_id"),
+        turn_run_id=payload.get("turn_run_id"),
+        disabled_builtin_extensions=payload.get("disabled_builtin_extensions"),
+        provisioned_tool_profile=payload.get("provisioned_tool_profile", ""),
+    )
+    atomic_write_json(run_dir / "execution.json", prepared.artifact.to_dict())
 
 
 def check(name: str, ok: bool) -> None:
@@ -388,7 +427,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     run_id = "retry-needs-coordinator"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(run_dir / "input.json", {
+    input_payload = {
         "prompt": "retry me",
         "source": "mssg",
         "cwd": "/tmp",
@@ -400,7 +439,9 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         },
         "disabled_builtin_extensions": ["recovery.disabled"],
         "provisioned_tool_profile": "",
-    })
+    }
+    atomic_write_json(run_dir / "input.json", input_payload)
+    _write_execution_artifact(run_dir, run_id, input_payload, kind="claude")
     fake_sm = _FakeSessionManager({
         "agent_session_id": "provider-sid",
         "messages": [
@@ -421,10 +462,13 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
             self.started: list[str] = []
             self.kwargs: dict = {}
 
-        def start_run(self, *, run_id: str, **kwargs) -> None:
+        def start_run(self, *, execution, **_kwargs) -> None:
+            kwargs = execution.start_arguments()
+            run_id = kwargs["run_id"]
             self.started.append(run_id)
             self.kwargs = kwargs
             self._runs[run_id] = _Run()
+            return True
 
     class _TurnManager:
         def __init__(self) -> None:
@@ -455,6 +499,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
             self._session_cancelled = {}
+            self.internal_token = "test-token"
 
     async def _sleep(_seconds: float) -> None:
         return None
@@ -526,10 +571,12 @@ def test_recovered_retry_cancelled_during_backoff_does_not_spawn() -> None:
     run_id = "retry-cancelled-before-spawn"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(run_dir / "input.json", {
+    input_payload = {
         "prompt": "do not retry me",
         "cwd": "/tmp",
-    })
+    }
+    atomic_write_json(run_dir / "input.json", input_payload)
+    _write_execution_artifact(run_dir, run_id, input_payload)
     fake_sm = _FakeSessionManager({
         "messages": [
             {"id": "msg-1", "role": "assistant", "events": [], "transient_attempt": 0},
@@ -545,6 +592,7 @@ def test_recovered_retry_cancelled_during_backoff_does_not_spawn() -> None:
 
         def start_run(self, **_kwargs) -> None:
             self.started += 1
+            return True
 
     class _TurnManager:
         def __init__(self) -> None:
@@ -608,10 +656,12 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
     run_id = "retry-spawn-boundaries"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(run_dir / "input.json", {
+    input_payload = {
         "prompt": "retry safely",
         "cwd": "/tmp",
-    })
+    }
+    atomic_write_json(run_dir / "input.json", input_payload)
+    _write_execution_artifact(run_dir, run_id, input_payload)
 
     class _Run:
         class _Popen:
@@ -647,6 +697,7 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
             self.turn_manager = _TurnManager()
             self._session_cancelled = {}
             self.cancelled_runs = []
+            self.internal_token = "test-token"
 
         def _cancel_turn_fanout(self, retry_run_id: str) -> None:
             self.cancelled_runs.append(retry_run_id)
@@ -687,11 +738,13 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
                 self._runs = {}
                 self.started = 0
 
-            def start_run(self, *, run_id: str, **_kwargs) -> None:
+            def start_run(self, *, execution, **_kwargs) -> None:
+                run_id = execution.start_arguments()["run_id"]
                 self.started += 1
                 self._runs[run_id] = _Run()
                 race_coordinator._session_cancelled["sid"] = True
                 race_coordinator.turn_manager.cancel_events["sid"].set()
+                return True
 
         run_recovery.session_manager = _FakeSessionManager({
             "messages": [{"id": "msg-1", "role": "assistant", "events": []}],
@@ -733,12 +786,14 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
     run_id = "recovered-capability-change"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(run_dir / "input.json", {
+    input_payload = {
         "prompt": "STALE WRAPPED RECOVERY PROMPT",
         "cwd": "/tmp",
         "model": "gpt",
         "continuation_chain": [],
-    })
+    }
+    atomic_write_json(run_dir / "input.json", input_payload)
+    _write_execution_artifact(run_dir, run_id, input_payload)
     fake_sm = _FakeSessionManager({
         "agent_session_id": "newer-session-global-sid",
         "messages": [
@@ -781,9 +836,12 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
             self._runs = {}
             self.kwargs: dict = {}
 
-        def start_run(self, *, run_id: str, **kwargs) -> None:
+        def start_run(self, *, execution, **_kwargs) -> None:
+            kwargs = execution.start_arguments()
+            run_id = kwargs["run_id"]
             self.kwargs = kwargs
             self._runs[run_id] = _Run()
+            return True
 
     class _TurnManager:
         def __init__(self) -> None:
@@ -801,6 +859,7 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
     class _Coordinator:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
+            self.internal_token = "test-token"
 
     def _create_task(coro, *, name=None):
         coro.close()

@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import ast
+import asyncio
+import inspect
+import json
+import sys
+import tempfile
+import threading
+import uuid
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import _test_home  # noqa: E402
+
+_test_home.isolate("bc-test-execution-template-")
+
+from execution_template import (  # noqa: E402
+    ExecutionArtifact,
+    ExecutionAuthorityError,
+    prepare_execution,
+    validate_recovery_input,
+    validate_recovery_sessions,
+)
+from provider import Provider  # noqa: E402
+import runs_dir  # noqa: E402
+
+
+def _record(*, revision: int = 4) -> dict:
+    return {
+        "id": "codex-work",
+        "kind": "codex",
+        "generation": "0a1f0f6c-f19f-4b9d-93d1-45d2db3af620",
+        "revision": revision,
+    }
+
+
+def _arguments() -> dict:
+    return {
+        "run_id": "f5af980c-b88a-45c7-b1d2-07522350a379",
+        "prompt": "finish the task",
+        "cwd": "/workspace",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "high",
+        "session_id": "native-session",
+        "mode": "native",
+        "app_session_id": "app-session",
+        "internal_token": "must-not-persist",
+        "extra_env": {"API_TOKEN": "must-not-persist"},
+        "provider_run_config": {
+            "mcp_servers": {
+                "private": {"command": "private-mcp", "args": ["serve"]},
+            },
+        },
+        "capability_contexts": [
+            {
+                "name": "review",
+                "provider_kind": "codex",
+                "content_kind": "instructions",
+                "content": "review carefully",
+            },
+        ],
+        "resolved_harness_run_config": {
+            "profile_id": "reviewer",
+            "profile_revision": "revision-1",
+        },
+    }
+
+
+def test_prepared_execution_is_detached_secret_free_and_authority_bound() -> None:
+    arguments = _arguments()
+    prepared = prepare_execution(_record(), **arguments)
+    arguments["model"] = "mutated-after-prepare"
+    arguments["provider_run_config"]["mcp_servers"].clear()
+
+    assert prepared.start_arguments()["model"] == "gpt-5.6-sol"
+    assert prepared.start_arguments()["provider_run_config"]["mcp_servers"]
+    encoded = prepared.artifact.to_dict()
+    serialized = json.dumps(encoded, sort_keys=True)
+    assert "must-not-persist" not in serialized
+    assert "internal_token" not in serialized
+    assert "extra_env" not in serialized
+    assert "backend_url" not in serialized
+    assert "provider_run_config" in serialized
+    assert "capability_contexts" in serialized
+    assert "resolved_harness_run_config" in serialized
+    assert "must-not-persist" not in repr(prepared)
+    assert prepared.artifact.provider_revision == 4
+    prepared.artifact.require_authority(_record())
+
+    for changed in (
+        _record(revision=5),
+        {**_record(), "generation": str(uuid.uuid4())},
+        {**_record(), "id": "other"},
+    ):
+        try:
+            prepared.artifact.require_authority(changed)
+        except ExecutionAuthorityError:
+            continue
+        raise AssertionError(f"changed provider authority was accepted: {changed}")
+
+
+def test_artifact_round_trip_is_strict_and_fingerprint_bound() -> None:
+    artifact = prepare_execution(_record(), **_arguments()).artifact
+    encoded = artifact.to_dict()
+    assert ExecutionArtifact.from_dict(json.loads(json.dumps(encoded))) == artifact
+
+    mutations = []
+    unknown = json.loads(json.dumps(encoded))
+    unknown["unexpected"] = True
+    mutations.append(unknown)
+    boolean_revision = json.loads(json.dumps(encoded))
+    boolean_revision["provider_revision"] = True
+    mutations.append(boolean_revision)
+    tampered_model = json.loads(json.dumps(encoded))
+    tampered_model["template"]["arguments"]["model"] = "other"
+    mutations.append(tampered_model)
+    missing_fingerprint = json.loads(json.dumps(encoded))
+    missing_fingerprint.pop("fingerprint")
+    mutations.append(missing_fingerprint)
+
+    for mutation in mutations:
+        try:
+            ExecutionArtifact.from_dict(mutation)
+        except (ExecutionAuthorityError, ValueError):
+            continue
+        raise AssertionError(f"invalid execution artifact was accepted: {mutation}")
+
+    unsafe = _arguments()
+    unsafe["run_id"] = "../../escape"
+    try:
+        prepare_execution(_record(), **unsafe)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe run_id reached execution persistence")
+
+    invalid_arguments = (
+        {"cwd": "relative/path"},
+        {"backend_url": "http://user:secret@localhost:8000"},
+        {"backend_url": 8000},
+        {"images": ["not-an-object"]},
+        {"files": [{"name": "missing-data"}]},
+        {"disallowed_tools": ["Bash", 4]},
+        {"continuation_chain": "not-a-list"},
+        {"provider_run_config": []},
+        {
+            "provider_run_config": {
+                "mcp_servers": {
+                    "private": {"env": {"SERVICE_TOKEN": "must-not-persist"}},
+                },
+            },
+        },
+        {"capability_contexts": {}},
+        {"resolved_harness_run_config": []},
+        {"extra_env": {"TOKEN": 4}},
+        {"source": 4},
+        {"target_message_id": 4},
+    )
+    for override in invalid_arguments:
+        candidate = {**_arguments(), **override}
+        try:
+            prepare_execution(_record(), **candidate)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid execution arguments were accepted: {override}")
+
+
+def test_recovery_input_is_diagnostic_only_and_must_match_artifact() -> None:
+    prepared = prepare_execution(_record(), **_arguments())
+    original = prepared.artifact.template.arguments()
+    validate_recovery_input(prepared.artifact, dict(original))
+
+    for key, value in (
+        ("prompt", "mutated prompt"),
+        ("cwd", "/different"),
+        ("model", "different-model"),
+        ("reasoning_effort", "low"),
+        ("mode", "manager"),
+        ("provider_run_config", {}),
+        ("capability_contexts", []),
+        ("resolved_harness_run_config", {}),
+        ("provider_id", "other-provider"),
+    ):
+        legacy = dict(original)
+        legacy[key] = value
+        try:
+            validate_recovery_input(prepared.artifact, legacy)
+        except ExecutionAuthorityError:
+            continue
+        raise AssertionError(f"recovery accepted mutated {key}")
+
+
+def test_retry_preserves_authority_and_original_frozen_inputs() -> None:
+    prepared = prepare_execution(_record(), **_arguments())
+    retry = prepared.retry(
+        run_id="8a012cf5-b8a1-4407-92b3-59e6e027d148",
+        session_id="resumed-session",
+    )
+
+    assert retry.artifact.provider_generation == prepared.artifact.provider_generation
+    assert retry.artifact.provider_revision == prepared.artifact.provider_revision
+    assert retry.start_arguments()["run_id"] != prepared.start_arguments()["run_id"]
+    assert retry.start_arguments()["session_id"] == "resumed-session"
+    assert retry.start_arguments()["model"] == "gpt-5.6-sol"
+    assert retry.artifact.fingerprint != prepared.artifact.fingerprint
+    local_url = prepared.retry(backend_url="http://node.local:8000")
+    assert local_url.artifact == prepared.artifact
+    assert local_url.start_arguments()["backend_url"] == "http://node.local:8000"
+
+    worker_arguments = {**_arguments(), "app_session_id": "worker-session"}
+    routed = prepare_execution(
+        _record(),
+        routing_session_id="manager-session",
+        **worker_arguments,
+    )
+    assert routed.artifact.routing_session_id == "manager-session"
+    assert routed.start_arguments()["app_session_id"] == "worker-session"
+    assert (
+        ExecutionArtifact.from_dict(routed.artifact.to_dict()).routing_session_id
+        == "manager-session"
+    )
+    validate_recovery_sessions(
+        routed.artifact,
+        routing_session_id="manager-session",
+        persist_session_id="worker-session",
+    )
+    for route, persist in (
+        ("other-manager", "worker-session"),
+        ("manager-session", "other-worker"),
+    ):
+        try:
+            validate_recovery_sessions(
+                routed.artifact,
+                routing_session_id=route,
+                persist_session_id=persist,
+            )
+        except ExecutionAuthorityError:
+            continue
+        raise AssertionError("recovery accepted conflicting routing authority")
+
+
+def test_provider_start_run_is_shared_final_template() -> None:
+    assert not getattr(Provider.start_run, "__isabstractmethod__", False)
+    assert getattr(Provider._start_run, "__isabstractmethod__", False)
+    signature = inspect.signature(Provider.start_run)
+    assert tuple(signature.parameters) == (
+        "self",
+        "execution",
+        "loop",
+        "queue",
+    )
+
+    provider_files = [
+        ROOT / name
+        for name in (
+            "provider_agy.py",
+            "provider_amp.py",
+            "provider_claude.py",
+            "provider_codex.py",
+            "provider_copilot.py",
+            "provider_cursor.py",
+            "provider_kimi.py",
+            "provider_openai.py",
+            "provider_opencode.py",
+            "provider_pi.py",
+            "provider_qwen.py",
+            "provider_remote.py",
+        )
+    ]
+    offenders = []
+    for path in provider_files:
+        source = path.read_text(encoding="utf-8")
+        if "\n    def start_run(" in source:
+            offenders.append(path.name)
+            continue
+        tree = ast.parse(source)
+        start_nodes = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_start_run"
+        ]
+        if not start_nodes:
+            offenders.append(path.name)
+            continue
+        for node in start_nodes:
+            keyword_names = [
+                argument.arg for argument in node.args.kwonlyargs
+            ]
+            execution_index = keyword_names.index("_execution")
+            if node.args.kw_defaults[execution_index] is not None:
+                offenders.append(path.name)
+    assert offenders == []
+
+
+def test_provider_boundary_persists_before_spawn_and_rejects_stale_authority() -> None:
+    class _Provider(Provider):
+        KIND = "codex"
+
+        def __init__(self) -> None:
+            super().__init__(_record())
+            self._runs = {}
+            self.events: list[str] = []
+
+        def assert_not_suspended(self, *, action: str = "start runs") -> None:
+            self.events.append(f"suspension:{action}")
+
+        def require_runtime_credential(self) -> None:
+            self.events.append("credential")
+
+        def _admit_execution(self, execution) -> None:
+            assert execution.artifact.provider_revision == 4
+            self.events.append("admission")
+
+        def build_env(self) -> dict[str, str]:
+            return {}
+
+        def _start_run(self, **kwargs) -> None:
+            assert kwargs["internal_token"] == "must-not-persist"
+            replacement_done = threading.Event()
+            replacement = threading.Thread(
+                target=lambda: (
+                    setattr(self, "record", {**_record(), "revision": 5}),
+                    replacement_done.set(),
+                ),
+            )
+            replacement.start()
+            assert not replacement_done.wait(0.05)
+            assert self.record["revision"] == 4
+            self.events.append("spawn")
+            self.replacement = replacement
+
+        def _write_backend_state(self, rs) -> None:
+            del rs
+
+        def recover_in_flight(self, loop=None, run_id_filter=None) -> list[dict]:
+            del loop, run_id_filter
+            return []
+
+        def prune_old_runs(self, max_age_days: int = 7) -> int:
+            del max_age_days
+            return 0
+
+        async def run_headless(self, *args, **kwargs) -> str:
+            del args, kwargs
+            return ""
+
+        async def rewind(self, rewind_session_id: str, message_uuid: str) -> None:
+            del rewind_session_id, message_uuid
+
+    provider = _Provider()
+    prepared = provider.prepare_run(**_arguments())
+    with tempfile.TemporaryDirectory() as raw:
+        original_runs_root = runs_dir.runs_root
+        runs_dir.runs_root = lambda: Path(raw)
+        loop = asyncio.new_event_loop()
+        try:
+            provider.start_run(
+                execution=prepared,
+                loop=loop,
+                queue=asyncio.Queue(),
+            )
+            provider.replacement.join(timeout=1)
+            assert not provider.replacement.is_alive()
+        finally:
+            loop.close()
+            runs_dir.runs_root = original_runs_root
+
+        persisted = json.loads(
+            (Path(raw) / _arguments()["run_id"] / "execution.json").read_text(
+                encoding="utf-8",
+            ),
+        )
+        assert ExecutionArtifact.from_dict(persisted) == prepared.artifact
+        assert provider.events == [
+            "suspension:start new runs",
+            "credential",
+            "admission",
+            "spawn",
+        ]
+
+    provider.events.clear()
+    provider.record = {**_record(), "revision": 5}
+    stale_loop = asyncio.new_event_loop()
+    try:
+        provider.start_run(
+            execution=prepared,
+            loop=stale_loop,
+            queue=asyncio.Queue(),
+        )
+    except ExecutionAuthorityError:
+        pass
+    else:
+        raise AssertionError("stale provider execution was spawned")
+    finally:
+        stale_loop.close()
+    assert provider.events == []
+
+
+def test_production_callers_use_prepared_execution_boundary() -> None:
+    direct_callers = []
+    for path in ROOT.rglob("*.py"):
+        if "scripts" in path.parts or path.name == "provider.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if ".start_run," in source or ".start_run(" in source:
+            direct_callers.append(str(path.relative_to(ROOT)))
+    assert direct_callers == []
+
+
+TESTS = (
+    test_prepared_execution_is_detached_secret_free_and_authority_bound,
+    test_artifact_round_trip_is_strict_and_fingerprint_bound,
+    test_recovery_input_is_diagnostic_only_and_must_match_artifact,
+    test_retry_preserves_authority_and_original_frozen_inputs,
+    test_provider_start_run_is_shared_final_template,
+    test_provider_boundary_persists_before_spawn_and_rejects_stale_authority,
+    test_production_callers_use_prepared_execution_boundary,
+)
+
+
+if __name__ == "__main__":
+    started = asyncio.get_event_loop_policy()
+    del started
+    for test in TESTS:
+        test()
+    print("PASS execution template")

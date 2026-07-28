@@ -40,7 +40,7 @@ class _StubProvider(Provider):
     def build_env(self):  # pragma: no cover - unused
         raise NotImplementedError
 
-    def start_run(self, **kwargs):  # pragma: no cover - unused
+    def _start_run(self, **kwargs):  # pragma: no cover - unused
         raise NotImplementedError
 
     def _write_backend_state(self, rs):  # pragma: no cover - unused

@@ -229,7 +229,7 @@ class QwenProvider(SessionEventsProvider):
     # run-dir protocol and bootstrap, but qwen's runner script and the
     # provider record mode forwarded for --auth-type routing.
     # ------------------------------------------------------------------
-    def start_run(
+    def _start_run(
         self,
         *,
         run_id: str,
@@ -267,6 +267,7 @@ class QwenProvider(SessionEventsProvider):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
+        _execution,
     ) -> None:
         del disallowed_tools, setting_sources
         del supervisor_agent_session_id, mssg_sender_session_id

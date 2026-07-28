@@ -27,18 +27,12 @@ from typing import Optional
 
 from orchs.jsonl_helpers import compute_jsonl_path
 from env_compat import get_env
-from provider import StreamEvent, default_provider
+from execution_template import ExecutionArtifact, restore_prepared_execution
+from provider import StreamEvent, get_provider, start_prepared_run
 from session_manager import manager as session_manager
 import perf
 
 logger = logging.getLogger(__name__)
-
-
-def _node_provisioned_tool_profile(value: object) -> str:
-    profile = str(value or "").strip()
-    if not profile:
-        return ""
-    raise ValueError("unsupported provisioned_tool_profile")
 
 
 @dataclass
@@ -69,6 +63,33 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     if not all([run_id, root_id, cwd, worker_agent_session_id]):
         logger.error("node_rpc: spawn_run missing required field: %r", msg)
         return
+    try:
+        artifact = ExecutionArtifact.from_dict(msg["execution_artifact"])
+        artifact_arguments = artifact.template.arguments()
+        if (
+            artifact_arguments["run_id"] != run_id
+            or artifact_arguments["cwd"] != cwd
+            or artifact_arguments["app_session_id"] != worker_agent_session_id
+        ):
+            raise ValueError("remote execution envelope does not match artifact")
+        provider = get_provider(artifact.provider_id)
+        execution = restore_prepared_execution(
+            artifact,
+            internal_token=__import__("node_runtime_auth").token(),
+            extra_env=msg.get("extra_env"),
+            backend_url=get_env(
+                "BETTER_CLAUDE_BACKEND_URL",
+                "http://localhost:8000",
+            ),
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        logger.error("node_rpc: invalid execution artifact: %s", exc)
+        await node_client.send_run_control(
+            run_id=str(run_id or ""),
+            control_type="error",
+            data={"error": f"invalid execution artifact: {exc}"},
+        )
+        return
 
     ctx = _RemoteRunCtx(
         run_id=run_id,
@@ -79,7 +100,6 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     _ctx_by_run[run_id] = ctx
 
     loop = asyncio.get_running_loop()
-    provider = default_provider()
     try:
         import startup_recovery_gate
         with perf.timed("node_rpc.provider_start_run.recovery_gate"):
@@ -90,46 +110,23 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         with perf.timed("node_rpc.provider_start_run.flush_pending_persists"):
             await asyncio.to_thread(session_manager.flush_pending_persists)
         with perf.timed("node_rpc.provider_start_run.provider_call"):
-            await asyncio.to_thread(
-                provider.start_run,
-            run_id=run_id,
-            prompt=msg["prompt"],
-            cwd=cwd,
-            loop=loop,
-            queue=ctx.queue,
-            model=msg.get("model"),
-            reasoning_effort=msg.get("reasoning_effort"),
-            session_id=msg.get("session_id"),
-            mode=msg.get("mode") or "native",
-            app_session_id=worker_agent_session_id,
-            source=msg.get("source"),
-            disallowed_tools=msg.get("disallowed_tools"),
-            setting_sources=msg.get("setting_sources"),
-            backend_url=get_env(
-                "BETTER_CLAUDE_BACKEND_URL",
-                "http://localhost:8000",
-            ),
-            internal_token=__import__("node_runtime_auth").token(),
-            fork=bool(msg.get("fork")),
-            supervised=bool(msg.get("supervised")),
-            supervisor_agent_session_id=msg.get("supervisor_agent_session_id"),
-            worker_agent_session_id=worker_agent_session_id,
-            mssg_sender_session_id=msg.get("mssg_sender_session_id"),
-            is_worker=bool(msg.get("is_worker")),
-            browser_harness_enabled=bool(msg.get("browser_harness_enabled")),
-            user_facing=bool(msg.get("user_facing")),
-            extra_env=msg.get("extra_env"),
-            provider_run_config=msg.get("provider_run_config"),
-            capability_contexts=msg.get("capability_contexts"),
-            resolved_harness_run_config=msg.get("resolved_harness_run_config"),
-            target_message_id=msg.get("target_message_id"),
-            turn_run_id=msg.get("turn_run_id"),
-            provisioned_tool_profile=_node_provisioned_tool_profile(
-                msg.get("provisioned_tool_profile")
-            ),
-            disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
-                files=msg.get("files"),
+            started = await asyncio.to_thread(
+                start_prepared_run,
+                provider,
+                execution,
+                loop=loop,
+                queue=ctx.queue,
             )
+        if not started:
+            admitted = await asyncio.to_thread(execution.wait_for_admission)
+            if not admitted:
+                await node_client.send_run_control(
+                    run_id=run_id,
+                    control_type="error",
+                    data={"error": "remote run was cancelled before admission"},
+                )
+                _ctx_by_run.pop(run_id, None)
+                return
     except Exception as e:
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
         await node_client.send_run_control(

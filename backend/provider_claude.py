@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -371,7 +372,52 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     # start_run — spawn runner, schedule bootstrap task, return immediately
     # ------------------------------------------------------------------
-    def start_run(
+    @contextmanager
+    def _execution_admission(self, execution, *, loop, queue):
+        arguments = execution.start_arguments()
+        run_id = arguments["run_id"]
+        session_id = arguments["session_id"]
+        if not session_id or arguments["fork"]:
+            yield True
+            return
+
+        with self._session_start_lock(session_id):
+            blockers = [
+                rs for rs in self._runs.values()
+                if getattr(rs, "session_id", None) == session_id
+            ] + self.parked_runs_ahead_of(session_id, run_id)
+            if blockers:
+                logger.info(
+                    "start_run: deferring run %s behind winding-down "
+                    "run(s) %s on native session %s",
+                    run_id[:8],
+                    [blocker.run_id[:8] for blocker in blockers],
+                    session_id[:8],
+                )
+                self.park_run(
+                    run_id,
+                    session_id=session_id,
+                    app_session_id=arguments["app_session_id"],
+                    loop=loop,
+                    execution=execution,
+                    turn_run_id=arguments["turn_run_id"],
+                )
+                schedule_loop_task(
+                    loop,
+                    self._start_after_release(
+                        blockers,
+                        execution,
+                        loop=loop,
+                        queue=queue,
+                    ),
+                    name=f"bridge-winddown-gate-{run_id[:8]}",
+                )
+                yield False
+                return
+            self.unpark_run(run_id)
+            yield True
+
+    def _start_run(
         self,
         *,
         run_id: str,
@@ -409,6 +455,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
+        _execution,
     ) -> None:
         """Spawn `runner.py` detached and schedule a bootstrap task that,
         as soon as the runner writes `state.json`, starts a `FileTailer`
@@ -416,11 +463,9 @@ class ClaudeProvider(Provider):
         onto `queue`.
 
         Returns immediately — the run continues in the background even
-        if the backend dies. When a previous run on the SAME native
-        `session_id` is still winding down (turn done, process exiting),
-        the spawn is deferred until its release event fires (see
-        `_start_after_release`). The prompt is already durably queued by
-        the orchestrator, so deferral cannot lose it.
+        if the backend dies. The shared execution-admission hook already
+        serialized this call behind any previous run on the same native
+        session before authority persistence.
         """
         if mode == "team":
             mode = "manager"
@@ -432,6 +477,7 @@ class ClaudeProvider(Provider):
                 "cannot start new runs"
             )
         self.assert_not_suspended(action="start new runs")
+        del _execution
 
         spawn_kwargs = dict(
             run_id=run_id,
@@ -471,56 +517,6 @@ class ClaudeProvider(Provider):
             provisioned_tool_profile=provisioned_tool_profile,
         )
 
-        # Wind-down serialization gate. A completed run stays registered
-        # until its runner process actually exits; a second --resume CLI
-        # spawned on the SAME native session while the previous instance
-        # is still shutting down can cross-process-enqueue the prompt
-        # into the dying instance and return a ghost zero-token success.
-        # Keyed on the NATIVE agent session id (rs.session_id), never
-        # app_session_id — worker forks share the parent's app_session_id
-        # but run their own native session. `fork=True` spawns are
-        # exempt: `--fork-session` creates a NEW native session id.
-        #
-        # The check and the registration that follows it must be atomic:
-        # `start_run` runs on a multi-worker dispatch pool, so two runs
-        # released from the gate at the same instant would otherwise both
-        # read an empty blocker set and both spawn a `--resume` CLI on the
-        # same native session. Serialized per native session id, so turns
-        # on unrelated sessions never wait on each other.
-        if session_id and not fork:
-            with self._session_start_lock(session_id):
-                blockers = [
-                    rs for rs in self._runs.values()
-                    if getattr(rs, "session_id", None) == session_id
-                ] + self.parked_runs_ahead_of(session_id, run_id)
-                if blockers:
-                    logger.info(
-                        "start_run: deferring run %s behind winding-down "
-                        "run(s) %s on native session %s",
-                        run_id[:8],
-                        [b.run_id[:8] for b in blockers],
-                        session_id[:8],
-                    )
-                    self.park_run(
-                        run_id,
-                        session_id=session_id,
-                        app_session_id=app_session_id,
-                        loop=loop,
-                        turn_run_id=turn_run_id,
-                    )
-                    schedule_loop_task(
-                        loop,
-                        self._start_after_release(blockers, spawn_kwargs),
-                        name=f"bridge-winddown-gate-{run_id[:8]}",
-                    )
-                    return
-                # Unpark before spawning: this run is the session's owner
-                # from here on, and `_spawn_run` registers it as a live
-                # blocker for anything queued behind it.
-                self.unpark_run(run_id)
-                self._spawn_run(**spawn_kwargs)
-            return
-
         self._spawn_run(**spawn_kwargs)
 
     def _session_start_lock(self, session_id: str) -> threading.Lock:
@@ -546,7 +542,12 @@ class ClaudeProvider(Provider):
             return lock
 
     async def _start_after_release(
-        self, blockers: list, spawn_kwargs: dict,
+        self,
+        blockers: list,
+        execution,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
     ) -> None:
         """Wait for every blocking run's release event (set by
         `Provider._cleanup_run` when the runner process exits, or by
@@ -555,7 +556,8 @@ class ClaudeProvider(Provider):
         re-checks the gate against runs that registered in the meantime.
         Purely event-driven: no polling, resolves the moment the release
         fires."""
-        run_id = spawn_kwargs.get("run_id")
+        arguments = execution.start_arguments()
+        run_id = arguments["run_id"]
         try:
             waits = [
                 blocker.released.wait()
@@ -575,21 +577,31 @@ class ClaudeProvider(Provider):
                     "waiting on the wind-down gate",
                     str(run_id)[:8],
                 )
+                execution._mark_cancelled()
                 self.unpark_run(run_id)
                 return
             from turn_manager import _to_turn_dispatch_thread
-            await _to_turn_dispatch_thread(self.start_run, **spawn_kwargs)
+            from provider import start_prepared_run
+
+            await _to_turn_dispatch_thread(
+                start_prepared_run,
+                self,
+                execution,
+                loop=loop,
+                queue=queue,
+            )
         except Exception as e:
+            execution._mark_admission_failed(e)
             self.unpark_run(run_id)
             logger.exception(
                 "deferred start after release failed for run %s",
-                spawn_kwargs.get("run_id"),
+                run_id,
             )
             try:
-                spawn_kwargs["queue"].put_nowait(StreamEvent("complete", {
+                queue.put_nowait(StreamEvent("complete", {
                     "success": False,
                     "error": f"deferred start after release failed: {e}",
-                    "session_id": spawn_kwargs.get("session_id"),
+                    "session_id": arguments["session_id"],
                     "token_usage": None,
                 }))
             except Exception:

@@ -17,7 +17,13 @@ from typing import Optional
 from weakref import WeakKeyDictionary
 
 import perf
-from provider import RecoveredPopen, live_recovery_pid
+from execution_template import (
+    ExecutionArtifact,
+    restore_prepared_execution,
+    validate_recovery_input,
+    validate_recovery_sessions,
+)
+from provider import RecoveredPopen, live_recovery_pid, start_prepared_run
 from runs_dir import (
     iter_run_dirs,
     pid_alive as _pid_alive,
@@ -2889,6 +2895,22 @@ async def _retry_recovered_run(
         inp = json.loads(input_path.read_text(encoding="utf-8")) if input_path.exists() else {}
     except Exception:
         inp = {}
+    artifact_path = run_dir / "execution.json"
+    try:
+        original_artifact = ExecutionArtifact.from_dict(
+            json.loads(artifact_path.read_text(encoding="utf-8")),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"recovered run {desc.get('run_id')} has no valid execution authority",
+        ) from exc
+    validate_recovery_input(original_artifact, inp)
+    original_arguments = original_artifact.template.arguments()
+    validate_recovery_sessions(
+        original_artifact,
+        routing_session_id=app_sid,
+        persist_session_id=persist_sid,
+    )
 
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()
@@ -2948,13 +2970,12 @@ async def _retry_recovered_run(
     # Re-read session to pick up the resume sid (set by
     # _integrate_one's replay or the prior run's session_discovered).
     fresh_sess = session_manager.get(persist_sid) or {}
-    mode = desc.get("mode") or "native"
     if fresh_continuation_reason is not None:
         resume_sid = desc.get("session_id")
     else:
         resume_sid = fresh_sess.get("agent_session_id") or desc.get("session_id")
-    prompt = inp.get("prompt", "")
-    continuation_chain = inp.get("continuation_chain")
+    prompt = original_arguments["prompt"]
+    continuation_chain = original_arguments["continuation_chain"]
     if fresh_continuation_reason is not None:
         continuation = await asyncio.to_thread(
             start_continuation_for,
@@ -2978,40 +2999,32 @@ async def _retry_recovered_run(
     # reads in _build_input_payload freeze the loop during recovery retries.
     recovery_loop = asyncio.get_running_loop()
     await asyncio.to_thread(session_manager.flush_pending_persists)
+    restored_execution = restore_prepared_execution(
+        original_artifact,
+        internal_token=coordinator.internal_token,
+        extra_env=None,
+    ).retry(
+        run_id=new_run_id,
+        prompt=prompt,
+        session_id=resume_sid,
+        continuation_chain=continuation_chain,
+        target_message_id=msg_id,
+    )
     try:
-        await asyncio.to_thread(
-            provider.start_run,
-            run_id=new_run_id,
-            prompt=prompt,
-            images=inp.get("images"),
-            cwd=inp.get("cwd", ""),
+        started = await asyncio.to_thread(
+            start_prepared_run,
+            provider,
+            restored_execution,
             loop=recovery_loop,
             queue=new_queue,
-            model=inp.get("model"),
-            reasoning_effort=inp.get("reasoning_effort"),
-            session_id=resume_sid,  # --resume target
-            mode=mode,
-            app_session_id=app_sid,
-            source=inp.get("source"),
-            disallowed_tools=inp.get("disallowed_tools"),
-            setting_sources=inp.get("setting_sources"),
-            backend_url=inp.get("backend_url"),
-            internal_token=inp.get("internal_token"),
-            fork=inp.get("fork", False),
-            supervised=inp.get("supervised", False),
-            supervisor_agent_session_id=inp.get("supervisor_agent_session_id"),
-            worker_agent_session_id=inp.get("worker_agent_session_id"),
-            browser_harness_enabled=inp.get("browser_harness_enabled", False),
-            user_facing=inp.get("user_facing", False),
-            provider_run_config=inp.get("provider_run_config"),
-            capability_contexts=inp.get("capability_contexts"),
-            continuation_chain=continuation_chain,
-            target_message_id=msg_id,
-            resolved_harness_run_config=inp.get("resolved_harness_run_config"),
-            turn_run_id=inp.get("turn_run_id"),
-            disabled_builtin_extensions=inp.get("disabled_builtin_extensions"),
-            provisioned_tool_profile=inp.get("provisioned_tool_profile") or "",
         )
+        if not started:
+            admitted = await asyncio.to_thread(
+                restored_execution.wait_for_admission,
+            )
+            if not admitted:
+                await cleanup_retry_registration()
+                return
     except BaseException:
         await cleanup_retry_registration()
         raise
@@ -3030,14 +3043,14 @@ async def _retry_recovered_run(
         "app_session_id": app_sid,
         "persist_to": persist_sid,
         "pid": None,
-        "mode": mode,
+        "mode": original_arguments["mode"],
         "session_id": resume_sid,
         "jsonl_path": desc.get("jsonl_path"),
         "alive": True,
         "has_complete_json": False,
         "cancelled": False,
         "target_message_id": msg_id,
-        "turn_run_id": inp.get("turn_run_id"),
+        "turn_run_id": original_arguments["turn_run_id"],
     }
 
     # Register the retried run in `active_run_ids` + `_run_state` so the
@@ -3058,7 +3071,7 @@ async def _retry_recovered_run(
             coordinator.turn_manager.run_state_add,
             app_sid,
             run_id=new_run_id,
-            kind=mode,
+            kind=original_arguments["mode"],
             target_message_id=recovering_msg_id,
             pid=int(pid) if pid else None,
         )

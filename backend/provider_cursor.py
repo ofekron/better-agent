@@ -163,7 +163,7 @@ class CursorProvider(SessionEventsProvider):
         env.pop("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", None)
         return self.finalize_env(env)
 
-    def start_run(
+    def _start_run(
         self,
         *,
         run_id: str,
@@ -201,6 +201,7 @@ class CursorProvider(SessionEventsProvider):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
+        _execution,
     ) -> None:
         del disallowed_tools, setting_sources
         del supervised, supervisor_agent_session_id, mssg_sender_session_id

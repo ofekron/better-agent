@@ -64,6 +64,7 @@ class SpawnRun(TypedDict, total=False):
     RemoteProviderProxy.start_run wants the node to spawn a worker."""
     type: Literal["spawn_run"]
     run_id: str
+    execution_artifact: dict
     prompt: str
     cwd: str
     model: Optional[str]

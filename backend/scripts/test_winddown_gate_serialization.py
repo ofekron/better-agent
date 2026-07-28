@@ -31,7 +31,9 @@ if _BACKEND not in sys.path:
 import _test_home  # noqa: E402
 _test_home.isolate("bc-test-winddown-gate-")
 
+from provider import prepare_and_start_run  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
+from runs_dir import runs_root  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -46,7 +48,12 @@ def check(cond: bool, msg: str) -> None:
 
 
 def _mk_provider() -> tuple[ClaudeProvider, list[str]]:
-    prov = ClaudeProvider({"id": "test-gate"})
+    prov = ClaudeProvider({
+        "id": "test-gate",
+        "kind": "claude",
+        "generation": "3c5c56ad-90ba-41b9-9f2d-aa4ab874ce83",
+        "revision": 0,
+    })
     spawned: list[str] = []
     prov._spawn_run = (  # type: ignore[method-assign]
         lambda **kw: spawned.append(kw["run_id"])
@@ -67,7 +74,8 @@ def _blocker(session_id: str) -> SimpleNamespace:
 
 
 def _start(prov: ClaudeProvider, loop, *, run_id: str, session_id, fork=False):
-    prov.start_run(
+    return prepare_and_start_run(
+        prov,
         run_id=run_id,
         prompt="hello",
         cwd="/tmp",
@@ -95,12 +103,18 @@ async def _main() -> None:
     prov, spawned = _mk_provider()
     blocker = _blocker("native-sid-1")
     prov._runs[blocker.run_id] = blocker
-    _start(prov, loop, run_id="run-new", session_id="native-sid-1")
+    execution = _start(prov, loop, run_id="run-new", session_id="native-sid-1")
     await _drain()
     check(spawned == [], "spawn deferred while blocker is registered")
+    check(
+        not (runs_root() / "run-new").exists(),
+        "deferred run has no pre-admission directory",
+    )
+    check(execution.admission_pending, "deferred admission remains pending")
     prov._cleanup_run(blocker.run_id)  # sets released + deregisters
     await _drain()
     check(spawned == ["run-new"], f"deferred spawn fired after release ({spawned})")
+    check(execution.wait_for_admission(), "deferred admission resolves after spawn")
 
     print("T3 fork=True bypasses the gate")
     prov, spawned = _mk_provider()
