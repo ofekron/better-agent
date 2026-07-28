@@ -21787,6 +21787,26 @@ button.progress-inflight {
   font-size: calc(13px * var(--app-font-scale));
 }
 
+.analytics-data-status {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  color: var(--text-secondary);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: calc(13px * var(--app-font-scale));
+  animation: analytics-status-in 180ms ease-out;
+}
+
+@keyframes analytics-status-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analytics-data-status { animation: none; }
+}
+
 .analytics-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

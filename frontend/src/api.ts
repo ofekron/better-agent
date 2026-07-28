@@ -78,6 +78,7 @@ export async function fetchAnalytics(
   start?: string,
   end?: string,
   granularity?: AnalyticsGranularity,
+  signal?: AbortSignal,
 ): Promise<AnalyticsReport> {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
@@ -86,7 +87,7 @@ export async function fetchAnalytics(
   const qs = params.toString();
   const res = await fetch(
     `${API}/api/analytics${qs ? `?${qs}` : ""}`,
-    { credentials: "include" },
+    { credentials: "include", signal },
   );
   return _json(res);
 }
@@ -155,6 +156,11 @@ export async function postChatMessage(
 
 export interface AnalyticsReport {
   range: { start: string; end: string; granularity: string };
+  native_data?: {
+    state: "current" | "stale" | "unavailable";
+    refresh_requested?: boolean;
+    partial_metrics?: string[];
+  };
   providers: { id: string; name: string; kind: string }[];
   sessions: {
     total: number;

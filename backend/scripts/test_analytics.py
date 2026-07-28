@@ -19,7 +19,6 @@ import sys
 import tempfile
 import traceback
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -35,8 +34,6 @@ import llm_call_log  # noqa: E402
 import run_source_index  # noqa: E402
 import session_store  # noqa: E402
 import trace_collector  # noqa: E402
-
-analytics.native_session_miner.iter_all_native_candidates = lambda: []
 
 END = datetime(2026, 6, 1, 12, 0, 0)
 
@@ -472,84 +469,75 @@ def test_aggregate_sessions_split_user_vs_system():
     assert sum(b["count"] for b in row.values()) == 3
 
 
-def test_compute_analytics_uses_raw_only_when_index_is_uncovered():
-    class Candidate:
-        sid = "uncovered-native"
-        cwd = "/repo"
-        format = "codex"
-        transcript = "/native/uncovered.jsonl"
+def test_compute_analytics_marks_native_data_unavailable_without_raw_fallback():
+    original_snapshot = analytics.native_analytics_snapshot.NativeAnalyticsSnapshot
 
-        def parse_elements(self):
-            return [
-                SimpleNamespace(
-                    kind="user_prompt",
-                    timestamp="2026-06-01T09:00:00.000000Z",
-                ),
-                SimpleNamespace(
-                    kind="assistant_text",
-                    timestamp="2026-06-01T09:00:01.000000Z",
-                ),
-            ]
+    class UnavailableSnapshot:
+        status = {"state": "unavailable"}
 
-    original_state = analytics.native_transcript_index.quick_state
-    original_iter = analytics.native_session_miner.iter_all_native_candidates
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": False,
-        "covered": False,
-        "usable": False,
-    }
-    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def query(self, *_args):
+            raise AssertionError("unavailable snapshot must not query")
+
+    analytics.native_analytics_snapshot.NativeAnalyticsSnapshot = UnavailableSnapshot
     try:
         out = analytics.compute_analytics(
             datetime(2026, 6, 1),
             datetime(2026, 6, 2),
         )
     finally:
-        analytics.native_transcript_index.quick_state = original_state
-        analytics.native_session_miner.iter_all_native_candidates = original_iter
+        analytics.native_analytics_snapshot.NativeAnalyticsSnapshot = original_snapshot
 
-    assert out["sessions"]["by_provider"][0]["kind"] == "codex"
-    assert out["turns"]["by_provider"][0]["turns"] == 1
+    assert out["native_data"] == {"state": "unavailable"}
 
 
-def test_compute_analytics_never_raw_parses_after_covered_query_failure():
-    original_state = analytics.native_transcript_index.quick_state
-    original_sql = analytics.native_transcript_index.run_readonly_sql
-    original_iter = analytics.native_session_miner.iter_all_native_candidates
-    raw_called = False
+def test_compute_analytics_includes_native_turns_from_current_snapshot():
+    original_snapshot = analytics.native_analytics_snapshot.NativeAnalyticsSnapshot
 
-    def raw_candidates():
-        nonlocal raw_called
-        raw_called = True
-        return []
+    class CurrentSnapshot:
+        status = {"state": "current", "refresh_requested": False}
 
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": True,
-        "covered": True,
-        "usable": True,
-    }
-    analytics.native_transcript_index.run_readonly_sql = lambda *_args, **_kwargs: {
-        "error": "result_too_large",
-        "columns": [],
-        "rows": [],
-    }
-    analytics.native_session_miner.iter_all_native_candidates = raw_candidates
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def query(self, sql, _params):
+            if "COUNT(*) AS count" in sql and "FROM native_file_state fs" in sql:
+                return [{
+                    "provider_kind": "codex",
+                    "bucket": "2026-06-01",
+                    "count": 1,
+                    "user_count": 1,
+                    "message_count": 2,
+                }]
+            if "native_element_meta m" in sql:
+                return [{
+                    "provider_kind": "codex",
+                    "bucket": "2026-06-01",
+                    "count": 2,
+                    "user_count": 2,
+                }]
+            return []
+
+    analytics.native_analytics_snapshot.NativeAnalyticsSnapshot = CurrentSnapshot
     try:
-        try:
-            analytics.compute_analytics(
-                datetime(2026, 6, 1),
-                datetime(2026, 6, 2),
-            )
-        except RuntimeError as exc:
-            assert str(exc) == "result_too_large"
-        else:
-            raise AssertionError("covered analytics query failure was hidden")
+        out = analytics.compute_analytics(
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+        )
     finally:
-        analytics.native_transcript_index.quick_state = original_state
-        analytics.native_transcript_index.run_readonly_sql = original_sql
-        analytics.native_session_miner.iter_all_native_candidates = original_iter
+        analytics.native_analytics_snapshot.NativeAnalyticsSnapshot = original_snapshot
 
-    assert not raw_called
+    assert out["native_data"]["state"] == "current"
+    assert out["turns"]["total"] == 2
+    assert "partial_metrics" not in out["native_data"]
 
 
 def test_utc_z_uses_lexically_stable_microsecond_bounds():

@@ -112,6 +112,7 @@ export function AnalyticsPage({ onBack }: Props) {
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const { start, end } = useMemo(() => {
     if (preset === "custom") return { start: customStart, end: customEnd };
@@ -123,17 +124,20 @@ export function AnalyticsPage({ onBack }: Props) {
   // Single fetcher for both the range-change effect and the refresh button.
   const reqIdRef = useRef(0);
   const load = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     const myId = ++reqIdRef.current;
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAnalytics(start, end, granularity);
+      const data = await fetchAnalytics(start, end, granularity, controller.signal);
       if (reqIdRef.current !== myId) return;
       setReport(data);
     } catch (e) {
+      if (controller.signal.aborted) return;
       if (reqIdRef.current !== myId) return;
       setError(e instanceof Error ? e.message : String(e));
-      setReport(null);
     } finally {
       if (reqIdRef.current === myId) setLoading(false);
     }
@@ -141,6 +145,7 @@ export function AnalyticsPage({ onBack }: Props) {
 
   useEffect(() => {
     void load();
+    return () => abortRef.current?.abort();
   }, [load]);
 
   const resolvedGranularity = report?.range.granularity ?? "day";
@@ -198,6 +203,13 @@ export function AnalyticsPage({ onBack }: Props) {
       </header>
 
       {error && <div className="analytics-error">{error}</div>}
+      {report && report.native_data?.state !== "current" && (
+        <div className="analytics-data-status" role="status">
+          {report?.native_data?.state === "unavailable"
+            ? t("analytics.nativeUnavailable")
+            : t("analytics.nativePartial")}
+        </div>
+      )}
 
       <div className="analytics-stats">
         <StatCard label={t("analytics.statSessions")} value={fmt(report?.sessions.total ?? 0)} />

@@ -52,7 +52,7 @@ const emptyReport = {
 
 describe("AnalyticsPage", () => {
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("loads backend-default all-time analytics by default", async () => {
@@ -61,8 +61,64 @@ describe("AnalyticsPage", () => {
     render(<AnalyticsPage onBack={() => undefined} />);
 
     await waitFor(() => {
-      expect(fetchAnalytics).toHaveBeenCalledWith(undefined, undefined, "auto");
+      expect(fetchAnalytics).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        "auto",
+        expect.any(AbortSignal),
+      );
     });
+  });
+
+  it("labels partial native data instead of leaving charts loading", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue({
+      ...emptyReport,
+      native_data: {
+        state: "stale",
+        refresh_requested: true,
+        partial_metrics: ["turns"],
+      },
+    });
+
+    render(<AnalyticsPage onBack={() => undefined} />);
+
+    expect((await screen.findByRole("status")).textContent).toBe(
+      "analytics.nativePartial",
+    );
+    expect(screen.queryByText("common.loading")).toBeNull();
+  });
+
+  it("aborts a superseded analytics request", async () => {
+    const signals: AbortSignal[] = [];
+    vi.mocked(fetchAnalytics).mockImplementation(
+      async (_start, _end, _granularity, signal) => {
+        if (signal) signals.push(signal);
+        return emptyReport;
+      },
+    );
+
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await waitFor(() => expect(signals).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+    await waitFor(() => expect(signals).toHaveLength(2));
+
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it("aborts analytics loading when the page unmounts", async () => {
+    let signal: AbortSignal | undefined;
+    vi.mocked(fetchAnalytics).mockImplementation(
+      async (_start, _end, _granularity, requestSignal) => {
+        signal = requestSignal;
+        return new Promise<never>(() => undefined);
+      },
+    );
+
+    const view = render(<AnalyticsPage onBack={() => undefined} />);
+    await waitFor(() => expect(signal).toBeDefined());
+    view.unmount();
+
+    expect(signal?.aborted).toBe(true);
   });
 
   it("shows zoom controls for populated time-series charts", async () => {
@@ -102,6 +158,9 @@ describe("AnalyticsPage", () => {
 
     render(<AnalyticsPage onBack={() => undefined} />);
 
-    expect((await screen.findByTestId("analytics-time-series-chart")).getAttribute("data-series-keys")).toBe("count,user_count");
+    const charts = await screen.findAllByTestId("analytics-time-series-chart");
+    expect(charts.some(
+      (chart) => chart.getAttribute("data-series-keys") === "user_count,non_user",
+    )).toBe(true);
   });
 });

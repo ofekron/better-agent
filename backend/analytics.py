@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 import config_store
 import llm_call_log
-import native_session_miner
-import native_transcript_index
+import native_analytics_snapshot
 import run_source_index
 import session_store
 import trace_collector
@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)
-NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS = 15.0
 VALID_GRANULARITIES = {"hour", "day", "week", "month"}
 
 
@@ -619,16 +618,12 @@ def _native_bucket_sql(column: str, granularity: str) -> str:
     return f"strftime('%Y-%m', {local})"
 
 
-def _native_projection_query(sql: str, params: tuple) -> list[dict]:
-    result = native_transcript_index.run_readonly_sql(
-        sql,
-        params,
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
-    )
-    if result.get("error"):
-        raise RuntimeError(str(result["error"]))
-    columns = result.get("columns") or []
-    return [dict(zip(columns, row)) for row in result.get("rows") or []]
+def _native_projection_query(
+    snapshot: native_analytics_snapshot.NativeAnalyticsSnapshot,
+    sql: str,
+    params: tuple,
+) -> list[dict]:
+    return snapshot.query(sql, params)
 
 
 def _native_analytics_projection(
@@ -636,30 +631,24 @@ def _native_analytics_projection(
     end: datetime,
     granularity: str,
     ba_session_ids: set[str],
-) -> Optional[dict]:
-    state = native_transcript_index.quick_state()
-    if not state.get("schema_ok") or not state.get("covered"):
-        return None
+) -> tuple[dict, dict]:
+    snapshot = native_analytics_snapshot.NativeAnalyticsSnapshot()
+    snapshot.__enter__()
+    if snapshot.status["state"] == "unavailable":
+        return {"sessions": [], "turns": [], "session_ids": []}, snapshot.status
 
     start_z = _utc_z(start)
     end_z = _utc_z(end)
     session_bucket = _native_bucket_sql("fs.first_user_prompt_ts", granularity)
-    turn_bucket = _native_bucket_sql("m.ts_utc", granularity)
-    range_paths = """
-        SELECT DISTINCT path
-        FROM native_element_meta INDEXED BY native_element_meta_kind_path_ts_idx
-        WHERE element_kind = 'user_prompt'
-          AND ts_utc >= ?
-          AND ts_utc <= ?
-    """
     sessions = _native_projection_query(
+        snapshot,
         f"""
         SELECT
             COALESCE(fs.tag, 'unknown') AS provider_kind,
             {session_bucket} AS bucket,
             COUNT(*) AS count,
-            SUM(CASE WHEN COALESCE(fs.turn_source, '') IN ('fork', 'team', 'internal')
-                     THEN 0 ELSE 1 END) AS user_count,
+            SUM(CASE WHEN COALESCE(fs.turn_source, '') IN
+                ('fork', 'team', 'internal') THEN 0 ELSE 1 END) AS user_count,
             SUM(COALESCE(fs.message_count, 0)) AS message_count
         FROM native_file_state fs
         WHERE fs.first_user_prompt_ts >= ?
@@ -668,133 +657,54 @@ def _native_analytics_projection(
         """,
         (start_z, end_z),
     )
-    missing_probe = _native_projection_query(
-        f"""
-        WITH range_paths(path) AS ({range_paths})
-        SELECT rp.path
-        FROM range_paths rp
-        LEFT JOIN native_file_state fs ON fs.path = rp.path
-        WHERE fs.path IS NULL
-        LIMIT 1
-        """,
-        (start_z, end_z),
-    )
-    if missing_probe:
-        missing_sessions = _native_projection_query(
-            f"""
-            WITH range_paths(path) AS ({range_paths}),
-            missing AS (
-                SELECT
-                    m.path,
-                    COALESCE(MAX(m.tag), 'unknown') AS provider_kind,
-                    MIN(CASE WHEN m.element_kind = 'user_prompt' THEN m.ts_utc END) AS created_at,
-                    COUNT(CASE WHEN m.element_kind IN ('user_prompt', 'assistant_text')
-                               THEN 1 END) AS message_count
-                FROM native_element_meta m
-                JOIN range_paths rp ON rp.path = m.path
-                LEFT JOIN native_file_state fs ON fs.path = m.path
-                WHERE fs.path IS NULL
-                GROUP BY m.path
-            )
-            SELECT
-                provider_kind,
-                {_native_bucket_sql("created_at", granularity)} AS bucket,
-                COUNT(*) AS count,
-                COUNT(*) AS user_count,
-                SUM(message_count) AS message_count
-            FROM missing
-            WHERE created_at >= ?
-              AND created_at <= ?
-            GROUP BY provider_kind, bucket
-            """,
-            (start_z, end_z, start_z, end_z),
-        )
-        sessions.extend(missing_sessions)
-    turns = _native_projection_query(
-        f"""
-        SELECT
-            COALESCE(fs.tag, m.tag, 'unknown') AS provider_kind,
-            {turn_bucket} AS bucket,
-            COUNT(*) AS count,
-            SUM(CASE WHEN COALESCE(fs.turn_source, '') IN ('fork', 'team', 'internal')
-                     THEN 0 ELSE 1 END) AS user_count
-        FROM native_element_meta m INDEXED BY native_element_meta_kind_path_ts_idx
-        LEFT JOIN native_file_state fs ON fs.path = m.path
-        WHERE m.element_kind = 'user_prompt'
-          AND m.ts_utc >= ?
-          AND m.ts_utc <= ?
-        GROUP BY provider_kind, bucket
-        """,
-        (start_z, end_z),
-    )
     sid_rows = []
     if ba_session_ids:
         sid_rows = _native_projection_query(
-            f"""
-            WITH requested(sid) AS (SELECT value FROM json_each(?)),
-            range_paths(path) AS ({range_paths})
-            SELECT fs.sid
-            FROM range_paths rp
-            JOIN native_file_state fs ON fs.path = rp.path
+            snapshot,
+            """
+            WITH requested(sid) AS (SELECT value FROM json_each(?))
+            SELECT DISTINCT fs.sid
+            FROM native_file_state fs
             JOIN requested r ON r.sid = fs.sid
-            UNION
-            SELECT m.sid
-            FROM range_paths rp
-            JOIN native_element_meta m ON m.path = rp.path
-            LEFT JOIN native_file_state fs ON fs.path = rp.path
-            JOIN requested r ON r.sid = m.sid
-            WHERE fs.path IS NULL
-              AND m.element_kind = 'user_prompt'
+            WHERE fs.first_user_prompt_ts >= ?
+              AND fs.first_user_prompt_ts <= ?
             """,
             (json.dumps(sorted(ba_session_ids)), start_z, end_z),
         )
+    turns = []
+    if snapshot.status["state"] == "current":
+        turn_bucket = _native_bucket_sql("m.ts_utc", granularity)
+        try:
+            turns = _native_projection_query(
+                snapshot,
+                f"""
+                SELECT
+                    COALESCE(fs.tag, m.tag, 'unknown') AS provider_kind,
+                    {turn_bucket} AS bucket,
+                    COUNT(*) AS count,
+                    SUM(CASE WHEN COALESCE(fs.turn_source, '') IN
+                        ('fork', 'team', 'internal') THEN 0 ELSE 1 END) AS user_count
+                FROM native_element_meta m
+                    INDEXED BY native_element_meta_kind_ts_path_idx
+                LEFT JOIN native_file_state fs ON fs.path = m.path
+                WHERE m.element_kind = 'user_prompt'
+                  AND m.ts_utc >= ?
+                  AND m.ts_utc <= ?
+                GROUP BY provider_kind, bucket
+                """,
+                (start_z, end_z),
+            )
+        except sqlite3.OperationalError:
+            snapshot.status["state"] = "stale"
+    if not turns:
+        snapshot.status["partial_metrics"] = ["turns"]
+    snapshot_status = snapshot.status
+    snapshot.__exit__(None, None, None)
     return {
         "sessions": sessions,
         "turns": turns,
         "session_ids": [row["sid"] for row in sid_rows],
-    }
-
-
-def _native_conversations_from_raw(start: datetime, end: datetime) -> list[dict]:
-    conversations: list[dict] = []
-    for candidate in native_session_miner.iter_all_native_candidates():
-        elements = candidate.parse_elements()
-        user_prompts = []
-        message_count = 0
-        for element in elements:
-            if element.kind not in {"user_prompt", "assistant_text"}:
-                continue
-            ts = _parse_dt(element.timestamp)
-            if not ts:
-                continue
-            message_count += 1
-            if element.kind == "user_prompt":
-                user_prompts.append(ts)
-        if not user_prompts:
-            continue
-        turns = [
-            {"timestamp": _utc_z(ts)}
-            for ts in user_prompts
-            if start <= ts <= end
-        ]
-        if not turns:
-            continue
-        provider_kind = candidate.format or "unknown"
-        created_at = min(user_prompts)
-        path = str(candidate.transcript)
-        conversations.append({
-            "id": f"native:{path}",
-            "sid": candidate.sid or "",
-            "cwd": candidate.cwd or "",
-            "provider_kind": provider_kind,
-            "provider_key": f"native:{provider_kind}",
-            "model": "unknown",
-            "orchestration_mode": "native",
-            "created_at": _utc_z(created_at),
-            "message_count": message_count,
-            "turns": turns,
-        })
-    return conversations
+    }, snapshot_status
 
 
 # ── wiring: fetch live data and aggregate ───────────────────────────────
@@ -814,7 +724,7 @@ def compute_analytics(
         p["id"]: p for p in prov_state.get("providers", []) if p.get("id")
     }
     resolved_granularity = resolve_granularity(granularity, start, end)
-    native_projection = _native_analytics_projection(
+    native_projection, native_status = _native_analytics_projection(
         start,
         end,
         resolved_granularity,
@@ -824,19 +734,16 @@ def compute_analytics(
             if session.get("id")
         },
     )
-    native_conversations = (
-        _native_conversations_from_raw(start, end)
-        if native_projection is None
-        else []
-    )
-    return aggregate(
+    report = aggregate(
         sessions,
         traces,
         llm_calls,
         provider_map,
         start,
         end,
-        native_conversations,
+        [],
         resolved_granularity,
         native_projection,
     )
+    report["native_data"] = native_status
+    return report

@@ -986,6 +986,8 @@
   "analytics.granularityWeek": "Weekly",
   "analytics.granularityMonth": "Monthly",
   "analytics.noData": "No data in this range",
+  "analytics.nativePartial": "Native session data is shown. Native turn metrics are omitted until the index is current.",
+  "analytics.nativeUnavailable": "Native usage data is temporarily unavailable while its index is prepared.",
   "analytics.statSessions": "Sessions",
   "analytics.statUserSessions": "User sessions",
   "analytics.statSystemSessions": "System sessions",
