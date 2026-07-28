@@ -6,6 +6,7 @@ python-dotenv>=1.0.0
 python-dateutil>=2.8.2
 PyYAML>=6.0.0
 keyring>=25.0.0
+keyrings.cryptfile>=1.3.9
 argon2-cffi>=23.1.0
 itsdangerous>=2.1.2
 tufup>=0.10.0
