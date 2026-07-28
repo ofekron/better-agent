@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import os
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from codex_execution_common import (
+    SHA256_RE,
+    ExecutionContractError,
+    required_integer,
+    required_string,
+    sha256_fd,
+    symlink_chain,
+)
+
+
+@dataclass(frozen=True)
+class FileIdentity:
+    requested_path: str
+    resolved_path: str
+    sha256: str
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    device: int
+    inode: int
+    symlink_chain: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def capture(cls, raw_path: str | Path) -> FileIdentity:
+        requested = Path(raw_path)
+        if not requested.is_absolute():
+            raise ExecutionContractError("authority file path must be absolute")
+        try:
+            chain_before = symlink_chain(requested)
+            resolved_before = requested.resolve(strict=True)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(resolved_before, flags)
+            try:
+                stat_before = os.fstat(fd)
+                if not stat.S_ISREG(stat_before.st_mode):
+                    raise ExecutionContractError("authority file is unavailable")
+                digest = sha256_fd(fd)
+                stat_after = os.fstat(fd)
+                if stat_before != stat_after:
+                    raise ExecutionContractError(
+                        "authority file changed during identity capture",
+                    )
+                chain_after = symlink_chain(requested)
+                resolved_after = requested.resolve(strict=True)
+                path_stat = resolved_after.stat()
+                if (
+                    chain_before != chain_after
+                    or resolved_before != resolved_after
+                    or path_stat.st_dev != stat_after.st_dev
+                    or path_stat.st_ino != stat_after.st_ino
+                ):
+                    raise ExecutionContractError(
+                        "authority path changed during identity capture",
+                    )
+            finally:
+                os.close(fd)
+            return cls(
+                requested_path=str(requested.absolute()),
+                resolved_path=str(resolved_after),
+                sha256=digest,
+                size=stat_after.st_size,
+                mtime_ns=stat_after.st_mtime_ns,
+                ctime_ns=stat_after.st_ctime_ns,
+                device=stat_after.st_dev,
+                inode=stat_after.st_ino,
+                symlink_chain=chain_after,
+            )
+        except ExecutionContractError:
+            raise
+        except OSError as exc:
+            raise ExecutionContractError("authority file is unavailable") from exc
+
+    def attest(self) -> bool:
+        try:
+            return FileIdentity.capture(self.requested_path) == self
+        except ExecutionContractError:
+            return False
+
+    def attest_metadata(self) -> bool:
+        try:
+            current = FileIdentity.capture_metadata(self.requested_path)
+        except ExecutionContractError:
+            return False
+        return current == (
+            self.resolved_path,
+            self.size,
+            self.mtime_ns,
+            self.ctime_ns,
+            self.device,
+            self.inode,
+            self.symlink_chain,
+        )
+
+    @classmethod
+    def capture_metadata(
+        cls,
+        raw_path: str | Path,
+    ) -> tuple[str, int, int, int, int, int, tuple[tuple[str, str], ...]]:
+        requested = Path(raw_path)
+        if not requested.is_absolute():
+            raise ExecutionContractError("authority file path must be absolute")
+        try:
+            chain = symlink_chain(requested)
+            resolved = requested.resolve(strict=True)
+            stat_result = resolved.stat()
+        except OSError as exc:
+            raise ExecutionContractError("authority file is unavailable") from exc
+        if not resolved.is_file():
+            raise ExecutionContractError("authority file is unavailable")
+        return (
+            str(resolved),
+            stat_result.st_size,
+            stat_result.st_mtime_ns,
+            stat_result.st_ctime_ns,
+            stat_result.st_dev,
+            stat_result.st_ino,
+            chain,
+        )
+
+
+def file_identity_from_dict(raw: Mapping[str, Any]) -> FileIdentity:
+    expected = {
+        "requested_path",
+        "resolved_path",
+        "sha256",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+        "device",
+        "inode",
+        "symlink_chain",
+    }
+    if set(raw) != expected:
+        raise ExecutionContractError("invalid file identity")
+    requested_path = required_string(raw, "requested_path")
+    resolved_path = required_string(raw, "resolved_path")
+    sha256 = required_string(raw, "sha256")
+    integers = {
+        key: required_integer(raw, key)
+        for key in ("size", "mtime_ns", "ctime_ns", "device", "inode")
+    }
+    symlink_chain_raw = raw.get("symlink_chain")
+    if (
+        type(symlink_chain_raw) is not list
+        or any(
+            type(item) is not list
+            or len(item) != 2
+            or any(type(value) is not str for value in item)
+            for item in symlink_chain_raw
+        )
+    ):
+        raise ExecutionContractError("invalid file identity symlink chain")
+    if (
+        not Path(requested_path).is_absolute()
+        or not Path(resolved_path).is_absolute()
+        or not SHA256_RE.fullmatch(sha256)
+        or any(value < 0 for value in integers.values())
+    ):
+        raise ExecutionContractError("invalid file identity")
+    return FileIdentity(
+        requested_path=requested_path,
+        resolved_path=resolved_path,
+        sha256=sha256,
+        symlink_chain=tuple(
+            (item[0], item[1]) for item in symlink_chain_raw
+        ),
+        **integers,
+    )
+
+
+@dataclass(frozen=True)
+class ConfigIdentity:
+    root_path: str
+    config_path: str
+    config_file: FileIdentity | None
+
+    @classmethod
+    def capture(
+        cls,
+        root_path: str | Path,
+        config_path: str | Path,
+    ) -> ConfigIdentity:
+        root = Path(root_path)
+        candidate = Path(config_path)
+        if not root.is_absolute() or not candidate.is_absolute():
+            raise ExecutionContractError("config paths must be absolute")
+        try:
+            canonical_root = root.resolve(strict=True)
+        except OSError as exc:
+            raise ExecutionContractError("config root is unavailable") from exc
+        lexical = candidate.absolute()
+        if not lexical.is_relative_to(root.absolute()):
+            raise ExecutionContractError("config path escapes its root")
+        try:
+            resolved_parent = candidate.parent.resolve(strict=True)
+        except OSError as exc:
+            raise ExecutionContractError("config parent is unavailable") from exc
+        if not resolved_parent.is_relative_to(canonical_root):
+            raise ExecutionContractError("config path escapes its root")
+        if candidate.exists() or candidate.is_symlink():
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError as exc:
+                raise ExecutionContractError("config path is unavailable") from exc
+            if not resolved.is_relative_to(canonical_root):
+                raise ExecutionContractError("config path escapes its root")
+            identity = FileIdentity.capture(candidate)
+        else:
+            identity = None
+        return cls(
+            root_path=str(canonical_root),
+            config_path=str(lexical),
+            config_file=identity,
+        )
+
+    def attest(self) -> bool:
+        root = Path(self.root_path)
+        candidate = Path(self.config_path)
+        try:
+            if root.resolve(strict=True) != root:
+                return False
+            current = ConfigIdentity.capture(root, candidate)
+        except ExecutionContractError:
+            return False
+        return current == self
+
+    def attest_metadata(self) -> bool:
+        root = Path(self.root_path)
+        candidate = Path(self.config_path)
+        try:
+            if root.resolve(strict=True) != root:
+                return False
+            if not candidate.absolute().is_relative_to(root):
+                return False
+            resolved_parent = candidate.parent.resolve(strict=True)
+            if not resolved_parent.is_relative_to(root):
+                return False
+        except OSError:
+            return False
+        if self.config_file is None:
+            return not candidate.exists() and not candidate.is_symlink()
+        return self.config_file.attest_metadata()
+
+
+def config_identity_from_dict(raw: Mapping[str, Any]) -> ConfigIdentity:
+    if type(raw) is not dict or set(raw) != {
+        "root_path",
+        "config_path",
+        "config_file",
+    }:
+        raise ExecutionContractError("invalid config identity")
+    root_path = required_string(raw, "root_path")
+    config_path = required_string(raw, "config_path")
+    if not Path(root_path).is_absolute() or not Path(config_path).is_absolute():
+        raise ExecutionContractError("invalid config identity")
+    config_file_raw = raw.get("config_file")
+    if config_file_raw is not None and type(config_file_raw) is not dict:
+        raise ExecutionContractError("invalid config identity")
+    return ConfigIdentity(
+        root_path=root_path,
+        config_path=config_path,
+        config_file=(
+            file_identity_from_dict(config_file_raw)
+            if config_file_raw
+            else None
+        ),
+    )

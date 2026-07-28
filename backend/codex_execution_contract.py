@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import hashlib
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
+
+from codex_execution_common import (
+    ALLOWED_CONFIG_KEYS,
+    ALLOWED_ENVIRONMENT_SELECTORS,
+    CONTRACT_SCHEMA,
+    SAFE_PROFILE_RE,
+    SECRET_NAMES,
+    SHA256_RE,
+    ExecutionContractError,
+    canonical_json,
+    required_integer,
+    required_string,
+    required_string_list,
+)
+from codex_execution_identity import (
+    ConfigIdentity,
+    config_identity_from_dict,
+    file_identity_from_dict,
+)
+from codex_execution_launch import (
+    LaunchChain,
+    resolve_codex_launch_chain,
+    validate_launch_chain,
+)
+
+
+@dataclass(frozen=True)
+class CodexExecutionContract:
+    schema: int
+    provider_id: str
+    provider_kind: str
+    provider_generation: str
+    provider_record_version: int
+    mode: str
+    base_url: str
+    profile: str
+    credential_generation: int
+    catalog_args: tuple[str, ...]
+    runtime_args: tuple[str, ...]
+    environment_selectors: tuple[tuple[str, str], ...]
+    config: tuple[ConfigIdentity, ...]
+    launch_chain: LaunchChain
+
+    def to_dict(self, *, include_fingerprint: bool = True) -> dict[str, Any]:
+        payload = asdict(self)
+        if include_fingerprint:
+            payload["fingerprint"] = hashlib.sha256(
+                canonical_json(payload),
+            ).hexdigest()
+        return payload
+
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(
+            canonical_json(self.to_dict(include_fingerprint=False)),
+        ).hexdigest()
+
+    @property
+    def catalog_fingerprint(self) -> str:
+        payload = self.to_dict(include_fingerprint=False)
+        payload.pop("runtime_args", None)
+        return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> CodexExecutionContract:
+        expected = {
+            "schema",
+            "provider_id",
+            "provider_kind",
+            "provider_generation",
+            "provider_record_version",
+            "mode",
+            "base_url",
+            "profile",
+            "credential_generation",
+            "catalog_args",
+            "runtime_args",
+            "environment_selectors",
+            "config",
+            "launch_chain",
+            "fingerprint",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ExecutionContractError("invalid execution contract")
+        try:
+            supplied_fingerprint = required_string(raw, "fingerprint")
+            launch_raw = raw["launch_chain"]
+            if type(launch_raw) is not dict:
+                raise ExecutionContractError("invalid launch chain")
+            if set(launch_raw) != {
+                "logical_command",
+                "mode",
+                "launcher",
+                "argv_prefix",
+                "components",
+                "component_argv_indexes",
+            }:
+                raise ExecutionContractError("invalid launch chain")
+            launcher = file_identity_from_dict(launch_raw["launcher"])
+            logical_command = required_string(launch_raw, "logical_command")
+            launch_mode = required_string(launch_raw, "mode")
+            argv_prefix = required_string_list(launch_raw, "argv_prefix")
+            components_raw = launch_raw.get("components")
+            if type(components_raw) is not list:
+                raise ExecutionContractError("invalid launch components")
+            components = tuple(
+                file_identity_from_dict(component)
+                for component in components_raw
+            )
+            component_indexes_raw = launch_raw.get("component_argv_indexes")
+            if (
+                type(component_indexes_raw) is not list
+                or any(type(index) is not int for index in component_indexes_raw)
+            ):
+                raise ExecutionContractError("invalid launch component indexes")
+            launch_chain = LaunchChain(
+                logical_command=logical_command,
+                mode=launch_mode,
+                launcher=launcher,
+                argv_prefix=argv_prefix,
+                components=components,
+                component_argv_indexes=tuple(component_indexes_raw),
+            )
+            config_raw = raw.get("config")
+            if type(config_raw) is not list:
+                raise ExecutionContractError("invalid config identities")
+            config = tuple(
+                config_identity_from_dict(item)
+                for item in config_raw
+            )
+            selectors_raw = raw.get("environment_selectors")
+            if (
+                type(selectors_raw) is not list
+                or any(
+                    type(item) is not list
+                    or len(item) != 2
+                    or any(type(value) is not str for value in item)
+                    for item in selectors_raw
+                )
+            ):
+                raise ExecutionContractError(
+                    "invalid environment selectors",
+                )
+            contract = cls(
+                schema=required_integer(raw, "schema"),
+                provider_id=required_string(raw, "provider_id"),
+                provider_kind=required_string(raw, "provider_kind"),
+                provider_generation=required_string(
+                    raw,
+                    "provider_generation",
+                ),
+                provider_record_version=required_integer(
+                    raw,
+                    "provider_record_version",
+                ),
+                mode=required_string(raw, "mode"),
+                base_url=required_string(raw, "base_url"),
+                profile=required_string(raw, "profile"),
+                credential_generation=required_integer(
+                    raw,
+                    "credential_generation",
+                ),
+                catalog_args=required_string_list(raw, "catalog_args"),
+                runtime_args=required_string_list(raw, "runtime_args"),
+                environment_selectors=tuple(
+                    (item[0], item[1]) for item in selectors_raw
+                ),
+                config=config,
+                launch_chain=launch_chain,
+            )
+        except ExecutionContractError:
+            raise
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            raise ExecutionContractError("invalid execution contract") from exc
+        if (
+            contract.schema != CONTRACT_SCHEMA
+            or contract.provider_kind not in {"codex", "fugu"}
+            or not contract.provider_id
+            or not contract.provider_generation
+            or contract.provider_record_version < 0
+            or contract.credential_generation < 0
+            or not SAFE_PROFILE_RE.fullmatch(contract.profile)
+            or not SHA256_RE.fullmatch(supplied_fingerprint)
+        ):
+            raise ExecutionContractError("unsupported execution contract")
+        validate_launch_chain(contract.launch_chain)
+        _clean_base_url(contract.base_url)
+        _clean_config_args(contract.catalog_args)
+        _clean_config_args(contract.runtime_args)
+        _clean_environment_selectors(dict(contract.environment_selectors))
+        if supplied_fingerprint != contract.fingerprint:
+            raise ExecutionContractError("execution contract fingerprint mismatch")
+        return contract
+
+    def attest(self) -> bool:
+        return self.launch_chain.attest() and all(
+            identity.attest() for identity in self.config
+        )
+
+    def attest_metadata(self) -> bool:
+        return self.launch_chain.attest_metadata() and all(
+            identity.attest_metadata() for identity in self.config
+        )
+
+
+def _clean_environment_selectors(
+    raw: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...]:
+    cleaned: list[tuple[str, str]] = []
+    for key, value in sorted((raw or {}).items()):
+        lowered = str(key).lower()
+        if any(marker in lowered for marker in SECRET_NAMES):
+            raise ExecutionContractError("secret selector is not allowed")
+        if str(key) not in ALLOWED_ENVIRONMENT_SELECTORS:
+            raise ExecutionContractError("environment selector is not allowed")
+        cleaned.append((str(key), str(value)))
+    return tuple(cleaned)
+
+
+def _clean_config_args(raw: Sequence[str]) -> tuple[str, ...]:
+    if type(raw) not in {list, tuple}:
+        raise ExecutionContractError("config arguments must be a sequence")
+    values = tuple(raw)
+    if any(type(value) is not str for value in values) or len(values) % 2:
+        raise ExecutionContractError("config arguments are invalid")
+    cleaned: list[str] = []
+    for index in range(0, len(values), 2):
+        marker, assignment = values[index:index + 2]
+        if marker != "-c" or "=" not in assignment:
+            raise ExecutionContractError("config arguments are invalid")
+        key, value = assignment.split("=", 1)
+        if key not in ALLOWED_CONFIG_KEYS or "\x00" in value or "\n" in value:
+            raise ExecutionContractError("config override is not allowed")
+        if key != "shell_environment_policy.exclude" and any(
+            secret in assignment.lower() for secret in SECRET_NAMES
+        ):
+            raise ExecutionContractError("secret config override is not allowed")
+        cleaned.extend((marker, assignment))
+    return tuple(cleaned)
+
+
+def _clean_base_url(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ExecutionContractError("provider base URL contains credentials")
+    return value
+
+
+def build_codex_execution_contract(
+    provider: Mapping[str, Any],
+    *,
+    launcher_path: str,
+    profile: str | None = None,
+    catalog_args: Sequence[str] = (),
+    runtime_args: Sequence[str] = (),
+    credential_generation: int = 0,
+    environment_selectors: Mapping[str, str] | None = None,
+    config_paths: Sequence[str] | None = None,
+    search_path: str | None = None,
+    platform: str | None = None,
+    architecture: str | None = None,
+) -> CodexExecutionContract:
+    provider_id = str(provider.get("id") or "").strip()
+    provider_kind = str(provider.get("kind") or "").strip()
+    generation = str(provider.get("generation") or "").strip()
+    try:
+        record_version = int(provider.get("record_version"))
+    except (TypeError, ValueError) as exc:
+        raise ExecutionContractError("provider record version is invalid") from exc
+    if not provider_id or provider_kind not in {"codex", "fugu"} or not generation:
+        raise ExecutionContractError("provider authority is incomplete")
+    if record_version < 0 or credential_generation < 0:
+        raise ExecutionContractError("provider authority revision is invalid")
+    cleaned_profile = str(profile or "")
+    if not SAFE_PROFILE_RE.fullmatch(cleaned_profile):
+        raise ExecutionContractError("provider profile is invalid")
+    config_dir_raw = str(provider.get("config_dir") or "").strip()
+    config_dir = (
+        Path(config_dir_raw).expanduser()
+        if config_dir_raw
+        else Path.home() / ".codex"
+    )
+    if not config_dir.is_absolute():
+        raise ExecutionContractError("provider config root must be absolute")
+    try:
+        canonical_config_dir = config_dir.resolve(strict=True)
+    except OSError as exc:
+        raise ExecutionContractError("provider config root is unavailable") from exc
+    observed_paths = (
+        tuple(Path(path) for path in config_paths)
+        if config_paths is not None
+        else (canonical_config_dir / "config.toml",)
+    )
+    config = tuple(
+        ConfigIdentity.capture(canonical_config_dir, path)
+        for path in observed_paths
+    )
+    launch_chain = resolve_codex_launch_chain(
+        launcher_path,
+        search_path=search_path,
+        platform=platform,
+        architecture=architecture,
+    )
+    return CodexExecutionContract(
+        schema=CONTRACT_SCHEMA,
+        provider_id=provider_id,
+        provider_kind=provider_kind,
+        provider_generation=generation,
+        provider_record_version=record_version,
+        mode=str(provider.get("mode") or "subscription"),
+        base_url=_clean_base_url(provider.get("base_url")),
+        profile=cleaned_profile,
+        credential_generation=int(credential_generation),
+        catalog_args=_clean_config_args(catalog_args),
+        runtime_args=_clean_config_args(runtime_args),
+        environment_selectors=_clean_environment_selectors(environment_selectors),
+        config=config,
+        launch_chain=launch_chain,
+    )
