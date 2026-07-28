@@ -65,9 +65,17 @@ async def _run_provider_smoke(provider_name: str, provider_cls, main, session_st
     )
     sid = session["id"]
     queue: asyncio.Queue = asyncio.Queue()
-    provider = provider_cls({"id": f"smoke-{provider_name}"})
+    provider = provider_cls({
+        "id": f"smoke-{provider_name}",
+        "kind": provider_cls.KIND,
+        "generation": "581cb14f-1bb5-4e93-82e7-b24376c37bf9",
+        "revision": 0,
+    })
     run_id = f"smoke-{provider_name}-{uuid.uuid4().hex[:12]}"
-    provider.start_run(
+    from provider import prepare_and_start_run
+
+    prepare_and_start_run(
+        provider,
         run_id=run_id,
         prompt=_prompt(provider_name),
         cwd="/tmp",

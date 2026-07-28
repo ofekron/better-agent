@@ -41,7 +41,7 @@ from orchs.manager._approval import (
     spawn_approved_worker,
 )
 from orchs.manager._rewind import _safe_delete_forks
-from provider import StreamEvent
+from provider import StreamEvent, prepare_and_start_run
 from event_shape import is_metadata_event as _is_metadata_event
 from event_shape import is_synthetic_event as _is_synthetic_event
 from event_shape import extract_output_text, strip_synthetic_events
@@ -1183,28 +1183,31 @@ async def run_delegation_locked(
                 await asyncio.to_thread(session_manager.flush_pending_persists)
             with perf.timed("delegate.provider_start_run.provider_call"):
                 await asyncio.to_thread(
-                    provider.start_run,
-                run_id=run_id,
-                prompt=worker_prompt,
-                cwd=cwd,
-                loop=loop,
-                queue=queue,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                session_id=resume_sid,
-                mode=worker_orchestration_mode,
-                app_session_id=app_session_id,
-                backend_url=worker_backend_url,
-                internal_token=worker_internal_token,
-                fork=needs_fork,
-                worker_agent_session_id=(
-                    worker_agent_session_id if run_mode == "direct" else None
-                ),
-                mssg_sender_session_id=None if machine_completion else worker_agent_session_id,
-                is_worker=True,
-                provider_run_config=provider_run_config,
-                capability_contexts=capability_contexts,
-                target_message_id=target_message_id,
+                    prepare_and_start_run,
+                    provider,
+                    run_id=run_id,
+                    prompt=worker_prompt,
+                    cwd=cwd,
+                    loop=loop,
+                    queue=queue,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    session_id=resume_sid,
+                    mode=worker_orchestration_mode,
+                    app_session_id=app_session_id,
+                    backend_url=worker_backend_url,
+                    internal_token=worker_internal_token,
+                    fork=needs_fork,
+                    worker_agent_session_id=(
+                        worker_agent_session_id if run_mode == "direct" else None
+                    ),
+                    mssg_sender_session_id=(
+                        None if machine_completion else worker_agent_session_id
+                    ),
+                    is_worker=True,
+                    provider_run_config=provider_run_config,
+                    capability_contexts=capability_contexts,
+                    target_message_id=target_message_id,
                     provisioned_tool_profile=provisioned_tool_profile,
                 )
     except Exception:

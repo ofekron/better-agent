@@ -93,7 +93,8 @@ def test_suspended_provider_instance_blocks_runs() -> None:
     config_store.set_provider_suspended(p["id"], True)
 
     try:
-        prov.start_run(
+        provider_mod.prepare_and_start_run(
+            prov,
             run_id="run-suspended",
             prompt="hi",
             cwd="/tmp",

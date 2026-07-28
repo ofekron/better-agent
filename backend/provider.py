@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ from typing import Any, Callable, ClassVar, Iterable, Optional
 
 import config_store
 import perf
+from execution_template import PreparedExecution, prepare_execution
 from env_compat import dual_env_many
 from paths import ba_home
 from proc_control import process_control as _process_control
@@ -484,6 +486,7 @@ class ParkedRun:
     # no other way to find a run that never spawned, so the gate records
     # it at park time.
     turn_run_id: Optional[str]
+    execution: PreparedExecution
     released: asyncio.Event
     # Loop the `released` event belongs to. `unpark_run` runs on a turn
     # dispatch worker thread, and `asyncio.Event.set` does not wake
@@ -566,6 +569,7 @@ class Provider(ABC):
 
     def __init__(self, record: dict):
         self.id: str = record["id"]
+        self._record_lock = threading.RLock()
         # Atomic-replace pattern: every read snapshots `self._record`
         # into a local var before touching it; writes assign a NEW dict
         # so partial-state reads can't observe a half-replaced record.
@@ -605,13 +609,15 @@ class Provider(ABC):
         same dict reference until `record.setter` is called; mutations
         to the returned dict are NOT safe — callers should treat the
         snapshot as read-only."""
-        return self._record
+        with self._record_lock:
+            return self._record
 
     @record.setter
     def record(self, value: dict) -> None:
-        self._record = dict(value)
-        self.suspended = config_store.provider_suspended(self.id)
-        self._apply_capability_overrides()
+        with self._record_lock:
+            self._record = dict(value)
+            self.suspended = config_store.provider_suspended(self.id)
+            self._apply_capability_overrides()
 
     def assert_not_suspended(self, *, action: str = "start runs") -> None:
         if config_store.provider_suspended(self.id):
@@ -686,8 +692,130 @@ class Provider(ABC):
     # ------------------------------------------------------------------
     # Long-lived turn — spawn worker process, stream events onto queue.
     # ------------------------------------------------------------------
-    @abstractmethod
     def start_run(
+        self,
+        *,
+        execution: PreparedExecution,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+    ) -> bool:
+        if type(execution) is not PreparedExecution:
+            raise TypeError("start_run requires a prepared execution")
+        try:
+            with self._record_lock:
+                return self._start_authorized_execution(
+                    execution=execution,
+                    loop=loop,
+                    queue=queue,
+                )
+        except BaseException as exc:
+            execution._mark_admission_failed(exc)
+            raise
+
+    def _start_authorized_execution(
+        self,
+        *,
+        execution: PreparedExecution,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+    ) -> bool:
+        arguments = execution.start_arguments()
+        authority = self.execution_authority_record(arguments)
+        execution.artifact.require_authority(authority)
+        if self.defunct:
+            raise RuntimeError(
+                f"provider {self.id} is defunct; cannot start new runs"
+            )
+        self.assert_not_suspended(action="start new runs")
+        self.require_runtime_credential()
+        with self._execution_admission(
+            execution,
+            loop=loop,
+            queue=queue,
+        ) as admitted:
+            if not admitted:
+                return False
+            self._admit_execution(execution)
+            self._persist_and_start_execution(
+                execution,
+                arguments=arguments,
+                loop=loop,
+                queue=queue,
+            )
+            execution._mark_admitted()
+            return True
+
+    def _persist_and_start_execution(
+        self,
+        execution: PreparedExecution,
+        *,
+        arguments: dict[str, Any],
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+    ) -> None:
+        from runs_dir import atomic_write_json, runs_root
+
+        run_id = arguments["run_id"]
+        run_dir = runs_root() / run_id
+        artifact_path = run_dir / "execution.json"
+        if run_dir.exists():
+            existing = tuple(run_dir.iterdir())
+            if existing != (artifact_path,):
+                raise RuntimeError(f"run directory already exists: {run_id}")
+            try:
+                persisted = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"run execution authority is unreadable: {run_id}",
+                ) from exc
+            if persisted != execution.artifact.to_dict():
+                raise RuntimeError(f"run execution authority conflicts: {run_id}")
+        else:
+            run_dir.mkdir(parents=True)
+            atomic_write_json(artifact_path, execution.artifact.to_dict())
+        try:
+            self._start_run(
+                loop=loop,
+                queue=queue,
+                _execution=execution,
+                **arguments,
+            )
+        except BaseException:
+            try:
+                if tuple(run_dir.iterdir()) == (artifact_path,):
+                    artifact_path.unlink()
+                    run_dir.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def prepare_run(self, **start_arguments: Any) -> PreparedExecution:
+        authority = self.execution_authority_record(start_arguments)
+        return prepare_execution(authority, **start_arguments)
+
+    def execution_authority_record(
+        self,
+        start_arguments: dict[str, Any],
+    ) -> dict:
+        del start_arguments
+        return self.record
+
+    @contextmanager
+    def _execution_admission(
+        self,
+        execution: PreparedExecution,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+    ):
+        del execution, loop, queue
+        yield True
+
+    def _admit_execution(self, execution: PreparedExecution) -> None:
+        del execution
+
+    @abstractmethod
+    def _start_run(
         self,
         *,
         run_id: str,
@@ -725,6 +853,7 @@ class Provider(ABC):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
+        _execution: PreparedExecution,
     ) -> None: ...
 
     # ------------------------------------------------------------------
@@ -764,6 +893,7 @@ class Provider(ABC):
         session_id: str,
         app_session_id: str,
         loop: asyncio.AbstractEventLoop,
+        execution: PreparedExecution,
         turn_run_id: Optional[str] = None,
     ) -> ParkedRun:
         """Park a run, or return its existing entry. A run that re-enters
@@ -778,6 +908,7 @@ class Provider(ABC):
             session_id=session_id,
             app_session_id=app_session_id,
             turn_run_id=turn_run_id,
+            execution=execution,
             released=asyncio.Event(),
             loop=loop,
             seq=self._park_seq,
@@ -949,6 +1080,7 @@ class Provider(ABC):
         parked = self._parked_runs.get(run_id)
         if parked is not None:
             parked.cancelled = True
+            parked.execution._mark_cancelled()
             self.unpark_run(run_id)
             logger.info(
                 "%s.cancel_run: dropped parked run %s",
@@ -1070,6 +1202,7 @@ class Provider(ABC):
         if parked_matches:
             for parked in parked_matches:
                 parked.cancelled = True
+                parked.execution._mark_cancelled()
                 self.unpark_run(parked.run_id)
                 logger.info(
                     "%s.cancel_turn: dropped parked run %s",
@@ -1296,6 +1429,27 @@ class Provider(ABC):
 # ============================================================================
 _PROVIDER_CACHE: dict[tuple[str, str], Provider] = {}
 _CACHE_LOCK = threading.Lock()
+
+
+def prepare_and_start_run(provider: Provider, **start_arguments: Any) -> PreparedExecution:
+    try:
+        loop = start_arguments.pop("loop")
+        queue = start_arguments.pop("queue")
+    except KeyError as exc:
+        raise TypeError("loop and queue are required") from exc
+    execution = provider.prepare_run(**start_arguments)
+    provider.start_run(execution=execution, loop=loop, queue=queue)
+    return execution
+
+
+def start_prepared_run(
+    provider: Provider,
+    execution: PreparedExecution,
+    *,
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue,
+) -> bool:
+    return provider.start_run(execution=execution, loop=loop, queue=queue)
 
 
 def _resolve_class(kind: str) -> type[Provider]:

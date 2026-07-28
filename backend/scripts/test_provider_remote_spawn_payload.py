@@ -17,35 +17,16 @@ _PROVIDER_TREE = ast.parse(_PROVIDER_SOURCE)
 
 def _start_run_node() -> ast.FunctionDef:
     for node in ast.walk(_PROVIDER_TREE):
-        if isinstance(node, ast.FunctionDef) and node.name == "start_run":
+        if isinstance(node, ast.FunctionDef) and node.name == "_start_run":
             return node
-    raise AssertionError("RemoteProviderProxy.start_run not found")
+    raise AssertionError("RemoteProviderProxy._start_run not found")
 
 
-def test_start_run_binds_extension_policy_records_locally() -> None:
-    """Regression: `start_run` referenced `session_record`/`worker_record`
-    when building the spawn_run payload but never assigned them, so every
-    remote spawn raised NameError at payload construction. They must be
-    local names of the function, not free/global lookups."""
-    start_run = _start_run_node()
-    assigned = {
-        node.id
-        for node in ast.walk(start_run)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-    }
-    loaded = {
-        node.id
-        for node in ast.walk(start_run)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
-    for name in ("session_record", "worker_record"):
-        if name in loaded and name not in assigned:
-            raise AssertionError(
-                f"{name!r} is referenced as a free/global name in start_run; "
-                f"it must be assigned locally before the spawn_run payload"
-            )
-        if name not in assigned:
-            raise AssertionError(f"{name!r} is not bound in start_run")
+def test_start_run_does_not_reread_mutable_harness_policy() -> None:
+    source = ast.get_source_segment(_PROVIDER_SOURCE, _start_run_node()) or ""
+    assert "resolve_extension_run_policy" not in source
+    assert "session_record" not in source
+    assert "worker_record" not in source
 
 
 def test_start_run_does_not_send_internal_token_field() -> None:
@@ -59,11 +40,47 @@ def test_node_run_uses_node_local_backend_proxy() -> None:
     assert 'backend_url=msg.get("backend_url")' not in source
 
 
+def test_remote_spawn_carries_strict_provider_authority() -> None:
+    provider_source = ast.get_source_segment(_PROVIDER_SOURCE, _start_run_node()) or ""
+    handler_module_source = Path(_BACKEND, "node_rpc_handlers.py").read_text()
+    handler_tree = ast.parse(handler_module_source)
+    handler = next(
+        node
+        for node in ast.walk(handler_tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_spawn_run"
+    )
+    handler_source = ast.get_source_segment(handler_module_source, handler) or ""
+    assert '"execution_artifact": node_execution.artifact.to_dict()' in provider_source
+    assert "_execution.retry(" not in provider_source
+    assert 'ExecutionArtifact.from_dict(msg["execution_artifact"])' in handler_source
+    assert ").retry(" not in handler_source
+    assert "provider = get_provider(artifact.provider_id)" in handler_source
+    assert "default_provider" not in handler_source
+    authority = next(
+        node
+        for node in ast.walk(_PROVIDER_TREE)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "execution_authority_record"
+    )
+    authority_source = ast.get_source_segment(_PROVIDER_SOURCE, authority) or ""
+    assert 'start_arguments.get("worker_agent_session_id")' in authority_source
+    prepare = next(
+        node
+        for node in ast.walk(_PROVIDER_TREE)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "prepare_run"
+    )
+    prepare_source = ast.get_source_segment(_PROVIDER_SOURCE, prepare) or ""
+    assert '"app_session_id": execution_session_id' in prepare_source
+
+
 def test_remote_spawn_forwards_effective_harness_policy() -> None:
     provider_source = ast.get_source_segment(_PROVIDER_SOURCE, _start_run_node()) or ""
     handler_source = Path(_BACKEND, "node_rpc_handlers.py").read_text()
     protocol_source = Path(_BACKEND, "node_protocol.py").read_text()
-    assert "payload.update(run_policy)" in provider_source
+    assert "**node_execution.artifact.template.arguments()" in provider_source
+    assert "payload.update(run_policy)" not in provider_source
     for field in (
         "extra_mcp_servers",
         "disabled_builtin_tools",
@@ -72,15 +89,34 @@ def test_remote_spawn_forwards_effective_harness_policy() -> None:
         "resolved_harness_run_config",
     ):
         assert f"{field}:" in protocol_source
-    assert (
-        'resolved_harness_run_config=msg.get("resolved_harness_run_config")'
-        in handler_source
+    assert 'provider_run_config=msg.get("provider_run_config")' not in handler_source
+    assert 'capability_contexts=msg.get("capability_contexts")' not in handler_source
+    assert 'resolved_harness_run_config=msg.get(' not in handler_source
+    assert "if not started:" in handler_source
+    assert "execution.wait_for_admission" in handler_source
+    assert handler_source.index("execution.wait_for_admission") < handler_source.index(
+        'atomic_write_json(rd / "remote_ctx.json"',
     )
 
 
+def test_remote_registration_requires_connection_and_send_failure_cleans_up() -> None:
+    source = ast.get_source_segment(_PROVIDER_SOURCE, _start_run_node()) or ""
+    assert source.index("node_store.get_connection") < source.index(
+        'atomic_write_json(run_dir / "backend_state.json"',
+    )
+    assert 'self._runs.pop(run_id, None)' in source
+    assert 'conn.runs.pop(run_id, None)' in source
+    assert "_finalize_remote_run_dir(" in source
+    assert "routing_session_id = _execution.artifact.routing_session_id" in source
+    assert '"app_session_id": routing_session_id' in source
+    assert '"persist_to": app_session_id' in source
+
+
 if __name__ == "__main__":
-    test_start_run_binds_extension_policy_records_locally()
+    test_start_run_does_not_reread_mutable_harness_policy()
     test_start_run_does_not_send_internal_token_field()
     test_node_run_uses_node_local_backend_proxy()
+    test_remote_spawn_carries_strict_provider_authority()
     test_remote_spawn_forwards_effective_harness_policy()
+    test_remote_registration_requires_connection_and_send_failure_cleans_up()
     print("provider_remote spawn-payload test passed")

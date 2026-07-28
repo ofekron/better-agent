@@ -36,7 +36,6 @@ import node_link
 import node_store
 import perf
 import config_store
-from extension_run_policy import resolve_extension_run_policy
 from provider import Provider, StreamEvent
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
@@ -121,10 +120,57 @@ class RemoteProviderProxy(Provider):
             lambda: sum(rs.queue.qsize() for rs in self._runs.values()),
         )
 
+    def execution_authority_record(
+        self,
+        start_arguments: dict[str, Any],
+    ) -> dict:
+        from session_manager import manager as session_manager
+
+        authority_session_id = (
+            start_arguments.get("worker_agent_session_id")
+            or start_arguments["app_session_id"]
+        )
+        session = session_manager.get_fields(
+            authority_session_id,
+            ("provider_id",),
+        ) or {}
+        provider_id = str(session.get("provider_id") or "").strip()
+        record = (
+            config_store.get_provider_with_key(provider_id)
+            if provider_id
+            else None
+        )
+        if record is None:
+            raise RuntimeError(
+                "remote execution requires an authoritative provider record",
+            )
+        if record.get("suspended") is True:
+            raise RuntimeError(f"provider {provider_id} is suspended")
+        return record
+
+    def prepare_run(self, **start_arguments):
+        routing_session_id = start_arguments["app_session_id"]
+        execution_session_id = (
+            start_arguments.get("worker_agent_session_id")
+            or routing_session_id
+        )
+        canonical_arguments = {
+            **start_arguments,
+            "app_session_id": execution_session_id,
+        }
+        authority = self.execution_authority_record(canonical_arguments)
+        from execution_template import prepare_execution
+
+        return prepare_execution(
+            authority,
+            routing_session_id=routing_session_id,
+            **canonical_arguments,
+        )
+
     # ------------------------------------------------------------------
     # start_run — ship spawn_run over WS, register local proxy state.
     # ------------------------------------------------------------------
-    def start_run(
+    def _start_run(
         self,
         *,
         run_id: str,
@@ -162,6 +208,7 @@ class RemoteProviderProxy(Provider):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
+        _execution,
     ) -> None:
         if mode == "manager":
             mode = "team"
@@ -190,29 +237,20 @@ class RemoteProviderProxy(Provider):
         # Resolve the session's root_id so the node can ingest into the
         # right events.jsonl directory.
         from session_manager import manager as session_manager
-        session_record = session_manager.get(app_session_id) or {}
-        worker_record = (
-            session_manager.get(worker_agent_session_id)
-            if worker_agent_session_id
-            else {}
-        )
         root_id = session_manager._root_id_for(
             worker_agent_session_id or app_session_id
-        )
-        run_policy = resolve_extension_run_policy(
-            resolved_harness_run_config=resolved_harness_run_config,
-            session_record=session_record,
-            worker_record=worker_record,
-            provider_kind=self.KIND,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            disabled_builtin_extensions=disabled_builtin_extensions,
         )
         if root_id is None:
             raise RuntimeError(
                 f"RemoteProviderProxy.start_run: no root_id for "
                 f"agent_session_id={worker_agent_session_id or app_session_id!r}"
             )
+        conn = node_store.get_connection(self.node_id)
+        if conn is None:
+            raise node_link.NodeOffline(
+                f"node {self.node_id!r} is offline; cannot start run"
+            )
+        routing_session_id = _execution.artifact.routing_session_id
 
         # Primary-side run dir: the durable record that THIS run was in
         # flight on THIS node, so a primary restart can reconcile it via
@@ -227,8 +265,8 @@ class RemoteProviderProxy(Provider):
                 "provider_id": self.id,
                 "node_id": self.node_id,
                 "root_id": root_id,
-                "app_session_id": app_session_id,
-                "persist_to": worker_agent_session_id or app_session_id,
+                "app_session_id": routing_session_id,
+                "persist_to": app_session_id,
                 "mode": mode,
                 "source": source or "",
                 "session_id": session_id,
@@ -241,18 +279,19 @@ class RemoteProviderProxy(Provider):
             logger.exception(
                 "RemoteProviderProxy: failed to persist run dir for %s", run_id,
             )
+            raise
 
         state = _RemoteRunState(
             run_id=run_id,
             run_dir=run_dir,
             mode=mode,
-            app_session_id=app_session_id,
+            app_session_id=routing_session_id,
             queue=queue,
             node_id=self.node_id,
             loop=loop,
             session_id=session_id,
             started_at=started_at,
-            persist_to=worker_agent_session_id or app_session_id,
+            persist_to=app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
@@ -262,46 +301,17 @@ class RemoteProviderProxy(Provider):
             self._runs[run_id] = state
 
         # Track in node_store so inbound messages can find this run.
-        conn = node_store.get_connection(self.node_id)
-        if conn is None:
-            raise node_link.NodeOffline(
-                f"node {self.node_id!r} is offline; cannot start run"
-            )
         conn.runs[run_id] = state
 
         # Provider-native config stays local to the executing node's CLI.
         # The coordinator's local config paths do not apply to remote runs.
+        node_execution = _execution
         payload = {
-            "run_id": run_id,
-            "prompt": prompt,
-            "cwd": cwd,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "session_id": session_id,
-            "mode": mode,
-            "source": source or "",
-            "app_session_id": app_session_id,
-            "worker_agent_session_id": worker_agent_session_id,
-            "mssg_sender_session_id": mssg_sender_session_id,
+            **node_execution.artifact.template.arguments(),
+            "execution_artifact": node_execution.artifact.to_dict(),
             "root_id": root_id,
-            "fork": fork,
-            "setting_sources": setting_sources,
-            "disallowed_tools": disallowed_tools,
-            "backend_url": backend_url,
-            "supervised": supervised,
-            "supervisor_agent_session_id": supervisor_agent_session_id,
-            "is_worker": is_worker,
-            "browser_harness_enabled": browser_harness_enabled,
-            "user_facing": user_facing,
-            "working_mode": working_mode,
             "extra_env": extra_env,
-            "files": files,
-            "continuation_chain": continuation_chain or [],
-            "target_message_id": target_message_id,
-            "turn_run_id": turn_run_id,
-            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
         }
-        payload.update(run_policy)
         # spawn_run send is async. If it raises (node disconnected
         # between the get_connection check and the actual ws.send), we
         # MUST enqueue an `error` StreamEvent so the caller's queue.get()
@@ -322,10 +332,9 @@ class RemoteProviderProxy(Provider):
                 except Exception:
                     pass
                 state.finished = True
-                self._runs.pop(run_id, None)
-                conn2 = node_store.get_connection(self.node_id)
-                if conn2:
-                    conn2.runs.pop(run_id, None)
+                with self._lock:
+                    self._runs.pop(run_id, None)
+                conn.runs.pop(run_id, None)
                 # The spawn never reached the node and the live queue
                 # got the error — finalize the run dir so recovery
                 # never tries to reconcile a run that never ran.

@@ -42,7 +42,7 @@ class _Provider(Provider):
     def build_env(self) -> dict[str, str]:
         return {}
 
-    def start_run(self, **kwargs) -> None:
+    def _start_run(self, **kwargs) -> None:
         raise NotImplementedError
 
     def _write_backend_state(self, rs) -> None:

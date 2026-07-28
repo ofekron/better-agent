@@ -71,7 +71,7 @@ from runtime_skills import runtime_skill_projection
 from i18n import t
 import llm_call_log
 import perf
-from provider import ProviderCredentialError, StreamEvent
+from provider import ProviderCredentialError, StreamEvent, prepare_and_start_run
 from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
@@ -2776,37 +2776,38 @@ class TurnManager:
                     await _to_turn_dispatch_thread(session_manager.flush_root_persist, root_id)
                 with perf.timed("provider.start_run.provider_call"):
                     await _to_turn_dispatch_thread(
-                        provider.start_run,
-                    run_id=run_id,
-                    prompt=prompt,
-                    images=images,
-                    files=files,
-                    cwd=cwd,
-                    loop=loop,
-                    queue=queue,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    session_id=current_session_id,
-                    mode=mode,
-                    app_session_id=app_session_id,
-                    source=source,
-                    setting_sources=run_setting_sources,
-                    backend_url=backend_url,
-                    internal_token=internal_token,
-                    fork=fork,
-                    supervised=supervised,
-                    supervisor_agent_session_id=supervisor_agent_session_id,
-                    worker_agent_session_id=worker_agent_session_id,
-                    browser_harness_enabled=bt_enabled,
-                    user_facing=user_initiated,
-                    working_mode=(_session_rec or {}).get("working_mode"),
-                    continuation_chain=_session_rec_chain or None,
-                    disallowed_tools=disallowed_tools,
-                    disabled_builtin_extensions=disabled_builtin_extensions,
-                    provider_run_config=provider_run_config,
-                    capability_contexts=run_capability_contexts,
-                    resolved_harness_run_config=resolved_harness_run_config,
-                    target_message_id=target_message_id,
+                        prepare_and_start_run,
+                        provider,
+                        run_id=run_id,
+                        prompt=prompt,
+                        images=images,
+                        files=files,
+                        cwd=cwd,
+                        loop=loop,
+                        queue=queue,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        session_id=current_session_id,
+                        mode=mode,
+                        app_session_id=app_session_id,
+                        source=source,
+                        setting_sources=run_setting_sources,
+                        backend_url=backend_url,
+                        internal_token=internal_token,
+                        fork=fork,
+                        supervised=supervised,
+                        supervisor_agent_session_id=supervisor_agent_session_id,
+                        worker_agent_session_id=worker_agent_session_id,
+                        browser_harness_enabled=bt_enabled,
+                        user_facing=user_initiated,
+                        working_mode=(_session_rec or {}).get("working_mode"),
+                        continuation_chain=_session_rec_chain or None,
+                        disallowed_tools=disallowed_tools,
+                        disabled_builtin_extensions=disabled_builtin_extensions,
+                        provider_run_config=provider_run_config,
+                        capability_contexts=run_capability_contexts,
+                        resolved_harness_run_config=resolved_harness_run_config,
+                        target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
                 silence_threshold_seconds = await _to_turn_dispatch_thread(

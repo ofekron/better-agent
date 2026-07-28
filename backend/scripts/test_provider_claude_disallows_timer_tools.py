@@ -23,7 +23,12 @@ class _Popen:
 
 
 def main() -> int:
-    provider = ClaudeProvider({"id": "timer-tools-test"})
+    provider = ClaudeProvider({
+        "id": "timer-tools-test",
+        "kind": "claude",
+        "generation": "5a2b93bb-adc6-4e8a-bcf9-78839101bcb7",
+        "revision": 0,
+    })
     run_id = "timer-tools-run"
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -40,7 +45,10 @@ def main() -> int:
         patch("containment.containment") as containment,
     ):
         containment.return_value.create.return_value = None
-        provider.start_run(
+        from provider import prepare_and_start_run
+
+        prepare_and_start_run(
+            provider,
             run_id=run_id,
             prompt="test",
             cwd=str(Path.cwd()),
@@ -51,6 +59,7 @@ def main() -> int:
             session_id=None,
             mode="native",
             app_session_id="session",
+            internal_token="test-runtime-token",
             source="mssg",
             disallowed_tools=["AskUserQuestion"],
         )

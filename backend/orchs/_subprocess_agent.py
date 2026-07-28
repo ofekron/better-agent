@@ -19,7 +19,7 @@ from event_shape import (
     is_synthetic_event as _is_synthetic_event,
 )
 import perf
-from provider import StreamEvent
+from provider import StreamEvent, prepare_and_start_run
 from session_manager import manager as session_manager
 
 if TYPE_CHECKING:
@@ -148,24 +148,32 @@ class SubprocessAgent:
                     await startup_recovery_gate.wait_for_recovery_ready()
                 with perf.timed("subprocess_agent.init.start_run.provider_call"):
                     await asyncio.to_thread(
-                        provider.start_run,
+                        prepare_and_start_run,
+                        provider,
                         run_id=run_id,
-                    prompt=prep_prompt,
-                    cwd=self.cwd,
-                    loop=loop,
-                    queue=queue,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    session_id=None,
-                    mode=mode,
-                    app_session_id=self.agent_session_id,
-                    backend_url=get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
-                    internal_token=getattr(coordinator, "internal_token", None),
-                    extra_env=self.extra_env,
-                    provider_run_config=provider_run_config,
-                    capability_contexts=capability_contexts,
-                    provisioned_tool_profile=provisioned_tool_profile,
-                    target_message_id=target_message_id,
+                        prompt=prep_prompt,
+                        cwd=self.cwd,
+                        loop=loop,
+                        queue=queue,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        session_id=None,
+                        mode=mode,
+                        app_session_id=self.agent_session_id,
+                        backend_url=get_env(
+                            "BETTER_CLAUDE_BACKEND_URL",
+                            "http://localhost:8000",
+                        ),
+                        internal_token=getattr(
+                            coordinator,
+                            "internal_token",
+                            None,
+                        ),
+                        extra_env=self.extra_env,
+                        provider_run_config=provider_run_config,
+                        capability_contexts=capability_contexts,
+                        provisioned_tool_profile=provisioned_tool_profile,
+                        target_message_id=target_message_id,
                     )
             discovered: Optional[str] = None
             terminal_error: Optional[str] = None
@@ -376,29 +384,30 @@ class SubprocessAgent:
                 raise RuntimeError("provider is suspended")
             with perf.timed("subprocess_agent.run.start_run.provider_call"):
                 await asyncio.to_thread(
-                    provider.start_run,
+                    prepare_and_start_run,
+                    provider,
                     run_id=run_id,
-                prompt=prompt,
-                cwd=self.cwd,
-                loop=loop,
-                queue=queue,
-                model=model,
-                reasoning_effort=(
-                    session_manager.get(self.agent_session_id) or {}
-                ).get("reasoning_effort"),
-                session_id=current_session_id,
-                mode=mode,
-                app_session_id=self.agent_session_id,
-                backend_url=backend_url,
-                internal_token=internal_token,
-                fork=fork,
-                extra_env=self.extra_env,
-                provider_run_config=(
-                    session_manager.get(self.agent_session_id) or {}
-                ).get("provider_run_config") or None,
-                capability_contexts=(
-                    session_manager.get(self.agent_session_id) or {}
-                ).get("capability_contexts") or None,
+                    prompt=prompt,
+                    cwd=self.cwd,
+                    loop=loop,
+                    queue=queue,
+                    model=model,
+                    reasoning_effort=(
+                        session_manager.get(self.agent_session_id) or {}
+                    ).get("reasoning_effort"),
+                    session_id=current_session_id,
+                    mode=mode,
+                    app_session_id=self.agent_session_id,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                    fork=fork,
+                    extra_env=self.extra_env,
+                    provider_run_config=(
+                        session_manager.get(self.agent_session_id) or {}
+                    ).get("provider_run_config") or None,
+                    capability_contexts=(
+                        session_manager.get(self.agent_session_id) or {}
+                    ).get("capability_contexts") or None,
                     target_message_id=target_message_id,
                 )
             coordinator.turn_manager.active_run_ids.setdefault(self.agent_session_id, []).append(run_id)
