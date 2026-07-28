@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "../api";
+import { eventBus } from "../lib/eventBus";
 
 // Backend contract (GET /api/extensions): an extension record may carry a
 // `pending_health_decision` when the runtime wants the user to decide
@@ -33,8 +34,6 @@ interface ExtensionHealthRecord {
   manifest?: { id?: string; name?: string };
   pending_health_decision?: PendingHealthDecision;
 }
-
-const HEALTH_FETCH_INTERVAL_MS = 30_000;
 
 async function fetchPendingDecision(): Promise<ActiveHealthDecision | null> {
   try {
@@ -77,10 +76,19 @@ export function useExtensionHealthDecision(): {
     void refresh();
     const onfocus = () => void refresh();
     window.addEventListener("focus", onfocus);
-    const interval = window.setInterval(() => void refresh(), HEALTH_FETCH_INTERVAL_MS);
+    // Push-driven invalidation: the backend broadcasts `extension.catalog`
+    // whenever the extension snapshot changes (incl. a health decision being
+    // raised/cleared), so refetch immediately on it. Catalog frames are also
+    // broadcast globally and are NOT replayed on WS reconnect, so rehydrate on
+    // `ws_connection_changed` (connected) to close that gap — no polling.
+    const offCatalog = eventBus.subscribe("extension.catalog", () => void refresh());
+    const offConn = eventBus.subscribe("ws_connection_changed", (p) => {
+      if (p && (p as { connected?: boolean }).connected) void refresh();
+    });
     return () => {
       window.removeEventListener("focus", onfocus);
-      window.clearInterval(interval);
+      offCatalog();
+      offConn();
     };
   }, [refresh]);
 
