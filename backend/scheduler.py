@@ -147,9 +147,8 @@ class Scheduler:
                 )
                 if rec.get("kind") == "once":
                     # mark_fired already deleted it (mark-before-submit);
-                    # restore with a 5-minute backoff so a transiently
-                    # locked queue (e.g. adv_sync overlay) doesn't
-                    # silently drop the prompt.
+                    # restore with a 5-minute backoff so a transient
+                    # submission failure doesn't silently drop the prompt.
                     try:
                         schedule_store.create(
                             app_session_id=sid,

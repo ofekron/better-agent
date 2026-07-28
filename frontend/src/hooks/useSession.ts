@@ -49,7 +49,6 @@ export interface CreateSessionOptions {
 
 export type SessionMetadataPatch = {
   inline_tags?: InlineTag[];
-  adv_sync_overlays?: Session["adv_sync_overlays"];
   open_file_panels?: OpenFilePanel[];
   open_config_panels?: import("../types").OpenConfigPanel[];
   draft_input?: string;
@@ -222,18 +221,10 @@ const SESSION_SEARCH_DEBOUNCE_MS = 300;
  * The backend embeds those in the same `forks` array as user-facing
  * forks; the frontend should never render them in the sidebar. */
 export function userFacingForks(node: Session): Session[] {
-  // INVARIANT: adv_sync_fork is intentionally EXCLUDED here. Those forks
-  // exist as embedded children but the user only sees them on demand
-  // — `handleAdvSyncClick` opens a separate window (?adv_sync_overlay=…)
-  // that renders them via AdvSyncWindow. The default session view stays
-  // linear regardless of any in-flight or converged adv-sync runs.
   return (node.forks ?? []).filter((f) => (f.kind ?? "user") === "user");
 }
 
-/** Forks that need WS subscriptions. Aliased to `userFacingForks` —
- * the main-window WS subscriptions follow the same set. AdvSyncWindow
- * opens its own connection and subscribes to the two adv-sync forks
- * directly. */
+/** Forks that need WS subscriptions. */
 export const wsSubscribableForks = userFacingForks;
 
 function isSidebarVisibleSession(session: Session): boolean {
@@ -267,25 +258,6 @@ function canLocallyInsertIntoSessionList(
   if (filters.modes?.length) return false;
   if (filters.sources?.length) return false;
   return true;
-}
-
-/** Return the two forks bound to an adv-sync overlay, in
- * (supportive, adversarial) order. Used by AdvSyncWindow. Returns
- * empty array if either fork is missing from the tree (e.g. one was
- * deleted out from under the overlay). */
-export function advSyncForksFor(
-  tree: Session,
-  overlay: { supportive_fork_id: string; adversarial_fork_id: string },
-): Session[] {
-  const byId = new Map<string, Session>();
-  const visit = (n: Session) => {
-    byId.set(n.id, n);
-    for (const f of n.forks ?? []) visit(f);
-  };
-  visit(tree);
-  const s = byId.get(overlay.supportive_fork_id);
-  const a = byId.get(overlay.adversarial_fork_id);
-  return s && a ? [s, a] : [];
 }
 
 /** Count total events on a message — primary msg.events plus all
@@ -1171,8 +1143,6 @@ export function useSession(authStatus?: string) {
           : patchOrUpdater;
       const next: Session = { ...session };
       if (patch.inline_tags !== undefined) next.inline_tags = patch.inline_tags;
-      if (patch.adv_sync_overlays !== undefined)
-        next.adv_sync_overlays = patch.adv_sync_overlays;
       if (patch.open_file_panels !== undefined)
         next.open_file_panels = patch.open_file_panels;
       if (patch.open_config_panels !== undefined)

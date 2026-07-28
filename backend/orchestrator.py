@@ -1311,25 +1311,6 @@ class Coordinator:
     # ------------------------------------------------------------------
     # Per-session prompt queue + processor task ownership
     # ------------------------------------------------------------------
-    def _reject_if_adv_sync_fork_locked(self, app_session_id: str) -> None:
-        _target = session_manager.get(app_session_id)
-        if not _target or _target.get("kind") != "adv_sync_fork":
-            return
-        _parent_id = _target.get("parent_session_id")
-        _parent = session_manager.get(_parent_id) if _parent_id else None
-        for ov in (_parent or {}).get("adv_sync_overlays") or []:
-            if ov.get("status") != "running":
-                continue
-            if app_session_id not in (
-                ov.get("supportive_fork_id"),
-                ov.get("adversarial_fork_id"),
-            ):
-                continue
-            raise RuntimeError(
-                "adv_sync_fork locked: parent has running overlay "
-                f"{ov.get('id')}",
-            )
-
     def _remember_active_prompt_client_id(
         self,
         app_session_id: str,
@@ -1478,11 +1459,9 @@ class Coordinator:
         *,
         start_processor: bool = True,
     ) -> str:
-        await _to_team_message_thread(self._reject_if_adv_sync_fork_locked, app_session_id)
         return self.submit_prompt(
             app_session_id,
             params,
-            _adv_sync_checked=True,
             start_processor=start_processor,
         )
 
@@ -1494,7 +1473,6 @@ class Coordinator:
         app_session_id: str,
         params: dict,
         *,
-        _adv_sync_checked: bool = False,
         start_processor: bool = True,
     ) -> str:
         """Enqueue a prompt for `app_session_id` and normally ensure its
@@ -1508,8 +1486,7 @@ class Coordinator:
             if params.get("_client_id_claimed"):
                 self._forget_active_prompt_item(params.get("_queued_id"))
             raise RuntimeError("prompt admission is closed")
-        if not _adv_sync_checked:
-            self._reject_if_adv_sync_fork_locked(app_session_id)
+        session_manager.assert_prompt_target_allowed(app_session_id)
         q = self._prompt_queues.get(app_session_id)
         if q is None:
             q = asyncio.Queue()
@@ -4252,11 +4229,9 @@ class Coordinator:
     # Run state — backend is source of truth for "what's running"
     # ------------------------------------------------------------------
     # Run kinds that drive `isStreaming` on the target assistant msg.
-    # Workers and adv-sync forks register against the PARENT msg but
-    # they don't represent "the assistant typing right now" — workers
-    # have their own worker-source msgs, adv-sync forks own a separate
-    # forked session. Listing here keeps the single source of truth
-    # for streaming-ness narrow and audited.
+    # Workers register against the parent message but have their own
+    # worker-source messages, so they do not represent the parent assistant
+    # typing. Keep the streaming source of truth narrow and audited.
     _STREAMING_KINDS = frozenset({"manager", "native"})
 
 

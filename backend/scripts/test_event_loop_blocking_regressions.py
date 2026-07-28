@@ -4456,7 +4456,6 @@ def test_team_message_dispatch_uses_dedicated_executor() -> None:
     submit_prompt_async_start = source.index("async def submit_prompt_async(")
     submit_prompt_async_end = source.index("def submit_prompt(", submit_prompt_async_start)
     submit_prompt_async_source = source[submit_prompt_async_start:submit_prompt_async_end]
-    assert "await _to_team_message_thread(self._reject_if_adv_sync_fork_locked" in submit_prompt_async_source
     assert "asyncio.to_thread(" not in submit_prompt_async_source
 
     team_message_start = source.index("async def submit_team_message(")

@@ -2,7 +2,7 @@
 
 A run dir's `state.json`/`backend_state.json` is the only structured record
 that a given provider native session was spawned BY Better Agent (worker,
-fork, delegate, supervisor, adv-sync, or a normal turn). Run dirs are reaped
+fork, delegate, supervisor, or a normal turn). Run dirs are reaped
 on session delete and on the 7-day age-prune, so that provenance evaporates
 within a week — after which the native-session importer can no longer tell a
 BA-spawned session apart from a real user CLI session.

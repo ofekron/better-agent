@@ -25,7 +25,6 @@ const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string; colo
   team_ask: { icon: "✉", label: "Ask", color: COLOR_EXTERNAL },
   schedule: { icon: "⏰", label: "Schedule", color: COLOR_EXTERNAL },
   "agent-board": { icon: "📋", label: "Agent Board", color: COLOR_EXTERNAL },
-  adv_sync: { icon: "⚖", label: "Adversarial", color: COLOR_REVIEW },
   provisioning: { icon: "⚙", label: "Provisioning", color: COLOR_EXTERNAL },
   subprocess_agent: { icon: "🤖", label: "Agent", color: COLOR_WORKER },
   assistant: { icon: "🤖", label: "Assistant", color: COLOR_WORKER },

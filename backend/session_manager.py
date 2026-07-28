@@ -635,8 +635,8 @@ class SessionManager:
         # `message_recovering_changed` carries `running_changed` /
         # `unread_changed` / `seen_advanced`. SessionWSBroadcaster maps
         # each to a global-allowlisted WS frame so home/sidebar/badge
-        # consumers converge without polling. `kind != "user"` sessions
-        # (delegate_fork, supervisor_worker, adv_sync_fork) are excluded
+        # consumers converge without polling. `kind != "user"` sessions,
+        # including legacy internal forks, are excluded
         # at the mutator boundary — workers don't contribute to a
         # user-facing session's unread, and they don't appear in the
         # sidebar so their "running" state never needs to surface.
@@ -4464,18 +4464,11 @@ class SessionManager:
         parent_sid: str,
         name: Optional[str] = None,
         *,
-        kind: Optional[str] = None,
         user_initiated: Optional[bool] = None,
     ) -> dict:
         """Fork `parent_sid` (root or embedded fork). The new fork is
         appended to the parent's `forks` array within the same root
         tree, then the whole root is persisted.
-
-        `kind` overrides the default `"user"` discriminator on the new
-        fork. Used by orchs.adv_sync to mark its forks as
-        `"adv_sync_fork"` *before* the `forked` broadcast fires so the
-        frontend's first view of the fork already carries the right
-        kind (avoids a post-create kind flip race).
 
         `user_initiated` overrides the inherited default for agent-driven
         forks (e.g. session-bridge ask/run fork) that should remain
@@ -4520,12 +4513,6 @@ class SessionManager:
                 raise KeyError(parent_sid)
             self._enforce_lineage_caps(cached_root, parent_sid)
             child = session_store.fork_session(cached_root, parent_sid, name=name)
-            if kind is not None:
-                child["kind"] = kind
-                # A non-"user" kind (e.g. adv_sync_fork) is an internal
-                # fork the user did not ask for — never user-facing.
-                if kind != "user":
-                    child["user_initiated"] = False
             if user_initiated is not None:
                 child["user_initiated"] = bool(user_initiated)
             # The new fork node is now live inside cached_root; register
@@ -5105,7 +5092,14 @@ class SessionManager:
 
     # ── Queued prompts ──────────────────────────────────────────────
 
+    def assert_prompt_target_allowed(self, sid: str) -> None:
+        """Fail closed for inert legacy session kinds."""
+        session = self.get(sid)
+        if session and session.get("kind") == "adv_sync_fork":
+            raise RuntimeError("prompt target belongs to a removed feature")
+
     def admit_queued_prompt(self, sid: str, prompt: dict) -> dict:
+        self.assert_prompt_target_allowed(sid)
         import session_queue_projection
 
         with session_queue_projection.producer_lease(
@@ -5781,8 +5775,7 @@ class SessionManager:
     @staticmethod
     def _is_user_kind(sess: Optional[dict]) -> bool:
         """A session contributes to the sidebar / aggregate metrics iff
-        its `kind` is None or "user". Worker forks
-        (`delegate_fork`, `supervisor_worker`, `adv_sync_fork`) are
+        its `kind` is None or "user". Internal and legacy forks are
         excluded — they never appear in the sidebar so neither their
         running state nor their unread count should leak into
         user-facing badges."""
@@ -6211,41 +6204,6 @@ class SessionManager:
         mode. Decouples callers from session_store schema details."""
         return session_store._agent_sid_field_for_mode(mode)
 
-    def recover_running_adv_sync_overlays(self) -> int:
-        """Walk every session on disk and flip any overlays stuck in
-        'running' status to 'interrupted'. Called at startup before
-        the coordinator starts any new driver tasks.
-        """
-        flipped = 0
-        seen_roots: set[str] = set()
-        for sess in session_store.iter_all_sessions():
-            if sess.get("parent_session_id"):
-                continue  # only persist on roots
-            sid = sess.get("id")
-            if not sid or sid in seen_roots:
-                continue
-            seen_roots.add(sid)
-            overlays = sess.get("adv_sync_overlays") or []
-            changed = False
-            for ov in overlays:
-                if ov.get("status") == "running":
-                    ov["status"] = "interrupted"
-                    ov["updated_at"] = datetime.now().isoformat()
-                    changed = True
-                    flipped += 1
-            if changed:
-                # Direct write-through since this runs BEFORE the
-                # manager's in-memory cache is fully populated and
-                # before any REST/WS readers are active.
-                try:
-                    self._root_repository.write_root(sess, bump_updated_at=False)
-                    self._note_root_file_written(sid)
-                except Exception:
-                    logger.exception(
-                        "recover_running_adv_sync_overlays: write failed for %s", sid,
-                    )
-        return flipped
-
     def set_msg_recovering(self, sid: str, msg_id: str, value: bool) -> None:
         """Transient marker: this message is being reconciled by
         run_recovery right now. Lives in the in-memory set only; never
@@ -6670,52 +6628,6 @@ class SessionManager:
         if sidebar_minimized is not None:
             change["sidebar_minimized"] = bool(sidebar_minimized)
         return self._run(sid, _do, change)
-
-    # ── Adversarial-sync overlays ──────────────────────────────────
-    #
-    # Per-message text substitutions produced by the orchs.adv_sync
-    # ping-pong loop. Same broadcast pattern as inline_tags: a single
-    # "adv_sync_updated" change kind fires regardless of add/update;
-    # the broadcaster ships the full post-mutation list. Overlay id is
-    # the stable handle the driver/REST endpoints reference; status
-    # transitions (running → converged/failed/stopped/interrupted) and
-    # round counters arrive via update_adv_sync_overlay.
-
-    def add_adv_sync_overlay(
-        self, sid: str, overlay: dict, *, client_id: Optional[str] = None,
-    ) -> Optional[dict]:
-        def _do(s: dict) -> None:
-            s.setdefault("adv_sync_overlays", []).append(overlay)
-        return self._run(
-            sid, _do,
-            {"kind": "adv_sync_updated", "client_id": client_id},
-            enrich=lambda s: {
-                "adv_sync_overlays": list(s.get("adv_sync_overlays") or []),
-            },
-        )
-
-    def update_adv_sync_overlay(
-        self,
-        sid: str,
-        overlay_id: str,
-        patch: dict,
-        *,
-        client_id: Optional[str] = None,
-    ) -> Optional[dict]:
-        def _do(s: dict) -> None:
-            overlays = s.get("adv_sync_overlays") or []
-            for ov in overlays:
-                if ov.get("id") == overlay_id:
-                    ov.update(patch)
-                    ov["updated_at"] = datetime.now().isoformat()
-                    return
-        return self._run(
-            sid, _do,
-            {"kind": "adv_sync_updated", "client_id": client_id},
-            enrich=lambda s: {
-                "adv_sync_overlays": list(s.get("adv_sync_overlays") or []),
-            },
-        )
 
     # ── Open file panels ───────────────────────────────────────────
     #

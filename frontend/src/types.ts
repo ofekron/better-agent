@@ -868,25 +868,6 @@ export interface QueuedPrompt {
 /** Lightweight worker entry returned in the session list payload — just
  * the agent_session_id + orchestration_mode. The full WorkerInfo (with
  * name, status, token usage) is fetched through the Team Orchestration extension. */
-/** Adversarial-sync overlay — a per-message text substitution proposed
- * by the orchs.adv_sync ping-pong loop. Anchored to a `message_id` on
- * the parent session; carries the two driving forks' ids so the
- * frontend can navigate into the side-by-side ForkSplitView on click. */
-export interface AdvSyncOverlay {
-  id: string;
-  message_id: string;
-  original_text: string;
-  agreed_text: string | null;
-  status: "running" | "converged" | "failed" | "stopped" | "interrupted";
-  supportive_fork_id: string;
-  adversarial_fork_id: string;
-  rounds_completed: number;
-  max_rounds: number;
-  created_at: string;
-  updated_at: string;
-  error?: string | null;
-}
-
 export interface SessionWorkerRef {
   agent_session_id: string;
   orchestration_mode: OrchestrationMode;
@@ -1060,13 +1041,6 @@ export interface Session {
    * default adversarial verdict prompt. Persisted on the backend session. */
   supervisor_custom_prompt?: string;
   inline_tags?: InlineTag[];
-  /** Per-message text substitutions produced by the adversarial-sync
-   * ping-pong loop (orchs.adv_sync). Same push channel as inline_tags
-   * — full post-mutation list arrives via `session_metadata_updated`
-   * on every transition (round_completed, converged, failed, stopped,
-   * interrupted). Anchored to a parent-session message_id; the two
-   * forks live as siblings under this session's `forks` array. */
-  adv_sync_overlays?: AdvSyncOverlay[];
   /** Backend-owned set of file panels open in the tabbed/split
    * right-panel viewer. Pulled via the session REST snapshot, pushed
    * via `session_metadata_updated` (same channel as inline_tags). */
@@ -1129,7 +1103,7 @@ export interface Session {
    * jsonls.
    *   - "delegate_fork": per-(caller, worker) thread used by
    *     manager-mode delegations. */
-  kind?: "user" | "delegate_fork" | "supervisor_worker" | "adv_sync_fork";
+  kind?: "user" | "delegate_fork" | "supervisor_worker";
   caller_agent_session_id?: string | null;
   pinned?: boolean;
   topbar_pinned?: boolean;
@@ -1312,7 +1286,7 @@ export interface Provider {
   login_state?: { status: string; message?: string; authenticated?: boolean | null };
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
-   * Adversarial Sync, Prompt-Engineer refine.
+   * and Prompt-Engineer refine.
    * Backend-resolved from Provider.supports_fork. */
   supports_fork: boolean;
   /** Whether this provider can drive the persistent "manager" session

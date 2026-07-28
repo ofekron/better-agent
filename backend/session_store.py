@@ -100,8 +100,8 @@ class SessionProviderNotConfiguredError(ValueError):
 #     • worker creation under "approve"/"deny" policy (no popup shown)
 #     • provisioned helper sessions (search / board workers, source=internal)
 #     • extension-created sessions
-#     • internal forks: delegate_fork / adv_sync_fork / supervisor_worker
-#       / sub_session
+#     • internal forks: delegate_fork / supervisor_worker / sub_session
+#     • legacy removed-feature forks: adv_sync_fork
 #
 # Backfill heuristic for legacy records lives in `_migrate_session`.
 
@@ -1154,7 +1154,7 @@ def _build_summary_for_root(
     import session_organization_store
     # `fork_count` is the sidebar-visible count (user forks only), while
     # `all_fork_ids` is the COMPLETE fork set the fork index resolves ids
-    # against — sub-sessions, delegate forks and adv-sync forks included.
+    # against — hidden internal and legacy forks included.
     # Readers trust it as complete for the root revision the summary is
     # stamped with, so it may reach disk ONLY through `_write_summary_file`,
     # which publishes it only for a caller that vouched for that revision.
@@ -3841,7 +3841,7 @@ def _event_uuid_from_stored(event: dict) -> Optional[str]:
 #      primary `agent_session_id` slot; supervisor owns a real separate
 #      sid slot (its sidecar session).
 #   3. turn source (`run_turn`'s `source` param):
-#      "user"|"supervisor"|"adv_sync"|"schedule"|None.
+#      "user"|"supervisor"|"schedule"|None.
 _CLAUDE_SID_FIELD_BY_MODE = {
     "team": "agent_session_id",
     "manager": "agent_session_id",
@@ -4663,9 +4663,8 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     # "delegate_fork" (per-pair manager-mode delegate fork),
     # "supervisor_worker" (the worker side of a supervisor session),
     # "sub_session" (hidden native child addressable by mssg/ask), or
-    # "adv_sync_fork" (one of the two adversarial-sync forks driven by
-    # orchs/adv_sync). Frontend hides non-user kinds from sidebar fork count;
-    # "adv_sync_fork" remains visible in ForkSplitView so the user can drill in.
+    # "adv_sync_fork" (inert compatibility value for legacy records).
+    # Frontend hides non-user kinds from sidebar fork count.
     # session_watcher still tails the jsonls of every kind.
     if session.get("kind") not in (
         "user", "delegate_fork", "supervisor_worker", "sub_session",
@@ -4688,10 +4687,6 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     # Embedded children. Roots and forks alike can have nested forks.
     session.setdefault("forks", [])
     session.setdefault("inline_tags", [])
-    # Adversarial-sync overlays — per-message text substitutions produced
-    # by the orchs.adv_sync ping-pong loop. Same persistence pattern as
-    # inline_tags (full list shipped via session_metadata_updated).
-    session.setdefault("adv_sync_overlays", [])
     # User-/agent-opened file panels for the tabbed/split right-panel
     # viewer. Additive metadata (like inline_tags) — the LIST + the
     # agent-requested focus/selection is persisted; the user's live
@@ -5013,7 +5008,6 @@ def create_session(
         "messages": [],
         "next_seq": 0,
         "inline_tags": [],
-        "adv_sync_overlays": [],
         "open_file_panels": [],
         "open_config_panels": [],
         "notes": [],
@@ -5503,10 +5497,7 @@ def _write_session_full_bound(
     writer. `_migrate_and_persist` routes through `_root_writer_guard`
     (registered by `session_manager`) precisely to close that gap for
     its own callers (`iter_all_sessions`, used by session_watcher /
-    run_recovery); `adv_sync.recover_running_overlays_on_startup` writes
-    directly and is safe only because it runs at startup before any
-    root is resident in `session_manager`'s cache and before any turn
-    can run. Any NEW unlocked bulk-walk writer must route through
+    run_recovery). Any NEW unlocked bulk-walk writer must route through
     `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     global _index_fingerprint
@@ -5753,8 +5744,7 @@ def iter_root_sessions() -> Iterator[dict]:
 
     Non-session JSON files that leak into the sessions dir (e.g. a
     stray ``git-last.json``) are skipped: only dicts carrying an
-    ``id`` are yielded, so one malformed file can't abort the walk and
-    crash callers like the startup adv-sync overlay recovery task."""
+    ``id`` are yielded, so one malformed file can't abort the walk."""
     _ensure_dir()
     for path in _session_json_files():
         try:
@@ -5906,7 +5896,7 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "source": parent.get("source") if parent.get("source") in _VALID_SESSION_SOURCES else "web",
         # A plain fork inherits the parent's user-awareness. The
         # session_manager.fork wrapper forces this False when a non-user
-        # `kind` (e.g. adv_sync_fork) is stamped on the new fork.
+        # kind is stamped on the new fork.
         "user_initiated": bool(parent.get("user_initiated", _infer_user_initiated(parent))),
         "processed_line_by_sid": {},
         "parent_session_id": parent_id,
@@ -6175,7 +6165,6 @@ def create_delegate_fork(
         "messages": [],
         "next_seq": 0,
         "inline_tags": [],
-        "adv_sync_overlays": [],
         "open_file_panels": [],
         "open_config_panels": [],
         "notes": [],

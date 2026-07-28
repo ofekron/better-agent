@@ -14606,7 +14606,7 @@ pre .inline-tag-highlight {
 /* Footnote-style reference number at the end of the commented range.
  * Rendered from `data-ref-number` (stamped on the tag's LAST span) so
  * no text node is added to the DOM — clipboard copy and the flat-string
- * matchers in tagHighlights/advSyncOverlays stay clean. In-flow ::after
+ * matcher in tagHighlights stays clean. In-flow ::after
  * follows the text-end: top-right in LTR, top-left in RTL. */
 .inline-tag-highlight[data-ref-number]::after {
   content: attr(data-ref-number);
@@ -14630,171 +14630,6 @@ pre .inline-tag-highlight {
 .inline-tag-highlight.inline-tag-highlight-focused[data-ref-number]::after {
   background: rgba(255, 255, 255, 0.92);
   color: rgb(93, 73, 214);
-}
-
-/* Adversarial-sync overlay spans. Wrap original_text (during running)
- * or agreed_text (after converge). Status drives the accent colour.
- * Inline-block keeps the styled segment in flow with the surrounding
- * text. */
-.adv-sync-span {
-  background: rgba(255, 196, 0, 0.18);
-  border-bottom: 2px dashed rgba(255, 196, 0, 0.9);
-  border-radius: 2px;
-  padding: 0 2px;
-}
-.adv-sync-running {
-  background: rgba(255, 196, 0, 0.18);
-  border-bottom: 2px dashed rgba(255, 196, 0, 0.9);
-}
-.adv-sync-converged {
-  background: rgba(80, 200, 120, 0.22);
-  border-bottom: 2px solid rgba(80, 200, 120, 1);
-  cursor: pointer;
-}
-.adv-sync-converged:hover {
-  background: rgba(80, 200, 120, 0.32);
-}
-.adv-sync-failed,
-.adv-sync-interrupted,
-.adv-sync-stopped {
-  background: rgba(200, 80, 80, 0.16);
-  border-bottom: 2px dotted rgba(200, 80, 80, 0.8);
-  color: var(--muted-text, #999);
-}
-.adv-sync-badge {
-  display: inline-block;
-  margin-inline-start: 4px;
-  padding: 0 6px;
-  font-size: 0.78em;
-  border-radius: 8px;
-  background: rgba(255, 196, 0, 0.22);
-  color: rgba(255, 196, 0, 1);
-  vertical-align: middle;
-}
-
-/* Dedicated drill-down window opened via window.open when a user
- * clicks a converged adv-sync overlay span. Full-viewport layout
- * with a header + two-column grid of fork message lists. */
-.adv-sync-window {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  width: 100vw;
-  background: var(--bg, #1a1a1a);
-  color: var(--text, #ddd);
-  font-family: inherit;
-  padding: 16px 20px;
-  box-sizing: border-box;
-  gap: 12px;
-}
-.adv-sync-window-header {
-  flex: 0 0 auto;
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-.adv-sync-window-titlerow {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-.adv-sync-window-titlerow h2 {
-  margin: 0;
-  font-size: calc(18px * var(--app-font-scale));
-}
-.adv-sync-window-status {
-  padding: 2px 10px;
-  font-size: calc(12px * var(--app-font-scale));
-  border-radius: 10px;
-  background: rgba(123, 104, 238, 0.18);
-  color: var(--text, #ddd);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.adv-sync-window-status.adv-sync-converged {
-  background: rgba(80, 200, 120, 0.22);
-  color: rgba(150, 230, 175, 1);
-}
-.adv-sync-window-status.adv-sync-failed,
-.adv-sync-window-status.adv-sync-interrupted,
-.adv-sync-window-status.adv-sync-stopped {
-  background: rgba(200, 80, 80, 0.18);
-  color: rgba(240, 160, 160, 1);
-}
-.adv-sync-window-textcompare {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-.adv-sync-window-text-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.adv-sync-window-text-label {
-  font-size: calc(11px * var(--app-font-scale));
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--muted-text, #888);
-}
-.adv-sync-window-text {
-  margin: 0;
-  padding: 8px 10px;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 4px;
-  white-space: pre-wrap;
-  font-size: calc(13px * var(--app-font-scale));
-  max-height: 200px;
-  overflow-y: auto;
-}
-.adv-sync-window-text-agreed {
-  border-inline-start: 3px solid rgba(80, 200, 120, 1);
-}
-.adv-sync-window-error-banner {
-  margin-top: 8px;
-  padding: 8px 10px;
-  background: rgba(200, 80, 80, 0.16);
-  border-radius: 4px;
-  font-size: calc(13px * var(--app-font-scale));
-}
-.adv-sync-window-grid {
-  flex: 1 1 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  min-height: 0;
-}
-.adv-sync-window-pane {
-  display: flex;
-  flex-direction: column;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-  overflow: hidden;
-  min-height: 0;
-}
-.adv-sync-window-pane-header {
-  flex: 0 0 auto;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.05);
-  font-weight: 600;
-  font-size: calc(13px * var(--app-font-scale));
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-.adv-sync-window-pane-body {
-  flex: 1 1 0;
-  overflow-y: auto;
-  padding: 8px;
-}
-.adv-sync-window-pane-empty {
-  padding: 24px;
-  text-align: center;
-  color: var(--muted-text, #888);
-  font-style: italic;
-}
-.adv-sync-window-loading,
-.adv-sync-window-error {
-  align-items: center;
-  justify-content: center;
 }
 
 /* Message row — flex container holding the chat content (left) and the
@@ -20845,13 +20680,9 @@ button.progress-inflight {
   border-color: var(--accent);
 }
 
-/* AdvSyncWindow and SupervisorSplitView use grid-template-columns:
-   1fr 1fr to put two panes side-by-side. On mobile / tablet they
-   stack vertically. Borders that used `border-inline-start` between
-   cells flip to top borders so the visual separator still applies. */
+/* SupervisorSplitView uses two side-by-side panes on desktop and
+   stacks them vertically on mobile / tablet. */
 @media (max-width: 1024px) {
-  .adv-sync-window-textcompare,
-  .adv-sync-window-grid,
   .supervisor-split-header,
   .supervisor-timeline-row {
     grid-template-columns: 1fr !important;

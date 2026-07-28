@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -75,6 +76,8 @@ def _seed_orphan_run(
     events: list[dict],
     *,
     processed_byte: int = 0,
+    runner_pid: int = 0,
+    cli_pid: int | None = None,
 ) -> str:
     """Synthesize a run dir on disk shaped like an orphan: input.json,
     backend_state.json with a dead pid, and a claude session jsonl on
@@ -106,7 +109,8 @@ def _seed_orphan_run(
     (run_dir / "state.json").write_text(json.dumps({
         "run_id": run_id,
         "mode": "native",
-        "runner_pid": 0,
+        "runner_pid": runner_pid,
+        "cli_pid": cli_pid,
         "app_session_id": app_sid,
         "session_id": claude_sid,
         "jsonl_path": str(claude_jsonl),
@@ -117,13 +121,14 @@ def _seed_orphan_run(
         "run_id": run_id,
         "app_session_id": app_sid,
         "mode": "native",
-        "runner_pid": 0,  # _pid_alive(0) → False, so this is a dead orphan
+        "runner_pid": runner_pid,
+        "cli_pid": cli_pid,
         "session_id": claude_sid,
         "jsonl_path": str(claude_jsonl),
         "processed_byte": processed_byte,
         "cancelled": False,
     }))
-    (run_dir / "pid").write_text("0")
+    (run_dir / "pid").write_text(str(runner_pid))
     return run_id
 
 
@@ -331,18 +336,126 @@ async def test_failed_run_without_terminal_stamp_is_not_consistent() -> bool:
     return True
 
 
+async def test_orphaned_cli_legacy_fork_is_cancelled_without_replay() -> bool:
+    parent_sid, _, _ = _seed_session_with_streaming_assistant()
+    session_manager.set_agent_sid(
+        parent_sid,
+        "native",
+        f"legacy-parent-{uuid.uuid4()}",
+    )
+    child = session_manager.fork(parent_sid, name="legacy-child")
+    with session_manager.live_tree(parent_sid) as root:
+        if root is None:
+            return False
+        persisted_child = next(
+            (fork for fork in root.get("forks") or [] if fork.get("id") == child["id"]),
+            None,
+        )
+        if persisted_child is None:
+            return False
+        persisted_child["kind"] = "adv_sync_fork"
+        persisted_child["user_initiated"] = False
+        session_manager._persist_root(parent_sid, bump=True)
+
+    launcher = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess, sys; "
+                "p = subprocess.Popen("
+                "[sys.executable, '-c', 'import time; time.sleep(60)'], "
+                "start_new_session=True, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL); "
+                "print(p.pid)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cli_pid = int(launcher.stdout.strip())
+    run_id = ""
+    try:
+        run_id = _seed_orphan_run(
+            child["id"],
+            str(uuid.uuid4()),
+            [_make_assistant_text_event("must never replay")],
+            runner_pid=0,
+            cli_pid=cli_pid,
+        )
+        bridge = default_provider()
+        recovered = bridge.recover_in_flight()
+        target = next(
+            (desc for desc in recovered if desc.get("run_id") == run_id),
+            None,
+        )
+        if target is None:
+            print("  live legacy run was not recovered")
+            return False
+        if not target.get("orphaned_cli"):
+            print(f"  expected orphaned_cli descriptor, got {target!r}")
+            return False
+
+        await integrate_recovered_runs(coordinator=None, recovered=[target])
+
+        run_dir = _runs_root() / run_id
+        if not (run_dir / "cancel").exists():
+            print("  legacy run cancellation sentinel missing")
+            return False
+        if not (run_dir / "reconciled.marker").exists():
+            print("  legacy run terminal reconciliation marker missing")
+            return False
+        if run_id in bridge._runs:
+            print("  legacy run was reattached to provider")
+            return False
+        loaded_child = session_manager.get(child["id"])
+        if any(
+            "must never replay" in str(event)
+            for message in (loaded_child or {}).get("messages") or []
+            for event in message.get("events") or []
+        ):
+            print("  legacy run event was replayed")
+            return False
+
+        parent_item = f"parent-{uuid.uuid4()}"
+        from main import coordinator
+        coordinator.submit_prompt(
+            parent_sid,
+            {"_queued_id": parent_item, "prompt": "parent still works"},
+            start_processor=False,
+        )
+        coordinator._prompt_queues.pop(parent_sid, None)
+        coordinator._queued_ids.pop(parent_sid, None)
+        return True
+    finally:
+        from containment import containment
+        container = containment()
+        try:
+            container.reattach(run_id, cli_pid)
+            container.force_kill_all(run_id)
+        finally:
+            container.teardown(run_id)
+
+
 TESTS = [
     ("dead orphan replays events.jsonl into assistant_msg", test_dead_orphan_replays_events_jsonl_into_assistant_msg),
     ("completed run is not clobbered by recovery", test_recovery_skips_replay_for_legitimately_completed_run),
     ("completed run without terminal stamp is finalized by recovery", test_completed_run_without_terminal_stamp_is_not_consistent),
     ("failed run without terminal stamp is finalized by recovery", test_failed_run_without_terminal_stamp_is_not_consistent),
+    ("orphaned CLI legacy fork is cancelled without replay", test_orphaned_cli_legacy_fork_is_cancelled_without_replay),
 ]
 
 
 def main_run() -> int:
     failed = 0
+    selected = (
+        [TESTS[-1]]
+        if "--legacy-removed-feature" in sys.argv
+        else TESTS
+    )
     try:
-        for name, fn in TESTS:
+        for name, fn in selected:
             try:
                 ok = asyncio.run(fn())
             except Exception as e:
@@ -358,9 +471,9 @@ def main_run() -> int:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     if failed:
-        print(f"{failed} of {len(TESTS)} test(s) FAILED")
+        print(f"{failed} of {len(selected)} test(s) FAILED")
     else:
-        print(f"all {len(TESTS)} tests passed")
+        print(f"all {len(selected)} tests passed")
     return 1 if failed else 0
 
 

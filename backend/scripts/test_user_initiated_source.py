@@ -99,7 +99,7 @@ def test_sub_session_not_user_initiated() -> None:
     )
 
 
-def test_user_fork_inherits_and_internal_fork_forced_false() -> None:
+def test_user_fork_inherits_and_agent_fork_can_be_hidden() -> None:
     parent = session_manager.create(
         name="forkable", cwd="/tmp/ui-d",
         orchestration_mode="native", source="web", user_initiated=True,
@@ -115,14 +115,6 @@ def test_user_fork_inherits_and_internal_fork_forced_false() -> None:
     check(
         "agent-requested fork from user session can be forced NOT user_initiated",
         bridge_fork.get("user_initiated") is False,
-    )
-
-    adv_fork = session_manager.fork(
-        parent["id"], name="adv-fork", kind="adv_sync_fork",
-    )
-    check(
-        "adv_sync fork is forced NOT user_initiated",
-        adv_fork.get("user_initiated") is False,
     )
 
     agent = session_manager.create(
@@ -180,7 +172,7 @@ def main() -> None:
     test_create_defaults_fail_closed()
     test_explicit_user_initiated()
     test_sub_session_not_user_initiated()
-    test_user_fork_inherits_and_internal_fork_forced_false()
+    test_user_fork_inherits_and_agent_fork_can_be_hidden()
     test_migration_backfill()
 
     internal = session_store.create_session(

@@ -12,8 +12,8 @@ import Icon from "./Icon";
 /** Long-press on a non-text target (image, video) → action sheet.
  *  Gated to media because firing on text would race with — and
  *  ultimately interrupt — Android's native text-selection drag /
- *  selection toolbar. Selection-derived actions (Copy, Comment,
- *  AdvSync) flow through SelectionPopup's touchend path instead. */
+ *  selection toolbar. Selection-derived Copy and Comment actions flow
+ *  through SelectionPopup's touchend path instead. */
 function isMediaTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLImageElement || target instanceof HTMLVideoElement
@@ -300,14 +300,6 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
           });
         }
 
-        if (messageId && handlers.advSync) {
-          items.push({
-            id: "adv-sync",
-            label: "Adversarial Sync",
-            icon: <Icon name="swords" size={14} />,
-            onClick: () => handlers.advSync!(text, messageId),
-          });
-        }
       }
 
       return items;

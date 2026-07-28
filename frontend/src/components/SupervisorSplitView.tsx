@@ -1,7 +1,6 @@
 import { useMemo, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type {
-  AdvSyncOverlay,
   ChatMessage,
   FileFocus,
   RunInfo,
@@ -31,8 +30,6 @@ interface Props {
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   tags?: InlineTag[];
   onRemoveTag?: (id: string) => void;
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
   expandAllTrigger?: number;
   streamingLoadPhase?: StreamingLoadPhase;
 }
@@ -55,8 +52,6 @@ export function SupervisorSplitView({
   onRetryStopped,
   tags,
   onRemoveTag,
-  advSyncOverlays,
-  onAdvSyncClick,
   expandAllTrigger,
   streamingLoadPhase,
 }: Props) {
@@ -165,8 +160,6 @@ export function SupervisorSplitView({
                       onRetryStopped={onRetryStopped}
                       tags={tags}
                       onRemoveTag={onRemoveTag}
-                      advSyncOverlays={advSyncOverlays}
-                      onAdvSyncClick={onAdvSyncClick}
                       expandAllTrigger={expandAllTrigger}
                       streamingLoadPhase={
                         row.primary.response?.isStreaming && isLatestPrimaryTurn
@@ -195,8 +188,6 @@ export function SupervisorSplitView({
                       onRetryStopped={onRetryStopped}
                       tags={tags}
                       onRemoveTag={onRemoveTag}
-                      advSyncOverlays={advSyncOverlays}
-                      onAdvSyncClick={onAdvSyncClick}
                       expandAllTrigger={expandAllTrigger}
                       streamingLoadPhase={
                         row.supervisor.response?.isStreaming && isLatestSupervisorTurn
@@ -247,8 +238,6 @@ interface CellGroupProps {
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   tags?: InlineTag[];
   onRemoveTag?: (id: string) => void;
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
   expandAllTrigger?: number;
   streamingLoadPhase?: StreamingLoadPhase;
 }
@@ -266,8 +255,6 @@ function CellGroup({
   onRetryStopped,
   tags,
   onRemoveTag,
-  advSyncOverlays,
-  onAdvSyncClick,
   expandAllTrigger,
   streamingLoadPhase,
 }: CellGroupProps) {
@@ -294,8 +281,6 @@ function CellGroup({
       runs={turnRuns}
       tags={tags}
       onRemoveTag={onRemoveTag}
-      advSyncOverlays={advSyncOverlays}
-      onAdvSyncClick={onAdvSyncClick}
       loadPhase={streamingLoadPhase}
     />
   );

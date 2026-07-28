@@ -57,7 +57,6 @@ _METADATA_KINDS = {
     "active_capability_added",
     "active_capability_removed",
     "working_mode_marked",
-    "adv_sync_updated",
     "msg_ask_result_set",
     "msg_ask_choice_set",
     "notes_updated",
@@ -582,15 +581,6 @@ class SessionWSBroadcaster:
             patch = {
                 "working_mode": change.get("working_mode"),
                 "working_mode_meta": change.get("working_mode_meta"),
-            }
-        elif kind == "adv_sync_updated":
-            # Adversarial-sync overlay add/update. Enriched payload
-            # ships the full post-mutation list so any open client
-            # converges without polling.
-            patch = {
-                "adv_sync_overlays": list(
-                    change.get("adv_sync_overlays") or []
-                )
             }
         elif kind == "notes_updated":
             # Per-session scratchpad notes. Enriched payload carries

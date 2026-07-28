@@ -92,8 +92,8 @@ class SessionEventsProvider(Provider):
     and pushes events onto the orchestrator queue."""
 
     # These CLIs expose no non-interactive fork primitive. Every
-    # fork-using feature (fork-and-send, adversarial sync,
-    # prompt-engineer refine, manager-mode delegate-fork) must read this
+    # fork-using feature (fork-and-send, prompt-engineer refine,
+    # manager-mode delegate-fork) must read this
     # flag and disable itself for such sessions.
     supports_fork: ClassVar[bool] = False
     # These CLIs use provider-native MCP/settings files, not the

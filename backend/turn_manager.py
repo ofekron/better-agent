@@ -161,8 +161,8 @@ class _Cancelled(Exception):
     """Raised when a turn is cancelled by the user."""
 
 
-# Streaming-eligible run kinds. Worker / adv-sync registrations
-# pointing at the parent msg do NOT flip streaming.
+# Streaming-eligible run kinds. Worker registrations pointing at the parent
+# message do not flip streaming.
 _STREAMING_KINDS = frozenset({"manager", "native"})
 _PIDLESS_RUN_STALE_AFTER_S = 30.0
 # Running-state discrepancy audit cadence: bg tick is 2 s, so 150 ticks

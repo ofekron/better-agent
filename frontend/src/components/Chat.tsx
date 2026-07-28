@@ -612,8 +612,6 @@ interface Props {
   onRename?: (id: string, name: string) => void;
   tags?: InlineTag[];
   onAddTag?: (text: string, comment: string, messageId: string) => void;
-  onAdvSync?: (text: string, messageId: string) => void;
-  onAdvSyncClick?: (overlay: import("../types").AdvSyncOverlay) => void;
   onRemoveTag?: (id: string) => void;
   /** Backend-backed draft input for this session. The `value` is owned
    * by the backend session record and synced via the
@@ -781,9 +779,7 @@ export function Chat({
   session,
   onRename,
   onAddTag,
-  onAdvSync,
   tags,
-  onAdvSyncClick,
   onRemoveTag,
   draft,
   onDraftChange,
@@ -946,7 +942,6 @@ export function Chat({
         if (msg) setRewindTarget({ message: msg, pos });
       },
       addTag: onAddTag,
-      advSync: onAdvSync,
     });
     return () => { clearMobileHandlers(); };
   });
@@ -1684,7 +1679,6 @@ export function Chat({
                       onViewDiff={onViewDiff}
                       tags={tags}
                       onRemoveTag={onRemoveTag}
-                      onAdvSyncClick={onAdvSyncClick}
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
                       userDisplayName={userDisplayName}
@@ -1857,7 +1851,7 @@ export function Chat({
         );
       })()}
       {onAddTag && (
-        <SelectionPopup onAdd={onAddTag} onAdvSync={onAdvSync} />
+        <SelectionPopup onAdd={onAddTag} />
       )}
       {rewindTarget && (
         <RewindPopover

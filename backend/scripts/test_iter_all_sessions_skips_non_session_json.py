@@ -1,8 +1,6 @@
-"""Repro / regression for: a stray non-session JSON file in the sessions
-dir (e.g. a leaked `git-last.json` with no `id`) must not crash
-`iter_all_sessions()` — which is walked by the startup adv-sync overlay
-recovery task. Before the fix, `_index_tree(root)` did `root["id"]` and
-raised KeyError, aborting the walk and failing the startup task."""
+"""A stray non-session JSON file in the sessions directory must not crash
+`iter_all_sessions()`. Before the fix, `_index_tree(root)` did `root["id"]`
+and raised KeyError, aborting the walk."""
 from __future__ import annotations
 
 import os

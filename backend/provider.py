@@ -516,7 +516,7 @@ class Provider(ABC):
     # Capabilities — overridden per-provider. INVARIANT: every CLI-level
     # primitive that some providers expose but others don't is published
     # here as a `supports_*` boolean so callers can gate features (fork &
-    # send, adversarial sync, prompt-engineer refine, …)
+    # send, prompt-engineer refine, …)
     # without `isinstance(provider, ClaudeProvider)` checks. Capabilities
     # are also exposed on the public providers list so the frontend can
     # disable buttons/menus without a per-feature roundtrip.

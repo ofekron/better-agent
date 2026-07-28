@@ -29,7 +29,6 @@ import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthProm
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
-import { AdvSyncWindow } from "./components/AdvSyncWindow";
 import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
 import type { FileEditorHandle } from "./components/FileViewer";
@@ -404,8 +403,6 @@ export default function App() {
   // Auth gate — every API call and the /ws/chat WebSocket require
   // a valid better_agent_session cookie. Render <Login /> while
   // unauthenticated; bounce to it again on WS-1008 close. The auth
-  // check is mounted ABOVE the adv-sync branch so a drill-down
-  // window opened by an unauth user lands on the login screen too.
   const {
     status: authStatus,
     error: authProbeError,
@@ -508,25 +505,6 @@ export default function App() {
 
   if (downloadPlatform) {
     return <DownloadRedirect platform={downloadPlatform} />;
-  }
-
-  // Adv-sync drill-down mode — when the URL carries
-  // ?adv_sync_overlay=<id>&parent=<id>, render the dedicated
-  // AdvSyncWindow instead of the regular workspace.
-  const advSyncParams = (() => {
-    const p = new URLSearchParams(window.location.search);
-    const overlayId = p.get("adv_sync_overlay");
-    const parentId = p.get("parent");
-    return overlayId && parentId ? { overlayId, parentId } : null;
-  })();
-
-  if (advSyncParams) {
-    return (
-      <AdvSyncWindow
-        overlayId={advSyncParams.overlayId}
-        parentId={advSyncParams.parentId}
-      />
-    );
   }
 
   return (
@@ -2992,53 +2970,6 @@ function AppMain({
       ).catch(() => {});
     },
     [currentSession, applySessionMetadata, clientId]
-  );
-
-  /** Kick off an adversarial-sync ping-pong for the selected text.
-   * Anchored to the parent root (currentTree), NOT the focused fork
-   * — overlays attach to messages that live on the displayed tree,
-   * and the message_id is the root's. The backend spawns the two
-   * forks + driver task; WS pushes drive the rest. */
-  const handleAdvSync = useCallback(
-    (text: string, messageId: string) => {
-      if (!currentTree) return;
-      progressTrackedFetch(
-        `advSync:start:${currentTree.id}:${messageId}`,
-        `${API}/api/sessions/${currentTree.id}/adv_sync`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message_id: messageId,
-            selected_text: text,
-          }),
-        },
-      ).catch((e) => {
-        alert(t("app.adversarialSyncFailed", "Adversarial sync failed to start: ") + (e?.message ?? String(e)));
-      });
-    },
-    [currentTree]
-  );
-
-  /** Click handler on a converged adversarial-sync agreed-text span.
-   * Opens a dedicated browser window rendered by AdvSyncWindow that
-   * loads the parent tree, finds the overlay, and displays the two
-   * forks side-by-side. The main app session view stays linear —
-   * adv-sync panes never appear inline. */
-  const handleAdvSyncClick = useCallback(
-    (overlay: import("./types").AdvSyncOverlay) => {
-      if (!currentTree) return;
-      const url =
-        `${window.location.origin}${window.location.pathname}` +
-        `?adv_sync_overlay=${encodeURIComponent(overlay.id)}` +
-        `&parent=${encodeURIComponent(currentTree.id)}`;
-      window.open(
-        url,
-        `adv-sync-${overlay.id}`,
-        "width=1400,height=900,resizable=yes,scrollbars=yes",
-      );
-    },
-    [currentTree]
   );
 
   // Live editor handles for the open file panels, keyed by path
@@ -7425,8 +7356,6 @@ function AppMain({
               }
               tags={tags}
               onAddTag={handleAddTag}
-              onAdvSync={handleAdvSync}
-              onAdvSyncClick={handleAdvSyncClick}
               onRemoveTag={handleRemoveTag}
               onRename={renameSession}
               draft={currentSession?.draft_input ?? ""}

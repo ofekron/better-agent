@@ -101,6 +101,11 @@ describe("SelectionPopup copy", () => {
         );
       });
       await screen.findByText("Copy");
+      expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Comment" })).toBeTruthy();
+      expect(
+        screen.queryByRole("button", { name: /adversarial sync/i }),
+      ).toBeNull();
 
       expect(window.getSelection()?.isCollapsed).toBe(false);
       await act(async () => {
@@ -280,56 +285,6 @@ describe("SelectionPopup copy", () => {
     }
   });
 
-  it("does not copy stale text after Adversarial sync closes the popup", async () => {
-    const { captured, restore } = captureDocumentListeners();
-
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    let unmount = () => {};
-    try {
-      ({ unmount } = render(
-        <>
-          <div data-message-id="m1">
-            <span data-testid="start">alpha </span>
-            <code>special</code>
-            <span data-testid="end"> omega</span>
-          </div>
-          <SelectionPopup onAdd={() => {}} onAdvSync={() => {}} />
-        </>,
-      ));
-
-      stubSelectedMessageText("alpha special omega");
-
-      await waitFor(() => {
-        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
-        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
-      });
-      await act(async () => {
-        captured.find((listener) => listener.type === "mouseup")!.fn(
-          new MouseEvent("mouseup", { bubbles: true }),
-        );
-      });
-      await screen.findByText("Adversarial sync");
-      await act(async () => {
-        screen.getByRole("button", { name: "Adversarial sync" }).click();
-      });
-      await act(async () => {
-        captured.find((listener) => listener.type === "keydown")!.fn(
-          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
-        );
-      });
-
-      expect(writeText).not.toHaveBeenCalled();
-    } finally {
-      unmount();
-      restore();
-    }
-  });
-
   it("opens the mobile copy sheet for touch selection on wide Android-style viewports", async () => {
     const { captured, restore } = captureDocumentListeners();
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -380,6 +335,11 @@ describe("SelectionPopup copy", () => {
       });
 
       await screen.findByText("Cancel");
+      expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Comment" })).toBeTruthy();
+      expect(
+        screen.queryByRole("button", { name: /adversarial sync/i }),
+      ).toBeNull();
       await act(async () => {
         screen.getByRole("button", { name: "Copy" }).click();
       });

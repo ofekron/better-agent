@@ -16,7 +16,6 @@ describe("turnMessageHeader", () => {
       "worker",
       "schedule",
       "agent-board",
-      "adv_sync",
       "subprocess_agent",
       "assistant",
       "file_editor",

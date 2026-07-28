@@ -11992,50 +11992,6 @@ async def internal_set_right_panel(
     return _right_panel_response(sess)
 
 
-@app.post("/api/sessions/{session_id}/adv_sync")
-async def start_adv_sync_endpoint(session_id: str, body: dict = Body(default={})):
-    """Kick off an adversarial-sync ping-pong for the selected text.
-
-    Body: `{message_id, selected_text}`. Returns the created overlay
-    record immediately; the ping-pong runs as a background task and
-    publishes progress via `session_metadata_updated` WS frames on
-    this session id."""
-    await _require_session_async(session_id)
-    body = body or {}
-    message_id = (body.get("message_id") or "").strip()
-    selected_text = body.get("selected_text") or ""
-    if not message_id:
-        raise HTTPException(status_code=400, detail="message_id required")
-    if not selected_text.strip():
-        raise HTTPException(status_code=400, detail="selected_text required")
-    from orchs.adv_sync import start_adv_sync
-    # Inherit the active provider env so the new forks' first CLI
-    # spawn picks up the right ANTHROPIC_API_KEY/BASE_URL/CONFIG_DIR.
-    await asyncio.to_thread(config_store.apply_env_vars)
-    try:
-        overlay = await start_adv_sync(
-            coordinator,
-            parent_session_id=session_id,
-            message_id=message_id,
-            selected_text=selected_text,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return overlay
-
-
-@app.post("/api/sessions/{session_id}/adv_sync/{overlay_id}/cancel")
-async def cancel_adv_sync_endpoint(session_id: str, overlay_id: str):
-    await _require_session_async(session_id)
-    from orchs.adv_sync import cancel_adv_sync
-    cancelled = await cancel_adv_sync(
-        coordinator,
-        parent_session_id=session_id,
-        overlay_id=overlay_id,
-    )
-    return {"cancelled": cancelled}
-
-
 def _sanitize_file_panel(raw: dict) -> dict:
     """Build a persisted open-file-panel dict from request input.
 
@@ -12562,10 +12518,6 @@ async def _durably_admit_and_submit_prompt(
     params: dict,
     admitted: asyncio.Future,
 ) -> None:
-    await asyncio.to_thread(
-        coordinator._reject_if_adv_sync_fork_locked,
-        session_id,
-    )
     admission = await asyncio.to_thread(
         session_manager.admit_queued_prompt_durable,
         session_id,
@@ -14034,7 +13986,6 @@ async def on_startup():
     # Schedule every long-running step as a tracked background task.
     # `on_startup` returns the moment these are dispatched —
     # "Application startup complete" fires within milliseconds.
-    from orchs.adv_sync import recover_running_overlays_on_startup
     from file_ref_resolver import run_migration_once
     from paths import ba_home
     import startup_recovery_gate
@@ -14081,17 +14032,6 @@ async def on_startup():
             ),
             name="startup-recover-in-flight",
         )
-
-        # Provider-neutral overlay recovery may proceed beside the core scan.
-        if installation_profile.integrations_enabled():
-            asyncio.create_task(
-                run_task(
-                    "adv_sync_overlay_recovery",
-                    "startup_tasks.adv_sync_overlay_recovery",
-                    recover_running_overlays_on_startup,
-                ),
-                name="startup-adv-sync-recovery",
-            )
 
         # Do not let unrelated maintenance compete with or precede recovery.
         await recovery_task

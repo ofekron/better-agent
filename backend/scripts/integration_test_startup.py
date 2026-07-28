@@ -5,8 +5,8 @@ Boots uvicorn under an isolated `BETTER_CLAUDE_HOME` and exercises:
   1. `/api/startup_tasks` responds within 2s of server-ready — proves
      `on_startup` no longer blocks on long-running steps.
 
-  2. All three known startup tasks (`adv_sync_overlay_recovery`,
-     `bcfile_migration`, `recover_in_flight`) transition to
+  2. All known startup tasks (`bcfile_migration`, `recover_in_flight`)
+     transition to
      `state=done` via BOTH the REST snapshot AND
      `startup_task_changed` WS frames. (`v3_migration` was deleted
      by A11 — schema migrations are not supported per CLAUDE.md.)
@@ -93,7 +93,6 @@ def _ensure_logs_dir(ba_home: str) -> None:
 
 
 EXPECTED_TASK_IDS = {
-    "adv_sync_overlay_recovery",
     "bcfile_migration",
     "recover_in_flight",
 }

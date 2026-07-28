@@ -37,11 +37,6 @@ export const KNOWN_TAGS: Record<string, string> = {
   // Cross-session delegated worker/task prompt.
   "delegated-task": "Delegated task",
 
-  // Adv-sync forks.
-  "adv-sync-brief": "Adv-sync brief",
-  "adv-sync-exchange": "Adv-sync exchange",
-  "text-under-review": "Text under review",
-  "original-text": "Original text",
   "other-fork-reply": "Other fork reply",
 
   // Working-mode file comment.

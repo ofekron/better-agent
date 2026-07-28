@@ -1776,6 +1776,76 @@ async def _integrate_one_locked(
             )
         return
 
+    if sess.get("kind") == "adv_sync_fork":
+        if summary is not None:
+            summary.record_skip("removed legacy session target", run_id)
+        else:
+            logger.warning(
+                "integrate_recovered_runs: cancelling %s targeting removed "
+                "legacy session %s",
+                run_id,
+                persist_sid,
+            )
+        try:
+            await asyncio.to_thread((_runs_root() / run_id / "cancel").touch)
+        except Exception:
+            logger.exception(
+                "integrate_recovered_runs: cancellation sentinel failed for %s",
+                run_id,
+            )
+        try:
+            await asyncio.to_thread(provider.cancel_run, run_id)
+        except Exception:
+            logger.exception(
+                "integrate_recovered_runs: provider cancellation failed for %s",
+                run_id,
+            )
+        recovered_pid = live_recovery_pid(desc)
+        if recovered_pid is not None:
+            container = None
+            try:
+                from containment import containment
+                container = containment()
+                await asyncio.to_thread(
+                    container.reattach,
+                    run_id,
+                    recovered_pid,
+                )
+                await asyncio.to_thread(container.force_kill_all, run_id)
+            except Exception:
+                logger.exception(
+                    "integrate_recovered_runs: containment cancellation failed "
+                    "for %s pid=%s",
+                    run_id,
+                    recovered_pid,
+                )
+            finally:
+                if container is not None:
+                    try:
+                        await asyncio.to_thread(container.teardown, run_id)
+                    except Exception:
+                        logger.exception(
+                            "integrate_recovered_runs: containment teardown "
+                            "failed for %s",
+                            run_id,
+                        )
+            if await asyncio.to_thread(_pid_alive, recovered_pid):
+                logger.error(
+                    "integrate_recovered_runs: legacy target process remains "
+                    "alive after cancellation; leaving %s unreconciled for retry "
+                    "(pid=%s)",
+                    run_id,
+                    recovered_pid,
+                )
+                return
+        await _mark_reconciled_terminal_async(
+            run_id,
+            desc,
+            "removed legacy session target",
+            summary=summary,
+        )
+        return
+
     alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = _recovered_run_cancelled(desc)

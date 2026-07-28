@@ -51,9 +51,6 @@ class _Coordinator:
         self.release = asyncio.Event()
         self.submitted: list[tuple[str, dict]] = []
 
-    def _reject_if_adv_sync_fork_locked(self, _sid: str) -> None:
-        return None
-
     async def submit_prompt_async(self, sid: str, params: dict) -> str:
         assert self.session_manager.durable, "dispatch happened before durable admission"
         self.submitted.append((sid, params))
@@ -61,16 +58,8 @@ class _Coordinator:
 
 
 class _FailingCoordinator:
-    def _reject_if_adv_sync_fork_locked(self, _sid: str) -> None:
-        return None
-
     async def submit_prompt_async(self, _sid: str, _params: dict) -> str:
         raise RuntimeError("submission unavailable")
-
-
-class _LockedCoordinator(_FailingCoordinator):
-    def _reject_if_adv_sync_fork_locked(self, _sid: str) -> None:
-        raise RuntimeError("fork sync locked")
 
 
 async def _disconnect_cannot_cancel_handoff() -> None:
@@ -134,26 +123,6 @@ async def _dispatch_failure_keeps_durable_outbox_item() -> None:
         main.session_manager, main.coordinator = real_sm, real_co
 
 
-async def _fork_lock_rejects_before_durable_admission() -> None:
-    sm = _SessionManager(asyncio.get_running_loop())
-    real_sm, real_co = main.session_manager, main.coordinator
-    main.session_manager, main.coordinator = sm, _LockedCoordinator()
-    try:
-        try:
-            await main._start_prompt_handoff(
-                "sid",
-                {"id": "q4", "content": "blocked"},
-                {"_queued_id": "q4", "prompt": "blocked"},
-            )
-        except RuntimeError as error:
-            assert str(error) == "fork sync locked"
-        else:
-            raise AssertionError("fork lock must reject prompt admission")
-        assert sm.admitted == {}
-    finally:
-        main.session_manager, main.coordinator = real_sm, real_co
-
-
 async def _real_outbox_id_is_idempotent_without_client_id() -> None:
     sm = main.session_manager
     session = await asyncio.to_thread(
@@ -178,7 +147,6 @@ def main_test() -> int:
     asyncio.run(_disconnect_cannot_cancel_handoff())
     asyncio.run(_duplicate_admission_does_not_dispatch_twice())
     asyncio.run(_dispatch_failure_keeps_durable_outbox_item())
-    asyncio.run(_fork_lock_rejects_before_durable_admission())
     asyncio.run(_real_outbox_id_is_idempotent_without_client_id())
     startup_source = inspect.getsource(main.on_startup)
     processor_source = inspect.getsource(
@@ -198,7 +166,6 @@ def main_test() -> int:
     print("PASS durable handoff survives disconnect and dispatches exactly once")
     print("PASS duplicate admission is idempotent")
     print("PASS dispatch failure remains in durable startup outbox")
-    print("PASS fork lock rejects before durable acceptance")
     print("PASS operation ID is idempotent without client ID")
     print("PASS user persistence precedes durable outbox consumption")
     print("PASS runtime queue watchdog removed")

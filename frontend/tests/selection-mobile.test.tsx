@@ -157,8 +157,15 @@ describe("InvestigateContextMenu mobile selection", () => {
     vi.advanceTimersByTime(600);
 
     expect(showSheet).toHaveBeenCalledTimes(1);
-    expect(showSheet.mock.calls[0][0].map((item: { id: string }) => item.id))
-      .toEqual(["copy-id", "investigate"]);
+    const actions = showSheet.mock.calls[0][0] as Array<{
+      id: string;
+      label: string;
+    }>;
+    expect(actions.map((item) => item.id)).toEqual(["copy-id", "investigate"]);
+    expect(actions.find((item) => item.id === "investigate")?.label).toBe(
+      "Investigate",
+    );
+    expect(actions.some((item) => item.id === "adv-sync")).toBe(false);
     await m.unmount();
   });
 

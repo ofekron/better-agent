@@ -1247,7 +1247,6 @@ export function useWebSocket(
             session_id: string;
             patch: {
               inline_tags?: InlineTag[];
-              adv_sync_overlays?: import("../types").AdvSyncOverlay[];
               open_file_panels?: OpenFilePanel[];
               open_config_panels?: import("../types").OpenConfigPanel[];
               draft_input?: string;

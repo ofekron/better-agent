@@ -204,7 +204,7 @@ def loaded_project_paths() -> list[str]:
 def _ba_managed_native_ids() -> set[str]:
     """Native session ids Better Agent itself spawned or manages — its own
     user sessions plus internal agent sessions (delegate forks, sub-sessions,
-    adv-sync review runs, workers, supervisor sessions). These already live
+    workers, supervisor sessions). These already live
     in BA (or did), so importing their native transcripts would duplicate
     agent/internal sessions rather than recover a real user conversation.
 

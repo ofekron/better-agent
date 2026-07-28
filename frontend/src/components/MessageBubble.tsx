@@ -15,9 +15,7 @@ import { RunBadgeStack } from "./RunBadge";
 import Icon from "./Icon";
 import { ImageLightboxGallery } from "./ImageLightboxGallery";
 import { SafeMarkdownPreview } from "./SafeMarkdownPreview";
-import { applyAdvSyncOverlays } from "../utils/advSyncOverlays";
 import { useMessageDecorations } from "../hooks/useMessageDecorations";
-import type { AdvSyncOverlay } from "../types";
 import { linkifyFilePaths, markdownLinkifyComponents, sessionLinkMarker, sessionMarkersToMarkdown } from "../utils/linkifyFilePaths";
 import {
   parseArtificialSections,
@@ -2549,8 +2547,6 @@ const AssistantMessage = memo(function AssistantMessage({
   onChooseAnotherProviderForRateLimit,
   threadColorMap,
   tags,
-  advSyncOverlays,
-  onAdvSyncClick,
   orchestrationMode,
   containerRef: externalContainerRef,
   runs = [],
@@ -2583,8 +2579,6 @@ const AssistantMessage = memo(function AssistantMessage({
   onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   threadColorMap?: Map<string, string>;
   tags?: InlineTag[];
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
   orchestrationMode?: OrchestrationMode;
   containerRef?: RefObject<HTMLDivElement | null>;
   runs?: import("../types").RunInfo[];
@@ -2652,15 +2646,12 @@ const AssistantMessage = memo(function AssistantMessage({
     cachedFetched
       ? messageWithHydratedRenderPayload(message, cachedFetched)
       : message;
-  const decorationRevision =
-    tags?.length || advSyncOverlays?.length
-      ? messageObjectRevision(effectiveMessage)
-      : message.id;
+  const decorationRevision = tags?.length
+    ? messageObjectRevision(effectiveMessage)
+    : message.id;
 
   useMessageDecorations(containerRef, {
     tags,
-    advSyncOverlays,
-    onAdvSyncClick,
     revision: decorationRevision,
   });
   // Event stream for this assistant bubble. Manager-mode turns keep
@@ -3180,7 +3171,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], fallbackRunMeta }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, expandAllTrigger, tags, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], fallbackRunMeta }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3205,8 +3196,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   expandAllTrigger?: number;
   tags?: InlineTag[];
   onRemoveTag?: (id: string) => void;
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
   /** Scroll container that owns this group. Used by the collapse-toggle
    *  scroll-anchor logic to compensate scrollTop after the group's
    *  height changes, so the bottom edge of the box stays put. Optional
@@ -3277,8 +3266,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     // Prefer the prop (parent-owned scroll container, zero DOM walk);
     // fall back to a computed-style walk up the tree for the nearest
     // overflow:auto|scroll ancestor. The walk covers every current
-    // host (.chat-messages, .fork-pane-messages, .supervisor-timeline,
-    // .adv-sync-window-pane-body) AND every future one without needing
+    // host (.chat-messages, .fork-pane-messages, .supervisor-timeline)
+    // AND every future one without needing
     // a class-list update here. getComputedStyle is fine perf-wise —
     // this fires only on user click, not on every render or scroll.
     const scrollEl =
@@ -3421,18 +3410,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     () => (responseMessage ? tags?.filter((t) => t.messageId === responseMessage.id) ?? [] : []),
     [tags, responseMessage]
   );
-  const responseOverlays = useMemo(
-    () =>
-      responseMessage
-        ? advSyncOverlays?.filter((o) => o.message_id === responseMessage.id) ?? []
-        : [],
-    [advSyncOverlays, responseMessage]
-  );
-  const initiatorOverlays = useMemo(
-    () =>
-      advSyncOverlays?.filter((o) => o.message_id === initiatorMessage.id) ?? [],
-    [advSyncOverlays, initiatorMessage.id]
-  );
   // Bucket runs by target_message_id once per render of this group, then
   // hand each AssistantMessage a stable per-id reference. Inline
   // `runs.filter(...)` would mint a new array on every render and defeat
@@ -3456,29 +3433,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     responseCollapsed && effectiveResponse?.error
       ? effectiveResponse.errorText ?? effectiveResponse.content
       : undefined;
-  // Apply overlays directly to the user-message-box body. The
-  // AssistantMessage component runs its own effect for assistant
-  // messages; user messages are rendered inline here so the same
-  // effect lives here. Order parity with the assistant case: tag
-  // overlays don't currently apply to user messages (tags are
-  // assistant-only in this codebase), so the order question is moot.
-  useEffect(() => {
-    if (!initiatorContainerRef.current || initiatorOverlays.length === 0) return;
-    let cleanup: (() => void) | undefined;
-    const timer = setTimeout(() => {
-      if (!initiatorContainerRef.current || !onAdvSyncClick) return;
-      cleanup = applyAdvSyncOverlays(
-        initiatorContainerRef.current,
-        initiatorOverlays,
-        onAdvSyncClick,
-      );
-    }, 50);
-    return () => {
-      clearTimeout(timer);
-      cleanup?.();
-    };
-  }, [initiatorOverlays, onAdvSyncClick]);
-
   const isRunning = sessionRunning || isGroupRunning(responseMessage, runs);
   const rawInitiatorContent =
     typeof initiatorMessage.content === "string" ? initiatorMessage.content : "";
@@ -3841,10 +3795,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               }
               threadColorMap={threadColorMap}
               tags={responseTags.length > 0 ? responseTags : undefined}
-              advSyncOverlays={
-                responseOverlays.length > 0 ? responseOverlays : undefined
-              }
-              onAdvSyncClick={onAdvSyncClick}
               orchestrationMode={orchestrationMode}
               containerRef={responseContainerRef}
               relabelManagerAsWorker={false}

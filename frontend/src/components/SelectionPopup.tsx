@@ -7,11 +7,6 @@ import Icon from "./Icon";
 
 interface Props {
   onAdd: (text: string, comment: string, messageId: string) => void;
-  /** Optional handler for the "Adversarial sync" action. When set,
-   * the popup renders a third button. Invoked with the selection
-   * verbatim + the messageId the selection was anchored to. The
-   * caller (App) POSTs /api/sessions/{id}/adv_sync. */
-  onAdvSync?: (text: string, messageId: string) => void;
 }
 
 interface PopupState {
@@ -23,7 +18,7 @@ interface PopupState {
 
 type Phase = "actions" | "comment";
 
-export function SelectionPopup({ onAdd, onAdvSync }: Props) {
+export function SelectionPopup({ onAdd }: Props) {
   const { t } = useTranslation();
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [phase, setPhase] = useState<Phase>("actions");
@@ -37,9 +32,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
   // change when parent re-renders (which would tear down listeners).
   const onAddRef = useRef(onAdd);
   onAddRef.current = onAdd;
-  const onAdvSyncRef = useRef(onAdvSync);
-  onAdvSyncRef.current = onAdvSync;
-
   const { show: showSheet } = useMobileActionSheet();
 
   const closePopup = useCallback(() => {
@@ -81,15 +73,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
           onClick: () => onAddRef.current(text, "", messageId),
         },
       ];
-
-      if (onAdvSyncRef.current) {
-        items.push({
-          id: "adv-sync",
-          label: "Adversarial Sync",
-          icon: <Icon name="swords" size={14} />,
-          onClick: () => onAdvSyncRef.current?.(text, messageId),
-        });
-      }
 
       showSheet(items, text.length > 40 ? text.slice(0, 40) + "…" : text);
     },
@@ -248,12 +231,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
     closePopup();
   }, [popup, closePopup]);
 
-  const handleAdvSync = useCallback(() => {
-    if (!popup || !onAdvSyncRef.current) return;
-    onAdvSyncRef.current(popup.text, popup.messageId);
-    closePopup();
-  }, [popup, closePopup]);
-
   if (!popup) return null;
 
   return (
@@ -274,15 +251,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
           <button className="selection-popup-action-btn" onClick={handleComment}>
             Comment
           </button>
-          {onAdvSync && (
-            <button
-              className="selection-popup-action-btn"
-              onClick={handleAdvSync}
-              title="Run adversarial sync: spawn supportive + adversarial forks and ping-pong them to convergence"
-            >
-              Adversarial sync
-            </button>
-          )}
         </div>
       ) : (
         <div className="selection-popup-row">

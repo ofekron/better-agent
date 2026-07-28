@@ -87,13 +87,11 @@ async def _submit_path() -> bool:
         admitted = co.submit_prompt(
             sid,
             {"client_id": cid, "_queued_id": "itemA", "_client_id_claimed": True},
-            _adv_sync_checked=True,
         )
         # A concurrent duplicate WITHOUT a pre-claim must still dedup to itemA.
         deduped = co.submit_prompt(
             sid,
             {"client_id": cid, "_queued_id": "itemB"},
-            _adv_sync_checked=True,
         )
         return pre is None and admitted == "itemA" and deduped == "itemA"
     finally:

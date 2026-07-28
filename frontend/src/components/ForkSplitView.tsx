@@ -2,7 +2,6 @@ import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type {
-  AdvSyncOverlay,
   ChatMessage,
   FileFocus,
   RunInfo,
@@ -52,10 +51,6 @@ interface Props {
   userDisplayName?: string | null;
   /** Load older messages for a pane. Keyed by session id. */
   onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<boolean>;
-  /** Click handler for adversarial-sync agreed-text spans. The
-   * overlay carries the two fork ids; App navigates the focused
-   * pane to the supportive fork. */
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
 }
 
 /** Side-by-side split view of a root session and its (possibly
@@ -94,16 +89,13 @@ export function ForkSplitView({
   onRetryStopped,
   userDisplayName,
   onLoadOlderMessages,
-  onAdvSyncClick,
 }: Props) {
   const { t } = useTranslation();
   const [focusedViewEnabled, setFocusedViewEnabled] = useState(true);
 
   // Flatten the tree depth-first so root → its forks → their forks ...
   // become an ordered list of panes. We render each as a column.
-  // Internal-kind Better Agent sessions (delegate_fork, supervisor_worker,
-  // adv_sync_fork) are skipped — adv-sync forks are accessed via the
-  // dedicated AdvSyncWindow, not as inline panes in the main view.
+  // Internal-kind Better Agent sessions are skipped.
   const flatPanes = useMemo(() => {
     const out: Session[] = [];
     const visit = (node: Session) => {
@@ -309,8 +301,6 @@ export function ForkSplitView({
           onViewDiff={onViewDiff}
           onRetry={onRetry}
           onRetryStopped={onRetryStopped}
-          advSyncOverlays={tree.adv_sync_overlays}
-          onAdvSyncClick={onAdvSyncClick}
         />
       </div>
       {panes.length > 1 && (
@@ -424,8 +414,6 @@ export function ForkSplitView({
                 ? () => onLoadOlderMessages(pane.id, paneOldestLoadedSeq)
                 : undefined}
               hasOlderMessages={paneHasOlder}
-              advSyncOverlays={tree.adv_sync_overlays}
-              onAdvSyncClick={onAdvSyncClick}
             />
           );
         })}
@@ -456,8 +444,6 @@ interface PaneProps {
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   onLoadOlderMessages?: () => Promise<boolean>;
   hasOlderMessages?: boolean;
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
 }
 
 function ForkPane({
@@ -482,8 +468,6 @@ function ForkPane({
   onRetryStopped,
   onLoadOlderMessages: onLoadOlder,
   hasOlderMessages,
-  advSyncOverlays,
-  onAdvSyncClick,
 }: PaneProps) {
   const { t } = useTranslation();
   const loadOlderOpId = `messages:loadOlder:${pane.id}`;
@@ -635,8 +619,6 @@ function ForkPane({
             onRetry={onRetry}
             onRetryStopped={onRetryStopped}
             scrollEl={scrollRef.current}
-            advSyncOverlays={advSyncOverlays}
-            onAdvSyncClick={onAdvSyncClick}
           />
         )}
       </div>
@@ -671,8 +653,6 @@ function MessageList({
   onRetry,
   onRetryStopped,
   scrollEl,
-  advSyncOverlays,
-  onAdvSyncClick,
 }: {
   messages: ChatMessage[];
   pending: ChatMessage[];
@@ -686,8 +666,6 @@ function MessageList({
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   scrollEl?: HTMLElement | null;
-  advSyncOverlays?: AdvSyncOverlay[];
-  onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
 }) {
   const all = useMemo(() => mergeMessagesSorted(messages, pending), [messages, pending]);
   const groups = useMemo(() => {
@@ -733,8 +711,6 @@ function MessageList({
             orchestrationMode={orchestrationMode}
             runs={turnRuns}
             scrollEl={scrollEl}
-            advSyncOverlays={advSyncOverlays}
-            onAdvSyncClick={onAdvSyncClick}
           />
         );
       })}
