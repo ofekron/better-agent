@@ -497,16 +497,20 @@ class _StorageIdentityQueue(queue.Queue):
         super().join()
 
 
-_index_sidecar_write_queue: queue.Queue[
-    tuple[
-        DirFingerprint,
-        dict[str, str],
-        dict[str, set[str]],
-        dict[str, FileSignature],
-    ] | None
-] = queue.Queue(maxsize=1)
+_IndexSidecarPayload = tuple[
+    DirFingerprint,
+    dict[str, str],
+    dict[str, set[str]],
+    dict[str, FileSignature],
+]
+_index_sidecar_write_queue: queue.Queue[Path | None] = _StorageIdentityQueue()
+_index_sidecar_pending: dict[Path, _IndexSidecarPayload] = {}
+_index_sidecar_signaled: set[Path] = set()
 _index_sidecar_write_started = False
-_index_sidecar_write_lock = threading.Lock()
+_index_sidecar_write_lock = threading.Condition(threading.Lock())
+_index_sidecar_shutdown_lock = threading.Lock()
+_index_sidecar_accepting = True
+_index_sidecar_thread: threading.Thread | None = None
 _durability_writer: GroupedDurabilityWriter | None = None
 _durability_writer_lock = threading.Lock()
 _root_change_owner: RootChangeOwner | None = None
@@ -547,18 +551,38 @@ def _wait_durability(receipt: DurabilityReceipt) -> None:
 
 
 def shutdown_durability_writer() -> None:
-    global _durability_writer, _index_sidecar_write_started
-    if _index_sidecar_write_started:
-        _index_sidecar_write_queue.join()
-        _index_sidecar_write_queue.put(None)
-        _index_sidecar_write_queue.join()
+    global _durability_writer, _index_sidecar_accepting
+    with _index_sidecar_shutdown_lock:
         with _index_sidecar_write_lock:
-            _index_sidecar_write_started = False
-    with _durability_writer_lock:
-        writer = _durability_writer
-        _durability_writer = None
-    if writer is not None:
-        writer.close()
+            _index_sidecar_accepting = False
+            _index_sidecar_write_lock.notify_all()
+            if (
+                _index_sidecar_write_queue.unfinished_tasks
+                and not _index_sidecar_write_started
+            ):
+                _start_index_sidecar_writer_unlocked()
+            thread = _index_sidecar_thread
+        _index_sidecar_write_queue.join()
+        if thread is not None:
+            _index_sidecar_write_queue.put(None)
+            _index_sidecar_write_queue.join()
+            thread.join()
+        with _index_sidecar_write_lock:
+            if (
+                _index_sidecar_thread is not None
+                or _index_sidecar_write_queue.unfinished_tasks
+                or _index_sidecar_pending
+                or _index_sidecar_signaled
+            ):
+                raise RuntimeError("fork-index sidecar writer failed to stop cleanly")
+        with _durability_writer_lock:
+            writer = _durability_writer
+            _durability_writer = None
+        if writer is not None:
+            writer.close()
+        with _index_sidecar_write_lock:
+            _index_sidecar_accepting = True
+            _index_sidecar_write_lock.notify_all()
 
 
 def _apply_root_change(change: RootChange) -> bool | None:
@@ -3120,38 +3144,55 @@ def _write_index_sidecar_best_effort(
         pass
 
 
-def _ensure_index_sidecar_writer() -> None:
-    global _index_sidecar_write_started
-    if _index_sidecar_write_started:
-        return
-    with _index_sidecar_write_lock:
-        if _index_sidecar_write_started:
-            return
-        thread = threading.Thread(
-            target=_index_sidecar_writer_loop,
-            name="session-fork-index-sidecar",
-            daemon=True,
-        )
+def _start_index_sidecar_writer_unlocked() -> None:
+    global _index_sidecar_thread, _index_sidecar_write_started
+    thread = threading.Thread(
+        target=_index_sidecar_writer_loop,
+        name="session-fork-index-sidecar",
+        daemon=True,
+    )
+    _index_sidecar_thread = thread
+    _index_sidecar_write_started = True
+    try:
         thread.start()
-        _index_sidecar_write_started = True
+    except BaseException:
+        _index_sidecar_thread = None
+        _index_sidecar_write_started = False
+        raise
 
 
 def _index_sidecar_writer_loop() -> None:
-    while True:
-        item = _index_sidecar_write_queue.get()
-        if item is None:
-            _index_sidecar_write_queue.task_done()
-            return
-        try:
-            fp, fork_index, root_forks, root_signatures = item
-            _write_index_sidecar_best_effort(
-                fp,
-                fork_index,
-                root_forks,
-                root_signatures,
-            )
-        finally:
-            _index_sidecar_write_queue.task_done()
+    global _index_sidecar_thread, _index_sidecar_write_started
+    current = threading.current_thread()
+    try:
+        while True:
+            storage_identity = _index_sidecar_write_queue.get()
+            if storage_identity is None:
+                _index_sidecar_write_queue.task_done()
+                return
+            try:
+                with _index_sidecar_write_lock:
+                    item = _index_sidecar_pending.pop(storage_identity, None)
+                    _index_sidecar_signaled.discard(storage_identity)
+                if item is None:
+                    continue
+                fp, fork_index, root_forks, root_signatures = item
+                with _storage_identity_scope(storage_identity, wait=True):
+                    _write_index_sidecar_best_effort(
+                        fp,
+                        fork_index,
+                        root_forks,
+                        root_signatures,
+                    )
+            except Exception:
+                logger.exception("fork-index sidecar write failed")
+            finally:
+                _index_sidecar_write_queue.task_done()
+    finally:
+        with _index_sidecar_write_lock:
+            if _index_sidecar_thread is current:
+                _index_sidecar_thread = None
+                _index_sidecar_write_started = False
 
 
 def _schedule_index_sidecar_write(
@@ -3160,33 +3201,30 @@ def _schedule_index_sidecar_write(
     root_forks: dict[str, set[str]],
     root_signatures: dict[str, FileSignature],
 ) -> None:
-    _ensure_index_sidecar_writer()
+    storage_identity = _sessions_dir().resolve()
     item = (
         fp,
         dict(fork_index),
         {root_id: set(forks) for root_id, forks in root_forks.items()},
         dict(root_signatures),
     )
-    try:
-        _index_sidecar_write_queue.put_nowait(item)
-        return
-    except queue.Full:
-        pass
-    try:
-        _index_sidecar_write_queue.get_nowait()
-        _index_sidecar_write_queue.task_done()
-    except queue.Empty:
-        pass
-    try:
-        _index_sidecar_write_queue.put_nowait(item)
-    except queue.Full:
-        pass
+    with _index_sidecar_write_lock:
+        if not _index_sidecar_accepting:
+            raise RuntimeError("fork-index sidecar writer is shutting down")
+        if not _index_sidecar_write_started:
+            _start_index_sidecar_writer_unlocked()
+        _index_sidecar_pending[storage_identity] = item
+        if storage_identity in _index_sidecar_signaled:
+            return
+        _index_sidecar_signaled.add(storage_identity)
+        _index_sidecar_write_queue.put_nowait(storage_identity)
 
 
 def _persist_index_sidecar_if_loaded(
     fingerprint: DirFingerprint | None = None,
     expected_generation: int | None = None,
 ) -> None:
+    storage_identity = _sessions_dir().resolve()
     with _index_lock:
         if not _index_loaded or _index_fingerprint is None:
             return
@@ -3203,7 +3241,8 @@ def _persist_index_sidecar_if_loaded(
             for root_id, forks in _root_forks.items()
         }
         root_signatures = dict(_root_index_signatures)
-    _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
+    with _storage_identity_scope(storage_identity):
+        _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
 
 
 def _refresh_index_sidecar_for_written_root(
