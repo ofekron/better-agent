@@ -111,6 +111,13 @@ def main_test() -> None:
     original_resolve_profile = harness_profile_resolver.resolve_profile
     resolve_calls = 0
 
+    summary_created = client.post(
+        "/api/harness-profiles",
+        json={"name": "Summary Profile", "description": "Visible profile summary"},
+    )
+    check(summary_created.status_code == 200, "summary profile creation succeeds")
+    summary_profile = summary_created.json()
+
     def counted_resolve_profile(*args, **kwargs):
         nonlocal resolve_calls
         resolve_calls += 1
@@ -123,6 +130,17 @@ def main_test() -> None:
         listed = profiles.json()["profiles"]
         check(listed[0]["id"] == "default", "profile summary list includes Default")
         check("fields" not in listed[0], "profile summary list omits resolved fields")
+        named_summary = next(item for item in listed if item["id"] == summary_profile["id"])
+        check(named_summary.get("name") == "Summary Profile", "profile summary includes its name")
+        check(
+            named_summary.get("description") == "Visible profile summary",
+            "profile summary includes its description",
+        )
+        check(
+            named_summary.get("revision") == summary_profile["revision"],
+            "profile summary includes its revision",
+        )
+        check("fields" not in named_summary, "named profile summary omits resolved fields")
         check(resolve_calls == 0, "profile summary list does not resolve every profile")
     finally:
         harness_profile_resolver.resolve_profile = original_resolve_profile

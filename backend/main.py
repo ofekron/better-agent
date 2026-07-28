@@ -4290,7 +4290,15 @@ def _profile_summary_response(profile: dict[str, Any] | None = None) -> dict[str
             "source": "",
             "extension_id": "",
         }
-    return _with_profile_meta({"id": profile["id"]}, profile)
+    return _with_profile_meta(
+        {
+            "id": profile["id"],
+            "name": profile["name"],
+            "description": profile.get("description"),
+            "revision": profile["revision"],
+        },
+        profile,
+    )
 
 
 def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str, Any]:
