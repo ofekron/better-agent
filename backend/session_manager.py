@@ -212,6 +212,13 @@ PERSIST_DEBOUNCE_S = 0.050
 EXTERNAL_RELOAD_POLL_INTERVAL_S = 1.0
 
 
+@dataclass(frozen=True)
+class _PersistClaim:
+    root_id: str
+    token: object
+    live_root: dict
+
+
 class _SessionPersistCoordinator:
     def __init__(self, flush_root: Callable[[str], None]) -> None:
         self.pending: dict[str, dict] = {}
@@ -241,6 +248,53 @@ class _SessionPersistCoordinator:
 
     def cancel_deadline_unlocked(self, root_id: str) -> None:
         self.deadlines.pop(root_id, None)
+        self.changed.notify_all()
+
+    def claim_pending_unlocked(self, root_id: str) -> Optional[_PersistClaim]:
+        if root_id in self.inflight:
+            return None
+        live_root = self.pending.pop(root_id, None)
+        self.cancel_deadline_unlocked(root_id)
+        if live_root is None:
+            return None
+        claim = _PersistClaim(root_id, object(), live_root)
+        self.inflight.add(root_id)
+        self.inflight_claims[root_id] = claim.token
+        self.last_at[root_id] = time.monotonic()
+        return claim
+
+    def cancel_active_claim_unlocked(self, root_id: str) -> None:
+        token = self.inflight_claims.get(root_id)
+        if token is not None:
+            self.cancelled_claims.add(token)
+
+    def finish_claim_unlocked(
+        self,
+        claim: _PersistClaim,
+        *,
+        failed: bool,
+        reschedule_concurrent: bool,
+    ) -> None:
+        if self.inflight_claims.get(claim.root_id) is claim.token:
+            new_work_waiting = claim.root_id in self.pending
+            cancelled = claim.token in self.cancelled_claims
+            if failed and not cancelled:
+                self.pending.setdefault(claim.root_id, claim.live_root)
+            self.inflight_claims.pop(claim.root_id, None)
+            self.inflight.discard(claim.root_id)
+            if (
+                reschedule_concurrent
+                and new_work_waiting
+                and claim.root_id in self.pending
+                and claim.root_id not in self.deadlines
+            ):
+                last = self.last_at.get(claim.root_id, 0.0)
+                delay = max(
+                    0.0,
+                    PERSIST_DEBOUNCE_S - (time.monotonic() - last),
+                )
+                self.arm_deadline_unlocked(claim.root_id, delay)
+        self.cancelled_claims.discard(claim.token)
         self.changed.notify_all()
 
     def clear_unlocked(self) -> None:
@@ -3873,9 +3927,8 @@ class SessionManager:
         """Scheduler callback. Copies the root under its lock, then writes
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
-        claim_token = None
+        claim = None
         failed = False
-        pending = None
         sess = None
         root_lock = self._lock_for_root(root_id)
         lock_wait_started = time.perf_counter()
@@ -3887,18 +3940,13 @@ class SessionManager:
                     with perf.timed("session.tail_persist.state"):
                         persist = self._persist_coordinator
                         with persist.lock:
-                            if root_id in persist.inflight:
+                            claim = persist.claim_pending_unlocked(root_id)
+                            if claim is None:
                                 return
-                            pending = persist.pending.pop(root_id, None)
-                            persist.cancel_deadline_unlocked(root_id)
-                            if pending is None:
-                                return
-                            claim_token = object()
-                            persist.inflight.add(root_id)
-                            persist.inflight_claims[root_id] = claim_token
-                            persist.last_at[root_id] = time.monotonic()
                     with perf.timed("session.tail_persist.copy"):
-                        sess = self._root_repository.copy_persistable_root(pending)
+                        sess = self._root_repository.copy_persistable_root(
+                            claim.live_root,
+                        )
             finally:
                 lock_released_at = time.perf_counter()
                 root_lock.release()
@@ -3926,29 +3974,14 @@ class SessionManager:
                 "_tail_persist failed for %s", root_id,
             )
         finally:
-            if claim_token is not None:
+            if claim is not None:
                 persist = self._persist_coordinator
                 with persist.changed:
-                    if persist.inflight_claims.get(root_id) is claim_token:
-                        new_work_waiting = root_id in persist.pending
-                        cancelled = claim_token in persist.cancelled_claims
-                        if failed and not cancelled:
-                            persist.pending.setdefault(root_id, pending)
-                        persist.inflight_claims.pop(root_id, None)
-                        persist.inflight.discard(root_id)
-                        if (
-                            new_work_waiting
-                            and root_id in persist.pending
-                            and root_id not in persist.deadlines
-                        ):
-                            last = persist.last_at.get(root_id, 0.0)
-                            delay = max(
-                                0.0,
-                                PERSIST_DEBOUNCE_S - (time.monotonic() - last),
-                            )
-                            persist.arm_deadline_unlocked(root_id, delay)
-                    persist.cancelled_claims.discard(claim_token)
-                    persist.changed.notify_all()
+                    persist.finish_claim_unlocked(
+                        claim,
+                        failed=failed,
+                        reschedule_concurrent=True,
+                    )
 
     def _drop_pending_persist(self, root_id: str) -> None:
         """Cancel any queued tail flush + drop the pending entry for
@@ -3968,9 +4001,7 @@ class SessionManager:
             persist.pending.pop(root_id, None)
             persist.cancel_deadline_unlocked(root_id)
             persist.last_at.pop(root_id, None)
-            claim_token = persist.inflight_claims.get(root_id)
-            if claim_token is not None:
-                persist.cancelled_claims.add(claim_token)
+            persist.cancel_active_claim_unlocked(root_id)
 
     def flush_pending_persists(self) -> None:
         """Best-effort drain of pending tail flushes. Called from:
@@ -4016,8 +4047,8 @@ class SessionManager:
         """Durability barrier for one root without draining unrelated roots."""
         persist = self._persist_coordinator
         while True:
-            claim_token = None
-            pending = None
+            claim = None
+            failed = False
             wait_started = time.perf_counter()
             with persist.changed:
                 while root_id in persist.inflight:
@@ -4038,15 +4069,12 @@ class SessionManager:
                     with persist.changed:
                         if root_id in persist.inflight:
                             continue
-                        pending = persist.pending.pop(root_id, None)
-                        persist.cancel_deadline_unlocked(root_id)
-                        if pending is None:
+                        claim = persist.claim_pending_unlocked(root_id)
+                        if claim is None:
                             return
-                        claim_token = object()
-                        persist.inflight.add(root_id)
-                        persist.inflight_claims[root_id] = claim_token
-                        persist.last_at[root_id] = time.monotonic()
-                    sess = self._root_repository.copy_persistable_root(pending)
+                    sess = self._root_repository.copy_persistable_root(
+                        claim.live_root,
+                    )
                 finally:
                     lock.release()
                 with perf.timed("session.flush_root.write"):
@@ -4058,22 +4086,16 @@ class SessionManager:
                     )
                 self._note_root_file_written(root_id)
             except Exception:
-                with persist.changed:
-                    if (
-                        claim_token is not None
-                        and persist.inflight_claims.get(root_id) is claim_token
-                        and claim_token not in persist.cancelled_claims
-                    ):
-                        persist.pending.setdefault(root_id, pending)
+                failed = True
                 raise
             finally:
-                if claim_token is not None:
+                if claim is not None:
                     with persist.changed:
-                        if persist.inflight_claims.get(root_id) is claim_token:
-                            persist.inflight_claims.pop(root_id, None)
-                            persist.inflight.discard(root_id)
-                        persist.cancelled_claims.discard(claim_token)
-                        persist.changed.notify_all()
+                        persist.finish_claim_unlocked(
+                            claim,
+                            failed=failed,
+                            reschedule_concurrent=False,
+                        )
 
     # ── Draft persist coalescer ────────────────────────────────────
     # Moved to `backend/draft_store.py`. sm hot paths resolve the

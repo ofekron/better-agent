@@ -66,6 +66,51 @@ class _FailingWrites:
         return False
 
 
+class _BlockedFailingWrite:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self._release = threading.Event()
+        self._original = session_store.write_session_full
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self):
+        def blocked_failure(*args, **kwargs):
+            self.entered.set()
+            self._release.wait()
+            raise OSError("simulated blocked write failure")
+
+        session_store.write_session_full = blocked_failure
+        return self
+
+    def start(self, target, *args) -> threading.Thread:
+        if self.thread is not None:
+            raise RuntimeError("blocked failing write already started")
+        self.thread = threading.Thread(target=target, args=args)
+        self.thread.start()
+        assert self.entered.wait(timeout=2.0)
+        return self.thread
+
+    def release_and_join(self) -> bool:
+        self._release.set()
+        if self.thread is None:
+            return True
+        self.thread.join(timeout=2.0)
+        return not self.thread.is_alive()
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            stopped = self.release_and_join()
+        finally:
+            session_store.write_session_full = self._original
+        if not stopped:
+            message = "blocked failing write thread did not stop"
+            if exc is not None:
+                exc.add_note(message)
+                return False
+            raise AssertionError(message)
+        return False
+
+
 def _fresh_session(name: str) -> str:
     sess = sm.create(
         name=name, model="sonnet", cwd="/tmp/test-drain",
@@ -81,6 +126,26 @@ def _queue_pending(sid: str, new_name: str) -> dict:
     with sm_mod._persist_state_lock:
         sm_mod._persist_pending[sid] = root
     return root
+
+
+def test_blocked_failure_helper_preserves_body_error() -> bool:
+    original = session_store.write_session_full
+    blocked = _BlockedFailingWrite()
+    try:
+        with blocked:
+            blocked.start(session_store.write_session_full)
+            raise ValueError("scenario failure")
+    except ValueError as error:
+        preserved = str(error) == "scenario failure"
+    else:
+        preserved = False
+    restored = session_store.write_session_full is original
+    idempotent = blocked.release_and_join()
+    ok = preserved and restored and idempotent
+    print(f"{OK if ok else FAIL} blocked failure helper preserves body error "
+          f"(preserved={preserved}, restored={restored}, "
+          f"idempotent={idempotent})")
+    return ok
 
 
 def test_load_root_drain_failure_keeps_pending() -> bool:
@@ -119,29 +184,12 @@ def test_tail_persist_failure_requeues() -> bool:
 def test_tail_failure_preserves_concurrent_mutation() -> bool:
     sid = _fresh_session("tail-concurrent")
     root = _queue_pending(sid, "tail-attempted")
-    write_entered = threading.Event()
-    release_write = threading.Event()
-    real_write = session_store.write_session_full
-
-    def blocked_failure(*args, **kwargs):
-        write_entered.set()
-        release_write.wait()
-        raise OSError("simulated blocked write failure")
-
-    session_store.write_session_full = blocked_failure
-    writer = threading.Thread(target=sm._tail_persist, args=(sid,))
-    try:
-        writer.start()
-        assert write_entered.wait(timeout=2.0)
+    with _BlockedFailingWrite() as blocked:
+        writer = blocked.start(sm._tail_persist, sid)
         with sm._lock_for_root(sid):
             root["name"] = "tail-concurrent-newest"
             sm._persist_root(sid, bump=False)
-        release_write.set()
-        writer.join(timeout=2.0)
-    finally:
-        release_write.set()
-        writer.join(timeout=2.0)
-        session_store.write_session_full = real_write
+        blocked.release_and_join()
 
     pending = sm_mod._persist_pending.get(sid)
     preserved = pending is root and pending.get("name") == "tail-concurrent-newest"
@@ -189,33 +237,16 @@ def test_stale_tail_cannot_mutate_new_claim_generation() -> bool:
     sid = _fresh_session("tail-stale")
     _queue_pending(sid, "tail-stale-old")
     coordinator = sm._persist_coordinator
-    write_entered = threading.Event()
-    release_write = threading.Event()
-    real_write = session_store.write_session_full
-
-    def blocked_failure(*args, **kwargs):
-        write_entered.set()
-        release_write.wait()
-        raise OSError("simulated stale callback failure")
-
-    session_store.write_session_full = blocked_failure
-    writer = threading.Thread(target=sm._tail_persist, args=(sid,))
     new_root = {"id": sid, "name": "tail-stale-new"}
     new_claim = object()
-    try:
-        writer.start()
-        assert write_entered.wait(timeout=2.0)
+    with _BlockedFailingWrite() as blocked:
+        writer = blocked.start(sm._tail_persist, sid)
         with coordinator.lock:
             coordinator.clear_unlocked()
             coordinator.pending[sid] = new_root
             coordinator.inflight.add(sid)
             coordinator.inflight_claims[sid] = new_claim
-        release_write.set()
-        writer.join(timeout=2.0)
-    finally:
-        release_write.set()
-        writer.join(timeout=2.0)
-        session_store.write_session_full = real_write
+        blocked.release_and_join()
 
     with coordinator.lock:
         untouched = (
@@ -299,27 +330,10 @@ def test_flush_pending_failure_requeues_and_terminates() -> bool:
 def test_delete_cancels_failed_tail_requeue() -> bool:
     sid = _fresh_session("delete-race")
     _queue_pending(sid, "delete-race-newer")
-    write_entered = threading.Event()
-    release_write = threading.Event()
-    real_write = session_store.write_session_full
-
-    def blocked_failure(*args, **kwargs):
-        write_entered.set()
-        release_write.wait()
-        raise OSError("simulated blocked write failure")
-
-    session_store.write_session_full = blocked_failure
-    writer = threading.Thread(target=sm._tail_persist, args=(sid,))
-    try:
-        writer.start()
-        assert write_entered.wait(timeout=2.0)
+    with _BlockedFailingWrite() as blocked:
+        writer = blocked.start(sm._tail_persist, sid)
         deleted = sm.delete(sid)
-        release_write.set()
-        writer.join(timeout=2.0)
-    finally:
-        release_write.set()
-        writer.join(timeout=2.0)
-        session_store.write_session_full = real_write
+        blocked.release_and_join()
 
     with sm_mod._persist_state_lock:
         not_requeued = sid not in sm_mod._persist_pending
@@ -351,6 +365,7 @@ def test_write_full_with_projection_overlay() -> bool:
 
 def main_run() -> int:
     tests = [
+        test_blocked_failure_helper_preserves_body_error,
         test_load_root_drain_failure_keeps_pending,
         test_tail_persist_failure_requeues,
         test_tail_failure_preserves_concurrent_mutation,
