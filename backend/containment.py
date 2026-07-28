@@ -260,7 +260,10 @@ class _LinuxCgroupContainment(Containment):
             # cannot leave it. os.write is async-signal-safe.
             os.write(fd, b"0")
 
-        return {"preexec_fn": _join_cgroup}
+        return {
+            "preexec_fn": _join_cgroup,
+            "pass_fds": (fd,),
+        }
 
     def after_spawn(self, run_id: str, runner_pid: int) -> None:
         fd = self._procs_fd.pop(run_id, None)

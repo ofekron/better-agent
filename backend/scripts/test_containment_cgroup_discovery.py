@@ -159,3 +159,15 @@ def test_linux_containment_rejects_symlink_run_directory(tmp_path) -> None:
         pass
     else:
         raise AssertionError("symlinked run cgroup must be rejected")
+
+
+def test_linux_spawn_preserves_cgroup_descriptor() -> None:
+    instance = containment._LinuxCgroupContainment(
+        cgroup_directory="/delegated/session.scope",
+    )
+    instance._procs_fd["run-1"] = 42
+
+    kwargs = instance.spawn_kwargs("run-1")
+
+    assert kwargs["pass_fds"] == (42,)
+    assert callable(kwargs["preexec_fn"])
