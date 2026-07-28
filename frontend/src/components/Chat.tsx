@@ -1667,9 +1667,10 @@ export function Chat({
                             }
                           : undefined
                       }
-                      // Never auto-collapse a group that is still running.
+                      // Only completed historical groups auto-collapse.
                       defaultCollapsed={
                         !!g.responseMessage &&
+                        !g.isLatest &&
                         !isGroupRunning(g.responseMessage, g.turnRuns)
                       }
                       threadColorMap={threadColorMap}

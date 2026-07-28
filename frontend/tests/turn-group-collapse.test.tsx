@@ -28,7 +28,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(summary?.textContent).not.toContain("[[ba-session:");
   });
 
-  it("collapses the latest completed chat group", async () => {
+  it("keeps the latest completed chat group expanded", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify([]), {
@@ -65,9 +65,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
       await waitFor(() => {
         expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-        expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+        expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
         expect(container.textContent).toContain("finished reply");
-        expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
+        expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▼");
       });
     } finally {
       globalThis.fetch = realFetch;
@@ -165,7 +165,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });
 
-  it("auto-collapses a live latest group when the turn finishes", async () => {
+  it("keeps a live latest group expanded when the turn finishes", async () => {
     const userMessage = makeUserMsg({ id: "u1", content: "latest prompt" });
     const runningAssistant = makeAssistantMsg({
       id: "a1",
@@ -215,13 +215,13 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     await waitFor(() => {
       expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+      expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
       expect(container.textContent).toContain("finished reply");
-      expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
+      expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▼");
     });
   });
 
-  it("auto-collapses the active group after terminal websocket frames", async () => {
+  it("keeps the active group expanded after terminal websocket frames", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -268,14 +268,13 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     ]);
     await h.flush();
 
-    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.raw.container.textContent).toContain("final reply");
-    expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
+    expect(h.$(".collapse-arrow")?.textContent).toBe("▼");
     h.unmount();
   });
 
-  it("collapses a completed latest group even while session monitoring remains active", async () => {
+  it("keeps a completed latest group expanded while session monitoring remains active", async () => {
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "done", seq: 0 }),
@@ -297,9 +296,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     await h.flush();
 
     expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.raw.container.textContent).toContain("finished reply");
-    expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
+    expect(h.$(".collapse-arrow")?.textContent).toBe("▼");
     h.unmount();
   });
 
