@@ -135,3 +135,8 @@ def revoke(extension_id: str) -> None:
             global _cache, _cache_key, _last_fingerprint_check
             _cache, _cache_key = data, _fingerprint(_path())
             _last_fingerprint_check = time.monotonic()
+
+
+def extension_ids() -> set[str]:
+    with _LOCK:
+        return set(_load_locked())

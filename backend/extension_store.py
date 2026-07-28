@@ -5346,6 +5346,7 @@ def set_enabled(
             raise ExtensionError(
                 f"Cannot disable: active extensions depend on it: {', '.join(dependents)}"
             )
+    _invalidate_pending_health_decisions(data, extension_id)
     record["enabled"] = bool(enabled)
     _rotate_activation_identity(record)
     if enabled:
@@ -5366,6 +5367,70 @@ def set_enabled(
         # Revoke so a disabled extension's token stops authenticating immediately.
         extension_token_registry.revoke(extension_id)
     return record
+
+
+def _dependent_cohort(
+    data: dict[str, Any], extension_id: str
+) -> list[str]:
+    cohort = {extension_id}
+    changed = True
+    while changed:
+        changed = False
+        for candidate_id, candidate in data["extensions"].items():
+            dependencies = (candidate.get("manifest") or {}).get("dependencies", [])
+            if (
+                candidate_id not in cohort
+                and candidate.get("enabled") is True
+                and cohort.intersection(dependencies)
+            ):
+                if candidate_id in REQUIRED_EXTENSION_IDS:
+                    return []
+                cohort.add(candidate_id)
+                changed = True
+    return sorted(cohort)
+
+
+def _health_decision_cohort(
+    data: dict[str, Any], cohort: list[str]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "extension_id": extension_id,
+            "activation_id": str(
+                data["extensions"][extension_id].get("activation_id") or ""
+            ),
+            "generation": _record_generation(data["extensions"][extension_id]),
+            "dependencies": sorted(
+                str(item)
+                for item in (
+                    (data["extensions"][extension_id].get("manifest") or {}).get(
+                        "dependencies"
+                    )
+                    or []
+                )
+            ),
+        }
+        for extension_id in cohort
+    ]
+
+
+def _invalidate_pending_health_decisions(
+    data: dict[str, Any], extension_id: str
+) -> bool:
+    changed = False
+    for record in data["extensions"].values():
+        decision = record.get("pending_health_decision")
+        if not isinstance(decision, dict):
+            continue
+        members = decision.get("cohort") or []
+        if any(
+            isinstance(item, dict) and item.get("extension_id") == extension_id
+            for item in members
+        ):
+            record.pop("pending_health_decision", None)
+            record["updated_at"] = _now()
+            changed = True
+    return changed
 
 
 def _record_backend_incident(
@@ -5469,53 +5534,100 @@ def _record_backend_incident(
         write_json(_slow_calls_path(), history)
         if len(incidents) < _EXTENSION_SLOW_CALL_LIMIT:
             return []
-        disabled = {extension_id}
-        changed = True
-        while changed:
-            changed = False
-            for candidate_id, candidate in data["extensions"].items():
-                dependencies = (candidate.get("manifest") or {}).get("dependencies", [])
-                if (
-                    candidate_id in REQUIRED_EXTENSION_IDS
-                    and candidate.get("enabled") is True
-                    and disabled.intersection(dependencies)
-                ):
-                    return []
-                if (
-                    candidate_id not in disabled
-                    and candidate_id not in REQUIRED_EXTENSION_IDS
-                    and candidate.get("enabled") is True
-                    and disabled.intersection(dependencies)
-                ):
-                    disabled.add(candidate_id)
-                    changed = True
+        if record.get("pending_health_decision"):
+            histories.pop(extension_id, None)
+            write_json(_slow_calls_path(), history)
+            return []
+        cohort = _dependent_cohort(data, extension_id)
+        if not cohort:
+            return []
         now = _now()
-        cohort = sorted(disabled)
         attributed_generation = _record_generation(data["extensions"][extension_id])
-        for candidate_id in disabled:
-            candidate = data["extensions"][candidate_id]
-            candidate["enabled"] = False
-            _rotate_activation_identity(candidate)
-            candidate["updated_at"] = now
-            candidate["quarantine"] = {
-                "reason": reason,
-                "at": now,
-                "attributed_extension_id": extension_id,
-                "attributed_generation": attributed_generation,
-                "cohort": cohort,
-                "elapsed_seconds": round(float(elapsed_seconds), 3),
-            }
+        record["pending_health_decision"] = {
+            "id": uuid.uuid4().hex,
+            "reason": reason,
+            "at": now,
+            "attributed_extension_id": extension_id,
+            "attributed_generation": attributed_generation,
+            "cohort": _health_decision_cohort(data, cohort),
+            "elapsed_seconds": round(float(elapsed_seconds), 3),
+        }
+        record["updated_at"] = now
         _write_store_unlocked(data)
         histories.pop(extension_id, None)
         write_json(_slow_calls_path(), history)
-    for candidate_id in disabled:
-        candidate = data["extensions"][candidate_id]
-        _evict_extension_backend(candidate_id)
-        extension_applied_config.reconcile(candidate)
-        import extension_token_registry
-        extension_token_registry.revoke(candidate_id)
-    reconcile_runtime_skills()
-    return sorted(disabled)
+    return cohort
+
+
+def resolve_health_decision(
+    extension_id: str, *, decision_id: str, action: str
+) -> dict[str, Any]:
+    if action not in {"disable", "keep_enabled"}:
+        raise ExtensionError("Health decision action must be disable or keep_enabled")
+    affected: list[str] = []
+    with _store_lock():
+        data = _read_store_unlocked()
+        record = _require_extension_source(data, extension_id)
+        decision = record.get("pending_health_decision")
+        if not isinstance(decision, dict) or decision.get("id") != decision_id:
+            raise ExtensionError("Extension health decision is stale")
+        expected = decision.get("cohort")
+        if not isinstance(expected, list):
+            raise ExtensionError("Extension health decision is invalid")
+        expected_ids = [
+            str(item.get("extension_id") or "")
+            for item in expected
+            if isinstance(item, dict)
+        ]
+        current_ids = _dependent_cohort(data, extension_id)
+        if not current_ids or current_ids != expected_ids:
+            raise ExtensionError("Extension health decision cohort changed")
+        if _health_decision_cohort(data, current_ids) != expected:
+            raise ExtensionError("Extension health decision cohort changed")
+        record.pop("pending_health_decision", None)
+        now = _now()
+        record["last_health_decision"] = {
+            "id": decision_id,
+            "action": action,
+            "at": now,
+            "incident": copy.deepcopy(decision),
+        }
+        record["updated_at"] = now
+        if action == "disable":
+            affected = current_ids
+            for candidate_id in affected:
+                candidate = data["extensions"][candidate_id]
+                candidate["enabled"] = False
+                candidate.pop("quarantine", None)
+                _rotate_activation_identity(candidate)
+                candidate["updated_at"] = now
+        _write_store_unlocked(data)
+    result = copy.deepcopy(get_extension(extension_id) or {})
+    projection_errors = reconcile_extension_runtime_state(affected) if affected else []
+    if projection_errors:
+        result["projection_errors"] = projection_errors
+    return result
+
+
+def reconcile_extension_runtime_state(
+    extension_ids: list[str] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    for extension_id in extension_ids or []:
+        try:
+            _evict_extension_backend(extension_id)
+        except Exception as exc:
+            errors.append(f"backend:{extension_id}:{exc}")
+    for name, reconcile in (
+        ("applied_config", reconcile_all_instructions),
+        ("runtime_skills", reconcile_runtime_skills),
+        ("tokens", reconcile_extension_tokens),
+    ):
+        try:
+            reconcile()
+        except Exception as exc:
+            errors.append(f"{name}:{exc}")
+    return errors
 
 
 def record_slow_backend_call(
@@ -5528,7 +5640,7 @@ def record_slow_backend_call(
     node_id: str | None = None,
     occurred_at: float | None = None,
 ) -> list[str]:
-    """Count one slow in-extension call, quarantining after the third one.
+    """Count one slow in-extension call, requesting a user decision after the third one.
 
     "Slow" is ``path``'s manifest-declared ``backend_timeouts`` budget when it
     declares one — a route the host is willing to wait 360s for is not slow at
@@ -6420,17 +6532,18 @@ def _mcp_item_available_for_inputs(
 
 
 def reconcile_extension_tokens() -> int:
-    """Pre-mint the per-extension internal-loopback token for every active
-    extension that declares it. Done in-backend so an out-of-process native
-    MCP launcher always reads an existing token from the registry instead of
-    racing to create one. Idempotent — mint() is a no-op once the token exists."""
+    """Make the token registry exactly match active extensions that need tokens."""
     import extension_token_registry
-    minted = 0
+    desired: set[str] = set()
     for record in _active_records():
         if needs_identity_token(record):
-            extension_token_registry.mint(str(record["manifest"]["id"]))
-            minted += 1
-    return minted
+            desired.add(str(record["manifest"]["id"]))
+    existing = extension_token_registry.extension_ids()
+    for extension_id in desired:
+        extension_token_registry.mint(extension_id)
+    for extension_id in existing - desired:
+        extension_token_registry.revoke(extension_id)
+    return len(desired)
 
 
 def reconcile_extension_consent() -> int:

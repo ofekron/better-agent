@@ -2278,13 +2278,16 @@ def test_set_enabled_enforces_dependencies() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> None:
+def test_slow_call_requests_user_decision_for_extension_and_dependents() -> None:
     work = _private_monorepo_test_work()
     try:
         base_repo, _ = _make_dep_repo(work, "ofek.laggy-base", [])
         feat_repo, _ = _make_dep_repo(work, "ofek.laggy-dependent", ["ofek.laggy-base"])
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
         extension_store.install_from_repo(repo_url=feat_repo.as_uri(), extension_path="extensions/pkg")
+        for extension_id in ("ofek.laggy-base", "ofek.laggy-dependent"):
+            extension_store.grant_consent(extension_id)
+            extension_store.set_enabled(extension_id, True)
         activation_id = extension_store.activation_identity("ofek.laggy-base")
 
         if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=1.99, path="work"):
@@ -2293,23 +2296,20 @@ def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> Non
             raise AssertionError("first slow call quarantined")
         if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.0, path="work"):
             raise AssertionError("second slow call quarantined")
-        disabled = extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.25, path="work")
-        if disabled != ["ofek.laggy-base", "ofek.laggy-dependent"]:
-            raise AssertionError(disabled)
-        for extension_id in disabled:
+        cohort = extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.25, path="work")
+        if cohort != ["ofek.laggy-base", "ofek.laggy-dependent"]:
+            raise AssertionError(cohort)
+        for extension_id in cohort:
             record = extension_store.get_extension(extension_id)
-            if not record or record["enabled"] is not False:
+            if not record or record["enabled"] is not True:
                 raise AssertionError(record)
-            quarantine = record.get("quarantine") or {}
-            if quarantine.get("reason") != "repeated_slow_backend_calls":
-                raise AssertionError(quarantine)
-            if quarantine.get("attributed_extension_id") != "ofek.laggy-base":
-                raise AssertionError(quarantine)
-
-        extension_store.set_enabled("ofek.laggy-base", True)
-        enabled = extension_store.get_extension("ofek.laggy-base")
-        if not enabled or "quarantine" in enabled:
-            raise AssertionError(enabled)
+        decision = (extension_store.get_extension("ofek.laggy-base") or {}).get(
+            "pending_health_decision"
+        ) or {}
+        if decision.get("reason") != "repeated_slow_backend_calls":
+            raise AssertionError(decision)
+        if [item["extension_id"] for item in decision.get("cohort", [])] != cohort:
+            raise AssertionError(decision)
     finally:
         for extension_id in ("ofek.laggy-dependent", "ofek.laggy-base"):
             try:
@@ -5793,7 +5793,7 @@ if __name__ == "__main__":
         test_runtime_ready_accepts_persisted_manifest_without_protocol()
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()
-        test_slow_call_quarantine_disables_extension_and_dependents_durably()
+        test_slow_call_requests_user_decision_for_extension_and_dependents()
         test_incidents_are_fenced_to_same_generation_activation()
         test_new_generation_recovers_exact_auto_quarantine_cohort()
         test_legacy_quarantine_is_annotated_without_enabling_then_recovers()

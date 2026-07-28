@@ -195,6 +195,11 @@ class SetEnabledRequest(BaseModel):
     enabled: bool
 
 
+class HealthDecisionRequest(BaseModel):
+    decision_id: str = Field(min_length=32, max_length=64, pattern=r"^[a-f0-9]+$")
+    action: str = Field(pattern=r"^(disable|keep_enabled)$")
+
+
 class SetInstructionEnabledRequest(BaseModel):
     level: str
     enabled: bool
@@ -1072,6 +1077,28 @@ async def set_extension_enabled(extension_id: str, req: SetEnabledRequest):
         raise _extension_error(exc) from exc
     await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
+
+
+@router.post("/{extension_id}/health-decision")
+async def resolve_extension_health_decision(
+    extension_id: str, req: HealthDecisionRequest
+):
+    try:
+        record = await asyncio.to_thread(
+            extension_store.resolve_health_decision,
+            extension_id,
+            decision_id=req.decision_id,
+            action=req.action,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
+    return {
+        "extension": record,
+        "projection_status": (
+            "degraded" if record.get("projection_errors") else "ready"
+        ),
+    }
 
 
 @router.post("/{extension_id}/consent")

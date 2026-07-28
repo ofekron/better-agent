@@ -514,8 +514,8 @@ async def _record_slow_call(
         return
     import extension_api
     await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
-    logger.error(
-        "extension backend quarantined after repeated slow calls: %s",
+    logger.warning(
+        "extension backend needs a user health decision after repeated slow calls: %s",
         extension_id,
     )
 
@@ -540,7 +540,10 @@ async def _record_timeout(
         return
     import extension_api
     await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
-    logger.error("extension backend quarantined after repeated timeouts: %s", extension_id)
+    logger.warning(
+        "extension backend needs a user health decision after repeated timeouts: %s",
+        extension_id,
+    )
 
 
 def _validated_child_timing(

@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import atexit
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc-test-extension-incident-delivery-")
-os.environ["HOME"] = tempfile.mkdtemp(prefix="bc-test-extension-incident-os-home-")
+_TEST_HOME = _test_home.TestHome.acquire("bc-test-extension-incident-delivery-")
+atexit.register(_TEST_HOME.release)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -225,8 +224,8 @@ async def test_primary_rejects_stale_future_malformed_and_over_capacity() -> Non
     check(_history_for("ofek.reject-ext") == {}, "rejected incidents do not mutate incident history")
 
 
-async def test_primary_quarantine_syncs_read_only_decision_state() -> None:
-    extension_id = "ofek.primary-quarantine"
+async def test_primary_syncs_read_only_health_decision_state() -> None:
+    extension_id = "ofek.primary-health-decision"
     activation_id = _seed_extension(extension_id)
     conn = _FakeConn()
     original_conn = node_store.get_connection
@@ -259,19 +258,12 @@ async def test_primary_quarantine_syncs_read_only_decision_state() -> None:
 
     record = extension_store.get_extension(extension_id) or {}
     decision = record.get("pending_health_decision") or {}
-    quarantine = record.get("quarantine") or {}
     check(
-        (
-            record.get("enabled") is True
-            and decision.get("attributed_extension_id") == extension_id
-        )
-        or (
-            record.get("enabled") is False
-            and quarantine.get("attributed_extension_id") == extension_id
-        ),
-        "primary owns extension health decision or quarantine state",
+        record.get("enabled") is True
+        and decision.get("attributed_extension_id") == extension_id,
+        "primary owns pending extension health decision",
     )
-    check(broadcasts == ["broadcast"], "primary broadcasts quarantine once")
+    check(broadcasts == ["broadcast"], "primary broadcasts health decision once")
     check(syncs == ["extensions"], "primary syncs read-only extension projection to workers")
 
 
@@ -334,7 +326,7 @@ async def _main() -> None:
     await test_worker_send_failure_keeps_persisted_incident_for_replay()
     await test_primary_dedups_ack_loss_replay_by_authenticated_node_id()
     await test_primary_rejects_stale_future_malformed_and_over_capacity()
-    await test_primary_quarantine_syncs_read_only_decision_state()
+    await test_primary_syncs_read_only_health_decision_state()
     await test_worker_outbox_capacity_does_not_fall_back_to_worker_store()
     await test_worker_outbox_expires_stale_incidents_before_capacity_check()
     print("extension incident delivery tests passed")

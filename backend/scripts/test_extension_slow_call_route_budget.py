@@ -134,7 +134,7 @@ def test_declared_route_budget_is_not_quarantined_within_budget() -> None:
         raise AssertionError("extension disabled despite staying inside its declared budget")
 
 
-def test_route_without_declaration_still_quarantines_at_global_floor() -> None:
+def test_route_without_declaration_requests_decision_at_global_floor() -> None:
     _seed_store()
     if _slow("probe.undeclared", 4.0, "anything"):
         raise AssertionError("first slow call quarantined")
@@ -143,9 +143,11 @@ def test_route_without_declaration_still_quarantines_at_global_floor() -> None:
     disabled = _slow("probe.undeclared", 4.0, "anything")
     if disabled != ["probe.undeclared"]:
         raise AssertionError(f"undeclared route not quarantined at the 2.0s floor: {disabled}")
-    quarantine = (extension_store.get_extension("probe.undeclared") or {}).get("quarantine") or {}
-    if quarantine.get("reason") != "repeated_slow_backend_calls":
-        raise AssertionError(quarantine)
+    decision = (extension_store.get_extension("probe.undeclared") or {}).get("pending_health_decision") or {}
+    if decision.get("reason") != "repeated_slow_backend_calls":
+        raise AssertionError(decision)
+    if not _is_enabled("probe.undeclared"):
+        raise AssertionError("decision request automatically disabled the extension")
 
 
 def test_exceeding_a_generous_declared_budget_still_quarantines() -> None:
@@ -201,7 +203,8 @@ def test_caller_pre_gate_forwards_the_same_incidents_the_store_counts() -> None:
     # Sub-floor strict route: the pre-gate must forward all three.
     for _ in range(3):
         asyncio.run(drive(1.0, "ping"))
-    if _is_enabled("probe.declared-strict"):
+    decision = (extension_store.get_extension("probe.declared-strict") or {}).get("pending_health_decision")
+    if not decision:
         raise AssertionError("pre-gate swallowed incidents on a sub-floor declared route")
 
 
@@ -267,7 +270,7 @@ def test_invoke_backend_attributes_the_route_it_dispatched() -> None:
     finally:
         extension_backend_loader._roundtrip = original_roundtrip
         extension_backend_loader._get_handle = original_get_handle
-    if _is_enabled("probe.declared-strict"):
+    if not (extension_store.get_extension("probe.declared-strict") or {}).get("pending_health_decision"):
         raise AssertionError("dispatch did not attribute the incident to the strict route")
 
 
@@ -285,9 +288,11 @@ def test_host_timeouts_ignore_the_declared_budget() -> None:
     )
     if disabled != ["probe.timeouts"]:
         raise AssertionError(f"repeated timeouts stopped quarantining: {disabled}")
-    quarantine = (extension_store.get_extension("probe.timeouts") or {}).get("quarantine") or {}
-    if quarantine.get("reason") != "repeated_backend_timeouts":
-        raise AssertionError(quarantine)
+    decision = (extension_store.get_extension("probe.timeouts") or {}).get("pending_health_decision") or {}
+    if decision.get("reason") != "repeated_backend_timeouts":
+        raise AssertionError(decision)
+    if not _is_enabled("probe.timeouts"):
+        raise AssertionError("timeout decision request automatically disabled the extension")
 
 
 def test_route_timeout_resolution_is_shared_with_the_host() -> None:
@@ -328,7 +333,7 @@ def test_route_timeout_resolution_is_shared_with_the_host() -> None:
 def main() -> None:
     tests = [
         test_declared_route_budget_is_not_quarantined_within_budget,
-        test_route_without_declaration_still_quarantines_at_global_floor,
+        test_route_without_declaration_requests_decision_at_global_floor,
         test_exceeding_a_generous_declared_budget_still_quarantines,
         test_strict_route_below_the_global_floor_is_still_judged_by_its_budget,
         test_caller_pre_gate_forwards_the_same_incidents_the_store_counts,
