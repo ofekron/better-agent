@@ -81,6 +81,15 @@ def _all_keys(value: object) -> set[str]:
     return set()
 
 
+def _unversioned_provider_state(canonical: dict) -> dict:
+    state = copy.deepcopy(canonical)
+    state.pop("schema_version")
+    for provider in state["providers"]:
+        provider.pop("generation")
+        provider.pop("revision")
+    return state
+
+
 def main() -> None:
     config_store.credential_session_client.available = lambda: True
     config_store.credential_session_client.request = _credential_request
@@ -399,11 +408,47 @@ else:
             raise AssertionError("unsupported provider schema was accepted")
         assert config_store._config_path().read_bytes() == unsupported_bytes
 
-    legacy_provider_state = copy.deepcopy(canonical)
-    legacy_provider_state.pop("schema_version")
-    for provider in legacy_provider_state["providers"]:
-        provider.pop("generation")
-        provider.pop("revision")
+    legacy_provider_state = _unversioned_provider_state(canonical)
+    unsupported_legacy_states = []
+    unexpected_top_level = copy.deepcopy(legacy_provider_state)
+    unexpected_top_level["unexpected"] = "shape"
+    unsupported_legacy_states.append(unexpected_top_level)
+    missing_top_level = copy.deepcopy(legacy_provider_state)
+    missing_top_level.pop("internal_llm")
+    unsupported_legacy_states.append(missing_top_level)
+    mixed_authority = copy.deepcopy(legacy_provider_state)
+    mixed_authority["providers"][0]["generation"] = str(uuid.uuid4())
+    unsupported_legacy_states.append(mixed_authority)
+    partial_authority = copy.deepcopy(legacy_provider_state)
+    partial_authority["providers"][0]["revision"] = 0
+    unsupported_legacy_states.append(partial_authority)
+    unexpected_provider_field = copy.deepcopy(legacy_provider_state)
+    unexpected_provider_field["providers"][0]["unexpected"] = True
+    unsupported_legacy_states.append(unexpected_provider_field)
+    partial_provider = copy.deepcopy(legacy_provider_state)
+    partial_provider["providers"][0].pop("runner")
+    unsupported_legacy_states.append(partial_provider)
+    noncanonical_provider = copy.deepcopy(legacy_provider_state)
+    noncanonical_provider["providers"][0]["mode"] = "invalid"
+    unsupported_legacy_states.append(noncanonical_provider)
+    noncanonical_top_level = copy.deepcopy(legacy_provider_state)
+    noncanonical_top_level["delegate_task_policy"] = "invalid"
+    unsupported_legacy_states.append(noncanonical_top_level)
+    for unsupported in unsupported_legacy_states:
+        config_store._config_path().write_text(
+            json.dumps(unsupported),
+            encoding="utf-8",
+        )
+        _reset_cache()
+        unsupported_bytes = config_store._config_path().read_bytes()
+        try:
+            config_store.list_providers()
+        except RuntimeError as exc:
+            assert "unsupported provider config schema" in str(exc)
+        else:
+            raise AssertionError("unsupported unversioned provider schema was accepted")
+        assert config_store._config_path().read_bytes() == unsupported_bytes
+
     config_store._config_path().write_text(
         json.dumps(legacy_provider_state),
         encoding="utf-8",
@@ -420,6 +465,18 @@ else:
     for provider in migrated_provider_state["providers"]:
         assert provider["revision"] == 0
         uuid.UUID(provider["generation"])
+    migrated_bytes = config_store._config_path().read_bytes()
+    migrated_authority = {
+        provider["id"]: _authority(provider)
+        for provider in migrated_provider_state["providers"]
+    }
+    _reset_cache()
+    reloaded_provider_state = config_store.list_providers()
+    assert config_store._config_path().read_bytes() == migrated_bytes
+    assert {
+        provider["id"]: _authority(provider)
+        for provider in reloaded_provider_state["providers"]
+    } == migrated_authority
 
     config_store._config_path().write_text(
         json.dumps({"mode": "subscription", "base_url": ""}),

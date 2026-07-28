@@ -692,7 +692,30 @@ def _is_legacy_flat_state(raw: dict) -> bool:
     return bool(keys & _LEGACY_FLAT_CONFIG_KEYS) and keys <= _LEGACY_FLAT_CONFIG_KEYS
 
 
+_UNVERSIONED_PROVIDER_STATE_KEYS = frozenset({
+    "default_provider_id",
+    "providers",
+    "delegate_task_policy",
+    "disabled_builtin_tools",
+    "disabled_builtin_extensions",
+    "internal_llm",
+})
+
 def _migrate_unversioned_provider_state(raw: dict) -> dict:
+    if set(raw) != _UNVERSIONED_PROVIDER_STATE_KEYS:
+        raise RuntimeError("unsupported provider config schema")
+    if (
+        raw["delegate_task_policy"]
+        != _normalize_delegate_task_policy(raw["delegate_task_policy"])
+        or raw["disabled_builtin_tools"]
+        != _normalize_disabled_builtin_tools(raw["disabled_builtin_tools"])
+        or raw["disabled_builtin_extensions"]
+        != _normalize_disabled_builtin_extensions(
+            raw["disabled_builtin_extensions"]
+        )
+        or raw["internal_llm"] != _normalize_internal_llm(raw["internal_llm"])
+    ):
+        raise RuntimeError("unsupported provider config schema")
     providers = raw.get("providers")
     if not isinstance(providers, list):
         raise RuntimeError("unsupported provider config schema: providers must be a list")
@@ -700,6 +723,9 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
     provider_ids: set[str] = set()
     for provider in providers:
         if not isinstance(provider, dict):
+            raise RuntimeError("unsupported provider config schema: invalid provider record")
+        canonical = _clean_provider_record(provider)
+        if provider != canonical:
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         provider_id = provider.get("id")
         if (
@@ -710,7 +736,7 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
             raise RuntimeError("unsupported provider config schema: invalid provider id")
         provider_ids.add(provider_id)
         migrated.append({
-            **_clean_provider_record(provider),
+            **canonical,
             **_new_provider_authority(),
         })
     state = _normalize_loaded_state({
