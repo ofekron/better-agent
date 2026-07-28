@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-session-org-")
@@ -15,6 +16,9 @@ if _BACKEND not in sys.path:
 _SDK = os.path.join(os.path.dirname(_BACKEND), "sdk")
 if _SDK not in sys.path:
     sys.path.insert(0, _SDK)
+
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
 
 from fastapi.testclient import TestClient  # noqa: E402
 from httpx import Response  # noqa: E402
@@ -209,22 +213,32 @@ def test_rejects_unknown_query_shape(client: TestClient) -> bool:
 
 
 def test_query_filters_provider_model_mode_and_tags(client: TestClient) -> bool:
+    claude_provider = main.config_store.get_default_provider()
+    if claude_provider is None:
+        print("  activated test installation has no default provider")
+        return False
+    codex_provider = main.config_store.add_provider({
+        "name": "Codex filter fixture",
+        "kind": "codex",
+        "mode": "subscription",
+        "default_model": "gpt-5-codex",
+    })
     sid_a = _session(
         "codex tagged",
         model="gpt-5-codex",
-        provider_id="codex",
+        provider_id=codex_provider["id"],
         orchestration_mode="native",
     )
     sid_b = _session(
         "claude tagged",
         model="claude-sonnet-4-6",
-        provider_id="claude",
+        provider_id=claude_provider["id"],
         orchestration_mode="team",
     )
     sid_c = _session(
         "codex other model",
         model="gpt-5",
-        provider_id="codex",
+        provider_id=codex_provider["id"],
         orchestration_mode="native",
     )
     tag = client.post(
@@ -239,7 +253,7 @@ def test_query_filters_provider_model_mode_and_tags(client: TestClient) -> bool:
     qr = client.post(
         "/api/session-organization/query",
         json={
-            "providers": ["codex"],
+            "providers": [codex_provider["id"]],
             "models": ["gpt-5-codex"],
             "modes": ["native"],
             "tag_ids": [tag["id"]],
