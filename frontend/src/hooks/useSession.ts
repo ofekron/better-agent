@@ -866,8 +866,48 @@ function preservePostRequestMessages(
   let reconciled = canonical;
   const visit = (node: Session) => {
     const baselineMessages = baseline.get(node.id);
-    const changed = (node.messages ?? []).filter(
-      (message) => baselineMessages?.get(message.id) !== message,
+    const canonicalNode = findNode(reconciled, node.id);
+    const canonicalById = new Map(
+      (canonicalNode?.messages ?? []).map((message) => [message.id, message]),
+    );
+    const messages = node.messages ?? [];
+    const changed = messages.filter(
+      (message, index) => {
+        if (baselineMessages?.get(message.id) === message) return false;
+        const canonicalMessage = canonicalById.get(message.id);
+        if (canonicalMessage) {
+          if (
+            canonicalMessage.role === "user" &&
+            canonicalMessage.status === "error"
+          ) {
+            return false;
+          }
+          return true;
+        }
+        if (message.role !== "assistant") return true;
+        let precedingUser: ChatMessage | undefined;
+        for (let i = index - 1; i >= 0; i--) {
+          if (messages[i].role === "user") {
+            precedingUser = messages[i];
+            break;
+          }
+        }
+        const canonicalUser = precedingUser
+          ? canonicalById.get(precedingUser.id)
+          : undefined;
+        if (
+          !message.isStreaming &&
+          !message.content &&
+          (message.events?.length ?? 0) === 0 &&
+          (message.workers?.length ?? 0) === 0 &&
+          canonicalUser?.role === "user" &&
+          canonicalUser.status === "error" &&
+          !!canonicalUser.errorText
+        ) {
+          return false;
+        }
+        return true;
+      },
     );
     if (changed.length > 0) {
       reconciled = updateNodeById(reconciled, node.id, (canonicalNode) => ({
