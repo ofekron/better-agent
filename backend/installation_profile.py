@@ -29,6 +29,7 @@ CAPABILITIES = frozenset({
     MOBILE,
     INTEGRATIONS,
 })
+NATIVE_PROVIDER_KINDS = frozenset({"openai"})
 
 _IDENTITY_FIELDS = {
     "command",
@@ -130,11 +131,19 @@ def _validate_active(value: Any) -> dict[str, Any]:
     if mode not in MODES:
         raise InstallationProfileError("unsupported installation mode")
     provider = value.get("provider")
-    if not isinstance(provider, str) or provider not in _installable_provider_kinds():
+    if not isinstance(provider, str) or (
+        provider not in _installable_provider_kinds()
+        and provider not in NATIVE_PROVIDER_KINDS
+    ):
         raise InstallationProfileError("unsupported installation provider")
-    identity = _validate_identity(value.get("provider_identity"))
-    if identity["command"] != _provider_command(provider):
-        raise InstallationProfileError("provider executable identity does not match provider")
+    if provider in NATIVE_PROVIDER_KINDS:
+        if value.get("provider_identity") is not None:
+            raise InstallationProfileError("native installation provider cannot have an executable identity")
+        identity = None
+    else:
+        identity = _validate_identity(value.get("provider_identity"))
+        if identity["command"] != _provider_command(provider):
+            raise InstallationProfileError("provider executable identity does not match provider")
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "active",
@@ -188,6 +197,19 @@ def new_active_profile(
         "mode": mode,
         "provider": provider,
         "provider_identity": provider_identity,
+    })
+
+
+def new_native_active_profile(*, mode: str, provider: str) -> dict[str, Any]:
+    if provider not in NATIVE_PROVIDER_KINDS:
+        raise InstallationProfileError("unsupported native installation provider")
+    return _validate_active({
+        "schema_version": SCHEMA_VERSION,
+        "status": "active",
+        "generation": uuid4().hex,
+        "mode": mode,
+        "provider": provider,
+        "provider_identity": None,
     })
 
 
@@ -413,6 +435,8 @@ def repin_provider_executable(identity: dict[str, Any]) -> bool:
     if profile["status"] != "active":
         return False
     current = profile["provider_identity"]
+    if not isinstance(current, dict):
+        return False
     if identity.get("command") != current["command"]:
         return False
     if identity.get("launcher_path") != current["launcher_path"]:
