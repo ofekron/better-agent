@@ -62,7 +62,7 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
     )
     (backend / "dependency_plan.py").write_text(
         "import sys\n"
-        "raise SystemExit(0 if sys.argv[1:] == ['assert-active'] else 2)\n",
+        "raise SystemExit(0 if sys.argv[1:] == ['assert-active-plan'] else 2)\n",
         encoding="utf-8",
     )
     operation = "read" if read else "status"
