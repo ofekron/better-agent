@@ -12,6 +12,8 @@ RUN_WINDOWS = ROOT / "run_windows.bat"
 APP_ENTRY = ROOT / "backend" / "app_entry.py"
 MAIN = ROOT / "backend" / "main.py"
 BROWSER_SUPERVISOR = ROOT / "desktop" / "browser_backend_supervisor.py"
+SERVER_CONFIG = ROOT / "backend" / "server_config.py"
+WINDOWS_SOURCE_LAUNCHER = ROOT / "desktop" / "windows_source_launcher.py"
 LOCAL_CODESIGN = ROOT / "desktop" / "local_codesign.sh"
 CREDENTIAL_BUILD = ROOT / "desktop" / "build_credential_authority.sh"
 
@@ -29,6 +31,8 @@ def main() -> int:
     app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
     main_text = MAIN.read_text(encoding="utf-8")
     browser_supervisor_text = BROWSER_SUPERVISOR.read_text(encoding="utf-8")
+    server_config_text = SERVER_CONFIG.read_text(encoding="utf-8")
+    windows_source_launcher_text = WINDOWS_SOURCE_LAUNCHER.read_text(encoding="utf-8")
     local_codesign_text = LOCAL_CODESIGN.read_text(encoding="utf-8")
     credential_build_text = CREDENTIAL_BUILD.read_text(encoding="utf-8")
 
@@ -106,7 +110,7 @@ def main() -> int:
     check(
         "supervised uvicorn launch skips proxy header parsing",
         "--no-proxy-headers" in browser_supervisor_text
-        and "--no-proxy-headers" in windows_text
+        and "BrowserBackendSupervisor" in windows_source_launcher_text
         and app_entry_text.count("proxy_headers=False") >= 2
         and "proxy_headers=False" in main_text,
         failures,
@@ -116,6 +120,25 @@ def main() -> int:
         '"--ws-per-message-deflate",\n                "false"' in browser_supervisor_text
         and app_entry_text.count("ws_per_message_deflate=False") >= 2
         and "ws_per_message_deflate=False" in main_text,
+        failures,
+    )
+    check(
+        "all production launchers bound graceful connection drain",
+        '"--timeout-graceful-shutdown"' in browser_supervisor_text
+        and app_entry_text.count(
+            "timeout_graceful_shutdown=timeout_graceful_shutdown"
+        ) == 2
+        and "GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 8" in server_config_text,
+        failures,
+    )
+    check(
+        "Windows source launcher uses the shared supervised recovery path",
+        "-m desktop.windows_source_launcher" in windows_text
+        and "BrowserBackendSupervisor" in windows_source_launcher_text
+        and "decide_recovery" in windows_source_launcher_text
+        and "consume_restart_request" in windows_source_launcher_text
+        and "append_backend_exit" in windows_source_launcher_text
+        and "taskkill /F /IM uvicorn.exe" not in windows_text,
         failures,
     )
     check(
@@ -129,6 +152,41 @@ def main() -> int:
     check(
         "main loop uses bounded backend exit wait",
         "wait_for_backend_exit" in text[text.index("while true; do"):],
+        failures,
+    )
+    check(
+        "unexpected backend exits use bounded recovery",
+        'BACKEND_CRASH_LIMIT="${BETTER_AGENT_BACKEND_CRASH_LIMIT:-5}"' in text
+        and "Backend exited unexpectedly (code $BACKEND_EXIT_CODE)" in text
+        and "Backend crash recovery circuit opened" in text,
+        failures,
+    )
+    check(
+        "backend respawn waits for terminal generation acknowledgement",
+        "Credential backend supervisor did not acknowledge terminal generation." in text
+        and '[ "$STATUS_GENERATION_ID" = "$BACKEND_GENERATION_ID" ]' in text
+        and "BACKEND_EXIT_CODE=" in text,
+        failures,
+    )
+    check(
+        "restart intent uses hardened shared consumer",
+        "-m desktop.restart_request" in text
+        and '"$FLAG" --clear' in text
+        and '--not-before "$BACKEND_GENERATION_STARTED_AT"' in text
+        and 'PENDING_REFRESH_ID="$(cat "$FLAG")"' not in text,
+        failures,
+    )
+    check(
+        "source crash circuit executes tested recovery policy",
+        "-m desktop.backend_recovery_policy" in text
+        and 'RECOVERY_ACTION BACKEND_CRASH_ATTEMPTS BACKEND_BACKOFF' in text,
+        failures,
+    )
+    check(
+        "browser launcher persists generation exit evidence",
+        "-m desktop.backend_exit_journal" in text
+        and '--generation-id "$BACKEND_GENERATION_ID"' in text
+        and '--pid "$BACKEND_EXIT_PID"' in text,
         failures,
     )
     check(

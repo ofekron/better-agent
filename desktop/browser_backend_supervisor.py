@@ -10,6 +10,8 @@ import struct
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +130,9 @@ class BrowserBackendSupervisor:
         self._session: ProviderCredentialSession | None = None
         self._proc: subprocess.Popen[str] | None = None
         self._last_exit_code: int | None = None
+        self._generation_id = ""
+        self._generation_started_at: float | None = None
+        self._last_generation_id = ""
         self._lock = threading.RLock()
         self._stopping = threading.Event()
 
@@ -156,6 +161,8 @@ class BrowserBackendSupervisor:
         return checkout
 
     def _start(self, request: dict[str, Any]) -> dict[str, Any]:
+        from server_config import graceful_shutdown_timeout_seconds
+
         host = request.get("host")
         port = request.get("port")
         requested_checkout = request.get("checkout")
@@ -189,6 +196,8 @@ class BrowserBackendSupervisor:
                 "--port",
                 str(port),
                 "--no-proxy-headers",
+                "--timeout-graceful-shutdown",
+                str(graceful_shutdown_timeout_seconds()),
                 "--ws-per-message-deflate",
                 "false",
             ]
@@ -210,6 +219,9 @@ class BrowserBackendSupervisor:
             self._session = session
             self._proc = proc
             self._last_exit_code = None
+            self._generation_id = uuid.uuid4().hex
+            self._generation_started_at = time.time()
+            generation_id = self._generation_id
             threading.Thread(
                 target=self._forward_output,
                 args=(proc,),
@@ -218,11 +230,15 @@ class BrowserBackendSupervisor:
             ).start()
             threading.Thread(
                 target=self._watch_generation,
-                args=(proc, session),
+                args=(proc, session, generation_id),
                 name="browser-backend-watch",
                 daemon=True,
             ).start()
-            return {"ok": True, "pid": proc.pid}
+            return {
+                "ok": True,
+                "pid": proc.pid,
+                "generation_id": generation_id,
+            }
 
     def _forward_output(self, proc: subprocess.Popen[str]) -> None:
         if proc.stdout is None:
@@ -242,12 +258,15 @@ class BrowserBackendSupervisor:
         self,
         proc: subprocess.Popen[str],
         session: ProviderCredentialSession,
+        generation_id: str,
     ) -> None:
         returncode = proc.wait()
         with self._lock:
             session.stop()
             if self._proc is proc:
                 self._last_exit_code = returncode
+                self._last_generation_id = generation_id
+                self._generation_id = ""
                 self._proc = None
                 self._session = None
 
@@ -255,11 +274,21 @@ class BrowserBackendSupervisor:
         with self._lock:
             proc = self._proc
             if proc is None:
-                return {"ok": True, "running": False, "returncode": self._last_exit_code}
+                return {
+                    "ok": True,
+                    "running": False,
+                    "terminal": bool(self._last_generation_id),
+                    "generation_id": self._last_generation_id,
+                    "started_at": None,
+                    "returncode": self._last_exit_code,
+                }
             return {
                 "ok": True,
                 "running": proc.poll() is None,
+                "terminal": False,
                 "pid": proc.pid,
+                "generation_id": self._generation_id,
+                "started_at": self._generation_started_at,
                 "returncode": proc.poll(),
             }
 
@@ -276,6 +305,8 @@ class BrowserBackendSupervisor:
         session = self._session
         self._session = None
         self._proc = None
+        self._generation_id = ""
+        self._generation_started_at = None
         if session is not None:
             session.stop()
 

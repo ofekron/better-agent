@@ -386,6 +386,10 @@ process_is_running() {
 
 FRONTEND_BUILD_PID=""
 BACKEND_PID=""
+BACKEND_GENERATION_ID=""
+BACKEND_GENERATION_STARTED_AT=""
+BACKEND_EXIT_CODE=0
+BACKEND_EXIT_PID=""
 ZAI_STARTUP_CHECK_PID=""
 DAEMON_HOST_PID=""
 CREDENTIAL_BACKEND_SUPERVISOR_PID=""
@@ -454,6 +458,43 @@ stop_child_process() {
 credential_backend_control() {
   PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop:$DIR/sdk" "$PY" \
     -m desktop.browser_backend_control --control "$CREDENTIAL_BACKEND_CONTROL" "$@"
+}
+
+STATUS_TERMINAL=""
+STATUS_PID=""
+STATUS_GENERATION_ID=""
+STATUS_RETURNCODE=""
+STATUS_STARTED_AT=""
+
+read_backend_status() {
+  local status_file="$CREDENTIAL_BACKEND_CONTROL_DIR/status.json"
+  local parsed=""
+  if ! credential_backend_control status > "$status_file"; then
+    rm -f "$status_file"
+    return 1
+  fi
+  if ! parsed="$("$PY" - "$status_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    status = json.load(handle)
+fields = (
+    "1" if status.get("terminal") is True else "0",
+    str(status.get("pid") if isinstance(status.get("pid"), int) else "-"),
+    str(status.get("generation_id") or "-"),
+    str(status.get("returncode") if isinstance(status.get("returncode"), int) else "-"),
+    str(status.get("started_at") if isinstance(status.get("started_at"), (int, float)) else "-"),
+)
+print("|".join(fields))
+PY
+)"; then
+    rm -f "$status_file"
+    return 1
+  fi
+  rm -f "$status_file"
+  IFS='|' read -r STATUS_TERMINAL STATUS_PID STATUS_GENERATION_ID \
+    STATUS_RETURNCODE STATUS_STARTED_AT <<EOF
+$parsed
+EOF
 }
 
 start_credential_backend_supervisor() {
@@ -921,6 +962,10 @@ open_first_run_browser() {
 start_backend() {
   local bind_host
   local pid_file="$CREDENTIAL_BACKEND_CONTROL_DIR/backend.pid"
+  if ! PYTHONPATH="$DIR" "$PY" -m desktop.restart_request "$FLAG" --clear; then
+    echo "Could not clear stale restart intent before backend generation." >&2
+    return 1
+  fi
   bind_host=$("$PY" - "$BA_HOME/user_prefs.json" <<'PY'
 import json
 import sys
@@ -954,10 +999,24 @@ PY
   # forwards output to this terminal and the backend log.
   : > "$BACKEND_LOG"
   echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BACKEND_PORT ---" >> "$BACKEND_LOG"
-  credential_backend_control start \
-    --checkout "$ACTIVE_DIR" --host "$bind_host" --port "$BACKEND_PORT" > "$pid_file"
+  if ! credential_backend_control start \
+    --checkout "$ACTIVE_DIR" --host "$bind_host" --port "$BACKEND_PORT" > "$pid_file"; then
+    rm -f "$pid_file"
+    return 1
+  fi
   IFS= read -r BACKEND_PID < "$pid_file"
   rm -f "$pid_file"
+  if ! read_backend_status; then
+    echo "Credential backend supervisor did not report the new generation." >&2
+    return 1
+  fi
+  BACKEND_GENERATION_ID="$STATUS_GENERATION_ID"
+  BACKEND_GENERATION_STARTED_AT="$STATUS_STARTED_AT"
+  if [ "$STATUS_PID" != "$BACKEND_PID" ] || [ "$BACKEND_GENERATION_ID" = "-" ] \
+    || [ "$BACKEND_GENERATION_STARTED_AT" = "-" ]; then
+    echo "Credential backend supervisor reported an invalid new generation." >&2
+    return 1
+  fi
 }
 
 wait_for_backend() {
@@ -1004,11 +1063,48 @@ wait_for_backend_exit() {
     sleep 0.25
   done
 
-  BACKEND_PID=""
+  local terminal_attempts=0
+
+  while [ "$terminal_attempts" -lt 100 ]; do
+    if ! read_backend_status 2>/dev/null; then
+      echo "Credential backend supervisor status failed after backend exit." >&2
+      return 1
+    fi
+    if [ "$STATUS_TERMINAL" = "1" ] \
+      && [ "$STATUS_GENERATION_ID" = "$BACKEND_GENERATION_ID" ] \
+      && [ "$STATUS_RETURNCODE" != "-" ]; then
+      BACKEND_EXIT_CODE="$STATUS_RETURNCODE"
+      BACKEND_EXIT_PID="$BACKEND_PID"
+      BACKEND_PID=""
+      return 0
+    fi
+    terminal_attempts=$((terminal_attempts + 1))
+    sleep 0.05
+  done
+  echo "Credential backend supervisor did not acknowledge terminal generation." >&2
+  return 1
 }
 
 PENDING_REFRESH_ID=""
 INITIAL_FRONTEND_BUILD_STARTED=0
+BACKEND_CRASH_ATTEMPTS=0
+BACKEND_HEALTHY_AT=0
+BACKEND_CRASH_LIMIT="${BETTER_AGENT_BACKEND_CRASH_LIMIT:-5}"
+BACKEND_STABILITY_SECONDS="${BETTER_AGENT_BACKEND_STABILITY_SECONDS:-60}"
+case "$BACKEND_CRASH_LIMIT" in
+  ''|*[!0-9]*) echo "BETTER_AGENT_BACKEND_CRASH_LIMIT must be an integer." >&2; exit 2 ;;
+esac
+case "$BACKEND_STABILITY_SECONDS" in
+  ''|*[!0-9]*) echo "BETTER_AGENT_BACKEND_STABILITY_SECONDS must be an integer." >&2; exit 2 ;;
+esac
+if [ "$BACKEND_CRASH_LIMIT" -lt 1 ] || [ "$BACKEND_CRASH_LIMIT" -gt 20 ]; then
+  echo "BETTER_AGENT_BACKEND_CRASH_LIMIT must be in 1..20." >&2
+  exit 2
+fi
+if [ "$BACKEND_STABILITY_SECONDS" -lt 1 ] || [ "$BACKEND_STABILITY_SECONDS" -gt 3600 ]; then
+  echo "BETTER_AGENT_BACKEND_STABILITY_SECONDS must be in 1..3600." >&2
+  exit 2
+fi
 
 integrations_enabled() {
   PYTHONPATH="$DIR/backend" "$PY" -c \
@@ -1103,10 +1199,14 @@ else
     INITIAL_FRONTEND_BUILD_STARTED=1
 
     prepare_daemon_host_for_backend
-    start_backend
+    if ! start_backend; then
+      echo "Backend generation failed to start safely."
+      break
+    fi
     # Capture health without aborting under `set -e` so line-switch recovery runs.
     if wait_for_backend; then
       BACKEND_HEALTHY=1
+      BACKEND_HEALTHY_AT=$SECONDS
     else
       BACKEND_HEALTHY=0
     fi
@@ -1133,17 +1233,56 @@ else
 
     # Block until uvicorn exits. Restart-requested exits are bounded so a stuck
     # shutdown does not leave the UI waiting forever.
-    wait_for_backend_exit
-
-    if [ -f "$FLAG" ]; then
-      PENDING_REFRESH_ID="$(cat "$FLAG")"
-      rm -f "$FLAG"
-      echo "Restart requested — restarting backend..."
-      continue
+    if ! wait_for_backend_exit; then
+      echo "Backend lifecycle state is unsafe; stopping launcher."
+      break
     fi
 
-    echo "Backend exited (no restart flag) — stopping."
-    break
+    if [ -f "$FLAG" ]; then
+      if ! PENDING_REFRESH_ID="$(PYTHONPATH="$DIR" "$PY" -m desktop.restart_request \
+        "$FLAG" --not-before "$BACKEND_GENERATION_STARTED_AT")"; then
+        echo "Restart request was invalid; stopping launcher." >&2
+        break
+      fi
+      if [ -n "$PENDING_REFRESH_ID" ]; then
+        BACKEND_CRASH_ATTEMPTS=0
+        PYTHONPATH="$DIR" "$PY" -m desktop.backend_exit_journal \
+          --state-root "$BA_HOME" --source run.sh --exit-code "$BACKEND_EXIT_CODE" \
+          --classification refresh --decision restart \
+          --generation-id "$BACKEND_GENERATION_ID" --pid "$BACKEND_EXIT_PID" \
+          --checkout "$ACTIVE_DIR" --request-id "$PENDING_REFRESH_ID" || true
+        echo "Restart requested — restarting backend..."
+        continue
+      fi
+    fi
+
+    RECOVERY_DECISION="$(PYTHONPATH="$DIR" "$PY" -m desktop.backend_recovery_policy \
+      --attempts "$BACKEND_CRASH_ATTEMPTS" \
+      --healthy-seconds "$((SECONDS - BACKEND_HEALTHY_AT))" \
+      --limit "$BACKEND_CRASH_LIMIT" \
+      --stability-seconds "$BACKEND_STABILITY_SECONDS")"
+    IFS='|' read -r RECOVERY_ACTION BACKEND_CRASH_ATTEMPTS BACKEND_BACKOFF <<EOF
+$RECOVERY_DECISION
+EOF
+    if [ "$RECOVERY_ACTION" = "circuit_open" ]; then
+      PYTHONPATH="$DIR" "$PY" -m desktop.backend_exit_journal \
+        --state-root "$BA_HOME" --source run.sh --exit-code "$BACKEND_EXIT_CODE" \
+        --classification unexpected --decision circuit_open \
+        --restart-attempt "$BACKEND_CRASH_ATTEMPTS" \
+        --generation-id "$BACKEND_GENERATION_ID" --pid "$BACKEND_EXIT_PID" \
+        --checkout "$ACTIVE_DIR" || true
+      echo "Backend crash recovery circuit opened after $BACKEND_CRASH_ATTEMPTS attempts."
+      break
+    fi
+    PYTHONPATH="$DIR" "$PY" -m desktop.backend_exit_journal \
+      --state-root "$BA_HOME" --source run.sh --exit-code "$BACKEND_EXIT_CODE" \
+      --classification unexpected --decision restart \
+      --restart-attempt "$BACKEND_CRASH_ATTEMPTS" \
+      --generation-id "$BACKEND_GENERATION_ID" --pid "$BACKEND_EXIT_PID" \
+      --checkout "$ACTIVE_DIR" || true
+    echo "Backend exited unexpectedly (code $BACKEND_EXIT_CODE) — restarting in ${BACKEND_BACKOFF}s..."
+    sleep "$BACKEND_BACKOFF"
+    continue
   done
 fi
 

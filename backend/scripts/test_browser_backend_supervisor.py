@@ -39,6 +39,14 @@ def _wait_until(predicate, timeout: float = 10.0) -> None:
     raise AssertionError("condition did not become true")
 
 
+def _port_accepts(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
 def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
     backend = root / "backend"
     python_path = backend / ".venvs" / "test" / "bin" / "python"
@@ -70,10 +78,18 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
         " probe.write(json.dumps({'fd_before': bool(fd_before), "
         "'fd_after': 'BETTER_AGENT_CREDENTIAL_SESSION_FD' in os.environ, "
         "'child_available': child.stdout.strip(), 'response': response}) + '\\n')\n"
+        "import asyncio\n"
         "from fastapi import FastAPI\n"
+        "from starlette.responses import StreamingResponse\n"
         "app = FastAPI()\n"
         "@app.get('/healthz')\n"
-        "def healthz(): return {'ok': True}\n",
+        "def healthz(): return {'ok': True}\n"
+        "@app.get('/held')\n"
+        "async def held():\n"
+        " async def stream():\n"
+        "  yield b'open\\n'\n"
+        "  await asyncio.Event().wait()\n"
+        " return StreamingResponse(stream())\n",
         encoding="utf-8",
     )
     return root
@@ -81,7 +97,9 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
 
 def _stop_generation(supervisor: BrowserBackendSupervisor) -> None:
     supervisor.handle({"op": "signal", "signal": "TERM"})
-    _wait_until(lambda: supervisor.handle({"op": "status"})["running"] is False)
+    _wait_until(
+        lambda: supervisor.handle({"op": "status"}).get("terminal") is True
+    )
 
 
 def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: Path) -> None:
@@ -107,6 +125,7 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
         },
     )
     try:
+        generation_ids: list[str] = []
         for _ in range(2):
             port = _free_port()
             result = supervisor.handle({
@@ -116,11 +135,19 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
                 "port": port,
             })
             assert isinstance(result.get("pid"), int)
+            assert isinstance(result.get("generation_id"), str)
+            assert len(result["generation_id"]) == 32
+            generation_ids.append(result["generation_id"])
             _wait_until(lambda: probe_path.exists() and len(probe_path.read_text().splitlines()) >= _ + 1)
             _stop_generation(supervisor)
+            terminal = supervisor.handle({"op": "status"})
+            assert terminal["terminal"] is True
+            assert terminal["generation_id"] == result["generation_id"]
+            assert terminal["returncode"] == -signal.SIGTERM
+        assert len(set(generation_ids)) == 2
         rows = [json.loads(line) for line in probe_path.read_text(encoding="utf-8").splitlines()]
         assert [row["response"]["status"] for row in rows] == ["blocked", "blocked"]
-        assert reads == 1, reads
+        assert reads == 2
         assert all(row["fd_before"] is True for row in rows)
         assert all(row["fd_after"] is False for row in rows)
         assert all(row["child_available"] == "False" for row in rows)
@@ -182,7 +209,10 @@ def test_control_server_keeps_handle_out_of_launcher(temp_root: Path) -> None:
             check=True,
         )
         assert int(started.stdout.strip()) > 0
-        _wait_until(probe_path.exists)
+        _wait_until(
+            lambda: probe_path.exists()
+            and bool(probe_path.read_text(encoding="utf-8").splitlines())
+        )
         row = json.loads(probe_path.read_text(encoding="utf-8").splitlines()[0])
         assert row == {
             "fd_before": True,
@@ -334,6 +364,55 @@ def test_controller_crash_stops_supervisor_and_backend(temp_root: Path) -> None:
         control_dir.rmdir()
 
 
+def test_graceful_drain_timeout_allows_next_generation(temp_root: Path) -> None:
+    checkout = _fake_checkout(
+        temp_root / "drain-checkout", temp_root / "drain-probe.jsonl", read=False,
+    )
+    state_root = temp_root / "drain-state"
+    supervisor = BrowserBackendSupervisor(
+        checkout,
+        {
+            **os.environ,
+            "BETTER_AGENT_HOME": str(state_root),
+            "BETTER_CLAUDE_HOME": str(state_root),
+            "BETTER_AGENT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "1",
+            "PYTHONPATH": f"{ROOT}:{ROOT / 'backend'}:{ROOT / 'desktop'}",
+        },
+    )
+    port = _free_port()
+    connection: socket.socket | None = None
+    try:
+        first = supervisor.handle({
+            "op": "start",
+            "checkout": str(checkout),
+            "host": "127.0.0.1",
+            "port": port,
+        })
+        _wait_until(lambda: _port_accepts(port))
+        connection = socket.create_connection(("127.0.0.1", port), timeout=2)
+        connection.sendall(
+            b"GET /held HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+        )
+        assert b"200 OK" in connection.recv(4096)
+
+        started = time.monotonic()
+        _stop_generation(supervisor)
+        assert time.monotonic() - started < 9
+
+        second = supervisor.handle({
+            "op": "start",
+            "checkout": str(checkout),
+            "host": "127.0.0.1",
+            "port": port,
+        })
+        assert second["generation_id"] != first["generation_id"]
+        _stop_generation(supervisor)
+    finally:
+        if connection is not None:
+            connection.close()
+        supervisor.shutdown()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-browser-supervisor-") as raw_temp_root:
         temp_root = Path(raw_temp_root)
@@ -346,6 +425,7 @@ def main() -> None:
             test_control_server_keeps_handle_out_of_launcher(temp_root)
             test_control_server_rejects_unrelated_callers(temp_root)
             test_controller_crash_stops_supervisor_and_backend(temp_root)
+            test_graceful_drain_timeout_allows_next_generation(temp_root)
         finally:
             if previous_home is None:
                 os.environ.pop("BETTER_AGENT_HOME", None)
