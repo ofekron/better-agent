@@ -43,10 +43,11 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Literal, Optional
 
 import config_store
 import perf
@@ -513,11 +514,37 @@ _index_sidecar_accepting = True
 _index_sidecar_thread: threading.Thread | None = None
 _durability_writer: GroupedDurabilityWriter | None = None
 _durability_writer_lock = threading.Lock()
-_root_change_owner: RootChangeOwner | None = None
-_root_change_owner_lock = threading.Lock()
-_summary_sidecar_write_queue: queue.Queue[
-    tuple[Path, str, dict, int | None, FileSignature | None] | None
-] = _StorageIdentityQueue(maxsize=256)
+
+
+@dataclass
+class _RootChangeBinding:
+    identity: Path
+    owner: RootChangeOwner
+    state: Literal["starting", "open", "closing"]
+    active_handles: int = 0
+    readiness_deadline: float | None = None
+
+
+@dataclass
+class _RootChangeHandle:
+    binding: _RootChangeBinding
+    change: RootChange
+    consumed: bool = False
+
+
+_root_change_binding: _RootChangeBinding | None = None
+_root_change_lifecycle = threading.Condition(threading.Lock())
+_root_change_start_stop_lock = threading.Lock()
+_SummarySidecarItem = tuple[
+    Path,
+    str,
+    dict,
+    int | None,
+    FileSignature | None,
+]
+_summary_sidecar_write_queue: queue.Queue[_SummarySidecarItem | None] = (
+    _StorageIdentityQueue(maxsize=256)
+)
 _summary_sidecar_write_started = False
 _summary_sidecar_write_lock = threading.Lock()
 _opened_cache_lock = threading.Lock()
@@ -612,66 +639,258 @@ def _apply_root_change(change: RootChange) -> bool | None:
     else:
         project_external_root_delete(change.root_id)
         applied = True
+    return applied
+
+
+def _root_change_storage_dirs(identity: Path) -> tuple[Path, ...]:
+    with _storage_identity_scope(identity, wait=True):
+        return tuple(_session_storage_dirs())
+
+
+def _apply_bound_root_change(
+    identity: Path,
+    change: RootChange,
+) -> bool | None:
+    with _storage_identity_scope(identity, wait=True):
+        applied = _apply_root_change(change)
     _index_sidecar_write_queue.join()
     return applied
 
 
-def start_root_change_owner() -> None:
-    global _root_change_owner
-    with _root_change_owner_lock:
-        if _root_change_owner is not None:
-            return
-        owner = RootChangeOwner(
-            wal=RootChangeWal(ba_home() / "indexes" / "root-changes.sqlite3"),
-            roots=lambda: tuple(_session_storage_dirs()),
-            apply=_apply_root_change,
-            accept_path=lambda path: path.suffix == ".json" and not _is_sidecar_json(path.name),
-        )
-        owner.start()
-        _root_change_owner = owner
+def _requested_storage_identity() -> Path:
+    identity = _STORAGE_IDENTITY.get()
+    return identity if identity is not None else (ba_home() / "sessions").resolve()
 
 
-def shutdown_root_change_owner() -> None:
-    global _root_change_owner
-    with _root_change_owner_lock:
-        owner, _root_change_owner = _root_change_owner, None
-    if owner is not None:
-        owner.stop()
+def start_root_change_owner(readiness_timeout: float = 5.0) -> None:
+    global _root_change_binding
+    if readiness_timeout <= 0:
+        raise ValueError("root change owner readiness timeout must be positive")
+    identity = _requested_storage_identity()
+    deadline = time.monotonic() + readiness_timeout
+    with _root_change_start_stop_lock:
+        with _root_change_lifecycle:
+            binding = _root_change_binding
+            if binding is not None:
+                if binding.identity != identity:
+                    raise RuntimeError(
+                        "root change owner is bound to another storage identity"
+                    )
+                if binding.state != "open":
+                    raise RuntimeError(
+                        f"root change owner is {binding.state}"
+                    )
+                return
+            owner = RootChangeOwner(
+                wal=RootChangeWal(
+                    identity.parent / "indexes" / "root-changes.sqlite3"
+                ),
+                roots=lambda: _root_change_storage_dirs(identity),
+                apply=lambda change: _apply_bound_root_change(identity, change),
+                accept_path=lambda path: (
+                    path.suffix == ".json"
+                    and not _is_sidecar_json(path.name)
+                ),
+            )
+            binding = _RootChangeBinding(
+                identity,
+                owner,
+                "starting",
+                readiness_deadline=deadline,
+            )
+            _root_change_binding = binding
+        try:
+            owner.start()
+            deadline = time.monotonic() + readiness_timeout
+            with _root_change_lifecycle:
+                binding.readiness_deadline = deadline
+                _root_change_lifecycle.notify_all()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("root change owner readiness timed out")
+            owner.wait_ready(remaining)
+        except BaseException:
+            with _root_change_lifecycle:
+                binding.state = "closing"
+                _root_change_lifecycle.notify_all()
+            try:
+                owner.stop(max(0.0, deadline - time.monotonic()))
+            except BaseException:
+                raise
+            with _root_change_lifecycle:
+                if _root_change_binding is binding:
+                    _root_change_binding = None
+                    _root_change_lifecycle.notify_all()
+            raise
+        with _root_change_lifecycle:
+            binding.state = "open"
+            _root_change_lifecycle.notify_all()
 
 
-def _begin_root_change(kind: str, root_id: str, path: Path) -> RootChange | None:
-    owner = _root_change_owner
-    if owner is None:
+def shutdown_root_change_owner(timeout: float = 5.0) -> None:
+    global _root_change_binding
+    if timeout <= 0:
+        raise ValueError("root change owner shutdown timeout must be positive")
+    deadline = time.monotonic() + timeout
+    with _root_change_start_stop_lock:
+        with _root_change_lifecycle:
+            binding = _root_change_binding
+            if binding is None:
+                return
+            binding.state = "closing"
+            _root_change_lifecycle.notify_all()
+            while binding.active_handles:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "root change owner has active local changes"
+                    )
+                _root_change_lifecycle.wait(remaining)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("root change owner shutdown timed out")
+        binding.owner.stop(remaining)
+        with _root_change_lifecycle:
+            if _root_change_binding is binding:
+                _root_change_binding = None
+                _root_change_lifecycle.notify_all()
+
+
+def _root_change_binding_for_mutation() -> _RootChangeBinding | None:
+    identity = _requested_storage_identity()
+    with _root_change_lifecycle:
+        binding = _root_change_binding
+        if binding is None:
+            return None
+        if binding.identity != identity:
+            raise RuntimeError(
+                "root change owner is bound to another storage identity"
+            )
+        if binding.state != "open":
+            raise RuntimeError(f"root change owner is {binding.state}")
+        return binding
+
+
+def _root_change_binding_for_read() -> _RootChangeBinding | None:
+    identity = _requested_storage_identity()
+    with _root_change_lifecycle:
+        binding = _root_change_binding
+        if binding is None:
+            return None
+        if binding.identity != identity:
+            raise RuntimeError(
+                "root change owner is bound to another storage identity"
+            )
+        while binding.state == "starting":
+            deadline = binding.readiness_deadline
+            if deadline is None:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            _root_change_lifecycle.wait(remaining)
+            if _root_change_binding is not binding:
+                return None
+        return binding if binding.state == "open" else None
+
+
+def _validated_root_change_path(
+    binding: _RootChangeBinding,
+    root_id: str,
+    path: Path,
+    *,
+    require_file: bool,
+) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute() or candidate.name != f"{root_id}.json":
+        raise ValueError("root change path does not match its root identity")
+    parent = candidate.parent.resolve(strict=True)
+    identity = binding.identity.resolve(strict=True)
+    routine_root = (identity.parent / _ROUTINE_SESSIONS_DIR_NAME).resolve()
+    if parent != identity and parent.parent != routine_root:
+        raise ValueError("root change path escapes its storage identity")
+    resolved = parent / candidate.name
+    if require_file and candidate.resolve(strict=True) != resolved:
+        raise ValueError("root change path escapes through a symlink")
+    return resolved
+
+
+def _begin_root_change(
+    kind: str,
+    root_id: str,
+    path: Path,
+) -> _RootChangeHandle | None:
+    binding = _root_change_binding_for_mutation()
+    if binding is None:
         return None
-    if kind == "upsert":
-        return owner.begin_local_upsert(root_id, path)
-    return owner.begin_local_delete(root_id, path)
+    if kind not in ("upsert", "delete"):
+        raise ValueError("unsupported root change kind")
+    validated = _validated_root_change_path(
+        binding,
+        root_id,
+        path,
+        require_file=kind == "upsert",
+    )
+    with _root_change_lifecycle:
+        if binding is not _root_change_binding or binding.state != "open":
+            raise RuntimeError("root change owner is not accepting local changes")
+        binding.active_handles += 1
+    try:
+        change = (
+            binding.owner.begin_local_upsert(root_id, validated)
+            if kind == "upsert"
+            else binding.owner.begin_local_delete(root_id, validated)
+        )
+    except BaseException:
+        with _root_change_lifecycle:
+            binding.active_handles -= 1
+            _root_change_lifecycle.notify_all()
+        raise
+    return _RootChangeHandle(binding, change)
 
 
-def _complete_root_change(change: RootChange | None) -> None:
-    if change is not None:
-        assert _root_change_owner is not None
-        _root_change_owner.complete_local(change)
+def _consume_root_change_handle(
+    handle: _RootChangeHandle,
+    *,
+    complete: bool,
+) -> None:
+    with _root_change_lifecycle:
+        if handle.consumed:
+            raise RuntimeError("root change handle was already consumed")
+        handle.consumed = True
+    try:
+        if complete:
+            handle.binding.owner.complete_local(handle.change)
+        else:
+            handle.binding.owner.abandon_local()
+    finally:
+        with _root_change_lifecycle:
+            handle.binding.active_handles -= 1
+            _root_change_lifecycle.notify_all()
 
 
-def _abandon_root_change(change: RootChange | None) -> None:
-    if change is not None:
-        assert _root_change_owner is not None
-        _root_change_owner.abandon_local()
+def _complete_root_change(handle: _RootChangeHandle | None) -> None:
+    if handle is not None:
+        _consume_root_change_handle(handle, complete=True)
+
+
+def _abandon_root_change(handle: _RootChangeHandle | None) -> None:
+    if handle is not None:
+        _consume_root_change_handle(handle, complete=False)
 
 
 def _wait_root_change_owner_ready() -> None:
-    owner = _root_change_owner
-    if owner is not None:
-        owner.wait_ready()
+    binding = _root_change_binding_for_read()
+    if binding is not None:
+        binding.owner.wait_ready()
 
 
 def _wait_root_change_observation(generation: int, timeout: float = 0.05) -> bool:
-    owner = _root_change_owner
-    if owner is None:
+    binding = _root_change_binding_for_read()
+    if binding is None:
         return False
     started = time.perf_counter()
-    observed = owner.wait_for_observation(generation, timeout)
+    observed = binding.owner.wait_for_observation(generation, timeout)
     perf.record(
         "store.session.root_change_watcher.resolve_observation_wait",
         (time.perf_counter() - started) * 1000.0,
@@ -1908,17 +2127,19 @@ def _summary_sidecar_writer_loop() -> None:
 
 
 def _process_summary_sidecar_batch(
-    first_item: tuple[Path, str, dict, int | None, FileSignature | None],
+    first_item: _SummarySidecarItem,
+    work_queue: queue.Queue[_SummarySidecarItem | None] | None = None,
 ) -> bool:
+    source = work_queue or _summary_sidecar_write_queue
     pending: dict[
         tuple[Path, str],
-        tuple[Path, str, dict, int | None, FileSignature | None],
+        _SummarySidecarItem,
     ] = {(first_item[0], first_item[1]): first_item}
     consumed = 1
     should_stop = False
     while True:
         try:
-            next_item = _summary_sidecar_write_queue.get_nowait()
+            next_item = source.get_nowait()
         except queue.Empty:
             break
         consumed += 1
@@ -1949,7 +2170,7 @@ def _process_summary_sidecar_batch(
                 _logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
     finally:
         for _ in range(consumed):
-            _summary_sidecar_write_queue.task_done()
+            source.task_done()
     return should_stop
 
 
@@ -3439,9 +3660,9 @@ def _resolve_root_id(sid: str) -> Optional[str]:
             return sid
         if sid in _fork_index:
             return _fork_index[sid]
-    owner = _root_change_owner
-    if owner is not None:
-        generation = owner.observation_generation
+    binding = _root_change_binding_for_read()
+    if binding is not None:
+        generation = binding.owner.observation_generation
         loaded_root_id = _loaded_root_id_for(sid)
         if loaded_root_id is not None:
             return loaded_root_id

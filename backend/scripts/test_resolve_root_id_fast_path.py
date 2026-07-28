@@ -25,6 +25,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _reset_home() -> None:
+    session_store._summary_sidecar_write_queue.join()
     session_store._index_sidecar_write_queue.join()
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
@@ -400,7 +401,7 @@ def test_projection_between_miss_and_generation_capture_resolves() -> bool:
     _write(_record("target-root"))
     _write_summary("target-root", 0)
     session_store._ensure_index()
-    original_owner = session_store._root_change_owner
+    original_binding = session_store._root_change_binding
 
     class RacingOwner:
         def wait_ready(self):
@@ -416,11 +417,15 @@ def test_projection_between_miss_and_generation_capture_resolves() -> bool:
             assert generation == 7
             return False
 
-    session_store._root_change_owner = RacingOwner()
+    session_store._root_change_binding = session_store._RootChangeBinding(
+        session_store._sessions_dir().resolve(),
+        RacingOwner(),
+        "open",
+    )
     try:
         resolved = session_store._resolve_root_id("racing-fork")
     finally:
-        session_store._root_change_owner = original_owner
+        session_store._root_change_binding = original_binding
     ok = resolved == "target-root"
     print(
         f"{PASS if ok else FAIL} projection before generation capture resolves"
@@ -434,7 +439,7 @@ def test_projection_during_timed_out_observation_wait_resolves() -> bool:
     _write(_record("target-root"))
     _write_summary("target-root", 0)
     session_store._ensure_index()
-    original_owner = session_store._root_change_owner
+    original_binding = session_store._root_change_binding
 
     class TimingOutOwner:
         def wait_ready(self):
@@ -447,11 +452,15 @@ def test_projection_during_timed_out_observation_wait_resolves() -> bool:
                 session_store._fork_index["timeout-fork"] = "target-root"
             return False
 
-    session_store._root_change_owner = TimingOutOwner()
+    session_store._root_change_binding = session_store._RootChangeBinding(
+        session_store._sessions_dir().resolve(),
+        TimingOutOwner(),
+        "open",
+    )
     try:
         resolved = session_store._resolve_root_id("timeout-fork")
     finally:
-        session_store._root_change_owner = original_owner
+        session_store._root_change_binding = original_binding
     ok = resolved == "target-root"
     print(f"{PASS if ok else FAIL} projection during timed-out wait resolves")
     return ok

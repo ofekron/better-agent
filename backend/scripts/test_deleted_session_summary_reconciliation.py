@@ -126,11 +126,11 @@ def _listed_ids() -> set[str]:
 def _externally_delete_and_wait(sid: str) -> bool:
     session_store.start_root_change_owner()
     session_store._wait_root_change_owner_ready()
-    owner = session_store._root_change_owner
-    assert owner is not None
-    generation = owner.observation_generation
+    binding = session_store._root_change_binding
+    assert binding is not None
+    generation = binding.owner.observation_generation
     (_sessions_dir() / f"{sid}.json").unlink()
-    return owner.wait_for_observation(generation, 2.0)
+    return binding.owner.wait_for_observation(generation, 2.0)
 
 
 def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
@@ -224,6 +224,7 @@ def test_summary_sidecar_batch_coalesces_latest_per_root() -> bool:
     for sid in ("summary-batch-a", "summary-batch-b"):
         _write_root(sid)
     writes: list[tuple[str, dict, int | None]] = []
+    work_queue = session_store._StorageIdentityQueue()
     original_write = session_store._write_summary_file
 
     def record_write(root_id: str, summary: dict, **_kwargs) -> None:
@@ -232,24 +233,25 @@ def test_summary_sidecar_batch_coalesces_latest_per_root() -> bool:
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-batch-a", {"version": 1})
         )
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-batch-a", {"version": 2})
         )
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-batch-b", {"version": 1})
         )
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-batch-a", {"version": 3})
         )
         stop = session_store._process_summary_sidecar_batch(
-            session_store._summary_sidecar_write_queue.get_nowait()
+            work_queue.get_nowait(),
+            work_queue,
         )
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
-        session_store._summary_sidecar_write_queue.join()
+        work_queue.join()
     by_root = {root_id: summary["version"] for root_id, summary, _ in writes}
     ok = not stop and by_root == {"summary-batch-a": 3, "summary-batch-b": 1}
     print(f"{PASS if ok else FAIL} summary sidecar batch coalesces latest per root")
@@ -266,6 +268,7 @@ def test_summary_sidecar_batch_skips_stale_root_mtime() -> bool:
     newer_mtime = old_mtime + 1_000_000
     os.utime(root_path, ns=(newer_mtime, newer_mtime))
     writes: list[str] = []
+    work_queue = session_store._StorageIdentityQueue()
     original_write = session_store._write_summary_file
 
     def record_write(root_id: str, summary: dict, **_kwargs) -> None:
@@ -273,15 +276,16 @@ def test_summary_sidecar_batch_skips_stale_root_mtime() -> bool:
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item(sid, {"version": 1}, old_mtime, old_signature)
         )
         stop = session_store._process_summary_sidecar_batch(
-            session_store._summary_sidecar_write_queue.get_nowait()
+            work_queue.get_nowait(),
+            work_queue,
         )
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
-        session_store._summary_sidecar_write_queue.join()
+        work_queue.join()
     ok = not stop and writes == []
     print(f"{PASS if ok else FAIL} stale summary sidecar batch item is skipped")
     return ok
@@ -292,6 +296,7 @@ def test_summary_sidecar_batch_handles_sentinel_after_work() -> bool:
     sid = "summary-sentinel-root"
     _write_root(sid)
     writes: list[str] = []
+    work_queue = session_store._StorageIdentityQueue()
     original_write = session_store._write_summary_file
 
     def record_write(root_id: str, summary: dict, **_kwargs) -> None:
@@ -299,17 +304,18 @@ def test_summary_sidecar_batch_handles_sentinel_after_work() -> bool:
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item(sid, {"version": 1})
         )
-        session_store._summary_sidecar_write_queue.put_nowait(None)
+        work_queue.put_nowait(None)
         stop = session_store._process_summary_sidecar_batch(
-            session_store._summary_sidecar_write_queue.get_nowait()
+            work_queue.get_nowait(),
+            work_queue,
         )
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
-        session_store._summary_sidecar_write_queue.join()
-    ok = stop and writes == [sid] and session_store._summary_sidecar_write_queue.empty()
+        work_queue.join()
+    ok = stop and writes == [sid] and work_queue.empty()
     print(f"{PASS if ok else FAIL} summary sidecar batch handles sentinel after work")
     return ok
 
@@ -319,6 +325,7 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
     for sid in ("summary-fail-a", "summary-fail-b"):
         _write_root(sid)
     writes: list[str] = []
+    work_queue = session_store._StorageIdentityQueue()
     original_write = session_store._write_summary_file
 
     def record_write(root_id: str, summary: dict, **_kwargs) -> None:
@@ -328,18 +335,19 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-fail-a", {"version": 1})
         )
-        session_store._summary_sidecar_write_queue.put_nowait(
+        work_queue.put_nowait(
             _summary_item("summary-fail-b", {"version": 1})
         )
         stop = session_store._process_summary_sidecar_batch(
-            session_store._summary_sidecar_write_queue.get_nowait()
+            work_queue.get_nowait(),
+            work_queue,
         )
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
-        session_store._summary_sidecar_write_queue.join()
+        work_queue.join()
     ok = not stop and writes == ["summary-fail-b"]
     print(f"{PASS if ok else FAIL} summary sidecar batch failure keeps other roots")
     return ok
