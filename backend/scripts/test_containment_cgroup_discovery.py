@@ -24,6 +24,7 @@ def write_cgroup_fixture(
     process_directory.mkdir(parents=True)
     (process_directory / "cgroup.procs").write_text(f"{pid}\n", encoding="ascii")
     (process_directory / "cgroup.controllers").write_text("cpu memory\n", encoding="ascii")
+    (process_directory / "cgroup.type").write_text("domain\n", encoding="ascii")
     mountinfo = tmp_path / f"{mount_name}.mountinfo"
     cgroup = tmp_path / f"{mount_name}.cgroup"
     mountinfo.write_text(
@@ -171,3 +172,42 @@ def test_linux_spawn_preserves_cgroup_descriptor() -> None:
 
     assert kwargs["pass_fds"] == (42,)
     assert callable(kwargs["preexec_fn"])
+
+
+def test_discovers_wsl_hybrid_freezer_hierarchy(tmp_path) -> None:
+    mount_point = tmp_path / "freezer"
+    mount_point.mkdir()
+    (mount_point / "tasks").write_text("123\n", encoding="ascii")
+    (mount_point / "freezer.state").write_text("THAWED\n", encoding="ascii")
+    mountinfo = tmp_path / "mountinfo"
+    cgroup = tmp_path / "cgroup"
+    mountinfo.write_text(
+        f"42 25 0:40 / {mount_point} rw - cgroup cgroup rw,freezer\n",
+        encoding="utf-8",
+    )
+    cgroup.write_text("7:freezer:/\n0::/\n", encoding="ascii")
+
+    assert containment._current_cgroup_v1_freezer_directory(
+        str(mountinfo),
+        str(cgroup),
+        pid=123,
+    ) == str(mount_point)
+
+
+def test_linux_factory_falls_back_to_verified_v1(monkeypatch) -> None:
+    monkeypatch.setattr(containment, "_INSTANCE", None)
+    monkeypatch.setattr(containment.sys if hasattr(containment, "sys") else __import__("sys"), "platform", "linux")
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v2_directory",
+        lambda: (_ for _ in ()).throw(containment.ContainmentUnavailable("no v2")),
+    )
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v1_freezer_directory",
+        lambda: "/freezer/session",
+    )
+
+    instance = containment.containment()
+
+    assert isinstance(instance, containment._LinuxCgroupV1FreezerContainment)
