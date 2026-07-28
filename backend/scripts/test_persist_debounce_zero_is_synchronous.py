@@ -119,10 +119,10 @@ def _run() -> bool:
         session_store.write_session_full = _counting_write
         try:
             _create_then_mutate()
+            drained_zero = _wait_for_persist_drain()
         finally:
             session_store.write_session_full = real_write
 
-        drained_zero = _wait_for_persist_drain()
         results.append((
             "debounce=0 drains async persist work before teardown",
             drained_zero,
