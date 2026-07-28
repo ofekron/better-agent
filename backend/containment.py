@@ -236,8 +236,6 @@ def _current_cgroup_v1_pids_directory(
                         members = {int(value) for value in tasks.read().split()}
                     if pid not in members:
                         continue
-                    if not os.path.isfile(os.path.join(resolved, "pids.current")):
-                        continue
                 except (OSError, ValueError):
                     continue
                 return resolved

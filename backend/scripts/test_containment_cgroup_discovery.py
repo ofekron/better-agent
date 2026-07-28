@@ -178,7 +178,6 @@ def test_discovers_wsl_hybrid_pids_hierarchy(tmp_path) -> None:
     mount_point = tmp_path / "pids"
     mount_point.mkdir()
     (mount_point / "tasks").write_text("123\n", encoding="ascii")
-    (mount_point / "pids.current").write_text("1\n", encoding="ascii")
     mountinfo = tmp_path / "mountinfo"
     cgroup = tmp_path / "cgroup"
     mountinfo.write_text(
