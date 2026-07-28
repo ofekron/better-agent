@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _test_installation  # noqa: E402
 _test_installation.activate(Path(_TMP_HOME))
 
-from turn_helpers import _is_transient_error  # noqa: E402
+from turn_helpers import _is_transient_error, _retry_attempt_limit  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
@@ -307,6 +307,20 @@ def test_codex_initialize_timeout_is_not_transient() -> None:
     check(
         "other timeout still transient",
         _is_transient_error("TimeoutError: upstream request timed out", []) is True,
+    )
+    check(
+        "initialize timeout gets one pre-accept retry",
+        _retry_attempt_limit(
+            "TimeoutError: codex app-server request timed out: initialize",
+            [],
+        ) == 1,
+    )
+    check(
+        "selected extension failure stays terminal",
+        _retry_attempt_limit(
+            "selected extension MCP 'coordination' exposed no usable tools",
+            [],
+        ) == 0,
     )
 
 

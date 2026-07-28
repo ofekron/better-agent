@@ -28,8 +28,7 @@ from runs_dir import (
 from event_shape import extract_output_text as _extract_output_text
 from turn_helpers import (
     _is_rate_limit_attempt,
-    _is_transient_error,
-    _TRANSIENT_MAX_ATTEMPTS,
+    _retry_attempt_limit,
 )
 from session_manager import manager as session_manager
 from ingestion_versions import current_ingestion_version, marker_matches_current, write_marker
@@ -2839,7 +2838,7 @@ def _should_retry_transient(
     """Check if a completed run failed with a transient error that
     hasn't exhausted its retry budget. Reads the attempt counter from
     the assistant message (persisted by the orchestrator) and checks
-    the error classification against ``_is_transient_error``."""
+    the error classification against the shared retry-budget policy."""
     complete_path = run_dir / "complete.json"
     if not complete_path.exists():
         return False
@@ -2854,21 +2853,18 @@ def _should_retry_transient(
 
     error = payload.get("error")
     sdk_output = payload.get("sdk_output") or ""
-    # Build minimal events list so _is_transient_error can check text.
+    # Build minimal events so the shared retry policy can check output text.
     events = []
     if sdk_output:
         events.append({"type": "agent_message", "data": {
             "type": "assistant", "text": sdk_output,
         }})
 
-    if not _is_transient_error(error, events):
-        return False
-
     # Check attempt budget from the persisted assistant message.
     prior = 0
     if msg:
         prior = int(msg.get("transient_attempt") or 0)
-    return prior < _TRANSIENT_MAX_ATTEMPTS
+    return prior < _retry_attempt_limit(error, events)
 
 
 async def _retry_recovered_run(
@@ -2894,15 +2890,60 @@ async def _retry_recovered_run(
     except Exception:
         inp = {}
 
+    new_run_id = str(uuid.uuid4())
+    new_queue: asyncio.Queue = asyncio.Queue()
+    retry_registered = False
+    retry_cancel_event: Optional[asyncio.Event] = None
+
+    async def cleanup_retry_registration() -> None:
+        if not retry_registered:
+            return
+        _cleanup_active_run_id(coordinator, app_sid, new_run_id)
+        coordinator.turn_manager.run_state_remove(app_sid, new_run_id)
+        if (
+            retry_cancel_event is not None
+            and coordinator.turn_manager.cancel_events.get(app_sid)
+            is retry_cancel_event
+        ):
+            coordinator.turn_manager.cancel_events.pop(app_sid, None)
+        await coordinator.turn_manager.emit_run_state(app_sid)
+
     if fresh_continuation_reason is None:
+        turn_manager = coordinator.turn_manager
+        retry_cancel_event = asyncio.Event()
+        if app_sid in turn_manager.cancel_events:
+            return
+        turn_manager.cancel_events[app_sid] = retry_cancel_event
+        turn_manager.active_run_ids.setdefault(app_sid, []).append(new_run_id)
+        await asyncio.to_thread(
+            turn_manager.run_state_add,
+            app_sid,
+            run_id=new_run_id,
+            kind=desc.get("mode") or "native",
+            target_message_id=recovering_msg_id,
+            pid=None,
+        )
+        turn_manager.run_state_mark_retrying(app_sid, new_run_id)
+        await turn_manager.emit_run_state(app_sid)
+        retry_registered = True
         retry_at = (datetime.now() + timedelta(seconds=5)).isoformat()
         session_manager.set_msg_retrying_until(persist_sid, msg_id, retry_at)
         fresh = session_manager.get(persist_sid) or {}
         last_asst = _assistant_by_id(fresh, msg_id)
         prior = int((last_asst or {}).get("transient_attempt") or 0)
         session_manager.set_msg_transient_attempt(persist_sid, msg_id, prior + 1)
-        await asyncio.sleep(5)
-        session_manager.set_msg_retrying_until(persist_sid, msg_id, None)
+        try:
+            await asyncio.wait_for(retry_cancel_event.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            session_manager.set_msg_retrying_until(persist_sid, msg_id, None)
+        if (
+            retry_cancel_event.is_set()
+            or getattr(coordinator, "_session_cancelled", {}).get(app_sid)
+        ):
+            await cleanup_retry_registration()
+            return
 
     # Re-read session to pick up the resume sid (set by
     # _integrate_one's replay or the prior run's session_discovered).
@@ -2927,8 +2968,6 @@ async def _retry_recovered_run(
         continuation_chain = continuation.continuation_chain
         resume_sid = None
 
-    new_run_id = str(uuid.uuid4())
-    new_queue: asyncio.Queue = asyncio.Queue()
     # Deliberately routed through start_run (not a gate bypass): if a
     # previous run is still winding down on `resume_sid`, this retry must
     # serialize behind it exactly like a fresh user prompt would —
@@ -2938,39 +2977,52 @@ async def _retry_recovered_run(
     # reads in _build_input_payload freeze the loop during recovery retries.
     recovery_loop = asyncio.get_running_loop()
     await asyncio.to_thread(session_manager.flush_pending_persists)
-    await asyncio.to_thread(
-        provider.start_run,
-        run_id=new_run_id,
-        prompt=prompt,
-        images=inp.get("images"),
-        cwd=inp.get("cwd", ""),
-        loop=recovery_loop,
-        queue=new_queue,
-        model=inp.get("model"),
-        reasoning_effort=inp.get("reasoning_effort"),
-        session_id=resume_sid,  # --resume target
-        mode=mode,
-        app_session_id=app_sid,
-        source=inp.get("source"),
-        disallowed_tools=inp.get("disallowed_tools"),
-        setting_sources=inp.get("setting_sources"),
-        backend_url=inp.get("backend_url"),
-        internal_token=inp.get("internal_token"),
-        fork=inp.get("fork", False),
-        supervised=inp.get("supervised", False),
-        supervisor_agent_session_id=inp.get("supervisor_agent_session_id"),
-        worker_agent_session_id=inp.get("worker_agent_session_id"),
-        browser_harness_enabled=inp.get("browser_harness_enabled", False),
-        user_facing=inp.get("user_facing", False),
-        provider_run_config=inp.get("provider_run_config"),
-        capability_contexts=inp.get("capability_contexts"),
-        continuation_chain=continuation_chain,
-        target_message_id=msg_id,
-        resolved_harness_run_config=inp.get("resolved_harness_run_config"),
-        turn_run_id=inp.get("turn_run_id"),
-        disabled_builtin_extensions=inp.get("disabled_builtin_extensions"),
-        provisioned_tool_profile=inp.get("provisioned_tool_profile") or "",
-    )
+    try:
+        await asyncio.to_thread(
+            provider.start_run,
+            run_id=new_run_id,
+            prompt=prompt,
+            images=inp.get("images"),
+            cwd=inp.get("cwd", ""),
+            loop=recovery_loop,
+            queue=new_queue,
+            model=inp.get("model"),
+            reasoning_effort=inp.get("reasoning_effort"),
+            session_id=resume_sid,  # --resume target
+            mode=mode,
+            app_session_id=app_sid,
+            source=inp.get("source"),
+            disallowed_tools=inp.get("disallowed_tools"),
+            setting_sources=inp.get("setting_sources"),
+            backend_url=inp.get("backend_url"),
+            internal_token=inp.get("internal_token"),
+            fork=inp.get("fork", False),
+            supervised=inp.get("supervised", False),
+            supervisor_agent_session_id=inp.get("supervisor_agent_session_id"),
+            worker_agent_session_id=inp.get("worker_agent_session_id"),
+            browser_harness_enabled=inp.get("browser_harness_enabled", False),
+            user_facing=inp.get("user_facing", False),
+            provider_run_config=inp.get("provider_run_config"),
+            capability_contexts=inp.get("capability_contexts"),
+            continuation_chain=continuation_chain,
+            target_message_id=msg_id,
+            resolved_harness_run_config=inp.get("resolved_harness_run_config"),
+            turn_run_id=inp.get("turn_run_id"),
+            disabled_builtin_extensions=inp.get("disabled_builtin_extensions"),
+            provisioned_tool_profile=inp.get("provisioned_tool_profile") or "",
+        )
+    except BaseException:
+        await cleanup_retry_registration()
+        raise
+    if retry_cancel_event is not None and retry_cancel_event.is_set():
+        cancel_run = getattr(coordinator, "_cancel_turn_fanout", None)
+        if cancel_run is not None:
+            cancel_run(new_run_id)
+    if (
+        retry_cancel_event is not None
+        and coordinator.turn_manager.cancel_events.get(app_sid) is retry_cancel_event
+    ):
+        coordinator.turn_manager.cancel_events.pop(app_sid, None)
 
     new_desc = {
         "run_id": new_run_id,
@@ -2990,17 +3042,25 @@ async def _retry_recovered_run(
     # Register the retried run in `active_run_ids` + `_run_state` so the
     # running-state signal is live and `_prune_dead_entries` doesn't
     # drop the pidless entry. Mirrors `_integrate_one`'s registration.
-    coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(new_run_id)
+    if not retry_registered:
+        coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(new_run_id)
     provider_rs = provider._runs.get(new_run_id)
     pid = provider_rs.popen.pid if provider_rs and provider_rs.popen else None
-    await asyncio.to_thread(
-        coordinator.turn_manager.run_state_add,
-        app_sid,
-        run_id=new_run_id,
-        kind=mode,
-        target_message_id=recovering_msg_id,
-        pid=int(pid) if pid else None,
-    )
+    if retry_registered:
+        coordinator.turn_manager.run_state_set_pid(
+            app_sid,
+            new_run_id,
+            int(pid) if pid else None,
+        )
+    else:
+        await asyncio.to_thread(
+            coordinator.turn_manager.run_state_add,
+            app_sid,
+            run_id=new_run_id,
+            kind=mode,
+            target_message_id=recovering_msg_id,
+            pid=int(pid) if pid else None,
+        )
     await asyncio.to_thread(
         coordinator.turn_manager.run_state_mark_provider_submitted,
         app_sid,

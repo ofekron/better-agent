@@ -103,7 +103,11 @@ _TRANSIENT_ERROR_TEXT_RE = re.compile(
 _NON_TRANSIENT_ERROR_SUBSTRINGS = (
     "codex app-server request timed out: initialize",
 )
+_PRE_ACCEPT_RETRY_ERROR_SUBSTRINGS = (
+    "codex app-server request timed out: initialize",
+)
 _TRANSIENT_MAX_ATTEMPTS = 10
+_PRE_ACCEPT_RETRY_MAX_ATTEMPTS = 1
 _TRANSIENT_BASE_WAIT_S = 5.0
 _TRANSIENT_MAX_WAIT_S = 60.0
 # Rate-limit retries are bounded too: an exhausted subscription window /
@@ -124,6 +128,17 @@ def _is_transient_error(error: Optional[str], events: list[dict]) -> bool:
     if extracted and _TRANSIENT_ERROR_TEXT_RE.search(extracted):
         return True
     return False
+
+
+def _retry_attempt_limit(error: Optional[str], events: list[dict]) -> int:
+    """Return the bounded retry budget for a failed provider attempt."""
+    if error:
+        low = error.lower()
+        if any(s in low for s in _PRE_ACCEPT_RETRY_ERROR_SUBSTRINGS):
+            return _PRE_ACCEPT_RETRY_MAX_ATTEMPTS
+    if _is_transient_error(error, events):
+        return _TRANSIENT_MAX_ATTEMPTS
+    return 0
 
 
 # ---------------------------------------------------------------------------

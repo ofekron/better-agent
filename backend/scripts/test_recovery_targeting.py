@@ -429,6 +429,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     class _TurnManager:
         def __init__(self) -> None:
             self.active_run_ids = {}
+            self.cancel_events = {}
             self.added: list[tuple[str, str]] = []
             self.submitted: list[tuple[str, str, str]] = []
             self.emitted: list[str] = []
@@ -441,15 +442,26 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         ) -> None:
             self.submitted.append((sid, run_id, provider_kind))
 
+        def run_state_mark_retrying(self, _sid: str, _run_id: str) -> None:
+            pass
+
+        def run_state_set_pid(self, _sid: str, _run_id: str, _pid) -> None:
+            pass
+
         async def emit_run_state(self, sid: str) -> None:
             self.emitted.append(sid)
 
     class _Coordinator:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
+            self._session_cancelled = {}
 
     async def _sleep(_seconds: float) -> None:
         return None
+
+    async def _wait_for(awaitable, *, timeout: float):
+        awaitable.close()
+        raise asyncio.TimeoutError()
 
     def _create_task(coro, *, name=None):
         coro.close()
@@ -457,10 +469,12 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
 
     original_sm = run_recovery.session_manager
     original_sleep = run_recovery.asyncio.sleep
+    original_wait_for = run_recovery.asyncio.wait_for
     original_create_task = run_recovery.asyncio.create_task
     try:
         run_recovery.session_manager = fake_sm
         run_recovery.asyncio.sleep = _sleep
+        run_recovery.asyncio.wait_for = _wait_for
         run_recovery.asyncio.create_task = _create_task
         coordinator = _Coordinator()
         provider = _Provider()
@@ -483,6 +497,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     finally:
         run_recovery.session_manager = original_sm
         run_recovery.asyncio.sleep = original_sleep
+        run_recovery.asyncio.wait_for = original_wait_for
         run_recovery.asyncio.create_task = original_create_task
 
     new_run_id = provider.started[0] if provider.started else ""
@@ -493,7 +508,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "provider startup monitoring registered",
         coordinator.turn_manager.submitted == [("sid", new_run_id, "claude")],
     )
-    check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
+    check("retry-pending and submitted state emitted", coordinator.turn_manager.emitted == ["sid", "sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
     check(
         "retry preserves resolved harness snapshot",
@@ -504,6 +519,213 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "retry preserves disabled extensions",
         provider.kwargs.get("disabled_builtin_extensions") == ["recovery.disabled"],
     )
+
+
+def test_recovered_retry_cancelled_during_backoff_does_not_spawn() -> None:
+    print("T7b recovered retry cancellation prevents spawn")
+    run_id = "retry-cancelled-before-spawn"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(run_dir / "input.json", {
+        "prompt": "do not retry me",
+        "cwd": "/tmp",
+    })
+    fake_sm = _FakeSessionManager({
+        "messages": [
+            {"id": "msg-1", "role": "assistant", "events": [], "transient_attempt": 0},
+        ],
+    })
+
+    class _Provider:
+        KIND = "codex"
+        _runs = {}
+
+        def __init__(self) -> None:
+            self.started = 0
+
+        def start_run(self, **_kwargs) -> None:
+            self.started += 1
+
+    class _TurnManager:
+        def __init__(self) -> None:
+            self.active_run_ids = {}
+            self.cancel_events = {}
+            self.removed = []
+
+        def run_state_add(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_retrying(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_remove(self, sid: str, run_id: str) -> None:
+            self.removed.append((sid, run_id))
+
+        async def emit_run_state(self, _sid: str) -> None:
+            pass
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.turn_manager = _TurnManager()
+            self._session_cancelled = {}
+
+    coordinator = _Coordinator()
+
+    async def _cancel_wait(awaitable, *, timeout: float):
+        awaitable.close()
+        event = coordinator.turn_manager.cancel_events["sid"]
+        coordinator._session_cancelled["sid"] = True
+        event.set()
+
+    original_sm = run_recovery.session_manager
+    original_wait_for = run_recovery.asyncio.wait_for
+    try:
+        run_recovery.session_manager = fake_sm
+        run_recovery.asyncio.wait_for = _cancel_wait
+        provider = _Provider()
+        asyncio.run(run_recovery._retry_recovered_run(
+            coordinator=coordinator,
+            provider=provider,
+            desc={"run_id": run_id, "mode": "native"},
+            run_dir=run_dir,
+            app_sid="sid",
+            persist_sid="sid",
+            msg_id="msg-1",
+            recovering_msg_id="msg-1",
+        ))
+    finally:
+        run_recovery.session_manager = original_sm
+        run_recovery.asyncio.wait_for = original_wait_for
+
+    check("provider was not spawned", provider.started == 0)
+    check("retry registration removed", coordinator.turn_manager.active_run_ids == {})
+    check("cancel event removed", coordinator.turn_manager.cancel_events == {})
+    check("run state removed", len(coordinator.turn_manager.removed) == 1)
+
+
+def test_recovered_retry_spawn_boundaries_cleanup() -> None:
+    print("T7c recovered retry spawn races clean up")
+    run_id = "retry-spawn-boundaries"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(run_dir / "input.json", {
+        "prompt": "retry safely",
+        "cwd": "/tmp",
+    })
+
+    class _Run:
+        class _Popen:
+            pid = None
+        popen = _Popen()
+
+    class _TurnManager:
+        def __init__(self) -> None:
+            self.active_run_ids = {}
+            self.cancel_events = {}
+            self.removed = []
+
+        def run_state_add(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_retrying(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_remove(self, sid: str, retry_run_id: str) -> None:
+            self.removed.append((sid, retry_run_id))
+
+        def run_state_set_pid(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_provider_submitted(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def emit_run_state(self, _sid: str) -> None:
+            pass
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.turn_manager = _TurnManager()
+            self._session_cancelled = {}
+            self.cancelled_runs = []
+
+        def _cancel_turn_fanout(self, retry_run_id: str) -> None:
+            self.cancelled_runs.append(retry_run_id)
+
+    async def _skip_backoff(awaitable, *, timeout: float):
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    def _create_task(coro, *, name=None):
+        coro.close()
+        return None
+
+    async def _run(provider, coordinator) -> None:
+        await run_recovery._retry_recovered_run(
+            coordinator=coordinator,
+            provider=provider,
+            desc={"run_id": run_id, "mode": "native"},
+            run_dir=run_dir,
+            app_sid="sid",
+            persist_sid="sid",
+            msg_id="msg-1",
+            recovering_msg_id="msg-1",
+        )
+
+    original_sm = run_recovery.session_manager
+    original_wait_for = run_recovery.asyncio.wait_for
+    original_create_task = run_recovery.asyncio.create_task
+    try:
+        run_recovery.asyncio.wait_for = _skip_backoff
+        run_recovery.asyncio.create_task = _create_task
+
+        race_coordinator = _Coordinator()
+
+        class _RaceProvider:
+            KIND = "codex"
+
+            def __init__(self) -> None:
+                self._runs = {}
+                self.started = 0
+
+            def start_run(self, *, run_id: str, **_kwargs) -> None:
+                self.started += 1
+                self._runs[run_id] = _Run()
+                race_coordinator._session_cancelled["sid"] = True
+                race_coordinator.turn_manager.cancel_events["sid"].set()
+
+        run_recovery.session_manager = _FakeSessionManager({
+            "messages": [{"id": "msg-1", "role": "assistant", "events": []}],
+        })
+        race_provider = _RaceProvider()
+        asyncio.run(_run(race_provider, race_coordinator))
+        check("spawn race starts exactly once", race_provider.started == 1)
+        check("spawn race fans out cancellation", len(race_coordinator.cancelled_runs) == 1)
+
+        failing_coordinator = _Coordinator()
+
+        class _FailingProvider:
+            KIND = "codex"
+            _runs = {}
+
+            def start_run(self, **_kwargs) -> None:
+                raise RuntimeError("spawn failed")
+
+        run_recovery.session_manager = _FakeSessionManager({
+            "messages": [{"id": "msg-1", "role": "assistant", "events": []}],
+        })
+        try:
+            asyncio.run(_run(_FailingProvider(), failing_coordinator))
+        except RuntimeError as error:
+            check("spawn exception propagated", str(error) == "spawn failed")
+        else:
+            check("spawn exception propagated", False)
+        check("spawn exception clears active id", failing_coordinator.turn_manager.active_run_ids == {})
+        check("spawn exception clears cancel event", failing_coordinator.turn_manager.cancel_events == {})
+        check("spawn exception clears run state", len(failing_coordinator.turn_manager.removed) == 1)
+    finally:
+        run_recovery.session_manager = original_sm
+        run_recovery.asyncio.wait_for = original_wait_for
+        run_recovery.asyncio.create_task = original_create_task
 
 
 def test_recovered_capability_change_starts_fresh_continuation() -> None:
@@ -625,6 +847,8 @@ def main() -> int:
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
+        test_recovered_retry_cancelled_during_backoff_does_not_spawn()
+        test_recovered_retry_spawn_boundaries_cleanup()
         test_recovered_capability_change_starts_fresh_continuation()
         test_bounded_capability_recovery_targets_descriptor_message()
         print()

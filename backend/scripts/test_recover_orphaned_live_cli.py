@@ -380,6 +380,28 @@ def test_both_dead_is_dead_orphan() -> bool:
     return True
 
 
+def test_initialize_timeout_recovery_uses_one_intent_retry() -> bool:
+    run_dir = _runs_root() / str(uuid.uuid4())
+    run_dir.mkdir(parents=True)
+    (run_dir / "complete.json").write_text(json.dumps({
+        "success": False,
+        "error": "TimeoutError: codex app-server request timed out: initialize",
+    }), encoding="utf-8")
+    if not _should_retry_transient(
+        run_dir,
+        {"transient_attempt": 0},
+    ):
+        print("  first proven pre-accept failure was not recoverable")
+        return False
+    if _should_retry_transient(
+        run_dir,
+        {"transient_attempt": 1},
+    ):
+        print("  pre-accept retry budget exceeded one intent retry")
+        return False
+    return True
+
+
 TESTS = [
     ("claude orphaned live CLI re-attaches (not dead_orphan)", test_orphaned_live_cli_reattaches),
     ("recycled pid + stale jsonl → dead_orphan", test_reused_pid_not_reattached),
@@ -388,6 +410,7 @@ TESTS = [
     ("dead Codex tool progress becomes recoverable partial", test_dead_codex_with_tool_progress_is_recoverable_partial),
     ("completed Claude server_error after tool progress is recoverable partial", test_completed_claude_server_error_after_tool_progress_is_recoverable_partial),
     ("wrapper + CLI both dead → dead_orphan", test_both_dead_is_dead_orphan),
+    ("initialize timeout recovery gets one intent retry", test_initialize_timeout_recovery_uses_one_intent_retry),
 ]
 
 

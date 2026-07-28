@@ -49,6 +49,16 @@ def test_turn_scoped_stall_and_recovery() -> None:
     assert target["startup_phase"] == "stalled"
     assert target.get("stalled_at")
 
+    previous_activity = {
+        key: target.get(key)
+        for key in ("last_event_at", "last_activity_at", "last_activity_kind")
+    }
+    assert manager.run_state_record_activity("sid", "target", "complete") is False
+    assert target["startup_phase"] == "stalled"
+    assert {
+        key: target.get(key)
+        for key in ("last_event_at", "last_activity_at", "last_activity_kind")
+    } == previous_activity
     assert manager.run_state_record_activity("sid", "target", "task_started") is True
     assert target["startup_phase"] == "awaiting_provider_ready"
     assert target["startup_expected_activity"] == "turn_context"

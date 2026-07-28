@@ -11,7 +11,7 @@ Coordinator (in `orchestrator.py`) delegates its core turn methods
 which returns this TurnManager instance.
 
 Shared helpers (`_TRANSIENT_*`, `_is_rate_limit_attempt`,
-`_is_transient_error`, `_is_stale_session_error`, `_append_todo_reminder`)
+`_retry_attempt_limit`, `_is_stale_session_error`, `_append_todo_reminder`)
 live in `backend/turn_helpers.py` — a neutral module both
 `orchestrator.py` and `turn_manager.py` import from.
 
@@ -78,12 +78,11 @@ from trace_collector import TraceCollector, extract_provider_result_token_usage
 from turn_helpers import (
     _RATE_LIMIT_MAX_ATTEMPTS,
     _TRANSIENT_BASE_WAIT_S,
-    _TRANSIENT_MAX_ATTEMPTS,
     _TRANSIENT_MAX_WAIT_S,
     _append_todo_reminder,
     _is_rate_limit_attempt,
     _is_stale_session_error,
-    _is_transient_error,
+    _retry_attempt_limit,
 )
 from user_msg_lifecycle import emit_sent
 
@@ -1238,6 +1237,9 @@ class TurnManager:
             if run.get("run_id") != run_id:
                 continue
             previous = run.get("startup_phase")
+            expected = run.get("startup_expected_activity")
+            if activity_kind != expected and activity_kind != "recovered_run":
+                return False
             run["last_event_at"] = now
             run["last_activity_at"] = now
             run["last_activity_kind"] = activity_kind
@@ -3246,8 +3248,13 @@ class TurnManager:
                 auto_retry_kinds.add("rate_limit")
                 continue
 
-            if not success and error and transient_attempt < _TRANSIENT_MAX_ATTEMPTS:
-                if _is_transient_error(error, attempt_events):
+            retry_attempt_limit = _retry_attempt_limit(error, attempt_events)
+            if (
+                not success
+                and error
+                and transient_attempt < retry_attempt_limit
+            ):
+                if retry_attempt_limit > 0:
                     transient_attempt += 1
                     wait_s = min(
                         _TRANSIENT_BASE_WAIT_S * (2 ** (transient_attempt - 1)),
@@ -3257,7 +3264,7 @@ class TurnManager:
                     wait_s = min(_TRANSIENT_MAX_WAIT_S, wait_s * random.uniform(0.75, 1.25))
                     logger.warning(
                         "Transient error on attempt %d/%d for %s, retrying in %.0fs: %s",
-                        transient_attempt, _TRANSIENT_MAX_ATTEMPTS,
+                        transient_attempt, retry_attempt_limit,
                         app_session_id, wait_s, error[:200],
                     )
                     in_flight = self.current_assistant_msgs.get(app_session_id)
