@@ -19,6 +19,47 @@ class ProviderStateConflict(RuntimeError):
         )
 
 
+def parse_record_authority(generation: object, revision: object) -> dict:
+    try:
+        parsed_generation = uuid.UUID(generation)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("provider generation must be a canonical UUID") from exc
+    if str(parsed_generation) != generation:
+        raise ValueError("provider generation must be a canonical UUID")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        raise ValueError("provider revision must be a non-negative integer")
+    return {
+        "generation": generation,
+        "revision": revision,
+    }
+
+
+def parse_authority(authority: object) -> dict:
+    if type(authority) is not dict or set(authority) != _AUTHORITY_KEYS:
+        raise ValueError(
+            "provider state authority must contain generation, revision, and digest"
+        )
+    parsed = parse_record_authority(
+        authority.get("generation"),
+        authority.get("revision"),
+    )
+    digest = authority.get("digest")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("provider state digest must be a SHA-256 digest")
+    return {
+        **parsed,
+        "digest": digest,
+    }
+
+
 def snapshot_digest(default_provider_id: str | None, providers: list[dict]) -> str:
     encoded = json.dumps(
         {
@@ -45,31 +86,11 @@ def validate_authority(
     default_provider_id: str | None,
     providers: list[dict],
 ) -> dict:
-    if not isinstance(authority, dict) or set(authority) != _AUTHORITY_KEYS:
-        raise ValueError("provider state authority must contain generation, revision, and digest")
-    generation = authority.get("generation")
-    try:
-        parsed_generation = uuid.UUID(generation)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("provider state generation must be a canonical UUID") from exc
-    if str(parsed_generation) != generation:
-        raise ValueError("provider state generation must be a canonical UUID")
-    revision = authority.get("revision")
-    if (
-        not isinstance(revision, int)
-        or isinstance(revision, bool)
-        or revision < 0
-    ):
-        raise ValueError("provider state revision must be a non-negative integer")
-    digest = authority.get("digest")
+    parsed = parse_authority(authority)
     expected_digest = snapshot_digest(default_provider_id, providers)
-    if not isinstance(digest, str) or digest != expected_digest:
+    if parsed["digest"] != expected_digest:
         raise ValueError("provider state digest does not match its snapshot")
-    return {
-        "generation": generation,
-        "revision": revision,
-        "digest": digest,
-    }
+    return parsed
 
 
 def advance_authority(

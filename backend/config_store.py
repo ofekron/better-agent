@@ -95,20 +95,17 @@ def _new_provider_authority() -> dict:
 
 
 def _validate_provider_authority(provider: dict) -> None:
-    generation = provider.get("generation")
-    revision = provider.get("revision")
     try:
-        parsed_generation = uuid.UUID(generation)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise RuntimeError("unsupported provider config schema: invalid generation") from exc
-    if str(parsed_generation) != generation:
-        raise RuntimeError("unsupported provider config schema: invalid generation")
-    if (
-        not isinstance(revision, int)
-        or isinstance(revision, bool)
-        or revision < 0
-    ):
-        raise RuntimeError("unsupported provider config schema: invalid revision")
+        provider_sync_authority.parse_record_authority(
+            provider.get("generation"),
+            provider.get("revision"),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        field = "generation" if "generation" in message else "revision"
+        raise RuntimeError(
+            f"unsupported provider config schema: invalid {field}"
+        ) from exc
 
 
 def _assert_provider_authority(
