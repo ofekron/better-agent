@@ -19454,7 +19454,9 @@ button.progress-inflight {
   .donation-option {
     min-height: 96px;
   }
+}
 
+@media (max-width: 760px) {
   .settings-page {
     height: 100dvh;
     min-height: 100dvh;
@@ -19465,6 +19467,7 @@ button.progress-inflight {
     position: sticky;
     top: 0;
     z-index: 5;
+    min-height: 0;
     align-items: stretch;
     gap: 10px;
     padding:
@@ -19480,6 +19483,7 @@ button.progress-inflight {
     align-items: baseline;
     justify-content: space-between;
     gap: 10px;
+    padding-inline-end: 88px;
   }
 
   .settings-page-header h2 {
@@ -19496,7 +19500,7 @@ button.progress-inflight {
   .settings-page-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 6px;
   }
 
@@ -19507,8 +19511,21 @@ button.progress-inflight {
     overflow-wrap: anywhere;
   }
 
-  .settings-page-close-action {
+  .settings-page-refresh-action {
+    grid-column: 2;
+  }
+
+  .settings-page-mobile-action {
     grid-column: 1 / -1;
+  }
+
+  .settings-page-close-action {
+    position: absolute;
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    inset-inline-end: calc(12px + env(safe-area-inset-right, 0px));
+    width: auto !important;
+    min-height: 38px;
+    padding-inline: 12px !important;
   }
 
   /* Master-detail: only one pane is visible at a time. The section list
@@ -19734,6 +19751,60 @@ button.progress-inflight {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .extension-ui-settings-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .extension-ui-settings-personal-harness,
+  .extension-ui-settings-personal-harness-files,
+  .extension-ui-settings-search,
+  .extension-ui-settings-toolbar > button {
+    width: 100%;
+  }
+
+  .extension-ui-settings-row,
+  .extension-ui-settings-group,
+  .extension-ui-settings-native-exposure {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .extension-ui-settings-header-actions {
+    width: 100%;
+  }
+
+  .extension-ui-settings-harness-addition {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .extension-ui-settings-permission-main {
+    flex-direction: column;
+  }
+
+  .extension-ui-settings-permission-mode,
+  .extension-ui-settings-permission-toggle {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .ext-setting-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ext-setting-field-label {
+    flex-basis: auto;
+  }
+
+  .ext-setting-field input[type="text"],
+  .ext-setting-field input[type="number"],
+  .ext-setting-field input[type="password"],
+  .ext-setting-field .bc-select-trigger {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
   .first-run-wizard-header,
   .provider-cli-tools-header,
   .first-run-next {
@@ -22005,7 +22076,6 @@ button.progress-inflight {
 }
 
 .settings-page-header {
-  min-height: 72px;
   border-color: var(--md-outline-variant);
   background: var(--md-surface-container-low);
 }
@@ -22031,15 +22101,21 @@ button.progress-inflight {
   box-shadow: none;
 }
 
-.settings-page-nav {
-  gap: 2px;
-  padding: 6px;
-  border-radius: var(--md-shape-md);
-}
+@media (min-width: 761px) {
+  .settings-page-header {
+    min-height: 72px;
+  }
 
-.settings-page-content {
-  padding: clamp(18px, 2.2vw, 28px);
-  border-radius: var(--md-shape-md);
+  .settings-page-nav {
+    gap: 2px;
+    padding: 6px;
+    border-radius: var(--md-shape-md);
+  }
+
+  .settings-page-content {
+    padding: clamp(18px, 2.2vw, 28px);
+    border-radius: var(--md-shape-md);
+  }
 }
 
 .settings-page-nav button,

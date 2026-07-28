@@ -1,3 +1,4 @@
+import { waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { renderApp } from "./harness";
@@ -16,7 +17,9 @@ describe("settings navigation", () => {
     await h.click('button[aria-label="app.settingsButtonTitle"]');
     expect(openSpy).not.toHaveBeenCalled();
     expect(window.location.pathname).toBe("/settings");
-    expect(h.$(".settings-page")).not.toBeNull();
+    await waitFor(() => {
+      expect(h.$(".settings-page")).not.toBeNull();
+    });
 
     await act(async () => {
       window.history.back();
