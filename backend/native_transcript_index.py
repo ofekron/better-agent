@@ -119,6 +119,8 @@ _WORKER_ROOTS_ARG = "--roots-json"
 _WORKER_TEST_START_GATE_ENV = "BETTER_AGENT_TEST_NATIVE_INDEX_START_GATE"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
 _WORKER_OWNER_POLL_INTERVAL_SECONDS = 0.25
+_WORKER_SHUTDOWN_GRACE_SECONDS = 0.5
+_WORKER_PARTIAL_BUILD_PAUSE_SECONDS = 2.0
 _WORKER_LOG_BYTES = 16 * 1024 * 1024
 _MAX_FILE_TIMING_ROWS = 20
 _REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
@@ -3413,7 +3415,7 @@ def _worker_main() -> None:
             logger.exception("native transcript index refresh failed")
             return  # avoid a hot failure loop; next ensure_started() restarts
         if result.get("partial"):
-            _stop.wait(0.2)
+            _stop.wait(_WORKER_PARTIAL_BUILD_PAUSE_SECONDS)
             continue
         if is_covered():
             # Sleep for the poll interval, but wake immediately if a query
@@ -3431,7 +3433,7 @@ def _worker_main() -> None:
                     _refresh_cond.wait(min(remaining, _WORKER_POLL_INTERVAL_SECONDS))
                 _refresh_requested = False
         else:
-            _stop.wait(0.2)  # throttle the initial build so we don't hog disk
+            _stop.wait(_WORKER_PARTIAL_BUILD_PAUSE_SECONDS)
 
 
 def _start_owner_watchdog(
@@ -3538,7 +3540,7 @@ def _stop_worker() -> None:
         if proc.poll() is None:
             proc.terminate()
             try:
-                proc.wait(timeout=5.0)
+                proc.wait(timeout=_WORKER_SHUTDOWN_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2.0)

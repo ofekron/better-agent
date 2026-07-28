@@ -18,7 +18,6 @@ _test_home.isolate("ba-extension-context-audit-")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import config_store  # noqa: E402
 import extension_context_audit as audit  # noqa: E402
 
 
@@ -266,54 +265,46 @@ def _assert_cache_is_atomic_and_bounded(label: str) -> None:
 def t_hot_path_never_runs_model_or_sleeps() -> None:
     reset_state()
     value = projection(profile_id="hot-path")
-    original_ready = audit._is_runtime_ready  # type: ignore[attr-defined]
     original_trigger = audit._trigger_refresh  # type: ignore[attr-defined]
     original_sleep = audit.time.sleep
     calls: list[str] = []
     try:
-        audit._is_runtime_ready = lambda: True  # type: ignore[attr-defined]
         audit._trigger_refresh = lambda fingerprint, _projection: calls.append(fingerprint)  # type: ignore[attr-defined]
         audit.time.sleep = lambda *_args: (_ for _ in ()).throw(AssertionError("hot path slept"))
         started = time.monotonic()
         contexts = audit.runtime_context(value)
         elapsed = time.monotonic() - started
     finally:
-        audit._is_runtime_ready = original_ready  # type: ignore[attr-defined]
         audit._trigger_refresh = original_trigger  # type: ignore[attr-defined]
         audit.time.sleep = original_sleep
     check(contexts == [] and len(calls) == 1, "cold hot path only schedules refresh")
     check(elapsed < 0.1, "cold hot path stays latency-bounded")
 
 
-class resolved_provider:
-    def __init__(self, provider_id: str, *, supports_fork: bool) -> None:
-        self._provider_id = provider_id
-        self._supports_fork = supports_fork
-
-    def __enter__(self) -> "resolved_provider":
-        self._resolve_internal_llm = config_store.resolve_internal_llm
-        self._resolve_provider_ref = config_store.resolve_provider_ref
-        config_store.resolve_internal_llm = lambda _task: {
-            "provider_id": self._provider_id,
-            "model": "test-model",
-            "reasoning_effort": "",
-            "runner": "",
-        }
-        config_store.resolve_provider_ref = lambda _ref: {
-            "id": self._provider_id,
-            "supports_fork": self._supports_fork,
-        }
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        config_store.resolve_internal_llm = self._resolve_internal_llm
-        config_store.resolve_provider_ref = self._resolve_provider_ref
+def t_provider_readiness_is_not_on_turn_hot_path() -> None:
+    reset_state()
+    value = projection(profile_id="readiness-off-hot-path")
+    original_trigger = audit._trigger_refresh  # type: ignore[attr-defined]
+    calls: list[str] = []
+    try:
+        audit._trigger_refresh = lambda fingerprint, _projection: calls.append(fingerprint)  # type: ignore[attr-defined]
+        contexts = audit.runtime_context(value)
+    finally:
+        audit._trigger_refresh = original_trigger  # type: ignore[attr-defined]
+    check(contexts == [] and len(calls) == 1, "provider readiness is delegated to refresh")
 
 
-def t_non_fork_provider_suppresses_audit() -> None:
-    with resolved_provider("agy-default", supports_fork=False):
-        check(audit._is_runtime_ready() is False, "non-fork provider suppresses audit")
-        check(audit.runtime_context(projection()) == [], "non-fork provider does not refresh or raise")
+def t_turn_path_reads_cache_without_starting_provisioning() -> None:
+    reset_state()
+    value = projection(profile_id="turn-cache-only")
+    original_trigger = audit._trigger_refresh  # type: ignore[attr-defined]
+    calls: list[str] = []
+    try:
+        audit._trigger_refresh = lambda fingerprint, _projection: calls.append(fingerprint)  # type: ignore[attr-defined]
+        contexts = audit.runtime_context(value, request_refresh=False)
+    finally:
+        audit._trigger_refresh = original_trigger  # type: ignore[attr-defined]
+    check(contexts == [] and calls == [], "turn cache miss does not start audit provisioning")
 
 
 def t_turn_manager_uses_paired_projection_on_both_paths() -> None:
@@ -321,6 +312,7 @@ def t_turn_manager_uses_paired_projection_on_both_paths() -> None:
     check(source.count("runtime_skill_projection,") == 2, "initial and refresh paths share runtime projection")
     check(source.count("provider_capability_projection(") >= 2, "initial and refresh paths share provider projection")
     check("runtime_skill_contexts," not in source, "legacy lossy runtime path is absent")
+    check(source.count("request_refresh=False") == 2, "both turn paths are audit-cache-only")
 
 
 def main() -> None:
@@ -335,7 +327,8 @@ def main() -> None:
         t_thread_cache_writes_are_atomic_and_bounded()
         t_cross_process_cache_writes_are_atomic_and_bounded()
         t_hot_path_never_runs_model_or_sleeps()
-        t_non_fork_provider_suppresses_audit()
+        t_provider_readiness_is_not_on_turn_hot_path()
+        t_turn_path_reads_cache_without_starting_provisioning()
         t_turn_manager_uses_paired_projection_on_both_paths()
     finally:
         shutil.rmtree(audit.bc_home(), ignore_errors=True)  # type: ignore[attr-defined]

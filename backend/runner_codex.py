@@ -491,29 +491,43 @@ async def _bridge_extension_mcp_dynamic_tools(
     )
     bridge_configs = dict(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
-    for server_name, config in bridge_configs.items():
+
+    async def probe(
+        server_name: str,
+        config: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], Optional[Exception]]:
+        call_config = dict(config)
+        call_config["_server_name"] = server_name
+        try:
+            return await mcp_stdio_bridge.mcp_list_tools(server_name, call_config), None
+        except Exception as exc:
+            return [], exc
+
+    probed = await asyncio.gather(*(
+        probe(server_name, config)
+        for server_name, config in bridge_configs.items()
+    ))
+    for (server_name, config), (tools, probe_error) in zip(
+        bridge_configs.items(),
+        probed,
+    ):
         configured_config = configured_servers.get(server_name)
         same_extension = (
             _extension_config_id(configured_config) == _extension_config_id(config)
         )
         call_config = dict(config)
         call_config["_server_name"] = server_name
-        try:
-            tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
-        except Exception:
-            try:
-                tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
-            except Exception as exc:
-                bridge_errors.append((server_name, exc))
-                if same_extension:
-                    configured_servers.pop(server_name, None)
-                logger.warning(
-                    "selected extension MCP %r unavailable; continuing without it: "
-                    "tools/list failed: %s",
-                    server_name,
-                    exc,
-                )
-                continue
+        if probe_error is not None:
+            bridge_errors.append((server_name, probe_error))
+            if same_extension:
+                configured_servers.pop(server_name, None)
+            logger.warning(
+                "selected extension MCP %r unavailable; continuing without it: "
+                "tools/list failed: %s",
+                server_name,
+                probe_error,
+            )
+            continue
         if same_extension and isinstance(configured_config, dict):
             for tool_name in configured_config.get("tool_names") or ():
                 existing_tool_names.discard(str(tool_name))

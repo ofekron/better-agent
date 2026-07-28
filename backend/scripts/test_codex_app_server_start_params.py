@@ -415,6 +415,53 @@ async def test_bridge_preserves_configured_extension_during_resolution_race() ->
     assert list_attempts == 0
 
 
+async def test_bridge_probes_extension_servers_concurrently() -> None:
+    original_configs = runner_codex.extension_store.native_mcp_server_configs
+    original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
+    both_started = asyncio.Event()
+    active = 0
+
+    def fake_configs(_inputs: dict, *, user_facing: bool, bare: bool):
+        return {
+            "first": {"command": "/fake/first", "args": [], "env": {}},
+            "second": {"command": "/fake/second", "args": [], "env": {}},
+        }
+
+    async def fake_list_tools(server_name: str, _config: dict):
+        nonlocal active
+        active += 1
+        if active == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+        return [{
+            "name": f"{server_name}_tool",
+            "description": "",
+            "inputSchema": {"type": "object"},
+        }]
+
+    runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
+    runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_list_tools  # type: ignore[assignment]
+    try:
+        dynamic_tools: list[dict] = []
+        await runner_codex._bridge_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config={},
+            dynamic_tools=dynamic_tools,
+            tool_handlers={},
+            existing_tool_names=set(),
+            user_facing=True,
+            bare_config=False,
+        )
+    finally:
+        runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
+
+    assert [tool["name"] for tool in dynamic_tools] == [
+        "first_tool",
+        "second_tool",
+    ]
+
+
 async def test_bridge_preserves_custom_same_name_mcp_server() -> None:
     original_launcher_configs = runner_codex.extension_store.native_mcp_server_configs
     original_mcp_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
@@ -1172,6 +1219,7 @@ if __name__ == "__main__":
     asyncio.run(test_bridges_selected_extension_mcp_tools_as_dynamic_tools())
     asyncio.run(test_bridge_uses_selected_extension_when_provider_config_has_only_skills())
     asyncio.run(test_bridge_preserves_configured_extension_during_resolution_race())
+    asyncio.run(test_bridge_probes_extension_servers_concurrently())
     asyncio.run(test_bridge_preserves_custom_same_name_mcp_server())
     asyncio.run(test_bridge_prunes_extension_owned_mcp_server_after_registration())
     asyncio.run(test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridges())

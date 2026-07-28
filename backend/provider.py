@@ -569,7 +569,6 @@ class Provider(ABC):
 
     def __init__(self, record: dict):
         self.id: str = record["id"]
-        self._record_lock = threading.RLock()
         # Atomic-replace pattern: every read snapshots `self._record`
         # into a local var before touching it; writes assign a NEW dict
         # so partial-state reads can't observe a half-replaced record.
@@ -609,15 +608,13 @@ class Provider(ABC):
         same dict reference until `record.setter` is called; mutations
         to the returned dict are NOT safe — callers should treat the
         snapshot as read-only."""
-        with self._record_lock:
-            return self._record
+        return self._record
 
     @record.setter
     def record(self, value: dict) -> None:
-        with self._record_lock:
-            self._record = dict(value)
-            self.suspended = config_store.provider_suspended(self.id)
-            self._apply_capability_overrides()
+        self._record = dict(value)
+        self.suspended = config_store.provider_suspended(self.id)
+        self._apply_capability_overrides()
 
     def assert_not_suspended(self, *, action: str = "start runs") -> None:
         if config_store.provider_suspended(self.id):
@@ -702,14 +699,14 @@ class Provider(ABC):
         if type(execution) is not PreparedExecution:
             raise TypeError("start_run requires a prepared execution")
         try:
-            with self._record_lock:
-                return self._start_authorized_execution(
-                    execution=execution,
-                    loop=loop,
-                    queue=queue,
-                )
+            return self._start_authorized_execution(
+                execution=execution,
+                loop=loop,
+                queue=queue,
+            )
         except BaseException as exc:
             execution._mark_admission_failed(exc)
+            execution._mark_spawn_failed(exc)
             raise
 
     def _start_authorized_execution(
@@ -736,13 +733,17 @@ class Provider(ABC):
             if not admitted:
                 return False
             self._admit_execution(execution)
+            if not execution._try_commit_spawn():
+                return False
             self._persist_and_start_execution(
                 execution,
                 arguments=arguments,
                 loop=loop,
                 queue=queue,
             )
-            execution._mark_admitted()
+            execution._mark_spawn_completed()
+            if execution.cancel_after_admission_requested:
+                self.cancel_turn(arguments["run_id"])
             return True
 
     def _persist_and_start_execution(

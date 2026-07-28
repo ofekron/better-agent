@@ -15,6 +15,7 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 - `backend/capability_api.py`: capability/action registry for extension-to-core calls; extensions use the SDK's pathless `invoke_capability` substrate and manifest grants rather than raw internal routes.
 - `backend/extension_jobs.py`: core-owned durable async workflow registry for extension jobs; owns persisted job lifecycle, restart resume, completion polling, and delegation-result recovery while extensions own domain parsing/policy.
 - `backend/todo_projection.py`: provider-neutral event-to-todo/task projection owned by core session replay and reused by the Todos extension.
+- `backend/lifecycle_state_machines.py`: event-loop-owned session hierarchy that projects user-prompt, turn, and provider-admission facts from the backend event bus; blocking provider adapters report facts and never mutate this lifecycle tree.
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.
 - `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.

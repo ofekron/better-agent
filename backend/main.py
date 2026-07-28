@@ -13999,6 +13999,7 @@ async def on_startup():
             priority=80,
             name="requirement_tags_ws",
         )
+        coordinator.turn_manager.lifecycle.bind()
     except Exception:
         logger.exception("event_bus subscriber registration failed")
 
@@ -14492,6 +14493,10 @@ async def on_shutdown():
             logger.exception("node_store: offset flush loop stop failed")
     from event_bus_subscribers import unbind_session_ws_broadcaster
     unbind_session_ws_broadcaster()
+    try:
+        coordinator.turn_manager.lifecycle.close()
+    except Exception:
+        logger.exception("lifecycle state tree shutdown failed")
     ui_selection_projection.unbind()
     await coordinator.drain_global_broadcasts()
     shutdown_ws_json_executor()

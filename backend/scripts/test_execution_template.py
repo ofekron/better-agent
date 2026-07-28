@@ -297,7 +297,7 @@ def test_provider_start_run_is_shared_final_template() -> None:
     assert offenders == []
 
 
-def test_provider_boundary_persists_before_spawn_and_rejects_stale_authority() -> None:
+def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace() -> None:
     class _Provider(Provider):
         KIND = "codex"
 
@@ -329,8 +329,8 @@ def test_provider_boundary_persists_before_spawn_and_rejects_stale_authority() -
                 ),
             )
             replacement.start()
-            assert not replacement_done.wait(0.05)
-            assert self.record["revision"] == 4
+            assert replacement_done.wait(0.2)
+            assert self.record["revision"] == 5
             self.events.append("spawn")
             self.replacement = replacement
 
@@ -400,11 +400,183 @@ def test_provider_boundary_persists_before_spawn_and_rejects_stale_authority() -
         stale_loop.close()
     assert provider.events == []
 
+def test_provider_starts_are_concurrent() -> None:
+    class _Provider(Provider):
+        KIND = "codex"
+
+        def __init__(self) -> None:
+            super().__init__(_record())
+            self._runs = {}
+            self.spawn_gate = threading.Event()
+            self.spawn_started = threading.Event()
+            self.spawned: list[str] = []
+
+        def assert_not_suspended(self, *, action: str = "start runs") -> None:
+            del action
+
+        def require_runtime_credential(self) -> None:
+            return None
+
+        def build_env(self) -> dict[str, str]:
+            return {}
+
+        def _start_run(self, **kwargs) -> None:
+            self.spawned.append(kwargs["run_id"])
+            self.spawn_started.set()
+            self.spawn_gate.wait(timeout=1)
+
+        def _write_backend_state(self, rs) -> None:
+            del rs
+
+        def recover_in_flight(self, loop=None, run_id_filter=None) -> list[dict]:
+            del loop, run_id_filter
+            return []
+
+        def prune_old_runs(self, max_age_days: int = 7) -> int:
+            del max_age_days
+            return 0
+
+        async def run_headless(self, *args, **kwargs) -> str:
+            del args, kwargs
+            return ""
+
+        async def rewind(self, rewind_session_id: str, message_uuid: str) -> None:
+            del rewind_session_id, message_uuid
+
+    provider = _Provider()
+    loops = [asyncio.new_event_loop() for _ in range(2)]
+    arguments = [
+        {**_arguments(), "run_id": f"run-{index}", "turn_run_id": f"turn-{index}"}
+        for index in range(2)
+    ]
+    executions = [provider.prepare_run(**item) for item in arguments]
+    with tempfile.TemporaryDirectory() as raw:
+        original_runs_root = runs_dir.runs_root
+        runs_dir.runs_root = lambda: Path(raw)
+        threads = [
+            threading.Thread(
+                target=provider.start_run,
+                kwargs={
+                    "execution": execution,
+                    "loop": loop,
+                    "queue": asyncio.Queue(),
+                },
+            )
+            for execution, loop in zip(executions, loops)
+        ]
+        try:
+            threads[0].start()
+            threads[1].start()
+            deadline = threading.Event()
+            assert deadline.wait(0.2) is False
+            assert sorted(provider.spawned) == ["run-0", "run-1"]
+
+            provider.spawn_gate.set()
+            for thread in threads:
+                thread.join(timeout=1)
+                assert not thread.is_alive()
+        finally:
+            provider.spawn_gate.set()
+            for loop in loops:
+                loop.close()
+            runs_dir.runs_root = original_runs_root
+
+    assert sorted(provider.spawned) == ["run-0", "run-1"]
+
+
+def test_spawn_commit_linearizes_cancellation() -> None:
+    class _Provider(Provider):
+        KIND = "codex"
+
+        def __init__(self) -> None:
+            super().__init__(_record())
+            self._runs = {}
+            self.spawn_started = threading.Event()
+            self.spawn_gate = threading.Event()
+            self.spawned: list[str] = []
+
+        def assert_not_suspended(self, *, action: str = "start runs") -> None:
+            del action
+
+        def require_runtime_credential(self) -> None:
+            return None
+
+        def build_env(self) -> dict[str, str]:
+            return {}
+
+        def _start_run(self, **kwargs) -> None:
+            self.spawned.append(kwargs["run_id"])
+            self.spawn_started.set()
+            self.spawn_gate.wait(timeout=1)
+
+        def _write_backend_state(self, rs) -> None:
+            del rs
+
+        def recover_in_flight(self, loop=None, run_id_filter=None) -> list[dict]:
+            del loop, run_id_filter
+            return []
+
+        def prune_old_runs(self, max_age_days: int = 7) -> int:
+            del max_age_days
+            return 0
+
+        async def run_headless(self, *args, **kwargs) -> str:
+            del args, kwargs
+            return ""
+
+        async def rewind(self, rewind_session_id: str, message_uuid: str) -> None:
+            del rewind_session_id, message_uuid
+
+    provider = _Provider()
+    loop = asyncio.new_event_loop()
+    with tempfile.TemporaryDirectory() as raw:
+        original_runs_root = runs_dir.runs_root
+        runs_dir.runs_root = lambda: Path(raw)
+        try:
+            before = provider.prepare_run(
+                **{**_arguments(), "run_id": "cancel-before"},
+            )
+            before._mark_cancelled()
+            assert provider.start_run(
+                execution=before,
+                loop=loop,
+                queue=asyncio.Queue(),
+            ) is False
+            assert "cancel-before" not in provider.spawned
+            assert not (Path(raw) / "cancel-before").exists()
+
+            after = provider.prepare_run(
+                **{**_arguments(), "run_id": "cancel-after"},
+            )
+            thread = threading.Thread(
+                target=provider.start_run,
+                kwargs={
+                    "execution": after,
+                    "loop": loop,
+                    "queue": asyncio.Queue(),
+                },
+            )
+            thread.start()
+            assert provider.spawn_started.wait(timeout=1)
+            after._request_cancel_after_admission()
+            provider.spawn_gate.set()
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+            assert (Path(raw) / "cancel-after" / "cancel").exists()
+        finally:
+            provider.spawn_gate.set()
+            loop.close()
+            runs_dir.runs_root = original_runs_root
+
 
 def test_production_callers_use_prepared_execution_boundary() -> None:
     direct_callers = []
     for path in ROOT.rglob("*.py"):
-        if "scripts" in path.parts or path.name == "provider.py":
+        if (
+            "scripts" in path.parts
+            or path.name == "provider.py"
+            or any(part.startswith(".") for part in path.relative_to(ROOT).parts)
+        ):
             continue
         source = path.read_text(encoding="utf-8")
         if ".start_run," in source or ".start_run(" in source:
@@ -418,7 +590,9 @@ TESTS = (
     test_recovery_input_is_diagnostic_only_and_must_match_artifact,
     test_retry_preserves_authority_and_original_frozen_inputs,
     test_provider_start_run_is_shared_final_template,
-    test_provider_boundary_persists_before_spawn_and_rejects_stale_authority,
+    test_provider_boundary_uses_frozen_execution_without_blocking_config_replace,
+    test_provider_starts_are_concurrent,
+    test_spawn_commit_linearizes_cancellation,
     test_production_callers_use_prepared_execution_boundary,
 )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
@@ -440,6 +441,16 @@ class PreparedExecution:
         compare=False,
         repr=False,
     )
+    _cancel_after_admission: threading.Event = field(
+        default_factory=threading.Event,
+        compare=False,
+        repr=False,
+    )
+    _spawn_completion: Future[bool] = field(
+        default_factory=Future,
+        compare=False,
+        repr=False,
+    )
 
     def start_arguments(self) -> dict[str, Any]:
         return {
@@ -472,8 +483,29 @@ class PreparedExecution:
     def admission_pending(self) -> bool:
         return not self._admission.done()
 
-    def _mark_admitted(self) -> None:
+    @property
+    def admission_cancelled(self) -> bool:
+        return self._admission.done() and self._admission.exception() is None and not self._admission.result()
+
+    def _try_commit_spawn(self) -> bool:
         self._resolve_admission(result=True)
+        return self._admission.exception() is None and self._admission.result()
+
+    def _request_cancel_after_admission(self) -> None:
+        self._cancel_after_admission.set()
+
+    @property
+    def cancel_after_admission_requested(self) -> bool:
+        return self._cancel_after_admission.is_set()
+
+    def _mark_spawn_completed(self) -> None:
+        self._resolve_future(self._spawn_completion, result=True)
+
+    def _mark_spawn_failed(self, error: BaseException) -> None:
+        self._resolve_future(self._spawn_completion, error=error)
+
+    def wait_for_spawn_completion(self) -> bool:
+        return self._spawn_completion.result()
 
     def _mark_cancelled(self) -> None:
         self._resolve_admission(result=False)
@@ -487,11 +519,20 @@ class PreparedExecution:
         result: bool | None = None,
         error: BaseException | None = None,
     ) -> None:
+        self._resolve_future(self._admission, result=result, error=error)
+
+    @staticmethod
+    def _resolve_future(
+        future: Future[bool],
+        *,
+        result: bool | None = None,
+        error: BaseException | None = None,
+    ) -> None:
         try:
             if error is None:
-                self._admission.set_result(bool(result))
+                future.set_result(bool(result))
             else:
-                self._admission.set_exception(error)
+                future.set_exception(error)
         except InvalidStateError:
             pass
 

@@ -191,12 +191,20 @@ def _resolve_binary(kind: str) -> Optional[str]:
     return resolve_cli_binary(_BINARY_NAME[kind])
 
 
-async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess.Process]:
+def _prepare_spawn(provider: dict, suffix_key: str) -> Optional[tuple[list[str], dict]]:
     kind = provider.get("kind") or "claude"
     binary = _resolve_binary(kind)
     if not binary:
         return None
     cmd = [binary, *_AUTH_COMMANDS[kind][suffix_key]]
+    return cmd, _build_env(provider)
+
+
+async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess.Process]:
+    prepared = await asyncio.to_thread(_prepare_spawn, provider, suffix_key)
+    if prepared is None:
+        return None
+    cmd, env = prepared
     # Detach as its own process-group root (SSOT) so a later force_kill
     # reaches the CLI and every helper it spawned (browser launchers, etc.)
     # as a unit — the same tree-kill model runners use.
@@ -205,7 +213,7 @@ async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=_build_env(provider),
+        env=env,
         **process_control().detach_spawn_kwargs(),
     )
 

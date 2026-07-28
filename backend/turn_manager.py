@@ -71,7 +71,8 @@ from runtime_skills import runtime_skill_projection
 from i18n import t
 import llm_call_log
 import perf
-from provider import ProviderCredentialError, StreamEvent, prepare_and_start_run
+from provider import ProviderCredentialError, StreamEvent, start_prepared_run
+from lifecycle_state_machines import LifecycleStateTree
 from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
@@ -291,6 +292,7 @@ class TurnManager:
         # `_draft_store_or_none()` which would RuntimeError on the
         # missing attr — see the ordering note in Coordinator.__init__.
         self._c = coordinator
+        self.lifecycle = LifecycleStateTree(bus)
 
         # ------------------------------------------------------------------
         # Turn-scoped state — moved from Coordinator.
@@ -1417,6 +1419,13 @@ class TurnManager:
         so a pure no-op cancel can't suppress the next turn's
         supervisor verdict.
         """
+        root_id = session_manager._root_id_for(app_session_id) or app_session_id
+        await self.lifecycle.publish(
+            "lifecycle.admission_cancel_requested",
+            root_id=root_id,
+            session_id=app_session_id,
+            payload={},
+        )
         event = self.cancel_events.get(app_session_id)
         if not event:
             landed = False
@@ -2412,6 +2421,7 @@ class TurnManager:
                 capability_identities,
             ),
             bare_config=harness_bare,
+            request_refresh=False,
         )
         run_capability_contexts = [
             *runtime_capability_contexts,
@@ -2607,6 +2617,7 @@ class TurnManager:
                     capability_identities,
                 ),
                 bare_config=harness_bare_refresh,
+                request_refresh=False,
             )
             run_capability_contexts = [
                 *runtime_capability_contexts,
@@ -2775,16 +2786,13 @@ class TurnManager:
                 with perf.timed("provider.start_run.flush_root_persist"):
                     await _to_turn_dispatch_thread(session_manager.flush_root_persist, root_id)
                 with perf.timed("provider.start_run.provider_call"):
-                    await _to_turn_dispatch_thread(
-                        prepare_and_start_run,
-                        provider,
+                    execution = await _to_turn_dispatch_thread(
+                        provider.prepare_run,
                         run_id=run_id,
                         prompt=prompt,
                         images=images,
                         files=files,
                         cwd=cwd,
-                        loop=loop,
-                        queue=queue,
                         model=model,
                         reasoning_effort=reasoning_effort,
                         session_id=current_session_id,
@@ -2810,6 +2818,101 @@ class TurnManager:
                         target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
+                    execution_handle = self.lifecycle.register_execution_handle(execution)
+                    await self.lifecycle.publish(
+                        "lifecycle.admission_registered",
+                        root_id=root_id,
+                        session_id=app_session_id,
+                        run_id=run_id,
+                        payload={
+                            "turn_run_id": turn_run_id,
+                            "execution_handle": execution_handle,
+                        },
+                    )
+                    self.active_run_ids.setdefault(app_session_id, []).append(run_id)
+                    if cancel_event.is_set():
+                        await self.lifecycle.publish(
+                            "lifecycle.admission_cancel_requested",
+                            root_id=root_id,
+                            session_id=app_session_id,
+                            payload={},
+                        )
+                    await self.lifecycle.publish(
+                        "lifecycle.admission_starting",
+                        root_id=root_id,
+                        session_id=app_session_id,
+                        run_id=run_id,
+                        payload={},
+                    )
+                    try:
+                        admitted = await _to_turn_dispatch_thread(
+                            start_prepared_run,
+                            provider,
+                            execution,
+                            loop=loop,
+                            queue=queue,
+                        )
+                        if not admitted and execution.admission_pending:
+                            await self.lifecycle.publish(
+                                "lifecycle.admission_deferred",
+                                root_id=root_id,
+                                session_id=app_session_id,
+                                run_id=run_id,
+                                payload={},
+                            )
+                            admitted = await _to_turn_dispatch_thread(
+                                execution.wait_for_admission,
+                            )
+                            if admitted:
+                                await self.lifecycle.publish(
+                                    "lifecycle.admission_admitted",
+                                    root_id=root_id,
+                                    session_id=app_session_id,
+                                    run_id=run_id,
+                                    payload={},
+                                )
+                                admitted = await _to_turn_dispatch_thread(
+                                    execution.wait_for_spawn_completion,
+                                )
+                        elif admitted:
+                            await self.lifecycle.publish(
+                                "lifecycle.admission_admitted",
+                                root_id=root_id,
+                                session_id=app_session_id,
+                                run_id=run_id,
+                                payload={},
+                            )
+                    except BaseException:
+                        await self.lifecycle.publish(
+                            "lifecycle.admission_failed",
+                            root_id=root_id,
+                            session_id=app_session_id,
+                            run_id=run_id,
+                            payload={},
+                        )
+                        raise
+                    await self.lifecycle.publish(
+                        (
+                            "lifecycle.admission_spawned"
+                            if admitted
+                            else "lifecycle.admission_cancelled"
+                        ),
+                        root_id=root_id,
+                        session_id=app_session_id,
+                        run_id=run_id,
+                        payload={},
+                    )
+                    if not admitted:
+                        attempt_events.append({
+                            "type": "complete",
+                            "data": {
+                                "success": False,
+                                "error": "cancelled",
+                                "session_id": current_session_id,
+                                "token_usage": None,
+                            },
+                        })
+                        continue
                 silence_threshold_seconds = await _to_turn_dispatch_thread(
                     self._load_task_start_silence_seconds,
                 )
@@ -2846,8 +2949,6 @@ class TurnManager:
                         )
                     except Exception:
                         logger.debug("lifecycle: emit_sent failed", exc_info=True)
-
-                self.active_run_ids.setdefault(app_session_id, []).append(run_id)
 
                 provider_rs = provider._runs.get(run_id)
                 if provider_rs and provider_rs.popen.pid:

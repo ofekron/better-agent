@@ -190,6 +190,43 @@ def test_login_spawns_fixed_argv_for_claude_and_codex():
         _restore()
 
 
+def test_spawn_preparation_does_not_block_event_loop():
+    original_prepare = provider_auth._prepare_spawn
+    original_create = asyncio.create_subprocess_exec
+
+    def slow_prepare(provider, suffix_key):
+        del provider, suffix_key
+        time.sleep(0.2)
+        return ["/usr/local/bin/cli", "status"], {}
+
+    async def fake_create(*args, **kwargs):
+        del args, kwargs
+        return _FakeProc()
+
+    async def scenario():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while ticks < 5:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        await asyncio.gather(
+            provider_auth._spawn({"kind": "claude"}, "status"),
+            heartbeat(),
+        )
+        assert ticks == 5
+
+    try:
+        provider_auth._prepare_spawn = slow_prepare
+        asyncio.create_subprocess_exec = fake_create
+        asyncio.run(scenario())
+    finally:
+        provider_auth._prepare_spawn = original_prepare
+        asyncio.create_subprocess_exec = original_create
+
+
 def test_monitor_marks_success_only_when_status_confirms():
     try:
         claude = _add_provider("claude", str(HOME / ".claude-success"))

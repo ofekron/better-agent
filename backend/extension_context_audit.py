@@ -164,14 +164,16 @@ def runtime_context(
     projection: dict[str, Any],
     *,
     bare_config: bool = False,
+    request_refresh: bool = True,
 ) -> list[dict[str, str]]:
-    if bare_config or not _is_runtime_ready():
+    if bare_config:
         return []
     normalized = _validate_projection(projection)
     fingerprint = _fingerprint(normalized)
     cached = _read_cache_cached(fingerprint, normalized)
     if not cached:
-        _trigger_refresh(fingerprint, normalized)
+        if request_refresh:
+            _trigger_refresh(fingerprint, normalized)
         return []
     content = _render_context(cached["result"], normalized)
     if not content:
@@ -343,10 +345,6 @@ def _fingerprint(projection: dict[str, Any]) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-
-
-def _is_runtime_ready() -> bool:
-    return provisioning.spec_is_runnable(AUDIT_SPEC)
 
 
 def _cache_dir() -> Path:

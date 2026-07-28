@@ -2023,6 +2023,41 @@ def test_ensure_started_spawns_external_worker_process() -> bool:
     return ok
 
 
+def test_shutdown_force_kills_unresponsive_worker_within_budget() -> bool:
+    _setup_roots()
+    calls = []
+
+    class UnresponsivePopen:
+        pid = 424242
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            calls.append("terminate")
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            if timeout == idx._WORKER_SHUTDOWN_GRACE_SECONDS:
+                raise idx.subprocess.TimeoutExpired("worker", timeout)
+            return -9
+
+        def kill(self):
+            calls.append("kill")
+
+    idx._worker_process = UnresponsivePopen()
+    idx._worker_started = True
+    idx.shutdown()
+    ok = calls == [
+        "terminate",
+        ("wait", idx._WORKER_SHUTDOWN_GRACE_SECONDS),
+        "kill",
+        ("wait", 2.0),
+    ]
+    print(f"{OK if ok else FAIL} shutdown force-kills unresponsive worker ({calls})")
+    return ok
+
+
 def test_worker_short_throttles_partial_covered_refresh() -> bool:
     _setup_roots()
     calls = {"refresh": 0, "wait": [], "covered": 0}
@@ -2054,7 +2089,11 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
         idx._stop.wait = original_wait
         idx._stop.clear()
 
-    ok = calls == {"refresh": 1, "wait": [0.2], "covered": 1}
+    ok = calls == {
+        "refresh": 1,
+        "wait": [idx._WORKER_PARTIAL_BUILD_PAUSE_SECONDS],
+        "covered": 1,
+    }
     print(f"{OK if ok else FAIL} worker short-throttles partial covered refresh "
           f"(calls={calls})")
     return ok
@@ -2547,6 +2586,7 @@ def main_run() -> int:
         test_request_refresh_persists_cross_process_marker,
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
+        test_shutdown_force_kills_unresponsive_worker_within_budget,
         test_worker_short_throttles_partial_covered_refresh,
         test_append_refresh_is_proportional_and_preserves_rows,
         test_append_refresh_holds_partial_line_until_complete,
