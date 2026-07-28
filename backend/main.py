@@ -11658,19 +11658,46 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
         )
 
     prompt = msgs[user_idx].get("content") or ""
-    landed = coordinator.turn_manager.request_immediate_continuation(
-        session_id,
-        prompt,
-        reason="rate_limit_provider_switch",
-    )
-    if not landed:
-        session_manager.set_continuation_requested(
+    def start_continuation() -> dict:
+        landed = coordinator.turn_manager.request_immediate_continuation(
             session_id,
             prompt,
             reason="rate_limit_provider_switch",
-            when="next_turn",
         )
-    return {"ok": True, "session_id": session_id, "updates": updates, "when": "now" if landed else "next_turn"}
+        if not landed:
+            session_manager.set_continuation_requested(
+                session_id,
+                prompt,
+                reason="rate_limit_provider_switch",
+                when="next_turn",
+            )
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "updates": updates,
+            "when": "now" if landed else "next_turn",
+        }
+
+    if not body.get("wait_for_completion"):
+        return start_continuation()
+
+    from rate_limit_recovery import continue_and_wait
+
+    timeout_seconds = float(body.get("timeout_seconds") or 1200)
+    if timeout_seconds <= 0 or timeout_seconds > 3600:
+        raise HTTPException(status_code=400, detail="invalid recovery timeout")
+    try:
+        return await continue_and_wait(
+            session_id,
+            str(asst_id),
+            start_continuation,
+            timeout_seconds=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="provider recovery did not complete before the deadline",
+        ) from exc
 
 
 def _latest_user_message_index(messages: list[dict]) -> Optional[int]:
