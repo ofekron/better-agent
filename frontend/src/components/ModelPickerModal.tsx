@@ -7,6 +7,7 @@ import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
 import { providerDisplayName } from "../utils/providerDisplayName";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
+import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
 import { HarnessProfileSelector } from "./HarnessProfileSelector";
 import {
   changedUpdates,
@@ -63,6 +64,7 @@ export function ModelPickerModal({
   const [error, setError] = useState<string | null>(null);
 
   const modelProviderId = draft.provider_id || selectedProviderId;
+  const modelCatalogRevision = useProviderCatalogRevision(modelProviderId);
   const cachedModels = modelProviderId ? readProviderCache()?.modelsByProvider[modelProviderId] ?? [] : [];
   const models = modelsResult?.providerId === modelProviderId ? modelsResult.models : cachedModels;
   const modelLoadError = modelsResult?.providerId === modelProviderId ? modelsResult.error ?? null : null;
@@ -96,7 +98,7 @@ export function ModelPickerModal({
     return () => {
       cancelled = true;
     };
-  }, [modelProviderId]);
+  }, [modelProviderId, modelCatalogRevision]);
 
   const changeDraftProvider = (providerId: string) => {
     const nextProvider = providers.find((p) => p.id === providerId && !p.suspended);

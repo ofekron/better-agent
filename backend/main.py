@@ -2718,6 +2718,13 @@ async def _broadcast_models_catalog_changed(provider_id: str, diff: dict) -> Non
     )
 
 
+_model_catalog_unsubscribe: Callable[[], None] | None = None
+
+
+async def _broadcast_model_catalog_fact(fact) -> None:
+    await _broadcast_models_catalog_changed(fact.provider_id, {})
+
+
 @app.get("/api/startup_tasks")
 async def get_startup_tasks():
     """Snapshot of in-flight + recent-history backend startup tasks.
@@ -3061,10 +3068,7 @@ async def internal_native_import_status(
 
 @app.get("/api/models")
 async def get_models():
-    """Disk-only read. NEVER makes a provider HTTP call. Catalog
-    population is owned by `_models_catalog_refresher` — see
-    `backend/models.py` for the cache schema. Frontend reads
-    `last_fetch_state` to render warming/failing UI."""
+    """Projection/cache-only read. NEVER makes a provider I/O call."""
     import models as models_mod
     return models_mod.models_catalog()
 
@@ -3089,15 +3093,12 @@ def _provider_models_catalog(provider_id: str) -> dict:
 
 @app.post("/api/models/refresh")
 async def refresh_active_models_endpoint():
-    """Manual refresh for the active provider. Bounded ~10s by
-    `_fetch_api_models` timeout; two back-to-back clicks serialize
-    behind the per-provider lock — also bounded ~10s. Not worth a
-    202 + WS-when-done complication for that window."""
+    """Refresh the active provider through its authoritative catalog owner."""
     import models as models_mod
     active = await asyncio.to_thread(config_store.get_default_provider)
     if active is None:
         raise HTTPException(status_code=400, detail=t("error.no_default_provider"))
-    diff = await models_mod.refresh_one(active["id"])
+    diff = await _refresh_provider_models(active)
     if diff:
         await _broadcast_models_catalog_changed(active["id"], diff)
     return _provider_models_catalog(active["id"])
@@ -3105,24 +3106,33 @@ async def refresh_active_models_endpoint():
 
 @app.post("/api/providers/{provider_id}/models/refresh")
 async def refresh_provider_models_endpoint(provider_id: str):
-    """Per-provider manual refresh — parity with `GET /api/providers/{id}/models`.
-    Same lock, same bounded await as the active endpoint."""
+    """Refresh one provider through its authoritative catalog owner."""
     import models as models_mod
     record = await asyncio.to_thread(config_store.get_provider, provider_id)
     if record is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
-    diff = await models_mod.refresh_one(provider_id)
+    diff = await _refresh_provider_models(record)
     if diff:
         await _broadcast_models_catalog_changed(provider_id, diff)
     return _provider_models_catalog(provider_id)
+
+
+async def _refresh_provider_models(record: dict) -> dict | None:
+    if record.get("kind") in {"codex", "fugu"}:
+        import model_catalog_refresh
+
+        await model_catalog_refresh.request_refresh(str(record["id"]))
+        return None
+    import models as models_mod
+
+    return await models_mod.refresh_one(str(record["id"]))
 
 
 @app.get("/api/providers/{provider_id}/models")
 async def get_provider_models(provider_id: str):
     """Models for a specific provider — used by the ProviderForm dropdown
     so the user can pick a default_model without activating the provider
-    first. Disk-only read (no provider HTTP call); the daily refresher
-    owns network I/O."""
+    first. Projection/cache-only read; it performs no provider I/O."""
     import models as models_mod
     record = await asyncio.to_thread(config_store.get_provider, provider_id)
     if record is None:
@@ -13867,6 +13877,13 @@ async def on_startup():
         schedule_ticker.start()
         import model_catalog_refresh
 
+        global _model_catalog_unsubscribe
+        if _model_catalog_unsubscribe is None:
+            _model_catalog_unsubscribe = (
+                model_catalog_refresh.subscribe_fact_sink(
+                    _broadcast_model_catalog_fact,
+                )
+            )
         await model_catalog_refresh.start()
 
     _start_tailscale_serve_reconciler()
@@ -14351,11 +14368,14 @@ async def on_shutdown():
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
     global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
-    global _PROMPT_HANDOFFS_OPEN
+    global _PROMPT_HANDOFFS_OPEN, _model_catalog_unsubscribe
     _PROMPT_HANDOFFS_OPEN = False
     import model_catalog_refresh
 
     await model_catalog_refresh.shutdown()
+    if _model_catalog_unsubscribe is not None:
+        _model_catalog_unsubscribe()
+        _model_catalog_unsubscribe = None
     startup_task = _STARTUP_ORCHESTRATOR_TASK
     _STARTUP_ORCHESTRATOR_TASK = None
     if startup_task is not None and not startup_task.done():

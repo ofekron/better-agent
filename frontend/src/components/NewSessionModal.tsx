@@ -18,6 +18,7 @@ import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { usePersistedDraft } from "../hooks/usePersistedDraft";
+import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
 import { ConfirmModal } from "./ConfirmModal";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
@@ -362,8 +363,8 @@ function RuntimeProfilePicker({
   const quotaStatus = useQuotaStatus(API, providers);
   const [models, setModels] = useState<string[]>([]);
   const [runtimeProfiles, setRuntimeProfiles] = useState<ModelRuntimeProfile[]>([]);
-  const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
+  const modelCatalogRevision = useProviderCatalogRevision(value.providerId);
   const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
 
   useEffect(() => {
@@ -372,8 +373,6 @@ function RuntimeProfilePicker({
       setRuntimeProfiles([]);
       return;
     }
-    if (value.providerId === prevProviderId) return;
-    setPrevProviderId(value.providerId);
     const cachedModels = readProviderCache()?.modelsByProvider[value.providerId] ?? [];
     setModels(cachedModels);
     setRuntimeProfiles([]);
@@ -392,7 +391,7 @@ function RuntimeProfilePicker({
         }
       })
       .catch(() => {});
-  }, [value.providerId]);
+  }, [value.providerId, modelCatalogRevision]);
 
   return (
     <div className="ns-modal-section">

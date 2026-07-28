@@ -1,9 +1,8 @@
 """Dynamic model discovery, scoped to the active provider.
 
-`/api/models` MUST never block on a provider HTTP call. This module is
-the disk-backed catalog that serves the model dropdown instantly. The
-catalog is refreshed in the background by the daily refresher task
-(`_models_catalog_refresher` in `main.py`) — never inline on a request.
+`/api/models` MUST never block on provider I/O. Codex and Fugu reads use
+the in-memory projection owned by `model_catalog_refresh`; other providers
+use the schema-2 disk cache refreshed by `_models_catalog_refresher`.
 
 Refresh paths per provider kind/mode:
   - Claude api_key      → HTTP /v1/models with x-api-key
@@ -12,7 +11,7 @@ Refresh paths per provider kind/mode:
                           `Claude Code-credentials`)
   - AGY                 → `agy models`
 
-Cache file (`ba_home()/models_cache.{provider_id}.json`):
+Legacy-provider cache file (`ba_home()/models_cache.{provider_id}.json`):
     {
       "schema": 2,
       "models": ["claude-...","..."],          # fetched list (order preserved)
@@ -391,12 +390,6 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
         if not base_url or not api_key:
             return None
         return lambda: fetch_openai_models(base_url, api_key)
-    if kind == "codex":
-        from provider_codex import fetch_codex_models
-        return fetch_codex_models
-    if kind == "fugu":
-        from provider_fugu import fetch_fugu_models
-        return fetch_fugu_models
     if kind == "agy":
         from provider_agy import fetch_agy_models
         return fetch_agy_models
@@ -441,15 +434,9 @@ def _dedupe_preserve_order(seq: list[str]) -> list[str]:
 
 def _static_cold_start(provider: dict) -> list[str]:
     """Cold-start data when no cache exists. Subscription Claude →
-    `_SUBSCRIPTION_ALIASES`. Codex → curated `CODEX_MODELS`. Other
-    cases → []. Explicit kind+mode pairing — no implicit fallthrough."""
+    `_SUBSCRIPTION_ALIASES`; configured legacy providers → their bundled
+    seeds. Codex and Fugu are projected exclusively from D3."""
     kind = _runtime_kind_for_provider(provider)
-    if kind == "codex":
-        from provider_codex import CODEX_MODELS
-        return list(CODEX_MODELS)
-    if kind == "fugu":
-        from provider_fugu import FUGU_MODELS
-        return list(FUGU_MODELS)
     if kind == "agy":
         from provider_agy import AGY_MODELS
         return list(AGY_MODELS)
@@ -484,11 +471,44 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
     Returns `(active_models, retired_ids, has_cache, cache_record)`.
 
     Semantics:
+    - Codex/Fugu → D3 read projection only. Missing projection is warming;
+      stale projection remains available with `models_current=False`.
     - Cache present → use cache. For subscription Claude, also union
       with `_SUBSCRIPTION_ALIASES` so `[1m]` variants survive.
     - Cache absent → fall back to static cold-start data (subscription
       aliases or a curated per-kind list). api_key Claude returns [].
     """
+    if provider.get("kind") in {"codex", "fugu"}:
+        import model_catalog_read_projection
+
+        projection = model_catalog_read_projection.snapshot(
+            str(provider["id"]),
+            str(provider.get("generation") or ""),
+        )
+        if projection is None:
+            return [], [], False, {
+                "last_fetch_state": "warming",
+                "last_refreshed_at": 0.0,
+                "catalog_status": "pending",
+                "models_current": False,
+                "catalog_reason": "catalog_pending",
+                "authority_fingerprint": "",
+            }
+        fetch_state = "ok" if projection.models_current else "failing"
+        return (
+            list(projection.models),
+            [record.id for record in projection.retired],
+            True,
+            {
+                "last_fetch_state": fetch_state,
+                "last_refreshed_at": projection.last_refreshed_at,
+                "catalog_status": projection.status,
+                "models_current": projection.models_current,
+                "catalog_reason": projection.reason,
+                "authority_fingerprint": projection.authority_fingerprint,
+            },
+        )
+
     cached = _read_cache(provider["id"])
     has_cache = cached is not None
     cached_models = list(cached.get("models") or []) if cached else []
@@ -528,15 +548,17 @@ def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     if default_model:
         known = set(models + custom + retired_ids)
         kind = _runtime_kind_for_provider(provider)
-        if kind != "codex" or not _cached or default_model in known:
+        if kind not in {"codex", "fugu"} or (
+            _cached and default_model in known
+        ):
             seed = [default_model]
     return _dedupe_preserve_order(models + custom + seed)
 
 
 def available_models(provider_id: Optional[str] = None) -> list[str]:
-    """Active models only. Providers with static cold-start data return
-    that list on cold start, or the refreshed cache after first
-    refresh. Does NOT include retired models.
+    """Active models only. Legacy providers with static cold-start data
+    return that list before their first refresh. Codex/Fugu return only
+    D3-projected models. Does NOT include retired models.
 
     Returns [] for no-active-provider / unknown-provider-id — NEVER
     fabricates aliases for a context that has no real provider behind
@@ -579,9 +601,10 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
     Cache-only.
 
     State resolution:
+    - Codex/Fugu → D3 projection status and currentness.
     - Cache present → `last_fetch_state` from disk.
-    - Cache absent + provider has static cold-start data (subscription
-      Claude, codex) → state="ok" (cold-start data IS canonical).
+    - Cache absent + a legacy provider has static cold-start data →
+      state="ok" (that provider's cold-start data is canonical).
     - Cache absent + no cold-start data (api_key Claude pre-refresh) →
       state="warming". Frontend shows a loading banner.
     """
@@ -612,12 +635,20 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
         state = "warming"
         last_refreshed_at = 0.0
 
-    return {
+    payload = {
         "models": models + custom,
         "retired": retired,
         "last_fetch_state": state,
         "last_refreshed_at": last_refreshed_at,
     }
+    if cached is not None and "catalog_status" in cached:
+        payload.update({
+            "catalog_status": cached["catalog_status"],
+            "models_current": cached["models_current"],
+            "catalog_reason": cached["catalog_reason"],
+            "authority_fingerprint": cached["authority_fingerprint"],
+        })
+    return payload
 
 
 # ---------------------------------------------------------------------

@@ -31,6 +31,7 @@ def _normalized_path(path: Path) -> str:
 @dataclass(frozen=True)
 class SourceWatchSpec:
     exact_paths: tuple[str, ...]
+    identity_directories: tuple[str, ...]
     search_directories: tuple[str, ...]
     search_names: tuple[str, ...]
     roots: tuple[str, ...]
@@ -40,6 +41,7 @@ class SourceWatchSpec:
         cls,
         *,
         exact_paths: Iterable[Path] = (),
+        identity_directories: Iterable[Path] = (),
         search_directories: Iterable[Path] = (),
         search_names: Iterable[str] = (),
     ) -> SourceWatchSpec:
@@ -55,6 +57,15 @@ class SourceWatchSpec:
                 raise CatalogSourceWatcherError("watch path must be absolute")
             exact.add(_normalized_path(path))
             directories.add(_normalized_directory(path.parent))
+        identity: set[str] = set()
+        for directory in identity_directories:
+            if not isinstance(directory, Path) or not directory.is_absolute():
+                raise CatalogSourceWatcherError(
+                    "identity directory must be absolute",
+                )
+            normalized = _normalized_directory(directory)
+            identity.add(normalized)
+            directories.add(normalized)
         search: set[str] = set()
         for directory in search_directories:
             if not isinstance(directory, Path) or not directory.is_absolute():
@@ -75,6 +86,7 @@ class SourceWatchSpec:
             raise CatalogSourceWatcherError("invalid watch root set")
         return cls(
             exact_paths=tuple(sorted(exact)),
+            identity_directories=tuple(sorted(identity)),
             search_directories=tuple(sorted(search)),
             search_names=tuple(sorted(names)),
             roots=existing,
@@ -86,8 +98,10 @@ class SourceWatchSpec:
             (
                 *self.exact_paths,
                 "\1",
-                *self.search_directories,
+                *self.identity_directories,
                 "\2",
+                *self.search_directories,
+                "\3",
                 *self.search_names,
             ),
         )
@@ -99,6 +113,8 @@ class SourceWatchSpec:
             _normalized_directory(path) in self.roots
             or _normalized_path(path) in self.exact_paths
         ):
+            return True
+        if _normalized_directory(path.parent) in self.identity_directories:
             return True
         return (
             _normalized_directory(path.parent) in self.search_directories

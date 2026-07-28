@@ -88,24 +88,34 @@ def _suspend_all_catalog_providers() -> None:
 
 async def _generation_fence(root: Path) -> None:
     _suspend_all_catalog_providers()
+    config = root / "config"
+    config.mkdir()
+    (config / "config.toml").write_text("", encoding="utf-8")
     executable = root / "bin" / "codex"
     pid_file = root / "slow.pid"
-    record = provider(root)
+    record = provider(root, config_dir=config)
     write_executable(
         executable,
-        {"models": [{"slug": "old", "visibility": "list"}]},
-        delay_seconds=1,
+        {"models": [{"slug": "directory-event", "visibility": "list"}]},
+        delay_seconds=0.4,
         pid_file=pid_file,
     )
     facts: asyncio.Queue[CatalogChangedFact] = asyncio.Queue()
     with codex_on_path(executable):
         owner = CatalogRefreshOwner(fact_sink=facts.put_nowait)
         await owner.start()
+        await owner.wait_ready()
+        initial = owner.snapshot(record["id"])
+        assert initial is not None
+        initial_authority = initial.authority_fingerprint
+        pid_file.unlink()
+        while not facts.empty():
+            facts.get_nowait()
+
+        (config / "unrelated").write_text("identity drift", encoding="utf-8")
         async with asyncio.timeout(3):
             while not pid_file.exists():
                 await asyncio.sleep(0)
-        while not facts.empty():
-            facts.get_nowait()
         replacement_generation = await asyncio.to_thread(
             _replace_generation,
             record["id"],
@@ -127,10 +137,14 @@ async def _generation_fence(root: Path) -> None:
             for index, fact in enumerate(observed)
             if fact.kind == "catalog_removed"
         )
+        assert any(
+            fact.projection is not None
+            and fact.projection.authority_fingerprint != initial_authority
+            for fact in observed[:removed_at]
+        )
         for fact in observed[removed_at + 1 :]:
             if fact.projection is not None:
                 assert fact.projection.provider_generation != record["generation"]
-        await owner.wait_ready()
         await owner.shutdown()
 
     for fact in list(facts._queue):

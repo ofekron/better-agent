@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -43,6 +44,35 @@ def test_provider_mutation_and_auth_completion_publish_dirty_facts() -> None:
     assert auth_facts == [record["id"]]
 
 
+def test_auth_status_resolution_invalidates_catalog_authority() -> None:
+    auth_facts: list[str] = []
+    broadcasts: list[str] = []
+    record = config_store.add_provider({
+        "name": "Codex auth refresh wiring",
+        "kind": "codex",
+        "mode": "subscription",
+        "runner": "native",
+    })
+    original_status = provider_auth._status_authenticated
+    original_auth = model_catalog_refresh.notify_provider_auth_changed
+    provider_auth._status_authenticated = lambda _provider: asyncio.sleep(
+        0,
+        result=True,
+    )
+    model_catalog_refresh.notify_provider_auth_changed = auth_facts.append
+    try:
+        asyncio.run(provider_auth.refresh_auth_status(
+            record["id"],
+            lambda: asyncio.sleep(0, result=broadcasts.append("changed")),
+        ))
+    finally:
+        provider_auth._status_authenticated = original_status
+        model_catalog_refresh.notify_provider_auth_changed = original_auth
+
+    assert broadcasts == ["changed"]
+    assert auth_facts == [record["id"]]
+
+
 def test_backend_lifecycle_owns_catalog_refresh_tasks() -> None:
     source = (BACKEND / "main.py").read_text(encoding="utf-8")
     startup = source.split("async def on_startup():", 1)[1].split(
@@ -52,7 +82,20 @@ def test_backend_lifecycle_owns_catalog_refresh_tasks() -> None:
     shutdown = source.split("async def on_shutdown():", 1)[1]
 
     assert "await model_catalog_refresh.start()" in startup
+    assert "model_catalog_refresh.subscribe_fact_sink(" in startup
     assert "await model_catalog_refresh.shutdown()" in shutdown
+    assert "_model_catalog_unsubscribe()" in shutdown
+
+
+def test_codex_and_fugu_manual_refresh_use_catalog_authority_owner() -> None:
+    source = (BACKEND / "main.py").read_text(encoding="utf-8")
+    helper = source.split(
+        "async def _refresh_provider_models(",
+        1,
+    )[1].split("\n\n@app.get", 1)[0]
+
+    assert 'record.get("kind") in {"codex", "fugu"}' in helper
+    assert "await model_catalog_refresh.request_refresh(" in helper
 
 
 def test_legacy_due_refresh_excludes_catalog_authority_owner() -> None:
@@ -64,6 +107,8 @@ def test_legacy_due_refresh_excludes_catalog_authority_owner() -> None:
 
 if __name__ == "__main__":
     test_provider_mutation_and_auth_completion_publish_dirty_facts()
+    test_auth_status_resolution_invalidates_catalog_authority()
     test_backend_lifecycle_owns_catalog_refresh_tasks()
+    test_codex_and_fugu_manual_refresh_use_catalog_authority_owner()
     test_legacy_due_refresh_excludes_catalog_authority_owner()
     print("PASS: model catalog refresh lifecycle wiring")

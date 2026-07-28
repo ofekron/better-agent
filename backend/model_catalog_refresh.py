@@ -8,6 +8,7 @@ import time
 from typing import Awaitable, Callable, Mapping
 
 import config_store
+import model_catalog_read_projection
 from model_catalog_refresh_engine import CatalogRefreshEngine
 from model_catalog_refresh_state import CatalogChangedFact, CatalogProjection
 from model_catalog_source_watcher import CatalogSourceWatcher
@@ -335,6 +336,7 @@ _fact_sinks: set[FactSink] = set()
 
 
 async def _fanout_fact(fact: CatalogChangedFact) -> None:
+    model_catalog_read_projection.apply_fact(fact)
     for sink in tuple(_fact_sinks):
         try:
             outcome = sink(fact)

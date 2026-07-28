@@ -27,6 +27,7 @@ class CatalogProjection:
     models: tuple[str, ...]
     models_current: bool
     retired: tuple[RetiredModel, ...]
+    last_refreshed_at: float
     reason: str
     authority_fingerprint: str
 
@@ -38,6 +39,7 @@ class CatalogProjection:
             "models": list(self.models),
             "models_current": self.models_current,
             "retired": [record.to_dict() for record in self.retired],
+            "last_refreshed_at": self.last_refreshed_at,
             "reason": self.reason,
             "authority_fingerprint": self.authority_fingerprint,
         }

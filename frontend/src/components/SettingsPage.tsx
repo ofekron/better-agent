@@ -28,6 +28,7 @@ import { cacheProviders } from "../utils/providerCache";
 import { providerNickname } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindForRunner } from "./modelPicker";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
+import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
@@ -2461,6 +2462,8 @@ function ProviderForm({
     }
   };
 
+  const modelCatalogRevision = useProviderCatalogRevision(providerId || "");
+
   // Edit mode: fetch this provider's model list so the default_model
   // dropdown is populated. Refetch on remount; cheap (cached server-side).
   useEffect(() => {
@@ -2480,7 +2483,7 @@ function ProviderForm({
     return () => {
       cancelled = true;
     };
-  }, [mode, providerId]);
+  }, [mode, providerId, modelCatalogRevision]);
 
   const submit = async () => {
     setSubmitting(true);

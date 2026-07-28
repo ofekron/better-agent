@@ -29,52 +29,6 @@ FUGU_MODELS = [
 ]
 
 
-def fetch_fugu_models() -> list[str]:
-    """Best-effort model list from Codex with the Sakana model provider.
-
-    Returns the static `FUGU_MODELS` list on any failure (codex missing,
-    provider not installed, non-zero exit, parse error) so the dropdown
-    always has something. Fugu exposes exactly two models — Fugu and Fugu
-    Ultra — so the static list is authoritative in practice.
-    """
-    import json as _json
-    import subprocess as _sp
-
-    from cli_paths import resolve_cli_binary
-
-    codex_bin = resolve_cli_binary("codex")
-    if not codex_bin:
-        return list(FUGU_MODELS)
-
-    try:
-        proc = _sp.run(
-            [
-                codex_bin,
-                "-c", "model_provider=\"sakana\"",
-                "-c", "model=\"fugu\"",
-                "debug", "models",
-            ],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, _sp.TimeoutExpired):
-        return list(FUGU_MODELS)
-
-    if proc.returncode != 0:
-        return list(FUGU_MODELS)
-
-    try:
-        data = _json.loads(proc.stdout)
-        allowed = set(FUGU_MODELS)
-        models = [
-            m["slug"]
-            for m in data.get("models", [])
-            if m.get("visibility") != "hide" and m.get("slug") in allowed
-        ]
-        return models if len(models) >= 1 else list(FUGU_MODELS)
-    except (ValueError, KeyError, TypeError):
-        return list(FUGU_MODELS)
-
-
 class FuguProvider(CodexProvider):
     """Sakana Fugu — drives the regular `codex` binary with the `fugu`
     model provider selected via `-c`. Inherits all Codex app-server

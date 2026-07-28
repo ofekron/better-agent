@@ -1,9 +1,6 @@
-import json
 import os
 import shutil
-import stat
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home
@@ -15,7 +12,7 @@ import models  # noqa: E402
 import config_store  # noqa: E402
 from provider import ProviderCredentialError, _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
-from provider_fugu import FUGU_MODELS, FuguProvider, fetch_fugu_models  # noqa: E402
+from provider_fugu import FUGU_MODELS, FuguProvider  # noqa: E402
 from provider_runtime import _preserved_env_keys  # noqa: E402
 from runner_codex import _build_app_server_argv  # noqa: E402
 
@@ -23,31 +20,6 @@ from runner_codex import _build_app_server_argv  # noqa: E402
 def check(cond: bool, msg: str) -> None:
     if not cond:
         raise AssertionError(msg)
-
-
-def _make_fake_codex(bin_dir: Path) -> Path:
-    """A fake `codex` that rejects profiles and accepts Sakana config."""
-    codex = bin_dir / "codex"
-    payload = json.dumps({"models": [
-        {"slug": "gpt-5.5", "visibility": "show"},
-        {"slug": "fugu", "visibility": "show"},
-        {"slug": "fugu-ultra", "visibility": "show"},
-    ]})
-    codex.write_text(
-        "#!/usr/bin/env sh\n"
-        "set -eu\n"
-        'if [ "${1:-}" = "-p" ]; then\n'
-        "  exit 2\n"
-        "fi\n"
-        'if [ "$1" = "-c" ] && [ "$2" = "model_provider=\\"sakana\\"" ] && [ "$3" = "-c" ] && [ "$4" = "model=\\"fugu\\"" ] && [ "$5" = "debug" ] && [ "$6" = "models" ]; then\n'
-        f"  printf '%s\\n' {json.dumps(payload)}\n"
-        "  exit 0\n"
-        "fi\n"
-        "exit 1\n",
-        encoding="utf-8",
-    )
-    codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
-    return codex
 
 
 def test_registry_and_capabilities() -> None:
@@ -76,9 +48,8 @@ def test_registry_and_capabilities() -> None:
 
 
 def test_models_catalog() -> None:
-    check(models._static_cold_start({"kind": "fugu"}) == FUGU_MODELS, "fugu static cold-start")
-    fetch = models._resolve_refresh_fetch({"kind": "fugu"})
-    check(fetch is fetch_fugu_models, "fugu refresh resolves to fetch_fugu_models")
+    check(models._static_cold_start({"kind": "fugu"}) == [], "fugu has no legacy cold-start authority")
+    check(models._resolve_refresh_fetch({"kind": "fugu"}) is None, "fugu has no legacy refresh authority")
 
 
 def test_argv_builder_selects_fugu_sakana_overrides() -> None:
@@ -171,19 +142,6 @@ def test_fugu_runner_rejects_non_authoritative_key() -> None:
     raise AssertionError("Fugu runner must reject unmanaged keys")
 
 
-def test_fetch_uses_codex_with_sakana_overrides() -> None:
-    bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-bin-"))
-    old_path = os.environ.get("PATH", "")
-    try:
-        _make_fake_codex(bin_dir)
-        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
-        # The fetched models come from Codex with Sakana model-provider config.
-        check(fetch_fugu_models() == ["fugu", "fugu-ultra"], "fetch_fugu_models parses the fugu catalog")
-    finally:
-        os.environ["PATH"] = old_path
-        shutil.rmtree(bin_dir, ignore_errors=True)
-
-
 def test_fugu_not_auto_installable() -> None:
     # The fugu installer is a `git clone HEAD | bash` bootstrap that is not
     # hash-pinnable, so it MUST NOT be wired into the setup wizard's
@@ -197,19 +155,6 @@ def test_fugu_not_auto_installable() -> None:
     raise AssertionError("installer_for(fugu) must raise — no safe installer exists")
 
 
-def test_fugu_models_fallback_without_binary() -> None:
-    # With no codex on PATH (or profile not installed), fetch must degrade to
-    # the static list rather than raising — the dropdown always needs something.
-    bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-empty-"))
-    old_path = os.environ.get("PATH", "")
-    try:
-        os.environ["PATH"] = f"{bin_dir}{os.pathsep}"
-        check(fetch_fugu_models() == FUGU_MODELS, "fetch falls back to static list without the binary")
-    finally:
-        os.environ["PATH"] = old_path
-        shutil.rmtree(bin_dir, ignore_errors=True)
-
-
 def main() -> int:
     tests = [
         test_registry_and_capabilities,
@@ -218,9 +163,7 @@ def main() -> int:
         test_fugu_disables_image_generation_tool,
         test_fugu_runner_uses_only_broker_authoritative_key,
         test_fugu_runner_rejects_non_authoritative_key,
-        test_fetch_uses_codex_with_sakana_overrides,
         test_fugu_not_auto_installable,
-        test_fugu_models_fallback_without_binary,
     ]
     for test in tests:
         test()

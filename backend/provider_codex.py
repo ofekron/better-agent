@@ -84,21 +84,6 @@ logger = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).parent / "runner_codex.py"
 _TAIL_POLL_INTERVAL = 0.05
 
-# Official Codex models for when no cache exists yet.
-# Checked 2026-07-09 against https://developers.openai.com/codex/models.
-# The daily refresh via `fetch_codex_models()` keeps this current.
-CODEX_MODELS = [
-    "gpt-5.6",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.3-codex-spark",
-]
-
-
 def _run_start_byte(bs: dict, rs_disk: dict) -> int:
     for value in (
         rs_disk.get("pre_query_byte_offset"),
@@ -287,45 +272,6 @@ def read_codex_run_rollout_events(run_dir: Path) -> list[dict[str, Any]]:
         namespace=str(sid),
     )
     return wrapped
-
-
-def fetch_codex_models() -> list[str]:
-    """Parse `codex debug models` output and return visible model slugs.
-
-    Returns the cold-start list on failure (CLI not installed, parse
-    error, etc.) so the model dropdown always has something.
-    """
-    import subprocess as _sp
-
-    from cli_paths import resolve_cli_binary
-
-    codex_bin = resolve_cli_binary("codex")
-    if not codex_bin:
-        return list(CODEX_MODELS)
-
-    try:
-        proc = _sp.run(
-            [codex_bin, "debug", "models"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, _sp.TimeoutExpired):
-        return list(CODEX_MODELS)
-
-    if proc.returncode != 0:
-        return list(CODEX_MODELS)
-
-    try:
-        import json as _json
-
-        data = _json.loads(proc.stdout)
-        models = [
-            m["slug"]
-            for m in data.get("models", [])
-            if m.get("visibility") != "hide" and m.get("slug")
-        ]
-        return models if len(models) >= 2 else list(CODEX_MODELS)
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return list(CODEX_MODELS)
 
 
 # ============================================================================
