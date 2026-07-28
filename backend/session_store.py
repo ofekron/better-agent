@@ -2177,9 +2177,11 @@ def _do_build_summary_index_unsafe() -> None:
                 summary_mtime = sp.stat().st_mtime_ns
                 if summary_mtime >= session_mtime:
                     summary = json.loads(sp.read_text(encoding="utf-8"))
-                    if summary.get("id") == sid and "last_seen_event_uid" in summary:
-                        if not _summary_has_current_projections(summary):
-                            continue
+                    if (
+                        summary.get("id") == sid
+                        and "last_seen_event_uid" in summary
+                        and _summary_has_current_projections(summary)
+                    ):
                         # Captured before sanitize strips it: this is the
                         # root revision the on-disk fork set was built from,
                         # and it is what lets a repaired summary republish

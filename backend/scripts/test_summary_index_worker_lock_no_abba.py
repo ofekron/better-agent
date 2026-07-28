@@ -87,9 +87,9 @@ def _run() -> bool:
 
     _orig = session_store._build_summary_for_root
 
-    def _patched(root):
+    def _patched(root, *args, **kwargs):
         x_in_build.set()
-        return _orig(root)
+        return _orig(root, *args, **kwargs)
 
     session_store._build_summary_for_root = _patched
 

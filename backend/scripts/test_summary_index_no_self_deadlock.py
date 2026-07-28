@@ -151,18 +151,31 @@ def _run() -> bool:
         "working_mode": None, "working_mode_meta": None,
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
         "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
+        "current_todos": [], "current_tasks": [],
     })
+    authoritative_todos = [{"content": "authoritative todo", "status": "pending"}]
+    authoritative_tasks = [{"id": "task-1", "subject": "authoritative task"}]
     _write_full(_v8_record(
         child_sid,
         working_mode="prompt_engineering",
         working_mode_meta={"parent_session_id": parent_sid},
+        current_todos=authoritative_todos,
+        current_tasks=authoritative_tasks,
     ))
+    _write_summary(child_sid, {
+        "id": child_sid, "name": child_sid, "cwd": CWD,
+        "working_mode": "prompt_engineering",
+        "working_mode_meta": {"parent_session_id": parent_sid},
+        "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
+        "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
+    })
     _write_full(_v8_record(pass1_parent_sid))
     _write_summary(pass1_parent_sid, {
         "id": pass1_parent_sid, "name": pass1_parent_sid, "cwd": CWD,
         "working_mode": None, "working_mode_meta": None,
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
         "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
+        "current_todos": [], "current_tasks": [],
     })
     _write_full(_v8_record(
         pass1_child_sid,
@@ -175,6 +188,7 @@ def _run() -> bool:
         "working_mode_meta": {"parent_session_id": pass1_parent_sid},
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
         "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
+        "current_todos": [], "current_tasks": [],
     })
 
     # --- Check 1: the blocking first build must NOT self-deadlock. ---
@@ -221,6 +235,24 @@ def _run() -> bool:
     results.append((
         "eng-pointer applied to Pass-1 parent from Pass-2 child",
         got == child_sid, f"got {got}",
+    ))
+    fallback_child = sessions.get(child_sid, {})
+    results.append((
+        "projection-stale child rebuilt from authoritative full file",
+        fallback_child.get("current_todos") == authoritative_todos
+        and fallback_child.get("current_tasks") == authoritative_tasks,
+        f"got todos={fallback_child.get('current_todos')}, "
+        f"tasks={fallback_child.get('current_tasks')}",
+    ))
+    repaired_summary = json.loads(
+        (_sessions_dir() / f"{child_sid}.summary.json").read_text(),
+    )
+    results.append((
+        "projection-stale sidecar repaired",
+        repaired_summary.get("current_todos") == authoritative_todos
+        and repaired_summary.get("current_tasks") == authoritative_tasks,
+        f"got todos={repaired_summary.get('current_todos')}, "
+        f"tasks={repaired_summary.get('current_tasks')}",
     ))
     got_pass1 = sessions.get(pass1_parent_sid, {}).get("pending_eng_session_id")
     results.append((
