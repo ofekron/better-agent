@@ -7657,6 +7657,8 @@ button.run-badge-clickable:focus-visible {
 }
 
 .input-area {
+  container-name: session-composer;
+  container-type: inline-size;
   padding-block: 12px 14px;
   padding-inline-start: clamp(10px, 1vw, 16px);
   padding-inline-end: calc(clamp(10px, 1vw, 16px) + 8px);
@@ -8756,7 +8758,7 @@ button.run-badge-clickable:focus-visible {
 .queued-prompt-preview:hover {
   background: var(--border);
 }
-@media (max-width: 640px) {
+@container session-composer (max-width: 640px) {
   .queued-list-header {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -8835,6 +8837,35 @@ button.run-badge-clickable:focus-visible {
     margin-inline-start: auto;
     flex-wrap: wrap;
   }
+  .input-row {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .input-row > .input-textarea-shell {
+    flex: 1 0 100%;
+  }
+  .input-row > :where(
+    .composer-focus-btn,
+    .extension-module-slot--composer-actions,
+    .send-btn,
+    .stop-btn,
+    .input-overflow-wrapper
+  ) {
+    flex-shrink: 0;
+  }
+}
+@container session-composer (max-width: 420px) {
+  .queued-list-bulk-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .queued-list-bulk-actions > button {
+    height: auto;
+    min-height: 40px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 640px) {
   .mobile-steer-actions {
     margin-bottom: 8px;
   }
@@ -23573,7 +23604,9 @@ button.progress-inflight {
   border: 1px solid var(--border-muted, rgba(255, 255, 255, 0.08));
   animation: extension-health-prompt-in 0.24s cubic-bezier(0.2, 0.78, 0.28, 1);
 }
-.extension-health-prompt--reduced,
+.extension-health-prompt--reduced {
+  animation: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .extension-health-prompt {
     animation: none;

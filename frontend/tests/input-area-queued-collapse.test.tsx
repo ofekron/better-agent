@@ -151,18 +151,33 @@ describe("queued list collapse CSS", () => {
     );
   });
 
-  it("gives mobile queue content and composer actions their own responsive tracks", () => {
+  it("responds queue tracks to composer width while keeping mobile actions viewport-based", () => {
     expect(css).toMatch(
-      /@media \(max-width: 640px\)[\s\S]*\.queued-list-bulk-actions\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
+      /\.input-area\s*\{[^}]*container-name:\s*session-composer[^}]*container-type:\s*inline-size/,
     );
     expect(css).toMatch(
-      /@media \(max-width: 640px\)[\s\S]*\.queued-prompt-banner:not\(\.is-minimized\)\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+      /@container session-composer \(max-width: 640px\)[\s\S]*\.queued-list-bulk-actions\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
+    );
+    expect(css).toMatch(
+      /@container session-composer \(max-width: 640px\)[\s\S]*\.queued-prompt-banner:not\(\.is-minimized\)\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
     );
     expect(css).toMatch(
       /\.queued-prompt-banner:not\(\.is-minimized\)\s*>\s*\.queued-prompt-preview[^}]*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*min-width:\s*0/,
     );
     expect(css).toMatch(
-      /\.mobile-steer-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*2fr\)[^}]*gap:\s*8px/,
+      /@container session-composer \(max-width: 640px\)[\s\S]*\.input-row\s*\{[^}]*flex-wrap:\s*wrap[^}]*justify-content:\s*flex-end/,
+    );
+    expect(css).toMatch(
+      /\.input-row\s*>\s*\.input-textarea-shell\s*\{[^}]*flex:\s*1\s+0\s+100%/,
+    );
+    expect(css).toMatch(
+      /@container session-composer \(max-width: 420px\)[\s\S]*\.queued-list-bulk-actions\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    );
+    expect(css).toMatch(
+      /@container session-composer \(max-width: 420px\)[\s\S]*\.queued-list-bulk-actions\s*>\s*button\s*\{[^}]*height:\s*auto[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere/,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*\.mobile-steer-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*2fr\)[^}]*gap:\s*8px/,
     );
     expect(css).not.toMatch(/\.mobile-steer-actions\s*\{[^}]*gap:\s*120px/);
   });

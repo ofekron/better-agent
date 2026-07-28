@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import "../src/i18n";
@@ -28,6 +30,22 @@ function renderPrompt(submit: (action: "disable" | "keep_enabled") => Promise<bo
 }
 
 describe("ExtensionHealthPrompt", () => {
+  it("keeps reduced-motion selectors syntactically independent", () => {
+    const css = fs.readFileSync(
+      path.resolve(__dirname, "../src/styles/globals.css"),
+      "utf8",
+    );
+    expect(css).toMatch(
+      /\.extension-health-prompt--reduced\s*\{[^}]*animation:\s*none/,
+    );
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.extension-health-prompt\s*\{[^}]*animation:\s*none/,
+    );
+    expect(css).not.toMatch(
+      /\.extension-health-prompt--reduced\s*,\s*@media/,
+    );
+  });
+
   it("renders the extension name, reason, and cohort", () => {
     renderPrompt(() => Promise.resolve(true));
     expect(screen.getByTestId("extension-health-prompt")).toBeTruthy();
