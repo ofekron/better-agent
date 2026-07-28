@@ -568,19 +568,20 @@ def test_broadcaster_maps_running_content_to_message_delta() -> bool:
 
     bcast = SessionWSBroadcaster(FakeCoord())
     bcast._dispatch = lambda payload: captured.append(payload)
-    bcast.on_change(
-        "sid",
-        {"kind": "running_content_updated", "msg_id": "msg-1", "content": "done"},
-    )
+    for kind in ("running_content_updated", "message_content_materialized"):
+        bcast.on_change(
+            "sid",
+            {"kind": kind, "msg_id": "msg-1", "content": "done"},
+        )
 
     ok = (
-        len(captured) == 1
-        and captured[0]["type"] == "message_content_updated"
-        and captured[0]["data"]["session_id"] == "sid"
-        and captured[0]["data"]["msg_id"] == "msg-1"
-        and captured[0]["data"]["content"] == "done"
+        len(captured) == 2
+        and all(frame["type"] == "message_content_updated" for frame in captured)
+        and all(frame["data"]["session_id"] == "sid" for frame in captured)
+        and all(frame["data"]["msg_id"] == "msg-1" for frame in captured)
+        and all(frame["data"]["content"] == "done" for frame in captured)
     )
-    print(f"{PASS if ok else FAIL} broadcaster maps running content to message content update")
+    print(f"{PASS if ok else FAIL} broadcaster maps content changes to message content update")
     return ok
 
 

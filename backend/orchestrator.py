@@ -5374,6 +5374,9 @@ class Coordinator:
             session_manager.update_running_content(
                 app_session_id, msg_id, extracted,
             )
+            session_manager.materialize_message_content(
+                app_session_id, msg_id,
+            )
 
             run_error = primary_result.get("error")
             run_failed = (

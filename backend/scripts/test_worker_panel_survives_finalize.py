@@ -151,6 +151,8 @@ def test_worker_panel_survives_finalize() -> bool:
         and workers[0].get("success") is True
         and len(workers[0].get("events") or []) == 1
         and workers[0]["events"][0]["data"]["uuid"] == "uuid-1"
+        and saved.get("content") == "worker did the thing"
+        and saved.get("_content_dirty") is False
     )
     print(f"{PASS if ok else FAIL} worker panel survives _finalize_turn_messages "
           f"— got workers={workers!r}")

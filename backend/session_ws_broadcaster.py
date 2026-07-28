@@ -294,7 +294,7 @@ class SessionWSBroadcaster:
                     },
                 })
             return
-        if kind == "running_content_updated":
+        if kind in ("running_content_updated", "message_content_materialized"):
             self._dispatch({
                 "type": "message_content_updated",
                 "data": {

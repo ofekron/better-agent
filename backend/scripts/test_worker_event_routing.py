@@ -381,6 +381,56 @@ def test_g3_worker_event_updates_raw_session_content() -> bool:
     return ok
 
 
+def test_g4_worker_event_defers_full_timeline_projection() -> bool:
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_G4")
+    original = render_stub.message_output_text
+    eager_projection = False
+
+    def reject_eager_projection(_msg: dict) -> str:
+        raise AssertionError("worker-event mutation rebuilt the full timeline")
+
+    render_stub.message_output_text = reject_eager_projection
+    try:
+        try:
+            _apply(
+                sid,
+                msg_id,
+                root_id,
+                _worker_event("del_G4", "uuid-G4", "deferred worker output"),
+                source_is_provider_stream=False,
+            )
+        except AssertionError:
+            eager_projection = True
+    finally:
+        render_stub.message_output_text = original
+
+    root = session_manager.get_ref(sid) or {}
+    live_msg = next(
+        (m for m in root.get("messages") or [] if m.get("id") == msg_id),
+        {},
+    )
+    dirty_before_persist = live_msg.get("_content_dirty")
+    persisted = session_store.copy_persistable_tree(root)
+    persisted_msg = next(
+        (m for m in persisted.get("messages") or [] if m.get("id") == msg_id),
+        {},
+    )
+    ok = (
+        not eager_projection
+        and dirty_before_persist is True
+        and live_msg.get("_content_dirty") is False
+        and persisted_msg.get("content") == "deferred worker output"
+        and "_content_dirty" not in persisted_msg
+    )
+    print(
+        f"{PASS if ok else FAIL} G4: worker output projection deferred — "
+        f"eager={eager_projection} dirty_before={dirty_before_persist!r} "
+        f"dirty_after={live_msg.get('_content_dirty')!r} "
+        f"persisted_content={persisted_msg.get('content')!r}",
+    )
+    return ok
+
+
 def test_h_multi_panel_routes_correctly() -> bool:
     """N>1 panels on the same msg. A worker_event for `del_Y` must
     land on the Y panel ONLY. Locks against wrong-panel routing /
@@ -1001,6 +1051,7 @@ def main() -> int:
             test_f_panel_stores_inner_not_outer_wrapper(),
             test_g_reconcile_roundtrip_rehydrates_panel_events(),
             test_g3_worker_event_updates_raw_session_content(),
+            test_g4_worker_event_defers_full_timeline_projection(),
             test_h_multi_panel_routes_correctly(),
             test_i_worker_event_does_not_need_snapshot_workers(),
             test_i2_worker_event_skips_cold_event_hydration(),

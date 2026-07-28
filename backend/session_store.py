@@ -5348,15 +5348,12 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         _pop_opened(node)
         for m in node.get("messages", []):
             if m.get("role") == "assistant":
-                dirty = bool(m.get("_content_dirty")) or not m.get("content")
-                if dirty:
+                if m.get("_content_dirty") or not m.get("content"):
                     try:
-                        from render_stub import message_output_text
-                        content = message_output_text(m)
+                        from render_stub import materialize_message_content
+                        materialize_message_content(m)
                     except Exception:
-                        content = ""
-                    if content:
-                        m["content"] = content
+                        pass
                 if "_content_dirty" in m:
                     content_dirty.append((m, False))
                     del m["_content_dirty"]

@@ -923,12 +923,20 @@ class OrchestrationStrategy(ABC):
 
 
     def _refresh_message_content_from_event_projection(self, msg: dict, event: dict) -> None:
+        from render_stub import mark_message_content_dirty
         from event_shape import (
             extract_output_text,
             has_final_answer_event,
             project_content_snapshot,
             strip_synthetic_events,
         )
+
+        if any(
+            isinstance(panel, dict) and panel.get("events")
+            for panel in msg.get("workers") or []
+        ):
+            mark_message_content_dirty(msg)
+            return
 
         # Final-marked events must project from the FULL event list so
         # multiple finals concatenate with origin labels, and later

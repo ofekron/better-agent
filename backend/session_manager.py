@@ -5267,6 +5267,8 @@ class SessionManager:
         if not delegation_id:
             return None
         def _do(s: dict) -> None:
+            from render_stub import mark_message_content_dirty
+
             m = _find_message(s, msg_id)
             if m is None:
                 return
@@ -5277,6 +5279,8 @@ class SessionManager:
             )
             if existing is None:
                 workers.append(panel)
+                if panel.get("events"):
+                    mark_message_content_dirty(m)
                 return
             events = existing.get("events")
             existing.update(panel)
@@ -5288,6 +5292,8 @@ class SessionManager:
                 invalidate_panel_anchor_cache(existing)
             elif events and not panel.get("events"):
                 existing["events"] = events
+            if events or existing.get("events"):
+                mark_message_content_dirty(m)
         return self._run(
             sid, _do,
             {"kind": "worker_panel_upserted", "msg_id": msg_id, "panel": panel},
@@ -5300,6 +5306,8 @@ class SessionManager:
         if not delegation_id:
             return None
         def _do(s: dict) -> None:
+            from render_stub import mark_message_content_dirty
+
             m = _find_message(s, msg_id)
             if m is None:
                 return
@@ -5310,6 +5318,8 @@ class SessionManager:
             )
             if panel is not None:
                 panel.update(fields)
+                if panel.get("events"):
+                    mark_message_content_dirty(m)
         return self._run(
             sid, _do,
             {
@@ -5350,6 +5360,7 @@ class SessionManager:
         # Resolve the inner uuid OUTSIDE _do so the dedup decision and
         # the mutation are atomic under the per-root lock.
         from orchs.base import _event_uuid, _uid_idx_for
+        from render_stub import mark_message_content_dirty
         ev_uuid = _event_uuid(inner_event)
         def _do(s: dict) -> None:
             m = _find_message(s, msg_id)
@@ -5375,17 +5386,12 @@ class SessionManager:
                     if evs[existing_idx] == inner_event:
                         return
                     evs[existing_idx] = inner_event
-                    from render_stub import message_output_text
-                    content = message_output_text(m)
-                    if content:
-                        m["content"] = content
-                    return
-                uid_idx[ev_uuid] = len(evs)
-            evs.append(inner_event)
-            from render_stub import message_output_text
-            content = message_output_text(m)
-            if content:
-                m["content"] = content
+                else:
+                    uid_idx[ev_uuid] = len(evs)
+                    evs.append(inner_event)
+            else:
+                evs.append(inner_event)
+            mark_message_content_dirty(m)
         return self._run(
             sid, _do,
             {
@@ -5419,14 +5425,40 @@ class SessionManager:
         self, sid: str, msg_id: str, content: str,
     ) -> Optional[dict]:
         def _do(s: dict) -> None:
+            from render_stub import mark_message_content_dirty
+
             m = _find_message(s, msg_id)
             if m is None:
                 return
             m["content"] = content
-            m["_content_dirty"] = False
+            if any(
+                isinstance(panel, dict) and panel.get("events")
+                for panel in m.get("workers") or []
+            ):
+                mark_message_content_dirty(m)
+            else:
+                m["_content_dirty"] = False
         return self._run(
             sid, _do,
             {"kind": "running_content_updated", "msg_id": msg_id, "content": content},
+        )
+
+    def materialize_message_content(
+        self, sid: str, msg_id: str,
+    ) -> Optional[dict]:
+        change = {"kind": "message_content_materialized", "msg_id": msg_id}
+
+        def _do(s: dict) -> None:
+            from render_stub import materialize_message_content
+
+            m = _find_message(s, msg_id)
+            if m is not None:
+                change["content"] = materialize_message_content(m)
+        return self._run(
+            sid,
+            _do,
+            change,
+            hydrate_events=False,
         )
 
     def refresh_message_content_from_events(

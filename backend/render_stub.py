@@ -266,6 +266,23 @@ def message_output_text(msg: dict) -> str:
     return extract_output_text(strip_synthetic_events(timeline_events(msg)))
 
 
+def mark_message_content_dirty(msg: dict) -> None:
+    msg["_content_dirty"] = True
+
+
+def materialize_message_content(msg: dict) -> str:
+    if not msg.get("_content_dirty") and msg.get("content"):
+        return msg["content"]
+    from event_shape import project_content_snapshot
+
+    msg["content"] = project_content_snapshot(
+        timeline_events(msg),
+        msg.get("content"),
+    )
+    msg["_content_dirty"] = False
+    return msg["content"]
+
+
 def latest_assistant_id(msgs: list) -> Optional[str]:
     """Id of the most-recent assistant message in a node's message list.
     Max by `seq`; falls back to last-in-order when seqs are absent."""
