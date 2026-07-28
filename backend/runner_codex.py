@@ -489,12 +489,7 @@ async def _bridge_extension_mcp_dynamic_tools(
         user_facing=user_facing,
         bare=bare_config,
     )
-    bridge_configs = {
-        server_name: config
-        for server_name, config in configured_servers.items()
-        if _extension_config_id(config)
-    }
-    bridge_configs.update(resolved_configs)
+    bridge_configs = dict(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
     unavailable_servers: list[tuple[str, Optional[Exception]]] = []
     for server_name, config in bridge_configs.items():
@@ -511,8 +506,7 @@ async def _bridge_extension_mcp_dynamic_tools(
                 tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
             except Exception as exc:
                 bridge_errors.append((server_name, exc))
-                if not same_extension:
-                    unavailable_servers.append((server_name, exc))
+                unavailable_servers.append((server_name, exc))
                 continue
         if same_extension and isinstance(configured_config, dict):
             for tool_name in configured_config.get("tool_names") or ():
@@ -544,7 +538,7 @@ async def _bridge_extension_mcp_dynamic_tools(
             and same_extension
         ):
             configured_servers.pop(server_name, None)
-        elif not bridged_any and not same_extension:
+        elif not bridged_any:
             unavailable_servers.append((server_name, None))
     if unavailable_servers:
         server_name, exc = unavailable_servers[0]
