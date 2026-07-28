@@ -411,9 +411,20 @@ class EventEmitter:
         self._thinking_buf: list[str] = []
         self._tool_calls: dict[int, dict] = {}
         self._model: str = ""
+        self._tool_provenance: dict[str, dict[str, str]] = {}
 
     def set_model(self, model: str) -> None:
         self._model = model or ""
+
+    def set_tool_provenance(self, value: dict[str, dict[str, Any]]) -> None:
+        self._tool_provenance = {
+            name: {
+                "mcp_server": str(item.get("server_name") or ""),
+                "mcp_tool": str(item.get("tool_name") or ""),
+            }
+            for name, item in value.items()
+            if item.get("server_name") and item.get("tool_name")
+        }
 
     def _write(self, event: dict, *, uuid_str: str) -> None:
         event["uuid"] = uuid_str
@@ -481,9 +492,15 @@ class EventEmitter:
             if not force:
                 return False
             parsed = {}
+        content = {
+            "type": "tool_use",
+            "id": tc["id"],
+            "name": canonical_name,
+            "input": _canonical_tool_input(canonical_name, parsed),
+            **self._tool_provenance.get(canonical_name, {}),
+        }
         self._assistant(
-            [{"type": "tool_use", "id": tc["id"], "name": canonical_name,
-              "input": _canonical_tool_input(canonical_name, parsed)}],
+            [content],
             uuid_str=tc["uuid"],
         )
         tc["emitted"] = True
@@ -2378,6 +2395,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     events_path = run_dir / "session_events.jsonl"
     emitter = EventEmitter(events_path)
     emitter.set_model(model)
+    emitter.set_tool_provenance(extension_mcp_handlers)
 
     # state.json — session_id known immediately; tailer starts on this.
     state = {
