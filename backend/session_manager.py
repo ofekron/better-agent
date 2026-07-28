@@ -46,6 +46,7 @@ import config_store
 import harness_profile_store
 import messages_delta_compaction
 import session_store
+from session_repository import JsonSessionRootRepository, SessionRootRepository
 from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
 
@@ -182,7 +183,7 @@ def _upsert_queue_projection_record(record: dict) -> None:
 # DRAFT_FLUSH_DELAY moved to backend/draft_store.py.
 
 # ── Per-root write_full debounce ──────────────────────────────────────
-# Leading-edge debounce around `session_store.write_session_full` for
+# Leading-edge debounce around `SessionRootRepository.write_root` for
 # the hot `_persist_root` path. First write of a burst fires
 # immediately; subsequent writes within the window queue a scheduler
 # deadline that tail-flushes the latest in-memory state once the window expires.
@@ -199,7 +200,7 @@ def _upsert_queue_projection_record(record: dict) -> None:
 #     50ms-late tail flush would write a wall-clock that misrepresents
 #     when the mutation happened, distorting `list_sessions` sort order.
 #   - Delete paths MUST call `_drop_pending_persist(rid)` while holding
-#     `_lock_for_root(rid)` BEFORE `session_store.delete_session(...)`
+#     `_lock_for_root(rid)` BEFORE `SessionRootRepository.delete_root(...)`
 #     — otherwise a queued tail flush would resurrect the just-deleted
 #     session by re-creating its file via `os.replace`.
 #   - `list_sessions` does NOT flush pending writes — accepting up to
@@ -360,6 +361,7 @@ def _validate_orchestration_mode_against_provider(
 
 class SessionManager:
     def __init__(self) -> None:
+        self._root_repository: SessionRootRepository = JsonSessionRootRepository()
         # Root trees, keyed by root_id. Forks live inside their root.
         # OrderedDict for LRU: `move_to_end` marks recency on access,
         # `_enforce_root_cap` evicts the oldest UNPINNED roots beyond
@@ -518,7 +520,7 @@ class SessionManager:
         # `get_unread_count(sid)` will hydrate before any bump matters.
         self._unread_hydrated: set[str] = set()
         self._home_sessions_dir: Path | None = None
-        session_store.register_root_writer_guard(self.write_root_locked)
+        self._root_repository.register_writer_guard(self.write_root_locked)
 
     def write_root_locked(
         self, root_id: str, write_fn: Callable[[], None],
@@ -1021,7 +1023,7 @@ class SessionManager:
     # ── Cache + lock ───────────────────────────────────────────────
 
     def _ensure_home_current(self) -> None:
-        sessions_dir = session_store._sessions_dir()
+        sessions_dir = self._root_repository.storage_identity()
         if self._home_sessions_dir == sessions_dir:
             return
         close_event_ingester = False
@@ -1096,19 +1098,19 @@ class SessionManager:
         rid = self._node_root_id.get(sid)
         if rid is not None:
             return rid
-        rid = session_store._loaded_root_id_for(sid)
+        rid = self._root_repository.loaded_root_id_for(sid)
         if rid is not None:
             self._node_root_id[sid] = rid
             self._node_root_missing_until.pop(sid, None)
             return rid
-        if session_store.session_file_fingerprint(sid) is not None:
+        if self._root_repository.root_version(sid) is not None:
             self._node_root_id[sid] = sid
             self._node_root_missing_until.pop(sid, None)
             return sid
         now = time.monotonic()
         if self._node_root_missing_until.get(sid, 0.0) > now:
             return None
-        rid = session_store._resolve_root_id(sid)
+        rid = self._root_repository.resolve_root_id(sid)
         if rid is not None:
             self._node_root_id[sid] = rid
             self._node_root_missing_until.pop(sid, None)
@@ -1232,11 +1234,11 @@ class SessionManager:
         root file is absent."""
         root = self._roots.get(rid)
         if root is None:
-            root = session_store.get_root_tree(rid)
+            root = self._root_repository.read_root(rid)
             if root is not None:
                 self._roots[rid] = root
                 self._root_file_fingerprints[rid] = (
-                    session_store.session_file_fingerprint(rid) or (0, 0)
+                    self._root_repository.root_version(rid) or (0, 0)
                 )
                 self._root_file_checked_at[rid] = time.monotonic()
                 self._index_root(root)
@@ -1248,7 +1250,7 @@ class SessionManager:
         if now - last_checked < EXTERNAL_RELOAD_POLL_INTERVAL_S:
             return False
         self._root_file_checked_at[rid] = now
-        current = session_store.session_file_fingerprint(rid)
+        current = self._root_repository.root_version(rid)
         if current is None:
             return False
         previous = self._root_file_fingerprints.get(rid)
@@ -1262,7 +1264,7 @@ class SessionManager:
         return not has_pending_local_write
 
     def _note_root_file_written(self, rid: str) -> None:
-        current = session_store.session_file_fingerprint(rid)
+        current = self._root_repository.root_version(rid)
         if current is not None:
             self._root_file_fingerprints[rid] = current
             self._root_file_checked_at[rid] = time.monotonic()
@@ -1349,7 +1351,7 @@ class SessionManager:
         drain_failed = False
         if pending is not None:
             try:
-                session_store.write_session_full(
+                self._root_repository.write_root(
                     pending,
                     bump_updated_at=False,
                     preserve_projection_fields=True,
@@ -1361,7 +1363,7 @@ class SessionManager:
                     "_load_root: pre-flush of pending persist failed for %s",
                     rid,
                 )
-        root = session_store.get_root_tree(rid)
+        root = self._root_repository.read_root(rid)
         if root is None:
             # Re-queue the drained pending state so it isn't silently
             # lost. The next reader/writer can retry the flush; the
@@ -1378,7 +1380,7 @@ class SessionManager:
                 )
             return None
         # `isStreaming` is no longer a persisted field (stripped on
-        # write by `session_store.write_session_full`). Loaded sessions
+        # write by `SessionRootRepository.write_root`). Loaded sessions
         # therefore have no flag; the runner-registration hook
         # (`coordinator.run_state_add`) is the only writer at runtime.
         # Upgrade path: pre-refactor sessions may still have a baked-in
@@ -1389,7 +1391,7 @@ class SessionManager:
         _strip_legacy_isstreaming_on_load(root)
         self._roots[rid] = root
         self._root_file_fingerprints[rid] = (
-            session_store.session_file_fingerprint(rid) or (0, 0)
+            self._root_repository.root_version(rid) or (0, 0)
         )
         self._root_file_checked_at[rid] = time.monotonic()
         # Mirror the warm-branch guard above (see comment at the cached
@@ -3826,7 +3828,7 @@ class SessionManager:
                         _persist_inflight.add(root_id)
                         _persist_last_at[root_id] = time.monotonic()
                 with perf.timed("session.tail_persist.copy"):
-                    sess = session_store.copy_persistable_tree(pending)
+                    sess = self._root_repository.copy_persistable_root(pending)
         finally:
             lock_released_at = time.perf_counter()
             root_lock.release()
@@ -3842,7 +3844,7 @@ class SessionManager:
         # the caller's lock.
         try:
             with perf.timed("session.tail_persist.write_full"):
-                session_store.write_session_full(
+                self._root_repository.write_root(
                     sess,
                     bump_updated_at=False,
                     preserve_projection_fields=True,
@@ -3905,7 +3907,7 @@ class SessionManager:
                             break
                         _persist_last_at[rid] = time.monotonic()
                     try:
-                        session_store.write_session_full(
+                        self._root_repository.write_root(
                             sess,
                             bump_updated_at=False,
                             preserve_projection_fields=True,
@@ -3949,12 +3951,12 @@ class SessionManager:
                         return
                     _persist_inflight.add(root_id)
                     _persist_last_at[root_id] = time.monotonic()
-                sess = session_store.copy_persistable_tree(pending)
+                sess = self._root_repository.copy_persistable_root(pending)
             finally:
                 lock.release()
             try:
                 with perf.timed("session.flush_root.write"):
-                    session_store.write_session_full(
+                    self._root_repository.write_root(
                         sess,
                         bump_updated_at=False,
                         preserve_projection_fields=True,
@@ -4187,7 +4189,7 @@ class SessionManager:
                 orchestration_mode=orchestration_mode,
             )
             self._index_root(cached_root)
-            session_store.write_session_full(cached_root, bump_updated_at=False)
+            self._root_repository.write_root(cached_root, bump_updated_at=False)
             self._note_root_file_written(rid)
             self._fire(
                 child["id"],
@@ -4249,7 +4251,7 @@ class SessionManager:
                 harness_profile_id=harness_profile_id,
             )
             self._index_root(cached_root)
-            session_store.write_session_full(cached_root, bump_updated_at=False)
+            self._root_repository.write_root(cached_root, bump_updated_at=False)
             self._note_root_file_written(rid)
             self._fire(
                 child["id"],
@@ -4335,7 +4337,7 @@ class SessionManager:
             # Synchronous (not debounced): fork durability is part of the
             # contract — the caller gets a fork already on disk.
             self._index_root(cached_root)
-            session_store.write_session_full(cached_root, bump_updated_at=True)
+            self._root_repository.write_root(cached_root, bump_updated_at=True)
             self._note_root_file_written(rid)
             # Fire INSIDE the lock for ordering parity with `_run` —
             # otherwise a `forked` frame could broadcast before an
@@ -4484,12 +4486,12 @@ class SessionManager:
             evidence_paths: list[Path] = []
             try:
                 if sid == rid:
-                    if not session_store.delete_session(sid):
+                    if not self._root_repository.delete_root(sid):
                         return False, []
                 else:
                     if not session_store.splice_fork(updated_root, sid):
                         return False, []
-                    session_store.write_session_full(updated_root, bump_updated_at=True)
+                    self._root_repository.write_root(updated_root, bump_updated_at=True)
                 evidence_paths = self._commit_deletion_evidence_locked(
                     deleted_sids,
                     rid,
@@ -4498,7 +4500,7 @@ class SessionManager:
             except Exception:
                 logger.exception("session deletion persistence failed for %s", sid)
                 try:
-                    session_store.write_session_full(original_root, bump_updated_at=False)
+                    self._root_repository.write_root(original_root, bump_updated_at=False)
                 except Exception:
                     logger.exception("session deletion rollback failed for %s", sid)
                 for path in evidence_paths:
@@ -5968,7 +5970,7 @@ class SessionManager:
                 # manager's in-memory cache is fully populated and
                 # before any REST/WS readers are active.
                 try:
-                    session_store.write_session_full(sess, bump_updated_at=False)
+                    self._root_repository.write_root(sess, bump_updated_at=False)
                     self._note_root_file_written(sid)
                 except Exception:
                     logger.exception(
@@ -7406,7 +7408,7 @@ class SessionManager:
             src.pop("source", None)
             session_store.assign_message_seq(y, src)
             y["messages"].append(src)
-        session_store.write_session_full(y, bump_updated_at=True)
+        self._root_repository.write_root(y, bump_updated_at=True)
 
         # Register in cache so subsequent get/mutate calls land.
         yid = y["id"]
@@ -7468,7 +7470,7 @@ class SessionManager:
 def _strip_legacy_isstreaming_on_load(root: dict) -> None:
     """Walk every node in the loaded tree and strip any baked-in
     `isStreaming` field. New writes never persist the flag (see
-    `session_store.write_session_full`); this function exists for the
+    `SessionRootRepository.write_root`); this function exists for the
     one-time upgrade from a pre-refactor on-disk shape, where a
     crashed backend could leave `isStreaming: True` lingering on the
     last assistant msg.
