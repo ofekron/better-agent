@@ -32,6 +32,7 @@ loads stay deterministic regardless of what's active later.
 """
 
 import copy
+import contextvars
 import hashlib
 import json
 import logging
@@ -41,6 +42,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -62,7 +64,7 @@ from permission import normalize_permission, default_permission_for_kind
 # session_manager → session_store → orchs.manager.* → session_manager
 # cycle.
 
-from paths import ba_home
+from paths import assert_state_root_safe, ba_home
 
 _logger = logging.getLogger(__name__)
 
@@ -141,6 +143,13 @@ def _infer_user_initiated(session: dict) -> bool:
 _SESSIONS_DIR: Path | None = None
 _SESSIONS_DIR_READY = False
 _SESSIONS_DIR_READY_LOCK = threading.Lock()
+_STORAGE_IDENTITY = contextvars.ContextVar[Path | None](
+    "session_storage_identity",
+    default=None,
+)
+_STORAGE_IDENTITY_LEASE_LOCK = threading.Lock()
+_active_storage_identity: Path | None = None
+_active_storage_identity_leases = 0
 _ROUTINE_SESSIONS_DIR_NAME = "routine-sessions"
 _STORAGE_SEGMENT_MAX = 128
 _root_file_dirs: dict[str, Path] = {}
@@ -149,16 +158,61 @@ _root_file_dirs_lock = threading.Lock()
 
 def _sessions_dir() -> Path:
     global _SESSIONS_DIR, _SESSIONS_DIR_READY
-    resolved = ba_home() / "sessions"
-    if _SESSIONS_DIR == resolved:
-        return resolved
-    with _SESSIONS_DIR_READY_LOCK:
+    resolved = _STORAGE_IDENTITY.get() or (ba_home() / "sessions")
+    with _STORAGE_IDENTITY_LEASE_LOCK:
+        if (
+            _active_storage_identity is not None
+            and _active_storage_identity != resolved
+        ):
+            raise RuntimeError(
+                "session storage identity is active in another scope"
+            )
         if _SESSIONS_DIR == resolved:
             return resolved
-        _SESSIONS_DIR = resolved
-        _SESSIONS_DIR_READY = False
-        _reset_home_scoped_caches()
-        return resolved
+        with _SESSIONS_DIR_READY_LOCK:
+            if _SESSIONS_DIR == resolved:
+                return resolved
+            _SESSIONS_DIR = resolved
+            _SESSIONS_DIR_READY = False
+            _reset_home_scoped_caches()
+            return resolved
+
+
+@contextmanager
+def _storage_identity_scope(storage_identity: Path) -> Iterator[Path]:
+    global _active_storage_identity, _active_storage_identity_leases
+    resolved = Path(storage_identity)
+    if not resolved.is_absolute():
+        raise ValueError("session storage identity must be absolute")
+    resolved = resolved.resolve()
+    if resolved.name != "sessions":
+        raise ValueError("session storage identity must be a sessions directory")
+    assert_state_root_safe(resolved.parent)
+    inherited = _STORAGE_IDENTITY.get()
+    if inherited is not None and inherited != resolved:
+        raise RuntimeError("nested session storage identity mismatch")
+    owns_lease = inherited is None
+    if owns_lease:
+        with _STORAGE_IDENTITY_LEASE_LOCK:
+            if (
+                _active_storage_identity is not None
+                and _active_storage_identity != resolved
+            ):
+                raise RuntimeError(
+                    "another session storage identity is already active"
+                )
+            _active_storage_identity = resolved
+            _active_storage_identity_leases += 1
+    token = _STORAGE_IDENTITY.set(resolved)
+    try:
+        yield resolved
+    finally:
+        _STORAGE_IDENTITY.reset(token)
+        if owns_lease:
+            with _STORAGE_IDENTITY_LEASE_LOCK:
+                _active_storage_identity_leases -= 1
+                if _active_storage_identity_leases == 0:
+                    _active_storage_identity = None
 
 
 def _ensure_dir():
@@ -174,7 +228,9 @@ def _ensure_dir():
 
 
 def _routine_sessions_dir() -> Path:
-    return ba_home() / _ROUTINE_SESSIONS_DIR_NAME
+    storage_identity = _STORAGE_IDENTITY.get()
+    home = storage_identity.parent if storage_identity is not None else ba_home()
+    return home / _ROUTINE_SESSIONS_DIR_NAME
 
 
 def _validate_storage_segment(value: object, field: str) -> str:
