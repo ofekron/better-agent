@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import stat
-import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -83,35 +82,3 @@ def append_backend_exit(
             written += os.write(descriptor, payload[written:])
     finally:
         os.close(descriptor)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--state-root", required=True, type=Path)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--exit-code", required=True, type=int)
-    parser.add_argument("--classification", required=True)
-    parser.add_argument("--decision", required=True)
-    parser.add_argument("--restart-attempt", type=int)
-    parser.add_argument("--generation-id", default="")
-    parser.add_argument("--pid", type=int)
-    parser.add_argument("--checkout", default="")
-    parser.add_argument("--request-id", default="")
-    args = parser.parse_args(argv)
-    append_backend_exit(
-        args.state_root,
-        source=args.source,
-        exit_code=args.exit_code,
-        classification=args.classification,
-        decision=args.decision,
-        restart_attempt=args.restart_attempt,
-        generation_id=args.generation_id,
-        pid=args.pid,
-        checkout=args.checkout,
-        request_id=args.request_id,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

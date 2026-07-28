@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import stat
 import signal
 import socket
 import subprocess
@@ -75,6 +76,11 @@ from env_compat import dual_env_many
 from backend_exit_journal import append_backend_exit
 from credential_session import ProviderCredentialBroker, ProviderCredentialSession
 from restart_request import clear_restart_request, consume_restart_request
+
+
+_CRASH_RESTART_LIMIT = 5
+_CRASH_STABILITY_SECONDS = 60.0
+_CRASH_RESTART_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 _CRASH_RESTART_LIMIT = 5
@@ -539,17 +545,53 @@ class BackendSupervisor:
         The flag is consumed so a later crash isn't mistaken for a
         restart."""
         flag = _ba_home() / "restart_requested"
-        request_id = consume_restart_request(
-            flag,
-            not_before=self._generation_started_wall_time,
-        )
-        if request_id is None:
+        try:
+            path_details = flag.lstat()
+        except FileNotFoundError:
             return False
+        if stat.S_ISLNK(path_details.st_mode):
+            raise OSError("restart request must not be a symlink")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(flag, flags)
+        except FileNotFoundError:
+            return False
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_size > 64
+                or (details.st_dev, details.st_ino)
+                != (path_details.st_dev, path_details.st_ino)
+            ):
+                raise OSError("restart request must be a small regular file")
+            request_id = os.read(descriptor, 65).decode("ascii")
+        except (UnicodeDecodeError, OSError):
+            raise OSError("restart request is invalid") from None
+        finally:
+            os.close(descriptor)
+        flag.unlink()
+        if (
+            self._generation_started_wall_time is not None
+            and details.st_mtime < self._generation_started_wall_time
+        ):
+            return False
+        if (
+            len(request_id) != 32
+            or any(character not in "0123456789abcdef" for character in request_id)
+        ):
+            raise OSError("restart request id is invalid")
         self._last_restart_request_id = request_id
         return True
 
     def _clear_stale_restart_request(self) -> None:
-        clear_restart_request(_ba_home() / "restart_requested")
+        flag = _ba_home() / "restart_requested"
+        try:
+            flag.unlink()
+        except FileNotFoundError:
+            pass
 
     def _set_generation(self, proc: subprocess.Popen) -> None:
         self._proc = proc
