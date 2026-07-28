@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import uuid
@@ -15,11 +16,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
-from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
-from cli_paths import resolve_cli_binary
-from prompt_templates import render_prompt
 from provider_run_config import symlink_home_overlay, write_skill_tree
-from runtime_skills import has_runtime_skills, materialize_runtime_skills
+from provider_family_execution_runtime import (
+    FamilyExecutionRuntime,
+    restore_family_runner_runtime,
+)
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -233,28 +234,16 @@ def _stream_new_events(
             fh.write(json.dumps(event) + "\n")
 
 
-def _load_json_object(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return data
-
-
 def _materialize_agy_run_home(
     run_dir: Path,
     provider_run_config: dict,
     *,
-    cwd: str,
-    bare_config: bool = False,
-    disabled_runtime_skills: Optional[list] = None,
+    config_root: Path,
+    settings: dict[str, Any],
+    mcp_servers: dict[str, dict[str, Any]],
+    skill_dirs: dict[str, Path],
 ) -> Optional[dict[str, str]]:
-    mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
-    has_ext_skills = has_runtime_skills(cwd, bare_config=bare_config)
-    if not mcp_servers and not skills and not has_ext_skills:
-        return None
 
     real_home = Path.home()
     overlay_home = run_dir / "agy-home"
@@ -266,25 +255,20 @@ def _materialize_agy_run_home(
     # the dedicated mirrors below overlay per-run settings/skills onto those.
     symlink_home_overlay(real_home, overlay_home, skip={".gemini", ".agents"})
     symlink_home_overlay(real_home / ".gemini", overlay_home / ".gemini", skip={"antigravity-cli"})
-    real_cli = real_home / ".gemini" / "antigravity-cli"
+    real_cli = config_root
     overlay_cli = overlay_home / ".gemini" / "antigravity-cli"
     symlink_home_overlay(real_cli, overlay_cli, skip={"settings.json", "builtin"})
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
-    ext_count = materialize_runtime_skills(
-        overlay_cli / "builtin" / "skills", cwd, bare_config=bare_config,
-        disabled=disabled_runtime_skills,
-    )
-    materialize_runtime_skills(
-        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config,
-        disabled=disabled_runtime_skills,
-    )
-    # Subagents: agy/gemini has no user-defined native agent-definition
-    # surface, so extension-declared agents are intentionally a no-op here.
-    # Claude and Codex materialize them in their runners; when gemini gains a
-    # native surface, add a materialize_runtime_agents(..., "gemini") call.
-
-    settings = _load_json_object(real_cli / "settings.json")
+    for name, source in skill_dirs.items():
+        for target_root in (
+            overlay_cli / "builtin" / "skills",
+            overlay_home / ".agents" / "skills",
+        ):
+            target = target_root / name
+            target_root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target, copy_function=shutil.copyfile)
+    settings = json.loads(json.dumps(settings))
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
         config_dir = overlay_home / ".gemini" / "config"
@@ -293,7 +277,7 @@ def _materialize_agy_run_home(
             json.dumps({"mcpServers": mcp_servers}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-    if skills or ext_count:
+    if skills or skill_dirs:
         settings["skills"] = {"enabled": True}
     if settings:
         overlay_cli.mkdir(parents=True, exist_ok=True)
@@ -1236,11 +1220,70 @@ def _auth_failure_from_output(stdout: str, stderr: str) -> Optional[str]:
     return "Antigravity authentication is required. Log in with the agy CLI and retry."
 
 
-async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
-    agy_bin = resolve_cli_binary("agy")
-    if not agy_bin:
-        _fail(run_dir, "agy CLI not found on PATH")
-        return 1
+def _effective_mcp_servers(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    servers = plan.get("mcp_servers")
+    if type(servers) is not list:
+        raise RuntimeError("frozen AGY MCP plan is invalid")
+    result: dict[str, dict[str, Any]] = {}
+    for server in servers:
+        if type(server) is not dict or type(server.get("config")) is not dict:
+            raise RuntimeError("frozen AGY MCP server is invalid")
+        name = server.get("name")
+        if type(name) is not str or not name or name in result:
+            raise RuntimeError("frozen AGY MCP server name is invalid")
+        variants = server["config"]
+        selected = next(
+            (
+                variants[key]
+                for key in ("explicit", "runtime", "launcher", "native")
+                if type(variants.get(key)) is dict
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError("frozen AGY MCP server has no launch config")
+        result[name] = json.loads(json.dumps(selected))
+    return result
+
+
+def _runtime_capabilities(
+    inputs: dict[str, Any],
+    runtime: FamilyExecutionRuntime,
+) -> tuple[dict[str, Any], dict[str, Path]]:
+    hydration = inputs.pop("_runtime_hydration", None)
+    if (
+        type(hydration) is not dict
+        or set(hydration) != {
+            "capability_plan",
+            "prewarm_status",
+            "skill_dirs",
+        }
+        or type(hydration["capability_plan"]) is not dict
+        or hydration["prewarm_status"] != runtime.capabilities.prewarm_status
+        or type(hydration["skill_dirs"]) is not dict
+    ):
+        raise RuntimeError("AGY runtime capability hydration is invalid")
+    expected_skills = {
+        name: str(path)
+        for name, path in runtime.capabilities.skill_dirs.items()
+    }
+    if hydration["skill_dirs"] != expected_skills:
+        raise RuntimeError("AGY runtime skill hydration is invalid")
+    return (
+        hydration["capability_plan"],
+        {
+            name: Path(path)
+            for name, path in expected_skills.items()
+        },
+    )
+
+
+async def _run(
+    run_dir: Path,
+    inputs: dict[str, Any],
+    runtime: FamilyExecutionRuntime,
+) -> int:
+    capability_plan, skill_dirs = _runtime_capabilities(inputs, runtime)
 
     prompt = str(inputs.get("prompt") or "")
     prompt = _prepend_capability_context(prompt, inputs)
@@ -1255,14 +1298,26 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
 
     stderr_path = run_dir / "agy_stderr.log"
     run_env = os.environ.copy()
-    run_env.update(native_mcp_runtime_env(inputs))
-    provider_run_config = with_builtin_mcp_servers(inputs, inputs.get("provider_run_config") or {})
+    provider_run_config = inputs.get("provider_run_config") or {}
+    if type(provider_run_config) is not dict:
+        raise RuntimeError("frozen AGY provider configuration is invalid")
+    config_root = Path(str(inputs.get("agy_config_root") or ""))
+    if (
+        not config_root.is_absolute()
+        or config_root.resolve(strict=True)
+        != Path(runtime.launch.config.root.resolved_path)
+    ):
+        raise RuntimeError("frozen AGY config root is invalid")
+    settings = inputs.get("agy_settings")
+    if type(settings) is not dict:
+        raise RuntimeError("frozen AGY settings are invalid")
     scoped_env = _materialize_agy_run_home(
         run_dir,
         provider_run_config,
-        cwd=cwd,
-        bare_config=bool(inputs.get("bare_config")),
-        disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
+        config_root=config_root,
+        settings=settings,
+        mcp_servers=_effective_mcp_servers(capability_plan),
+        skill_dirs=skill_dirs,
     )
     if scoped_env:
         run_env.update(scoped_env)
@@ -1282,17 +1337,17 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     if session_id or resume_session_id:
         _write_state(run_dir, state)
 
-    argv = [agy_bin]
+    downstream_arguments: list[str] = []
     if model:
-        argv += ["--model", model]
+        downstream_arguments += ["--model", model]
     if resume_session_id:
-        argv += ["--conversation", resume_session_id]
-    argv += permission_argv(inputs.get("permission"))
-    argv += ["--add-dir", cwd, "--print-timeout", "24h"]
+        downstream_arguments += ["--conversation", resume_session_id]
+    downstream_arguments += permission_argv(inputs.get("permission"))
+    downstream_arguments += ["--add-dir", cwd, "--print-timeout", "24h"]
     if attachment_dir:
-        argv += ["--add-dir", str(attachment_dir)]
+        downstream_arguments += ["--add-dir", str(attachment_dir)]
     log_path = run_dir / "agy_cli.log"
-    argv += ["--log-file", str(log_path), "-p", prompt]
+    downstream_arguments += ["--log-file", str(log_path), "-p", prompt]
 
     # On resume the conversation DB is cumulative -- snapshot prior turns'
     # stabilized uuids BEFORE spawning agy so they are not re-emitted into
@@ -1302,14 +1357,27 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         if resume_session_id else set()
     )
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=run_env,
-    )
+    launch_context = runtime.launch.open_downstream()
+    pinned = launch_context.__enter__()
+    try:
+        pass_fds = (
+            {"pass_fds": pinned.pass_fds}
+            if os.name != "nt" and pinned.pass_fds
+            else {}
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *pinned.argv,
+            *downstream_arguments,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=run_env,
+            **pass_fds,
+        )
+    except BaseException:
+        launch_context.__exit__(*sys.exc_info())
+        raise
     cancel_path = run_dir / "cancel"
     cancelled = False
     events_path = run_dir / "session_events.jsonl"
@@ -1382,6 +1450,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                     await task
                 except asyncio.CancelledError:
                     pass
+        launch_context.__exit__(None, None, None)
     stdout = stdout_bytes.decode(errors="replace").strip()
     stderr = stderr_bytes.decode(errors="replace").strip()
     if stderr:
@@ -1452,14 +1521,15 @@ def main(run_dir: Path) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        runtime = restore_family_runner_runtime(run_dir)
+        inputs = runtime.inputs
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as exc:
         _fail(run_dir, f"failed to read input.json: {exc}")
         return 1
     try:
-        return asyncio.run(_run(run_dir, inputs))
+        return asyncio.run(_run(run_dir, inputs, runtime))
     except Exception as exc:
         logger.exception("runner_agy top-level failure")
         _fail(run_dir, f"{type(exc).__name__}: {exc}")

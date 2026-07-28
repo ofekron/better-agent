@@ -109,6 +109,7 @@ class _Provider(Provider):
         super().__init__(record)
         self.spawned = False
         self.runtime_snapshot: dict | None = None
+        self.released = 0
 
     def build_env(self) -> dict[str, str]:
         self.runtime_snapshot = dict(self.runtime_record())
@@ -121,6 +122,10 @@ class _Provider(Provider):
 
     def _write_backend_state(self, rs) -> None:
         del rs
+
+    def _release_execution_authority(self, execution) -> None:
+        del execution
+        self.released += 1
 
     def recover_in_flight(self, loop=None, run_id_filter=None) -> list[dict]:
         del loop, run_id_filter
@@ -227,6 +232,7 @@ def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
     finally:
         loop.close()
     assert not provider.spawned
+    assert provider.released == 1
 
 
 def test_base_admission_rejects_wrong_provider_instance() -> None:
@@ -248,6 +254,7 @@ def test_base_admission_rejects_wrong_provider_instance() -> None:
     finally:
         loop.close()
     assert not provider.spawned
+    assert provider.released == 0
 
 
 def test_extra_env_rejects_launch_runtime_and_authority_collisions() -> None:

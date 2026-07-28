@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 
 from paths import bc_home
@@ -10,17 +11,41 @@ _LOCK = threading.Lock()
 _LEASES: dict[str, RuntimeBroker] = {}
 
 
-def issue(secret: str) -> str:
+def issue(
+    secret: str,
+    *,
+    runtime_hydration: dict[str, object] | None = None,
+) -> str:
     value = str(secret or "")
     if not value:
         raise ValueError("runtime bootstrap secret is required")
+    if runtime_hydration is not None:
+        try:
+            hydration = json.loads(json.dumps(
+                runtime_hydration,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "runtime bootstrap hydration must be JSON-compatible",
+            ) from exc
+        if type(hydration) is not dict:
+            raise ValueError("runtime bootstrap hydration must be an object")
+    else:
+        hydration = None
     consumed = threading.Event()
 
     def handle(request: BrokerRequest) -> dict[str, object]:
         if request.kind != "catalog" or consumed.is_set():
             raise PermissionError("runtime bootstrap handle is invalid")
         consumed.set()
-        return {"success": True, "secret": value}
+        return {
+            "success": True,
+            "secret": value,
+            "runtime_hydration": hydration,
+        }
 
     broker = RuntimeBroker(bc_home() / "runtime" / "bootstrap", handle)
     address = broker.start()

@@ -379,12 +379,69 @@ def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> Non
             raise AssertionError("drifted SDK executable was materialized")
 
 
+def test_shebang_launch_pins_script_and_restricts_interpreter() -> None:
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        launcher = root / "agy"
+        _write_executable(
+            launcher,
+            b"#!/bin/sh\nprintf original\n",
+        )
+        launch = capture_cli_launch(
+            logical_command="agy",
+            launcher_path=launcher,
+            platform=sys.platform,
+        )
+        with open_pinned_launch(launch) as pinned:
+            replacement = root / "replacement"
+            _write_executable(
+                replacement,
+                b"#!/bin/sh\nprintf replacement\n",
+            )
+            replacement.replace(launcher)
+            completed = subprocess.run(
+                pinned.argv,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert pinned.argv[0] == str(Path("/bin/sh").resolve())
+            assert pinned.argv[-1] != str(launcher)
+            assert completed.returncode == 0
+            assert completed.stdout == "original"
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        interpreter = root / "runtime"
+        launcher = root / "agy"
+        _write_executable(interpreter, b"runtime")
+        _write_executable(
+            launcher,
+            f"#!{interpreter}\n".encode("utf-8"),
+        )
+        launch = capture_cli_launch(
+            logical_command="agy",
+            launcher_path=launcher,
+            platform=sys.platform,
+        )
+        try:
+            with open_pinned_launch(launch):
+                pass
+        except ExecutionContractError:
+            pass
+        else:
+            raise AssertionError("mutable interpreter executed by path")
+
+
 TESTS = (
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
     test_cli_path_swap_and_windows_command_shape_are_bound,
     test_source_package_config_resume_and_symlink_drift_fail_attestation,
     test_payload_round_trip_and_tamper_are_strict,
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,
+    test_shebang_launch_pins_script_and_restricts_interpreter,
 )
 
 

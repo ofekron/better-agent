@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError
 from provider_runtime_capability_model import frozen_json, normalize_plan
+from provider_runtime_plan_hydration import (
+    apply_runtime_hydration,
+    capture_runtime_hydration,
+)
 
 
 _FAMILIES = frozenset({"claude", "agy"})
@@ -41,7 +45,12 @@ def _secret_ref(path: str, *, kind: str = "runtime_value") -> dict[str, str]:
     }
 
 
-def _secret_free(value: Any, *, path: str) -> Any:
+def _secret_free(
+    value: Any,
+    *,
+    path: str,
+    hydration: dict[str, str] | None = None,
+) -> Any:
     if type(value) is dict:
         clean: dict[str, Any] = {}
         for key, item in value.items():
@@ -52,17 +61,29 @@ def _secret_free(value: Any, *, path: str) -> Any:
             if _SECRET_KEY_RE.search(normalized) and not normalized.endswith(
                 ("_ref", "_refs"),
             ):
-                clean[f"{key}_ref"] = _secret_ref(item_path)
+                reference = _secret_ref(item_path)
+                capture_runtime_hydration(hydration, reference, item)
+                clean[f"{key}_ref"] = reference
                 continue
-            clean[key] = _secret_free(item, path=item_path)
+            clean[key] = _secret_free(
+                item,
+                path=item_path,
+                hydration=hydration,
+            )
         return clean
     if type(value) is list:
         return [
-            _secret_free(item, path=f"{path}[{index}]")
+            _secret_free(
+                item,
+                path=f"{path}[{index}]",
+                hydration=hydration,
+            )
             for index, item in enumerate(value)
         ]
     if type(value) is str and _SECRET_VALUE_RE.search(value):
-        return _secret_ref(path)
+        reference = _secret_ref(path)
+        capture_runtime_hydration(hydration, reference, value)
+        return reference
     if value is None or type(value) in (str, bool, int):
         return value
     if type(value) is float and value == value and value not in (
@@ -139,6 +160,7 @@ def _setting_projection(
     extension_id: str,
     schema: list[dict[str, Any]],
     values: Mapping[str, Any],
+    hydration: dict[str, str] | None,
 ) -> dict[str, Any]:
     projected: dict[str, Any] = {}
     for item in schema:
@@ -146,21 +168,29 @@ def _setting_projection(
         if not key:
             continue
         if item.get("type") == "secret":
-            projected[f"{key}_ref"] = {
+            reference = {
                 "kind": "extension_setting",
                 "extension_id": extension_id,
                 "key_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
             }
+            capture_runtime_hydration(
+                hydration,
+                reference,
+                values.get(key, item.get("default")),
+            )
+            projected[f"{key}_ref"] = reference
             continue
         if key in values:
             projected[key] = _secret_free(
                 values[key],
                 path=f"extensions.{extension_id}.settings.{key}",
+                hydration=hydration,
             )
         elif "default" in item:
             projected[key] = _secret_free(
                 item["default"],
                 path=f"extensions.{extension_id}.settings.{key}",
+                hydration=hydration,
             )
     return projected
 
@@ -168,6 +198,7 @@ def _setting_projection(
 def _extension_projection(
     record: Mapping[str, Any],
     overlays: Mapping[str, Any],
+    hydration: dict[str, str] | None,
 ) -> dict[str, Any] | None:
     import extension_store
 
@@ -191,6 +222,7 @@ def _extension_projection(
             "predicate": _secret_free(
                 item.get("predicate") or {},
                 path=f"extensions.{extension_id}.mcp.predicate",
+                hydration=hydration,
             ),
         }
         for item in mcp_items
@@ -212,16 +244,19 @@ def _extension_projection(
         "permission_grants": _secret_free(
             extension_store.permission_grants(dict(record)),
             path=f"extensions.{extension_id}.permission_grants",
+            hydration=hydration,
         ),
         "mcp_predicates": predicates,
         "settings": _setting_projection(
             extension_id,
             settings_schema,
             setting_values,
+            hydration,
         ),
         "setting_overlays": _secret_free(
             overlays.get(extension_id) or {},
             path=f"extensions.{extension_id}.setting_overlays",
+            hydration=hydration,
         ),
     }
 
@@ -250,13 +285,18 @@ def _tool_names(config: Mapping[str, Any]) -> list[str]:
     })
 
 
-def _config_without_tool_metadata(config: Mapping[str, Any], *, path: str) -> dict:
+def _config_without_tool_metadata(
+    config: Mapping[str, Any],
+    *,
+    path: str,
+    hydration: dict[str, str] | None,
+) -> dict:
     stripped = {
         key: value
         for key, value in config.items()
         if key not in {"tool_names", "tools"}
     }
-    return _secret_free(stripped, path=path)
+    return _secret_free(stripped, path=path, hydration=hydration)
 
 
 def _explicit_mcp_configs(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -273,13 +313,14 @@ def _explicit_mcp_configs(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]
     }
 
 
-def structural_provider_runtime_plan(
+def _structural_provider_runtime_plan(
     inputs: dict[str, Any],
     provider_kind: str,
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     if type(inputs) is not dict or provider_kind not in _FAMILIES:
         raise ExecutionContractError("invalid provider runtime plan source")
     frozen_inputs = _json_copy(inputs, label="provider runtime inputs")
+    hydration: dict[str, str] = {}
     bare = bool(frozen_inputs.get("bare_config"))
     user_facing = bool(frozen_inputs.get("user_facing"))
 
@@ -335,6 +376,7 @@ def structural_provider_runtime_plan(
                 delivery: _config_without_tool_metadata(
                     config,
                     path=f"mcp_servers.{name}.{delivery}",
+                    hydration=hydration,
                 )
                 for delivery, config in variants.items()
             },
@@ -357,10 +399,10 @@ def structural_provider_runtime_plan(
     overlays = launcher_projection.get("extension_setting_overlays")
     overlays = overlays if type(overlays) is dict else {}
     extensions = [
-        projected
-        for record in extension_store.list_extensions(include_hidden=True)
-        if (
-            projected := _extension_projection(record, overlays)
+            projected
+            for record in extension_store.list_extensions(include_hidden=True)
+            if (
+            projected := _extension_projection(record, overlays, hydration)
         ) is not None
     ]
     extensions.sort(key=lambda item: item["id"])
@@ -373,7 +415,11 @@ def structural_provider_runtime_plan(
     harness = frozen_inputs.get("resolved_harness_run_config")
     harness = harness if type(harness) is dict else {}
     resolved_plan = normalize_plan({
-        "harness": _secret_free(harness, path="harness"),
+        "harness": _secret_free(
+            harness,
+            path="harness",
+            hydration=hydration,
+        ),
         "tools": sorted(all_tools),
         "mcp_servers": servers,
     })
@@ -385,6 +431,7 @@ def structural_provider_runtime_plan(
         "native_grants": _secret_free(
             native_grants,
             path="native_grants",
+            hydration=hydration,
         ),
         "extensions": extensions,
     }
@@ -392,10 +439,12 @@ def structural_provider_runtime_plan(
         "profile": _secret_free(
             installation_profile.load(),
             path="installation.profile",
+            hydration=hydration,
         ),
         "capabilities": _secret_free(
             installation_profile.capabilities(),
             path="installation.capabilities",
+            hydration=hydration,
         ),
     }
     return {
@@ -408,10 +457,43 @@ def structural_provider_runtime_plan(
             installation_decisions,
             label="installation profile decisions",
         )),
-    }
+    }, hydration
+
+
+def structural_provider_runtime_plan(
+    inputs: dict[str, Any],
+    provider_kind: str,
+) -> dict[str, dict[str, Any]]:
+    projection, _hydration = _structural_provider_runtime_plan(
+        inputs,
+        provider_kind,
+    )
+    return projection
+
+
+def hydrate_structural_provider_runtime_plan(
+    inputs: dict[str, Any],
+    provider_kind: str,
+    *,
+    expected: Mapping[str, Any],
+) -> dict[str, Any]:
+    frozen_expected = _json_copy(expected, label="expected runtime projection")
+    current, hydration = _structural_provider_runtime_plan(
+        inputs,
+        provider_kind,
+    )
+    if current != frozen_expected:
+        raise ExecutionContractError(
+            "runtime capability authority changed after preparation",
+        )
+    return apply_runtime_hydration(
+        current["resolved_plan"],
+        hydration,
+    )
 
 
 __all__ = [
+    "hydrate_structural_provider_runtime_plan",
     "selected_runtime_agent_sources",
     "selected_runtime_skill_sources",
     "structural_provider_runtime_plan",

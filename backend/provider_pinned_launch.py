@@ -18,6 +18,11 @@ from provider_launch_identity import (
     _verify_file_handle,
 )
 
+_SYSTEM_INTERPRETER_ROOTS = (
+    Path("/bin"),
+    Path("/usr/bin"),
+)
+
 
 @dataclass(frozen=True)
 class PinnedLaunch:
@@ -77,6 +82,24 @@ def _copy_descriptor(
         raise
 
 
+def _trusted_system_interpreter(
+    descriptor: int,
+    identity: FileIdentity,
+) -> bool:
+    try:
+        observed = os.fstat(descriptor)
+        resolved = Path(identity.resolved_path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(observed.st_mode)
+        and observed.st_uid == 0
+        and not observed.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        and any(resolved.is_relative_to(root) for root in _SYSTEM_INTERPRETER_ROOTS)
+        and _verify_file_handle(descriptor, identity) is None
+    )
+
+
 @contextmanager
 def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
     _validate_launch(launch)
@@ -97,6 +120,12 @@ def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
                 zip(launch.component_argv_indexes, handles),
             ):
                 source = launch.components[position]
+                if launch.mode == "posix-shebang" and position == 0:
+                    if not _trusted_system_interpreter(descriptor, source):
+                        raise ExecutionContractError(
+                            "provider interpreter cannot be executed safely",
+                        )
+                    continue
                 target = Path(raw) / f"{position}-{Path(argv[index]).name}"
                 _copy_descriptor(descriptor, target, source)
                 argv[index] = str(target)

@@ -5,17 +5,30 @@ import stat
 import sqlite3
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-agy-")
 _BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
+sys.path.insert(0, str(_BACKEND.parent / "sdk"))
 
 import config_store  # noqa: E402
-from provider import _resolve_class  # noqa: E402
+from capability_contexts import prompt_heading_for_source  # noqa: E402
+from provider import _resolve_class, build_better_agent_run_env  # noqa: E402
 from provider_agy import AgyProvider, fetch_agy_models  # noqa: E402
-from runner_agy import _agy_worker_events, _materialize_agy_run_home, _prepend_capability_context, main as runner_main  # noqa: E402
+from provider_family_execution_runtime import (  # noqa: E402
+    install_family_execution_payload,
+    resolve_family_execution_payload,
+)
+from provider_runtime_plan_source import (  # noqa: E402
+    hydrate_structural_provider_runtime_plan,
+)
+from runner_agy import _agy_worker_events, _materialize_agy_run_home, main as runner_main  # noqa: E402
+from runner_operation_host import stop_active_host  # noqa: E402
+from runs_dir import atomic_write_json, runs_root  # noqa: E402
+import session_manager  # noqa: E402
 
 
 def check(cond: bool, msg: str) -> None:
@@ -24,16 +37,10 @@ def check(cond: bool, msg: str) -> None:
 
 
 def test_agy_capability_context_labels_team_message() -> None:
-    prompt = _prepend_capability_context("<mssg>done</mssg>", {
-        "source": "mssg",
-        "capability_contexts": [{
-            "name": "Runtime",
-            "category": "system",
-            "content": "Use runtime context.",
-        }],
-    })
-    check("## Message\n\n<mssg>" in prompt, "agy labels team messages as Message")
-    check("## User prompt\n\n<mssg>" not in prompt, "agy does not label team messages as User prompt")
+    check(
+        prompt_heading_for_source("mssg") == "Message",
+        "agy labels team messages as Message",
+    )
 
 
 def _make_fake_agy(bin_dir: Path) -> Path:
@@ -55,6 +62,7 @@ def _make_fake_agy(bin_dir: Path) -> Path:
         "  case \"$1\" in\n"
         "    --model) model=\"$2\"; shift 2 ;;\n"
         "    --conversation) conversation=\"$2\"; shift 2 ;;\n"
+        "    --dangerously-skip-permissions) shift ;;\n"
         "    --add-dir) add_dirs=\"${add_dirs}${2};\"; shift 2 ;;\n"
         "    --print-timeout) timeout=\"$2\"; shift 2 ;;\n"
         "    --log-file) log_file=\"$2\"; shift 2 ;;\n"
@@ -126,11 +134,118 @@ def test_config_dir_does_not_export_claude_env() -> None:
             os.environ["CLAUDE_CONFIG_DIR"] = old_claude_dir
 
 
+def _run_prepared_agy(
+    provider: AgyProvider,
+    *,
+    cwd: Path,
+    prompt: str,
+    session_id: str | None = None,
+    provider_run_config: dict | None = None,
+) -> tuple[Path, int]:
+    app_session = session_manager.manager.create(
+        name="AGY runner fixture",
+        cwd=str(cwd),
+        orchestration_mode="native",
+        source="test",
+        provider_id=provider.id,
+        model=None,
+        permission={"mode": "dontAsk"},
+    )
+    run_id = str(uuid.uuid4())
+    arguments = {
+        "run_id": run_id,
+        "prompt": prompt,
+        "images": None,
+        "files": None,
+        "cwd": str(cwd),
+        "model": "Gemini Test (High)",
+        "reasoning_effort": None,
+        "session_id": session_id,
+        "mode": "native",
+        "app_session_id": app_session["id"],
+        "source": "test",
+        "disallowed_tools": None,
+        "setting_sources": None,
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "runner-fixture-token",
+        "fork": False,
+        "supervised": False,
+        "supervisor_agent_session_id": None,
+        "worker_agent_session_id": None,
+        "mssg_sender_session_id": None,
+        "is_worker": False,
+        "browser_harness_enabled": False,
+        "user_facing": False,
+        "working_mode": None,
+        "extra_env": None,
+        "continuation_chain": None,
+        "provider_run_config": provider_run_config,
+        "capability_contexts": None,
+        "target_message_id": None,
+        "resolved_harness_run_config": None,
+        "turn_run_id": None,
+        "disabled_builtin_extensions": [],
+        "provisioned_tool_profile": "",
+    }
+    execution = provider.prepare_run(**arguments)
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True)
+    atomic_write_json(run_dir / "execution.json", execution.artifact.to_dict())
+    install_family_execution_payload(execution, run_dir)
+    runner_input = execution.artifact.runtime_policy["runner_input"]
+    atomic_write_json(run_dir / "input.json", runner_input)
+    _launch, capabilities = resolve_family_execution_payload(
+        execution.artifact,
+        run_dir,
+    )
+    capability_plan = hydrate_structural_provider_runtime_plan(
+        runner_input,
+        "agy",
+        expected={
+            "resolved_plan": capabilities.plan,
+            "extension_state": capabilities.extension_state,
+            "installation_decisions": capabilities.installation_decisions,
+        },
+    )
+    env = build_better_agent_run_env(
+        backend_url=runner_input["backend_url"],
+        internal_token=arguments["internal_token"],
+        run_id=run_id,
+        app_session_id=app_session["id"],
+        cwd=str(cwd),
+        model=arguments["model"],
+        provider_id=provider.id,
+        bare_config=bool(runner_input["bare_config"]),
+        user_facing=False,
+        disabled_builtin_extensions=runner_input[
+            "disabled_builtin_extensions"
+        ],
+        runtime_hydration={
+            "capability_plan": capability_plan,
+            "prewarm_status": capabilities.prewarm_status,
+            "skill_dirs": {
+                name: str(path)
+                for name, path in capabilities.skill_dirs.items()
+            },
+        },
+    )
+    os.environ.update({
+        key: value
+        for key, value in env.items()
+        if "RUNTIME_BOOTSTRAP" in key
+    })
+    try:
+        return run_dir, runner_main(run_dir)
+    finally:
+        stop_active_host()
+
+
 def test_model_fetch_and_runner() -> None:
     bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-agy-bin-"))
     fake_home = Path(tempfile.mkdtemp(prefix="bc-test-agy-home-"))
     old_path = os.environ.get("PATH", "")
     old_home = os.environ.get("HOME")
+    cwd: Path | None = None
     try:
         _make_fake_agy(bin_dir)
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
@@ -138,20 +253,27 @@ def test_model_fetch_and_runner() -> None:
         argv_log = bin_dir / "argv.log"
         os.environ["AGY_ARGV_LOG"] = str(argv_log)
         check(fetch_agy_models() == ["Gemini Test (High)", "Other Model"], "agy models parsed")
-        run_dir = Path(tempfile.mkdtemp(prefix="bc-test-agy-run-"))
-        (run_dir / "input.json").write_text(
-            json.dumps({
-                "prompt": "hello",
-                "cwd": str(run_dir),
-                "model": "Gemini Test (High)",
-                "provider_run_config": {
-                    "mcp_servers": {"demo": {"command": "demo", "args": []}},
-                    "skills": {"demo-skill": "Use demo skill.\n"},
+        config_root = fake_home / ".gemini" / "antigravity-cli"
+        config_root.mkdir(parents=True)
+        record = config_store.add_provider({
+            "name": "AGY fixture",
+            "kind": "agy",
+            "mode": "subscription",
+            "config_dir": str(config_root),
+        })
+        provider = AgyProvider(record)
+        cwd = Path(tempfile.mkdtemp(prefix="bc-test-agy-cwd-"))
+        run_dir, code = _run_prepared_agy(
+            provider,
+            cwd=cwd,
+            prompt="hello",
+            provider_run_config={
+                "mcp_servers": {
+                    "demo": {"command": "demo", "args": []},
                 },
-            }),
-            encoding="utf-8",
+                "skills": {"demo-skill": "Use demo skill.\n"},
+            },
         )
-        code = runner_main(run_dir)
         check(code == 0, "runner exits cleanly")
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
         check(complete["success"] is True, "runner marks success")
@@ -181,25 +303,20 @@ def test_model_fetch_and_runner() -> None:
         check(argv_lines == [
             "model=Gemini Test (High)",
             "conversation=",
-            f"add_dirs={run_dir};",
+            f"add_dirs={cwd};",
             "timeout=24h",
             "prompt=hello",
         ], "runner passes agy native flags before prompt")
 
-        run_dir_2 = Path(tempfile.mkdtemp(prefix="bc-test-agy-run-resume-"))
         conv_dir = fake_home / ".gemini" / "antigravity-cli" / "conversations"
         conv_dir.mkdir(parents=True, exist_ok=True)
         (conv_dir / f"{complete['session_id']}.db").touch()
-        (run_dir_2 / "input.json").write_text(
-            json.dumps({
-                "prompt": "again",
-                "cwd": str(run_dir_2),
-                "model": "Gemini Test (High)",
-                "session_id": complete["session_id"],
-            }),
-            encoding="utf-8",
+        run_dir_2, code = _run_prepared_agy(
+            provider,
+            cwd=cwd,
+            prompt="again",
+            session_id=complete["session_id"],
         )
-        code = runner_main(run_dir_2)
         check(code == 0, "resume runner exits cleanly")
         complete_2 = json.loads((run_dir_2 / "complete.json").read_text(encoding="utf-8"))
         check(complete_2["session_id"] == complete["session_id"], "runner resumes requested agy conversation")
@@ -209,26 +326,21 @@ def test_model_fetch_and_runner() -> None:
             "runner passes validated agy conversation id on resume",
         )
 
-        run_dir_3 = Path(tempfile.mkdtemp(prefix="bc-test-agy-run-bad-resume-"))
         valid_sid = "22222222-3333-4444-5555-666666666666"
         (conv_dir / f"{valid_sid}.db").touch()
         cache_dir = fake_home / ".gemini" / "antigravity-cli" / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / "last_conversations.json").write_text(
-            json.dumps({str(run_dir_3): valid_sid}),
-            encoding="utf-8",
-        )
-        (run_dir_3 / "input.json").write_text(
-            json.dumps({
-                "prompt": "bad resume",
-                "cwd": str(run_dir_3),
-                "model": "Gemini Test (High)",
-                "session_id": "99999999-9999-9999-9999-999999999999",
-            }),
+            json.dumps({str(cwd): valid_sid}),
             encoding="utf-8",
         )
         argv_before_bad = argv_log.read_text(encoding="utf-8")
-        code = runner_main(run_dir_3)
+        run_dir_3, code = _run_prepared_agy(
+            provider,
+            cwd=cwd,
+            prompt="bad resume",
+            session_id="99999999-9999-9999-9999-999999999999",
+        )
         check(code == 0, "bad stored id runner exits cleanly")
         complete_3 = json.loads((run_dir_3 / "complete.json").read_text(encoding="utf-8"))
         # Fail closed: an invalid stored id must NOT be "repaired" from the
@@ -252,17 +364,12 @@ def test_model_fetch_and_runner() -> None:
             "runner passes no cwd-cache/bad conversation id to the agy CLI",
         )
 
-        run_dir_4 = Path(tempfile.mkdtemp(prefix="bc-test-agy-run-auth-"))
-        (run_dir_4 / "input.json").write_text(
-            json.dumps({
-                "prompt": "auth fail",
-                "cwd": str(run_dir_4),
-                "model": "Gemini Test (High)",
-            }),
-            encoding="utf-8",
-        )
         os.environ["AGY_FAKE_AUTH_FAIL"] = "1"
-        code = runner_main(run_dir_4)
+        run_dir_4, code = _run_prepared_agy(
+            provider,
+            cwd=cwd,
+            prompt="auth fail",
+        )
         os.environ.pop("AGY_FAKE_AUTH_FAIL", None)
         check(code == 1, "auth prompt with exit 0 is classified as failure")
         complete_4 = json.loads((run_dir_4 / "complete.json").read_text(encoding="utf-8"))
@@ -288,6 +395,8 @@ def test_model_fetch_and_runner() -> None:
         os.environ.pop("AGY_FAKE_AUTH_FAIL", None)
         shutil.rmtree(bin_dir, ignore_errors=True)
         shutil.rmtree(fake_home, ignore_errors=True)
+        if cwd is not None:
+            shutil.rmtree(cwd, ignore_errors=True)
 
 
 def _write_agy_db(path: Path, rows: list[tuple[int, int, bytes]]) -> None:
@@ -564,7 +673,10 @@ def test_agy_run_home_overlay_carries_library_for_auth() -> None:
     scoped = _materialize_agy_run_home(
         run_dir,
         {"mcp_servers": {"x": {"command": "echo", "args": []}}},
-        cwd=str(real_home),
+        config_root=real_home / ".gemini" / "antigravity-cli",
+        settings={},
+        mcp_servers={"x": {"command": "echo", "args": []}},
+        skill_dirs={},
     )
     check(scoped is not None, "overlay is materialized when an mcp server is present")
     overlay = Path(scoped["HOME"])

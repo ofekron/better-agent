@@ -13,10 +13,12 @@ sys.path.insert(0, str(ROOT))
 
 from provider_runtime_capability_model import reject_secrets  # noqa: E402
 from provider_runtime_plan_source import (  # noqa: E402
+    hydrate_structural_provider_runtime_plan,
     selected_runtime_agent_sources,
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
 )
+from codex_execution_common import ExecutionContractError  # noqa: E402
 
 
 def _record(package: Path) -> dict:
@@ -203,6 +205,27 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             for runtime_patch in patches:
                 stack.enter_context(runtime_patch)
             prepared = structural_provider_runtime_plan(inputs, "claude")
+            hydrated = hydrate_structural_provider_runtime_plan(
+                inputs,
+                "claude",
+                expected=prepared,
+            )
+            explicit_server = next(
+                server
+                for server in hydrated["mcp_servers"]
+                if server["name"] == "explicit"
+            )
+            runtime_server = next(
+                server
+                for server in hydrated["mcp_servers"]
+                if server["name"] == "example-mcp"
+            )
+            assert explicit_server["config"]["explicit"]["env"]["API_TOKEN"] == (
+                "never-persist"
+            )
+            assert runtime_server["config"]["runtime"]["env"][
+                "BETTER_CLAUDE_INTERNAL_TOKEN"
+            ] == "never-persist"
             state["profile"]["generation"] = "mutated"
             state["store"] = (99, 99)
             state["settings_fp"] = (98, 98)
@@ -215,6 +238,16 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             inputs["resolved_harness_run_config"]["launcher_projection"][
                 "extension_setting_overlays"
             ]["example.extension"]["label"]["value"] = "mutated"
+            try:
+                hydrate_structural_provider_runtime_plan(
+                    inputs,
+                    "claude",
+                    expected=prepared,
+                )
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("runtime plan drift was hydrated")
 
         encoded = json.dumps(prepared, sort_keys=True)
         assert "never-persist" not in encoded

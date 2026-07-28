@@ -407,6 +407,7 @@ def build_better_agent_run_env(
     bare_config: bool,
     user_facing: bool,
     disabled_builtin_extensions: list[str] | None,
+    runtime_hydration: dict[str, object] | None = None,
 ) -> dict[str, str]:
     from operation_cli import install_launcher
     from sdk_pythonpath import sdk_pythonpath
@@ -424,7 +425,10 @@ def build_better_agent_run_env(
         from runtime_bootstrap import issue
 
         env.update(dual_env_many({
-            "BETTER_CLAUDE_RUNTIME_BOOTSTRAP": issue(str(internal_token or "")),
+            "BETTER_CLAUDE_RUNTIME_BOOTSTRAP": issue(
+                str(internal_token or ""),
+                runtime_hydration=runtime_hydration,
+            ),
         }))
     pythonpath = sdk_pythonpath(
         Path(__file__).resolve().parents[1], os.environ.get("PYTHONPATH", "")
@@ -875,9 +879,11 @@ class Provider(ABC):
     ):
         del start_arguments
         installed = False
+        owned = False
         try:
             artifact = execution.artifact
             self._assert_execution_provider(artifact)
+            owned = True
             hydration = config_store.hydrate_provider_execution(
                 artifact.provider_id,
                 expected_generation=artifact.provider_generation,
@@ -894,7 +900,8 @@ class Provider(ABC):
         finally:
             if installed:
                 del self._execution_record.value
-            self._release_execution_authority(execution)
+            if owned:
+                self._release_execution_authority(execution)
 
     def _assert_execution_provider(
         self,

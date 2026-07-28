@@ -122,6 +122,11 @@ def hydrate_runner_inputs(inputs: dict[str, Any], run_dir: Path) -> dict[str, An
     if not secret:
         raise RuntimeError("runner runtime bootstrap returned no secret")
     inputs["internal_token"] = secret
+    hydration = response.get("runtime_hydration")
+    if hydration is not None:
+        if type(hydration) is not dict:
+            raise RuntimeError("runner runtime hydration is invalid")
+        inputs["_runtime_hydration"] = hydration
     authority = _install_internal_token_authority(secret)
     host = _RunnerOperationHost(run_dir, inputs, authority)
     global _ACTIVE_HOST
