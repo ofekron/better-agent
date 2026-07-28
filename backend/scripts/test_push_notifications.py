@@ -185,14 +185,21 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
 
 def test_successful_turn_emits_configurable_response_push() -> bool:
     import asyncio
+    import threading
 
     import session_manager
 
     calls: list[tuple[str, str | None]] = []
+    send_started = threading.Event()
+    release_send = threading.Event()
     original = push_sender.send_turn_completed_push
 
-    def fake_send(session_id: str, *, message_id: str | None = None) -> None:
+    def fake_send(
+        session_id: str, *, message_id: str | None = None,
+    ) -> None:
         calls.append((session_id, message_id))
+        send_started.set()
+        release_send.wait()
 
     push_sender.send_turn_completed_push = fake_send
     bind_push_notifications()
@@ -203,24 +210,35 @@ def test_successful_turn_emits_configurable_response_push() -> bool:
         lambda sid: "msg-latest" if sid == "sid-complete" else None
     )
     try:
-        asyncio.run(bus.publish(BusEvent(
-            type="lifecycle.turn_complete",
-            root_id="sid-complete",
-            sid="sid-complete",
-            payload={"reason": "success"},
-            persist=False,
-        )))
-        asyncio.run(bus.publish(BusEvent(
-            type="lifecycle.turn_complete",
-            root_id="sid-error",
-            sid="sid-error",
-            payload={"reason": "error"},
-            persist=False,
-        )))
-        # Successful turn deep-links to the resolved latest assistant message;
-        # the error turn is skipped entirely.
-        return calls == [("sid-complete", "msg-latest")]
+        async def exercise() -> bool:
+            publish_task = asyncio.create_task(bus.publish(BusEvent(
+                type="lifecycle.turn_complete",
+                root_id="sid-complete",
+                sid="sid-complete",
+                payload={"reason": "success"},
+                persist=False,
+            )))
+            started = await asyncio.to_thread(send_started.wait, 1.0)
+            await asyncio.sleep(0)
+            completed_before_delivery = publish_task.done()
+            release_send.set()
+            await publish_task
+            await bus.publish(BusEvent(
+                type="lifecycle.turn_complete",
+                root_id="sid-error",
+                sid="sid-error",
+                payload={"reason": "error"},
+                persist=False,
+            ))
+            return (
+                started
+                and completed_before_delivery
+                and calls == [("sid-complete", "msg-latest")]
+            )
+
+        return asyncio.run(exercise())
     finally:
+        release_send.set()
         bus.unsubscribe("push_notification_turn_complete")
         session_manager.manager.latest_assistant_msg_id = original_lookup
         push_sender.send_turn_completed_push = original

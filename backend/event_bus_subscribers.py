@@ -19,6 +19,7 @@ they never run before persistence.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import threading
@@ -774,14 +775,21 @@ def bind_push_notifications() -> None:
 
         sid = event.sid
 
-        # Resolve the latest assistant message off the event-loop thread
-        # (latest_assistant_msg_id takes a per-root lock) so the push can
-        # deep-link to the finished response instead of the session root.
-        def _send() -> None:
-            message_id = session_manager.latest_assistant_msg_id(sid)
-            push_sender.send_turn_completed_push(sid, message_id=message_id)
-
-        await asyncio.to_thread(_send)
+        # Capture the completed response before the next queued turn can
+        # create another assistant message, then keep external delivery off
+        # the terminal lifecycle lane.
+        message_id = await asyncio.to_thread(
+            session_manager.latest_assistant_msg_id,
+            sid,
+        )
+        asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(
+                push_sender.send_turn_completed_push,
+                sid,
+                message_id=message_id,
+            ),
+        )
 
     bus.unsubscribe("push_notification_turn_complete")
     bus.subscribe(
