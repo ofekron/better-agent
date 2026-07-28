@@ -40,6 +40,7 @@ import extension_instructions
 import extension_mcp
 import native_mcp_grants
 import installation_profile
+from bundled_extensions import PUBLIC_EXTENSION_PATHS
 import harness_run_projection
 import dependency_plan
 
@@ -168,18 +169,7 @@ _OBSOLETE_EXTENSION_IDS = {
     "better-agent.marketplace": MARKETPLACE_EXTENSION_ID,
     "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
 }
-_PUBLIC_EXTENSION_PATHS = {
-    BUILTIN_ASK_EXTENSION_ID: "extensions/ask",
-    BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "extensions/session-bridge",
-    BUILTIN_SESSION_CONTROL_EXTENSION_ID: "extensions/session-control",
-    BUILTIN_COORDINATION_EXTENSION_ID: "extensions/coordination",
-    BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
-    BUILTIN_FILE_EDIT_EXTENSION_ID: "extensions/file-edit",
-    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
-    BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
-    BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "extensions/switch-control",
-    MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
-}
+_PUBLIC_EXTENSION_PATHS = PUBLIC_EXTENSION_PATHS
 _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "Session Bridge",
@@ -3658,12 +3648,10 @@ def _managed_extension_package_exists(extension_id: str) -> bool:
     extension_path = _PUBLIC_EXTENSION_PATHS.get(extension_id)
     if not extension_path:
         return False
-    roots: list[Path] = []
+    roots = [_repo_root()]
     configured = _required_marketplace_repo_root()
     if configured is not None:
-        roots.append(configured)
-    elif os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") != "1":
-        roots.append(_repo_root())
+        roots.insert(0, configured)
     return any((root / extension_path).exists() for root in roots)
 
 
@@ -3891,15 +3879,9 @@ def _required_artifact_update_needed(extension_id: str, record: dict[str, Any]) 
 
 
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
-    if not installation_profile.integrations_enabled():
-        return False
     changed = False
-    # Resolve bundled public extensions from the configured catalog checkout
-    # or this public repository.
-    default_repo_root = None if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1" else _repo_root()
+    default_repo_root = _repo_root()
     configured_repo_root = _required_marketplace_repo_root()
-    if configured_repo_root is None and default_repo_root is None:
-        return False
     deleted = set((data.get("deleted_extensions") or {}).keys())
     for extension_id, extension_path in _PUBLIC_EXTENSION_PATHS.items():
         if extension_id in deleted:
@@ -3907,8 +3889,6 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
         repo_root = configured_repo_root
         if repo_root is None or not (repo_root / extension_path).exists():
             repo_root = default_repo_root
-        if repo_root is None:
-            continue
         package_dir = (repo_root / extension_path).resolve()
         if not package_dir.is_relative_to(repo_root):
             raise ExtensionError("Public extension path escapes repository root")

@@ -25,7 +25,9 @@ _SDK = os.path.join(_REPO, "sdk")
 
 # Single source of truth for the app version (desktop/_version.py).
 sys.path.insert(0, _DESKTOP)
+sys.path.insert(0, _BACKEND)
 from _version import __version__ as _APP_VERSION  # noqa: E402
+from bundled_extensions import PUBLIC_EXTENSION_PATHS  # noqa: E402
 
 datas = [
     # The built frontend — served by the backend; resolved at runtime via
@@ -34,6 +36,10 @@ datas = [
     (os.path.join(_BACKEND, "prompts"), "prompts"),
     (os.path.join(_BACKEND, "provisioning", "prompts"), os.path.join("prompts", "provisioning")),
 ]
+datas.extend(
+    (os.path.join(_REPO, relative_path), relative_path)
+    for relative_path in PUBLIC_EXTENSION_PATHS.values()
+)
 _TUFUP_ROOT = os.path.join(_DESKTOP, "tufup_root.json")
 if os.path.exists(_TUFUP_ROOT):
     datas.append((_TUFUP_ROOT, "."))
