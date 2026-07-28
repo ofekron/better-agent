@@ -147,7 +147,7 @@ _STORAGE_IDENTITY = contextvars.ContextVar[Path | None](
     "session_storage_identity",
     default=None,
 )
-_STORAGE_IDENTITY_LEASE_LOCK = threading.Lock()
+_STORAGE_IDENTITY_LEASE_LOCK = threading.Condition(threading.Lock())
 _active_storage_identity: Path | None = None
 _active_storage_identity_leases = 0
 _ROUTINE_SESSIONS_DIR_NAME = "routine-sessions"
@@ -179,7 +179,11 @@ def _sessions_dir() -> Path:
 
 
 @contextmanager
-def _storage_identity_scope(storage_identity: Path) -> Iterator[Path]:
+def _storage_identity_scope(
+    storage_identity: Path,
+    *,
+    wait: bool = False,
+) -> Iterator[Path]:
     global _active_storage_identity, _active_storage_identity_leases
     resolved = Path(storage_identity)
     if not resolved.is_absolute():
@@ -194,17 +198,20 @@ def _storage_identity_scope(storage_identity: Path) -> Iterator[Path]:
     owns_lease = inherited is None
     if owns_lease:
         with _STORAGE_IDENTITY_LEASE_LOCK:
-            if (
+            while (
                 _active_storage_identity is not None
                 and _active_storage_identity != resolved
             ):
-                raise RuntimeError(
-                    "another session storage identity is already active"
-                )
+                if not wait:
+                    raise RuntimeError(
+                        "another session storage identity is already active"
+                    )
+                _STORAGE_IDENTITY_LEASE_LOCK.wait()
             _active_storage_identity = resolved
             _active_storage_identity_leases += 1
     token = _STORAGE_IDENTITY.set(resolved)
     try:
+        _sessions_dir()
         yield resolved
     finally:
         _STORAGE_IDENTITY.reset(token)
@@ -213,6 +220,7 @@ def _storage_identity_scope(storage_identity: Path) -> Iterator[Path]:
                 _active_storage_identity_leases -= 1
                 if _active_storage_identity_leases == 0:
                     _active_storage_identity = None
+                    _STORAGE_IDENTITY_LEASE_LOCK.notify_all()
 
 
 def _ensure_dir():
@@ -478,6 +486,17 @@ def register_root_writer_guard(
 ) -> None:
     global _root_writer_guard
     _root_writer_guard = fn
+
+
+class _StorageIdentityQueue(queue.Queue):
+    def join(self) -> None:
+        if _STORAGE_IDENTITY.get() is not None:
+            raise RuntimeError(
+                "cannot join deferred storage work inside a storage identity scope"
+            )
+        super().join()
+
+
 _index_sidecar_write_queue: queue.Queue[
     tuple[
         DirFingerprint,
@@ -493,8 +512,8 @@ _durability_writer_lock = threading.Lock()
 _root_change_owner: RootChangeOwner | None = None
 _root_change_owner_lock = threading.Lock()
 _summary_sidecar_write_queue: queue.Queue[
-    tuple[str, dict, int | None, FileSignature | None] | None
-] = queue.Queue(maxsize=256)
+    tuple[Path, str, dict, int | None, FileSignature | None] | None
+] = _StorageIdentityQueue(maxsize=256)
 _summary_sidecar_write_started = False
 _summary_sidecar_write_lock = threading.Lock()
 _opened_cache_lock = threading.Lock()
@@ -1370,6 +1389,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
 def _upsert_summary(
     root: dict,
     *,
+    storage_identity: Path | None = None,
     preserve_projection_fields: bool = False,
     root_mtime_ns: int | None = None,
     sync_sidecar: bool = False,
@@ -1377,6 +1397,8 @@ def _upsert_summary(
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    if storage_identity is None:
+        storage_identity = _sessions_dir().resolve()
     root_signature = _session_file_signature(_root_file_path(root["id"]))
     existing = None
     if preserve_projection_fields:
@@ -1431,6 +1453,7 @@ def _upsert_summary(
                 )
             else:
                 _schedule_summary_sidecar_write(
+                    storage_identity,
                     root["id"],
                     summary,
                     root_mtime_ns=root_mtime_ns,
@@ -1861,11 +1884,12 @@ def _summary_sidecar_writer_loop() -> None:
 
 
 def _process_summary_sidecar_batch(
-    first_item: tuple[str, dict, int | None, FileSignature | None],
+    first_item: tuple[Path, str, dict, int | None, FileSignature | None],
 ) -> bool:
     pending: dict[
-        str, tuple[str, dict, int | None, FileSignature | None]
-    ] = {first_item[0]: first_item}
+        tuple[Path, str],
+        tuple[Path, str, dict, int | None, FileSignature | None],
+    ] = {(first_item[0], first_item[1]): first_item}
     consumed = 1
     should_stop = False
     while True:
@@ -1877,19 +1901,26 @@ def _process_summary_sidecar_batch(
         if next_item is None:
             should_stop = True
             break
-        pending[next_item[0]] = next_item
+        pending[(next_item[0], next_item[1])] = next_item
     try:
-        for root_id, summary, root_mtime_ns, root_signature in pending.values():
-            if _summary_sidecar_write_item_stale(root_id, root_signature):
-                continue
+        for (
+            storage_identity,
+            root_id,
+            summary,
+            root_mtime_ns,
+            root_signature,
+        ) in pending.values():
             try:
-                with perf.timed("store.session.summary.sidecar_write"):
-                    _write_summary_file(
-                        root_id,
-                        summary,
-                        root_mtime_ns=root_mtime_ns,
-                        expected_root_signature=root_signature,
-                    )
+                with _storage_identity_scope(storage_identity, wait=True):
+                    if _summary_sidecar_write_item_stale(root_id, root_signature):
+                        continue
+                    with perf.timed("store.session.summary.sidecar_write"):
+                        _write_summary_file(
+                            root_id,
+                            summary,
+                            root_mtime_ns=root_mtime_ns,
+                            expected_root_signature=root_signature,
+                        )
             except Exception:
                 _logger.debug("summary sidecar write failed for %s", root_id, exc_info=True)
     finally:
@@ -1908,6 +1939,7 @@ def _summary_sidecar_write_item_stale(
 
 
 def _schedule_summary_sidecar_write(
+    storage_identity: Path,
     root_id: str,
     summary: dict,
     *,
@@ -1915,7 +1947,14 @@ def _schedule_summary_sidecar_write(
     root_signature: FileSignature | None = None,
 ) -> None:
     _ensure_summary_sidecar_writer()
-    item = (root_id, _copy_jsonish(summary), root_mtime_ns, root_signature)
+    identity = Path(storage_identity).resolve()
+    item = (
+        identity,
+        root_id,
+        _copy_jsonish(summary),
+        root_mtime_ns,
+        root_signature,
+    )
     try:
         _summary_sidecar_write_queue.put_nowait(item)
     except queue.Full:
@@ -5194,6 +5233,7 @@ def write_session_full(
     `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     global _index_fingerprint
+    storage_identity = _sessions_dir().resolve()
     if root.get("parent_session_id"):
         raise ValueError(
             "write_session_full received a fork dict; pass the root tree "
@@ -5263,6 +5303,7 @@ def write_session_full(
         with perf.timed("store.session.write_full.summary"):
             _upsert_summary(
                 root,
+                storage_identity=storage_identity,
                 preserve_projection_fields=preserve_projection_fields,
                 root_mtime_ns=file_signature[3] if file_signature is not None else None,
                 sync_sidecar=bool(root.get("forks")),

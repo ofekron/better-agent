@@ -15,7 +15,7 @@ import session_store  # noqa: E402
 
 class _InstrumentedLock:
     def __init__(self, scope_attempted: threading.Event, events: list[str]) -> None:
-        self._lock = threading.Lock()
+        self._condition = threading.Condition(threading.Lock())
         self._scope_attempted = scope_attempted
         self._events = events
 
@@ -24,14 +24,20 @@ class _InstrumentedLock:
         self._events.append(f"{name}:attempt")
         if name == "identity-scope":
             self._scope_attempted.set()
-        self._lock.acquire()
+        self._condition.acquire()
         self._events.append(f"{name}:acquired")
         return self
 
     def __exit__(self, _exc_type, _exc, _tb) -> None:
         name = threading.current_thread().name
         self._events.append(f"{name}:released")
-        self._lock.release()
+        self._condition.release()
+
+    def wait(self, timeout=None):
+        return self._condition.wait(timeout)
+
+    def notify_all(self) -> None:
+        self._condition.notify_all()
 
 
 def _assert_cache_transition_is_lease_atomic(
@@ -90,7 +96,7 @@ def _assert_cache_transition_is_lease_atomic(
         scope_thread.join(timeout=2.0)
         assert not dynamic_thread.is_alive()
         assert not scope_thread.is_alive()
-        assert not errors
+        assert not errors, errors
         assert events.index("reset:completed") < events.index("identity-scope:acquired")
     finally:
         release_reset.set()
