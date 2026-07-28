@@ -677,12 +677,13 @@ def _scan_frame(
     tag: str,
     *,
     cursor: str = "",
-    offset: int | None = None,
 ) -> dict[str, Any]:
-    frame: dict[str, Any] = {"path": path, "tag": tag, "cursor": cursor}
-    if offset is not None:
-        frame["offset"] = offset
-    return frame
+    # `cursor` is the sole resume key: the name of the last examined entry in
+    # this directory. On resume, entries with name <= cursor are skipped without
+    # touching the seen-set, so a directory mutating between passes (real file
+    # insert/delete shifts filesystem scandir order) cannot skip extant entries.
+    # A legacy persisted `offset` key is ignored — schema migrations are unsupported.
+    return {"path": path, "tag": tag, "cursor": cursor}
 
 
 def _scan_full_batch(
@@ -719,67 +720,65 @@ def _scan_full_batch(
         dir_path = Path(str(item.get("path") or ""))
         tag = str(item.get("tag") or "")
         cursor = str(item.get("cursor") or "")
-        offset_raw = item.get("offset")
-        has_offset = isinstance(offset_raw, int)
-        offset = int(offset_raw) if has_offset else 0
-        next_offset = offset
         budget_exhausted = False
         child_dirs: list[str] = []
         try:
             with os.scandir(dir_path) as entries:
-                entry_index = 0
-                for entry in entries:
-                    entry_index += 1
-                    if entry_index <= offset:
-                        continue
-                    if not has_offset and cursor and entry.name <= cursor:
-                        continue
-                    next_offset = entry_index
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            visited_entries += 1
-                            child_dirs.append(entry.path)
-                            if visited_entries >= entry_budget:
-                                budget_exhausted = True
-                                break
-                            continue
-                        path = Path(entry.path)
-                        visited_entries += 1
-                        if _full_scan_seen_contains(conn, path):
-                            if visited_entries >= entry_budget:
-                                budget_exhausted = True
-                                break
-                            continue
-                        pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
-                        if not entry.name.endswith(pattern_suffix):
-                            _full_scan_mark_seen(conn, path)
-                            if visited_entries >= entry_budget:
-                                budget_exhausted = True
-                                break
-                            continue
-                        if not is_native_transcript_path(path, tag):
-                            _full_scan_mark_seen(conn, path)
-                            if visited_entries >= entry_budget:
-                                budget_exhausted = True
-                                break
-                            continue
-                        st = path.stat()
-                    except OSError:
-                        if visited_entries >= entry_budget:
-                            budget_exhausted = True
-                            break
-                        continue
-                    _full_scan_mark_seen(conn, path)
-                    discovered.append((path, tag, st.st_mtime, st.st_size))
-                    if len(discovered) >= limit or visited_entries >= entry_budget:
-                        budget_exhausted = True
-                        break
+                # Sort by name so the cursor is a stable resume key regardless of
+                # filesystem scandir order, which is unspecified and shifts when
+                # the directory mutates between passes.
+                ordered = sorted(entries, key=lambda e: e.name)
         except OSError:
             continue
+        next_cursor = cursor
+        for entry in ordered:
+            # Entries at or behind the cursor were examined in a prior pass; skip
+            # them without a seen-set query (cheap, uncharged). Only entries with
+            # name > cursor cost a budget unit as they are examined.
+            if entry.name <= cursor:
+                continue
+            next_cursor = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    visited_entries += 1
+                    child_dirs.append(entry.path)
+                    if visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+                    continue
+                path = Path(entry.path)
+                visited_entries += 1
+                if _full_scan_seen_contains(conn, path):
+                    if visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+                    continue
+                pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
+                if not entry.name.endswith(pattern_suffix):
+                    _full_scan_mark_seen(conn, path)
+                    if visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+                    continue
+                if not is_native_transcript_path(path, tag):
+                    _full_scan_mark_seen(conn, path)
+                    if visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+                    continue
+                st = path.stat()
+            except OSError:
+                if visited_entries >= entry_budget:
+                    budget_exhausted = True
+                    break
+                continue
+            _full_scan_mark_seen(conn, path)
+            discovered.append((path, tag, st.st_mtime, st.st_size))
+            if len(discovered) >= limit or visited_entries >= entry_budget:
+                budget_exhausted = True
+                break
         if budget_exhausted:
-            stack.append(_scan_frame(
-                str(dir_path), tag, offset=next_offset,
-            ))
+            stack.append(_scan_frame(str(dir_path), tag, cursor=next_cursor))
         for child_path in child_dirs:
             stack.append(_scan_frame(child_path, tag))
 

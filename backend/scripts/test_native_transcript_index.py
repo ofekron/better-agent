@@ -810,7 +810,7 @@ def test_partial_full_scan_defers_repeat_projection() -> bool:
 
 
 def test_full_scan_completes_despite_live_touched_directory() -> bool:
-    """Directory metadata changes must not reset positional resume."""
+    """Directory metadata changes must not reset name-cursor resume."""
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -856,6 +856,10 @@ def test_full_scan_completes_despite_live_touched_directory() -> bool:
 
 
 def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
+    """Under the name-cursor resume contract, an entry inserted with a name that
+    sorts at or before the current cursor is DEFERRED to the next fresh full
+    sweep (cursor resets to "") rather than discovered mid-sweep. It must not be
+    silently dropped: the next fresh sweep rediscovers it."""
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -875,6 +879,16 @@ def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
         results = [first]
         while results[-1]["partial"] == 1 and len(results) < 20:
             results.append(idx.refresh_once())
+        deferred_rows = idx.search_rows(["insertcursorneedle"], limit=20)
+        deferred_paths = {Path(row["path"]).name for row in deferred_rows}
+        # A fresh full sweep reopens the directory with cursor="" and rediscovers
+        # the deferred early-sorting entry.
+        fresh = []
+        while True:
+            r = idx.refresh_once(full=True)
+            fresh.append(r)
+            if r["partial"] == 0 or len(fresh) >= 20:
+                break
         rows = idx.search_rows(["insertcursorneedle"], limit=20)
         final_state = idx.quick_state()
     finally:
@@ -888,11 +902,17 @@ def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
         first["partial"] == 1
         and results[-1]["partial"] == 0
         and final_state["covered"] is True
+        # deferred during the in-progress sweep (cursor already past it)
+        and "a-inserted-before-cursor.jsonl" not in deferred_paths
+        and len(deferred_rows) == 4
+        # rediscovered by the next fresh full sweep
+        and fresh[-1]["partial"] == 0
         and len(rows) == 5
         and "a-inserted-before-cursor.jsonl" in paths
     )
-    print(f"{OK if ok else FAIL} full scan indexes file inserted before resume cursor "
-          f"(passes={len(results)}, rows={len(rows)}, paths={sorted(paths)}, "
+    print(f"{OK if ok else FAIL} full scan defers then rediscovers file inserted before cursor "
+          f"(passes={len(results)}, deferred={len(deferred_rows)}, "
+          f"fresh_passes={len(fresh)}, rows={len(rows)}, paths={sorted(paths)}, "
           f"final={final_state})")
     return ok
 
@@ -1052,6 +1072,13 @@ def test_corrupt_duplicate_full_scan_state_restarts() -> bool:
 
 
 def test_full_scan_entry_budget_yields_without_candidates() -> bool:
+    """With a tiny entry budget, a directory full of ignored-suffix entries
+    exhausts the budget before any candidate is found: the frame is saved with
+    its name cursor, the discovery batch is empty, and per-pass examined work
+    (seen-set queries) stays within the budget. Sorting materializes the whole
+    directory each pass by design, so the bound is on EXAMINED entries, not on
+    scandir iteration. An entry inserted with a name sorting at or before the
+    cursor is deferred to the next fresh full sweep."""
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1063,40 +1090,39 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         (project_path / f"ignored-{i:02d}.txt").write_text("skip\n", encoding="utf-8")
     _write_claude(project_path / "needle.jsonl", ["entrybudgetneedle"])
 
-    original_entry_budget = idx._FULL_SCAN_ENTRY_BUDGET
-    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
-    original_scandir = idx.os.scandir
-    yielded_entries = {"count": 0}
-
-    class CountingScandir:
+    class GuardedConn:
         def __init__(self, inner):
             self.inner = inner
+            self.seen_queries = 0
 
-        def __enter__(self):
-            return self
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(str(sql).split()).lower()
+            if "from native_full_scan_seen" in normalized and "where path" in normalized:
+                self.seen_queries += 1
+            return self.inner.execute(sql, *args, **kwargs)
 
-        def __exit__(self, exc_type, exc, tb):
-            close = getattr(self.inner, "close", None)
-            if close:
-                close()
-            return False
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
 
-        def __iter__(self):
-            return self
+    def _run_pass_counted():
+        real_conn = idx._writer_connection()
+        guarded = GuardedConn(real_conn)
+        idx._writer_conn = guarded
+        try:
+            result = idx.refresh_once(full=True)
+        finally:
+            if isinstance(idx._writer_conn, GuardedConn):
+                idx._writer_conn = idx._writer_conn.inner
+        return result, guarded.seen_queries
 
-        def __next__(self):
-            yielded_entries["count"] += 1
-            return next(self.inner)
-
-    def counted_scandir(path):
-        return CountingScandir(original_scandir(path))
-
+    original_entry_budget = idx._FULL_SCAN_ENTRY_BUDGET
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
     idx._FULL_SCAN_ENTRY_BUDGET = 3
     idx._FULL_SCAN_DISCOVERY_BATCH = 128
-    idx.os.scandir = counted_scandir
+    per_pass_seen: list[int] = []
     try:
-        first = idx.refresh_once()
-        yielded_after_first = yielded_entries["count"]
+        first, first_seen = _run_pass_counted()
+        per_pass_seen.append(first_seen)
         stack_after_first = _full_scan_stack()
         batch_after_first = idx._readonly_connection().execute(
             "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_batch_size'"
@@ -1104,17 +1130,29 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         remaining_after_first = idx._readonly_connection().execute(
             "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_remaining'"
         ).fetchone()[0]
+        # Insert an entry that sorts before every ignored file → name <= cursor
+        # once the cursor has advanced past it, so it is deferred this sweep.
         _write_claude(project_path / "aaa-inserted.jsonl", ["entrybudgetinserted"])
         results = [first]
-        while results[-1]["partial"] == 1 and len(results) < 20:
-            results.append(idx.refresh_once())
+        while results[-1]["partial"] == 1 and len(results) < 30:
+            r, seen = _run_pass_counted()
+            per_pass_seen.append(seen)
+            results.append(r)
         rows = idx.search_rows(["entrybudgetneedle"], limit=10)
         inserted_rows = idx.search_rows(["entrybudgetinserted"], limit=10)
+        # A fresh full sweep (cursor resets to "") rediscovers the deferred entry.
+        fresh = []
+        while True:
+            r, seen = _run_pass_counted()
+            per_pass_seen.append(seen)
+            fresh.append(r)
+            if r["partial"] == 0 or len(fresh) >= 30:
+                break
+        inserted_after = idx.search_rows(["entrybudgetinserted"], limit=10)
         final_state = idx.quick_state()
     finally:
         idx._FULL_SCAN_ENTRY_BUDGET = original_entry_budget
         idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
-        idx.os.scandir = original_scandir
         shutil.rmtree(claude, ignore_errors=True)
         shutil.rmtree(codex, ignore_errors=True)
 
@@ -1122,18 +1160,194 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         first["partial"] == 1
         and batch_after_first == "0"
         and remaining_after_first == "1"
-        and yielded_after_first <= 4
         and stack_after_first
+        and max(per_pass_seen) <= original_entry_budget + 1
         and results[-1]["partial"] == 0
         and len(rows) == 1
-        and len(inserted_rows) == 1
+        and len(inserted_rows) == 0
+        and len(inserted_after) == 1
+        and fresh[-1]["partial"] == 0
         and final_state == {"schema_ok": True, "covered": True, "usable": True}
     )
     print(f"{OK if ok else FAIL} full scan entry budget yields without candidates "
           f"(first={first}, stack={stack_after_first}, batch={batch_after_first}, "
-          f"remaining={remaining_after_first}, yielded_first={yielded_after_first}, "
-          f"passes={len(results)}, rows={len(rows)}, inserted={len(inserted_rows)}, "
-          f"final={final_state})")
+          f"remaining={remaining_after_first}, per_pass_seen={per_pass_seen}, "
+          f"passes={len(results)}, rows={len(rows)}, inserted={len(inserted_after)}, "
+          f"fresh_passes={len(fresh)}, final={final_state})")
+    return ok
+
+
+def _install_order_scandir(sort_key, *, reverse=False):
+    """Replace idx.os.scandir with one that yields REAL DirEntry objects (so
+    is_dir/stat/.name/.path stay valid) in a fixed caller-chosen order. Real
+    os.scandir order is filesystem-dependent and not name-sorted; the positional
+    resume bug is order-dependent, so a fixed non-sorted order makes the test
+    deterministic and cross-platform. Returns the original scandir for restore."""
+    original = idx.os.scandir
+
+    class _Reordered:
+        def __init__(self, path):
+            self._inner = original(path)
+            self._ordered = sorted(self._inner, key=sort_key, reverse=reverse)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            close = getattr(self._inner, "close", None)
+            if close:
+                close()
+            return False
+
+        def __iter__(self):
+            return iter(self._ordered)
+
+    idx.os.scandir = _Reordered
+    return original
+
+
+def _seen_query_guarded_conn(inner):
+    class GuardedConn:
+        def __init__(self, inner):
+            self.inner = inner
+            self.seen_queries = 0
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(str(sql).split()).lower()
+            if "from native_full_scan_seen" in normalized and "where path" in normalized:
+                self.seen_queries += 1
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    return GuardedConn(inner)
+
+
+def test_full_scan_deletion_scrambled_order_finds_surviving_needles() -> bool:
+    """Regression for the positional-offset resume bug (c4632ec6a). With scandir
+    yielding a fixed non-sorted order, deleting a sibling that yields BEFORE
+    later needles shifts their positional index; the positional offset then skips
+    extant surviving needles forever. Name-cursor resume is immune: it sorts by
+    name and skips by name compare, so no surviving entry is dropped."""
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    live_dir = claude / encode_cwd("/scrambled-delete")
+    needles = [
+        "del-needle-a.jsonl", "del-needle-b.jsonl", "del-needle-c.jsonl",
+        "del-needle-d.jsonl", "del-needle-e.jsonl",
+    ]
+    for i, name in enumerate(needles):
+        _write_claude(live_dir / name, [f"delneedleword {i}"])
+    for f in ["del-fill-0.txt", "del-fill-1.txt", "del-fill-2.txt",
+              "del-fill-3.txt", "del-fill-4.txt"]:
+        (live_dir / f).write_text("skip\n", encoding="utf-8")
+
+    original_budget = idx._FULL_SCAN_ENTRY_BUDGET
+    # Descending name order: non-sorted, deterministic. "del-needle-e.jsonl"
+    # yields first, so deleting it shifts every later entry's positional index.
+    original_scandir = _install_order_scandir(lambda e: e.name, reverse=True)
+    idx._FULL_SCAN_ENTRY_BUDGET = 3
+    per_pass: list[int] = []
+    deleted = False
+
+    def _run_pass():
+        guarded = _seen_query_guarded_conn(idx._writer_connection())
+        idx._writer_conn = guarded
+        try:
+            return idx.refresh_once(full=True), guarded.seen_queries
+        finally:
+            if isinstance(idx._writer_conn, type(guarded)):
+                idx._writer_conn = idx._writer_conn.inner
+
+    try:
+        results = []
+        while True:
+            result, seen = _run_pass()
+            per_pass.append(seen)
+            results.append(result)
+            if not deleted and result["partial"] == 1:
+                (live_dir / "del-needle-e.jsonl").unlink()
+                deleted = True
+            if result["partial"] == 0 or len(results) >= 40:
+                break
+        rows = idx.search_rows(["delneedleword"], limit=20)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_SCAN_ENTRY_BUDGET = original_budget
+        idx.os.scandir = original_scandir
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    found = {Path(row["path"]).name for row in rows}
+    expected = set(needles) - {"del-needle-e.jsonl"}
+    ok = (
+        any(r["partial"] == 1 for r in results)
+        and results[-1]["partial"] == 0
+        and max(per_pass) <= original_budget + 1
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and found == expected
+    )
+    print(f"{OK if ok else FAIL} full scan finds surviving needles after deletion in scrambled order "
+          f"(passes={len(results)}, per_pass_seen={per_pass}, found={sorted(found)}, "
+          f"expected={sorted(expected)}, final={final_state})")
+    return ok
+
+
+def test_full_scan_scrambled_order_finds_insertion_after_cursor() -> bool:
+    """An entry inserted with a name that sorts AFTER the current cursor must be
+    discovered (never skipped) — that is the core correctness invariant of
+    name-cursor resume. Run under a non-sorted scandir order to also prove
+    convergence and full discovery are independent of filesystem order."""
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    live_dir = claude / encode_cwd("/scrambled-insert")
+    needles = [
+        "ins-needle-a.jsonl", "ins-needle-b.jsonl",
+        "ins-needle-c.jsonl", "ins-needle-d.jsonl",
+    ]
+    for i, name in enumerate(needles):
+        _write_claude(live_dir / name, [f"insneedleword {i}"])
+
+    original_budget = idx._FULL_SCAN_ENTRY_BUDGET
+    original_scandir = _install_order_scandir(lambda e: e.name, reverse=True)
+    idx._FULL_SCAN_ENTRY_BUDGET = 3
+    inserted = False
+
+    try:
+        first = idx.refresh_once(full=True)
+        results = [first]
+        while results[-1]["partial"] == 1 and len(results) < 40:
+            if not inserted:
+                # Sorts after every existing entry → name > cursor until reached.
+                _write_claude(live_dir / "ins-needle-zzz.jsonl", ["insneedleword zzz"])
+                inserted = True
+            results.append(idx.refresh_once(full=True))
+        rows = idx.search_rows(["insneedleword"], limit=20)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_SCAN_ENTRY_BUDGET = original_budget
+        idx.os.scandir = original_scandir
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    found = {Path(row["path"]).name for row in rows}
+    expected = set(needles) | {"ins-needle-zzz.jsonl"}
+    ok = (
+        first["partial"] == 1
+        and inserted
+        and results[-1]["partial"] == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and found == expected
+    )
+    print(f"{OK if ok else FAIL} full scan finds insertion after cursor in scrambled order "
+          f"(passes={len(results)}, found={sorted(found)}, final={final_state})")
     return ok
 
 
@@ -1199,8 +1413,8 @@ def test_partial_resume_does_not_scan_entire_queue() -> bool:
 def test_full_scan_seen_queries_bounded_on_mutated_resume() -> bool:
     """Regression: a directory mutated between passes must not re-query the
     SQLite seen-set for every already-seen entry each pass (O(N^2)). Each
-    examined entry costs one budget unit, and the positional offset persists
-    across the mutation so already-seen entries are skipped by index compare
+    examined entry costs one budget unit, and the name cursor persists across
+    the mutation so already-seen entries are skipped by cheap name compare
     and never reach the seen-query. Per-pass seen-query count must stay within
     the entry budget while the scan converges monotonically and still finds
     the needle."""
@@ -1860,6 +2074,8 @@ def main_run() -> int:
         test_incremental_full_scan_keeps_one_parent_continuation,
         test_corrupt_duplicate_full_scan_state_restarts,
         test_full_scan_entry_budget_yields_without_candidates,
+        test_full_scan_deletion_scrambled_order_finds_surviving_needles,
+        test_full_scan_scrambled_order_finds_insertion_after_cursor,
         test_full_scan_seen_queries_bounded_on_mutated_resume,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
