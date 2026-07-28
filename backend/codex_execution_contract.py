@@ -37,7 +37,7 @@ class CodexExecutionContract:
     provider_id: str
     provider_kind: str
     provider_generation: str
-    provider_record_version: int
+    provider_revision: int
     mode: str
     base_url: str
     profile: str
@@ -75,7 +75,7 @@ class CodexExecutionContract:
             "provider_id",
             "provider_kind",
             "provider_generation",
-            "provider_record_version",
+            "provider_revision",
             "mode",
             "base_url",
             "profile",
@@ -156,9 +156,9 @@ class CodexExecutionContract:
                     raw,
                     "provider_generation",
                 ),
-                provider_record_version=required_integer(
+                provider_revision=required_integer(
                     raw,
-                    "provider_record_version",
+                    "provider_revision",
                 ),
                 mode=required_string(raw, "mode"),
                 base_url=required_string(raw, "base_url"),
@@ -184,7 +184,7 @@ class CodexExecutionContract:
             or contract.provider_kind not in {"codex", "fugu"}
             or not contract.provider_id
             or not contract.provider_generation
-            or contract.provider_record_version < 0
+            or contract.provider_revision < 0
             or contract.credential_generation < 0
             or not SAFE_PROFILE_RE.fullmatch(contract.profile)
             or not SHA256_RE.fullmatch(supplied_fingerprint)
@@ -278,13 +278,14 @@ def build_codex_execution_contract(
     provider_id = str(provider.get("id") or "").strip()
     provider_kind = str(provider.get("kind") or "").strip()
     generation = str(provider.get("generation") or "").strip()
-    try:
-        record_version = int(provider.get("record_version"))
-    except (TypeError, ValueError) as exc:
-        raise ExecutionContractError("provider record version is invalid") from exc
+    provider_revision = provider.get("revision")
     if not provider_id or provider_kind not in {"codex", "fugu"} or not generation:
         raise ExecutionContractError("provider authority is incomplete")
-    if record_version < 0 or credential_generation < 0:
+    if (
+        type(provider_revision) is not int
+        or provider_revision < 0
+        or credential_generation < 0
+    ):
         raise ExecutionContractError("provider authority revision is invalid")
     cleaned_profile = str(profile or "")
     if not SAFE_PROFILE_RE.fullmatch(cleaned_profile):
@@ -321,7 +322,7 @@ def build_codex_execution_contract(
         provider_id=provider_id,
         provider_kind=provider_kind,
         provider_generation=generation,
-        provider_record_version=record_version,
+        provider_revision=provider_revision,
         mode=str(provider.get("mode") or "subscription"),
         base_url=_clean_base_url(provider.get("base_url")),
         profile=cleaned_profile,

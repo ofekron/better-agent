@@ -16,6 +16,17 @@ from codex_execution_common import (
 )
 
 
+def _stable_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    return (
+        stat_result.st_mode,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+        stat_result.st_dev,
+        stat_result.st_ino,
+    )
+
+
 @dataclass(frozen=True)
 class FileIdentity:
     requested_path: str
@@ -45,7 +56,7 @@ class FileIdentity:
                     raise ExecutionContractError("authority file is unavailable")
                 digest = sha256_fd(fd)
                 stat_after = os.fstat(fd)
-                if stat_before != stat_after:
+                if _stable_identity(stat_before) != _stable_identity(stat_after):
                     raise ExecutionContractError(
                         "authority file changed during identity capture",
                     )

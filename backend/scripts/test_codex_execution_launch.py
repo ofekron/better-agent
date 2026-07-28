@@ -13,6 +13,7 @@ from codex_execution import (  # noqa: E402
     ExecutionContractError,
     resolve_codex_launch_chain,
 )
+from codex_execution_identity import FileIdentity  # noqa: E402
 from scripts.codex_execution_test_support import write_executable  # noqa: E402
 
 
@@ -179,6 +180,20 @@ def test_open_attested_components_pins_exact_bytes() -> None:
         assert not chain.attest_metadata()
 
 
+def test_identity_capture_ignores_access_time_updates() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        executable = Path(raw) / "codex"
+        write_executable(executable, b"native")
+        current = executable.stat()
+        os.utime(executable, ns=(0, current.st_mtime_ns))
+        before = executable.stat()
+
+        identity = FileIdentity.capture(executable)
+
+        assert identity.sha256
+        assert executable.stat().st_atime_ns != before.st_atime_ns
+
+
 LAUNCH_TESTS = (
     test_native_symlink_chain_is_attested_and_retarget_fails,
     test_same_size_same_mtime_replacement_fails_strong_identity,
@@ -187,6 +202,7 @@ LAUNCH_TESTS = (
     test_x64_vendor_package_suffix_is_resolved,
     test_ambiguous_vendor_targets_fail_closed,
     test_open_attested_components_pins_exact_bytes,
+    test_identity_capture_ignores_access_time_updates,
 )
 
 

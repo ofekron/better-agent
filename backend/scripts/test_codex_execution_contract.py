@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -153,7 +154,7 @@ def test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint() -> 
         ).to_dict()
         mutations = []
         boolean_revision = json.loads(json.dumps(encoded))
-        boolean_revision["provider_record_version"] = True
+        boolean_revision["provider_revision"] = True
         mutations.append(boolean_revision)
         string_args = json.loads(json.dumps(encoded))
         string_args["catalog_args"] = "abc"
@@ -249,6 +250,42 @@ def test_fingerprint_matches_canonical_payload() -> None:
         assert contract.fingerprint == expected
 
 
+def test_builder_accepts_config_store_provider_authority() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        state_home = root / "state"
+        config_dir = root / "config"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text("", encoding="utf-8")
+        executable = root / "codex"
+        write_executable(executable, b"native")
+        previous_home = os.environ.get("BETTER_AGENT_HOME")
+        os.environ["BETTER_AGENT_HOME"] = str(state_home)
+        try:
+            import config_store
+
+            created = config_store.add_provider({
+                "name": "Contract test",
+                "kind": "codex",
+                "mode": "subscription",
+                "config_dir": str(config_dir),
+            })
+            record = config_store.get_provider(created["id"])
+            assert record is not None
+            contract = build_codex_execution_contract(
+                record,
+                launcher_path=str(executable),
+            )
+        finally:
+            if previous_home is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous_home
+
+        assert contract.provider_generation == record["generation"]
+        assert contract.provider_revision == record["revision"]
+
+
 CONTRACT_TESTS = (
     test_facade_exports_stable_execution_api,
     test_contract_is_deterministic_secret_free_and_config_bound,
@@ -257,6 +294,7 @@ CONTRACT_TESTS = (
     test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint,
     test_deserialization_reconstructs_exact_shebang_arguments,
     test_fingerprint_matches_canonical_payload,
+    test_builder_accepts_config_store_provider_authority,
 )
 
 
