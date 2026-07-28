@@ -1377,6 +1377,48 @@ class TurnManager:
                 session_manager.recompute_state(sid)
         return copy.deepcopy(self._run_state)
 
+    async def reconcile_lifecycle_projection(self) -> None:
+        for session_id, requirements in (
+            self.lifecycle.reconciliation_requirements().items()
+        ):
+            queued_message_ids: set[str] = set()
+            completed_message_ids: set[str] = set()
+            if requirements["prompt_message_ids"]:
+                session = await asyncio.to_thread(
+                    session_manager.get_lite,
+                    session_id,
+                )
+                queued_message_ids = {
+                    str(prompt.get("lifecycle_msg_id"))
+                    for prompt in (session or {}).get("queued_prompts") or []
+                    if prompt.get("lifecycle_msg_id")
+                }
+                completed_message_ids = {
+                    str(message_id)
+                    for message_id in (
+                        (session or {}).get("user_lifecycle_msg_ids") or []
+                    )
+                    if message_id
+                }
+            live_run_ids: set[str] = set()
+            if requirements["needs_live_runs"]:
+                live_run_ids.update(self.active_run_ids.get(session_id) or ())
+                live_run_ids.update(
+                    str(run.get("run_id"))
+                    for run in self._run_state.get(session_id) or []
+                    if run.get("run_id")
+                    and (
+                        run.get("pid") is None
+                        or _pid_alive(run.get("pid"))
+                    )
+                )
+            await self.lifecycle.reconcile(
+                session_id,
+                live_run_ids=live_run_ids,
+                queued_message_ids=queued_message_ids,
+                completed_message_ids=completed_message_ids,
+            )
+
     async def emit_run_state(self, app_session_id: str) -> None:
         snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
         if logger.isEnabledFor(logging.DEBUG):

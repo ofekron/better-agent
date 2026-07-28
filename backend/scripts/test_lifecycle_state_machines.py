@@ -41,7 +41,7 @@ def _execution():
 async def test_fact_driven_hierarchy_and_pre_spawn_cancel() -> None:
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
-    tree.bind()
+    await tree.bind()
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
 
@@ -85,7 +85,7 @@ async def test_same_facts_converge_to_same_tree() -> None:
     async def project() -> tuple[str, str]:
         event_bus = EventBus()
         tree = LifecycleStateTree(event_bus)
-        tree.bind()
+        await tree.bind()
         for event_type in (
             "user_message_queued",
             "user_message_sent",
@@ -120,7 +120,7 @@ async def test_same_facts_converge_to_same_tree() -> None:
 async def test_bus_facts_are_serializable_and_tree_rebinds_after_close() -> None:
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
-    tree.bind()
+    await tree.bind()
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
     payload = {"turn_run_id": "turn-run", "execution_handle": handle_id}
@@ -140,15 +140,15 @@ async def test_bus_facts_are_serializable_and_tree_rebinds_after_close() -> None
         payload={},
     )
     assert handle_id not in tree._execution_handles
-    tree.close()
-    tree.bind()
-    tree.close()
+    await tree.close()
+    await tree.bind()
+    await tree.close()
 
 
 async def test_deferred_commit_to_spawn_cancel_uses_real_facts() -> None:
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
-    tree.bind()
+    await tree.bind()
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
     await tree.publish(
@@ -195,7 +195,7 @@ async def test_deferred_commit_to_spawn_cancel_uses_real_facts() -> None:
 async def test_parent_terminal_and_close_cancel_pending_children() -> None:
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
-    tree.bind()
+    await tree.bind()
     first = _execution()
     first_handle = tree.register_execution_handle(first)
     await tree.publish(
@@ -224,8 +224,177 @@ async def test_parent_terminal_and_close_cancel_pending_children() -> None:
         run_id="provider-run-2",
         payload={"turn_run_id": "turn-run-2", "execution_handle": second_handle},
     )
-    tree.close()
+    await tree.close()
     assert second.wait_for_admission() is False
+
+
+async def test_steer_machine_stays_under_turn_and_fallback_transfers_owner() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id="session",
+        session_id="session",
+        payload={},
+    )
+    for event_type in (
+        "lifecycle.steer_requested",
+        "lifecycle.steer_accepted",
+        "lifecycle.steer_persisted",
+    ):
+        await tree.publish(
+            event_type,
+            root_id="session",
+            session_id="session",
+            run_id="provider-run",
+            message_id="steer-1",
+            payload={},
+        )
+    session = tree.session("session")
+    assert session.turn.steers["steer-1"].state == "persisted"
+    assert session.turn.steers["steer-1"].provider_run_id == "provider-run"
+    assert "steer-1" not in session.prompts
+
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="session",
+        session_id="session",
+        run_id="provider-run",
+        message_id="steer-2",
+        payload={},
+    )
+    await tree.publish(
+        "lifecycle.steer_failed",
+        root_id="session",
+        session_id="session",
+        run_id="provider-run",
+        message_id="steer-2",
+        payload={"reason": "runner_not_ready"},
+    )
+    assert session.turn.steers["steer-2"].failure_reason == "runner_not_ready"
+    await tree.publish(
+        "lifecycle.steer_fallback_queued",
+        root_id="session",
+        session_id="session",
+        message_id="steer-2",
+        payload={"reason": "steer_rejected"},
+    )
+    assert "steer-2" not in session.turn.steers
+    assert session.prompts["steer-2"].state == "queued"
+
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="session",
+        session_id="session",
+        payload={},
+    )
+    assert session.turn.steers == {}
+
+
+async def test_persisted_projection_reloads_and_reconciles_from_reality() -> None:
+    first_bus = EventBus()
+    first = LifecycleStateTree(first_bus)
+    await first.bind()
+    await first.publish(
+        "lifecycle.turn_start",
+        root_id="restart-session",
+        session_id="restart-session",
+        payload={},
+    )
+    await first.publish(
+        "lifecycle.steer_requested",
+        root_id="restart-session",
+        session_id="restart-session",
+        run_id="gone-run",
+        message_id="gone-steer",
+        payload={},
+    )
+    await first.publish(
+        "user_message_queued",
+        root_id="restart-session",
+        session_id="restart-session",
+        message_id="persisted-prompt",
+        payload={},
+    )
+    await first.flush()
+    await first.close()
+
+    second_bus = EventBus()
+    second = LifecycleStateTree(second_bus)
+    await second.bind()
+    restored = second.session("restart-session")
+    assert restored.turn.state == "running"
+    assert restored.turn.steers["gone-steer"].provider_run_id == "gone-run"
+    assert restored.prompts["persisted-prompt"].state == "queued"
+    requirements = second.reconciliation_requirements()
+    assert requirements.get("restart-session") == {
+        "prompt_message_ids": {"persisted-prompt"},
+        "needs_live_runs": True,
+    }, requirements
+
+    await second.reconcile(
+        "restart-session",
+        live_run_ids=set(),
+        queued_message_ids=set(),
+        completed_message_ids={"persisted-prompt"},
+    )
+    reconciled = second.session("restart-session")
+    assert reconciled.turn.state == "idle"
+    assert reconciled.turn.steers == {}
+    assert reconciled.prompts == {}
+    await second.close()
+
+
+async def test_reconcile_queries_and_repairs_only_state_declared_evidence() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    await tree.publish(
+        "user_message_queued",
+        root_id="queued-only",
+        session_id="queued-only",
+        message_id="missing-prompt",
+        payload={},
+    )
+    execution = _execution()
+    handle_id = tree.register_execution_handle(execution)
+    await tree.publish(
+        "lifecycle.admission_registered",
+        root_id="admission-only",
+        session_id="admission-only",
+        run_id="missing-run",
+        payload={
+            "turn_run_id": "turn-run",
+            "execution_handle": handle_id,
+        },
+    )
+
+    requirements = tree.reconciliation_requirements()
+    assert requirements["queued-only"] == {
+        "prompt_message_ids": {"missing-prompt"},
+        "needs_live_runs": False,
+    }
+    assert requirements["admission-only"] == {
+        "prompt_message_ids": set(),
+        "needs_live_runs": True,
+    }
+
+    await tree.reconcile(
+        "queued-only",
+        live_run_ids=set(),
+        queued_message_ids=set(),
+        completed_message_ids=set(),
+    )
+    await tree.reconcile(
+        "admission-only",
+        live_run_ids=set(),
+        queued_message_ids=set(),
+        completed_message_ids=set(),
+    )
+    assert tree.session("queued-only").prompts == {}
+    assert tree.session("admission-only").turn.admissions == {}
+    await tree.close()
 
 
 def main() -> None:
@@ -234,6 +403,9 @@ def main() -> None:
     asyncio.run(test_bus_facts_are_serializable_and_tree_rebinds_after_close())
     asyncio.run(test_deferred_commit_to_spawn_cancel_uses_real_facts())
     asyncio.run(test_parent_terminal_and_close_cancel_pending_children())
+    asyncio.run(test_steer_machine_stays_under_turn_and_fallback_transfers_owner())
+    asyncio.run(test_persisted_projection_reloads_and_reconciles_from_reality())
+    asyncio.run(test_reconcile_queries_and_repairs_only_state_declared_evidence())
     print("PASS lifecycle state machines")
 
 

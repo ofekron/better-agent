@@ -76,8 +76,17 @@ class _TurnManager:
     def __init__(self, save_callback=None) -> None:
         self.active_run_ids = {"sid": ["run-1"]}
         self._turn_save_callbacks = {}
+        self.lifecycle = _Lifecycle()
         if save_callback is not None:
             self._turn_save_callbacks["sid"] = save_callback
+
+
+class _Lifecycle:
+    def __init__(self) -> None:
+        self.facts: list[tuple[str, dict]] = []
+
+    async def publish(self, event_type: str, **kwargs) -> None:
+        self.facts.append((event_type, kwargs))
 
 
 class _Provider:
@@ -161,6 +170,14 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
             "lifecycle_msg_id": "life-1",
         },
     })]
+    assert [
+        event_type
+        for event_type, _payload in coord.turn_manager.lifecycle.facts
+    ] == [
+        "lifecycle.steer_requested",
+        "lifecycle.steer_accepted",
+        "lifecycle.steer_persisted",
+    ]
 
 
 async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:

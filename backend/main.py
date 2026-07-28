@@ -13036,6 +13036,7 @@ async def _recover_in_flight_task() -> None:
         # alive run must be registered before rehydrated prompts can start.
         startup_recovery_gate.mark_recovery_done()
         gate_open = True
+        await coordinator.turn_manager.reconcile_lifecycle_projection()
         for sid in sorted(rehydrated_session_ids):
             await coordinator.start_session_processor_async(sid)
         if recovered:
@@ -14002,7 +14003,7 @@ async def on_startup():
             priority=80,
             name="requirement_tags_ws",
         )
-        coordinator.turn_manager.lifecycle.bind()
+        await coordinator.turn_manager.lifecycle.bind()
     except Exception:
         logger.exception("event_bus subscriber registration failed")
 
@@ -14500,7 +14501,7 @@ async def on_shutdown():
     from event_bus_subscribers import unbind_session_ws_broadcaster
     unbind_session_ws_broadcaster()
     try:
-        coordinator.turn_manager.lifecycle.close()
+        await coordinator.turn_manager.lifecycle.close()
     except Exception:
         logger.exception("lifecycle state tree shutdown failed")
     ui_selection_projection.unbind()
@@ -20469,6 +20470,20 @@ async def websocket_chat(websocket: WebSocket):
                             coordinator._forget_active_prompt_item(_steer_item)
                     if _steered:
                         continue
+                    root_id = (
+                        await asyncio.to_thread(
+                            session_manager._root_id_for,
+                            app_session_id,
+                        )
+                        or app_session_id
+                    )
+                    await coordinator.turn_manager.lifecycle.publish(
+                        "lifecycle.steer_fallback_queued",
+                        root_id=root_id,
+                        session_id=app_session_id,
+                        message_id=lifecycle_msg_id,
+                        payload={"reason": "steer_rejected"},
+                    )
                     send_mode = _fallback_ws_send_mode_after_failed_steer(
                         send_mode,
                     )

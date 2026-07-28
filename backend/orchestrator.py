@@ -1227,6 +1227,33 @@ class Coordinator:
         # the next prompt), so the live run is still owned by the
         # previously-active provider instance.
         run_ids = list(self.turn_manager.active_run_ids.get(app_session_id, []))
+        lifecycle_run_id = run_ids[0] if len(run_ids) == 1 else None
+        root_id = (
+            await asyncio.to_thread(
+                session_manager._root_id_for,
+                app_session_id,
+            )
+            or app_session_id
+        )
+
+        async def publish_steer_fact(
+            event_type: str,
+            *,
+            reason: Optional[str] = None,
+        ) -> None:
+            payload = {"client_id": client_id}
+            if reason is not None:
+                payload["reason"] = reason
+            await self.turn_manager.lifecycle.publish(
+                event_type,
+                root_id=root_id,
+                session_id=app_session_id,
+                run_id=lifecycle_run_id,
+                message_id=lifecycle_msg_id,
+                payload=payload,
+            )
+
+        await publish_steer_fact("lifecycle.steer_requested")
         candidates: list[tuple[object, str]] = []
         seen_runs: set[str] = set()
 
@@ -1249,10 +1276,19 @@ class Coordinator:
 
         save_callback = self.turn_manager._turn_save_callbacks.get(app_session_id)
         if save_callback is None:
+            await publish_steer_fact(
+                "lifecycle.steer_failed",
+                reason="turn_not_writable",
+            )
             return False
         if len(candidates) != 1:
+            await publish_steer_fact(
+                "lifecycle.steer_failed",
+                reason="unsupported_or_ambiguous_runner",
+            )
             return False
         provider, run_id = candidates[0]
+        lifecycle_run_id = run_id
         current_assistant_msgs = getattr(
             self.turn_manager, "current_assistant_msgs", {},
         )
@@ -1261,6 +1297,7 @@ class Coordinator:
             client_id=client_id,
             lifecycle_msg_id=lifecycle_msg_id,
         ):
+            await publish_steer_fact("lifecycle.steer_persisted")
             await self.dispatch_raw(app_session_id, {
                 "type": "steer_prompt_persisted",
                 "data": {
@@ -1275,8 +1312,13 @@ class Coordinator:
             if provider.steer_run(run_id, prompt, images):
                 break
             if _time.monotonic() >= deadline:
+                await publish_steer_fact(
+                    "lifecycle.steer_failed",
+                    reason="runner_not_ready",
+                )
                 return False
             await asyncio.sleep(_STEER_READY_RETRY_INTERVAL_SECONDS)
+        await publish_steer_fact("lifecycle.steer_accepted")
         event_data = {
             "uuid": str(uuid.uuid4()),
             "prompt": display_prompt or prompt,
@@ -1294,6 +1336,7 @@ class Coordinator:
             "type": "steer_prompt",
             "data": event_data,
         })
+        await publish_steer_fact("lifecycle.steer_persisted")
         await self.dispatch_raw(app_session_id, {
             "type": "steer_prompt_persisted",
             "data": {
