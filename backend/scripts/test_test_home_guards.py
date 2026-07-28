@@ -33,6 +33,17 @@ def _check(cond: bool, msg: str) -> bool:
     return cond
 
 
+def _seed_provider() -> dict:
+    import config_store
+
+    return config_store.add_provider({
+        "name": "Home guard provider",
+        "kind": "claude",
+        "mode": "subscription",
+        "default_model": "model",
+    })
+
+
 def main() -> int:
     import shutil
 
@@ -121,13 +132,14 @@ def main() -> int:
     from session_manager import manager as session_manager
 
     first_home = paths.ba_home()
+    first_provider = _seed_provider()
     first = session_manager.create(
         id="home-switch-first",
         name="first",
         cwd="/repo",
         orchestration_mode="native",
         model="model",
-        provider_id="provider",
+        provider_id=first_provider["id"],
     )
     ok &= _check(
         (first_home / "sessions" / f"{first['id']}.json").exists(),
@@ -135,6 +147,7 @@ def main() -> int:
     )
     _test_home._ORIG_RMTREE(first_home)
     second_home = Path(_test_home.isolate("bc-test-home-switch-"))
+    second_provider = _seed_provider()
     ok &= _check(
         session_store.get_session(first["id"]) is None,
         "session_store does not see old-home session after test-home switch",
@@ -149,7 +162,7 @@ def main() -> int:
         cwd="/repo",
         orchestration_mode="native",
         model="model",
-        provider_id="provider",
+        provider_id=second_provider["id"],
     )
     ok &= _check(
         (second_home / "sessions" / f"{second['id']}.json").exists(),
