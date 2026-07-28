@@ -81,4 +81,22 @@ describe("sidebar never scrolls horizontally", () => {
     const between = app.slice(clipIndex, ghostIndex);
     expect(between).not.toContain("</div>");
   });
+
+  it("keeps extension page icons visible when secondary actions overflow", () => {
+    const extensionPagesIndex = app.indexOf("const extensionPages =");
+    const headerActionsIndex = app.indexOf('className="header-actions"');
+    const secondaryIndex = app.indexOf("{!headerOverflow && secondary}", headerActionsIndex);
+    const overflowWrapperIndex = app.indexOf("header-overflow-wrapper", headerActionsIndex);
+    const visibleExtensionPagesIndex = app.indexOf("{extensionPages}", headerActionsIndex);
+    const secondaryDeclaration = app.slice(
+      app.indexOf("const secondary ="),
+      extensionPagesIndex,
+    );
+
+    expect(extensionPagesIndex).toBeGreaterThan(-1);
+    expect(secondaryDeclaration).not.toContain("ExtensionPageIcons");
+    expect(visibleExtensionPagesIndex).toBeGreaterThan(headerActionsIndex);
+    expect(visibleExtensionPagesIndex).toBeLessThan(secondaryIndex);
+    expect(visibleExtensionPagesIndex).toBeLessThan(overflowWrapperIndex);
+  });
 });
