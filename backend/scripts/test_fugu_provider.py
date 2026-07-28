@@ -17,7 +17,7 @@ from provider import ProviderCredentialError, _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_fugu import FUGU_MODELS, FuguProvider, fetch_fugu_models  # noqa: E402
 from provider_runtime import _preserved_env_keys  # noqa: E402
-from runner_codex import _build_app_server_argv, _resolve_codex_cli  # noqa: E402
+from runner_codex import _build_app_server_argv  # noqa: E402
 
 
 def check(cond: bool, msg: str) -> None:
@@ -108,7 +108,7 @@ def test_fugu_disables_image_generation_tool() -> None:
     # type (only `function`/`custom` allowed). Codex enables that feature by
     # default, so Fugu runs must turn it off via a config override.
     provider = FuguProvider({"id": "fugu-test", "kind": "fugu"})
-    for model in ("fugu", "fugu-ultra", None, "bogus"):
+    for model in ("fugu", "fugu-ultra"):
         overrides = provider.codex_config_overrides(model=model)
         check("features.image_generation=false" in overrides,
               f"fugu overrides disable image_generation for model={model!r}")
@@ -116,6 +116,13 @@ def test_fugu_disables_image_generation_tool() -> None:
               f"fugu overrides disable shell snapshots for model={model!r}")
         check("shell_environment_policy.exclude=[\"SAKANA_API_KEY\"]" in overrides,
               f"fugu excludes its API key from spawned commands for model={model!r}")
+    for model in (None, "bogus"):
+        try:
+            provider.codex_config_overrides(model=model)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid Fugu model must fail closed")
     # Global flags still precede the subcommand for generic profile users.
     check(_build_app_server_argv("codex", "other") == ["codex", "-p", "other", "app-server"],
           "arbitrary profile is forwarded")
@@ -177,24 +184,6 @@ def test_fetch_uses_codex_with_sakana_overrides() -> None:
         shutil.rmtree(bin_dir, ignore_errors=True)
 
 
-def test_codex_binary_override_mechanism() -> None:
-    # The codex_binary override still works generically (independent of fugu),
-    # and defaults to plain `codex`.
-    bin_dir = Path(tempfile.mkdtemp(prefix="bc-test-fugu-bin2-"))
-    old_path = os.environ.get("PATH", "")
-    try:
-        _make_fake_codex(bin_dir)
-        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
-        resolved = _resolve_codex_cli({"codex_binary": "codex"})
-        check(resolved is not None and resolved.endswith("codex"), "runner honors codex_binary override")
-        missing = _resolve_codex_cli({"codex_binary": "definitely-not-real-xyz"})
-        check(missing is None, "runner returns None when the named binary is absent")
-        check(_resolve_codex_cli() == _resolve_codex_cli({}), "default resolution is stable without an override")
-    finally:
-        os.environ["PATH"] = old_path
-        shutil.rmtree(bin_dir, ignore_errors=True)
-
-
 def test_fugu_not_auto_installable() -> None:
     # The fugu installer is a `git clone HEAD | bash` bootstrap that is not
     # hash-pinnable, so it MUST NOT be wired into the setup wizard's
@@ -230,7 +219,6 @@ def main() -> int:
         test_fugu_runner_uses_only_broker_authoritative_key,
         test_fugu_runner_rejects_non_authoritative_key,
         test_fetch_uses_codex_with_sakana_overrides,
-        test_codex_binary_override_mechanism,
         test_fugu_not_auto_installable,
         test_fugu_models_fallback_without_binary,
     ]

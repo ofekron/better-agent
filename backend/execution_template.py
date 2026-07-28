@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 
-EXECUTION_SCHEMA = 1
+EXECUTION_SCHEMA = 2
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|authorization|credential|password|secret|token)($|_)",
@@ -173,6 +173,48 @@ def _json_object(encoded: str) -> dict[str, Any]:
     return value
 
 
+def _freeze_runtime_policy(value: Mapping[str, Any] | None) -> str:
+    policy = dict(value or {})
+    _validate_json_tree(policy, field_name="execution runtime policy")
+    _reject_embedded_secrets(policy, "execution runtime policy")
+    return _canonical_json(policy)
+
+
+def _freeze_provider_contract(
+    provider: Mapping[str, Any],
+    value: Mapping[str, Any] | None,
+) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {"type", "contract"}:
+        raise ExecutionAuthorityError("invalid provider execution contract")
+    if value["type"] != "codex" or type(value["contract"]) is not dict:
+        raise ExecutionAuthorityError("unsupported provider execution contract")
+    from codex_execution_contract import CodexExecutionContract
+
+    contract = CodexExecutionContract.from_dict(value["contract"])
+    expected = (
+        provider.get("id"),
+        provider.get("kind"),
+        provider.get("generation"),
+        provider.get("revision"),
+    )
+    actual = (
+        contract.provider_id,
+        contract.provider_kind,
+        contract.provider_generation,
+        contract.provider_revision,
+    )
+    if actual != expected:
+        raise ExecutionAuthorityError(
+            "provider execution contract authority mismatch",
+        )
+    return _canonical_json({
+        "type": "codex",
+        "contract": contract.to_dict(),
+    })
+
+
 def _normalize_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
     if type(arguments) is not dict:
         raise ValueError("execution arguments must be an object")
@@ -319,6 +361,8 @@ class ExecutionArtifact:
     provider_revision: int
     routing_session_id: str
     template: ExecutionTemplate
+    _runtime_policy_json: str = field(repr=False)
+    _provider_contract_json: str | None = field(repr=False)
 
     @classmethod
     def create(
@@ -327,6 +371,8 @@ class ExecutionArtifact:
         template: ExecutionTemplate,
         *,
         routing_session_id: str | None = None,
+        runtime_policy: Mapping[str, Any] | None = None,
+        provider_contract: Mapping[str, Any] | None = None,
     ) -> ExecutionArtifact:
         provider_id = provider.get("id")
         provider_kind = provider.get("kind")
@@ -362,6 +408,11 @@ class ExecutionArtifact:
             provider_revision=revision,
             routing_session_id=route,
             template=template,
+            _runtime_policy_json=_freeze_runtime_policy(runtime_policy),
+            _provider_contract_json=_freeze_provider_contract(
+                provider,
+                provider_contract,
+            ),
         )
 
     @classmethod
@@ -374,6 +425,8 @@ class ExecutionArtifact:
             "provider_revision",
             "routing_session_id",
             "template",
+            "runtime_policy",
+            "provider_contract",
             "fingerprint",
         }
         if type(raw) is not dict or set(raw) != expected:
@@ -389,6 +442,8 @@ class ExecutionArtifact:
             },
             ExecutionTemplate.from_dict(raw["template"]),
             routing_session_id=raw["routing_session_id"],
+            runtime_policy=raw["runtime_policy"],
+            provider_contract=raw["provider_contract"],
         )
         if type(raw["fingerprint"]) is not str or raw["fingerprint"] != artifact.fingerprint:
             raise ExecutionAuthorityError("execution artifact fingerprint mismatch")
@@ -403,6 +458,8 @@ class ExecutionArtifact:
             "provider_revision": self.provider_revision,
             "routing_session_id": self.routing_session_id,
             "template": self.template.to_dict(),
+            "runtime_policy": self.runtime_policy,
+            "provider_contract": self.provider_contract,
         }
         if include_fingerprint:
             payload["fingerprint"] = self.fingerprint
@@ -430,6 +487,16 @@ class ExecutionArtifact:
             raise ExecutionAuthorityError(
                 "provider authority changed after execution preparation",
             )
+
+    @property
+    def runtime_policy(self) -> dict[str, Any]:
+        return _json_object(self._runtime_policy_json)
+
+    @property
+    def provider_contract(self) -> dict[str, Any] | None:
+        if self._provider_contract_json is None:
+            return None
+        return _json_object(self._provider_contract_json)
 
 
 @dataclass(frozen=True)
@@ -469,6 +536,8 @@ class PreparedExecution:
             provider_revision=self.artifact.provider_revision,
             routing_session_id=self.artifact.routing_session_id,
             template=template,
+            _runtime_policy_json=self.artifact._runtime_policy_json,
+            _provider_contract_json=self.artifact._provider_contract_json,
         )
         volatile = {
             key: arguments[key]
@@ -541,6 +610,8 @@ def prepare_execution(
     provider: Mapping[str, Any],
     *,
     routing_session_id: str | None = None,
+    runtime_policy: Mapping[str, Any] | None = None,
+    provider_contract: Mapping[str, Any] | None = None,
     **start_arguments: Any,
 ) -> PreparedExecution:
     normalized = _normalize_arguments(start_arguments)
@@ -554,6 +625,8 @@ def prepare_execution(
             provider,
             template,
             routing_session_id=routing_session_id,
+            runtime_policy=runtime_policy,
+            provider_contract=provider_contract,
         ),
         _canonical_json(volatile),
     )

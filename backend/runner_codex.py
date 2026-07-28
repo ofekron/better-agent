@@ -24,6 +24,7 @@ import http.client
 import json
 import logging
 import os
+import stat
 import time
 import uuid
 from tool_approval_client import request_tool_approval
@@ -31,7 +32,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn, Optional
+from typing import Any, NoReturn, Optional, Sequence
 
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
@@ -109,7 +110,6 @@ from orchestration_tool_schemas import (
 from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
 from runtime_skills import materialize_runtime_skills
-from runtime_agents import has_runtime_agents, materialize_runtime_agents
 from proc_control import process_control as _process_control
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
@@ -123,6 +123,17 @@ _CODEX_HOME_OVERLAY_SKIP = {
     ".zprofile",
     ".zshenv",
     ".zshrc",
+}
+_CODEX_MUTABLE_RUNTIME_CHILDREN = {
+    "archived_sessions",
+    "attachments",
+    "history.jsonl",
+    "session_index.jsonl",
+    "sessions",
+    "shell_snapshots",
+    "state_5.sqlite",
+    "state_5.sqlite-shm",
+    "state_5.sqlite-wal",
 }
 
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
@@ -160,7 +171,9 @@ def _codex_approval_summary(method: str, params: dict) -> dict:
 
 
 def _codex_runner_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
-    return {**inputs, "provider_kind": "codex"}
+    if inputs.get("provider_kind") not in {"codex", "fugu"}:
+        raise ValueError("invalid Codex runner provider kind")
+    return dict(inputs)
 
 
 def _codex_thread_config(provider_run_config: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -282,12 +295,10 @@ def _dynamic_tools_missing_from_rollout(
 
 
 def _overlay_codex_home_children(overlay_codex_home: Path, real_codex_home: Path) -> None:
-    """Build overlay_codex_home as a real dir symlinking each child of the real
-    codex home except `agents/`, which is layered separately so extension
-    subagents can be merged in without mutating the real home."""
+    """Expose only mutable native thread state; config and auth are copied."""
     overlay_codex_home.mkdir(parents=True, exist_ok=True)
     for child in real_codex_home.iterdir():
-        if child.name == "agents":
+        if child.name not in _CODEX_MUTABLE_RUNTIME_CHILDREN:
             continue
         link = overlay_codex_home / child.name
         if link.exists() or link.is_symlink():
@@ -295,28 +306,52 @@ def _overlay_codex_home_children(overlay_codex_home: Path, real_codex_home: Path
         os.symlink(child, link, target_is_directory=child.is_dir())
 
 
-def _merge_codex_agents_dir(agents_root: Path, real_agents: Path) -> None:
-    """Seed the overlay agents dir with symlinks to the user's real codex agents
-    so manually installed subagents stay available alongside extension ones.
-    Extension materialization later overwrites same-named entries (single source
-    of truth)."""
-    agents_root.mkdir(parents=True, exist_ok=True)
-    if not real_agents.is_dir():
-        return
-    for child in real_agents.iterdir():
-        if child.name.startswith("."):
-            continue
-        link = agents_root / child.name
-        if link.exists() or link.is_symlink():
-            continue
-        os.symlink(child, link, target_is_directory=child.is_dir())
+def _write_private_codex_file(
+    root: Path,
+    relative: Path,
+    contents: bytes,
+) -> None:
+    root_stat = os.lstat(root)
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or relative.is_absolute()
+        or not relative.parts
+        or ".." in relative.parts
+    ):
+        raise ValueError("Codex config path escapes run home")
+    current = root
+    for part in relative.parent.parts:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            observed = os.lstat(current)
+            if not stat.S_ISDIR(observed.st_mode):
+                raise ValueError("Codex config parent is unsafe")
+    target = root / relative
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags, 0o600)
+    try:
+        view = memoryview(contents)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short Codex config write")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _materialize_codex_run_home(
     run_dir: Path,
     provider_run_config: dict,
     *,
+    execution_contract,
     cwd: str,
+    runtime_agent_manifest=None,
     bare_config: bool = False,
     disabled_runtime_skills: list | None = None,
 ) -> dict[str, str]:
@@ -329,14 +364,34 @@ def _materialize_codex_run_home(
     )
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
-    real_codex_home = Path(os.environ.get("CODEX_HOME") or real_home / ".codex").expanduser()
+    from codex_execution_runtime import (
+        attested_config_files,
+        read_codex_runtime_agent_payload,
+    )
+
+    selectors = dict(execution_contract.environment_selectors)
+    real_codex_home = Path(selectors["CODEX_HOME"])
     overlay_codex_home = overlay_home / ".codex"
-    inject_agents = has_runtime_agents("codex", bare_config=bare_config)
-    if real_codex_home.exists() and not overlay_codex_home.exists() and not overlay_codex_home.is_symlink():
-        if inject_agents:
-            _overlay_codex_home_children(overlay_codex_home, real_codex_home)
-        else:
-            os.symlink(real_codex_home, overlay_codex_home, target_is_directory=real_codex_home.is_dir())
+    overlay_codex_home.mkdir(parents=True, exist_ok=True)
+    if real_codex_home.exists():
+        _overlay_codex_home_children(overlay_codex_home, real_codex_home)
+    files = {
+        relative: contents
+        for relative, contents in attested_config_files(execution_contract)
+        if contents is not None
+    }
+    runtime_agents = read_codex_runtime_agent_payload(
+        run_dir,
+        runtime_agent_manifest,
+    )
+    for name, contents in runtime_agents:
+        files[Path("agents") / name] = contents
+    for relative, contents in sorted(files.items()):
+        _write_private_codex_file(
+            overlay_codex_home,
+            relative,
+            contents,
+        )
 
     skills_root = overlay_home / ".agents" / "skills"
     materialize_runtime_skills(
@@ -348,14 +403,8 @@ def _materialize_codex_run_home(
     if skills:
         write_skill_tree(skills_root, skills)
 
-    if inject_agents and overlay_codex_home.is_dir() and not overlay_codex_home.is_symlink():
-        agents_root = overlay_codex_home / "agents"
-        _merge_codex_agents_dir(agents_root, real_codex_home / "agents")
-        materialize_runtime_agents(agents_root, "codex", bare_config=bare_config)
-
     env = {"HOME": str(overlay_home)}
-    if overlay_codex_home.exists() or overlay_codex_home.is_symlink():
-        env["CODEX_HOME"] = str(overlay_codex_home)
+    env["CODEX_HOME"] = str(overlay_codex_home)
     return env
 
 
@@ -2580,7 +2629,7 @@ class _AppServerProcess:
 
 
 def _build_app_server_argv(
-    codex_bin: str,
+    codex_bin: str | Sequence[str],
     profile: Optional[str],
     config_overrides: Optional[list[str]] = None,
 ) -> list[str]:
@@ -2590,7 +2639,7 @@ def _build_app_server_argv(
     that differ only by config.toml profile reuse the single `codex` binary
     instead of shipping a launcher. Global flags precede the subcommand.
     """
-    argv = [codex_bin]
+    argv = [codex_bin] if isinstance(codex_bin, str) else list(codex_bin)
     if profile:
         argv += ["-p", profile]
     for override in config_overrides or []:
@@ -2600,7 +2649,7 @@ def _build_app_server_argv(
 
 
 async def _start_app_server(
-    codex_bin: str,
+    codex_bin: str | Sequence[str],
     *,
     run_dir: Path,
     cwd: str,
@@ -2618,8 +2667,14 @@ async def _start_app_server(
     sandbox: str = "danger-full-access",
     approval_ctx: Optional[dict] = None,
     profile: Optional[str] = None,
+    launch_pass_fds: tuple[int, ...] = (),
 ) -> _AppServerProcess:
     argv = _build_app_server_argv(codex_bin, profile, config_overrides)
+    descriptor_args = (
+        {"pass_fds": launch_pass_fds}
+        if launch_pass_fds and os.name != "nt"
+        else {}
+    )
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,
@@ -2627,6 +2682,7 @@ async def _start_app_server(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
+        **descriptor_args,
         **_process_control().detach_spawn_kwargs(),
         limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
@@ -2709,7 +2765,7 @@ async def _start_app_server(
 
 
 async def _start_app_server_with_retry(
-    codex_bin: str,
+    codex_bin: str | Sequence[str],
     *,
     cancel_path: Path,
     **start_kwargs: Any,
@@ -2729,27 +2785,6 @@ async def _start_app_server_with_retry(
 
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_codex_cli(inputs: Optional[dict[str, Any]] = None) -> Optional[str]:
-    """Find the codex CLI binary.
-
-    Honors `inputs["codex_binary"]` (defaults to `codex`). Provider-specific
-    selection that differs only by config.toml profile is handled separately
-    via `inputs["codex_profile"]`, so every provider reuses the one binary.
-    """
-    from cli_paths import resolve_cli_binary
-
-    binary = (inputs or {}).get("codex_binary") or "codex"
-    resolved = resolve_cli_binary(binary)
-    if os.name == "nt" and binary == "codex" and resolved:
-        npm_dir = Path(resolved).parent
-        vendor_root = npm_dir / "node_modules" / "@openai" / "codex" / "node_modules"
-        if vendor_root.is_dir():
-            for candidate in sorted(vendor_root.glob("@openai/codex-win32-*/vendor/*/bin/codex.exe")):
-                if candidate.is_file():
-                    return str(candidate)
-    return resolved
 
 
 def _materialize_image_attachments(run_dir: Path, images: list) -> list[Path]:
@@ -3224,7 +3259,7 @@ def _prepend_capability_context(prompt: str, inputs: dict) -> str:
 # ============================================================================
 # Main async runner
 # ============================================================================
-async def _run(run_dir: Path, inputs: dict) -> int:
+async def _run(run_dir: Path, inputs: dict, execution_contract, launch) -> int:
     log = logging.getLogger("runner_codex")
 
     mode = inputs.get("mode", "native")
@@ -3261,6 +3296,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     run_env.update(_materialize_codex_run_home(
         run_dir,
         provider_run_config,
+        execution_contract=execution_contract,
+        runtime_agent_manifest=inputs.get(
+            "_codex_runtime_agent_manifest",
+        ),
         cwd=cwd,
         bare_config=bare_config,
         disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
@@ -3300,11 +3339,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         )
     except RuntimeError as exc:
         _fail(run_dir, str(exc))
-        return 1
-
-    codex_bin = _resolve_codex_cli(inputs)
-    if not codex_bin:
-        _fail(run_dir, "codex CLI not found on PATH")
         return 1
 
     turn_input = build_codex_turn_input(run_dir, prompt, images)
@@ -3390,7 +3424,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
         try:
             proc = await _start_app_server_with_retry(
-                codex_bin,
+                launch.argv_prefix,
                 cancel_path=_cancel_path,
                 run_dir=run_dir,
                 cwd=cwd,
@@ -3403,7 +3437,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 tool_handlers=tool_handlers,
                 provider_run_config=provider_run_config,
                 config_overrides=[
-                    *list((inputs or {}).get("codex_config_overrides") or []),
+                    *list(execution_contract.runtime_args[1::2]),
                     *_codex_config_overrides(run_dir, provider_run_config),
                     *_context_strategy_config_overrides(inputs),
                 ],
@@ -3421,7 +3455,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     and backend_url and internal_token and app_session_id
                     else None
                 ),
-                profile=(inputs or {}).get("codex_profile") or None,
+                profile=execution_contract.profile or None,
+                launch_pass_fds=launch.pass_fds,
             )
 
             cancel_seen = asyncio.Event()
@@ -3874,6 +3909,11 @@ def main(run_dir: Path) -> NoReturn:
 
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from codex_execution_runtime import restore_codex_runner_inputs
+        inputs, execution_contract = restore_codex_runner_inputs(
+            run_dir,
+            inputs,
+        )
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
         inputs = harness_run_projection.apply_to_inputs(inputs)
@@ -3886,7 +3926,11 @@ def main(run_dir: Path) -> NoReturn:
     # parked on one of those threads would stall.
     loop = asyncio.new_event_loop()
     try:
-        code = loop.run_until_complete(_run(run_dir, inputs))
+        from codex_execution_launch import pinned_launch
+        with pinned_launch(execution_contract.launch_chain) as launch:
+            code = loop.run_until_complete(
+                _run(run_dir, inputs, execution_contract, launch),
+            )
     except Exception as e:
         logger.exception("runner_codex top-level failure")
         _fail(run_dir, f"{type(e).__name__}: {e}")

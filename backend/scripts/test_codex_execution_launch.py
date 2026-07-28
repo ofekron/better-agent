@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from codex_execution import (  # noqa: E402
 )
 from codex_execution_identity import FileIdentity  # noqa: E402
 import codex_execution_launch as execution_launch  # noqa: E402
+from codex_execution_launch import pinned_launch  # noqa: E402
 from scripts.codex_execution_test_support import write_executable  # noqa: E402
 
 
@@ -233,6 +235,72 @@ def test_shebang_resolution_ignores_access_time_updates() -> None:
         assert chain.attest()
 
 
+def test_pinned_launch_executes_original_after_path_replacement() -> None:
+    if os.name == "nt":
+        return
+    executable_source = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        executable = root / "codex"
+        os.link(executable_source, executable)
+        chain = resolve_codex_launch_chain(str(executable))
+
+        with pinned_launch(chain) as pinned:
+            replacement = root / "replacement"
+            replacement.write_bytes(b"not-the-original")
+            replacement.chmod(replacement.stat().st_mode | 0o100)
+            replacement.replace(executable)
+            completed = subprocess.run(
+                [
+                    *pinned.argv_prefix,
+                    "-c",
+                    "print('original', end='')",
+                ],
+                capture_output=True,
+                check=False,
+                pass_fds=pinned.pass_fds,
+                text=True,
+            )
+
+        assert completed.returncode == 0
+        assert completed.stdout == "original"
+        assert not chain.attest_metadata()
+
+
+def test_windows_pinned_launch_denies_component_replacement() -> None:
+    if os.name != "nt":
+        return
+    executable_source = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        executable = root / "codex.exe"
+        os.link(executable_source, executable)
+        chain = resolve_codex_launch_chain(str(executable), platform="win32")
+
+        with pinned_launch(chain) as pinned:
+            replacement = root / "replacement.exe"
+            os.link(executable_source, replacement)
+            try:
+                replacement.replace(executable)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("Windows launch component was replaceable")
+            completed = subprocess.run(
+                [
+                    *pinned.argv_prefix,
+                    "-c",
+                    "print('original', end='')",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+
+        assert completed.returncode == 0
+        assert completed.stdout == "original"
+
+
 LAUNCH_TESTS = (
     test_native_symlink_chain_is_attested_and_retarget_fails,
     test_same_size_same_mtime_replacement_fails_strong_identity,
@@ -243,6 +311,8 @@ LAUNCH_TESTS = (
     test_open_attested_components_pins_exact_bytes,
     test_identity_capture_ignores_access_time_updates,
     test_shebang_resolution_ignores_access_time_updates,
+    test_pinned_launch_executes_original_after_path_replacement,
+    test_windows_pinned_launch_denies_component_replacement,
 )
 
 

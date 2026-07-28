@@ -91,7 +91,7 @@ SPECS: dict[str, ProviderSpec] = {
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",
-        runner_module="runner_codex", recovery_family="claude",
+        runner_module="runner_codex", recovery_family="codex",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
         credential_config_env="CODEX_HOME",

@@ -2161,6 +2161,39 @@ def get_provider_with_key(provider_id: str) -> Optional[dict]:
     return None
 
 
+@_serialized_provider_mutation
+def hydrate_provider_execution(
+    provider_id: str,
+    *,
+    expected_generation: str,
+    expected_revision: int,
+) -> Optional[dict]:
+    state = _load_state()
+    for provider in state.get("providers", []):
+        if provider.get("id") != provider_id:
+            continue
+        if not _provider_available_for_state(state, provider):
+            return None
+        _assert_provider_authority(
+            provider,
+            expected_generation,
+            expected_revision,
+        )
+        hydrated = dict(provider)
+        api_key = (
+            _read_api_key(provider_id)
+            if provider.get("mode") == "api_key"
+            else ""
+        )
+        hydrated["api_key"] = api_key
+        if provider.get("mode") == "api_key":
+            hydrated["_credential_authoritative"] = bool(
+                provider_credential_authority_available() and api_key
+            )
+        return hydrated
+    return None
+
+
 def get_default_provider() -> Optional[dict]:
     """Return the active provider record INCLUDING its api_key (from keychain).
 

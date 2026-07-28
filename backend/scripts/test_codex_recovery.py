@@ -40,9 +40,12 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from scripts.codex_execution_test_support import runner_authority  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+from codex_execution_contract import build_codex_execution_contract  # noqa: E402
+from codex_execution_runtime import codex_provider_contract  # noqa: E402
+from execution_template import prepare_execution  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
-from paths import ba_home  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
@@ -119,6 +122,59 @@ def _seed_codex_run(
     run_id = run_id or str(uuid.uuid4())
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    authority_root = Path(_TMP_HOME) / "codex-execution-authority"
+    config_root = authority_root / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_root / "config.toml"
+    if not config_path.exists():
+        config_path.write_text("", encoding="utf-8")
+    launcher = authority_root / "codex"
+    if not launcher.exists():
+        os.link(Path(sys.executable).resolve(), launcher)
+    provider_record = {
+        "id": "codex-test",
+        "kind": "codex",
+        "generation": "e5ef524a-58ae-44cf-bfee-80be44e5da9e",
+        "revision": 1,
+        "mode": "subscription",
+        "config_dir": str(config_root),
+    }
+    contract = build_codex_execution_contract(
+        provider_record,
+        launcher_path=str(launcher),
+        environment_selectors={"CODEX_HOME": str(config_root)},
+        config_paths=(
+            str(config_path),
+            str(config_root / "auth.json"),
+        ),
+    )
+    execution = prepare_execution(
+        provider_record,
+        runtime_policy={
+            "context_strategy": None,
+            "disabled_runtime_skills": [],
+            "permission": {},
+            "request_user_input_enabled": False,
+            "run_policy": {},
+            "runtime_agent_manifest": None,
+            "worker_working_mode": None,
+            "working_mode": None,
+        },
+        provider_contract=codex_provider_contract(contract),
+        run_id=run_id,
+        prompt="recover",
+        cwd="/tmp",
+        model="gpt-5.5",
+        reasoning_effort="high",
+        session_id=codex_sid,
+        mode="native",
+        app_session_id=app_sid,
+        target_message_id=target_message_id,
+    )
+    (run_dir / "execution.json").write_text(
+        json.dumps(execution.artifact.to_dict()),
+        encoding="utf-8",
+    )
 
     events_path = run_dir / "codex-rollout.jsonl"
     with events_path.open("w", encoding="utf-8") as f:
@@ -293,6 +349,7 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
             self, app_sid, *, run_id, kind, target_message_id, pid,
             foreground_status=None, background_work_ids=None,
             activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+            **_kwargs,
         ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
@@ -303,11 +360,23 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
         async def emit_run_state(self, app_sid):
             return None
 
+        def register_recovered_turn_creator(self, *_args):
+            return None
+
+        def run_state_mark_provider_submitted(self, *_args):
+            return None
+
     class _Coordinator:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
 
     async def _run() -> bool:
+        import event_bus_subscribers
+        from event_journal import bind_event_journal_loop
+
+        bind_event_journal_loop(asyncio.get_running_loop())
+        event_bus_subscribers.bind_event_journal_writer()
+        event_bus_subscribers.bind_session_content_projection()
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
         )
@@ -328,9 +397,26 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
                 if item.get("run_id") == run_id
             )
             before_offset = desc.get("processed_byte_offset")
+            watermark_before = session_manager.get_fold_watermark(app_sid)
             await _integrate_one(_Coordinator(), provider, desc)
 
             deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline:
+                rs = provider._runs.get(run_id)
+                if rs is not None and rs.tailer is not None:
+                    await rs.tailer.drain_available()
+                    break
+                await asyncio.sleep(0)
+            while asyncio.get_running_loop().time() < deadline:
+                await event_bus_subscribers.await_session_content_projection(
+                    app_sid,
+                )
+                if (
+                    session_manager.get_fold_watermark(app_sid)
+                    > watermark_before
+                ):
+                    break
+                await asyncio.sleep(0)
             rendered = ""
             while asyncio.get_running_loop().time() < deadline:
                 sess = session_manager.get(app_sid) or {}
@@ -386,6 +472,7 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
             self, app_sid, *, run_id, kind, target_message_id, pid,
             foreground_status=None, background_work_ids=None,
             activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+            **_kwargs,
         ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
@@ -394,6 +481,12 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
                 self.active_run_ids[app_sid].remove(run_id)
 
         async def emit_run_state(self, app_sid):
+            return None
+
+        def register_recovered_turn_creator(self, *_args):
+            return None
+
+        def run_state_mark_provider_submitted(self, *_args):
             return None
 
     class _Coordinator:
@@ -649,8 +742,13 @@ def test_dead_wrapper_without_terminal_still_fails_closed() -> bool:
     if complete.get("success") is not False:
         print(f"  expected success=False, got {complete!r}")
         return False
-    if complete.get("error") != "runner died before completion (recovered at startup)":
-        print(f"  unexpected error: {complete!r}")
+    if (
+        complete.get("outcome") != "recoverable_partial"
+        or complete.get("recoverable") is not True
+        or complete.get("cause")
+        != "runner died before completion (recovered at startup)"
+    ):
+        print(f"  unexpected recoverable partial: {complete!r}")
         return False
     return True
 
@@ -751,7 +849,6 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True)
         original_start = runner_codex._start_app_server
-        original_resolve_cli = runner_codex._resolve_codex_cli
         original_resolve_rollout = codex_native.resolve_rollout_path
         original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
         original_control = runner_codex._process_control
@@ -765,7 +862,6 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
                 return rollout
 
             runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
@@ -774,8 +870,10 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
                 return None
 
             runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
+            contract, launch = runner_authority(run_dir)
             code = await runner_codex._run(run_dir, {
                 "prompt": "continue",
+                "provider_kind": "codex",
                 "cwd": "/tmp",
                 "mode": "native",
                 "session_id": codex_sid,
@@ -783,10 +881,9 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
                 "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
                 "bare_config": True,
                 "provider_run_config": {},
-            })
+            }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._process_control = original_control  # type: ignore[assignment]
@@ -910,7 +1007,6 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True)
         original_start = runner_codex._start_app_server
-        original_resolve_cli = runner_codex._resolve_codex_cli
         original_resolve_rollout = codex_native.resolve_rollout_path
         original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
         original_bridge = runner_codex._bridge_extension_mcp_dynamic_tools
@@ -930,13 +1026,14 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
                 return None
 
             runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
+            contract, launch = runner_authority(run_dir)
             code = await runner_codex._run(run_dir, {
                 "prompt": "continue",
+                "provider_kind": "codex",
                 "cwd": "/tmp",
                 "mode": "native",
                 "session_id": codex_sid,
@@ -944,10 +1041,9 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
                 "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
                 "bare_config": True,
                 "provider_run_config": {},
-            })
+            }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._bridge_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
@@ -1011,7 +1107,6 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True)
         original_start = runner_codex._start_app_server
-        original_resolve_cli = runner_codex._resolve_codex_cli
         original_control = runner_codex._process_control
         original_resolve_rollout = codex_native.resolve_rollout_path
         try:
@@ -1019,21 +1114,21 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
                 return _Proc()
 
             runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: None  # type: ignore[assignment]
+            contract, launch = runner_authority(run_dir)
             code = await runner_codex._run(run_dir, {
                 "prompt": "start",
+                "provider_kind": "codex",
                 "cwd": "/tmp",
                 "mode": "native",
                 "app_session_id": "app-pre-thread",
                 "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
                 "bare_config": True,
                 "provider_run_config": {},
-            })
+            }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
-            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
             runner_codex._process_control = original_control  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
 
@@ -1099,24 +1194,10 @@ def test_loopback_post_retries_transient_reset() -> bool:
     return True
 
 
-def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
+def test_loopback_post_does_not_reread_ambient_token_after_forbidden() -> bool:
     import runner_codex
 
-    token_file = ba_home() / "internal_token"
-    token_file.write_text("disk-token", encoding="utf-8")
-    runner_codex._token_cache["token"] = None
-    runner_codex._token_cache["mtime"] = 0.0
     seen_tokens: list[str | None] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self):
-            return b'{"success": true}'
 
     original_urlopen = runner_codex.urllib.request.urlopen
 
@@ -1131,25 +1212,28 @@ def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
                 hdrs=None,
                 fp=None,
             )
-        return _Resp()
+        raise AssertionError("loopback retried with ambient authority")
 
     try:
         runner_codex.urllib.request.urlopen = fake_urlopen
-        res = _post_loopback_sync(
-            {"x": 1},
-            backend_url="http://127.0.0.1:8000",
-            internal_token="spawn-token",
-            url_path="/api/internal/ask",
-            timeout_s=10,
-        )
+        try:
+            _post_loopback_sync(
+                {"x": 1},
+                backend_url="http://127.0.0.1:8000",
+                internal_token="spawn-token",
+                url_path="/api/internal/ask",
+                timeout_s=10,
+            )
+        except RuntimeError as exc:
+            if "HTTP 403" not in str(exc):
+                raise
+        else:
+            raise AssertionError("forbidden loopback must fail closed")
     finally:
         runner_codex.urllib.request.urlopen = original_urlopen
 
-    if res != {"success": True}:
-        print(f"  expected success response, got {res!r}")
-        return False
-    if seen_tokens != ["spawn-token", "disk-token"]:
-        print(f"  expected spawn then disk token, got {seen_tokens!r}")
+    if seen_tokens != ["spawn-token"]:
+        print(f"  expected only prepared token, got {seen_tokens!r}")
         return False
     return True
 
@@ -1384,7 +1468,22 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
             self.app_sid = app_sid
             self.codex_sid = codex_sid
 
-        def start_run(self, **kwargs) -> None:
+        def prepare_run(self, **kwargs):
+            return prepare_execution(
+                {
+                    "id": self.id,
+                    "kind": self.KIND,
+                    "generation": "e5ef524a-58ae-44cf-bfee-80be44e5da9e",
+                    "revision": 1,
+                },
+                **kwargs,
+            )
+
+        def start_run(self, *, execution, loop, queue) -> bool:
+            del loop, queue
+            if not execution._try_commit_spawn():
+                return False
+            kwargs = execution.start_arguments()
             _seed_codex_run(
                 app_sid=self.app_sid,
                 codex_sid=self.codex_sid,
@@ -1413,6 +1512,8 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 complete=True,
                 run_id=kwargs["run_id"],
             )
+            execution._mark_spawn_completed()
+            return True
 
         def is_running(self, _run_id: str) -> bool:
             return False
@@ -1447,6 +1548,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         codex_sid = str(uuid.uuid4())
         provider = _FakeCodexProvider(app_sid, codex_sid)
         tm = TurnManager(_Coordinator(provider))
+        tm.lifecycle.bind()
         ws_events: list[dict] = []
 
         async def ws_callback(event: dict) -> None:
@@ -1472,6 +1574,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         finally:
             turn_manager_mod.runtime_skill_projection = original_runtime
             turn_manager_mod.extension_audit_context = original_audit
+            tm.lifecycle.close()
         events = result.get("events") or []
         if result.get("success") is not True:
             print(f"  expected success result, got {result!r}")
@@ -2644,7 +2747,7 @@ TESTS = [
     ("codex fallback rollout completion settles app-server", test_codex_fallback_rollout_completion_settles_app_server),
     ("codex pre-thread ambient cancel cleans unrecoverable app-server", test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
-    ("codex loopback POST retries disk token after forbidden", test_loopback_post_retries_disk_token_after_forbidden),
+    ("codex loopback POST rejects ambient token after forbidden", test_loopback_post_does_not_reread_ambient_token_after_forbidden),
     ("codex loopback POST surfaces HTTP error detail", test_loopback_post_surfaces_http_error_detail),
     ("provider bootstrap task schedules from worker thread", test_schedule_loop_task_from_worker_thread),
     ("provider bootstrap schedule does not block under loop lag", test_schedule_loop_task_no_block_under_loop_lag),

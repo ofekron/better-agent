@@ -8,6 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import runner_codex
+from scripts.codex_execution_test_support import runner_authority
 
 
 class _FakeMapped:
@@ -836,7 +837,6 @@ async def test_bridge_preserves_explicit_servers_when_no_extension_is_selected()
 
 async def test_fresh_run_bridges_extension_mcp_before_thread_start() -> None:
     original_start = runner_codex._start_app_server
-    original_resolve_cli = runner_codex._resolve_codex_cli
     original_with_builtin = runner_codex.with_builtin_mcp_servers
     original_launcher_configs = runner_codex.extension_store.native_mcp_server_configs
     original_mcp_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
@@ -875,15 +875,16 @@ async def test_fresh_run_bridges_extension_mcp_before_thread_start() -> None:
         raise RuntimeError("stop after capture")
 
     runner_codex._start_app_server = fake_start_app_server  # type: ignore[assignment]
-    runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
     runner_codex.with_builtin_mcp_servers = fake_with_builtin  # type: ignore[assignment]
     runner_codex.extension_store.native_mcp_server_configs = fake_launcher_configs  # type: ignore[method-assign]
     runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_mcp_list_tools  # type: ignore[assignment]
     try:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            contract, launch = runner_authority(tmp_path)
             code = await runner_codex._run(tmp_path, {
                 "prompt": "check testape",
+                "provider_kind": "codex",
                 "cwd": str(tmp_path),
                 "mode": "native",
                 "app_session_id": "app-1",
@@ -891,10 +892,9 @@ async def test_fresh_run_bridges_extension_mcp_before_thread_start() -> None:
                 "backend_url": "http://localhost:8000",
                 "internal_token": "token-1",
                 "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-            })
+            }, contract, launch)
     finally:
         runner_codex._start_app_server = original_start  # type: ignore[assignment]
-        runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
         runner_codex.with_builtin_mcp_servers = original_with_builtin  # type: ignore[assignment]
         runner_codex.extension_store.native_mcp_server_configs = original_launcher_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]

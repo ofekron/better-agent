@@ -96,7 +96,9 @@ class FuguProvider(CodexProvider):
     default_reasoning_effort: ClassVar[str] = "high"
 
     def codex_config_overrides(self, *, model: Optional[str]) -> list[str]:
-        selected_model = model if model in FUGU_MODELS else FUGU_MODELS[0]
+        if model not in FUGU_MODELS:
+            raise ValueError("Fugu model must be one of the configured models")
+        selected_model = model
         return [
             f"model_provider={toml_literal(self.CODEX_MODEL_PROVIDER)}",
             f"model={toml_literal(selected_model)}",
@@ -112,7 +114,7 @@ class FuguProvider(CodexProvider):
     def build_env(self) -> dict[str, str]:
         env = super().build_env()
         env.pop("SAKANA_API_KEY", None)
-        api_key = self.record.get("api_key")
+        api_key = self.runtime_record().get("api_key")
         if isinstance(api_key, str) and api_key:
             env["SAKANA_API_KEY"] = api_key
         return env

@@ -18,7 +18,9 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +58,25 @@ from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
 from codex_normalize import _codex_terminal_state
 from codex_usage import token_usage_from_codex_usage
 from provider_completion import recoverable_partial_payload
+from codex_execution_contract import build_codex_execution_contract
+from codex_execution_runtime import (
+    cleanup_installed_codex_runtime_agent_payload,
+    cleanup_staged_codex_runtime_agent_payload,
+    codex_authority_paths,
+    codex_contract_from_artifact,
+    codex_provider_contract,
+    codex_runtime_agent_manifest,
+    codex_runtime_policy,
+    install_staged_codex_runtime_agent_payload,
+    read_codex_runtime_agent_payload,
+    snapshot_codex_runtime_agents,
+    stage_codex_runtime_agent_payload,
+)
+from execution_template import (
+    ExecutionArtifact,
+    prepare_execution,
+    validate_recovery_sessions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -423,10 +444,166 @@ class CodexProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        self._execution_record = threading.local()
+
+    def runtime_record(self) -> dict:
+        active = getattr(self._execution_record, "value", None)
+        return active if active is not None else self.record
+
+    @contextmanager
+    def _execution_authority_context(
+        self,
+        execution,
+        start_arguments: dict[str, Any],
+    ):
+        del start_arguments
+        artifact = execution.artifact
+        hydrated = config_store.hydrate_provider_execution(
+            artifact.provider_id,
+            expected_generation=artifact.provider_generation,
+            expected_revision=artifact.provider_revision,
+        )
+        if hydrated is None:
+            raise RuntimeError(
+                f"provider {artifact.provider_id} is unavailable",
+            )
+        self._execution_record.value = hydrated
+        try:
+            yield hydrated
+        finally:
+            del self._execution_record.value
+            run_id = artifact.template.arguments()["run_id"]
+            cleanup_staged_codex_runtime_agent_payload(run_id)
 
     def codex_config_overrides(self, *, model: Optional[str]) -> list[str]:
         del model
         return list(self.CODEX_CONFIG_OVERRIDES)
+
+    def prepare_run(self, **start_arguments: Any):
+        from cli_paths import resolve_cli_binary
+        from paths import resolve_provider_config_dir, user_home
+        from permission import resolve_for_run
+        from session_manager import manager as session_manager
+        import user_prefs
+
+        authority = self.record
+        launcher = resolve_cli_binary(self.CODEX_BINARY)
+        if not launcher:
+            raise RuntimeError("codex CLI is unavailable")
+        app_session_id = start_arguments["app_session_id"]
+        worker_session_id = start_arguments.get("worker_agent_session_id")
+        session_record = session_manager.get(app_session_id) or {}
+        worker_record = (
+            session_manager.get(worker_session_id) or {}
+            if worker_session_id
+            else {}
+        )
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=start_arguments.get(
+                "resolved_harness_run_config",
+            ),
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=start_arguments.get("provider_run_config"),
+            capability_contexts=start_arguments.get("capability_contexts"),
+            disabled_builtin_extensions=start_arguments.get(
+                "disabled_builtin_extensions",
+            ),
+        )
+        bare_config = bool(run_policy["bare_config"])
+        request_user_input_enabled = (
+            bool(start_arguments.get("user_facing"))
+            and not bare_config
+            and not worker_session_id
+            and not start_arguments.get("supervisor_agent_session_id")
+            and not start_arguments.get("is_worker")
+        )
+        config_dir_raw = str(authority.get("config_dir") or "").strip()
+        config_root = (
+            resolve_provider_config_dir(config_dir_raw)
+            if config_dir_raw
+            else user_home() / ".codex"
+        )
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_root = config_root.resolve(strict=True)
+        runtime_args = tuple(
+            value
+            for assignment in self.codex_config_overrides(
+                model=start_arguments.get("model"),
+            )
+            for value in ("-c", assignment)
+        )
+        contract = build_codex_execution_contract(
+            {**authority, "config_dir": str(config_root)},
+            launcher_path=launcher,
+            profile=self.CODEX_PROFILE,
+            runtime_args=runtime_args,
+            environment_selectors={"CODEX_HOME": str(config_root)},
+            config_paths=codex_authority_paths(config_root),
+            search_path=os.environ.get("PATH"),
+        )
+        runtime_agent_manifest, runtime_agent_payload = (
+            snapshot_codex_runtime_agents(
+                enabled=not bare_config,
+            )
+        )
+        runtime_policy = {
+            "context_strategy": user_prefs.get_context_strategy(),
+            "disabled_runtime_skills": disabled_runtime_skills_for_run(
+                session_record=session_record,
+                worker_record=worker_record,
+            ),
+            "permission": resolve_for_run(
+                sess_rec=session_record,
+                worker_sess_rec=worker_record,
+                is_worker=bool(start_arguments.get("is_worker")),
+                fallback_kind=self.KIND,
+            ),
+            "request_user_input_enabled": request_user_input_enabled,
+            "run_policy": run_policy,
+            "runtime_agent_manifest": runtime_agent_manifest,
+            "worker_working_mode": worker_record.get("working_mode"),
+            "working_mode": session_record.get("working_mode"),
+        }
+        prepared = prepare_execution(
+            authority,
+            runtime_policy=runtime_policy,
+            provider_contract=codex_provider_contract(contract),
+            **start_arguments,
+        )
+        run_id = prepared.artifact.template.arguments()["run_id"]
+        try:
+            stage_codex_runtime_agent_payload(
+                run_id=run_id,
+                manifest=runtime_agent_manifest,
+                payload=runtime_agent_payload,
+            )
+        except BaseException:
+            cleanup_staged_codex_runtime_agent_payload(run_id)
+            raise
+        return prepared
+
+    def _install_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        run_id = execution.artifact.template.arguments()["run_id"]
+        install_staged_codex_runtime_agent_payload(
+            run_dir,
+            run_id=run_id,
+            manifest=codex_runtime_agent_manifest(execution.artifact),
+        )
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        run_id = execution.artifact.template.arguments()["run_id"]
+        cleanup_staged_codex_runtime_agent_payload(run_id)
+        cleanup_installed_codex_runtime_agent_payload(run_dir)
 
     def _prewarm_extension_mcp_ready(
         self, input_payload: dict[str, Any], app_session_id: str,
@@ -504,7 +681,7 @@ class CodexProvider(Provider):
         # log in as distinct accounts. A record on the shared default (no
         # config_dir / `~/.codex`) yields no override, leaving any ambient
         # CODEX_HOME the user exported at backend launch untouched.
-        cred = config_store.provider_credential_env(self.record)
+        cred = config_store.provider_credential_env(self.runtime_record())
         if cred:
             env[cred[0]] = cred[1]
         return self.finalize_env(env)
@@ -574,34 +751,9 @@ class CodexProvider(Provider):
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         runner_mode = "manager" if mode == "team" else mode
-        from session_manager import manager as _sm
-        import user_prefs
-        _sess_rec = _sm.get(app_session_id) or {}
-        _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        from permission import resolve_for_run as _resolve_perm
-        _permission = _resolve_perm(
-            sess_rec=_sess_rec,
-            worker_sess_rec=_worker_sess_rec,
-            is_worker=is_worker,
-            fallback_kind=self.KIND,
-        )
-        run_policy = resolve_extension_run_policy(
-            resolved_harness_run_config=resolved_harness_run_config,
-            session_record=_sess_rec,
-            worker_record=_worker_sess_rec,
-            provider_kind=self.KIND,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            disabled_builtin_extensions=disabled_builtin_extensions,
-        )
+        runtime_policy = codex_runtime_policy(_execution.artifact)
+        run_policy = runtime_policy["run_policy"]
         _bare = bool(run_policy["bare_config"])
-        request_user_input_enabled = (
-            bool(user_facing)
-            and not _bare
-            and not bool(worker_agent_session_id)
-            and not bool(supervisor_agent_session_id)
-            and not bool(is_worker)
-        )
 
         input_payload = {
             "prompt": prompt,
@@ -609,14 +761,10 @@ class CodexProvider(Provider):
             "cwd": cwd,
             "model": model,
             "reasoning_effort": reasoning_effort,
-            "permission": _permission,
+            "permission": runtime_policy["permission"],
             "session_id": session_id,
             "mode": runner_mode,
             "source": source or "",
-            "provider_kind": self.KIND,
-            "codex_binary": self.CODEX_BINARY,
-            "codex_profile": self.CODEX_PROFILE,
-            "codex_config_overrides": self.codex_config_overrides(model=model),
             "app_session_id": app_session_id,
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
@@ -630,24 +778,26 @@ class CodexProvider(Provider):
             "mssg_sender_session_id": mssg_sender_session_id,
             "browser_harness_enabled": bool(browser_harness_enabled),
             "user_facing": bool(user_facing),
-            "request_user_input_enabled": request_user_input_enabled,
+            "request_user_input_enabled": runtime_policy[
+                "request_user_input_enabled"
+            ],
             "bare_config": _bare,
-            "working_mode": _sess_rec.get("working_mode"),
-            "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
-            "context_strategy": user_prefs.get_context_strategy(),
+            "working_mode": runtime_policy["working_mode"],
+            "worker_working_mode": runtime_policy["worker_working_mode"],
+            "context_strategy": runtime_policy["context_strategy"],
             "continuation_chain": continuation_chain or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_runtime_skills": disabled_runtime_skills_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
+            "disabled_runtime_skills": runtime_policy[
+                "disabled_runtime_skills"
+            ],
         }
         input_payload.update(run_policy)
         input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
             input_payload, app_session_id,
         )
-        (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
+        _atomic_write_json(run_dir / "input.json", input_payload)
 
         from containment import containment
         containment().create(run_id)
@@ -1418,6 +1568,45 @@ class CodexProvider(Provider):
 
         for child in iter_run_dirs(run_id_filter):
             if marker_matches_current(child / "reconciled.marker", self.KIND):
+                try:
+                    cleanup_installed_codex_runtime_agent_payload(child)
+                except OSError:
+                    logger.exception(
+                        "failed cleaning reconciled Codex payload run=%s",
+                        child.name,
+                    )
+                continue
+            try:
+                execution_payload = json.loads(
+                    (child / "execution.json").read_text(encoding="utf-8"),
+                )
+                artifact = ExecutionArtifact.from_dict(execution_payload)
+                contract = codex_contract_from_artifact(artifact)
+                read_codex_runtime_agent_payload(
+                    child,
+                    codex_runtime_agent_manifest(artifact),
+                )
+                execution_arguments = artifact.template.arguments()
+                persist_to = (
+                    execution_arguments.get("worker_agent_session_id")
+                    or execution_arguments["app_session_id"]
+                )
+                validate_recovery_sessions(
+                    artifact,
+                    routing_session_id=artifact.routing_session_id,
+                    persist_session_id=persist_to,
+                )
+                if (
+                    artifact.provider_id != self.id
+                    or artifact.provider_kind != self.KIND
+                    or not contract.attest()
+                ):
+                    raise ValueError("Codex recovery authority mismatch")
+            except Exception:
+                logger.exception(
+                    "codex recover_in_flight: invalid execution authority for %s",
+                    child.name,
+                )
                 continue
             complete_path = child / "complete.json"
             has_complete_json = complete_path.exists()
@@ -1545,19 +1734,21 @@ class CodexProvider(Provider):
                 "has_complete_json": has_complete_json,
                 "session_id": session_id,
                 "jsonl_path": jsonl_path,
-                "app_session_id": bs.get("app_session_id") or rs_disk.get("app_session_id"),
-                "persist_to": bs.get("persist_to") or bs.get("app_session_id"),
+                "app_session_id": artifact.routing_session_id,
+                "persist_to": persist_to,
                 "started_at": bs.get("started_at") or rs_disk.get("started_at") or "",
                 "processed_line": processed_line,
                 "processed_byte_offset": processed_byte_offset,
                 "cancelled": bool(bs.get("cancelled", False)),
                 "turn_cancelled": bool(bs.get("turn_cancelled", False)),
-                "mode": bs.get("mode") or rs_disk.get("mode") or "native",
-                "provider_id": bs.get("provider_id") or self.id,
-                "provider_kind": self.KIND,
+                "mode": execution_arguments["mode"],
+                "provider_id": artifact.provider_id,
+                "provider_kind": artifact.provider_kind,
                 "ingestion_version": bs.get("ingestion_version"),
-                "target_message_id": bs.get("target_message_id"),
-                "turn_run_id": bs.get("turn_run_id"),
+                "target_message_id": execution_arguments.get(
+                    "target_message_id",
+                ),
+                "turn_run_id": execution_arguments.get("turn_run_id"),
                 "child_sources": bs.get("child_sources")
                 if isinstance(bs.get("child_sources"), dict) else {},
                 "recovered_as": recovered_as,

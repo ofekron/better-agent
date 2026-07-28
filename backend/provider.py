@@ -624,8 +624,11 @@ class Provider(ABC):
             )
         self.suspended = False
 
+    def runtime_record(self) -> dict:
+        return self.record
+
     def require_runtime_credential(self) -> None:
-        record = self.record
+        record = self.runtime_record()
         if record.get("mode") != "api_key" or not self.uses_managed_api_key:
             return
         from provider_env import is_ollama_base_url
@@ -679,8 +682,8 @@ class Provider(ABC):
         return apply_provider_transport(
             env,
             provider_id=self.id,
-            provider_kind=str(self.record.get("kind") or self.KIND),
-            provider_mode=str(self.record.get("mode") or ""),
+            provider_kind=str(self.runtime_record().get("kind") or self.KIND),
+            provider_mode=str(self.runtime_record().get("mode") or ""),
             run_id=run_id,
             session_id=app_session_id,
             resolved_harness_run_config=resolved_harness_run_config,
@@ -717,34 +720,37 @@ class Provider(ABC):
         queue: asyncio.Queue,
     ) -> bool:
         arguments = execution.start_arguments()
-        authority = self.execution_authority_record(arguments)
-        execution.artifact.require_authority(authority)
-        if self.defunct:
-            raise RuntimeError(
-                f"provider {self.id} is defunct; cannot start new runs"
-            )
-        self.assert_not_suspended(action="start new runs")
-        self.require_runtime_credential()
-        with self._execution_admission(
+        with self._execution_authority_context(
             execution,
-            loop=loop,
-            queue=queue,
-        ) as admitted:
-            if not admitted:
-                return False
-            self._admit_execution(execution)
-            if not execution._try_commit_spawn():
-                return False
-            self._persist_and_start_execution(
+            arguments,
+        ) as authority:
+            execution.artifact.require_authority(authority)
+            if self.defunct:
+                raise RuntimeError(
+                    f"provider {self.id} is defunct; cannot start new runs"
+                )
+            self.assert_not_suspended(action="start new runs")
+            self.require_runtime_credential()
+            with self._execution_admission(
                 execution,
-                arguments=arguments,
                 loop=loop,
                 queue=queue,
-            )
-            execution._mark_spawn_completed()
-            if execution.cancel_after_admission_requested:
-                self.cancel_turn(arguments["run_id"])
-            return True
+            ) as admitted:
+                if not admitted:
+                    return False
+                self._admit_execution(execution)
+                if not execution._try_commit_spawn():
+                    return False
+                self._persist_and_start_execution(
+                    execution,
+                    arguments=arguments,
+                    loop=loop,
+                    queue=queue,
+                )
+                execution._mark_spawn_completed()
+                if execution.cancel_after_admission_requested:
+                    self.cancel_turn(arguments["run_id"])
+                return True
 
     def _persist_and_start_execution(
         self,
@@ -775,6 +781,7 @@ class Provider(ABC):
             run_dir.mkdir(parents=True)
             atomic_write_json(artifact_path, execution.artifact.to_dict())
         try:
+            self._install_execution_payloads(execution, run_dir)
             self._start_run(
                 loop=loop,
                 queue=queue,
@@ -782,6 +789,7 @@ class Provider(ABC):
                 **arguments,
             )
         except BaseException:
+            self._cleanup_failed_execution_payloads(execution, run_dir)
             try:
                 if tuple(run_dir.iterdir()) == (artifact_path,):
                     artifact_path.unlink()
@@ -789,6 +797,20 @@ class Provider(ABC):
             except OSError:
                 pass
             raise
+
+    def _install_execution_payloads(
+        self,
+        execution: PreparedExecution,
+        run_dir: Path,
+    ) -> None:
+        del execution, run_dir
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution: PreparedExecution,
+        run_dir: Path,
+    ) -> None:
+        del execution, run_dir
 
     def prepare_run(self, **start_arguments: Any) -> PreparedExecution:
         authority = self.execution_authority_record(start_arguments)
@@ -800,6 +822,15 @@ class Provider(ABC):
     ) -> dict:
         del start_arguments
         return self.record
+
+    @contextmanager
+    def _execution_authority_context(
+        self,
+        execution: PreparedExecution,
+        start_arguments: dict[str, Any],
+    ):
+        del execution
+        yield self.execution_authority_record(start_arguments)
 
     @contextmanager
     def _execution_admission(
@@ -1755,6 +1786,25 @@ def _recover_all_in_flight_owned(
     marker_fallback_reads = 0
     backend_state_reads = 0
     phase_started = time.perf_counter()
+
+    def cleanup_reconciled_codex_payload(
+        run_dir: Path,
+        provider_kind: str,
+    ) -> None:
+        if provider_kind not in {"codex", "fugu"}:
+            return
+        try:
+            from codex_execution_runtime import (
+                cleanup_installed_codex_runtime_agent_payload,
+            )
+
+            cleanup_installed_codex_runtime_agent_payload(run_dir)
+        except OSError:
+            logger.exception(
+                "failed cleaning reconciled Codex payload run=%s",
+                run_dir.name,
+            )
+
     for child in runs_root.iterdir():
         if child.is_symlink():
             ownership_safe = False
@@ -1771,6 +1821,10 @@ def _recover_all_in_flight_owned(
                 str(indexed_marker.get("provider_kind") or ""),
             )
         ):
+            cleanup_reconciled_codex_payload(
+                child,
+                str(indexed_marker.get("provider_kind") or ""),
+            )
             indexed_skips += 1
             continue
         marker_path = child / "reconciled.marker"
@@ -1784,6 +1838,10 @@ def _recover_all_in_flight_owned(
                     marker,
                     str(marker.get("provider_kind") or ""),
                 ):
+                    cleanup_reconciled_codex_payload(
+                        child,
+                        str(marker.get("provider_kind") or ""),
+                    )
                     append_reconciled_marker_index(
                         marker_path,
                         str(marker.get("provider_kind") or ""),
@@ -1796,9 +1854,46 @@ def _recover_all_in_flight_owned(
                 pass
         bs_path = child / "backend_state.json"
         input_path = child / "input.json"
+        execution_path = child / "execution.json"
         pid: Optional[str] = None
         runner = ""
         documents: list[dict] = []
+        execution_document: Optional[dict] = None
+        execution_kind = ""
+        if execution_path.exists():
+            try:
+                if execution_path.is_symlink():
+                    raise ValueError("invalid execution ownership document")
+                from execution_template import ExecutionArtifact
+
+                artifact = ExecutionArtifact.from_dict(
+                    json.loads(execution_path.read_text(encoding="utf-8")),
+                )
+                arguments = artifact.template.arguments()
+                execution_document = {
+                    "persist_to": (
+                        arguments.get("worker_agent_session_id")
+                        or arguments["app_session_id"]
+                    ),
+                    "target_message_id": arguments.get(
+                        "target_message_id",
+                    ),
+                    "provider_id": artifact.provider_id,
+                }
+                execution_kind = artifact.provider_kind
+            except Exception:
+                try:
+                    raw_execution = json.loads(
+                        execution_path.read_text(encoding="utf-8"),
+                    )
+                    failed_kind = str(
+                        raw_execution.get("provider_kind") or "",
+                    )
+                except Exception:
+                    failed_kind = ""
+                if failed_kind in {"codex", "fugu"}:
+                    ownership_safe = False
+                    continue
         backend_document_error = False
         if bs_path.exists():
             backend_state_reads += 1
@@ -1849,6 +1944,17 @@ def _recover_all_in_flight_owned(
             )
             if input_document else ""
         )
+        if (
+            execution_document is not None
+            and execution_kind in {"codex", "fugu"}
+        ):
+            documents = [execution_document]
+            pid = str(execution_document["provider_id"])
+            runner = ""
+            backend_sid = str(execution_document["persist_to"])
+            input_sid = backend_sid
+            backend_document_error = False
+            input_document_error = False
         relevant_or_unknown = bool(
             candidate_sids is None
             or not (backend_sid or input_sid)

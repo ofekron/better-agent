@@ -1389,7 +1389,16 @@ def _mark_reconciled_terminal(
                 run_id,
                 reason,
             )
-    return _touch_reconciled(run_id, desc)
+    marked = _touch_reconciled(run_id, desc)
+    if marked and _provider_kind(desc) in {"codex", "fugu"}:
+        from codex_execution_runtime import (
+            cleanup_installed_codex_runtime_agent_payload,
+        )
+
+        cleanup_installed_codex_runtime_agent_payload(
+            _runs_root() / run_id,
+        )
+    return marked
 
 
 async def _mark_reconciled_terminal_async(
@@ -3069,17 +3078,30 @@ async def _retry_recovered_run(
     # reads in _build_input_payload freeze the loop during recovery retries.
     recovery_loop = asyncio.get_running_loop()
     await asyncio.to_thread(session_manager.flush_pending_persists)
+    retry_overrides = {
+        "run_id": new_run_id,
+        "prompt": prompt,
+        "session_id": resume_sid,
+        "continuation_chain": continuation_chain,
+        "target_message_id": msg_id,
+    }
+    if original_artifact.provider_kind in {"codex", "fugu"}:
+        from codex_execution_runtime import (
+            clone_codex_runtime_agent_payload,
+            codex_runtime_agent_manifest,
+        )
+
+        await asyncio.to_thread(
+            clone_codex_runtime_agent_payload,
+            run_dir,
+            target_run_id=new_run_id,
+            manifest=codex_runtime_agent_manifest(original_artifact),
+        )
     restored_execution = restore_prepared_execution(
         original_artifact,
         internal_token=coordinator.internal_token,
         extra_env=None,
-    ).retry(
-        run_id=new_run_id,
-        prompt=prompt,
-        session_id=resume_sid,
-        continuation_chain=continuation_chain,
-        target_message_id=msg_id,
-    )
+    ).retry(**retry_overrides)
     try:
         started = await asyncio.to_thread(
             start_prepared_run,

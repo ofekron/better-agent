@@ -5,6 +5,7 @@ import platform as host_platform
 import shlex
 import shutil
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,115 @@ class LaunchChain:
         finally:
             for fd in handles:
                 os.close(fd)
+
+
+@dataclass(frozen=True)
+class PinnedLaunch:
+    argv_prefix: tuple[str, ...]
+    pass_fds: tuple[int, ...]
+
+
+def _verify_component_handle(fd: int, component: FileIdentity) -> None:
+    stat_result = os.fstat(fd)
+    if (
+        stat_result.st_dev != component.device
+        or stat_result.st_ino != component.inode
+        or stat_result.st_size != component.size
+        or stat_result.st_mtime_ns != component.mtime_ns
+        or stat_result.st_ctime_ns != component.ctime_ns
+        or sha256_fd(fd) != component.sha256
+    ):
+        raise ExecutionContractError("execution component identity mismatch")
+
+
+@contextmanager
+def _open_windows_locked_components(
+    components: tuple[FileIdentity, ...],
+) -> Iterator[tuple[int, ...]]:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    invalid_handle = wintypes.HANDLE(-1).value
+    handles: list[int] = []
+    try:
+        for component in components:
+            handle = create_file(
+                component.resolved_path,
+                0x80000000,
+                0x00000001,
+                None,
+                3,
+                0x00200080,
+                None,
+            )
+            if handle == invalid_handle:
+                raise ExecutionContractError(
+                    "execution component is unavailable",
+                )
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+            handles.append(fd)
+            _verify_component_handle(fd, component)
+        yield tuple(handles)
+    finally:
+        for fd in handles:
+            os.close(fd)
+
+
+@contextmanager
+def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
+    validate_launch_chain(chain)
+    if os.name == "nt":
+        with _open_windows_locked_components(chain.components):
+            yield PinnedLaunch(chain.argv_prefix, ())
+        return
+    with chain.open_attested_components() as handles:
+        if Path("/proc/self/fd").is_dir():
+            argv = list(chain.argv_prefix)
+            for index, fd in zip(chain.component_argv_indexes, handles):
+                argv[index] = f"/proc/self/fd/{fd}"
+            yield PinnedLaunch(tuple(argv), handles)
+            return
+        with tempfile.TemporaryDirectory(
+            prefix="better-agent-codex-launch-",
+        ) as raw:
+            root = Path(raw)
+            argv = list(chain.argv_prefix)
+            for position, (index, fd) in enumerate(
+                zip(chain.component_argv_indexes, handles),
+            ):
+                target = root / f"{position}-{Path(argv[index]).name}"
+                try:
+                    os.link(chain.components[position].resolved_path, target)
+                except OSError as exc:
+                    raise ExecutionContractError(
+                        "execution component cannot be pinned",
+                    ) from exc
+                observed = target.stat()
+                expected = os.fstat(fd)
+                if (
+                    observed.st_dev != expected.st_dev
+                    or observed.st_ino != expected.st_ino
+                    or FileIdentity.capture(target).sha256
+                    != chain.components[position].sha256
+                ):
+                    raise ExecutionContractError(
+                        "execution component pin mismatch",
+                    )
+                argv[index] = str(target)
+            yield PinnedLaunch(tuple(argv), ())
 
 
 def validate_launch_chain(chain: LaunchChain) -> None:

@@ -17,6 +17,7 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc-test-codex-interrupt-drain-")
 
 import runner_codex  # noqa: E402
+from scripts.codex_execution_test_support import runner_authority  # noqa: E402
 
 
 class _FakeStderr:
@@ -92,10 +93,8 @@ async def _run_with_fake_process(
         async def start_app_server(*_args, **_kwargs):
             return fake
 
-        original_resolve = runner_codex._resolve_codex_cli
         original_start = runner_codex._start_app_server
         original_signal_stop = runner_codex._process_control().signal_stop
-        runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
         runner_codex._start_app_server = start_app_server  # type: ignore[assignment]
         runner_codex._process_control().signal_stop = lambda _pid: None  # type: ignore[method-assign]
         cleanup = None
@@ -104,11 +103,17 @@ async def _run_with_fake_process(
                 cleanup = configure(run_dir, fake)
             payload = {"prompt": "go", "cwd": str(run_dir)}
             payload.update(inputs or {})
-            code = await runner_codex._run(run_dir, payload)
+            payload.setdefault("provider_kind", "codex")
+            contract, launch = runner_authority(run_dir)
+            code = await runner_codex._run(
+                run_dir,
+                payload,
+                contract,
+                launch,
+            )
         finally:
             if callable(cleanup):
                 cleanup()
-            runner_codex._resolve_codex_cli = original_resolve  # type: ignore[assignment]
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             runner_codex._process_control().signal_stop = original_signal_stop  # type: ignore[method-assign]
 

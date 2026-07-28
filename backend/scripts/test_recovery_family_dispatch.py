@@ -36,8 +36,7 @@ def test_recovery_family_resolution():
     assert rr._recovery_family({"provider_kind": "copilot"}) == "session_events"
     assert rr._recovery_family({"provider_kind": "qwen"}) == "session_events"
     assert rr._recovery_family({"provider_kind": "claude"}) == "claude"
-    # fugu currently uses the claude reader (pre-existing, flagged)
-    assert rr._recovery_family({"provider_kind": "fugu"}) == "claude"
+    assert rr._recovery_family({"provider_kind": "fugu"}) == "codex"
     # unknown / missing fall back to the claude reader
     assert rr._recovery_family({"provider_kind": "nope"}) == "claude"
     assert rr._recovery_family(None) == "claude"
