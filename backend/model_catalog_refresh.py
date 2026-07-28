@@ -333,6 +333,7 @@ class CatalogRefreshOwner:
 
 
 _fact_sinks: set[FactSink] = set()
+_background_refreshes: dict[str, asyncio.Task[None]] = {}
 
 
 async def _fanout_fact(fact: CatalogChangedFact) -> None:
@@ -359,6 +360,12 @@ async def start() -> None:
 
 
 async def shutdown() -> None:
+    tasks = list(_background_refreshes.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _background_refreshes.clear()
     await catalog_refresh_owner.shutdown()
 
 
@@ -372,3 +379,30 @@ def notify_provider_auth_changed(provider_id: str) -> None:
 
 async def request_refresh(provider_id: str) -> CatalogProjection:
     return await catalog_refresh_owner.refresh(provider_id)
+
+
+def request_refresh_background(provider_id: str) -> bool:
+    if type(provider_id) is not str or not provider_id:
+        raise CatalogRefreshError("invalid provider id")
+    current = _background_refreshes.get(provider_id)
+    if current is not None and not current.done():
+        return False
+    task = asyncio.create_task(
+        _run_background_refresh(provider_id),
+        name=f"model-catalog-refresh-request:{provider_id}",
+    )
+    _background_refreshes[provider_id] = task
+    return True
+
+
+async def _run_background_refresh(provider_id: str) -> None:
+    task = asyncio.current_task()
+    try:
+        await request_refresh(provider_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("model catalog refresh request failed")
+    finally:
+        if _background_refreshes.get(provider_id) is task:
+            _background_refreshes.pop(provider_id, None)

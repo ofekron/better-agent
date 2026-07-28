@@ -50,7 +50,21 @@ describe("provider credential denial", () => {
         return retryResponse;
       }
       if (url.endsWith("/api/providers/provider-blocked/models")) {
-        return response({ models: [] });
+        return response({
+          provider_id: provider.id,
+          provider_generation: "generation-1",
+          authoritative: false,
+          status: "current",
+          models: [],
+          models_current: true,
+          retired: [],
+          retired_models: [],
+          last_refreshed_at: 1,
+          reason: "",
+          authority_fingerprint: "",
+          last_known_good: null,
+          runtime_profiles: [],
+        });
       }
       if (url.includes("/api/providers")) {
         return response({ providers: [provider], default_provider_id: provider.id });

@@ -6,7 +6,7 @@ import {
   NewSessionModal,
 } from "../src/components/NewSessionModal";
 import type { Provider } from "../src/types";
-import { cacheProviderModels, cacheProviders } from "../src/utils/providerCache";
+import { cacheProviders } from "../src/utils/providerCache";
 
 vi.mock("../src/hooks/useMachines", () => ({
   useMachines: () => ({ machines: [] }),
@@ -70,7 +70,6 @@ describe("NewSessionModal prompt draft", () => {
   beforeEach(() => {
     localStorage.clear();
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
   });
 

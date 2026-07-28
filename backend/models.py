@@ -493,6 +493,7 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
                 "models_current": False,
                 "catalog_reason": "catalog_pending",
                 "authority_fingerprint": "",
+                "retired_models": [],
             }
         fetch_state = "ok" if projection.models_current else "failing"
         return (
@@ -506,6 +507,9 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
                 "models_current": projection.models_current,
                 "catalog_reason": projection.reason,
                 "authority_fingerprint": projection.authority_fingerprint,
+                "retired_models": [
+                    record.to_dict() for record in projection.retired
+                ],
             },
         )
 
@@ -617,10 +621,19 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
         # NOT fabricated aliases. Frontend handles empty + ok-state as
         # "no models for this context" rather than masking the issue.
         return {
+            "provider_id": "",
+            "provider_generation": "",
+            "authoritative": False,
+            "status": "unavailable",
             "models": [],
             "retired": [],
+            "retired_models": [],
+            "models_current": False,
+            "reason": "no_provider",
+            "authority_fingerprint": "",
             "last_fetch_state": "ok",
             "last_refreshed_at": 0.0,
+            "last_known_good": None,
         }
     custom = list(rec.get("custom_models") or [])
     models, retired, has_cache, cached = _read_catalog_models(rec)
@@ -635,19 +648,65 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
         state = "warming"
         last_refreshed_at = 0.0
 
+    authoritative = rec.get("kind") in {"codex", "fugu"}
+    if cached is not None and "catalog_status" in cached:
+        status = cached["catalog_status"]
+        models_current = bool(cached["models_current"])
+        reason = str(cached["catalog_reason"])
+        authority_fingerprint = str(cached["authority_fingerprint"])
+    else:
+        status = (
+            "pending"
+            if state == "warming"
+            else "error"
+            if state == "failing"
+            else "current"
+        )
+        models_current = status == "current"
+        reason = "catalog_pending" if status == "pending" else (
+            "refresh_failed" if status == "error" else ""
+        )
+        authority_fingerprint = ""
+
+    active_models = _dedupe_preserve_order(models + custom)
+    retired_models = (
+        list(cached.get("retired_models") or [])
+        if cached is not None and "retired_models" in cached
+        else list(cached.get("retired") or [])
+        if cached is not None
+        else []
+    )
+    retired_models = [
+        record
+        for record in retired_models
+        if isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and isinstance(record.get("first_absent_at"), (int, float))
+    ]
     payload = {
-        "models": models + custom,
+        "provider_id": str(rec["id"]),
+        "provider_generation": str(rec.get("generation") or ""),
+        "authoritative": authoritative,
+        "status": status,
+        "models": active_models,
         "retired": retired,
+        "retired_models": retired_models,
+        "models_current": models_current,
+        "reason": reason,
+        "authority_fingerprint": authority_fingerprint,
         "last_fetch_state": state,
         "last_refreshed_at": last_refreshed_at,
+        "last_known_good": (
+            {
+                "models": active_models,
+                "last_refreshed_at": last_refreshed_at,
+            }
+            if active_models and not models_current
+            else None
+        ),
     }
-    if cached is not None and "catalog_status" in cached:
-        payload.update({
-            "catalog_status": cached["catalog_status"],
-            "models_current": cached["models_current"],
-            "catalog_reason": cached["catalog_reason"],
-            "authority_fingerprint": cached["authority_fingerprint"],
-        })
+    payload["catalog_status"] = status
+    payload["catalog_reason"] = reason
     return payload
 
 

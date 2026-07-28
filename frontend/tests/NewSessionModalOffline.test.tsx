@@ -8,7 +8,7 @@ import {
 } from "../src/components/NewSessionModal";
 import type { Provider } from "../src/types";
 import { completeOp, startOp } from "../src/progress/store";
-import { cacheProviderModels, cacheProviders } from "../src/utils/providerCache";
+import { cacheProviders } from "../src/utils/providerCache";
 
 vi.mock("../src/hooks/useMachines", () => ({
   useMachines: () => ({ machines: [] }),
@@ -62,7 +62,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("only shows creating for this modal's own submission", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     let resolveCreate!: () => void;
     const createPending = new Promise<void>((resolve) => {
@@ -112,7 +111,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("offers all create actions and remembers the last selection", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn();
 
@@ -182,7 +180,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("creates with cached provider and model when provider fetches fail", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default", "cached-opus"]);
     localStorage.setItem(
       "better-agent-new-session-defaults",
       JSON.stringify({
@@ -228,7 +225,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("hides orchestration choice and creates native when native is the only available mode", async () => {
     cacheProviders([nativeOnlyProvider], nativeOnlyProvider.id);
-    cacheProviderModels(nativeOnlyProvider.id, ["cached-default"]);
     localStorage.setItem(
       "better-agent-new-session-defaults",
       JSON.stringify({
@@ -271,7 +267,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("creates file edit sessions without selecting a file in the modal", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
@@ -309,7 +304,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("lets extension options patch the created session config", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
     const options: NewSessionExtensionOption[] = [
@@ -368,7 +362,6 @@ describe("NewSessionModal offline provider cache", () => {
 
   it("keeps same-id extension options isolated by extension id", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 

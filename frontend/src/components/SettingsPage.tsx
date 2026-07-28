@@ -33,7 +33,8 @@ import { cacheProviders } from "../utils/providerCache";
 import { providerNickname } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindForRunner } from "./modelPicker";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
-import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
+import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
+import { ModelCatalogStatus } from "./ModelCatalogStatus";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
@@ -2451,7 +2452,6 @@ function ProviderForm({
   const [apiKey, setApiKey] = useState(initial.api_key ?? "");
   const [suspended, setSuspended] = useState(initial.suspended === true);
   const [submitting, setSubmitting] = useState(false);
-  const [modelOptions, setModelOptions] = useState<string[] | null>(null);
   const [customModelMode, setCustomModelMode] = useState(false);
   // Per-capability tri-state: inherit (kind default) / on / off. Seeded
   // from the provider's raw override map so an untouched save reproduces
@@ -2490,28 +2490,26 @@ function ProviderForm({
     }
   };
 
-  const modelCatalogRevision = useProviderCatalogRevision(providerId || "");
-
-  // Edit mode: fetch this provider's model list so the default_model
-  // dropdown is populated. Refetch on remount; cheap (cached server-side).
-  useEffect(() => {
-    if (mode !== "edit" || !providerId) return;
-    let cancelled = false;
-    const { promise } = trackPromise(`providers:fetchModels:${providerId}`, async () => {
-      const r = await fetch(`${API}/api/providers/${providerId}/models`);
-      return r.ok ? ((await r.json()) as { models: string[] }) : { models: [] };
-    });
-    promise
-      .then((d) => {
-        if (!cancelled) setModelOptions(d.models || []);
-      })
-      .catch(() => {
-        if (!cancelled) setModelOptions([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, providerId, modelCatalogRevision]);
+  const {
+    catalog,
+    networkState,
+    refresh,
+    refreshing,
+    refreshError,
+  } = useProviderModelCatalog(
+    mode === "edit" ? providerId || "" : "",
+  );
+  const catalogDefaultInvalid = (
+    mode === "edit"
+    && catalog?.authoritative === true
+    && (
+      catalog.status === "pending"
+      || catalog.status === "unsupported"
+      || catalog.status === "unavailable"
+      || !catalog.models.includes(defaultModel)
+    )
+  );
+  const modelOptions = mode === "edit" ? catalog?.models ?? null : null;
 
   const submit = async () => {
     setSubmitting(true);
@@ -2715,14 +2713,14 @@ function ProviderForm({
                 type="text"
                 value={defaultModel}
                 onChange={(e) => setDefaultModel(e.target.value)}
-                placeholder="sonnet, glm-4.6, claude-opus-5[1m], …"
+                placeholder={t("setup.defaultModelCustomPlaceholder")}
                 spellCheck={false}
               />
               {mode === "edit" && modelOptions !== null && (
                 <button
                   type="button"
                   className="btn-icon"
-                  title="Pick from list"
+                  title={t("setup.defaultModelPickFromList")}
                   onClick={() => setCustomModelMode(false)}
                 >
                   <Icon name="check" size={18} />
@@ -2731,8 +2729,17 @@ function ProviderForm({
             </div>
           )}
           {mode === "edit" && modelOptions === null && (
-            <span className="setup-field-hint">Loading model list…</span>
+            <span className="setup-field-hint">{t("model.catalogPending")}</span>
           )}
+          {mode === "edit" ? (
+            <ModelCatalogStatus
+              catalog={catalog}
+              networkState={networkState}
+              onRefresh={refresh}
+              refreshing={refreshing}
+              refreshError={refreshError}
+            />
+          ) : null}
         </div>
 
         {effortOptions.length > 0 && (
@@ -2810,7 +2817,11 @@ function ProviderForm({
         <button
           className="setup-save-btn"
           onClick={submit}
-          disabled={submitting || (credentialBlocked && !apiKey)}
+          disabled={
+            submitting
+            || (credentialBlocked && !apiKey)
+            || catalogDefaultInvalid
+          }
         >
           {submitting
             ? t('setup.saving')

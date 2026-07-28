@@ -2,14 +2,13 @@ import type { Provider } from "../types";
 import { providerDisplayName } from "./providerDisplayName";
 
 const STORAGE_KEY = "better-agent-provider-cache";
-const VERSION = 4;
+const VERSION = 5;
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 export interface ProviderCache {
   version: typeof VERSION;
   defaultProviderId: string | null;
   providers: Provider[];
-  modelsByProvider: Record<string, string[]>;
 }
 
 function isProvider(value: unknown): value is Provider {
@@ -47,19 +46,10 @@ function parseCache(value: unknown): ProviderCache | null {
   if (cache.version !== VERSION) return null;
   if (cache.defaultProviderId !== null && typeof cache.defaultProviderId !== "string") return null;
   if (!Array.isArray(cache.providers) || !cache.providers.every(isProvider)) return null;
-  if (!cache.modelsByProvider || typeof cache.modelsByProvider !== "object") return null;
-
-  const modelsByProvider: Record<string, string[]> = {};
-  for (const [providerId, models] of Object.entries(cache.modelsByProvider)) {
-    if (!Array.isArray(models) || !models.every((model) => typeof model === "string")) return null;
-    modelsByProvider[providerId] = models;
-  }
-
   return {
     version: VERSION,
     defaultProviderId: cache.defaultProviderId,
     providers: cache.providers,
-    modelsByProvider,
   };
 }
 
@@ -114,18 +104,5 @@ export function cacheProviders(providers: Provider[], defaultProviderId: string 
     version: VERSION,
     defaultProviderId,
     providers,
-    modelsByProvider: readProviderCache()?.modelsByProvider ?? {},
-  });
-}
-
-export function cacheProviderModels(providerId: string, models: string[]): void {
-  const cached = readProviderCache();
-  if (!cached) return;
-  writeProviderCache({
-    ...cached,
-    modelsByProvider: {
-      ...cached.modelsByProvider,
-      [providerId]: models,
-    },
   });
 }
