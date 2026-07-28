@@ -63,8 +63,8 @@ def test_ownership_projection_uses_dedicated_executor() -> None:
     assert "self._executors = tuple(\n            ThreadPoolExecutor(" in drainer_source
     assert 'thread_name_prefix=f"session-projection-{i}"' in drainer_source
     assert "for i in range(shards)" in drainer_source
-    assert "self._executor(command.root_id).submit(self._drain_chunk, command.root_id)" in drainer_source
-    assert "self._apply_row(root_id, row)" in drainer_source
+    assert "self._executor(root_id).submit(self._drain_chunk, root_id)" in drainer_source
+    assert "self._apply_row(root_id, row, fold_start_watermark)" in drainer_source
     assert "def _executor(self, root_id: str) -> ThreadPoolExecutor:" in drainer_source
     assert "return self._executors[self._shard(root_id)]" in drainer_source
 
@@ -229,12 +229,17 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "async def dumps_ws_json(" in ws_json_source
     assert "def shutdown_ws_json_executor()" in ws_json_source
     orchestrator_source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    global_start = orchestrator_source.index("async def broadcast_global(")
-    global_end = orchestrator_source.index("async def _broadcast_global_one(", global_start)
-    global_source = orchestrator_source[global_start:global_end]
+    prepared_start = orchestrator_source.index("    def _schedule_prepared_global(")
+    prepared_end = orchestrator_source.index(
+        "    def _own_global_future(",
+        prepared_start,
+    )
+    prepared_source = orchestrator_source[prepared_start:prepared_end]
     assert "SerializedGlobalEvent" in orchestrator_source
-    assert "_bc_serialized_json_task" in global_source
-    assert "dumps_ws_json(event)" in global_source
+    assert "asyncio.create_task(dumps_ws_json(event))" in prepared_source
+    assert "event._bc_serialized_json_task = serialization_task" in prepared_source
+    assert "self._own_global_task(serialization_task)" in prepared_source
+    assert "self._schedule_prepared_global(event, event_type)" in prepared_source
 
 
 def test_resolved_event_reader_keeps_unfiltered_reads_paged() -> None:
@@ -673,7 +678,8 @@ def test_publish_event_sync_resolves_cwd_without_full_session_copy() -> None:
 
 def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                    strategy.ingest_orphan" in source
+    assert "await asyncio.to_thread(\n                    session_manager.run_if_owner" in source
+    assert "lambda: strategy.ingest_orphan(" in source
     assert "\n                strategy.ingest_orphan(" not in source
 
 
