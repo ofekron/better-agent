@@ -61,6 +61,7 @@ from communication_modes import (
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
 from provider_completion import classify_completion_after_progress
+from runner_operation_host import internal_token_lease
 from runner_exit import hard_exit
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
@@ -1133,13 +1134,13 @@ def _post_loopback_sync(
     recover: Optional[Callable[[], Optional[dict]]] = None,
 ) -> dict:
     """Shared retry loop for the runner's loopback POSTs into the
-    backend (delegate, open-file-panel). Retries on
-    transient connection loss with exponential backoff. HTTPError
-    responses are terminal and re-raised. If `recover` returns a dict
+    backend (delegate, open-file-panel). Retries on transient connection
+    loss with exponential backoff and refreshes the runner's canonical
+    token once after a forbidden response. If `recover` returns a dict
     after a connection loss, that durable result is returned instead of
     retrying. `log_prefix` is interpolated into the retry warning.
-    `non_json_t_key` is the i18n key for the "response body did not
-    parse" RuntimeError each tool uses.
+    `non_json_t_key` is the i18n key for the "response body did not parse"
+    RuntimeError each tool uses.
 
     INVARIANT: matches the inlined retry loop each `_post_*_sync`
     previously implemented — same headers, same JSON envelope, same
@@ -1149,6 +1150,8 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout
     backoff = 1.0
+    token_lease = internal_token_lease(internal_token)
+
     def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             url=backend_url.rstrip("/") + url_path,
@@ -1165,17 +1168,29 @@ def _post_loopback_sync(
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
+            preview = raw[:200]
+            for value in token_lease.redact_values():
+                if value:
+                    preview = preview.replace(
+                        value.encode("utf-8"),
+                        b"[redacted]",
+                    )
             raise RuntimeError(
-                t(non_json_t_key, e=str(e), raw=repr(raw[:200]))
+                t(non_json_t_key, e=str(e), raw=repr(preview))
             )
 
     while True:
         try:
             _mark_runner_activity()
-            return _request_once(internal_token)
+            return _request_once(token_lease.token)
         except urllib.error.HTTPError as e:
             _mark_runner_activity()
-            raise_loopback_http_error(e)
+            if e.code == 403 and token_lease.refresh_after_forbidden():
+                continue
+            raise_loopback_http_error(
+                e,
+                redact_values=token_lease.redact_values(),
+            )
         except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
             _mark_runner_activity()
             recovered = recover() if recover is not None else None

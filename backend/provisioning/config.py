@@ -192,7 +192,6 @@ def _resolve_internal_token(spec: ProvisionedSessionSpec) -> str:
 
 
 def _read_internal_token() -> str:
-    try:
-        return (ba_home() / "internal_token").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    from internal_token_file import read_private_token
+
+    return read_private_token(ba_home() / "internal_token") or ""

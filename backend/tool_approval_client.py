@@ -13,7 +13,6 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from typing import Optional
 
 logger = logging.getLogger("tool_approval_client")
 
@@ -21,7 +20,6 @@ logger = logging.getLogger("tool_approval_client")
 # HTTP client, is the fail-closed authority.
 _HTTP_TIMEOUT_S = 6 * 60
 _TRANSIENT_RETRY_SLEEP_S = 0.5
-_token_cache: dict[str, object] = {"token": None, "mtime": 0.0}
 
 
 # Per-field display cap. The summary rides a WS broadcast to every tab, so a
@@ -52,20 +50,6 @@ def describe_tool_call(tool_name: object, tool_input: object) -> dict:
                 text = str(value)
         described[str(key)] = text[:_SUMMARY_VALUE_CAP]
     return {"tool": str(tool_name), "input": described}
-
-
-def _load_internal_token() -> Optional[str]:
-    try:
-        from paths import ba_home
-        path = ba_home() / "internal_token"
-        st = path.stat()
-        if _token_cache.get("mtime") != st.st_mtime:
-            _token_cache["token"] = path.read_text(encoding="utf-8").strip()
-            _token_cache["mtime"] = st.st_mtime
-        token = _token_cache.get("token")
-        return token if isinstance(token, str) and token else None
-    except Exception:
-        return None
 
 
 def _is_transient_approval_error(exc: BaseException) -> bool:
@@ -105,8 +89,9 @@ def request_tool_approval(
         }
     ).encode("utf-8")
     deadline = time.monotonic() + _HTTP_TIMEOUT_S
-    tried_live_token_after_forbidden = False
-    token = internal_token
+    from runner_operation_host import internal_token_lease
+
+    token_lease = internal_token_lease(internal_token)
 
     def _request_once(use_token: str) -> dict:
         req = urllib.request.Request(
@@ -128,18 +113,10 @@ def request_tool_approval(
             logger.warning("tool-approval request retry deadline expired before attempt (denying)")
             return False
         try:
-            payload = _request_once(token)
+            payload = _request_once(token_lease.token)
             return bool(payload.get("approved"))
         except urllib.error.HTTPError as exc:
-            live_token = _load_internal_token()
-            if (
-                exc.code == 403
-                and live_token
-                and live_token != token
-                and not tried_live_token_after_forbidden
-            ):
-                tried_live_token_after_forbidden = True
-                token = live_token
+            if exc.code == 403 and token_lease.refresh_after_forbidden():
                 continue
             if _is_transient_approval_error(exc):
                 logger.info("tool-approval request transient HTTP failure; retrying: %s", exc)
