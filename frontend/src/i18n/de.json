@@ -1345,5 +1345,6 @@
   "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here.",
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
-  "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one."
+  "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
+  "newSession.usageLowWarning": "{{provider}}-Nutzung ist fast erschöpft — {{remaining}}"
 }

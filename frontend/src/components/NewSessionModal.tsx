@@ -21,7 +21,13 @@ import { usePersistedDraft } from "../hooks/usePersistedDraft";
 import { ConfirmModal } from "./ConfirmModal";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
-import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
+import {
+  optionLabelWithQuota,
+  quotaRemainingText,
+  quotaResetText,
+  summarizeProvider,
+  type QuotaSummary,
+} from "../utils/quotaStatus";
 import { providerDisplayName } from "../utils/providerDisplayName";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import Icon from "./Icon";
@@ -301,6 +307,44 @@ export function resolveRuntimeProfile(
   };
 }
 
+/** Inline usage-left warning shown in a runtime profile picker when the
+ * selected provider's worst-window quota is at warn or critical. Surfaces
+ * the same reading the option labels append as "X% left", but prominently
+ * so a near-exhausted provider is not missed before creating a session. */
+function UsageLeftWarning({
+  summary,
+  providerLabel,
+}: {
+  summary: QuotaSummary;
+  providerLabel: string;
+}) {
+  const { t } = useTranslation();
+  const remaining = quotaRemainingText(summary, t);
+  const reset = quotaResetText(summary, t);
+  return (
+    <div
+      className={`ns-modal-usage-warning usage-${summary.level}`}
+      role="status"
+      aria-live="polite"
+    >
+      <span className="ns-modal-usage-warning-dot" aria-hidden="true" />
+      <span className="ns-modal-usage-warning-text">
+        {t("newSession.usageLowWarning", {
+          provider: providerLabel,
+          remaining,
+          defaultValue: "{{provider}} usage is running low — {{remaining}}",
+        })}
+      </span>
+      {reset && <span className="ns-modal-usage-warning-meta">{reset}</span>}
+      {summary.stale && (
+        <span className="ns-modal-usage-warning-meta">
+          {t("quota.stale", { defaultValue: "stale" })}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function RuntimeProfilePicker({
   label,
   role,
@@ -380,6 +424,14 @@ function RuntimeProfilePicker({
           })}
         </select>
       </div>
+      {selectedQuota &&
+      (selectedQuota.level === "warn" || selectedQuota.level === "critical") &&
+      selectedProvider ? (
+        <UsageLeftWarning
+          summary={selectedQuota}
+          providerLabel={providerDisplayName(selectedProvider)}
+        />
+      ) : null}
       {selectedProvider && selectedProvider.runner_options.length > 1 ? (
         <div className="ns-modal-row ns-runtime-axis">
           <label>{t("newSession.runner")}</label>
