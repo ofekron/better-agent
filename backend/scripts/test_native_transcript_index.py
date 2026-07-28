@@ -32,6 +32,7 @@ import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-native-transcript-index-")
 
 import config_store  # noqa: E402
+import native_elements  # noqa: E402
 import native_session_prompt_search as nsp  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
 import native_session_miner as nm  # noqa: E402
@@ -2059,6 +2060,448 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
     return ok
 
 
+def _append_user(path: Path, uid: str, text: str) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user",
+            "uuid": uid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": text},
+        }) + "\n")
+
+
+def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/append") / "append.jsonl"
+    _write_claude(path, [f"appendbase {index} " + "x" * 2048 for index in range(100)])
+    idx.refresh_once(full=True)
+    conn = idx._readonly_connection()
+    original_rowids = {
+        row[0] for row in conn.execute(
+            "SELECT rowid FROM native_element_meta WHERE path=?",
+            (str(path),),
+        )
+    }
+    original_offset = conn.execute(
+        "SELECT source_offset FROM native_file_state WHERE path=?",
+        (str(path),),
+    ).fetchone()[0]
+    _append_user(path, "tail", "appendtailneedle")
+    result = idx.refresh_once(full=False)
+    current_rowids = {
+        row[0] for row in conn.execute(
+            "SELECT rowid FROM native_element_meta WHERE path=?",
+            (str(path),),
+        )
+    }
+    state = conn.execute(
+        "SELECT source_offset FROM native_file_state WHERE path=?",
+        (str(path),),
+    ).fetchone()
+    timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
+    ok = (
+        result["touched"] == 1
+        and original_rowids < current_rowids
+        and len(current_rowids - original_rowids) == 1
+        and state[0] - original_offset < 512
+        and timing["mode"] == "append"
+        and timing["rows"] == 1
+        and idx.search_rows(["appendtailneedle"], limit=5)
+    )
+    print(
+        f"{OK if ok else FAIL} append work stays proportional "
+        f"(new_rows={len(current_rowids - original_rowids)}, timing={timing})"
+    )
+    return bool(ok)
+
+
+def test_append_refresh_holds_partial_line_until_complete() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/partial") / "partial.jsonl"
+    _write_claude(path, ["partialbase"])
+    idx.refresh_once(full=True)
+    line = json.dumps({
+        "type": "user",
+        "uuid": "partial-tail",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "user", "content": "partialtailneedle"},
+    })
+    split = len(line) // 2
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line[:split])
+    idx.refresh_once(full=False)
+    before = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+    ).fetchone()[0]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line[split:] + "\n")
+    idx.refresh_once(full=False)
+    after = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+    ).fetchone()[0]
+    ok = before == 0 and after == 1
+    print(f"{OK if ok else FAIL} partial append waits for newline")
+    return ok
+
+
+def test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/rewrite") / "rewrite.jsonl"
+    _write_claude(path, ["early-old-" + "x" * 8192, "boundary-old"])
+    idx.refresh_once(full=True)
+    with path.open("r+b") as handle:
+        payload = handle.read().replace(b"early-old-", b"early-new-")
+        handle.seek(0)
+        handle.write(payload)
+        handle.truncate()
+    _append_user(path, "after-rewrite", "afterrewrite")
+    idx.refresh_once(full=False)
+    conn = idx._readonly_connection()
+    texts = {row[0] for row in conn.execute("SELECT text FROM native_element_text")}
+    timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
+    rewrite_ok = (
+        any(text.startswith("early-new-") for text in texts)
+        and not any(text.startswith("early-old-") for text in texts)
+        and timing["mode"] == "rebuild"
+    )
+    _write_claude(path, ["replacementneedle"])
+    idx.refresh_once(full=False)
+    truncated = {
+        row[0] for row in conn.execute("SELECT text FROM native_element_text")
+    }
+    ok = rewrite_ok and truncated == {"replacementneedle"}
+    print(f"{OK if ok else FAIL} prefix rewrite and truncate force rebuild")
+    return ok
+
+
+def test_append_refresh_defers_unstable_generation() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/racing") / "racing.jsonl"
+    _write_claude(path, ["stablebase"])
+    idx.refresh_once(full=True)
+    _append_user(path, "racing-one", "racingone")
+    original = nm.NativeCandidate.parse_elements_from
+    mutated = False
+
+    def parse_and_mutate(candidate, offset):
+        nonlocal mutated
+        result = original(candidate, offset)
+        if not mutated:
+            mutated = True
+            _append_user(candidate.transcript, "racing-two", "racingtwo")
+        return result
+
+    nm.NativeCandidate.parse_elements_from = parse_and_mutate
+    try:
+        first = idx.refresh_once(full=False)
+    finally:
+        nm.NativeCandidate.parse_elements_from = original
+    before = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    second = idx.refresh_once(full=False)
+    after = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    ok = (
+        first["touched"] == 0
+        and before == {"stablebase"}
+        and second["touched"] == 1
+        and after == {"stablebase", "racingone", "racingtwo"}
+    )
+    print(f"{OK if ok else FAIL} unstable source generation defers atomically")
+    return ok
+
+
+def test_append_refresh_recovers_after_transient_parse_failure() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/retry") / "retry.jsonl"
+    _write_claude(path, ["retrybase"])
+    idx.refresh_once(full=True)
+    _append_user(path, "retry-tail", "retrytailneedle")
+    original = native_elements._claude_elements
+    native_elements._claude_elements = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(OSError("transient parse failure"))
+    )
+    try:
+        first = idx.refresh_once(full=False)
+    finally:
+        native_elements._claude_elements = original
+    before = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+    ).fetchone()[0]
+    second = idx.refresh_once(full=False)
+    after = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+    ).fetchone()[0]
+    ok = first["touched"] == 0 and before == 0 and second["touched"] == 1 and after == 1
+    print(f"{OK if ok else FAIL} transient tail parse failure retries safely")
+    return ok
+
+
+def test_rebuild_defers_transient_parse_failure_without_erasing_rows() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/rebuild-retry") / "retry.jsonl"
+    _write_claude(path, ["rebuildoldneedle"])
+    idx.refresh_once(full=True)
+    _write_claude(path, ["rebuildnewneedle"])
+    original = native_elements._claude_elements
+    native_elements._claude_elements = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(OSError("transient rebuild parse failure"))
+    )
+    try:
+        first = idx.refresh_once(full=False)
+    finally:
+        native_elements._claude_elements = original
+    before = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    second = idx.refresh_once(full=False)
+    after = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    ok = (
+        first["touched"] == 0
+        and before == {"rebuildoldneedle"}
+        and second["touched"] == 1
+        and after == {"rebuildnewneedle"}
+    )
+    print(f"{OK if ok else FAIL} transient rebuild parse preserves rows and retries")
+    return ok
+
+
+def test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows() -> bool:
+    _setup_roots()
+    root = _SCRATCH / "windsurf-retry"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    path = root / "retry.pb"
+    path.write_bytes(b"old-generation")
+    original_roots = idx._roots_resolver_override
+    original_parser = native_elements._windsurf_elements
+
+    def candidate_from_match(candidate_path: Path, tag: str):
+        return native_elements.NativeCandidate(
+            key=str(candidate_path),
+            sid=candidate_path.stem,
+            cwd="/windsurf",
+            data={},
+            transcript=candidate_path,
+            mtime=candidate_path.stat().st_mtime,
+            format=tag,
+        )
+
+    idx.set_roots_resolver(lambda: (
+        lambda: [(root, "windsurf")],
+        lambda _path, _roots: "windsurf",
+        candidate_from_match,
+        lambda _path, tag: tag == "windsurf",
+    ))
+    native_elements._windsurf_elements = lambda _path: [
+        native_elements.NativeElement("user_prompt", "user", "windsurfoldneedle")
+    ]
+    try:
+        idx.reset_for_test()
+        idx.refresh_once(full=True)
+        path.write_bytes(b"new-generation-longer")
+        native_elements._windsurf_elements = lambda _path: (
+            (_ for _ in ()).throw(OSError("transient windsurf parse failure"))
+        )
+        first = idx.refresh_once(full=False)
+        before = {
+            row[0] for row in idx._readonly_connection().execute(
+                "SELECT text FROM native_element_text"
+            )
+        }
+        native_elements._windsurf_elements = lambda _path: [
+            native_elements.NativeElement("user_prompt", "user", "windsurfnewneedle")
+        ]
+        second = idx.refresh_once(full=False)
+        after = {
+            row[0] for row in idx._readonly_connection().execute(
+                "SELECT text FROM native_element_text"
+            )
+        }
+    finally:
+        native_elements._windsurf_elements = original_parser
+        idx.set_roots_resolver(original_roots)
+    ok = (
+        first["touched"] == 0
+        and before == {"windsurfoldneedle"}
+        and second["touched"] == 1
+        and after == {"windsurfnewneedle"}
+    )
+    print(f"{OK if ok else FAIL} windsurf rebuild parse preserves rows and retries")
+    return ok
+
+
+def test_append_transaction_rolls_back_rows_and_cursor() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/rollback") / "rollback.jsonl"
+    _write_claude(path, ["rollbackbase"])
+    idx.refresh_once(full=True)
+    _append_user(path, "rollback", "rollbacktailneedle")
+    conn = idx._readonly_connection()
+    original_offset = conn.execute(
+        "SELECT source_offset FROM native_file_state WHERE path=?",
+        (str(path),),
+    ).fetchone()[0]
+    original = idx._insert_index_rows
+
+    def insert_then_fail(connection, rows, indexed_path):
+        original(connection, rows, indexed_path)
+        raise RuntimeError("crash boundary")
+
+    idx._insert_index_rows = insert_then_fail
+    try:
+        try:
+            idx.refresh_once(full=False)
+        except RuntimeError:
+            pass
+    finally:
+        idx._insert_index_rows = original
+    before = conn.execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+    ).fetchone()[0]
+    offset_after_failure = conn.execute(
+        "SELECT source_offset FROM native_file_state WHERE path=?",
+        (str(path),),
+    ).fetchone()[0]
+    idx.refresh_once(full=False)
+    after = conn.execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+    ).fetchone()[0]
+    ok = before == 0 and offset_after_failure == original_offset and after == 1
+    print(f"{OK if ok else FAIL} append rows and cursor roll back atomically")
+    return ok
+
+
+def test_append_cursor_survives_connection_restart() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/restart-append") / "restart.jsonl"
+    _write_claude(path, ["restartbase"])
+    idx.refresh_once(full=True)
+    original_rowid = idx._readonly_connection().execute(
+        "SELECT rowid FROM native_element_meta WHERE path=?",
+        (str(path),),
+    ).fetchone()[0]
+    idx._close_readonly_connection()
+    with idx._lock:
+        idx._writer_conn.close()
+        idx._writer_conn = None
+        idx._writer_conn_path = None
+    _append_user(path, "restart-tail", "restarttailneedle")
+    idx.refresh_once(full=False)
+    rows = list(idx._readonly_connection().execute(
+        "SELECT rowid,text FROM native_element_text ORDER BY rowid"
+    ))
+    ok = rows[0][0] == original_rowid and [row[1] for row in rows] == [
+        "restartbase",
+        "restarttailneedle",
+    ]
+    print(f"{OK if ok else FAIL} persisted append cursor survives connection restart")
+    return ok
+
+
+def test_append_repeat_projection_matches_full_rebuild() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/repeat-parity") / "parity.jsonl"
+    repeated = "repeat parity body " + "x" * 1200
+    _write_claude(path, [repeated, repeated])
+    idx.refresh_once(full=True)
+    _append_user(path, "repeat-tail", repeated)
+    idx.refresh_once(full=False)
+
+    def snapshot():
+        conn = idx._readonly_connection()
+        return (
+            list(conn.execute(
+                "SELECT kind,bucket_field,hash_key,count,common_norm_prefix_len "
+                "FROM native_repeat_group "
+                "ORDER BY kind,bucket_field,hash_key"
+            )),
+            list(conn.execute(
+                "SELECT m.element_index,g.kind,b.raw_tail_start,b.norm_tail_start "
+                "FROM native_element_repeat_best b "
+                "JOIN native_element_meta m ON m.rowid=b.rowid "
+                "JOIN native_repeat_group g ON g.group_id=b.group_id "
+                "ORDER BY m.element_index"
+            )),
+        )
+
+    incremental = snapshot()
+    idx.reset_for_test()
+    idx.refresh_once(full=True)
+    rebuilt = snapshot()
+    ok = incremental == rebuilt
+    print(f"{OK if ok else FAIL} append repeat projection equals full rebuild")
+    return ok
+
+
+def test_incremental_parser_provider_parity() -> bool:
+    root = _SCRATCH / "provider-parity"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    records = {
+        "claude": lambda text: {
+            "type": "user",
+            "uuid": text,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": text},
+        },
+        "codex": lambda text: {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": text,
+                "id": text,
+            },
+        },
+        "pi": lambda text: {
+            "type": "message",
+            "id": text,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": text},
+        },
+    }
+    observed = {}
+    for format_name, make_record in records.items():
+        path = root / f"{format_name}.jsonl"
+        path.write_text(
+            json.dumps(make_record("base")) + "\n",
+            encoding="utf-8",
+        )
+        candidate = nm.NativeCandidate(
+            format_name,
+            format_name,
+            "/parity",
+            {},
+            path,
+            path.stat().st_mtime,
+            format_name,
+        )
+        _base, offset = candidate.parse_elements_from(0)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(make_record(f"{format_name}-tail")) + "\n")
+        tail, _new_offset = candidate.parse_elements_from(offset)
+        observed[format_name] = [element.text for element in tail]
+    ok = all(
+        observed[name] == [f"{name}-tail"]
+        for name in records
+    )
+    print(f"{OK if ok else FAIL} incremental parser provider parity ({observed})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -2105,6 +2548,17 @@ def main_run() -> int:
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
         test_worker_short_throttles_partial_covered_refresh,
+        test_append_refresh_is_proportional_and_preserves_rows,
+        test_append_refresh_holds_partial_line_until_complete,
+        test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate,
+        test_append_refresh_defers_unstable_generation,
+        test_append_refresh_recovers_after_transient_parse_failure,
+        test_rebuild_defers_transient_parse_failure_without_erasing_rows,
+        test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows,
+        test_append_transaction_rolls_back_rows_and_cursor,
+        test_append_cursor_survives_connection_restart,
+        test_append_repeat_projection_matches_full_rebuild,
+        test_incremental_parser_provider_parity,
     ]
     results = []
     for fn in tests:

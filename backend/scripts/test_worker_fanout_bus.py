@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -144,6 +145,74 @@ async def _run() -> int:
         "worker-side delegate-fork session deleted on registered worker delete",
     )
     check(broadcasts == [None, None, None], "workers_changed broadcast emitted for each cleanup")
+
+    responsive = session_manager.create(
+        name="responsive-delete",
+        cwd=_TMP,
+        orchestration_mode="native",
+    )
+    for index in range(200):
+        worker_store.upsert_worker(
+            cwd="",
+            agent_session_id=f"large-registry-worker-{index}",
+            orchestration_mode="native",
+            agent_sid=f"large-registry-agent-{index}",
+        )
+    worker_store.upsert_worker(
+        cwd="",
+        agent_session_id=responsive["id"],
+        orchestration_mode="native",
+        agent_sid="responsive-delete-agent",
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    loop_progressed = threading.Event()
+    observed_progress: list[bool] = []
+    real_cleanup = worker_store.cleanup_session_fanout
+
+    def blocking_cleanup(*args, **kwargs):
+        result = real_cleanup(*args, **kwargs)
+        entered.set()
+        release.wait(timeout=1)
+        return result
+
+    def release_after_observation() -> None:
+        assert entered.wait(timeout=2)
+        observed_progress.append(loop_progressed.wait(timeout=0.5))
+        release.set()
+
+    worker_store.cleanup_session_fanout = blocking_cleanup
+    observer = threading.Thread(target=release_after_observation)
+    observer.start()
+    try:
+        publish_task = asyncio.create_task(bus.publish(BusEvent(
+            type="session.worker_fanout_required",
+            root_id=responsive["id"],
+            sid=responsive["id"],
+            payload={
+                "session_id": responsive["id"],
+                "op_label": "responsive session delete",
+                "caller_scope": True,
+                "remove_worker": True,
+                "outer_log_msg": "responsive delete cleanup failed",
+            },
+            persist=False,
+        )))
+        await asyncio.sleep(0)
+        loop_progressed.set()
+        await publish_task
+    finally:
+        release.set()
+        observer.join(timeout=1)
+        worker_store.cleanup_session_fanout = real_cleanup
+
+    check(observed_progress == [True], "large-registry cleanup stays off event loop")
+    check(
+        worker_store.get_worker("", responsive["id"]) is None,
+        "large-registry cleanup remains visible after awaited publish",
+    )
+    check(broadcasts == [None, None, None, None], "responsive cleanup broadcasts once")
 
     if failures:
         print(f"\n{len(failures)} FAILURES")

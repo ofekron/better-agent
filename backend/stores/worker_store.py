@@ -563,6 +563,56 @@ def remove_worker_everywhere(agent_session_id: str) -> int:
     return 0
 
 
+def cleanup_session_fanout(
+    agent_session_id: str,
+    *,
+    caller_scope: bool,
+    remove_worker: bool,
+) -> list[str]:
+    """Atomically remove worker/fork state owned by a session lifecycle change."""
+    cleared: list[str] = []
+    with _lock_for():
+        raw = _read()
+        forks = raw.get("forks") or {}
+        changed = False
+        removed_worker = False
+
+        if caller_scope:
+            by_worker = forks.pop(agent_session_id, None)
+            if by_worker:
+                changed = True
+                for rec in by_worker.values():
+                    if isinstance(rec, dict) and rec.get("fork_agent_session_id"):
+                        cleared.append(str(rec["fork_agent_session_id"]))
+
+        if remove_worker or not caller_scope:
+            for caller_sid, by_worker in list(forks.items()):
+                rec = by_worker.pop(agent_session_id, None)
+                if rec is None:
+                    continue
+                changed = True
+                if isinstance(rec, dict) and rec.get("fork_agent_session_id"):
+                    cleared.append(str(rec["fork_agent_session_id"]))
+                if not by_worker:
+                    forks.pop(caller_sid, None)
+
+        if remove_worker:
+            workers = raw.get("workers", [])
+            raw["workers"] = [
+                worker
+                for worker in workers
+                if worker.get("agent_session_id") != agent_session_id
+            ]
+            removed_worker = len(raw["workers"]) != len(workers)
+            changed = changed or removed_worker
+
+        if changed:
+            raw["forks"] = forks
+            _write("", raw, refresh_worker_summaries=removed_worker)
+
+    return list(dict.fromkeys(cleared))
+
+
 # ============================================================================
 # Per-pair fork mapping
 # ============================================================================

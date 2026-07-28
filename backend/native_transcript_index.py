@@ -51,6 +51,7 @@ from process_identity import (
 import portable_lock
 import native_internal_prompt
 import run_source_index
+from native_elements import NativeParseDeferred
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -124,6 +125,11 @@ _REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
 _REFRESH_HANDLED_AT_KEY = "refresh_handled_at"
 _WRITER_CACHE_KIB = 200_000
 _READONLY_CACHE_KIB = 8_192
+
+
+class _SourceChanged(RuntimeError):
+    pass
+
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -331,7 +337,12 @@ def _ensure_file_state_schema(conn: sqlite3.Connection) -> None:
             first_user_prompt_ts TEXT,
             message_count INTEGER NOT NULL,
             turn_source TEXT,
-            indexed_at REAL NOT NULL
+            indexed_at REAL NOT NULL,
+            source_inode INTEGER NOT NULL DEFAULT 0,
+            source_offset INTEGER NOT NULL DEFAULT 0,
+            source_element_count INTEGER NOT NULL DEFAULT 0,
+            source_user_prompt_count INTEGER NOT NULL DEFAULT 0,
+            source_prefix_sha256 TEXT NOT NULL DEFAULT ''
         );
         """
     )
@@ -1031,16 +1042,17 @@ def _text_collapse_signature(text: str) -> tuple[Any, ...]:
     )
 
 
-def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[tuple[Any, ...]]:
-    """Lean-extract one transcript to FTS rows. Drops tool_result/meta and keeps
-    full indexed-element text plus structural kind/tool name for categorization."""
+def _index_element_rows(
+    candidate,
+    elements,
+    *,
+    source_tag: str | None = None,
+    element_index_base: int = 0,
+) -> list[tuple[Any, ...]]:
     tag = source_tag or candidate.format
     rows: list[tuple[Any, ...]] = []
-    try:
-        elements = candidate.parse_elements()
-    except Exception:
-        return rows
-    for element_index, el in enumerate(elements):
+    for relative_index, el in enumerate(elements):
+        element_index = element_index_base + relative_index
         if el.kind not in _INDEXED_KINDS:
             continue
         text = el.text
@@ -1052,6 +1064,21 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
             el.role, el.id, element_index, *_text_collapse_signature(text),
         ))
     return rows
+
+
+def _source_prefix_sha256(path: Path, offset: int) -> str:
+    if offset <= 0:
+        return ""
+    digest = hashlib.sha256()
+    remaining = offset
+    with path.open("rb") as handle:
+        while remaining > 0:
+            payload = handle.read(min(1024 * 1024, remaining))
+            if not payload:
+                raise _SourceChanged(str(path))
+            digest.update(payload)
+            remaining -= len(payload)
+    return digest.hexdigest()
 
 
 def _reset_repeat_projection(conn: sqlite3.Connection) -> None:
@@ -1458,54 +1485,20 @@ def _replace_candidate(
 ) -> tuple[int, dict[str, float]]:
     tag = source_tag or candidate.format
     path = str(candidate.transcript)
+    parse_start = time.monotonic()
+    elements, source_offset = candidate.parse_elements_from(0)
+    rows = _index_element_rows(candidate, elements, source_tag=tag)
+    parse_s = time.monotonic() - parse_start
+    parsed_stat = candidate.transcript.stat()
+    if parsed_stat.st_size != size or parsed_stat.st_mtime != mtime:
+        raise _SourceChanged(path)
+
     delete_start = time.monotonic()
     _delete_path(conn, path, file_state=False)
     delete_s = time.monotonic() - delete_start
 
-    parse_start = time.monotonic()
-    rows = _index_candidate_rows(candidate, source_tag=tag)
-    parse_s = time.monotonic() - parse_start
-
     insert_start = time.monotonic()
-    if rows:
-        path_rows = []
-        meta_rows = []
-        text_rows = []
-        for row in rows:
-            cursor = conn.execute(
-                f"INSERT INTO native_element_fts({', '.join(_FTS_COLUMNS)}) "
-                f"VALUES ({', '.join('?' for _ in _FTS_COLUMNS)})",
-                row,
-            )
-            rowid = cursor.lastrowid
-            path_rows.append((rowid, path))
-            meta_rows.append((rowid, *row[1:]))
-            text_rows.append((rowid, row[0]))
-        conn.executemany(
-            "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
-            path_rows,
-        )
-        conn.executemany(
-            f"INSERT INTO native_element_meta(rowid, {', '.join(_META_COLUMNS)}) "
-            f"VALUES ({', '.join('?' for _ in range(len(_META_COLUMNS) + 1))})",
-            meta_rows,
-        )
-        conn.executemany(
-            "INSERT INTO native_element_text(rowid, text) VALUES (?, ?)",
-            text_rows,
-        )
-        dirty_keys: list[tuple[str, str]] = []
-        for meta_row in meta_rows:
-            dirty_keys.extend(
-                _repeat_dirty_keys_from_meta_values(
-                    str(meta_row[12] or ""),
-                    str(meta_row[13] or ""),
-                    str(meta_row[14] or ""),
-                    str(meta_row[15] or ""),
-                    int(meta_row[17] or 0),
-                )
-            )
-        _mark_repeat_dirty_keys(conn, dirty_keys)
+    _insert_index_rows(conn, rows, path)
     insert_s = time.monotonic() - insert_start
 
     state_start = time.monotonic()
@@ -1538,13 +1531,18 @@ def _replace_candidate(
     conn.execute(
         "INSERT INTO native_file_state("
         "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
-        "turn_source, indexed_at"
-        ") VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+        "turn_source, indexed_at, source_inode, source_offset, source_element_count, "
+        "source_user_prompt_count, source_prefix_sha256"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
         "mtime=excluded.mtime, size=excluded.size, tag=excluded.tag, "
         "sid=excluded.sid, cwd=excluded.cwd, "
         "first_user_prompt_ts=excluded.first_user_prompt_ts, "
         "message_count=excluded.message_count, "
-        "turn_source=excluded.turn_source, indexed_at=excluded.indexed_at",
+        "turn_source=excluded.turn_source, indexed_at=excluded.indexed_at, "
+        "source_inode=excluded.source_inode, source_offset=excluded.source_offset, "
+        "source_element_count=excluded.source_element_count, "
+        "source_user_prompt_count=excluded.source_user_prompt_count, "
+        "source_prefix_sha256=excluded.source_prefix_sha256",
         (
             path,
             mtime,
@@ -1556,6 +1554,11 @@ def _replace_candidate(
             message_count,
             turn_source,
             time.time(),
+            parsed_stat.st_ino,
+            source_offset,
+            len(elements),
+            sum(1 for element in elements if element.kind == "user_prompt"),
+            _source_prefix_sha256(candidate.transcript, source_offset),
         ),
     )
     state_s = time.monotonic() - state_start
@@ -1564,6 +1567,174 @@ def _replace_candidate(
         "parse_s": parse_s,
         "insert_s": insert_s,
         "state_s": state_s,
+    }
+
+
+def _insert_index_rows(
+    conn: sqlite3.Connection,
+    rows: list[tuple[Any, ...]],
+    path: str,
+) -> None:
+    if not rows:
+        return
+    path_rows = []
+    meta_rows = []
+    text_rows = []
+    for row in rows:
+        cursor = conn.execute(
+            f"INSERT INTO native_element_fts({', '.join(_FTS_COLUMNS)}) "
+            f"VALUES ({', '.join('?' for _ in _FTS_COLUMNS)})",
+            row,
+        )
+        rowid = cursor.lastrowid
+        path_rows.append((rowid, path))
+        meta_rows.append((rowid, *row[1:]))
+        text_rows.append((rowid, row[0]))
+    conn.executemany(
+        "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
+        path_rows,
+    )
+    conn.executemany(
+        f"INSERT INTO native_element_meta(rowid, {', '.join(_META_COLUMNS)}) "
+        f"VALUES ({', '.join('?' for _ in range(len(_META_COLUMNS) + 1))})",
+        meta_rows,
+    )
+    conn.executemany(
+        "INSERT INTO native_element_text(rowid, text) VALUES (?, ?)",
+        text_rows,
+    )
+    dirty_keys: list[tuple[str, str]] = []
+    for meta_row in meta_rows:
+        dirty_keys.extend(_repeat_dirty_keys_from_meta_values(
+            str(meta_row[12] or ""),
+            str(meta_row[13] or ""),
+            str(meta_row[14] or ""),
+            str(meta_row[15] or ""),
+            int(meta_row[17] or 0),
+        ))
+    _mark_repeat_dirty_keys(conn, dirty_keys)
+
+
+def _append_candidate(
+    conn: sqlite3.Connection,
+    candidate,
+    mtime: float,
+    size: int,
+    source_tag: str,
+) -> tuple[int, dict[str, float | str]] | None:
+    path = str(candidate.transcript)
+    state = conn.execute(
+        "SELECT source_inode, source_offset, source_element_count, "
+        "source_user_prompt_count, source_prefix_sha256, turn_source "
+        "FROM native_file_state WHERE path = ?",
+        (path,),
+    ).fetchone()
+    if state is None or source_tag == "windsurf":
+        return None
+    (
+        source_inode,
+        source_offset,
+        element_count,
+        user_prompt_count,
+        prefix_sha256,
+        turn_source,
+    ) = state
+    stat_result = candidate.transcript.stat()
+    if (
+        stat_result.st_size != size
+        or stat_result.st_mtime != mtime
+        or int(source_inode) != int(stat_result.st_ino)
+        or size < int(source_offset)
+    ):
+        return None
+    prefix_start = time.monotonic()
+    if _source_prefix_sha256(candidate.transcript, int(source_offset)) != prefix_sha256:
+        return None
+    prefix_s = time.monotonic() - prefix_start
+    parse_start = time.monotonic()
+    elements, new_offset = candidate.parse_elements_from(int(source_offset))
+    parse_s = time.monotonic() - parse_start
+    parsed_stat = candidate.transcript.stat()
+    if (
+        parsed_stat.st_ino != stat_result.st_ino
+        or parsed_stat.st_size != size
+        or parsed_stat.st_mtime != mtime
+    ):
+        raise _SourceChanged(path)
+    if new_offset == int(source_offset):
+        return 0, {
+            "delete_s": 0.0,
+            "parse_s": parse_s,
+            "insert_s": 0.0,
+            "state_s": 0.0,
+            "prefix_s": prefix_s,
+            "mode": "append_waiting",
+        }
+    rows = _index_element_rows(
+        candidate,
+        elements,
+        source_tag=source_tag,
+        element_index_base=int(element_count),
+    )
+    insert_start = time.monotonic()
+    _insert_index_rows(conn, rows, path)
+    insert_s = time.monotonic() - insert_start
+    state_start = time.monotonic()
+    prompt_timestamps = [
+        row[7] for row in rows if row[5] == "user_prompt" and row[7]
+    ]
+    first_prompt = min(prompt_timestamps) if prompt_timestamps else None
+    message_delta = sum(
+        1 for row in rows
+        if row[5] in {"user_prompt", "assistant_text"} and row[7]
+    )
+    appended_user_prompts = [
+        element.text for element in elements if element.kind == "user_prompt"
+    ]
+    remaining_prompt_scan = max(
+        0,
+        _INTERNAL_PROMPT_SCAN_LIMIT - int(user_prompt_count),
+    )
+    next_turn_source = turn_source
+    if turn_source == run_source_index.EXTERNAL and remaining_prompt_scan:
+        if any(
+            native_internal_prompt.is_internal_import_prompt(text)
+            for text in appended_user_prompts[:remaining_prompt_scan]
+        ):
+            next_turn_source = run_source_index.INTERNAL
+    conn.execute(
+        "UPDATE native_file_state SET mtime=?, size=?, indexed_at=?, "
+        "first_user_prompt_ts=CASE WHEN first_user_prompt_ts IS NULL THEN ? "
+        "WHEN ? IS NULL THEN first_user_prompt_ts "
+        "WHEN ? < first_user_prompt_ts THEN ? ELSE first_user_prompt_ts END, "
+        "message_count=message_count+?, source_offset=?, source_element_count=?, "
+        "source_user_prompt_count=?, source_prefix_sha256=?, turn_source=? "
+        "WHERE path=?",
+        (
+            mtime,
+            size,
+            time.time(),
+            first_prompt,
+            first_prompt,
+            first_prompt,
+            first_prompt,
+            message_delta,
+            new_offset,
+            int(element_count) + len(elements),
+            int(user_prompt_count) + len(appended_user_prompts),
+            _source_prefix_sha256(candidate.transcript, new_offset),
+            next_turn_source,
+            path,
+        ),
+    )
+    state_s = time.monotonic() - state_start
+    return len(rows), {
+        "delete_s": 0.0,
+        "parse_s": parse_s,
+        "insert_s": insert_s,
+        "state_s": state_s,
+        "prefix_s": prefix_s,
+        "mode": "append",
     }
 
 
@@ -1793,9 +1964,18 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                             continue
                         per_file_start = time.monotonic()
                         candidate = candidate_from_match(path, tag)
-                        rows_count, timings = _replace_candidate(
-                            conn, candidate, mt, sz, source_tag=tag,
-                        )
+                        try:
+                            result = _append_candidate(conn, candidate, mt, sz, tag)
+                            if result is None:
+                                rows_count, timings = _replace_candidate(
+                                    conn, candidate, mt, sz, source_tag=tag,
+                                )
+                                timings["prefix_s"] = 0.0
+                                timings["mode"] = "rebuild"
+                            else:
+                                rows_count, timings = result
+                        except (_SourceChanged, NativeParseDeferred):
+                            continue
                         per_file_total_s = time.monotonic() - per_file_start
                         inserted_rows += rows_count
                         parse_insert_s += per_file_total_s
@@ -1809,6 +1989,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                             "parse_s": round(timings["parse_s"], 6),
                             "insert_s": round(timings["insert_s"], 6),
                             "state_s": round(timings["state_s"], 6),
+                            "prefix_s": round(float(timings["prefix_s"]), 6),
+                            "mode": timings["mode"],
                         })
                         new_or_changed += 1
                 phase_timings["index_s"] = time.monotonic() - index_start

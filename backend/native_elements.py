@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,10 @@ from codex_normalize import (
     _codex_reasoning_text,
     _codex_text_content,
 )
+
+
+class NativeParseDeferred(RuntimeError):
+    pass
 
 
 @dataclass
@@ -107,6 +112,59 @@ class NativeCandidate:
             return _claude_elements(self.transcript)
         except (OSError, ValueError, InvalidTag):
             return []
+
+    def parse_elements_from(self, byte_offset: int) -> tuple[list[NativeElement], int]:
+        try:
+            if self.format == "windsurf":
+                return (
+                    _windsurf_elements(self.transcript),
+                    self.transcript.stat().st_size,
+                )
+            end_offset = _complete_jsonl_size(self.transcript, byte_offset)
+            if end_offset <= byte_offset:
+                return [], byte_offset
+            if self.format == "codex":
+                return _codex_elements(self.transcript, byte_offset, end_offset), end_offset
+            if self.format == "pi":
+                return _pi_elements(self.transcript, byte_offset, end_offset), end_offset
+            return _claude_elements(self.transcript, byte_offset, end_offset), end_offset
+        except (OSError, UnicodeDecodeError, ValueError, InvalidTag):
+            raise NativeParseDeferred(str(self.transcript))
+
+
+def _complete_jsonl_size(path: Path, start: int) -> int:
+    size = path.stat().st_size
+    if size <= start:
+        return start
+    with path.open("rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return size
+        cursor = size
+        while cursor > start:
+            chunk_start = max(start, cursor - 64 * 1024)
+            handle.seek(chunk_start)
+            payload = handle.read(cursor - chunk_start)
+            newline = payload.rfind(b"\n")
+            if newline >= 0:
+                return chunk_start + newline + 1
+            cursor = chunk_start
+    return start
+
+
+def _jsonl_lines(path: Path, start: int = 0, end: int | None = None):
+    with path.open("rb") as handle:
+        handle.seek(start)
+        while end is None or handle.tell() < end:
+            payload = handle.readline()
+            if not payload:
+                return
+            yield payload.decode("utf-8")
+
+
+@contextmanager
+def _jsonl_text_reader(path: Path, start: int = 0, end: int | None = None):
+    yield _jsonl_lines(path, start, end)
 
 # Claude CLI user lines that are injected context/commands, not typed prompts.
 _NON_PROMPT_TAGS = (
@@ -509,12 +567,16 @@ def _claude_user_kind(text: str) -> str:
     return "user_prompt" if _is_real_user_prompt(stripped) else "meta"
 
 
-def _claude_elements(transcript_path: Path) -> list[NativeElement]:
+def _claude_elements(
+    transcript_path: Path,
+    start: int = 0,
+    end: int | None = None,
+) -> list[NativeElement]:
     """Claude-shaped transcript → elements (covers ~/.claude/projects and the
     BA run-dir session_events.jsonl, both Claude message-shaped)."""
     elements: list[NativeElement] = []
-    with transcript_path.open(encoding="utf-8") as f:
-        for line in f:
+    with _jsonl_text_reader(transcript_path, start, end) as lines:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -573,9 +635,24 @@ def _claude_elements(transcript_path: Path) -> list[NativeElement]:
     return elements
 
 
-def _pi_elements(transcript_path: Path) -> list[NativeElement]:
+def _pi_elements(
+    transcript_path: Path,
+    start: int = 0,
+    end: int | None = None,
+) -> list[NativeElement]:
     elements: list[NativeElement] = []
-    for obj in _pi_jsonl_objects(transcript_path):
+    if start == 0 and end is None:
+        objects = _pi_jsonl_objects(transcript_path)
+    else:
+        objects = []
+        for line in _jsonl_lines(transcript_path, start, end):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                objects.append(value)
+    for obj in objects:
         uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
         if obj.get("type") in {"compaction", "branch_summary"}:
             summary = obj.get("summary") if isinstance(obj.get("summary"), str) else ""
@@ -649,10 +726,14 @@ def _codex_output_text(output: object) -> str:
     return _stringify(output)
 
 
-def _codex_elements(transcript_path: Path) -> list[NativeElement]:
+def _codex_elements(
+    transcript_path: Path,
+    start: int = 0,
+    end: int | None = None,
+) -> list[NativeElement]:
     elements: list[NativeElement] = []
-    with transcript_path.open(encoding="utf-8") as f:
-        for line in f:
+    with _jsonl_text_reader(transcript_path, start, end) as lines:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue

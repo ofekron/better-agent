@@ -915,6 +915,29 @@ def _session_change_from_event(event: BusEvent) -> dict:
 
 def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
     """Project worker/fork invalidation facts into worker_store state."""
+    def _project(
+        session_id: str,
+        *,
+        caller_scope: bool,
+        remove_worker: bool,
+        op_label: str,
+    ) -> None:
+        from stores import worker_store as _ws
+
+        cleared = _ws.cleanup_session_fanout(
+            session_id,
+            caller_scope=caller_scope,
+            remove_worker=remove_worker,
+        )
+        for fork_session_id in cleared:
+            try:
+                session_manager.delete(fork_session_id)
+            except Exception:
+                logger.exception(
+                    "delete delegate-fork BC %s failed during %s",
+                    fork_session_id, op_label,
+                )
+
     async def _handler(event: BusEvent) -> None:
         payload = event.payload
         session_id = str(payload.get("session_id") or event.sid or "")
@@ -925,26 +948,13 @@ def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
         caller_scope = bool(payload.get("caller_scope"))
         remove_worker = bool(payload.get("remove_worker"))
         try:
-            from stores import worker_store as _ws
-            cleared: list[str] = []
-            if caller_scope:
-                cleared.extend(_ws.clear_forks_for_caller_everywhere(session_id))
-            if remove_worker or not caller_scope:
-                cleared.extend(_ws.clear_forks_for_worker_everywhere(session_id))
-            if remove_worker:
-                _ws.remove_worker_everywhere(session_id)
-            seen_forks: set[str] = set()
-            for fork_session_id in cleared:
-                if fork_session_id in seen_forks:
-                    continue
-                seen_forks.add(fork_session_id)
-                try:
-                    session_manager.delete(fork_session_id)
-                except Exception:
-                    logger.exception(
-                        "delete delegate-fork BC %s failed during %s",
-                        fork_session_id, op_label,
-                    )
+            await asyncio.to_thread(
+                _project,
+                session_id,
+                caller_scope=caller_scope,
+                remove_worker=remove_worker,
+                op_label=op_label,
+            )
             await broadcast_workers_changed(None)
         except Exception:
             logger.exception(
