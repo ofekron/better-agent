@@ -84,8 +84,18 @@ def test_enumerate_and_bg_work():
     print(f"T1 enumerate + has_background_work ({type(C).__name__}, "
           f"guaranteed={C.guaranteed})")
     C.create(RUN_ID)
-    p = subprocess.Popen([sys.executable, "-c", _TREE],
-                         stdout=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        p = subprocess.Popen(
+            [sys.executable, "-c", _TREE],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            **C.spawn_kwargs(RUN_ID),
+        )
+    except Exception:
+        C.after_spawn(RUN_ID, -1)
+        C.teardown(RUN_ID)
+        raise
     pids = json.loads(p.stdout.readline())
     leader, c1, c2 = pids["leader"], pids["c1"], pids["c2"]
     C.after_spawn(RUN_ID, leader)
@@ -111,8 +121,18 @@ def test_enumerate_and_bg_work():
 def test_reparented_orphan():
     print("T2 reparented orphan: enumerated IFF guaranteed (else honest miss)")
     C.create(RUN_ID)
-    leader = subprocess.Popen([sys.executable, "-c", _ORPHAN],
-                              stdout=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        leader = subprocess.Popen(
+            [sys.executable, "-c", _ORPHAN],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            **C.spawn_kwargs(RUN_ID),
+        )
+    except Exception:
+        C.after_spawn(RUN_ID, -1)
+        C.teardown(RUN_ID)
+        raise
     g = json.loads(leader.stdout.readline())["g"]
     C.after_spawn(RUN_ID, leader.pid)
     try:

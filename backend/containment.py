@@ -36,6 +36,7 @@ from __future__ import annotations
 import abc
 import logging
 import os
+import stat
 import subprocess
 from typing import Callable, Optional
 
@@ -125,35 +126,129 @@ class Containment(abc.ABC):
 # ======================================================================
 # Linux — cgroup v2
 # ======================================================================
+def _unescape_mountinfo_path(value: str) -> str:
+    for escaped, literal in (
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ):
+        value = value.replace(escaped, literal)
+    return value
+
+
+def _current_cgroup_v2_directory(
+    mountinfo_path: str = "/proc/self/mountinfo",
+    cgroup_path: str = "/proc/self/cgroup",
+    *,
+    pid: int | None = None,
+) -> str:
+    pid = os.getpid() if pid is None else pid
+    membership = None
+    try:
+        with open(cgroup_path, encoding="ascii") as stream:
+            for line in stream:
+                hierarchy, controllers, path = line.rstrip("\n").split(":", 2)
+                if hierarchy == "0" and not controllers:
+                    membership = os.path.normpath(path)
+                    break
+        if membership is None or not membership.startswith("/"):
+            raise ValueError("process has no cgroup v2 membership")
+
+        with open(mountinfo_path, encoding="utf-8") as stream:
+            for line in stream:
+                before, separator, after = line.rstrip("\n").partition(" - ")
+                fields = before.split()
+                if not separator or len(fields) < 5 or not after.startswith("cgroup2 "):
+                    continue
+                mount_root = os.path.normpath(_unescape_mountinfo_path(fields[3]))
+                mount_point = os.path.normpath(_unescape_mountinfo_path(fields[4]))
+                if membership == mount_root:
+                    relative = "."
+                elif membership.startswith(mount_root.rstrip("/") + "/"):
+                    relative = os.path.relpath(membership, mount_root)
+                else:
+                    continue
+                resolved = os.path.normpath(os.path.join(mount_point, relative))
+                if os.path.commonpath((mount_point, resolved)) != mount_point:
+                    raise ValueError("cgroup v2 membership escapes mount")
+                try:
+                    with open(os.path.join(resolved, "cgroup.procs"), encoding="ascii") as procs:
+                        members = {int(value) for value in procs.read().split()}
+                    if pid not in members:
+                        continue
+                    if not os.path.isfile(os.path.join(resolved, "cgroup.controllers")):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                return resolved
+    except (OSError, ValueError) as exc:
+        raise ContainmentUnavailable(f"cannot discover cgroup v2 hierarchy: {exc}") from exc
+    raise ContainmentUnavailable("cannot discover cgroup v2 hierarchy")
+
+
 class _LinuxCgroupContainment(Containment):
     guaranteed = True
 
-    #: Root under which per-run cgroups are created. Must be a delegated /
-    #: writable cgroup-v2 subtree (systemd ``Delegate=yes`` for the service,
-    #: or root). We do NOT mkdir the unified root itself.
-    _BASE = "/sys/fs/cgroup/better-agent"
-
-    def __init__(self) -> None:
+    def __init__(self, *, cgroup_directory: str | None = None) -> None:
         self._procs_fd: dict[str, int] = {}
+        parent = cgroup_directory or _current_cgroup_v2_directory()
+        self._base = os.path.join(parent, "better-agent")
 
     def _dir(self, run_id: str) -> str:
         # run_id is backend-generated (uuid-ish); reject path tricks anyway.
         safe = os.path.basename(run_id)
         if safe != run_id or not safe or safe in (".", ".."):
             raise ContainmentUnavailable(f"unsafe run_id for cgroup: {run_id!r}")
-        return os.path.join(self._BASE, safe)
+        return os.path.join(self._base, safe)
 
     def create(self, run_id: str) -> None:
         d = self._dir(run_id)
+        base_fd = None
+        run_fd = None
         try:
-            os.makedirs(d, exist_ok=True)
+            try:
+                os.mkdir(self._base, 0o700)
+            except FileExistsError:
+                pass
+            base_stat = os.lstat(self._base)
+            if not stat.S_ISDIR(base_stat.st_mode) or base_stat.st_uid != os.geteuid():
+                raise OSError("cgroup base is not an owned directory")
+            os.chmod(self._base, 0o700)
+            base_fd = os.open(
+                self._base,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            safe = os.path.basename(d)
+            try:
+                os.mkdir(safe, 0o700, dir_fd=base_fd)
+            except FileExistsError:
+                pass
+            run_fd = os.open(
+                safe,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=base_fd,
+            )
+            run_stat = os.fstat(run_fd)
+            if run_stat.st_uid != os.geteuid():
+                raise OSError("run cgroup is not owned by the backend user")
+            os.fchmod(run_fd, 0o700)
             # Open cgroup.procs now so the child's preexec_fn can join with
             # an async-signal-safe os.write (no open() in the forked child).
-            fd = os.open(os.path.join(d, "cgroup.procs"), os.O_WRONLY)
+            fd = os.open(
+                "cgroup.procs",
+                os.O_WRONLY | os.O_NOFOLLOW,
+                dir_fd=run_fd,
+            )
         except (FileNotFoundError, PermissionError, OSError) as e:
             raise ContainmentUnavailable(
-                f"cgroup v2 unavailable/undelegated at {self._BASE}: {e}"
+                f"cgroup v2 unavailable/undelegated at {self._base}: {e}"
             ) from e
+        finally:
+            if run_fd is not None:
+                os.close(run_fd)
+            if base_fd is not None:
+                os.close(base_fd)
         self._procs_fd[run_id] = fd
 
     def spawn_kwargs(self, run_id: str) -> dict:
