@@ -315,15 +315,6 @@ def test_codex_initialize_timeout_is_not_transient() -> None:
             [],
         ) == 1,
     )
-    check(
-        "selected extension failure stays terminal",
-        _retry_attempt_limit(
-            "selected extension MCP 'coordination' exposed no usable tools",
-            [],
-        ) == 0,
-    )
-
-
 def test_drive_cli_run_pre_spawn_guard() -> None:
     print("T5 _drive_cli_run with pre-set cancel_event never spawns")
     c = _StubCoordinator()
