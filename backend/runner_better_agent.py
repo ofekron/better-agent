@@ -1214,12 +1214,22 @@ async def _mcp_json_request(
         *args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
         env=_mcp_subprocess_env(config),
         limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
+    assert proc.stderr is not None
+    stderr_tail = bytearray()
+
+    async def _drain_stderr() -> None:
+        while chunk := await proc.stderr.read(4096):
+            stderr_tail.extend(chunk)
+            if len(stderr_tail) > 16 * 1024:
+                del stderr_tail[:-16 * 1024]
+
+    stderr_task = asyncio.create_task(_drain_stderr())
 
     async def _send(payload: dict[str, Any]) -> None:
         proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -1228,7 +1238,15 @@ async def _mcp_json_request(
     async def _read_response() -> dict[str, Any]:
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
         if not line:
-            raise RuntimeError("MCP server closed stdout")
+            try:
+                await asyncio.wait_for(asyncio.shield(stderr_task), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            detail = stderr_tail.decode("utf-8", "replace").strip()
+            raise RuntimeError(
+                "MCP server closed stdout"
+                + (f": {detail}" if detail else "")
+            )
         response = json.loads(line.decode("utf-8", "replace"))
         if response.get("error"):
             raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
@@ -1257,6 +1275,7 @@ async def _mcp_json_request(
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        await stderr_task
 
 
 async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:

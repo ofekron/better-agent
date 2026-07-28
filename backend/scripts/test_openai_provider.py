@@ -814,6 +814,29 @@ def test_openai_runner_accepts_large_extension_mcp_stdio_response():
     assert result.endswith("...[truncated, 70000 total chars]")
 
 
+def test_openai_runner_surfaces_extension_mcp_stderr():
+    runner = _mod("runner_better_agent")
+    with tempfile.TemporaryDirectory() as d:
+        server = Path(d) / "failed_mcp_server.py"
+        server.write_text(
+            "import sys\n"
+            "sys.stderr.write('fixture MCP launch failure\\n')\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(RuntimeError, match="fixture MCP launch failure"):
+            asyncio.run(runner._mcp_json_request(
+                {
+                    "command": sys.executable,
+                    "args": [str(server)],
+                    "env": {},
+                },
+                "tools/list",
+                {},
+                timeout=5,
+            ))
+
+
 def test_openai_runner_requirements_wait_true_uses_long_mcp_timeout():
     runner = _mod("runner_better_agent")
     captured = {}

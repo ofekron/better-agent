@@ -6504,7 +6504,12 @@ def _runtime_mcp_server_config_for_item(
         return None
     return {
         "command": str(python),
-        "args": [str(script), *list(item.get("args") or [])],
+        "args": [
+            "-m",
+            "better_agent_sdk.script_entrypoint",
+            str(script),
+            *list(item.get("args") or []),
+        ],
         "env": env,
         **timeout_config,
     }
