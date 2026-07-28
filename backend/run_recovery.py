@@ -57,6 +57,7 @@ _RECOVERY_LEASE_SHUTTING_DOWN = False
 _MARKER_INDEX_BATCH = threading.local()
 _TERMINAL_MARKER_QUANTUM_MAX = 16
 _TERMINAL_MARKER_QUANTUM_MS = 5.0
+_PRE_PROVIDER_ORPHAN_ERROR = "Backend stopped before the provider run started."
 
 
 def _normalize_recovered_started_at(value: object) -> str:
@@ -779,6 +780,236 @@ async def _release_recovery_root_lease(held: _HeldRecoveryRootLease) -> None:
         held.lease.release()
     finally:
         held.admission.release()
+
+
+def _descriptor_ownership(
+    recovered: list[dict],
+) -> tuple[set[tuple[str, str]], set[str]]:
+    targets: set[tuple[str, str]] = set()
+    sessions_without_target: set[str] = set()
+    for desc in recovered:
+        sid = str(desc.get("persist_to") or desc.get("app_session_id") or "")
+        if not sid:
+            continue
+        msg_id = str(_descriptor_target_message_id(desc) or "")
+        if msg_id:
+            targets.add((sid, msg_id))
+        else:
+            sessions_without_target.add(sid)
+    return targets, sessions_without_target
+
+
+def _is_empty_assistant_scaffold(assistant: dict) -> bool:
+    return (
+        not str(assistant.get("content") or "").strip()
+        and not (assistant.get("events") or [])
+        and not (assistant.get("workers") or [])
+        and not assistant.get("completed_at")
+        and not assistant.get("stopped_at")
+        and not assistant.get("error")
+    )
+
+
+def _unterminated_tail_candidates() -> list[tuple[str, str, str]]:
+    """Return ``(root_id, session_id, assistant_id)`` tail candidates."""
+    candidates: list[tuple[str, str, str]] = []
+    for session in session_manager.iter_all_entities():
+        messages = session.get("messages") or []
+        if not messages:
+            continue
+        assistant = messages[-1]
+        if not isinstance(assistant, dict) or assistant.get("role") != "assistant":
+            continue
+        assistant_id = str(assistant.get("id") or "")
+        session_id = str(session.get("id") or "")
+        if (
+            not assistant_id
+            or not session_id
+            or not _is_empty_assistant_scaffold(assistant)
+        ):
+            continue
+        root_id = session_manager._root_id_for(session_id)
+        if root_id:
+            candidates.append((root_id, session_id, assistant_id))
+    return candidates
+
+
+def pre_provider_orphan_candidates() -> list[tuple[str, str, str]]:
+    return _unterminated_tail_candidates()
+
+
+def _started_turns_for_candidates(
+    candidates: list[tuple[str, str, str]],
+) -> dict[tuple[str, str], str]:
+    """Map exact candidate targets to their durable turn ids."""
+    import event_ingester
+
+    wanted_by_root: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for root_id, session_id, assistant_id in candidates:
+        wanted_by_root[root_id].add((session_id, assistant_id))
+
+    started: dict[tuple[str, str], str] = {}
+    terminal: set[tuple[str, str]] = set()
+    non_scaffold_facts: set[tuple[str, str]] = set()
+    for root_id, wanted in wanted_by_root.items():
+        after_seq = 0
+        while True:
+            rows, _, has_more = event_ingester.event_ingester.read_events(
+                root_id,
+                after_seq=after_seq,
+                limit=10_000,
+            )
+            for row in rows:
+                data = row.get("data") if isinstance(row.get("data"), dict) else {}
+                sid = str(
+                    data.get("app_session_id")
+                    or data.get("context_id")
+                    or row.get("sid")
+                    or root_id
+                )
+                msg_id = str(data.get("message_id") or row.get("msg_id") or "")
+                key = (sid, msg_id)
+                if key not in wanted:
+                    continue
+                event_type = str(row.get("type") or "")
+                if event_type == "turn_started":
+                    turn_id = str(data.get("turn_id") or row.get("run_id") or "")
+                    if turn_id:
+                        started[key] = turn_id
+                elif event_type in {"turn_complete", "turn_stopped"}:
+                    terminal.add(key)
+                elif event_type != "turn_start":
+                    non_scaffold_facts.add(key)
+            if not has_more or not rows:
+                break
+            after_seq = int(rows[-1].get("seq") or after_seq)
+    return {
+        key: turn_id
+        for key, turn_id in started.items()
+        if key not in terminal and key not in non_scaffold_facts
+    }
+
+
+def _finalize_pre_provider_orphan(
+    session_id: str,
+    assistant_id: str,
+) -> bool:
+    """Atomically fail the paired user and remove the empty placeholder."""
+    with session_manager.batch(session_id):
+        session = session_manager.get_ref(session_id)
+        if session is None:
+            return False
+        messages = session.get("messages") or []
+        assistant = next(
+            (
+                msg for msg in messages
+                if isinstance(msg, dict) and msg.get("id") == assistant_id
+            ),
+            None,
+        )
+        if (
+            assistant is None
+            or messages[-1] is not assistant
+            or assistant.get("role") != "assistant"
+            or not _is_empty_assistant_scaffold(assistant)
+        ):
+            return False
+        user_msg = _last_user_before(session, assistant)
+        if user_msg is None:
+            return False
+        session_manager.mark_user_error(
+            session_id,
+            user_msg["id"],
+            _PRE_PROVIDER_ORPHAN_ERROR,
+        )
+        session_manager.remove_assistant_msg(session_id, assistant_id)
+        session_manager.set_unseen_error(
+            session_id,
+            _PRE_PROVIDER_ORPHAN_ERROR,
+        )
+    return True
+
+
+async def reconcile_pre_provider_orphans(
+    coordinator,
+    recovered: list[dict],
+    *,
+    ownership_documents: Optional[list[dict]] = None,
+    ownership_safe: bool = True,
+    candidates: Optional[list[tuple[str, str, str]]] = None,
+) -> int:
+    """Terminalize admitted turns that never acquired provider ownership."""
+    if candidates is None:
+        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+    if not candidates:
+        return 0
+
+    protected_targets, protected_sessions = _descriptor_ownership(recovered)
+    document_targets, document_sessions = _descriptor_ownership(
+        ownership_documents or [],
+    )
+    if not ownership_safe:
+        logger.error(
+            "recovery: pre-provider reconciliation aborted because run "
+            "ownership documents were unreadable or escaped the runs root",
+        )
+        return 0
+    protected_targets.update(document_targets)
+    protected_sessions.update(document_sessions)
+
+    for _, session_id, _ in candidates:
+        for run in coordinator.turn_manager.get_run_state(session_id):
+            target_id = str(run.get("target_message_id") or "")
+            if target_id:
+                protected_targets.add((session_id, target_id))
+            else:
+                protected_sessions.add(session_id)
+
+    started = await asyncio.to_thread(_started_turns_for_candidates, candidates)
+    reconciled = 0
+    for root_id, session_id, assistant_id in candidates:
+        key = (session_id, assistant_id)
+        if (
+            session_id in protected_sessions
+            or key in protected_targets
+            or key not in started
+        ):
+            continue
+        held = await _acquire_recovery_root_lease(root_id)
+        try:
+            if not await asyncio.to_thread(
+                _finalize_pre_provider_orphan,
+                session_id,
+                assistant_id,
+            ):
+                continue
+            turn_id = started[key]
+            from event_journal import publish_event
+            await publish_event(
+                session_id=root_id,
+                context_id=session_id,
+                event_type="turn_stopped",
+                data={
+                    "app_session_id": session_id,
+                    "message_id": assistant_id,
+                    "turn_id": turn_id,
+                    "reason": "orphaned_before_provider",
+                },
+                source="run_recovery.pre_provider",
+                message_id=assistant_id,
+                turn_id=turn_id,
+                run_id=turn_id,
+            )
+            await coordinator.turn_manager.emit_run_state(session_id)
+            reconciled += 1
+        finally:
+            await _release_recovery_root_lease(held)
+    if reconciled:
+        logger.warning(
+            "recovery: finalized %d unmatched pre-provider turn(s)",
+            reconciled,
+        )
+    return reconciled
 
 
 @perf.timed_fn("run_recovery.integrate_recovered_runs")

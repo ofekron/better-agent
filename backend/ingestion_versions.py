@@ -65,6 +65,11 @@ def current_ingestion_version(provider_kind: str | None) -> int:
 
 
 def marker_matches_current(path: Path, provider_kind: str | None) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+    except OSError:
+        return False
     if not path.exists():
         return False
     try:

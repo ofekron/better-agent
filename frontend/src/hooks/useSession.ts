@@ -832,11 +832,53 @@ export function applyLiveEventToMessages(
   return [...msgs, applied];
 }
 
-function treeHasStreamingAssistant(node: Session): boolean {
-  if ((node.messages ?? []).some((m) => m.role === "assistant" && m.isStreaming)) {
-    return true;
-  }
-  return (node.forks ?? []).some(treeHasStreamingAssistant);
+type MessageBaseline = Map<string, Map<string, ChatMessage>>;
+
+function addOrReplaceMessages(
+  existing: ChatMessage[],
+  replacements: ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map(replacements.map((message) => [message.id, message]));
+  const merged = existing.map((message) => byId.get(message.id) ?? message);
+  const existingIds = new Set(existing.map((message) => message.id));
+  merged.push(...replacements.filter((message) => !existingIds.has(message.id)));
+  merged.sort((a, b) => {
+    const aSeq = typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
+    const bSeq = typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
+    return aSeq - bSeq;
+  });
+  return merged;
+}
+
+function captureMessageBaseline(node: Session, baseline: MessageBaseline): void {
+  baseline.set(
+    node.id,
+    new Map((node.messages ?? []).map((message) => [message.id, message])),
+  );
+  for (const fork of node.forks ?? []) captureMessageBaseline(fork, baseline);
+}
+
+function preservePostRequestMessages(
+  canonical: Session,
+  current: Session,
+  baseline: MessageBaseline,
+): Session {
+  let reconciled = canonical;
+  const visit = (node: Session) => {
+    const baselineMessages = baseline.get(node.id);
+    const changed = (node.messages ?? []).filter(
+      (message) => baselineMessages?.get(message.id) !== message,
+    );
+    if (changed.length > 0) {
+      reconciled = updateNodeById(reconciled, node.id, (canonicalNode) => ({
+        ...canonicalNode,
+        messages: addOrReplaceMessages(canonicalNode.messages ?? [], changed),
+      }));
+    }
+    for (const fork of node.forks ?? []) visit(fork);
+  };
+  visit(current);
+  return reconciled;
 }
 
 export function useSession(authStatus?: string) {
@@ -884,9 +926,9 @@ export function useSession(authStatus?: string) {
   // backend on every WS subscribe as `events_from_seq` — the backend's
   // wire tailer drains the gap before live events flow.
   const lastEventSeqBySessionRef = useRef<Record<string, number>>({});
-  // Pending replay queue: WS messages_replay can arrive before the
-  // REST selectSession resolves (C1/C5). We stash them here and
-  // flush after the REST tree lands in currentSession.
+  // Pending replay queue: WS messages_replay can arrive while another
+  // root is selected or before its REST snapshot resolves. Entries stay
+  // queued until a tree containing their session is loaded.
   const pendingReplayRef = useRef<
     { sessionId: string; messages: ChatMessage[] }[]
   >([]);
@@ -1735,29 +1777,24 @@ export function useSession(authStatus?: string) {
     setSessionLoading(true);
     const cached = sessionsRef.current.find((s) => s.id === id);
     const cur = currentSessionRef.current;
+    const messageBaseline: MessageBaseline = new Map();
+    if (cur) captureMessageBaseline(cur, messageBaseline);
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
+    const reconcilingCachedTree = cachedTree !== null;
+    let openedAt: string | null = null;
     if (cachedTree) {
       const viewedSessionId = cachedTree.id;
-      const openedAt = markSessionOpened(viewedSessionId);
+      const cachedOpenedAt = markSessionOpened(viewedSessionId);
+      openedAt = cachedOpenedAt;
       const cachedTreeWithOpenedAt = updateNodeById(cachedTree, viewedSessionId, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const openedMs = Date.parse(openedAt);
+        const openedMs = Date.parse(cachedOpenedAt);
         if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
-        return { ...node, last_opened_at: openedAt };
+        return { ...node, last_opened_at: cachedOpenedAt };
       });
       setCurrentSession(cachedTreeWithOpenedAt);
-      const t = openTimingRef.current;
-      if (t && t.sid === id) {
-        t.restMs = 0;
-        armOpenQuietTimer();
-      }
-      setWsTargetSessionId(id);
-      selectInFlightIdRef.current = null;
-      setSessionLoading(false);
-      completeOp(opId);
-      return;
     }
-    if (cached && cur?.id !== id) {
+    if (!cachedTree && cached && cur?.id !== id) {
       setCurrentSession({
         ...cached,
         messages: [],
@@ -1786,13 +1823,33 @@ export function useSession(authStatus?: string) {
       const tree = (await res.json()) as Session;
       if (myReqId !== selectRequestIdRef.current) return;
       const viewedSessionId = tree.id;
-      const openedAt = markSessionOpened(viewedSessionId);
-      const treeWithOpenedAt = updateNodeById(tree, viewedSessionId, (node) => {
+      const effectiveOpenedAt = openedAt ?? markSessionOpened(viewedSessionId);
+      let treeWithOpenedAt = updateNodeById(tree, viewedSessionId, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const openedMs = Date.parse(openedAt);
+        const openedMs = Date.parse(effectiveOpenedAt);
         if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
-        return { ...node, last_opened_at: openedAt };
+        return { ...node, last_opened_at: effectiveOpenedAt };
       });
+      const retainedReplays: typeof pendingReplayRef.current = [];
+      for (const replay of pendingReplayRef.current) {
+        if (!findNode(treeWithOpenedAt, replay.sessionId)) {
+          retainedReplays.push(replay);
+          continue;
+        }
+        treeWithOpenedAt = updateNodeById(
+          treeWithOpenedAt,
+          replay.sessionId,
+          (node) => ({
+            ...node,
+            messages: mergeIncomingMessagesForNode(
+              node.messages || [],
+              replay.messages,
+            ),
+          }),
+        );
+        bumpLastSeq(replay.sessionId, replay.messages);
+      }
+      pendingReplayRef.current = retainedReplays;
       // Record REST-resolve checkpoint for the open-latency probe.
       // The quiet timer only arms once restMs is set, so any replay/
       // live event that lands before this point is folded into the
@@ -1819,29 +1876,11 @@ export function useSession(authStatus?: string) {
         if (!prev || prev.id !== treeWithOpenedAt.id) {
           return treeWithOpenedAt;
         }
-        if (
-          treeHasStreamingAssistant(prev) &&
-          treeHasStreamingAssistant(treeWithOpenedAt)
-        ) {
-          return prev;
-        }
         const carried = carryDrafts(prev, treeWithOpenedAt);
-        if (prev.messages?.length) {
-          return addMissingMessages(carried, prev.id, prev.messages);
-        }
-        return carried;
+        return reconcilingCachedTree
+          ? carried
+          : preservePostRequestMessages(carried, prev, messageBaseline);
       });
-      // Flush any WS replays that arrived while REST was in flight.
-      const pending = pendingReplayRef.current;
-      if (pending.length > 0) {
-        pendingReplayRef.current = [];
-        for (const { sessionId, messages } of pending) {
-          setCurrentSession((prev) =>
-            prev ? mergeReplayIntoNode(prev, sessionId, messages) : prev
-          );
-          bumpLastSeq(sessionId, messages);
-        }
-      }
       // Seed the seq cursor for the root AND every embedded fork —
       // each pane's WS subscribe sends its own since_seq.
       const updates: Record<string, number> = {};
@@ -1853,7 +1892,7 @@ export function useSession(authStatus?: string) {
         updates[node.id] = highest;
         for (const f of wsSubscribableForks(node)) visit(f);
       };
-      visit(tree);
+      visit(treeWithOpenedAt);
       lastSeqBySessionRef.current = {
         ...lastSeqBySessionRef.current,
         ...updates,
@@ -1905,8 +1944,8 @@ export function useSession(authStatus?: string) {
     } finally {
       if (myReqId === selectRequestIdRef.current) {
         selectInFlightIdRef.current = null;
+        setSessionLoading(false);
       }
-      setSessionLoading(false);
       completeOp(opId);
     }
   }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
@@ -2043,36 +2082,6 @@ export function useSession(authStatus?: string) {
       return updateNodeById(prev, sessionId, (node) => {
         const existing = node.messages || [];
         return { ...node, messages: mergeIncomingMessagesForNode(existing, messages) };
-      });
-    },
-    []
-  );
-
-  /** Add messages from `source` into the tree node ONLY if their id
-   * doesn't already exist in the node. Used by selectSession and
-   * applySessionReconciled to preserve optimistic messages
-   * (user_message_persisted during fetch) without overwriting the
-   * canonical REST data with stale local versions. */
-  const addMissingMessages = useCallback(
-    (
-      tree: Session,
-      sessionId: string,
-      source: ChatMessage[]
-    ): Session => {
-      return updateNodeById(tree, sessionId, (node) => {
-        const existing = node.messages || [];
-        const existingIds = new Set(existing.map((m) => m.id));
-        const missing = source.filter((m) => !existingIds.has(m.id));
-        if (missing.length === 0) return node;
-        const merged = [...existing, ...missing];
-        merged.sort((a, b) => {
-          const sa =
-            typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
-          const sb =
-            typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
-          return sa - sb;
-        });
-        return { ...node, messages: merged };
       });
     },
     []
@@ -2914,22 +2923,18 @@ export function useSession(authStatus?: string) {
     [],
   );
 
-  /** Backend reconcile completed — silently refetch the session tree
-   * if the user is currently viewing it. The initial GET may have
-   * returned stale cache; this replaces it with the reconciled state
-   * without a loading indicator or optimistic swap. */
+  /** Backend reconcile completed — silently replace the selected tree
+   * from REST while preserving only changes that arrived after this
+   * request started. Reconcile is authoritative for every event shape. */
   const applySessionReconciled = useCallback(
-    (rootId: string, authoritative = false) => {
+    (rootId: string) => {
       const cur = currentSessionRef.current;
       // Only refetch if the user is viewing this root (or a fork in it).
       if (!cur) return;
       if (cur.id !== rootId && !findNode(cur, rootId)) return;
-      // Don't clobber a live streaming turn.
-      const isStreaming = cur.messages?.some(
-        (m) => m.role === "assistant" && m.isStreaming
-      );
-      if (isStreaming && !authoritative) return;
       const id = cur.id;
+      const messageBaseline: MessageBaseline = new Map();
+      captureMessageBaseline(cur, messageBaseline);
       return fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
         credentials: "include",
       })
@@ -2938,16 +2943,17 @@ export function useSession(authStatus?: string) {
           if (!tree) return;
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
-            let carried = carryDrafts(prev, tree);
-            if (!authoritative && prev.messages?.length) {
-              carried = addMissingMessages(carried, prev.id, prev.messages);
-            }
+            const carried = preservePostRequestMessages(
+              carryDrafts(prev, tree),
+              prev,
+              messageBaseline,
+            );
             return applyReconcilePreserves(carried);
           });
           return undefined;
         });
     },
-    [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize]
+    [applyReconcilePreserves, carryDrafts, exchangePageSize]
   );
 
   /** Update a user message's `status` field, located by `lifecycle_msg_id`.

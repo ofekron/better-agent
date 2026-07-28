@@ -1532,9 +1532,15 @@ from provider import (
     known_providers,
     load_all_providers,
     recover_all_in_flight,
+    take_recovery_scan_ownership,
 )
 from orchestrator import Coordinator, build_semantic_alter_prompt
-from run_recovery import integrate_recovered_runs, shutdown_recovery_lease_executor
+from run_recovery import (
+    integrate_recovered_runs,
+    pre_provider_orphan_candidates,
+    reconcile_pre_provider_orphans,
+    shutdown_recovery_lease_executor,
+)
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import (
@@ -12969,8 +12975,18 @@ async def _recover_in_flight_task() -> None:
     gate_open = False
     try:
         loop = asyncio.get_running_loop()
+        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+        candidate_targets = {
+            (session_id, assistant_id)
+            for _, session_id, assistant_id in candidates
+        }
         with perf.timed("startup.recovery.classification"):
-            recovered = await _to_thread_join_on_cancel(recover_all_in_flight, loop)
+            recovered = await _to_thread_join_on_cancel(
+                recover_all_in_flight,
+                loop,
+                candidate_targets=candidate_targets,
+            )
+        ownership_documents, ownership_safe = take_recovery_scan_ownership()
         if recovered and not installation_profile.integrations_enabled():
             import extension_session_ownership
             allowed: list[dict] = []
@@ -12996,6 +13012,13 @@ async def _recover_in_flight_task() -> None:
                         run_ids=[run_id],
                     )
             recovered = allowed
+        await reconcile_pre_provider_orphans(
+            coordinator,
+            recovered,
+            ownership_documents=ownership_documents,
+            ownership_safe=ownership_safe,
+            candidates=candidates,
+        )
         if recovered:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]

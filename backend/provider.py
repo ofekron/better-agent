@@ -1523,12 +1523,31 @@ def _recovery_scan_parallelism(provider_count: int) -> int:
     return max(1, min(provider_count, _MAX_RECOVERY_SCAN_PARALLELISM, requested))
 
 
-def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> list[dict]:
-    return _recover_all_in_flight_owned(loop)
+def recover_all_in_flight(
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    *,
+    candidate_targets: Optional[set[tuple[str, str]]] = None,
+) -> list[dict]:
+    return _recover_all_in_flight_owned(
+        loop,
+        candidate_targets=candidate_targets,
+    )
+
+
+_RECOVERY_SCAN_OWNERSHIP: tuple[list[dict], bool] = ([], True)
+
+
+def take_recovery_scan_ownership() -> tuple[list[dict], bool]:
+    global _RECOVERY_SCAN_OWNERSHIP
+    snapshot = _RECOVERY_SCAN_OWNERSHIP
+    _RECOVERY_SCAN_OWNERSHIP = ([], True)
+    return snapshot
 
 
 def _recover_all_in_flight_owned(
     loop: Optional[asyncio.AbstractEventLoop] = None,
+    *,
+    candidate_targets: Optional[set[tuple[str, str]]] = None,
 ) -> list[dict]:
     """Scan the global runs root and dispatch each in-flight run to
     its owning provider's `recover_in_flight`. Each run dir's
@@ -1547,6 +1566,8 @@ def _recover_all_in_flight_owned(
         reconciled_marker_index_row_matches,
         runs_root as _runs_root,
     )
+    global _RECOVERY_SCAN_OWNERSHIP
+    _RECOVERY_SCAN_OWNERSHIP = ([], True)
     runs_root = _runs_root()
     if not runs_root.exists():
         return []
@@ -1564,6 +1585,14 @@ def _recover_all_in_flight_owned(
         (time.perf_counter() - phase_started) * 1000.0,
     )
 
+    ownership_documents: list[dict] = []
+    ownership_safe = True
+    candidate_sids = (
+        {sid for sid, _ in candidate_targets}
+        if candidate_targets is not None
+        else None
+    )
+
     # Group run_ids by owning provider_id.
     by_provider: dict[tuple[Optional[str], str], list[str]] = {}
     enumerated = 0
@@ -1572,7 +1601,10 @@ def _recover_all_in_flight_owned(
     backend_state_reads = 0
     phase_started = time.perf_counter()
     for child in runs_root.iterdir():
-        if not child.is_dir() or child.is_symlink():
+        if child.is_symlink():
+            ownership_safe = False
+            continue
+        if not child.is_dir():
             continue
         enumerated += 1
         indexed_marker = reconciled_index.get(child.name)
@@ -1587,7 +1619,9 @@ def _recover_all_in_flight_owned(
             indexed_skips += 1
             continue
         marker_path = child / "reconciled.marker"
-        if marker_path.exists():
+        if marker_path.is_symlink():
+            ownership_safe = False
+        elif marker_path.exists():
             marker_fallback_reads += 1
             try:
                 marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1606,17 +1640,88 @@ def _recover_all_in_flight_owned(
             except Exception:
                 pass
         bs_path = child / "backend_state.json"
+        input_path = child / "input.json"
         pid: Optional[str] = None
         runner = ""
+        documents: list[dict] = []
+        backend_document_error = False
         if bs_path.exists():
             backend_state_reads += 1
             try:
+                if bs_path.is_symlink():
+                    raise ValueError("invalid backend_state ownership document")
                 bs = json.loads(bs_path.read_text(encoding="utf-8"))
+                if not isinstance(bs, dict):
+                    raise ValueError("invalid backend_state ownership document")
+                documents.append(bs)
                 pid = bs.get("provider_id")
                 runner = str(bs.get("runner") or "").strip()
             except Exception:
-                pass
+                backend_document_error = True
+        backend_sid = str(
+            (
+                documents[0].get("persist_to")
+                or documents[0].get("worker_agent_session_id")
+                or documents[0].get("app_session_id")
+                or ""
+            )
+            if documents else ""
+        )
+        inspect_input = (
+            candidate_sids is None
+            or not backend_sid
+            or backend_sid in candidate_sids
+        )
+        input_document: Optional[dict] = None
+        input_document_error = False
+        if inspect_input and input_path.exists():
+            try:
+                if input_path.is_symlink():
+                    raise ValueError("invalid input ownership document")
+                inp = json.loads(input_path.read_text(encoding="utf-8"))
+                if not isinstance(inp, dict):
+                    raise ValueError("invalid input ownership document")
+                documents.append(inp)
+                input_document = inp
+            except Exception:
+                input_document_error = True
+        input_sid = str(
+            (
+                input_document.get("persist_to")
+                or input_document.get("worker_agent_session_id")
+                or input_document.get("app_session_id")
+                or ""
+            )
+            if input_document else ""
+        )
+        relevant_or_unknown = bool(
+            candidate_sids is None
+            or not (backend_sid or input_sid)
+            or backend_sid in candidate_sids
+            or input_sid in candidate_sids
+        )
+        if relevant_or_unknown and (backend_document_error or input_document_error):
+            ownership_safe = False
+        for document in documents:
+            persist_sid = str(
+                document.get("persist_to")
+                or document.get("worker_agent_session_id")
+                or document.get("app_session_id")
+                or ""
+            )
+            if not persist_sid:
+                if relevant_or_unknown:
+                    ownership_safe = False
+                continue
+            if candidate_sids is not None and persist_sid not in candidate_sids:
+                continue
+            ownership_documents.append({
+                "persist_to": persist_sid,
+                "target_message_id": document.get("target_message_id"),
+                "run_id": child.name,
+            })
         by_provider.setdefault((pid, runner), []).append(child.name)
+    _RECOVERY_SCAN_OWNERSHIP = (ownership_documents, ownership_safe)
     perf.record(
         "startup.recovery.discovery",
         (time.perf_counter() - phase_started) * 1000.0,

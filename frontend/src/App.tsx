@@ -1718,14 +1718,17 @@ function AppMain({
     checkConnection,
   } = useWebSocket(WS_URL, {
     currentAppSessionId: wsTargetSessionId,
+    prepareSessionSubscriptions: () => {
+      if (!currentSession?.id) return;
+      return selectSession(currentSession.id);
+    },
     // Subscribe to every pane in the open tree. `currentAppSessionId`
     // covers the primary transport target; this list carries the rest.
     // useWebSocket de-duplicates and diffs against the previous set so
     // subscribe/unsubscribe frames only fire on actual changes.
-    additionalAppSessionIds: additionalSessionSubscriptionIds(
-      allOpenSessionIds(),
-      wsTargetSessionId,
-    ),
+    additionalAppSessionIds: wsTargetSessionId
+      ? additionalSessionSubscriptionIds(allOpenSessionIds(), wsTargetSessionId)
+      : [],
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
     onMessagesDelta: applyMessagesReplay, // same upsert reducer
@@ -1734,7 +1737,20 @@ function AppMain({
     onPromptSendError: handlePromptSendError,
     onRunState: applyRunState,
     onLiveTurnEvent: applyLiveEvent,
-    onTurnTerminal: markTurnTerminal,
+    onTurnTerminal: (
+      sessionId,
+      stoppedAt,
+      interruptedByMsgId,
+      errorText,
+    ) => {
+      markTurnTerminal(
+        sessionId,
+        stoppedAt,
+        interruptedByMsgId,
+        errorText,
+      );
+      void applySessionReconciled(sessionId);
+    },
     onTurnDetached: markTurnDetached,
     onMessageRecoveringChanged: applyMessageRecovering,
     onMessageRetryingChanged: applyMessageRetrying,
@@ -1943,7 +1959,11 @@ function AppMain({
     if (inventoryBecameUnavailable && previous.hasConnected) {
       refreshSessionInventory();
     }
-  }, [connected, refreshSessionInventory, sessionInventoryUnavailable]);
+  }, [
+    connected,
+    refreshSessionInventory,
+    sessionInventoryUnavailable,
+  ]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -6810,8 +6830,10 @@ function AppMain({
                 >
                   {restarting ? "…" : <Icon name="refresh" size={18} />}
                 </button>
-                <ExtensionPageIcons context={hookActionContext} />
               </>
+            );
+            const extensionPages = (
+              <ExtensionPageIcons context={hookActionContext} />
             );
             const configBtn = (
               <button
@@ -6829,6 +6851,7 @@ function AppMain({
                 {brand}
                 <div className="header-actions">
                   {filesBtn}
+                  {extensionPages}
                   {!headerOverflow && secondary}
                   {configBtn}
                   {headerOverflow && (
@@ -6861,6 +6884,7 @@ function AppMain({
                     {minimizeBtn}
                     {brand}
                     {filesBtn}
+                    {extensionPages}
                     {secondary}
                     {configBtn}
                   </div>

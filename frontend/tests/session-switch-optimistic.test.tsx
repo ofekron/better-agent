@@ -23,6 +23,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useSession } from "../src/hooks/useSession";
+import { isInflight } from "../src/progress/store";
 import type { Session } from "../src/types";
 
 const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
@@ -425,8 +426,8 @@ describe("useSession.selectSession — optimistic swap", () => {
   });
 
   it("discards a late-returning prior-REST response so it cannot clobber newer optimistic state", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const b = makeSession({ id: "b", name: "Beta" });
+    const a = makeSession({ id: "race-a", name: "Alpha" });
+    const b = makeSession({ id: "race-b", name: "Beta" });
 
     gate = installFetchGate({
       hold: SESSION_FETCH,
@@ -440,17 +441,17 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     // Click A — REST A is parked.
     await act(async () => {
-      void result.current.selectSession("a");
+      void result.current.selectSession("race-a");
       await Promise.resolve();
     });
-    expect(result.current.currentSession?.id).toBe("a");
+    expect(result.current.currentSession?.id).toBe("race-a");
 
     // Click B — REST B is parked. Optimistic state is now B.
     await act(async () => {
-      void result.current.selectSession("b");
+      void result.current.selectSession("race-b");
       await Promise.resolve();
     });
-    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.currentSession?.id).toBe("race-b");
 
     // Resolve REST A FIRST (out of order). The stale-request guard
     // (selectRequestIdRef) must drop it — currentSession stays on B.
@@ -459,7 +460,8 @@ describe("useSession.selectSession — optimistic swap", () => {
       gate!.resolve(SESSION_FETCH, canonicalA);
       await Promise.resolve();
     });
-    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.currentSession?.id).toBe("race-b");
+    expect(isInflight("session:select:race-a")).toBe(false);
 
     // Resolve REST B — canonical state lands.
     const canonicalB: Session = { ...b, messages: [] };
@@ -467,7 +469,8 @@ describe("useSession.selectSession — optimistic swap", () => {
       gate!.resolve(SESSION_FETCH, canonicalB);
       await Promise.resolve();
     });
-    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.currentSession?.id).toBe("race-b");
+    expect(isInflight("session:select:race-b")).toBe(false);
   });
 
   it("DEEP-LINK (no cached entry): no optimistic write — currentSession stays null until REST resolves", async () => {
@@ -556,7 +559,7 @@ describe("useSession.selectSession — optimistic swap", () => {
     expect(result.current.currentSession?.messages).toHaveLength(1);
   });
 
-  it("reopens a previously loaded session from the in-memory tree cache", async () => {
+  it("paints a cached session immediately, then reconciles it with backend truth", async () => {
     const a = makeSession({ id: "a", name: "Alpha" });
     const b = makeSession({ id: "b", name: "Beta" });
 
@@ -574,25 +577,25 @@ describe("useSession.selectSession — optimistic swap", () => {
       void result.current.selectSession("a");
       await Promise.resolve();
     });
+    const failedAssistant = {
+      id: "a-failed",
+      role: "assistant" as const,
+      content: "",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.601488",
+      isStreaming: false,
+      seq: 11,
+      errorText: "selected extension MCP 'scheduler' exposed no usable tools",
+    };
     await act(async () => {
       gate!.resolve(SESSION_FETCH, {
         ...a,
-        messages: [
-          {
-            id: "a-msg",
-            role: "user",
-            content: "cached prompt",
-            events: [],
-            timestamp: new Date().toISOString(),
-            isStreaming: false,
-            seq: 0,
-          },
-        ],
+        messages: [failedAssistant],
       });
       await Promise.resolve();
     });
     await waitFor(() => {
-      expect(result.current.currentSession?.messages?.[0]?.content).toBe("cached prompt");
+      expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-failed");
     });
 
     await act(async () => {
@@ -614,9 +617,183 @@ describe("useSession.selectSession — optimistic swap", () => {
     });
 
     expect(result.current.currentSession?.id).toBe("a");
-    expect(result.current.currentSession?.messages?.[0]?.content).toBe("cached prompt");
-    expect(result.current.wsTargetSessionId).toBe("a");
-    expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(fetchCountBeforeReopen);
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "a-failed",
+    ]);
+    expect(result.current.wsTargetSessionId).toBeNull();
+    expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(
+      fetchCountBeforeReopen + 1,
+    );
+    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
+
+    const persistedPrompt = {
+      id: "a-user",
+      role: "user" as const,
+      content: "persisted prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.587603",
+      isStreaming: false,
+      seq: 10,
+    };
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [persistedPrompt, failedAssistant],
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+        "a-user",
+        "a-failed",
+      ]);
+      expect(result.current.wsTargetSessionId).toBe("a");
+      expect(result.current.sessionLoading).toBe(false);
+    });
+  });
+
+  it("keeps cached content visible and disconnected when reconciliation fails", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const b = makeSession({ id: "b", name: "Beta" });
+    const cachedMessage = {
+      id: "a-cached",
+      role: "user" as const,
+      content: "cached prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.587603",
+      isStreaming: false,
+      seq: 10,
+    };
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a, b] },
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(2);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, { ...a, messages: [cachedMessage] });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.selectSession("b");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, { ...b, messages: [] });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-cached");
+    expect(result.current.wsTargetSessionId).toBeNull();
+
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, { detail: "backend unavailable" }, 503);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-cached");
+      expect(result.current.sessionLoadError).toEqual({
+        sessionId: "a",
+        message: "backend unavailable",
+      });
+      expect(result.current.wsTargetSessionId).toBeNull();
+      expect(result.current.sessionLoading).toBe(false);
+    });
+  });
+
+  it("retains a late replay for A while B loads and applies it exactly once", async () => {
+    const aPrompt = {
+      id: "a-user",
+      role: "user" as const,
+      content: "first prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.000000",
+      isStreaming: false,
+      seq: 0,
+    };
+    const lateReply = {
+      id: "a-late",
+      role: "assistant" as const,
+      content: "late replay",
+      events: [],
+      timestamp: "2026-07-28T09:46:38.000000",
+      isStreaming: false,
+      seq: 1,
+    };
+    const a = makeSession({ id: "a", name: "Alpha", messages: [aPrompt] });
+    const b = makeSession({ id: "b", name: "Beta" });
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a, b] },
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(2);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+      gate!.resolve(SESSION_FETCH, a);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.selectSession("b");
+      await Promise.resolve();
+      result.current.applyMessagesReplay("a", [lateReply]);
+      gate!.resolve(SESSION_FETCH, b);
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.getSinceSeq("a")).toBe(0);
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+      gate!.resolve(SESSION_FETCH, a);
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "a-user",
+      "a-late",
+    ]);
+    expect(result.current.getSinceSeq("a")).toBe(1);
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [aPrompt, lateReply],
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "a-user",
+      "a-late",
+    ]);
   });
 
   it("REFETCH-OF-SAME-ID: finalized REST snapshot replaces stale local streaming message", async () => {
@@ -687,6 +864,200 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     expect(result.current.currentSession?.messages?.[1]?.content).toBe("complete");
     expect(result.current.currentSession?.messages?.[1]?.isStreaming).toBe(false);
+  });
+
+  it("REFETCH-OF-SAME-ID: completed backend truth removes stale baseline rows", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const userMessage = {
+      id: "u1",
+      role: "user" as const,
+      content: "prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.587603",
+      isStreaming: false,
+      seq: 10,
+    };
+    const staleFailure = {
+      id: "stale-failure",
+      role: "assistant" as const,
+      content: "",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.601488",
+      isStreaming: false,
+      seq: 11,
+      errorText: "stale failure",
+    };
+    const canonicalAssistant = {
+      id: "canonical-assistant",
+      role: "assistant" as const,
+      content: "complete",
+      events: [],
+      timestamp: "2026-07-28T09:46:38.000000",
+      isStreaming: false,
+      seq: 11,
+    };
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(1);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [userMessage, staleFailure],
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [userMessage, canonicalAssistant],
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "u1",
+      "canonical-assistant",
+    ]);
+  });
+
+  it("session reconciliation is authoritative without a refresh correlation id", async () => {
+    const stale = {
+      id: "stale-orphan",
+      role: "assistant" as const,
+      content: "orphaned local row",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.000000",
+      isStreaming: false,
+      seq: 4,
+    };
+    const prompt = {
+      id: "restored-prompt",
+      role: "user" as const,
+      content: "restored prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:36.000000",
+      isStreaming: false,
+      seq: 0,
+    };
+    const a = makeSession({ id: "a", messages: [stale] });
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(1);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+      gate!.resolve(SESSION_FETCH, a);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.applySessionReconciled("a");
+      await Promise.resolve();
+      gate!.resolve(SESSION_FETCH, { ...a, messages: [prompt] });
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "restored-prompt",
+    ]);
+  });
+
+  it("REFETCH-OF-SAME-ID: preserves messages created or changed after reconciliation starts", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    const userMessage = {
+      id: "u1",
+      role: "user" as const,
+      content: "prompt",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.587603",
+      isStreaming: false,
+      seq: 10,
+    };
+    const arrivedDuringFetch = {
+      id: "a2",
+      role: "assistant" as const,
+      content: "arrived during fetch",
+      events: [],
+      timestamp: "2026-07-28T09:46:38.000000",
+      isStreaming: false,
+      seq: 12,
+    };
+    const streamingAssistant = {
+      id: "a1",
+      role: "assistant" as const,
+      content: "before fetch",
+      events: [],
+      timestamp: "2026-07-28T09:46:37.700000",
+      isStreaming: true,
+      seq: 11,
+    };
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(1);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [userMessage, streamingAssistant],
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+      result.current.addMessages("a", [arrivedDuringFetch]);
+      result.current.applyMessageContent("a", "a1", "changed during fetch");
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [userMessage, streamingAssistant],
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
+      "u1",
+      "a1",
+      "a2",
+    ]);
+    expect(result.current.currentSession?.messages?.[1]?.content).toBe(
+      "changed during fetch",
+    );
   });
 
   it("uses the current search field snapshot when refetching the session list", async () => {

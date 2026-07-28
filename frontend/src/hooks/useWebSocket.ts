@@ -75,6 +75,9 @@ interface UseWebSocketOptions {
    * where to push live events for this WS. Pass null when no session
    * is open. */
   currentAppSessionId?: string | null;
+  /** Before a reconnect restores subscriptions, reconcile the selected
+   * tree and seed its cursors from authoritative REST state. */
+  prepareSessionSubscriptions?: () => void | Promise<void>;
   /** Additional session ids to keep subscribed beyond the focused one.
    * Used by the split-pane fork view: every visible pane's session
    * stays subscribed so its messages_replay / messages_delta /
@@ -357,7 +360,7 @@ interface UseWebSocketOptions {
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
-  onSessionReconciled?: (rootId: string, authoritative?: boolean) => void | Promise<void>;
+  onSessionReconciled?: (rootId: string) => void | Promise<void>;
   /** Stable per-tab id sent in PATCH bodies; events whose
    * `originated_by` matches this id are ignored locally. */
   clientId?: string;
@@ -467,6 +470,9 @@ export function useWebSocket(
     options.onMessageAskChoiceChanged
   );
   const onSessionReconciledRef = useRef(options.onSessionReconciled);
+  const prepareSessionSubscriptionsRef = useRef(
+    options.prepareSessionSubscriptions,
+  );
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
     onRewindCompleteRef.current = options.onRewindComplete;
@@ -509,6 +515,7 @@ export function useWebSocket(
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
     onSessionReconciledRef.current = options.onSessionReconciled;
+    prepareSessionSubscriptionsRef.current = options.prepareSessionSubscriptions;
     clientIdRef.current = options.clientId;
   }, [
     options.onRewindComplete,
@@ -548,6 +555,7 @@ export function useWebSocket(
     options.onMessageAskResultChanged,
     options.onMessageAskChoiceChanged,
     options.onSessionReconciled,
+    options.prepareSessionSubscriptions,
     options.clientId,
   ]);
   // Track the currently-viewed session id in a ref so onmessage can
@@ -559,6 +567,8 @@ export function useWebSocket(
     currentAppSessionIdRef.current = options.currentAppSessionId ?? null;
   }, [options.currentAppSessionId]);
   const [connected, setConnected] = useState(false);
+  const [subscriptionsReady, setSubscriptionsReady] = useState(true);
+  const hasOpenedRef = useRef(false);
   const [events, setEvents] = useState<WSEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -620,9 +630,21 @@ export function useWebSocket(
     };
 
     ws.onopen = () => {
+      const isReconnect = hasOpenedRef.current;
+      hasOpenedRef.current = true;
       setConnected(true);
       eventBus.publish("ws_connection_changed", { connected: true });
       snapshotTransportRef.current.resume((frame) => sendWebSocketFrame(ws, frame));
+      if (isReconnect && prepareSessionSubscriptionsRef.current) {
+        setSubscriptionsReady(false);
+        void Promise.resolve(prepareSessionSubscriptionsRef.current()).then(() => {
+          if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+            setSubscriptionsReady(true);
+          }
+        });
+      } else {
+        setSubscriptionsReady(true);
+      }
       lastPongAtRef.current = Date.now();
       heartbeatIntervalRef.current = setInterval(() => {
         if (Date.now() - lastPongAtRef.current > HEARTBEAT_TIMEOUT_MS) {
@@ -644,6 +666,7 @@ export function useWebSocket(
         heartbeatIntervalRef.current = undefined;
       }
       setConnected(false);
+      setSubscriptionsReady(false);
       eventBus.publish("ws_connection_changed", { connected: false });
       setIsStreaming(false);
       setIsStopping(false);
@@ -803,12 +826,9 @@ export function useWebSocket(
         // may have returned stale cache; silently refetch if the user
         // is viewing this root's session.
         if (event.type === "session_reconciled") {
-          const d = event.data as { root_id?: string; snapshot_refresh_id?: string };
+          const d = event.data as { root_id?: string };
           if (d.root_id) {
-            verifiedRouteResult = onSessionReconciledRef.current?.(
-              d.root_id,
-              typeof d.snapshot_refresh_id === "string",
-            );
+            verifiedRouteResult = onSessionReconciledRef.current?.(d.root_id);
           }
           return;
         }
@@ -1565,7 +1585,7 @@ export function useWebSocket(
     subscribedIdsRef.current = new Set(subscribedIdsRef.current).add(id);
   }, []);
   useEffect(() => {
-    if (!connected) {
+    if (!connected || !subscriptionsReady) {
       // WS went down — drop our local record of subscriptions so that
       // the reconnect re-subscribes the full desired set fresh.
       subscribedIdsRef.current = new Set();
@@ -1601,7 +1621,7 @@ export function useWebSocket(
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, desiredSetKey]);
+  }, [connected, desiredSetKey, subscriptionsReady]);
 
   const sendMessage = useCallback(
     (

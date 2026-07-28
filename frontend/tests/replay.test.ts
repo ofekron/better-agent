@@ -584,10 +584,18 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     });
     const h = await renderApp({ seed: { sessions: [a] } });
     await h.selectSession("a");
-
-    const subA = h.outbound.find(
-      (f) => f.type === "subscribe" && f.app_session_id === "a",
+    await waitFor(h, () =>
+      h.outbound.some(
+        (frame) =>
+          frame.type === "subscribe" &&
+          frame.app_session_id === "a" &&
+          frame.since_seq === 1,
+      ),
     );
+
+    const subA = h.outbound.filter(
+      (f) => f.type === "subscribe" && f.app_session_id === "a",
+    ).at(-1);
     // Highest seq in REST payload is 1, so the very first subscribe
     // sends since_seq=1 (the backend's `seq >= since_seq` filter
     // re-emits the in-flight assistant on reconnect, idempotently).
@@ -614,10 +622,117 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     h.unmount();
   });
 
+  it("reconnect replaces a completed partial tree before resubscribing", async () => {
+    const visiblePrompt = makeUserMsg({
+      id: "u3",
+      content: "visible cached prompt",
+      seq: 4,
+      timestamp: "2026-06-19T21:44:19.000000",
+    });
+    const partialAssistant = makeAssistantMsg({
+      id: "a3",
+      content: "partial failure",
+      seq: 5,
+      isStreaming: true,
+      timestamp: "2026-06-19T21:44:20.000000",
+    });
+    const partial = makeSession({
+      id: "a",
+      name: "partial",
+      messages: [visiblePrompt, partialAssistant],
+    });
+    const other = makeSession({ id: "b", name: "other" });
+    const h = await renderApp({ seed: { sessions: [partial, other] } });
+    await h.selectSession(partial.id);
+
+    h.emit({
+      type: "turn_complete",
+      data: { app_session_id: partial.id, success: true },
+    });
+    await h.flush();
+    expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual(["u3"]);
+    expect(h.raw.container.textContent).toContain("partial failure");
+
+    const authoritative = makeSession({
+      ...partial,
+      messages: [
+        makeUserMsg({
+          id: "u1",
+          content: "first missing prompt",
+          seq: 0,
+          timestamp: "2026-06-19T21:44:15.000000",
+        }),
+        makeAssistantMsg({
+          id: "a1",
+          content: "first answer",
+          seq: 1,
+          timestamp: "2026-06-19T21:44:16.000000",
+          completed_at: "2026-06-19T21:44:17.000000",
+        }),
+        makeUserMsg({
+          id: "u2",
+          content: "second missing prompt",
+          seq: 2,
+          timestamp: "2026-06-19T21:44:17.000000",
+        }),
+        makeAssistantMsg({
+          id: "a2",
+          content: "second answer",
+          seq: 3,
+          timestamp: "2026-06-19T21:44:18.000000",
+          completed_at: "2026-06-19T21:44:18.000000",
+        }),
+        visiblePrompt,
+        {
+          ...partialAssistant,
+          content: "canonical failure",
+          isStreaming: false,
+          completed_at: "2026-06-19T21:44:19.000000",
+        },
+      ],
+    });
+    h.backend.state.sessions[
+      h.backend.state.sessions.findIndex((session) => session.id === partial.id)
+    ] = authoritative;
+
+    h.dropConnection();
+    h.reopenConnection();
+    await waitFor(h, () =>
+      h.toJSON().chat.messages.map((message) => message.id).join(",") ===
+      "u1,u2,u3"
+    );
+    const reconnectSubscribe = h.outbound
+      .filter(
+        (frame) =>
+          frame.type === "subscribe" &&
+          frame.app_session_id === partial.id,
+      )
+      .at(-1);
+    expect(reconnectSubscribe).toMatchObject({ since_seq: 5 });
+
+    expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual([
+      "u1",
+      "u2",
+      "u3",
+    ]);
+    expect(h.raw.container.textContent).toContain("first missing prompt");
+    expect(h.raw.container.textContent).toContain("second missing prompt");
+    expect(h.raw.container.textContent).toContain("canonical failure");
+    expect(h.raw.container.textContent).not.toContain("partial failure");
+    h.unmount();
+  });
+
   it("messages_replay sorts merged messages by seq", async () => {
     const session = makeSession({ messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await waitFor(h, () =>
+      h.outbound.some(
+        (frame) =>
+          frame.type === "subscribe" &&
+          frame.app_session_id === session.id,
+      ),
+    );
 
     // Replay arrives out of order.
     h.emit({
@@ -639,11 +754,21 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     await h.flush();
     await waitFor(
       h,
-      () => h.toJSON().chat.messages.map((m) => m.id).join(",") === "u1,a",
+      () => h.raw.container.textContent?.includes("second") ?? false,
     );
 
-    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "a"]);
-    expect(h.raw.container.textContent).toContain("second");
+    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1"]);
+    const user = h.raw.container.querySelector(
+      '[data-testid="user-message"][data-message-id="u1"]',
+    );
+    const response = h.raw.container.querySelector(
+      '.turn-group-children[data-message-id="a"]',
+    );
+    expect(user).not.toBeNull();
+    expect(response?.textContent).toContain("second");
+    expect(
+      user!.compareDocumentPosition(response!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     h.unmount();
   });
 

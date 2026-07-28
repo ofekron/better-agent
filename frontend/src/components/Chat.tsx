@@ -1607,7 +1607,7 @@ export function Chat({
 
         {!showRaw && (
           <>
-            {sessionLoadError && sessionLoadError.sessionId === (focusedSessionId ?? tree?.id) ? (
+            {sessionLoadError && sessionLoadError.sessionId === (focusedSessionId ?? tree?.id) && (
               <div className="chat-load-error" role="alert">
                 <span className="chat-load-error-text">
                   {t("chat.sessionLoadFailed", { detail: sessionLoadError.message })}
@@ -1622,7 +1622,8 @@ export function Chat({
                   </button>
                 )}
               </div>
-            ) : sessionLoading && displayTurnGroups.length === 0 ? (
+            )}
+            {sessionLoading && displayTurnGroups.length === 0 ? (
               <div className="chat-loading-skeleton">
                 <div className="chat-loading-pulse" />
               </div>
