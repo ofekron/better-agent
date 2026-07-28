@@ -32,7 +32,7 @@ except Exception:
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import BackgroundTasks, Response
 from pathlib import Path
@@ -1680,6 +1680,8 @@ async def app_lifespan(_app: FastAPI):
     module; names resolve at call time.
     """
     await on_startup()
+    for _deferred in _deferred_startup_tasks:
+        await _deferred()
     try:
         yield
     finally:
@@ -20990,6 +20992,13 @@ _COLD_BUILDING_HTML = """\
 
 _COLD_BUILD_CHECK_INTERVAL = 1.0
 
+# Startup tasks armed during module load (the cold-build watcher) but launched
+# by `app_lifespan` after `on_startup`. Starlette raises when a lifespan is set
+# and a legacy router event handler is registered, so this list is the single
+# drain point.
+_deferred_startup_tasks: list[Callable[[], Awaitable[None]]] = []
+_cold_build_watcher_armed = False
+
 
 def _mount_cold_build_stub(target_app: FastAPI) -> None:
     """Serve a placeholder while the frontend builds on a cold clone.
@@ -21012,11 +21021,16 @@ def _arm_cold_build_restart(target_app: FastAPI, dist_index: Path) -> None:
     after the restart, mount_frontend sees the dist and takes the normal
     StaticFiles branch, so the watcher never re-arms.
     """
+    global _cold_build_watcher_armed
     if get_env("BETTER_CLAUDE_RUN_SH_SUPERVISOR") != "1":
         logger.info(
             "cold frontend build: supervisor absent; placeholder served until manual restart"
         )
         return
+
+    if _cold_build_watcher_armed:
+        return
+    _cold_build_watcher_armed = True
 
     async def _watch_for_build():
         try:
@@ -21033,7 +21047,7 @@ def _arm_cold_build_restart(target_app: FastAPI, dist_index: Path) -> None:
     async def _start_watcher():
         asyncio.create_task(_watch_for_build())
 
-    target_app.add_event_handler("startup", _start_watcher)
+    _deferred_startup_tasks.append(_start_watcher)
 
 
 def mount_frontend(target_app: FastAPI, *, dist_dir: Path | None = None) -> None:
