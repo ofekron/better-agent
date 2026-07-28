@@ -59,7 +59,7 @@ class ProviderCredentialBroker:
         with self._locks_guard:
             return self._locks.setdefault(provider_id, threading.Lock())
 
-    def handle(self, request: object) -> dict[str, str]:
+    def handle(self, request: object) -> dict[str, str | bool]:
         if not isinstance(request, dict):
             raise ValueError("request must be an object")
         op = request.get("op")
@@ -106,6 +106,21 @@ class ProviderCredentialBroker:
                 if not isinstance(value, str) or not value or len(value) > 128 * 1024:
                     raise ValueError("invalid credential")
                 return self._store(provider_id, value)
+            if op == "compare_set":
+                value = request.get("value")
+                expected_value = request.get("expected_value")
+                if (
+                    not isinstance(value, str)
+                    or len(value) > 128 * 1024
+                    or not isinstance(expected_value, str)
+                    or len(expected_value) > 128 * 1024
+                ):
+                    raise ValueError("invalid credential compare-and-set")
+                return self._compare_set(
+                    provider_id,
+                    expected_value,
+                    value,
+                )
             if op == "delete":
                 return self._delete(provider_id)
         raise ValueError("unsupported operation")
@@ -190,6 +205,41 @@ class ProviderCredentialBroker:
             return self._remember(provider_id, "blocked")
         self._remember(provider_id, "available", value=value)
         return {"status": "available"}
+
+    def _compare_set(
+        self,
+        provider_id: str,
+        expected_value: str,
+        value: str,
+    ) -> dict[str, str | bool]:
+        try:
+            with self._keychain_lock:
+                current = self._credential_store.read(provider_id)
+                if current != expected_value:
+                    status = "available" if current else "missing"
+                    self._remember(
+                        provider_id,
+                        status,
+                        value=current,
+                    )
+                    return {"status": status, "applied": False}
+                if value:
+                    self._credential_store.store(provider_id, value)
+                else:
+                    self._credential_store.delete(provider_id)
+        except ProviderCredentialAccessBlocked as exc:
+            self._remember_blocked(
+                provider_id,
+                exc,
+                blocked_candidate=exc.candidate,
+            )
+            return {"status": "blocked", "applied": False}
+        except RuntimeError:
+            self._remember(provider_id, "blocked")
+            return {"status": "blocked", "applied": False}
+        status = "available" if value else "missing"
+        self._remember(provider_id, status, value=value)
+        return {"status": status, "applied": True}
 
     def _migrate_flat(self, provider_id: str) -> dict[str, str]:
         try:

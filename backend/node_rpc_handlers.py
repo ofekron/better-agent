@@ -831,6 +831,8 @@ def _rpc_sync_provider_config(params: dict) -> dict:
         "default_provider_id": synced.get("default_provider_id"),
         "provider_count": len(synced.get("providers", [])),
         "provider_api_key_count": synced.get("provider_api_key_count", 0),
+        "provider_state_authority": synced.get("provider_state_authority"),
+        "sync_status": synced.get("sync_status"),
     }
 
 

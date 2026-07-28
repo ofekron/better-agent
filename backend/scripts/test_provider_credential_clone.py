@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,133 @@ sys.path.insert(0, str(ROOT / "backend"))
 import config_store  # noqa: E402
 import credential_clone_api  # noqa: E402
 import credential_session  # noqa: E402
+
+
+def test_authority_compare_set_is_atomic_and_secret_free() -> None:
+    broker = credential_session.ProviderCredentialBroker()
+    credentials = {"target": "old-secret"}
+
+    with (
+        patch.object(
+            broker._credential_store,
+            "read",
+            side_effect=lambda provider_id: credentials.get(provider_id, ""),
+        ),
+        patch.object(
+            broker._credential_store,
+            "store",
+            side_effect=lambda provider_id, value: credentials.__setitem__(
+                provider_id,
+                value,
+            ),
+        ),
+        patch.object(
+            broker._credential_store,
+            "delete",
+            side_effect=lambda provider_id: credentials.pop(provider_id, None),
+        ),
+    ):
+        applied = broker.handle({
+            "op": "compare_set",
+            "provider_id": "target",
+            "expected_value": "old-secret",
+            "value": "new-secret",
+            "request_id": "a" * 32,
+        })
+        conflict = broker.handle({
+            "op": "compare_set",
+            "provider_id": "target",
+            "expected_value": "old-secret",
+            "value": "stale-secret",
+            "request_id": "b" * 32,
+        })
+        deleted = broker.handle({
+            "op": "compare_set",
+            "provider_id": "target",
+            "expected_value": "new-secret",
+            "value": "",
+            "request_id": "c" * 32,
+        })
+
+    assert applied == {"status": "available", "applied": True}
+    assert conflict == {"status": "available", "applied": False}
+    assert deleted == {"status": "missing", "applied": True}
+    assert credentials == {}
+    responses = repr((applied, conflict, deleted))
+    assert "old-secret" not in responses
+    assert "new-secret" not in responses
+    assert "stale-secret" not in responses
+
+
+def test_compare_set_and_clone_have_one_target_write_order() -> None:
+    broker = credential_session.ProviderCredentialBroker()
+    credentials = {
+        "source": "clone-secret",
+        "target": "old-secret",
+    }
+    compare_reading = threading.Event()
+    release_compare = threading.Event()
+    results: dict[str, dict] = {}
+
+    def read(provider_id: str) -> str:
+        if (
+            provider_id == "target"
+            and threading.current_thread().name == "compare-writer"
+        ):
+            compare_reading.set()
+            assert release_compare.wait(2)
+        return credentials.get(provider_id, "")
+
+    with (
+        patch.object(broker._credential_store, "read", side_effect=read),
+        patch.object(
+            broker._credential_store,
+            "store",
+            side_effect=lambda provider_id, value: credentials.__setitem__(
+                provider_id,
+                value,
+            ),
+        ),
+    ):
+        compare = threading.Thread(
+            name="compare-writer",
+            target=lambda: results.__setitem__(
+                "compare",
+                broker.handle({
+                    "op": "compare_set",
+                    "provider_id": "target",
+                    "expected_value": "old-secret",
+                    "value": "incoming-secret",
+                    "request_id": "d" * 32,
+                }),
+            ),
+        )
+        clone = threading.Thread(
+            name="clone-writer",
+            target=lambda: results.__setitem__(
+                "clone",
+                broker.handle({
+                    "op": "clone",
+                    "provider_id": "source",
+                    "target_provider_id": "target",
+                    "request_id": "e" * 32,
+                }),
+            ),
+        )
+        compare.start()
+        assert compare_reading.wait(2)
+        clone.start()
+        release_compare.set()
+        compare.join(2)
+        clone.join(2)
+
+    assert not compare.is_alive()
+    assert not clone.is_alive()
+    assert results == {
+        "compare": {"status": "available", "applied": True},
+        "clone": {"status": "available"},
+    }
+    assert credentials["target"] == "clone-secret"
 
 
 def test_authority_clone_never_returns_plaintext() -> None:

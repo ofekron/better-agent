@@ -28,6 +28,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import config_store  # noqa: E402
+import provider_sync_authority  # noqa: E402
 
 
 def _reset_state_cache() -> None:
@@ -48,6 +49,11 @@ def _seed_config(provider_ids: list[str]) -> None:
             "schema_version": config_store.CONFIG_SCHEMA_VERSION,
             "default_provider_id": provider_ids[0],
             "providers": providers,
+            "provider_state_authority": provider_sync_authority.new_authority(
+                provider_ids[0],
+                providers,
+            ),
+            "provider_state_projected": False,
         }),
         encoding="utf-8",
     )

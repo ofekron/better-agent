@@ -22,9 +22,59 @@ import extension_store  # noqa: E402
 import node_link  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import node_store  # noqa: E402
+import provider_sync_authority  # noqa: E402
 import provider_remote  # noqa: E402
 
 logging.disable(logging.CRITICAL)
+
+
+def _provider_record(
+    provider_id: str,
+    name: str,
+    *,
+    mode: str = "subscription",
+) -> dict:
+    provider = config_store._new_provider_record("claude")
+    provider.update({
+        "id": provider_id,
+        "name": name,
+        "mode": mode,
+        "default_model": "opus",
+    })
+    authority = {
+        "generation": provider["generation"],
+        "revision": provider["revision"],
+    }
+    return {
+        **config_store._clean_provider_record(provider),
+        **authority,
+    }
+
+
+def _provider_sync_payload(
+    default_provider_id: str,
+    providers: list[dict],
+    *,
+    provider_api_keys: list[dict] | None = None,
+) -> dict:
+    payload = {
+        "provider_state_authority": provider_sync_authority.new_authority(
+            default_provider_id,
+            providers,
+        ),
+        "default_provider_id": default_provider_id,
+        "providers": providers,
+    }
+    if provider_api_keys is not None:
+        payload["provider_api_keys"] = provider_api_keys
+    return payload
+
+
+def _fresh_provider_sync(payload: dict) -> dict:
+    config_store._config_path().unlink(missing_ok=True)
+    with config_store._state_cache_lock:
+        config_store._state_cache = None
+    return config_store.import_provider_sync_state(payload)
 
 
 class _Request:
@@ -411,17 +461,16 @@ async def test_run_headless_requires_version_ready() -> None:
 
 def test_export_provider_sync_state_excludes_api_keys_by_default() -> None:
     original_read = config_store._read_api_key
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        )
+    ]
     config_store._save_state({
         "default_provider_id": "api-provider",
-        "providers": [
-            {
-                "id": "api-provider",
-                "name": "API Provider",
-                "kind": "claude",
-                "mode": "api_key",
-                "default_model": "opus",
-            },
-        ],
+        "providers": providers,
     })
     config_store._read_api_key = lambda _provider_id: "secret-value"  # type: ignore[assignment]
     try:
@@ -435,33 +484,33 @@ def test_export_provider_sync_state_excludes_api_keys_by_default() -> None:
 
 def test_export_provider_sync_state_includes_only_selected_api_keys() -> None:
     original_read = config_store._read_api_key
+    original_read_authoritative = config_store._read_api_key_authoritative
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        ),
+        _provider_record(
+            "other-provider",
+            "Other Provider",
+            mode="api_key",
+        ),
+    ]
     config_store._save_state({
         "default_provider_id": "api-provider",
-        "providers": [
-            {
-                "id": "api-provider",
-                "name": "API Provider",
-                "kind": "claude",
-                "mode": "api_key",
-                "default_model": "opus",
-            },
-            {
-                "id": "other-provider",
-                "name": "Other Provider",
-                "kind": "claude",
-                "mode": "api_key",
-                "default_model": "opus",
-            },
-        ],
+        "providers": providers,
     })
     config_store._read_api_key = lambda provider_id: {  # type: ignore[assignment]
         "api-provider": "selected-secret",
         "other-provider": "other-secret",
     }.get(provider_id, "")
+    config_store._read_api_key_authoritative = config_store._read_api_key  # type: ignore[assignment]
     try:
         payload = config_store.export_provider_sync_state(["api-provider"])
     finally:
         config_store._read_api_key = original_read  # type: ignore[assignment]
+        config_store._read_api_key_authoritative = original_read_authoritative  # type: ignore[assignment]
 
     assert payload["provider_api_keys"] == [
         {"provider_id": "api-provider", "api_key": "selected-secret"}
@@ -470,30 +519,37 @@ def test_export_provider_sync_state_includes_only_selected_api_keys() -> None:
 
 
 def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
-    original_write = config_store._write_api_key
+    original_compare_set = config_store._compare_set_api_key
     original_read = config_store._read_api_key
+    original_read_authoritative = config_store._read_api_key_authoritative
     keys: dict[str, str] = {}
-    config_store._write_api_key = lambda provider_id, api_key: keys.__setitem__(provider_id, api_key)  # type: ignore[assignment]
+    config_store._compare_set_api_key = (
+        lambda provider_id, _expected, api_key: keys.__setitem__(
+            provider_id,
+            api_key,
+        )
+    )
     config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
+    config_store._read_api_key_authoritative = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        )
+    ]
     try:
-        result = config_store.import_provider_sync_state({
-            "default_provider_id": "api-provider",
-            "providers": [
-                {
-                    "id": "api-provider",
-                    "name": "API Provider",
-                    "kind": "claude",
-                    "mode": "api_key",
-                    "default_model": "opus",
-                },
-            ],
-            "provider_api_keys": [
+        result = _fresh_provider_sync(_provider_sync_payload(
+            "api-provider",
+            providers,
+            provider_api_keys=[
                 {"provider_id": "api-provider", "api_key": "selected-secret"},
             ],
-        })
+        ))
     finally:
-        config_store._write_api_key = original_write  # type: ignore[assignment]
+        config_store._compare_set_api_key = original_compare_set  # type: ignore[assignment]
         config_store._read_api_key = original_read  # type: ignore[assignment]
+        config_store._read_api_key_authoritative = original_read_authoritative  # type: ignore[assignment]
 
     assert keys == {"api-provider": "selected-secret"}
     assert result["provider_api_key_count"] == 1
@@ -502,78 +558,79 @@ def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
 
 
 def test_import_provider_sync_fails_when_api_key_cannot_be_stored() -> None:
-    original_write = config_store._write_api_key
+    original_compare_set = config_store._compare_set_api_key
     original_read = config_store._read_api_key
-    config_store._write_api_key = lambda _provider_id, _api_key: None  # type: ignore[assignment]
+    original_read_authoritative = config_store._read_api_key_authoritative
+
+    def fail_store(_provider_id: str, api_key: str) -> None:
+        if api_key:
+            raise RuntimeError("credential store failed")
+
+    config_store._compare_set_api_key = (
+        lambda provider_id, _expected, api_key: fail_store(
+            provider_id,
+            api_key,
+        )
+    )
     config_store._read_api_key = lambda _provider_id: ""  # type: ignore[assignment]
+    config_store._read_api_key_authoritative = lambda _provider_id: ""  # type: ignore[assignment]
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        )
+    ]
     try:
         try:
-            config_store.import_provider_sync_state({
-                "default_provider_id": "api-provider",
-                "providers": [
-                    {
-                        "id": "api-provider",
-                        "name": "API Provider",
-                        "kind": "claude",
-                        "mode": "api_key",
-                        "default_model": "opus",
-                    },
-                ],
-                "provider_api_keys": [
+            _fresh_provider_sync(_provider_sync_payload(
+                "api-provider",
+                providers,
+                provider_api_keys=[
                     {"provider_id": "api-provider", "api_key": "selected-secret"},
                 ],
-            })
-        except ValueError as exc:
-            assert "could not be stored" in str(exc)
+            ))
+        except RuntimeError as exc:
+            assert "credential store failed" in str(exc)
             assert "selected-secret" not in str(exc)
             return
     finally:
-        config_store._write_api_key = original_write  # type: ignore[assignment]
+        config_store._compare_set_api_key = original_compare_set  # type: ignore[assignment]
         config_store._read_api_key = original_read  # type: ignore[assignment]
+        config_store._read_api_key_authoritative = original_read_authoritative  # type: ignore[assignment]
     raise AssertionError("provider sync succeeded without stored credentials")
 
 
 def test_import_provider_sync_skips_keyless_api_provider_as_default() -> None:
-    payload = {
-        "default_provider_id": "api-provider",
-        "providers": [
-            {
-                "id": "api-provider",
-                "name": "API Provider",
-                "kind": "claude",
-                "mode": "api_key",
-                "default_model": "opus",
-            },
-            {
-                "id": "subscription-provider",
-                "name": "Subscription Provider",
-                "kind": "claude",
-                "mode": "subscription",
-                "default_model": "opus",
-            },
-        ],
-    }
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        ),
+        _provider_record(
+            "subscription-provider",
+            "Subscription Provider",
+        ),
+    ]
+    payload = _provider_sync_payload("api-provider", providers)
 
-    result = config_store.import_provider_sync_state(payload)
+    result = _fresh_provider_sync(payload)
 
     assert result["default_provider_id"] == "subscription-provider"
 
 
 def test_import_provider_sync_clears_default_when_every_provider_needs_missing_key() -> None:
-    payload = {
-        "default_provider_id": "api-provider",
-        "providers": [
-            {
-                "id": "api-provider",
-                "name": "API Provider",
-                "kind": "claude",
-                "mode": "api_key",
-                "default_model": "opus",
-            },
-        ],
-    }
+    providers = [
+        _provider_record(
+            "api-provider",
+            "API Provider",
+            mode="api_key",
+        )
+    ]
+    payload = _provider_sync_payload("api-provider", providers)
 
-    result = config_store.import_provider_sync_state(payload)
+    result = _fresh_provider_sync(payload)
 
     assert result["default_provider_id"] is None
 

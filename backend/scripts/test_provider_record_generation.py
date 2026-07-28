@@ -38,6 +38,19 @@ def _credential_request(action: str, provider_id: str, **kwargs) -> dict:
     if action == "store":
         CREDENTIALS[provider_id] = kwargs["value"]
         return {"status": "available"}
+    if action == "compare_set":
+        current = CREDENTIALS.get(provider_id, "")
+        if current != kwargs["expected_value"]:
+            return {
+                "status": "available" if current else "missing",
+                "applied": False,
+            }
+        value = kwargs["value"]
+        if value:
+            CREDENTIALS[provider_id] = value
+            return {"status": "available", "applied": True}
+        CREDENTIALS.pop(provider_id, None)
+        return {"status": "missing", "applied": True}
     raise AssertionError(f"unexpected credential action: {action}")
 
 
@@ -84,6 +97,8 @@ def _all_keys(value: object) -> set[str]:
 def _unversioned_provider_state(canonical: dict) -> dict:
     state = copy.deepcopy(canonical)
     state.pop("schema_version")
+    state.pop("provider_state_authority")
+    state.pop("provider_state_projected")
     for provider in state["providers"]:
         provider.pop("generation")
         provider.pop("revision")
@@ -377,6 +392,15 @@ else:
     missing_generation = copy.deepcopy(canonical)
     missing_generation["providers"][0].pop("generation")
     unsupported_states.append(missing_generation)
+    missing_provider_state_authority = copy.deepcopy(canonical)
+    missing_provider_state_authority.pop("provider_state_authority")
+    unsupported_states.append(missing_provider_state_authority)
+    missing_projection_marker = copy.deepcopy(canonical)
+    missing_projection_marker.pop("provider_state_projected")
+    unsupported_states.append(missing_projection_marker)
+    previous_schema = copy.deepcopy(canonical)
+    previous_schema["schema_version"] = config_store.CONFIG_SCHEMA_VERSION - 1
+    unsupported_states.append(previous_schema)
     wrong_version = copy.deepcopy(canonical)
     wrong_version["schema_version"] += 1
     unsupported_states.append(wrong_version)
@@ -459,6 +483,12 @@ else:
         config_store._config_path().read_text(encoding="utf-8")
     )
     assert persisted_migration["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+    assert persisted_migration["provider_state_projected"] is False
+    assert persisted_migration["provider_state_authority"] == (
+        migrated_provider_state["provider_state_authority"]
+    )
+    uuid.UUID(persisted_migration["provider_state_authority"]["generation"])
+    assert persisted_migration["provider_state_authority"]["revision"] == 0
     assert [provider["id"] for provider in migrated_provider_state["providers"]] == [
         provider["id"] for provider in legacy_provider_state["providers"]
     ]

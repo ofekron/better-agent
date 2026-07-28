@@ -40,6 +40,7 @@ from typing import Optional
 
 import credential_session_client
 import dependency_plan
+import provider_sync_authority
 import runtime_profile
 from filelock import FileLock
 
@@ -59,7 +60,7 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
@@ -74,6 +75,18 @@ class ProviderConfigConflict(RuntimeError):
         super().__init__(
             f"provider config conflict: current authority is "
             f"{self.generation}@{self.revision}"
+        )
+
+
+ProviderStateConflict = provider_sync_authority.ProviderStateConflict
+
+
+class ProviderCredentialConflict(RuntimeError):
+    def __init__(self, provider_id: str):
+        self.provider_id = provider_id
+        super().__init__(
+            f"provider credential conflict for {provider_id}: "
+            "the same provider state authority already has a different credential"
         )
 
 
@@ -343,23 +356,75 @@ def _read_api_key_authoritative(provider_id: str) -> str:
     return value
 
 
+def _compare_set_api_key(
+    provider_id: str,
+    expected_value: str,
+    value: str,
+) -> None:
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request(
+        "compare_set",
+        provider_id,
+        expected_value=expected_value,
+        value=value,
+    )
+    status = response["status"]
+    _credential_status[provider_id] = status
+    if response.get("applied") is not True:
+        with _api_key_cache_lock:
+            _api_key_cache.pop(provider_id, None)
+        if status == "blocked":
+            raise RuntimeError("OS credential access is blocked")
+        raise ProviderCredentialConflict(provider_id)
+    with _api_key_cache_lock:
+        if value:
+            _api_key_cache[provider_id] = value
+        else:
+            _api_key_cache.pop(provider_id, None)
+
+
 @contextmanager
-def _credential_transaction(changes: list[tuple[str, str]]):
+def _credential_transaction(
+    changes: list[tuple[str, str]],
+    *,
+    expected_values: dict[str, str] | None = None,
+):
     snapshots = {
         provider_id: _read_api_key_authoritative(provider_id)
         for provider_id, _value in changes
     }
+    if expected_values is not None:
+        changed_provider = next(
+            (
+                provider_id
+                for provider_id, value in snapshots.items()
+                if expected_values.get(provider_id) != value
+            ),
+            None,
+        )
+        if changed_provider is not None:
+            raise ProviderCredentialConflict(changed_provider)
+    desired_values = dict(changes)
     applied: list[str] = []
     try:
         for provider_id, value in changes:
+            _compare_set_api_key(
+                provider_id,
+                snapshots[provider_id],
+                value,
+            )
             applied.append(provider_id)
-            _write_api_key(provider_id, value)
         yield
     except BaseException as exc:
         rollback_errors: list[Exception] = []
         for provider_id in reversed(applied):
             try:
-                _write_api_key(provider_id, snapshots[provider_id])
+                _compare_set_api_key(
+                    provider_id,
+                    desired_values[provider_id],
+                    snapshots[provider_id],
+                )
             except Exception as rollback_exc:
                 rollback_errors.append(rollback_exc)
         if rollback_errors:
@@ -558,12 +623,14 @@ def _seed_default_state() -> dict:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "default_provider_id": claude["id"],
             "providers": [claude, codex],
+            "provider_state_projected": False,
         }
     provider = _new_provider_record(str(kind))
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": provider["id"],
         "providers": [provider],
+        "provider_state_projected": False,
     }
 
 
@@ -676,6 +743,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": pid,
         "providers": [provider],
+        "provider_state_projected": False,
     }
 
 
@@ -739,10 +807,16 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
             **canonical,
             **_new_provider_authority(),
         })
+    default_provider_id = raw["default_provider_id"]
     state = _normalize_loaded_state({
         **raw,
         "schema_version": CONFIG_SCHEMA_VERSION,
         "providers": migrated,
+        "provider_state_authority": provider_sync_authority.new_authority(
+            default_provider_id,
+            migrated,
+        ),
+        "provider_state_projected": False,
     })
     return state
 
@@ -777,10 +851,27 @@ def _normalize_loaded_state(raw: dict) -> dict:
     if active_record is None or _provider_is_suspended(active_record):
         if active is not None or available:
             raise RuntimeError("unsupported provider config schema: invalid default provider")
+    projected = raw.get("provider_state_projected")
+    if not isinstance(projected, bool):
+        raise RuntimeError(
+            "unsupported provider config schema: provider_state_projected must be boolean"
+        )
+    try:
+        provider_state_authority = provider_sync_authority.validate_authority(
+            raw.get("provider_state_authority"),
+            active,
+            providers,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"unsupported provider config schema: {exc}"
+        ) from exc
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": active,
         "providers": providers,
+        "provider_state_authority": provider_state_authority,
+        "provider_state_projected": projected,
         "delegate_task_policy": _normalize_delegate_task_policy(
             raw.get("delegate_task_policy")
         ),
@@ -970,19 +1061,108 @@ def _log_removed_providers(new_providers: list) -> None:
 
 
 def _validate_state_for_save(state: dict) -> None:
-    _normalize_loaded_state(state)
-    dependency_plan.assert_state_supported(state)
+    candidate = copy.deepcopy(state)
+    providers = candidate.get("providers", [])
+    default_provider_id = candidate.get("default_provider_id")
+    authority = candidate.get("provider_state_authority")
+    if authority is None:
+        authority = provider_sync_authority.new_authority(
+            default_provider_id,
+            providers,
+        )
+    elif isinstance(authority, dict):
+        authority = {
+            **authority,
+            "digest": provider_sync_authority.snapshot_digest(
+                default_provider_id,
+                providers,
+            ),
+        }
+    candidate["provider_state_authority"] = authority
+    candidate.setdefault("provider_state_projected", False)
+    _normalize_loaded_state(candidate)
+    dependency_plan.assert_state_supported(candidate)
 
 
-def _save_state(state: dict) -> None:
+def _current_provider_state_metadata() -> tuple[dict | None, bool]:
+    raw = read_json(_config_path(), {})
+    if not raw:
+        return None, False
+    if _is_legacy_flat_state(raw):
+        return None, False
+    if "schema_version" not in raw and "providers" in raw:
+        _migrate_unversioned_provider_state(raw)
+        return None, False
+    if raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"unsupported provider config schema: expected {CONFIG_SCHEMA_VERSION}"
+        )
+    try:
+        authority = provider_sync_authority.validate_authority(
+            raw.get("provider_state_authority"),
+            raw.get("default_provider_id"),
+            raw.get("providers"),
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"unsupported provider config schema: {exc}"
+        ) from exc
+    projected = raw.get("provider_state_projected")
+    if not isinstance(projected, bool):
+        raise RuntimeError(
+            "unsupported provider config schema: provider_state_projected must be boolean"
+        )
+    return authority, projected
+
+
+def _save_state(
+    state: dict,
+    *,
+    provider_state_authority: dict | None = None,
+) -> None:
     global _state_cache
-    _validate_state_for_save(state)
-    new_providers = state.get("providers", [])
-    _log_removed_providers(new_providers)
+    providers = copy.deepcopy(state.get("providers", []))
+    default_provider_id = state.get("default_provider_id")
+    current_authority, current_projected = _current_provider_state_metadata()
+    if provider_state_authority is None:
+        supplied_authority = state.get("provider_state_authority")
+        if current_authority is None:
+            authority = provider_sync_authority.new_authority(
+                default_provider_id,
+                providers,
+            )
+        else:
+            if (
+                supplied_authority is not None
+                and supplied_authority != current_authority
+            ):
+                raise ProviderStateConflict(
+                    "local_stale",
+                    current_authority,
+                    supplied_authority,
+                )
+            authority = provider_sync_authority.advance_authority(
+                current_authority,
+                default_provider_id,
+                providers,
+            )
+            if current_projected and authority != current_authority:
+                raise RuntimeError(
+                    "provider config is a primary-owned projection"
+                )
+    else:
+        authority = provider_sync_authority.validate_authority(
+            provider_state_authority,
+            default_provider_id,
+            providers,
+        )
+    _log_removed_providers(providers)
     payload = {
         "schema_version": CONFIG_SCHEMA_VERSION,
-        "default_provider_id": state.get("default_provider_id"),
-        "providers": state.get("providers", []),
+        "default_provider_id": default_provider_id,
+        "providers": providers,
+        "provider_state_authority": authority,
+        "provider_state_projected": state.get("provider_state_projected", False),
         "delegate_task_policy": state.get("delegate_task_policy", "auto"),
         "disabled_builtin_tools": _normalize_disabled_builtin_tools(
             state.get("disabled_builtin_tools")
@@ -992,6 +1172,7 @@ def _save_state(state: dict) -> None:
         ),
         "internal_llm": _normalize_internal_llm(state.get("internal_llm")),
     }
+    _validate_state_for_save(payload)
     write_json(_config_path(), payload)
     _config_transaction_state.committed = True
     with _state_cache_lock:
@@ -1188,16 +1369,16 @@ def resolve_internal_llm(task_key: str) -> dict:
             (p for p in state.get("providers", []) if p.get("id") == provider_id),
             None,
         )
-        if provider and _provider_is_suspended(provider):
+        if provider and not _provider_available_for_state(state, provider):
             provider = None
             provider_id = None
     if provider is None:
-        active_id = state.get("default_provider_id")
+        active_id = _runtime_default_provider_id(state)
         provider = next(
             (p for p in state.get("providers", []) if p.get("id") == active_id),
             None,
         )
-        if provider and _provider_is_suspended(provider):
+        if provider and not _provider_available_for_state(state, provider):
             provider = None
         provider_id = provider["id"] if provider else None
     model = assignment.get("model") or (provider.get("default_model") if provider else "")
@@ -1462,16 +1643,22 @@ def _clean_default_permission(kind: str, value: object) -> dict:
 def list_providers() -> dict:
     state = _load_state()
     return {
-        "default_provider_id": state.get("default_provider_id"),
+        "default_provider_id": _runtime_default_provider_id(state),
         "providers": [_provider_config(p) for p in state.get("providers", [])],
+        "provider_state_authority": copy.deepcopy(
+            state["provider_state_authority"]
+        ),
     }
 
 
 def list_provider_ui_state() -> dict:
     state = _load_state()
     return {
-        "default_provider_id": state.get("default_provider_id"),
+        "default_provider_id": _runtime_default_provider_id(state),
         "providers": [_provider_ui_state(p) for p in state.get("providers", [])],
+        "provider_state_authority": copy.deepcopy(
+            state["provider_state_authority"]
+        ),
     }
 
 
@@ -1522,7 +1709,7 @@ def _export_provider_sync_api_keys(
             raise ValueError(f"provider {provider_id!r} is not configured")
         if provider.get("mode") != "api_key":
             raise ValueError(f"provider {provider_id!r} does not use API-key credentials")
-        api_key = _read_api_key(provider_id)
+        api_key = _read_api_key_authoritative(provider_id)
         if not api_key:
             raise ValueError(f"provider {provider_id!r} has no local API key")
         out.append({"provider_id": provider_id, "api_key": api_key})
@@ -1536,13 +1723,29 @@ def export_provider_sync_state(provider_api_key_ids: object = None) -> dict:
     api_key provider credentials after it has passed the machine-node approval
     and transport checks.
     """
-    state = _load_state()
-    providers = [_provider_config(p) for p in state.get("providers", [])]
+    api_key_ids = _clean_provider_sync_api_key_ids(provider_api_key_ids)
+    if not api_key_ids:
+        return _export_provider_sync_payload(_load_state(), ())
+    with _provider_mutation_lock:
+        with _config_file_transaction():
+            return _export_provider_sync_payload(
+                _load_state(),
+                api_key_ids,
+            )
+
+
+def _export_provider_sync_payload(
+    state: dict,
+    api_key_ids: tuple[str, ...],
+) -> dict:
+    providers = copy.deepcopy(state.get("providers", []))
     payload = {
+        "provider_state_authority": copy.deepcopy(
+            state["provider_state_authority"]
+        ),
         "default_provider_id": state.get("default_provider_id"),
         "providers": providers,
     }
-    api_key_ids = _clean_provider_sync_api_key_ids(provider_api_key_ids)
     if api_key_ids:
         payload["provider_api_keys"] = _export_provider_sync_api_keys(
             providers,
@@ -1565,23 +1768,10 @@ def _provider_has_local_runtime_auth(
     return bool(provider_id and _read_api_key(provider_id))
 
 
-def _clean_provider_sync_record(
-    provider: dict,
-    staged_api_keys: dict[str, str],
-) -> dict:
-    clean = _clean_provider_record(provider)
-    if clean.get("mode") == "api_key" and not _provider_has_local_runtime_auth(
-        clean,
-        staged_api_keys,
-    ):
-        clean["suspended"] = True
-    return clean
-
-
 def _provider_sync_default_provider_id(
     providers: list[dict],
-    requested_default: str,
-    staged_api_keys: dict[str, str],
+    requested_default: str | None,
+    staged_api_keys: dict[str, str] | None = None,
 ) -> str | None:
     providers_by_id = {
         str(provider.get("id") or ""): provider
@@ -1597,13 +1787,94 @@ def _provider_sync_default_provider_id(
     return None
 
 
+def _runtime_default_provider_id(state: dict) -> str | None:
+    requested = state.get("default_provider_id")
+    if state.get("provider_state_projected") is not True:
+        return requested
+    return _provider_sync_default_provider_id(
+        state.get("providers", []),
+        requested,
+    )
+
+
+def _provider_available_for_state(state: dict, provider: dict) -> bool:
+    if _provider_is_suspended(provider):
+        return False
+    if state.get("provider_state_projected") is not True:
+        return True
+    return _provider_has_local_runtime_auth(provider)
+
+
+def _canonical_provider_sync_snapshot(
+    payload: dict,
+) -> tuple[list[dict], str | None, dict]:
+    allowed_keys = {
+        "provider_state_authority",
+        "default_provider_id",
+        "providers",
+        "provider_api_keys",
+    }
+    unexpected = set(payload) - allowed_keys
+    if unexpected:
+        raise ValueError(
+            f"provider sync payload has unexpected fields: {sorted(unexpected)}"
+        )
+    providers = payload.get("providers")
+    if not isinstance(providers, list):
+        raise ValueError("provider sync payload must include providers")
+    canonical: list[dict] = []
+    provider_ids: set[str] = set()
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise ValueError("provider sync providers must be objects")
+        try:
+            _validate_provider_authority(provider)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        clean = {
+            **_clean_provider_record(provider),
+            "generation": provider["generation"],
+            "revision": provider["revision"],
+        }
+        if provider != clean:
+            raise ValueError("provider sync payload contains a noncanonical provider")
+        provider_id = clean["id"]
+        if provider_id in provider_ids:
+            raise ValueError("provider sync payload contains duplicate provider ids")
+        provider_ids.add(provider_id)
+        canonical.append(clean)
+    default_provider_id = payload.get("default_provider_id")
+    if default_provider_id is not None and (
+        not isinstance(default_provider_id, str)
+        or not default_provider_id
+        or default_provider_id not in provider_ids
+    ):
+        raise ValueError("provider sync payload has an invalid default provider")
+    default = next(
+        (
+            provider
+            for provider in canonical
+            if provider["id"] == default_provider_id
+        ),
+        None,
+    )
+    if default is not None and _provider_is_suspended(default):
+        raise ValueError("provider sync payload default provider is suspended")
+    authority = provider_sync_authority.validate_authority(
+        payload.get("provider_state_authority"),
+        default_provider_id,
+        canonical,
+    )
+    return canonical, default_provider_id, authority
+
+
 def _prepare_provider_sync_api_keys(
     payload: dict,
     providers: list[dict],
 ) -> list[tuple[str, str]]:
-    raw_api_keys = payload.get("provider_api_keys", [])
-    if raw_api_keys in (None, []):
+    if "provider_api_keys" not in payload:
         return []
+    raw_api_keys = payload["provider_api_keys"]
     if not isinstance(raw_api_keys, list):
         raise ValueError("provider_api_keys must be a list")
     providers_by_id = {
@@ -1614,13 +1885,16 @@ def _prepare_provider_sync_api_keys(
     normalized: list[tuple[str, str]] = []
     seen: set[str] = set()
     for item in raw_api_keys:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or set(item) != {"provider_id", "api_key"}:
             raise ValueError("provider_api_keys entries must be objects")
         provider_id = item.get("provider_id")
         api_key = item.get("api_key")
-        if not isinstance(provider_id, str) or not provider_id.strip():
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or provider_id != provider_id.strip()
+        ):
             raise ValueError("provider_api_keys entries must include provider_id")
-        provider_id = provider_id.strip()
         provider = providers_by_id.get(provider_id)
         if provider is None:
             raise ValueError(f"provider credential {provider_id!r} is not in provider sync payload")
@@ -1636,38 +1910,97 @@ def _prepare_provider_sync_api_keys(
     return normalized
 
 
+def _provider_sync_credential_changes(
+    requested: list[tuple[str, str]],
+    *,
+    current_providers: list[dict] | None,
+    incoming_providers: list[dict],
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    current_by_id = {
+        provider["id"]: provider
+        for provider in (current_providers or [])
+    }
+    incoming_by_id = {
+        provider["id"]: provider
+        for provider in incoming_providers
+    }
+    changes: list[tuple[str, str]] = []
+    observed: dict[str, str] = {}
+    for provider_id, api_key in requested:
+        existing = _read_api_key_authoritative(provider_id)
+        observed[provider_id] = existing
+        if existing == api_key:
+            continue
+        if existing:
+            current = current_by_id.get(provider_id)
+            incoming = incoming_by_id[provider_id]
+            rotation_authorized = bool(
+                current is not None
+                and incoming["generation"] == current["generation"]
+                and incoming["revision"] > current["revision"]
+            )
+            if not rotation_authorized:
+                raise ProviderCredentialConflict(provider_id)
+        changes.append((provider_id, api_key))
+    return changes, observed
+
+
 @_serialized_provider_mutation
 def import_provider_sync_state(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
-    providers = payload.get("providers")
-    if not isinstance(providers, list):
-        raise ValueError("provider sync payload must include providers")
-    clean_providers = [
-        _clean_provider_record(dict(provider))
-        for provider in providers
-        if isinstance(provider, dict)
-    ]
-    dependency_plan.assert_state_supported({"providers": clean_providers})
-    credential_changes = _prepare_provider_sync_api_keys(payload, clean_providers)
-    staged_api_keys = dict(credential_changes)
-    state = _load_state()
-    next_state = dict(state)
-    next_state["providers"] = [
-        _clean_provider_sync_record(provider, staged_api_keys)
-        for provider in clean_providers
-    ]
-    requested_default = str(payload.get("default_provider_id") or "")
-    next_state["default_provider_id"] = _provider_sync_default_provider_id(
-        next_state["providers"],
-        requested_default,
-        staged_api_keys,
+    providers, default_provider_id, incoming_authority = (
+        _canonical_provider_sync_snapshot(payload)
     )
+    dependency_plan.assert_state_supported({"providers": providers})
+    state = _load_state() if _config_path().exists() else None
+    current_authority = (
+        state["provider_state_authority"]
+        if state is not None
+        else None
+    )
+    if current_authority is not None:
+        provider_sync_authority.assert_importable(
+            current_authority,
+            incoming_authority,
+        )
+        provider_sync_authority.assert_record_progress(
+            state["providers"],
+            providers,
+            current_authority,
+            incoming_authority,
+        )
+    same_authority = current_authority == incoming_authority
+    requested_credentials = _prepare_provider_sync_api_keys(payload, providers)
+    credential_changes, observed_credentials = _provider_sync_credential_changes(
+        requested_credentials,
+        current_providers=state["providers"] if state is not None else None,
+        incoming_providers=providers,
+    )
+    next_state = dict(state if state is not None else _seed_default_state())
+    next_state["providers"] = copy.deepcopy(providers)
+    next_state["default_provider_id"] = default_provider_id
+    next_state["provider_state_authority"] = copy.deepcopy(incoming_authority)
+    next_state["provider_state_projected"] = True
     _validate_state_for_save(next_state)
-    with _credential_transaction(credential_changes):
-        _save_state(next_state)
+    config_changed = not same_authority
+    with _credential_transaction(
+        credential_changes,
+        expected_values=observed_credentials,
+    ):
+        if config_changed:
+            _save_state(
+                next_state,
+                provider_state_authority=incoming_authority,
+            )
     result = list_providers()
     result["provider_api_key_count"] = len(credential_changes)
+    if config_changed:
+        result["sync_status"] = "applied"
+    elif credential_changes:
+        result["sync_status"] = "credentials_applied"
+    else:
+        result["sync_status"] = "unchanged"
     return result
 
 
@@ -1711,7 +2044,7 @@ def get_provider_with_key(provider_id: str) -> Optional[dict]:
     state = _load_state()
     for p in state.get("providers", []):
         if p.get("id") == provider_id:
-            if _provider_is_suspended(p):
+            if not _provider_available_for_state(state, p):
                 return None
             cp = dict(p)
             api_key = _read_api_key(provider_id) if p.get("mode") == "api_key" else ""
@@ -1731,12 +2064,12 @@ def get_default_provider() -> Optional[dict]:
     HTTP layer never returns the api_key — see `list_providers` / `_strip`.
     """
     state = _load_state()
-    active_id = state.get("default_provider_id")
+    active_id = _runtime_default_provider_id(state)
     if not active_id:
         return None
     for p in state.get("providers", []):
         if p.get("id") == active_id:
-            if _provider_is_suspended(p):
+            if not _provider_available_for_state(state, p):
                 return None
             cp = dict(p)
             api_key = _read_api_key(active_id) if p.get("mode") == "api_key" else ""
@@ -2085,7 +2418,7 @@ def add_custom_model_to_default(name: str) -> Optional[dict]:
 def apply_provider_config_env_vars() -> None:
     """Apply non-secret active-provider environment during startup/config edits."""
     state = _load_state()
-    active_id = state.get("default_provider_id")
+    active_id = _runtime_default_provider_id(state)
     active = get_provider(active_id) if active_id else None
     os.environ.pop("ANTHROPIC_API_KEY", None)
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)

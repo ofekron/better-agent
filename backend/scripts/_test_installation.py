@@ -49,6 +49,7 @@ def activate(
 ) -> dict[str, Any]:
     import config_store
     import installation_profile
+    import provider_sync_authority
 
     mode = mode or installation_profile.DEFAULT
     backend = root / "backend"
@@ -63,11 +64,17 @@ def activate(
     provider_id = f"{provider}-id"
     provider_record = config_store._new_provider_record(provider)
     provider_record["id"] = provider_id
+    providers = [provider_record]
     (root / "config.json").write_text(
         json.dumps({
             "schema_version": config_store.CONFIG_SCHEMA_VERSION,
             "default_provider_id": provider_id,
-            "providers": [provider_record],
+            "providers": providers,
+            "provider_state_authority": provider_sync_authority.new_authority(
+                provider_id,
+                providers,
+            ),
+            "provider_state_projected": False,
         }),
         encoding="utf-8",
     )

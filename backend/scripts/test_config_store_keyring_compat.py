@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
 import config_store  # noqa: E402
 import keyring  # noqa: E402
 import oskeychain  # noqa: E402
+import provider_sync_authority  # noqa: E402
 
 
 def _reset_cache() -> None:
@@ -68,10 +69,16 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
     }
     reads: list[str] = []
     status_reads: list[str] = []
-    config_store._load_state = lambda: {
+    state = {
         "default_provider_id": provider["id"],
         "providers": [provider],
+        "provider_state_authority": provider_sync_authority.new_authority(
+            provider["id"],
+            [provider],
+        ),
+        "provider_state_projected": False,
     }
+    config_store._load_state = lambda: state
 
     def read(provider_id: str) -> str:
         reads.append(provider_id)
@@ -89,10 +96,12 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
 
         assert reads == []
         assert status_reads == []
-        for record in (listed["providers"][0], fetched, resolved, exported["providers"][0]):
+        for record in (listed["providers"][0], fetched, resolved):
             assert record is not None
             assert record["supports_fork"] is False
             assert "has_api_key" not in record
+        assert exported["providers"][0] == provider
+        assert "has_api_key" not in exported["providers"][0]
 
         ui_state = config_store.list_provider_ui_state()
         assert reads == []

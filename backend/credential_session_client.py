@@ -15,6 +15,7 @@ class CredentialResponse(TypedDict, total=False):
     status: CredentialStatus
     value: str
     error: str
+    applied: bool
 
 
 _FD_TEXT = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FD", "")
@@ -44,6 +45,7 @@ def request(
     provider_id: str,
     *,
     value: str | None = None,
+    expected_value: str | None = None,
     target_provider_id: str | None = None,
 ) -> CredentialResponse:
     if not available():
@@ -56,6 +58,8 @@ def request(
     }
     if value is not None:
         payload["value"] = value
+    if expected_value is not None:
+        payload["expected_value"] = expected_value
     if target_provider_id is not None:
         payload["target_provider_id"] = target_provider_id
     assert _CONNECTION is not None
