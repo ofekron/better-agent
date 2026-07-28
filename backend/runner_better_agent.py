@@ -1426,6 +1426,7 @@ def _tool_schemas_for_run(
 def _loopback_tools_enabled(
     *,
     interactive: bool,
+    integrations_enabled: bool,
     bare_config: bool,
     mode: str,
     team_orchestration_enabled: bool,
@@ -1433,7 +1434,7 @@ def _loopback_tools_enabled(
     if not interactive:
         return False
     if not bare_config:
-        return True
+        return integrations_enabled
     return mode == "manager" and team_orchestration_enabled
 
 
@@ -2308,6 +2309,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         coordination_enabled = False
     loopback_enabled = _loopback_tools_enabled(
         interactive=interactive,
+        integrations_enabled=integrations_enabled,
         bare_config=bool(inputs.get("bare_config")),
         mode=mode,
         team_orchestration_enabled=team_orchestration_enabled,

@@ -390,6 +390,7 @@ def test_bare_manager_loopback_requires_authenticated_team_orchestration() -> No
 
     bare_manager_enabled = enabled(
         interactive=True,
+        integrations_enabled=False,
         bare_config=True,
         mode="manager",
         team_orchestration_enabled=True,
@@ -415,27 +416,38 @@ def test_bare_manager_loopback_requires_authenticated_team_orchestration() -> No
     } <= names
     assert not enabled(
         interactive=True,
+        integrations_enabled=True,
         bare_config=True,
         mode="native",
         team_orchestration_enabled=True,
     )
     assert not enabled(
         interactive=True,
+        integrations_enabled=True,
         bare_config=True,
         mode="manager",
         team_orchestration_enabled=False,
     )
     assert not enabled(
         interactive=False,
+        integrations_enabled=True,
         bare_config=True,
         mode="manager",
         team_orchestration_enabled=True,
     )
     assert enabled(
         interactive=True,
+        integrations_enabled=True,
         bare_config=False,
         mode="native",
         team_orchestration_enabled=False,
+    )
+    assert not enabled(
+        interactive=True,
+        integrations_enabled=False,
+        bare_config=False,
+        mode="native",
+        team_orchestration_enabled=True,
     )
 
 
