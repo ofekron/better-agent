@@ -24,7 +24,7 @@ import tempfile
 # importing any backend module so the dev's real session store is
 # never touched.
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-draft-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-draft-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 # Add backend/ to sys.path so `import main` etc work when run from repo root.

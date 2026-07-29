@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-ws-accept-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-ws-accept-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

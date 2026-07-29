@@ -9,10 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-_home = tempfile.mkdtemp(prefix="ba-preview-test-")
-import paths  # noqa: E402
+import _test_home  # noqa: E402
 
-paths.engage_test_home(_home)
+_home = _test_home.isolate_installed("ba-preview-test-")
 
 import time  # noqa: E402
 

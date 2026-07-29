@@ -9,7 +9,7 @@ import threading
 import time
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-user-input-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-user-input-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

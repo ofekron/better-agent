@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 import _test_home
-_tmp = _test_home.isolate("ba-test-")
+_tmp = _test_home.isolate_installed("ba-test-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = Path(__file__).resolve().parent

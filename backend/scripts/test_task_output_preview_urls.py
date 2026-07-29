@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 
 import _test_home
 
-_TMP_HOME = _test_home.isolate("ba-task-output-preview-")
+_TMP_HOME = _test_home.isolate_installed("ba-task-output-preview-")
 
 import auth  # noqa: E402
 import main  # noqa: E402

@@ -32,7 +32,7 @@ import time
 # importing any backend module so the dev's real session store is
 # never touched.
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-ofp-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-ofp-")
 # The user-facing REST routes under /api/sessions/* require auth.
 # The test client gets a normal bearer token below; internal routes
 # use X-Internal-Token.
