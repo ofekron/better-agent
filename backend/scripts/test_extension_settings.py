@@ -151,6 +151,47 @@ def test_ambient_native_mcp_manifest_requires_stateless_opt_in() -> None:
             pass
 
 
+def test_ambient_native_mcp_manifest_accepts_launcher_auth_opt_in() -> None:
+    manifest = _base_manifest()
+    manifest["surfaces"] = ["runtime_mcp"]
+    manifest["entrypoints"] = {"mcp": [{
+        "name": "coordination",
+        "command": "coordination",
+        "user_facing": True,
+        "requires_backend_auth": True,
+        "ambient_native": True,
+        "ambient_auth": "launcher",
+    }]}
+    item = extension_store.validate_manifest(manifest)["entrypoints"]["mcp"][0]
+    assert item["ambient_native"] is True
+    assert item["ambient_auth"] == "launcher"
+
+    for unsafe in (
+        # ambient_auth is meaningless without ambient_native
+        {"ambient_native": False, "ambient_auth": "launcher"},
+        # unknown auth mode must fail closed, not be coerced
+        {"ambient_native": True, "ambient_auth": "none-at-all"},
+        # a predicate is never ambient-resolvable, opt-in or not
+        {
+            "ambient_native": True,
+            "ambient_auth": "launcher",
+            "predicate": {"nonempty": ["app_session_id"]},
+        },
+    ):
+        rejected = _base_manifest()
+        rejected["surfaces"] = ["runtime_mcp"]
+        rejected["entrypoints"] = {"mcp": [{
+            "name": "coordination",
+            "command": "coordination",
+            **unsafe,
+        }]}
+        try:
+            extension_store.validate_manifest(rejected)
+            raise AssertionError("unsafe ambient_auth manifest was accepted")
+        except extension_store.ExtensionError:
+            pass
+
+
 def test_non_secret_settings_stored_with_defaults() -> None:
     restore = _with_fake_extension(_FakeKeychain())
     try:

@@ -16,6 +16,12 @@ reset, checkout, rebase, or merge), then release it immediately with
 expose `lock_ops`, proceed with precise git operations instead of leaving work
 uncommitted.
 
+In an ambient session (no Better Agent session bound to the run), `lock_ops`
+authenticates as the extension rather than as a trusted runner, so the
+owner-based operations `reattach`, `list_owned`, and `release_owned` are
+refused. Track your own `holder_token` from the acquire response and release or
+renew with it explicitly; do not retry an owner-based operation there.
+
 If `lock_ops` had to wait, use the precise `waited_keys` / `blocked_keys` in the
 response. Re-read files only when their own `file_edit:` key was contended or
 when their mtime/hash changed while waiting. If only `git_ops:<absolute-repo-root>`

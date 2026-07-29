@@ -89,6 +89,12 @@ _RUNTIME_SKILL_OWNER_FILE = ".better-agent-extension-owner"
 _HARNESS_DELIVERY_NATIVE = "native"
 _HARNESS_DELIVERY_RUNTIME = "runtime"
 _NATIVE_HARNESS_KINDS = frozenset({"instructions", "skill", "mcp"})
+# Ambient (session-less) native launches normally get no backend authority.
+# `launcher` opts an entrypoint into launcher-mediated auth: the config on
+# disk carries no secret, and `extension_mcp_launcher` mints an
+# extension-scoped token at connect time.
+_AMBIENT_AUTH_LAUNCHER = "launcher"
+_AMBIENT_AUTH_MODES = frozenset({"", _AMBIENT_AUTH_LAUNCHER})
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RUNTIME_READY_PROJECTION: dict[str, bool] = {}
 _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
@@ -2254,10 +2260,20 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         user_facing = _mcp_user_facing_value(item)
         requires_backend_auth = item.get("requires_backend_auth") is not False
         predicate = _validate_mcp_predicate(item.get("predicate"))
-        if ambient_native and (user_facing or requires_backend_auth or predicate):
+        ambient_auth = str(item.get("ambient_auth") or "").strip().lower()
+        if ambient_auth not in _AMBIENT_AUTH_MODES:
             raise ExtensionError(
-                "entrypoints.mcp.ambient_native requires user_facing=false, "
-                "requires_backend_auth=false, and no predicate"
+                "entrypoints.mcp.ambient_auth must be one of: "
+                + ", ".join(sorted(m for m in _AMBIENT_AUTH_MODES if m))
+            )
+        if ambient_auth and not ambient_native:
+            raise ExtensionError("entrypoints.mcp.ambient_auth requires ambient_native=true")
+        if ambient_native and predicate:
+            raise ExtensionError("entrypoints.mcp.ambient_native requires no predicate")
+        if ambient_native and (user_facing or requires_backend_auth) and ambient_auth != _AMBIENT_AUTH_LAUNCHER:
+            raise ExtensionError(
+                "entrypoints.mcp.ambient_native with user_facing=true or "
+                "requires_backend_auth=true requires ambient_auth='launcher'"
             )
         label = str(item.get("label") or "").strip()
         if label and len(label) > 80:
@@ -2281,6 +2297,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "bare_allowed": item.get("bare_allowed") is True,
                 "requires_backend_auth": requires_backend_auth,
                 "ambient_native": ambient_native,
+                "ambient_auth": ambient_auth,
                 "replaces_builtin": replaces_builtin,
                 "predicate": predicate,
             }
@@ -6607,12 +6624,13 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
-    ambient_launch = item.get("ambient_native") is True and not str(
-        inputs.get("app_session_id") or ""
-    ).strip()
+    # An ambient launch that opted into launcher-mediated auth still mints a
+    # token -- an extension-scoped one, never the core private token, so the
+    # backend principal stays the extension and owner-based lock ops remain
+    # refused.
     if (
         needs_identity_token(record)
-        and not ambient_launch
+        and (not _is_ambient_launch(item, inputs) or _ambient_launcher_auth(item))
         and manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
     ):
         # Per-extension token: identity is derived from this secret, never
@@ -6726,10 +6744,12 @@ def _mcp_item_available_for_inputs(
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("user_facing")) and not bare
+    ambient_launch = _is_ambient_launch(item, inputs) and _ambient_launcher_auth(item)
     if (
         item.get("user_facing")
         and not user_facing
         and not session_opted_in
+        and not ambient_launch
         and not (bare and item.get("bare_allowed"))
     ):
         return False
@@ -6745,8 +6765,8 @@ def _mcp_item_available_for_inputs(
     runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
     launcher_can_mint_token = (
         bool(inputs.get("extension_mcp_launcher_context"))
-        and bool(str(inputs.get("app_session_id") or "").strip())
         and bool(explicit_backend_url)
+        and (bool(str(inputs.get("app_session_id") or "").strip()) or ambient_launch)
     )
     brokered = (
         manifest["id"] in _BROKERED_MCP_EXTENSION_IDS
@@ -7866,17 +7886,35 @@ def _harness_addition(record: dict[str, Any], kind: str, name: str) -> dict[str,
     )
 
 
+def _ambient_launcher_auth(item: dict[str, Any]) -> bool:
+    """True when this MCP entrypoint opted into launcher-mediated backend auth
+    for ambient (session-less) native launches."""
+    return (
+        item.get("ambient_native") is True
+        and str(item.get("ambient_auth") or "").strip().lower() == _AMBIENT_AUTH_LAUNCHER
+    )
+
+
+def _is_ambient_launch(item: dict[str, Any], inputs: dict[str, Any]) -> bool:
+    """An ambient-native entrypoint being resolved with no session bound to it."""
+    return item.get("ambient_native") is True and not str(
+        inputs.get("app_session_id") or ""
+    ).strip()
+
+
 def _native_harness_eligible(record: dict[str, Any], kind: str, name: str) -> bool:
     item = _harness_addition(record, kind, name)
     if item is None:
         return False
     if kind != "mcp":
         return True
+    if item.get("ambient_native") is not True or item.get("predicate"):
+        return False
+    if _ambient_launcher_auth(item):
+        return True
     return bool(
-        item.get("ambient_native") is True
-        and item.get("user_facing") is False
+        item.get("user_facing") is False
         and item.get("requires_backend_auth") is False
-        and not item.get("predicate")
     )
 
 

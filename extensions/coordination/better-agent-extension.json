@@ -18,7 +18,9 @@
         "env": {},
         "user_facing": true,
         "bare_allowed": true,
-        "requires_backend_auth": true
+        "requires_backend_auth": true,
+        "ambient_native": true,
+        "ambient_auth": "launcher"
       }
     ],
     "instructions": [
