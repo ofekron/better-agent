@@ -17,6 +17,7 @@ from typing import Optional
 from weakref import WeakKeyDictionary
 
 import perf
+import recovery_manager
 import recovery_schedule
 from execution_artifact_io import validate_execution_input_projection
 from execution_template import (
@@ -486,6 +487,48 @@ def batch_runs_by_session(
     if current:
         batches.append(current)
     return batches
+
+
+def _bucket_needs_main_loop(descs: list[dict]) -> bool:
+    """True if this session bucket must be integrated on the main loop.
+
+    Two branches inside `_integrate_one` reach loop-bound state, and both
+    are decidable before any integration work starts:
+
+    - A live run with no completion payload takes the reattach branch,
+      which builds an `asyncio.Queue` and hands the running loop to
+      `provider.attach_recovered_run`; the drain and finalize tasks must
+      share that loop.
+    - A completed run whose payload is a provider-capability-change error
+      is retried as a FRESH run, which likewise binds the calling loop
+      and plants an `asyncio.Event` in `turn_manager.cancel_events` that
+      the main-loop cancel handler sets.
+
+    Everything else — replay, reconcile, terminal markers — is
+    thread-agnostic and serialized by `session_manager.batch`'s per-root
+    RLock, so it can run on the recovery loop.
+
+    Only the group's latest run reaches `_integrate_one`, so one
+    evaluation decides the bucket. Fails CLOSED: anything unreadable or
+    unexpected is treated as main-loop work.
+    """
+    if not descs:
+        return True
+    try:
+        desc = _latest_run(descs)
+        alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
+        has_complete = bool(desc.get("has_complete_json"))
+        if alive and not has_complete:
+            return True
+        run_id = desc.get("run_id")
+        if has_complete and isinstance(run_id, str) and run_id:
+            return _is_provider_capability_change(run_id)
+        return False
+    except Exception:
+        logger.exception(
+            "recovery: bucket routing check failed; keeping it on the main loop",
+        )
+        return True
 
 
 def _run_order_key(desc: dict) -> tuple[str, float]:
@@ -1073,7 +1116,23 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
                 return
             session_key, descs = popped
             try:
-                await _integrate_recovered_session_group(coordinator, descs, summary)
+                if _bucket_needs_main_loop(descs):
+                    await _integrate_recovered_session_group(
+                        coordinator, descs, summary,
+                    )
+                    continue
+                # Replay-only bucket: no reattach, no fresh run, so
+                # nothing here binds this loop. Run it on the recovery
+                # thread, where a full jsonl replay stops competing with
+                # request handlers. Mutual exclusion still holds — the
+                # root lease is a process-wide threading.Lock plus an
+                # flock, and render-tree mutation is serialized by
+                # session_manager.batch's per-root RLock.
+                await recovery_manager.manager.run(
+                    lambda descs=descs: _integrate_recovered_session_group(
+                        coordinator, descs, summary,
+                    ),
+                )
             except Exception:
                 logger.exception(
                     "integrate_recovered_runs: session bucket %s failed "
@@ -2020,6 +2079,7 @@ async def _integrate_one_locked(
                 mode=desc.get("mode") or "manager",
                 agent_sid=desc.get("session_id"),
                 run_id=run_id,
+                execution_turn_id=desc.get("turn_run_id"),
                 cancelled=cancelled,
                 sess=sess,
                 assistant_msg=last_asst_initial,
@@ -2232,20 +2292,34 @@ async def _integrate_one_locked(
                 if isinstance(recovered_user, dict)
                 else None
             )
-            lifecycle_commands = getattr(
-                coordinator,
-                "lifecycle_commands",
-                None,
-            )
+            lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
             if (
                 lifecycle_commands is not None
                 and isinstance(recovered_lifecycle_id, str)
                 and recovered_lifecycle_id
             ):
-                await lifecycle_commands.confirm_active_started(
-                    app_sid,
-                    lifecycle_message_id=recovered_lifecycle_id,
-                )
+                snapshot = lifecycle_commands.snapshot(app_sid)
+                execution = snapshot.execution
+                if snapshot.identity is not None:
+                    if (
+                        snapshot.identity.lifecycle_message_id
+                        != recovered_lifecycle_id
+                        or execution is None
+                        or execution.phase not in {"detached", "detached_stopping"}
+                        or execution.identity.assistant_message_id
+                        != (recovering_msg_id or "")
+                        or execution.identity.execution_turn_id
+                        != str(desc.get("turn_run_id") or "")
+                        or execution.provider_run_id != run_id
+                    ):
+                        raise RuntimeError(
+                            "recovered live execution identity is ambiguous"
+                        )
+                    await lifecycle_commands.adopt_execution(
+                        app_sid,
+                        execution_identity=execution.identity,
+                        provider_run_id=run_id,
+                    )
             logger.info(
                 "integrate_recovered_runs: registered run_state for %s (alive, no complete.json)",
                 run_id[:8],
@@ -2314,6 +2388,7 @@ async def _integrate_one_locked(
                         mode=mode,
                         agent_sid=claude_sid,
                         run_id=run_id,
+                        execution_turn_id=desc.get("turn_run_id"),
                         cancelled=cancelled,
                         sess=live_sess,
                         assistant_msg=terminal_asst,
@@ -2374,6 +2449,7 @@ async def _emit_recovered_user_message_terminal(
     mode: str,
     agent_sid: Optional[str],
     run_id: str,
+    execution_turn_id: str | None = None,
     cancelled: bool,
     sess: dict,
     assistant_msg: dict,
@@ -2406,25 +2482,41 @@ async def _emit_recovered_user_message_terminal(
     )
     lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
     if lifecycle_commands is not None:
-        await lifecycle_commands.finish_active(
-            app_session_id,
-            lifecycle_message_id=lifecycle_msg_id,
-            outcome=command_outcome,
-        )
+        snapshot = lifecycle_commands.snapshot(app_session_id)
+        execution = snapshot.execution
+        if snapshot.identity is not None:
+            if (
+                snapshot.identity.lifecycle_message_id != lifecycle_msg_id
+                or execution is None
+                or execution.identity.assistant_message_id
+                != str(assistant_msg.get("id") or "")
+                or execution.identity.execution_turn_id
+                != str(execution_turn_id or "")
+                or execution.provider_run_id != run_id
+            ):
+                raise RuntimeError(
+                    "recovered terminal execution identity is ambiguous"
+                )
+            await lifecycle_commands.finish_execution_and_turn(
+                app_session_id,
+                execution_identity=execution.identity,
+                provider_run_id=run_id,
+                outcome=command_outcome,
+            )
     try:
         import user_msg_lifecycle
         from orchs import get_strategy
     except Exception:
-        logger.debug("recovery lifecycle terminal imports failed", exc_info=True)
-        return
+        logger.exception("recovery lifecycle terminal imports failed")
+        raise
     try:
         if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
             persist_sid, lifecycle_msg_id,
         ) is not None:
             return
     except Exception:
-        logger.debug("recovery lifecycle terminal check failed", exc_info=True)
-        return
+        logger.exception("recovery lifecycle terminal check failed")
+        raise
 
     error = complete.get("error") if isinstance(complete, dict) else None
     try:
@@ -2457,6 +2549,7 @@ async def _emit_recovered_user_message_terminal(
             persist_sid,
             run_id,
         )
+        raise
 
 
 def _apply_completion_state(
@@ -3024,6 +3117,59 @@ def _should_retry_transient(
     return prior < _retry_attempt_limit(error, events)
 
 
+async def _restore_retry_election(
+    lifecycle_commands,
+    *,
+    app_session_id: str,
+    execution_identity,
+    failed_run_id: str,
+    authoritative_run_id: str,
+) -> bool:
+    from lifecycle_command_states import LifecycleCommandRejected
+
+    try:
+        await lifecycle_commands.restore_execution_run(
+            app_session_id,
+            execution_identity=execution_identity,
+            expected_failed_run_id=failed_run_id,
+            replacement_provider_run_id=authoritative_run_id,
+        )
+    except LifecycleCommandRejected:
+        return False
+    return True
+
+
+async def _project_admitted_retry(
+    lifecycle_commands,
+    *,
+    app_session_id: str,
+    execution_identity,
+    provider_run_id: str,
+) -> None:
+    elected = lifecycle_commands.snapshot(app_session_id).execution
+    if (
+        elected is None
+        or elected.identity != execution_identity
+        or elected.provider_run_id != provider_run_id
+    ):
+        raise RuntimeError("retry election changed after admission")
+    if elected.phase in {"detached", "detached_stopping"}:
+        await lifecycle_commands.adopt_execution(
+            app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id=provider_run_id,
+        )
+        return
+    if elected.phase in {"starting", "running"}:
+        await lifecycle_commands.confirm_execution_started(
+            app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id=provider_run_id,
+        )
+        return
+    raise RuntimeError("retry admission reached invalid lifecycle phase")
+
+
 async def _retry_recovered_run(
     *,
     coordinator,
@@ -3079,8 +3225,30 @@ async def _retry_recovered_run(
     new_queue: asyncio.Queue = asyncio.Queue()
     retry_registered = False
     retry_cancel_event: Optional[asyncio.Event] = None
+    elected_execution_identity = None
+    old_elected_run_id: str | None = None
+    election_rebound = False
+    admission_confirmed = False
 
     async def cleanup_retry_registration() -> None:
+        nonlocal election_rebound
+        if admission_confirmed:
+            return
+        if election_rebound and not admission_confirmed:
+            lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+            if (
+                lifecycle_commands is not None
+                and elected_execution_identity is not None
+                and old_elected_run_id is not None
+            ):
+                await _restore_retry_election(
+                    lifecycle_commands,
+                    app_session_id=app_sid,
+                    execution_identity=elected_execution_identity,
+                    failed_run_id=new_run_id,
+                    authoritative_run_id=old_elected_run_id,
+                )
+            election_rebound = False
         if not retry_registered:
             return
         _cleanup_active_run_id(coordinator, app_sid, new_run_id)
@@ -3245,6 +3413,25 @@ async def _retry_recovered_run(
             provider.prepare_run,
             **fresh_arguments,
         )
+    lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+    if lifecycle_commands is not None:
+        lifecycle_snapshot = lifecycle_commands.snapshot(app_sid)
+        execution = lifecycle_snapshot.execution
+        old_run_id = str(desc.get("run_id") or run_dir.name)
+        if (
+            execution is None
+            or execution.identity.assistant_message_id != msg_id
+            or execution.provider_run_id != old_run_id
+        ):
+            raise RuntimeError("recovered retry execution identity is ambiguous")
+        await lifecycle_commands.bind_execution_run(
+            app_sid,
+            execution_identity=execution.identity,
+            provider_run_id=new_run_id,
+        )
+        elected_execution_identity = execution.identity
+        old_elected_run_id = old_run_id
+        election_rebound = True
     try:
         started = await asyncio.to_thread(
             start_prepared_run,
@@ -3260,6 +3447,7 @@ async def _retry_recovered_run(
             if not admitted:
                 await cleanup_retry_registration()
                 return
+        admission_confirmed = True
     except BaseException:
         await cleanup_retry_registration()
         raise
@@ -3317,6 +3505,14 @@ async def _retry_recovered_run(
         getattr(provider, "KIND", "unknown"),
     )
     await coordinator.turn_manager.emit_run_state(app_sid)
+
+    if lifecycle_commands is not None and elected_execution_identity is not None:
+        await _project_admitted_retry(
+            lifecycle_commands,
+            app_session_id=app_sid,
+            execution_identity=elected_execution_identity,
+            provider_run_id=new_run_id,
+        )
 
     asyncio.create_task(
         _finalize_when_done(coordinator, provider, new_desc, recovering_msg_id),
@@ -3515,6 +3711,7 @@ async def _finalize_when_done(
                 mode=desc.get("mode") or "native",
                 agent_sid=desc.get("session_id"),
                 run_id=run_id,
+                execution_turn_id=desc.get("turn_run_id"),
                 cancelled=cancelled,
                 sess=sess,
                 assistant_msg=last_asst,
