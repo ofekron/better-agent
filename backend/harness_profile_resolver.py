@@ -800,7 +800,13 @@ def resolve_for_session(
     extension_setting_overlays: dict[str, dict[str, Any]] = {}
     secret_refs: dict[str, list[str]] = {}
     dropped_extension_ids: list[str] = []
+    disabled_builtin_extensions = list(
+        resolved["disabled_builtin_extensions"]["resolved"]
+    )
+    disabled_extension_ids = set(disabled_builtin_extensions)
     for extension_id, fields in resolved["extension_instances"].items():
+        if extension_id in disabled_extension_ids:
+            continue
         mcp_servers = fields["mcp_servers"]["resolved"]
         skills = fields["skills"]["resolved"]
         instruction_names = fields["instruction_names"]["resolved"]
@@ -847,7 +853,11 @@ def resolve_for_session(
         live_secret_refs = fields.get("secret_refs", {}).get("resolved") or []
         if live_secret_refs:
             secret_refs[extension_id] = list(live_secret_refs)
-    secret_refs.update(copy.deepcopy(resolved.get("secret_refs") or {}))
+    secret_refs.update({
+        extension_id: copy.deepcopy(refs)
+        for extension_id, refs in (resolved.get("secret_refs") or {}).items()
+        if extension_id not in disabled_extension_ids
+    })
     inherited_instruction_sources = {
         name: entry["resolved"] for name, entry in resolved["instruction_sources"].items()
     }
@@ -884,7 +894,7 @@ def resolve_for_session(
         "extra_mcp_servers": sorted({server for servers in extension_mcp_servers.values() for server in servers}),
         "active_capability_ids": list(active_capability_ids),
         "disabled_builtin_tools": list(resolved["disabled_builtin_tools"]["resolved"]),
-        "disabled_builtin_extensions": list(resolved["disabled_builtin_extensions"]["resolved"]),
+        "disabled_builtin_extensions": disabled_builtin_extensions,
         "disabled_runtime_skills": list(resolved["disabled_runtime_skills"]["resolved"]),
         "extension_revisions": extension_revisions,
         "extension_mcp_servers": extension_mcp_servers,
