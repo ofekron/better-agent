@@ -1685,7 +1685,7 @@ def test_installed_extension_exports_team_definition_sources() -> None:
             extension_path="extensions/testape",
         )
         sources = extension_store.team_definition_sources()
-        source = next(item for item in sources if item["source_id"] == f"extension:{"fixture.testape"}:testape-ui-expert")
+        source = next(item for item in sources if item["source_id"] == "extension:fixture.testape:testape-ui-expert")
         if source["definition"]["manager"]["id"] != "coordinator":
             raise AssertionError(source)
         if source["extension_name"] != "Testape":
@@ -4488,11 +4488,11 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
                 "label": "Project structure",
                 "open": {
                     "type": "ensure",
-                    "endpoint": f"/api/extensions/{"fixture.project-structure"}/backend/project-structure-edit/ensure",
+                    "endpoint": "/api/extensions/fixture.project-structure/backend/project-structure-edit/ensure",
                     "path_template": "/s/{session_id}",
                 },
                 "badge": {
-                    "endpoint": f"/api/extensions/{"fixture.project-structure"}/backend/project-updates/total",
+                    "endpoint": "/api/extensions/fixture.project-structure/backend/project-updates/total",
                 },
             },
         },
