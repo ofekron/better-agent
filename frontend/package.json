@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:fullstack": "npm run build && node_modules/.bin/playwright test",
+    "test:fullstack:headed": "npm run build && node_modules/.bin/playwright test --headed",
     "install:desktop-deps": "node scripts/install-frontend-deps.mjs desktop",
     "install:mobile-deps": "node scripts/install-frontend-deps.mjs mobile",
     "postinstall": "node scripts/detect-ips.mjs",
@@ -47,6 +49,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.62.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

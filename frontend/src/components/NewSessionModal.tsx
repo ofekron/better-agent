@@ -393,6 +393,7 @@ function RuntimeProfilePicker({
       <div className="ns-modal-row">
         <label>{t("newSession.provider")}</label>
         <select
+          data-testid="new-session-provider-select"
           value={value.providerId}
           onChange={(e) => {
             const p = providers.find((pr) => pr.id === e.target.value && !pr.suspended);
@@ -450,6 +451,7 @@ function RuntimeProfilePicker({
       <div className="ns-modal-row">
         <label>{t("newSession.model")}</label>
         <select
+          data-testid="new-session-model-select"
           value={value.model}
           disabled={
             !models.length
@@ -493,6 +495,7 @@ function RuntimeProfilePicker({
         <div className="ns-modal-row">
           <label>{t("newSession.reasoningEffort")}</label>
           <select
+            data-testid="new-session-effort-select"
             value={value.reasoningEffort}
             onChange={(e) => onChange({ ...value, reasoningEffort: e.target.value as ReasoningEffort })}
           >
