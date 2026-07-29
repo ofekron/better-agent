@@ -151,7 +151,7 @@ def test_fugu_runner_rejects_non_authoritative_key() -> None:
 
 
 def test_runner_backend_state_projects_recovery_family() -> None:
-    def state(run_dir: Path) -> SimpleNamespace:
+    def state(run_dir: Path, runner: str) -> SimpleNamespace:
         run_dir.mkdir(parents=True)
         return SimpleNamespace(
             run_id=run_dir.name,
@@ -170,6 +170,7 @@ def test_runner_backend_state_projects_recovery_family() -> None:
             target_message_id=None,
             turn_run_id=None,
             child_sources={},
+            runner=runner,
         )
 
     native_dir = Path(_TMP_HOME) / "native-fugu"
@@ -177,25 +178,33 @@ def test_runner_backend_state_projects_recovery_family() -> None:
         "id": "fugu-provider",
         "kind": "fugu",
         "runner": "native",
-    })._write_backend_state(state(native_dir))
+    })._write_backend_state(state(native_dir, "native"))
     native = json.loads(
         (native_dir / "backend_state.json").read_text(encoding="utf-8"),
     )
     check(native["provider_kind"] == "fugu", "native Fugu persists its runtime kind")
+    check(native["runner"] == "native", "native Fugu persists its frozen runner")
     check(_recovery_family(native) == "codex", "native Fugu replays Codex rollout")
 
     better_agent_dir = Path(_TMP_HOME) / "better-agent-fugu"
-    OpenAIProvider({
+    better_agent_provider = OpenAIProvider({
         "id": "fugu-provider",
         "kind": "fugu",
         "runner": "better_agent_runner",
-    })._write_backend_state(state(better_agent_dir))
+    })
+    better_agent_state = state(better_agent_dir, "better_agent_runner")
+    better_agent_provider._record["runner"] = "native"
+    better_agent_provider._write_backend_state(better_agent_state)
     better_agent = json.loads(
         (better_agent_dir / "backend_state.json").read_text(encoding="utf-8"),
     )
     check(
         better_agent["provider_kind"] == "openai",
         "Better Agent Fugu persists its runtime kind",
+    )
+    check(
+        better_agent["runner"] == "better_agent_runner",
+        "Better Agent Fugu persists its frozen runner",
     )
     check(
         _recovery_family(better_agent) == "session_events",
