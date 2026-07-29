@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -14,7 +13,8 @@ if str(BACKEND) not in sys.path:
 
 import _test_home
 
-TMP_HOME = Path(_test_home.isolate("bc-testape-provider-parity-"))
+TEST_HOME = _test_home.TestHome.acquire("bc-testape-provider-parity-")
+TMP_HOME = Path(TEST_HOME.path)
 os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/testape-provider-parity.sock"
 
 import builtin_mcp_config  # noqa: E402
@@ -24,6 +24,9 @@ import harness_fields  # noqa: E402
 import harness_profile_resolver  # noqa: E402
 import harness_profile_store  # noqa: E402
 import installation_profile  # noqa: E402
+from provider_runtime_plan_source import (  # noqa: E402
+    structural_provider_runtime_plan,
+)
 import runner_agy  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_qwen  # noqa: E402
@@ -140,12 +143,26 @@ def _resolved_provider_config(snapshot: dict, provider_kind: str) -> dict:
 
 
 def _materialized_agy_servers(snapshot: dict, run_dir: Path) -> dict:
-    config = _resolved_provider_config(snapshot, "agy")
-    env = runner_agy._materialize_agy_run_home(
-        run_dir,
-        config,
-        cwd=str(TMP_HOME),
+    prepared = structural_provider_runtime_plan(_inputs(snapshot, "agy"), "agy")
+    mcp_servers = runner_agy._effective_mcp_servers(
+        prepared["resolved_plan"],
     )
+    source_home = TMP_HOME / "agy-source-home"
+    config_root = source_home / ".gemini" / "antigravity-cli"
+    config_root.mkdir(parents=True, exist_ok=True)
+    original_home = Path.home
+    Path.home = staticmethod(lambda: source_home)  # type: ignore[method-assign]
+    try:
+        env = runner_agy._materialize_agy_run_home(
+            run_dir,
+            {},
+            config_root=config_root,
+            settings={},
+            mcp_servers=mcp_servers,
+            skill_dirs={},
+        )
+    finally:
+        Path.home = original_home  # type: ignore[method-assign]
     if not env:
         return {}
     settings = Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json"
@@ -223,7 +240,7 @@ def main() -> int:
         test_deselected_testape_is_absent_from_every_provider_launch_surface()
     finally:
         installation_profile.integrations_enabled = original_integrations_enabled
-        shutil.rmtree(TMP_HOME, ignore_errors=True)
+        TEST_HOME.release()
     print("PASS TestApe MCP projection parity across Codex, AGY, and Qwen")
     return 0
 
