@@ -18,7 +18,8 @@ Layers 1 and 2 are installed automatically by `isolate()` (standalone tests)
 and by the conftest module body (pytest runs), so callers do not have to
 remember them. `isolate()` returns the resolved temp home path as a string;
 new code prefers `TestHome.acquire()` for an owned handle whose
-`release()` is the sole structured cleanup path.
+`release()` is the sole structured cleanup path. Either way the home is
+removed at process exit, so a run leaves no residue behind.
 """
 from __future__ import annotations
 
@@ -183,15 +184,14 @@ atexit.register(unlock_prod_home)
 def isolate(prefix: str = "ba-test-", lock: bool = False) -> str:
     """Force both home env vars onto a fresh tempdir + engage all guards.
 
-    Returns the resolved tempdir path. Call at the very top
-    of a test module, BEFORE importing any backend module.
+    Returns the resolved tempdir path, removed when the process exits. Call at
+    the very top of a test module, BEFORE importing any backend module.
 
     `lock=True` sets the immutable flag on the real home (zero-residual: even
     child-process deletion fails), but it ALSO blocks a concurrently-running
     production backend from writing — only use it when no prod backend is up.
     """
-    home = tempfile.mkdtemp(prefix=prefix)
-    return engage(home, lock=lock)
+    return TestHome.acquire(prefix, lock=lock).path
 
 
 def _activate_installation(home: str, **kwargs) -> None:
@@ -221,6 +221,11 @@ class TestHome:
 
     Acquire per-test for a fresh home (repoints env each time), or share one
     across a session — tests pick.
+
+    Every acquired home is also released at process exit. A test that forgets
+    to release (or that never held the handle, like `isolate()` callers) would
+    otherwise strand a full state tree under the system temp dir on every run:
+    the homes are megabytes each and nothing else ever collects them.
     """
 
     __slots__ = ("path", "_released")
@@ -232,7 +237,9 @@ class TestHome:
     @classmethod
     def acquire(cls, prefix: str = "ba-test-", lock: bool = False) -> "TestHome":
         home = tempfile.mkdtemp(prefix=prefix)
-        return cls(engage(home, lock=lock))
+        handle = cls(engage(home, lock=lock))
+        atexit.register(handle.release)
+        return handle
 
     @classmethod
     def acquire_installed(
