@@ -3837,6 +3837,26 @@ function AppMain({
     setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }, []);
 
+  // Stable identity so memoized <SessionList> bails on unrelated App
+  // re-renders (e.g. opening the New Session modal).
+  const handleSelectSession = useCallback(
+    (id: string, row?: Session) => {
+      markSessionKnown(id);
+      const s = row ?? sessions.find((sess) => sess.id === id);
+      if (s) {
+        setSelectedProjectPath(s.cwd);
+        setSelectedProjectNodeId(s.node_id || "primary");
+      }
+      navigate(sessionPath(id));
+      if (isMobile) setMobileSidebarOpen(false);
+    },
+    [markSessionKnown, sessions, navigate, isMobile],
+  );
+
+  const openNewSessionModal = useCallback(() => {
+    setNewSessionModalOpen(true);
+  }, []);
+
   const openSessionRecordSessionSignature = useMemo(
     () => sessions.map((session) => [
       session.id,
@@ -6942,16 +6962,7 @@ function AppMain({
               selectedSession={currentSession}
               selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
-              onSelect={(id, row) => {
-                markSessionKnown(id);
-                const s = row ?? sessions.find((s) => s.id === id);
-                if (s) {
-                  setSelectedProjectPath(s.cwd);
-                  setSelectedProjectNodeId(s.node_id || "primary");
-                }
-                navigate(sessionPath(id));
-                if (isMobile) setMobileSidebarOpen(false);
-              }}
+              onSelect={handleSelectSession}
               onDelete={requestDeleteSession}
               onDeleteSelected={requestDeleteSessions}
               onRename={renameSession}
@@ -6969,7 +6980,7 @@ function AppMain({
               onAiActiveChange={setAiSearchActive}
               backendProjectPath={selectedProjectPath}
               onBackendFiltersChange={setSessionListFilters}
-              onCreate={() => setNewSessionModalOpen(true)}
+              onCreate={openNewSessionModal}
               hasMore={sessionsHasMore}
               searching={sessionsSearching}
               loadingMore={sessionsLoadingMore}

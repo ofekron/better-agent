@@ -1625,7 +1625,7 @@ function FolderSection({
   );
 }
 
-export function SessionList({
+function SessionListImpl({
   sessions,
   allSessions,
   currentSessionId,
@@ -3650,3 +3650,10 @@ export function SessionList({
     </div>
   );
 }
+
+/** Memoized so an unrelated parent re-render (e.g. opening the New Session
+ *  modal flips a boolean in App) does NOT re-render this list and re-run its
+ *  O(N) useMemos over hundreds of sessions. Effective only when every prop
+ *  identity passed in is stable — App wraps its handlers in useCallback. */
+export const SessionList = memo(SessionListImpl);
+
