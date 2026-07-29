@@ -573,14 +573,11 @@ def _copy_attested_file(
             finally:
                 os.close(output)
             after = os.fstat(source)
-            if (
-                after.st_dev != observed.st_dev
-                or after.st_ino != observed.st_ino
-                or after.st_size != observed.st_size
-                or after.st_mtime_ns != observed.st_mtime_ns
-                or after.st_ctime_ns != observed.st_ctime_ns
-                or digest.hexdigest() != identity.sha256
-                or not identity.attest_metadata()
+            if not _copied_descriptor_matches_identity(
+                observed,
+                after,
+                digest.hexdigest(),
+                identity,
             ):
                 raise ExecutionContractError(
                     "frozen bundle changed during materialization",
@@ -593,6 +590,21 @@ def _copy_attested_file(
         raise ExecutionContractError(
             "frozen bundle cannot be materialized",
         ) from exc
+
+
+def _copied_descriptor_matches_identity(
+    before: os.stat_result,
+    after: os.stat_result,
+    digest: str,
+    identity: FileIdentity,
+) -> bool:
+    return (
+        stat.S_ISREG(after.st_mode)
+        and after.st_dev == before.st_dev == identity.device
+        and after.st_ino == before.st_ino == identity.inode
+        and after.st_size == before.st_size == identity.size
+        and digest == identity.sha256
+    )
 
 
 def _safe_materialization_parent(destination: Path) -> Path:

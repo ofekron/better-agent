@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -13,6 +14,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_execution_common import ExecutionContractError
+from codex_execution_identity import FileIdentity
 from provider_claude_execution import (
     attest_embedded_claude_sdk,
     capture_embedded_claude_sdk,
@@ -20,6 +22,7 @@ from provider_claude_execution import (
 from provider_frozen_artifact_smoke import main as artifact_smoke_main
 from provider_frozen_bundle import (
     FrozenBundleIdentity,
+    _copied_descriptor_matches_identity,
     attest_materialized_frozen_bundle,
     materialize_frozen_bundle,
 )
@@ -136,6 +139,37 @@ def test_embedded_sdk_binding_is_independent_of_live_bundle_state() -> None:
         executable.write_bytes(b"drifted-frozen-executable")
         assert not runner.attest()
         assert attest_embedded_claude_sdk(package, runner)
+
+
+def test_descriptor_copy_accepts_metadata_only_drift() -> None:
+    with tempfile.TemporaryDirectory(prefix="descriptor-copy-") as raw:
+        source = Path(raw) / "source"
+        source.write_bytes(b"descriptor-bound-content")
+        identity = FileIdentity.capture(source)
+        descriptor = os.open(source, os.O_RDONLY)
+        try:
+            before = os.fstat(descriptor)
+            digest = hashlib.sha256(os.read(descriptor, identity.size)).hexdigest()
+            os.utime(
+                source,
+                ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000),
+            )
+            after = os.fstat(descriptor)
+            assert not identity.attest_metadata()
+            assert _copied_descriptor_matches_identity(
+                before,
+                after,
+                digest,
+                identity,
+            )
+            assert not _copied_descriptor_matches_identity(
+                before,
+                after,
+                "0" * 64,
+                identity,
+            )
+        finally:
+            os.close(descriptor)
 
 
 def test_macos_default_bundle_root_preserves_app_layout() -> None:
@@ -295,11 +329,23 @@ def test_artifact_smoke_failure_is_structured() -> None:
 
 
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
+    def truncate(root: Path, sidecar: Path) -> None:
+        target = sidecar / "claude_agent_sdk" / "__init__.py"
+        target.write_bytes(b"x")
+
+    def replace(root: Path, sidecar: Path) -> None:
+        target = sidecar / "runner_agy.pyc"
+        contents = target.read_bytes()
+        target.unlink()
+        target.write_bytes(contents)
+
     mutations = (
         lambda root, sidecar: (sidecar / "injected.py").write_bytes(b"x"),
         lambda root, sidecar: (
             sidecar / "claude_agent_sdk" / "__init__.py"
         ).write_bytes(b"changed"),
+        truncate,
+        replace,
         lambda root, sidecar: (
             sidecar / "runner_agy.pyc"
         ).unlink(),
