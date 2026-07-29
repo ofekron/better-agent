@@ -440,6 +440,24 @@ class RemoteProviderProxy(Provider):
             return None
         return resp.get("result")
 
+    async def run_admitted_headless(self, admitted: Any) -> dict:
+        timeout = admitted.to_dict().get("timeout")
+        rpc_timeout = (
+            float(timeout) + 30.0
+            if type(timeout) in (int, float)
+            else 1800.0
+        )
+        resp = await node_link.rpc_call(
+            self.node_id,
+            "run_admitted_headless",
+            {"admitted": admitted.to_dict()},
+            timeout=rpc_timeout,
+            version_ready_required=True,
+        )
+        if type(resp) is not dict or type(resp.get("result")) is not dict:
+            raise RuntimeError("remote admitted headless result is invalid")
+        return resp["result"]
+
     async def rewind(self, agent_sid: str, message_uuid: str) -> None:
         # ClaudeProvider.rewind raises RuntimeError on non-zero CLI exit;
         # rpc_call re-raises that from the node's error reply, so the

@@ -1010,6 +1010,21 @@ async def _rpc_run_headless(params: dict) -> dict:
     return {"result": result}
 
 
+async def _rpc_run_admitted_headless(params: dict) -> dict:
+    if type(params) is not dict or set(params) != {"admitted"}:
+        raise ValueError("invalid admitted headless RPC envelope")
+    from headless_request_contract import AdmittedHeadlessRequest
+
+    admitted = AdmittedHeadlessRequest.from_dict(params["admitted"])
+    payload = admitted.to_dict()
+    provider = get_provider(
+        payload["provider"]["id"],
+        payload["runtime_profile"],
+    )
+    result = await provider.run_admitted_headless(admitted)
+    return {"result": result}
+
+
 async def _rpc_rewind(params: dict) -> dict:
     provider = default_provider()
     agent_sid = params.get("agent_sid") or ""
@@ -1087,6 +1102,7 @@ _HANDLERS = {
     "pe_temp_read": _rpc_pe_temp_read,
     "pe_temp_cleanup": _rpc_pe_temp_cleanup,
     "run_headless": _rpc_run_headless,
+    "run_admitted_headless": _rpc_run_admitted_headless,
     "rewind": _rpc_rewind,
 }
 

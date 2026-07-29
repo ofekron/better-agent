@@ -4,6 +4,7 @@ import os
 import platform as host_platform
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -71,6 +72,21 @@ class LaunchChain:
 class PinnedLaunch:
     argv_prefix: tuple[str, ...]
     pass_fds: tuple[int, ...]
+
+
+def _trusted_system_interpreter(fd: int, component: FileIdentity) -> bool:
+    observed = os.fstat(fd)
+    resolved = Path(component.resolved_path)
+    return (
+        stat.S_ISREG(observed.st_mode)
+        and observed.st_uid == 0
+        and not observed.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        and any(
+            resolved.is_relative_to(root)
+            for root in (Path("/bin"), Path("/usr/bin"))
+        )
+        and sha256_fd(fd) == component.sha256
+    )
 
 
 def _verify_component_handle(fd: int, component: FileIdentity) -> None:
@@ -154,6 +170,15 @@ def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
             for position, (index, fd) in enumerate(
                 zip(chain.component_argv_indexes, handles),
             ):
+                if chain.mode == "shebang" and position == 0:
+                    if not _trusted_system_interpreter(
+                        fd,
+                        chain.components[position],
+                    ):
+                        raise ExecutionContractError(
+                            "execution interpreter cannot be pinned",
+                        )
+                    continue
                 target = root / f"{position}-{Path(argv[index]).name}"
                 try:
                     os.link(chain.components[position].resolved_path, target)

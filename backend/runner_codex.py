@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import stat
+import tempfile
 import time
 import uuid
 from tool_approval_client import request_tool_approval
@@ -2573,7 +2574,14 @@ class _AppServerProcess:
                 "type": "turn.failed",
                 "error": {"message": str(turn.get("error") or status or "turn failed")},
             }
-        if method in ("item/started", "item/updated", "item/completed"):
+        if method == "item/completed":
+            item = params.get("item") or {}
+            if item.get("type") == "agentMessage":
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    return {"type": "agent.message", "text": text}
+            return None
+        if method in ("item/started", "item/updated"):
             return None
         if method == "error":
             error = params.get("error") or {}
@@ -2774,6 +2782,83 @@ async def _start_app_server(
             await client.wait()
         raise
     return client
+
+
+async def run_headless_app_server(
+    codex_bin: str | Sequence[str],
+    *,
+    pass_fds: tuple[int, ...],
+    prompt: str,
+    cwd: str,
+    model: str,
+    reasoning_effort: str,
+    session_id: Optional[str],
+    fork: bool,
+    timeout: Optional[float],
+    profile: Optional[str],
+    config_overrides: list[str],
+    env: dict[str, str],
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="better-agent-headless-") as raw:
+        run_dir = Path(raw)
+        client = await _start_app_server(
+            codex_bin,
+            run_dir=run_dir,
+            cwd=cwd,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            session_id=session_id,
+            fork=fork,
+            turn_input=build_codex_turn_input(run_dir, prompt, []),
+            config_overrides=config_overrides,
+            env=env,
+            approval_policy="never",
+            sandbox="danger-full-access",
+            profile=profile,
+            launch_pass_fds=pass_fds,
+        )
+        messages: list[str] = []
+        output_chars = 0
+        usage: dict[str, Any] = {}
+
+        async def collect() -> None:
+            nonlocal output_chars, usage
+            while True:
+                raw_event = await client._mapped.get()
+                if raw_event is None:
+                    raise RuntimeError("Codex app-server exited before completion")
+                event = json.loads(raw_event)
+                event_type = event.get("type")
+                if event_type == "agent.message":
+                    message = str(event.get("text") or "")
+                    output_chars += len(message)
+                    if output_chars > 4 * 1024 * 1024:
+                        raise RuntimeError("Codex headless output is too large")
+                    messages.append(message)
+                elif event_type == "turn.failed":
+                    raise RuntimeError("Codex headless turn failed")
+                elif event_type == "turn.completed":
+                    usage = event.get("usage") or {}
+                    return
+
+        try:
+            if timeout is None:
+                await collect()
+            else:
+                await asyncio.wait_for(collect(), timeout=timeout)
+        finally:
+            await client.close_input()
+            try:
+                await asyncio.wait_for(client.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                _process_control().force_kill(client._proc.pid)
+                await client.wait()
+        return {
+            "result": "\n".join(messages),
+            "session_id": client.thread_id,
+            "usage": usage,
+            "total_cost_usd": 0.0,
+        }
 
 
 async def _start_app_server_with_retry(

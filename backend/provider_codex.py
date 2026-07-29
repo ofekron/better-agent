@@ -339,8 +339,8 @@ class CodexProvider(Provider):
     supports_steering: ClassVar[bool] = True
     supports_native_subagents: ClassVar[bool] = True
     supports_reasoning_effort: ClassVar[bool] = True
-    # `-s read-only` confines the one-shot run to a read-only sandbox.
-    supports_headless_no_tools: ClassVar[bool] = True
+    # Codex read-only sandboxing still exposes built-in read/shell tools.
+    supports_headless_no_tools: ClassVar[bool] = False
     reasoning_effort_options: ClassVar[tuple[str, ...]] = CODEX_REASONING_EFFORTS
     default_reasoning_effort: ClassVar[str] = DEFAULT_REASONING_EFFORT
 
@@ -1688,6 +1688,27 @@ class CodexProvider(Provider):
     # ------------------------------------------------------------------
     # run_headless
     # ------------------------------------------------------------------
+    async def run_admitted_headless(self, admitted: Any) -> dict:
+        from codex_headless_execution import (
+            execute_codex_headless,
+            prepare_codex_headless,
+        )
+
+        prepared = prepare_codex_headless(self, admitted)
+        authority = prepared.admitted.to_dict()["provider"]
+        hydration = config_store.hydrate_provider_execution(
+            authority["id"],
+            expected_generation=authority["generation"],
+            expected_revision=authority["revision"],
+        )
+        if hydration is None:
+            raise RuntimeError("headless provider authority is unavailable")
+        return await execute_codex_headless(
+            self,
+            prepared,
+            runtime_record=hydration.runtime_record(),
+        )
+
     async def run_headless(
         self,
         *,
@@ -1700,6 +1721,10 @@ class CodexProvider(Provider):
         no_tools: bool = False,
     ) -> Optional[dict]:
         self.assert_not_suspended(action="run headless work")
+        if no_tools:
+            raise NotImplementedError(
+                "Codex cannot guarantee a no-tools headless run",
+            )
         from cli_paths import resolve_cli_binary
 
         codex_bin = resolve_cli_binary("codex")
@@ -1708,15 +1733,10 @@ class CodexProvider(Provider):
             return None
 
         cmd: list[str] = [codex_bin, "exec", "--skip-git-repo-check"]
-        if no_tools:
-            # Read-only sandbox: the model can read context but cannot
-            # write files or run mutating shell commands — pure text out.
-            cmd += ["-s", "read-only"]
-        else:
-            cmd += [
-                "--dangerously-bypass-approvals-and-sandbox",
-                "-s", "danger-full-access",
-            ]
+        cmd += [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-s", "danger-full-access",
+        ]
         resume_target = resume_sid or session_id
         if resume_target:
             cmd += ["resume", resume_target, prompt]

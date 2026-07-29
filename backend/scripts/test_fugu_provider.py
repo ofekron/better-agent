@@ -41,6 +41,10 @@ def test_registry_and_capabilities() -> None:
     # Fugu IS codex under the hood, so the codex app-server capabilities
     # (fork, steering, subagents, team mode) carry over unchanged.
     check(FuguProvider.supports_fork is True, "fugu inherits codex fork")
+    check(
+        FuguProvider.supports_headless_no_tools is False,
+        "fugu does not misrepresent read-only sandboxing as no-tools",
+    )
     check(FuguProvider.supports_manager_mode is True, "fugu inherits codex team mode")
     check(FuguProvider.supports_steering is True, "fugu inherits codex steering")
     check(FuguProvider.supports_native_subagents is True, "fugu inherits codex subagents")

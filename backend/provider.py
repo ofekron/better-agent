@@ -1465,6 +1465,12 @@ class Provider(ABC):
         no_tools: bool = False,
     ) -> Optional[dict]: ...
 
+    async def run_admitted_headless(self, admitted: Any) -> dict:
+        del admitted
+        raise NotImplementedError(
+            f"{self.KIND} does not support admitted headless execution",
+        )
+
     # ------------------------------------------------------------------
     # File-system rewind — undo the file edits a turn produced.
     # Raises on non-zero CLI exit so the caller can surface the error.
