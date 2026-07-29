@@ -1,111 +1,136 @@
-"""Runner user-MCP merge: fail loud on malformed mcps.json.
-
-Locks `runner._merge_user_mcps`: valid `{mcpServers: {...}}` content merges
-without clobbering BC-internal servers; malformed JSON or a wrong shape
-RAISES (the run fails loud with an error complete.json) instead of silently
-dropping every user MCP; an empty file is vacuous, not malformed.
-
-Run:
-    cd backend && .venv/bin/python scripts/test_runner_user_mcps.py
-"""
+"""Provider-run MCP config validation and builtin precedence parity."""
 
 from __future__ import annotations
 
-import os
-import shutil
+import copy
 import sys
-import tempfile
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-runner-mcps-")
+_BACKEND = Path(__file__).resolve().parent.parent
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-
-import runner  # noqa: E402
-
-FAILURES: list[str] = []
+import builtin_mcp_config  # noqa: E402
+import provider_run_config  # noqa: E402
 
 
-def check(cond: bool, msg: str) -> None:
-    print(f"  {'✓' if cond else '✗'} {msg}")
-    if not cond:
-        FAILURES.append(msg)
+def test_alias_normalizes_without_sharing_mutable_state() -> None:
+    source = {
+        "mcpServers": {
+            "user-a": {
+                "command": "echo",
+                "args": ["ready"],
+            },
+        },
+    }
+    normalized = provider_run_config.normalize_provider_run_config(source)
+    source["mcpServers"]["user-a"]["args"].append("mutated")
+    assert normalized == {
+        "mcp_servers": {
+            "user-a": {
+                "command": "echo",
+                "args": ["ready"],
+            },
+        },
+    }
 
 
-def _write(content: str) -> str:
-    f = tempfile.NamedTemporaryFile(
-        "w", suffix=".json", dir=_TMP_HOME, delete=False, encoding="utf-8"
-    )
-    f.write(content)
-    f.close()
-    return f.name
-
-
-def t_valid_merge() -> None:
-    servers = {"internal": "BC"}
-    runner._merge_user_mcps(
-        _write('{"mcpServers":{"user-a":{"command":"echo"},"internal":{"command":"evil"}}}'),
-        servers,
-    )
-    check(servers["user-a"] == {"command": "echo"}, "user MCP merged")
-    check(servers["internal"] == "BC", "BC-internal MCP never clobbered")
-
-
-def t_empty_file_is_vacuous() -> None:
-    servers: dict = {}
-    runner._merge_user_mcps(_write("  \n"), servers)
-    check(servers == {}, "empty mcps.json merges nothing and does not raise")
-
-
-def t_malformed_raises() -> None:
-    raised = False
-    try:
-        runner._merge_user_mcps(_write("{not json"), {})
-    except Exception:
-        raised = True
-    check(raised, "invalid JSON raises (fails the run loud)")
-
-    for content, label in [
-        ('{"servers": {}}', "missing mcpServers key"),
-        ('{"mcpServers": []}', "non-object mcpServers"),
-        ("[1,2]", "top-level list"),
-        ('"text"', "top-level string"),
-    ]:
-        raised = False
+def test_malformed_mcp_config_fails_closed() -> None:
+    malformed = [
+        [],
+        "",
+        {"mcpServers": None},
+        {"mcpServers": []},
+        {"mcp_servers": ""},
+        {"mcp_servers": {"": {"command": "echo"}}},
+        {"mcp_servers": {" padded ": {"command": "echo"}}},
+        {"mcp_servers": {"user-a": []}},
+        {"mcp_servers": {}, "mcpServers": {}},
+        {"skills": []},
+    ]
+    for value in malformed:
         try:
-            runner._merge_user_mcps(_write(content), {})
+            provider_run_config.normalize_provider_run_config(value)
         except ValueError:
-            raised = True
-        check(raised, f"wrong shape raises ValueError: {label}")
+            continue
+        raise AssertionError(f"malformed provider run config was accepted: {value!r}")
+
+
+def test_override_merge_is_explicit_and_immutable() -> None:
+    base = {
+        "mcp_servers": {
+            "shared": {"command": "base"},
+            "base-only": {"command": "base-only"},
+        },
+    }
+    override = {
+        "mcp_servers": {
+            "shared": {"command": "override"},
+            "override-only": {"command": "override-only"},
+        },
+    }
+    merged = provider_run_config.merge_provider_run_configs(base, override)
+    base["mcp_servers"]["base-only"]["command"] = "mutated"
+    override["mcp_servers"]["shared"]["command"] = "mutated"
+    assert merged["mcp_servers"] == {
+        "shared": {"command": "override"},
+        "base-only": {"command": "base-only"},
+        "override-only": {"command": "override-only"},
+    }
+
+
+def test_builtin_mcp_precedence_matches_openai_codex_and_agy() -> None:
+    explicit = {
+        "mcp_servers": {
+            "user-a": {"command": "echo", "args": ["user"]},
+            "capabilities": {"command": "malicious"},
+        },
+    }
+    effective = {}
+    for provider_kind in ("openai", "codex", "agy"):
+        config = builtin_mcp_config.with_builtin_mcp_servers(
+            {
+                "app_session_id": "session",
+                "backend_url": "http://127.0.0.1:8000",
+                "cwd": "/tmp",
+                "provider_id": f"{provider_kind}-provider",
+                "provider_kind": provider_kind,
+                "user_facing": True,
+                "bare_config": False,
+            },
+            copy.deepcopy(explicit),
+            runtime_broker={"kind": "runner_operation_broker"},
+            integrations_enabled=True,
+            runtime_mcp_servers={},
+            launcher_mcp_servers={},
+        )
+        servers = config["mcp_servers"]
+        assert servers["user-a"] == {"command": "echo", "args": ["user"]}
+        assert servers["capabilities"]["command"] == sys.executable
+        assert servers["capabilities"]["command"] != "malicious"
+        effective[provider_kind] = {
+            "user-a": servers["user-a"],
+            "capabilities": {
+                "command": servers["capabilities"]["command"],
+                "args": servers["capabilities"]["args"],
+                "tool_names": servers["capabilities"].get("tool_names"),
+            },
+        }
+    assert effective["openai"] == effective["codex"] == effective["agy"]
 
 
 def main() -> int:
-    for name, fn in [
-        ("valid merge + internal precedence", t_valid_merge),
-        ("empty file is vacuous", t_empty_file_is_vacuous),
-        ("malformed content raises", t_malformed_raises),
-    ]:
-        print(f"\n--- {name} ---")
-        try:
-            fn()
-        except Exception as e:
-            FAILURES.append(f"{name}: {e!r}")
-            import traceback
-            traceback.print_exc()
-    shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    print()
-    if FAILURES:
-        print(f"FAILED: {len(FAILURES)} assertion(s)")
-        for f in FAILURES:
-            print(f"  - {f}")
-        return 1
+    tests = [
+        (name, fn)
+        for name, fn in sorted(globals().items())
+        if name.startswith("test_") and callable(fn)
+    ]
+    for name, fn in tests:
+        fn()
+        print(f"PASS {name}")
     print("ALL PASS")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

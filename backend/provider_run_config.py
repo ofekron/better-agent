@@ -8,27 +8,53 @@ from typing import Any, Optional
 
 
 def normalize_provider_run_config(value: Optional[dict]) -> dict:
-    if not value:
+    if value is None:
         return {}
     if not isinstance(value, dict):
         raise ValueError("provider_run_config must be an object")
+    if not value:
+        return {}
 
     out = {
         key: copy.deepcopy(item)
         for key, item in value.items()
         if key not in ("mcp_servers", "mcpServers", "skills")
     }
-    mcp_servers = value.get("mcp_servers", value.get("mcpServers", {}))
-    if mcp_servers:
+    if "mcp_servers" in value and "mcpServers" in value:
+        raise ValueError("provider_run_config MCP server keys are ambiguous")
+    mcp_key = (
+        "mcp_servers"
+        if "mcp_servers" in value
+        else "mcpServers"
+        if "mcpServers" in value
+        else ""
+    )
+    if mcp_key:
+        mcp_servers = value[mcp_key]
         if not isinstance(mcp_servers, dict):
             raise ValueError("provider_run_config.mcp_servers must be an object")
-        out["mcp_servers"] = mcp_servers
+        for name, config in mcp_servers.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or name != name.strip()
+            ):
+                raise ValueError(
+                    "provider_run_config.mcp_servers names must be non-empty strings"
+                )
+            if not isinstance(config, dict):
+                raise ValueError(
+                    f"provider_run_config.mcp_servers.{name} must be an object"
+                )
+        if mcp_servers:
+            out["mcp_servers"] = copy.deepcopy(mcp_servers)
 
-    skills = value.get("skills", {})
-    if skills:
+    if "skills" in value:
+        skills = value["skills"]
         if not isinstance(skills, dict):
             raise ValueError("provider_run_config.skills must be an object")
-        out["skills"] = skills
+        if skills:
+            out["skills"] = copy.deepcopy(skills)
 
     return out
 
