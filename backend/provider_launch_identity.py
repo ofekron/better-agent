@@ -323,7 +323,7 @@ def _validate_launch(launch: AttestedLaunch) -> None:
         raise ExecutionContractError("incoherent runner launcher")
 
 
-def _read_attested_shebang(identity: FileIdentity) -> tuple[str, ...]:
+def _read_attested_shebang(identity: FileIdentity) -> str:
     flags = binary_open_flags(
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
     )
@@ -347,14 +347,33 @@ def _read_attested_shebang(identity: FileIdentity) -> tuple[str, ...]:
     ):
         raise ExecutionContractError("provider launcher identity mismatch")
     if not first_line.startswith(b"#!"):
-        return ()
+        return ""
     try:
-        values = shlex.split(first_line[2:].decode("utf-8").strip())
-    except (UnicodeDecodeError, ValueError) as exc:
+        line = first_line[2:].decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ExecutionContractError("provider launcher shebang is invalid") from exc
+    if not line:
+        raise ExecutionContractError("provider launcher shebang is empty")
+    return line
+
+
+def _parse_shebang_tokens(line: str) -> tuple[str, ...]:
+    # Absolute interpreter paths may legitimately contain spaces (e.g. a venv
+    # installed under "~/Library/Application Support/..."). An unquoted
+    # shebang line cannot distinguish embedded spaces from a following
+    # argument, so prefer the whole line as one interpreter token whenever it
+    # resolves to a real file before falling back to word-splitting (which
+    # covers "/usr/bin/env node"-style shebangs with no spaces at all).
+    whole = Path(line)
+    if whole.is_absolute() and whole.exists():
+        return (line,)
+    try:
+        values = tuple(shlex.split(line))
+    except ValueError as exc:
         raise ExecutionContractError("provider launcher shebang is invalid") from exc
     if not values:
         raise ExecutionContractError("provider launcher shebang is empty")
-    return tuple(values)
+    return values
 
 
 def capture_cli_launch(
@@ -380,8 +399,8 @@ def capture_cli_launch(
         raise ExecutionContractError(
             "Windows command wrappers require complete chain authority",
         )
-    tokens = _read_attested_shebang(launcher)
-    if not tokens:
+    shebang_line = _read_attested_shebang(launcher)
+    if not shebang_line:
         launch = AttestedLaunch(
             logical_command=logical_command,
             platform=effective_platform,
@@ -393,6 +412,7 @@ def capture_cli_launch(
         )
         _validate_launch(launch)
         return launch
+    tokens = _parse_shebang_tokens(shebang_line)
     interpreter_token = tokens[0]
     interpreter_args = tokens[1:]
     if interpreter_token == "/usr/bin/env":

@@ -223,7 +223,9 @@ class AgyProvider(SessionEventsProvider):
         if start_arguments.get("fork"):
             raise NotImplementedError("agy provider does not support fork.")
         model = start_arguments.get("model")
-        available = fetch_agy_models()
+        import models as models_mod
+
+        available = models_mod.available_models(self.id)
         if model and model not in available:
             raise ValueError(
                 f"model {model!r} is not available for the AGY provider. "
