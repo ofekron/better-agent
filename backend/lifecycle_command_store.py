@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from lifecycle_command_model import (
+    LifecycleCommand,
+    LifecycleEffect,
+    LifecycleSnapshot,
+    TransitionPlan,
+    materialize_json,
+    validate_identifier,
+)
+from paths import ba_home
+
+
+SCHEMA_VERSION = 1
+_STATUSES = {
+    "planned",
+    "effects_applied",
+    "committed",
+    "notification_attempted",
+}
+
+
+class TransitionConflict(RuntimeError):
+    pass
+
+
+class TransitionBusy(TransitionConflict):
+    pass
+
+
+class SnapshotChanged(TransitionConflict):
+    pass
+
+
+def _path() -> Path:
+    return ba_home() / "lifecycle-command-state.sqlite3"
+
+
+def _connect() -> sqlite3.Connection:
+    path = _path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=2.0, isolation_level=None)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = FULL")
+        _migrate(connection)
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    connection.execute("BEGIN EXCLUSIVE")
+    try:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if type(version) is not int or version < 0:
+            raise RuntimeError("invalid lifecycle command schema version")
+        if version > SCHEMA_VERSION:
+            raise RuntimeError("unsupported lifecycle command schema")
+        if version == 0:
+            schema = """
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                identity_json TEXT,
+                revision INTEGER NOT NULL CHECK (revision >= 0)
+            ) STRICT;
+            CREATE TABLE transitions (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                command_json TEXT NOT NULL,
+                source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+                next_snapshot_json TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                notification_payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'planned',
+                        'effects_applied',
+                        'committed',
+                        'notification_attempted'
+                    )
+                ),
+                PRIMARY KEY (session_id, request_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            ) STRICT;
+            CREATE TABLE effects (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                effect_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                result_json TEXT,
+                PRIMARY KEY (session_id, request_id, ordinal),
+                UNIQUE (effect_id),
+                FOREIGN KEY (session_id, request_id)
+                    REFERENCES transitions(session_id, request_id)
+            ) STRICT;
+            CREATE UNIQUE INDEX one_unfinished_transition_per_session
+                ON transitions(session_id)
+                WHERE status IN ('planned', 'effects_applied', 'committed');
+            CREATE INDEX transitions_by_status
+                ON transitions(status, session_id, request_id);
+            """
+            for statement in schema.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    if version == 0:
+        connection.execute("PRAGMA journal_mode = WAL")
+
+
+def initialize() -> None:
+    with _connect():
+        return
+
+
+def session_snapshot(session_id: str) -> LifecycleSnapshot:
+    validate_identifier(session_id, "session_id")
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT session_id, phase, identity_json, revision
+            FROM sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    return _snapshot_from_row(row) if row is not None else LifecycleSnapshot()
+
+
+def transition_for(session_id: str, request_id: str) -> dict[str, Any] | None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(request_id, "request_id")
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM transitions
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if row is None:
+            return None
+        effects = connection.execute(
+            """
+            SELECT effect_id, kind, payload_json, result_json
+            FROM effects
+            WHERE session_id = ? AND request_id = ?
+            ORDER BY ordinal
+            """,
+            (session_id, request_id),
+        ).fetchall()
+    return _transition_from_rows(row, effects)
+
+
+def required_transition(session_id: str, request_id: str) -> dict[str, Any]:
+    transition = transition_for(session_id, request_id)
+    if transition is None:
+        raise RuntimeError("lifecycle command transition disappeared")
+    return transition
+
+
+def unfinished_transitions() -> tuple[tuple[str, str], ...]:
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT session_id, request_id
+            FROM transitions
+            WHERE status IN ('planned', 'effects_applied', 'committed')
+            ORDER BY session_id, request_id
+            """
+        ).fetchall()
+    return tuple((row["session_id"], row["request_id"]) for row in rows)
+
+
+def persist_plan(
+    command: LifecycleCommand,
+    snapshot: LifecycleSnapshot,
+    plan: TransitionPlan,
+) -> str:
+    command_json = _dump(command.to_dict())
+    next_snapshot_json = _dump(plan.next_snapshot.to_dict())
+    notification_payload_json = _dump(materialize_json(plan.fact_payload))
+    effects = tuple(
+        (
+            ordinal,
+            effect.effect_id,
+            effect.kind,
+            _dump(effect.to_dict()["payload"]),
+        )
+        for ordinal, effect in enumerate(plan.effects)
+    )
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            """
+            SELECT fingerprint
+            FROM transitions
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (command.session_id, command.request_id),
+        ).fetchone()
+        if existing is not None:
+            connection.commit()
+            if existing["fingerprint"] != command.fingerprint():
+                raise TransitionConflict(
+                    "request_id is already bound to another command"
+                )
+            return "existing"
+        connection.execute(
+            """
+            INSERT INTO sessions(session_id, phase, identity_json, revision)
+            VALUES (?, 'idle', NULL, 0)
+            ON CONFLICT(session_id) DO NOTHING
+            """,
+            (command.session_id,),
+        )
+        current = connection.execute(
+            """
+            SELECT session_id, phase, identity_json, revision
+            FROM sessions
+            WHERE session_id = ?
+            """,
+            (command.session_id,),
+        ).fetchone()
+        if _snapshot_from_row(current) != snapshot:
+            connection.rollback()
+            raise SnapshotChanged("lifecycle snapshot changed before intent")
+        try:
+            connection.execute(
+                """
+                INSERT INTO transitions(
+                    session_id,
+                    request_id,
+                    fingerprint,
+                    command_json,
+                    source_revision,
+                    next_snapshot_json,
+                    notification_type,
+                    notification_payload_json,
+                    status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned')
+                """,
+                (
+                    command.session_id,
+                    command.request_id,
+                    command.fingerprint(),
+                    command_json,
+                    snapshot.revision,
+                    next_snapshot_json,
+                    plan.fact_type,
+                    notification_payload_json,
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO effects(
+                    session_id,
+                    request_id,
+                    ordinal,
+                    effect_id,
+                    kind,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        command.session_id,
+                        command.request_id,
+                        ordinal,
+                        effect_id,
+                        kind,
+                        payload_json,
+                    )
+                    for ordinal, effect_id, kind, payload_json in effects
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise TransitionBusy(
+                "another lifecycle transition is unfinished"
+            ) from exc
+        connection.commit()
+        return "inserted"
+
+
+def record_effect_result(
+    session_id: str,
+    request_id: str,
+    ordinal: int,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("effect ordinal must be a non-negative integer")
+    result_json = _dump(result)
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT result_json
+            FROM effects
+            WHERE session_id = ? AND request_id = ? AND ordinal = ?
+            """,
+            (session_id, request_id, ordinal),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            raise RuntimeError("lifecycle effect disappeared")
+        if row["result_json"] is not None:
+            connection.commit()
+            return _load_object(row["result_json"], "effect result")
+        connection.execute(
+            """
+            UPDATE effects
+            SET result_json = ?
+            WHERE session_id = ? AND request_id = ? AND ordinal = ?
+            """,
+            (result_json, session_id, request_id, ordinal),
+        )
+        remaining = connection.execute(
+            """
+            SELECT 1
+            FROM effects
+            WHERE session_id = ? AND request_id = ? AND result_json IS NULL
+            LIMIT 1
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if remaining is None:
+            connection.execute(
+                """
+                UPDATE transitions
+                SET status = 'effects_applied'
+                WHERE session_id = ? AND request_id = ? AND status = 'planned'
+                """,
+                (session_id, request_id),
+            )
+        connection.commit()
+    return result
+
+
+def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT source_revision, next_snapshot_json, status
+            FROM transitions
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            raise RuntimeError("lifecycle transition disappeared")
+        next_snapshot = LifecycleSnapshot.from_dict(
+            _load_object(row["next_snapshot_json"], "next snapshot")
+        )
+        if row["status"] in {"committed", "notification_attempted"}:
+            connection.commit()
+            return next_snapshot
+        if row["status"] != "effects_applied":
+            connection.rollback()
+            raise RuntimeError("cannot commit lifecycle transition before effects")
+        cursor = connection.execute(
+            """
+            UPDATE sessions
+            SET phase = ?, identity_json = ?, revision = ?
+            WHERE session_id = ? AND revision = ?
+            """,
+            (
+                next_snapshot.phase,
+                _identity_json(next_snapshot),
+                next_snapshot.revision,
+                session_id,
+                row["source_revision"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            raise SnapshotChanged("lifecycle revision changed before commit")
+        connection.execute(
+            """
+            UPDATE transitions
+            SET status = 'committed'
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (session_id, request_id),
+        )
+        connection.commit()
+    return next_snapshot
+
+
+def mark_notification_attempted(session_id: str, request_id: str) -> bool:
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute(
+            """
+            UPDATE transitions
+            SET status = 'notification_attempted'
+            WHERE session_id = ? AND request_id = ? AND status = 'committed'
+            """,
+            (session_id, request_id),
+        )
+        connection.commit()
+    return cursor.rowcount == 1
+
+
+def table_counts() -> dict[str, int]:
+    with _connect() as connection:
+        return {
+            table: connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in ("sessions", "transitions", "effects")
+        }
+
+
+def _snapshot_from_row(row: sqlite3.Row) -> LifecycleSnapshot:
+    identity = (
+        _load_object(row["identity_json"], "turn identity")
+        if row["identity_json"] is not None
+        else None
+    )
+    return LifecycleSnapshot.from_dict({
+        "phase": row["phase"],
+        "identity": identity,
+        "revision": row["revision"],
+    })
+
+
+def _transition_from_rows(
+    row: sqlite3.Row,
+    effect_rows: list[sqlite3.Row],
+) -> dict[str, Any]:
+    if row["status"] not in _STATUSES:
+        raise RuntimeError("invalid lifecycle transition status")
+    command = LifecycleCommand.from_dict(
+        _load_object(row["command_json"], "command")
+    )
+    if command.fingerprint() != row["fingerprint"]:
+        raise RuntimeError("lifecycle transition fingerprint mismatch")
+    effects = []
+    results = []
+    for effect_row in effect_rows:
+        effect = LifecycleEffect(
+            effect_id=effect_row["effect_id"],
+            kind=effect_row["kind"],
+            payload=_load_object(effect_row["payload_json"], "effect payload"),
+        )
+        effects.append(effect.to_dict())
+        if effect_row["result_json"] is not None:
+            results.append(
+                _load_object(effect_row["result_json"], "effect result")
+            )
+    return {
+        "command": command.to_dict(),
+        "fingerprint": row["fingerprint"],
+        "source_revision": row["source_revision"],
+        "next_snapshot": _load_object(
+            row["next_snapshot_json"],
+            "next snapshot",
+        ),
+        "effects": effects,
+        "effect_results": results,
+        "notification_type": row["notification_type"],
+        "notification_payload": _load_object(
+            row["notification_payload_json"],
+            "notification payload",
+        ),
+        "status": row["status"],
+    }
+
+
+def _identity_json(snapshot: LifecycleSnapshot) -> str | None:
+    return _dump(snapshot.identity.to_dict()) if snapshot.identity else None
+
+
+def _dump(value: Any) -> str:
+    return json.dumps(
+        materialize_json(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _load_object(raw: str, name: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid lifecycle {name} JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"invalid lifecycle {name}")
+    return value
