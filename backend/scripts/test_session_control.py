@@ -326,11 +326,46 @@ def test_endpoints() -> None:
             session_manager.manager.delete(sid)
 
 
+def test_runtime_operation_ignores_empty_model_provider_defaults() -> None:
+    import runtime_operations
+    from better_agent_sdk.surfaces import request_model_for_callable
+
+    server = runtime_operations._load_bundled_server("session-control")
+    switch_model = next(
+        item.handler for item in server._specs() if item.name == "switch_model"
+    )
+    model = request_model_for_callable(
+        "runtime_session_control_switch_model",
+        switch_model,
+    )
+
+    values = runtime_operations._session_control_values(model(
+        model="",
+        provider_id="   ",
+        reasoning_effort="none",
+    ))
+    check(
+        values == {"reasoning_effort": "none"},
+        "runtime operation drops only empty model/provider selectors",
+    )
+
+    forbidden = runtime_operations._session_control_values(model(
+        model="forbidden",
+        provider_id="",
+        reasoning_effort="none",
+    ))
+    check(
+        forbidden == {"model": "forbidden", "reasoning_effort": "none"},
+        "runtime operation preserves explicit forbidden model selector",
+    )
+
+
 def main_runner() -> int:
     test_continuation_requested_flag_roundtrip()
     test_agent_requested_continuation_prompt()
     test_session_control_extension_validates_and_injects()
     test_endpoints()
+    test_runtime_operation_ignores_empty_model_provider_defaults()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURES:")
         for f in FAILURES:
