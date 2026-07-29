@@ -75,27 +75,33 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $ArtifactRoot "state") | Out-Null
           $env:BETTER_AGENT_HOME = Join-Path $ArtifactRoot "state"
           $Result = Join-Path $ArtifactRoot "result.json"
-          $Progress = Join-Path $ArtifactRoot "result.progress.jsonl"
           $Smoke = Start-Process `
             -FilePath "desktop\dist\Better Agent\Better Agent.exe" `
             -ArgumentList "--frozen-artifact-smoke", "--output", $Result `
             -PassThru
-          $SeenProgress = 0
+          $SeenProgress = @{}
           do {
               $Exited = $Smoke.WaitForExit(1000)
-              if (Test-Path $Progress) {
-                  $ProgressLines = @(Get-Content -LiteralPath $Progress)
-                  for (
-                      $Index = $SeenProgress
-                      $Index -lt $ProgressLines.Count
-                      $Index++
-                  ) {
-                      Write-Host (
-                          "artifact-smoke-progress " +
-                          $ProgressLines[$Index]
-                      )
+              $ProgressFiles = @(
+                  Get-ChildItem `
+                    -LiteralPath $ArtifactRoot `
+                    -Filter "result.progress.*.json" |
+                    Sort-Object -Property Name
+              )
+              foreach ($ProgressFile in $ProgressFiles) {
+                  if ($SeenProgress.ContainsKey($ProgressFile.Name)) {
+                      continue
                   }
-                  $SeenProgress = $ProgressLines.Count
+                  try {
+                      $ProgressLine = Get-Content `
+                        -LiteralPath $ProgressFile.FullName `
+                        -Raw
+                      $null = $ProgressLine | ConvertFrom-Json
+                  } catch {
+                      continue
+                  }
+                  Write-Host "artifact-smoke-progress $ProgressLine"
+                  $SeenProgress[$ProgressFile.Name] = $true
               }
           } while (-not $Exited)
           if ($Smoke.ExitCode -ne 0) {

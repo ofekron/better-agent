@@ -173,7 +173,8 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     assert "Start-Process" in windows_smoke["run"]
     assert "-PassThru" in windows_smoke["run"]
     assert "$Smoke.WaitForExit(1000)" in windows_smoke["run"]
-    assert "result.progress.jsonl" in windows_smoke["run"]
+    assert 'Filter "result.progress.*.json"' in windows_smoke["run"]
+    assert "ConvertFrom-Json" in windows_smoke["run"]
     assert "artifact-smoke-progress" in windows_smoke["run"]
     assert "$Smoke.ExitCode" in windows_smoke["run"]
     assert "$LASTEXITCODE" not in windows_smoke["run"]
@@ -215,7 +216,20 @@ def test_windows_materialization_uses_acl_authority() -> None:
     ).read_text(encoding="utf-8")
     assert "make_private_directory(run_dir)" in pinned_source
     assert "make_private_directory(container)" in sdk_source
-    assert "dir=ba_home()" in smoke_source
+    assert "state_root = ba_home()" in smoke_source
+    assert "dir=state_root" in smoke_source
+    for stage in (
+        "state-root",
+        "temp-root",
+        "snapshot-root",
+        "capture",
+        "materialize",
+        "tamper",
+        "windows-wrapper",
+        "temp-cleanup",
+    ):
+        assert f'stage="{stage}"' in smoke_source
+    assert 'stage=f"probe:{family}"' in smoke_source
     assert smoke_source.count("open_pinned_runner_launch(") == 1
     assert '"timings_ms": timings' in smoke_source
     assert "os.fsync(output)" not in bundle_source
@@ -231,10 +245,10 @@ def test_artifact_smoke_failure_is_structured() -> None:
         assert json.loads(output.read_text(encoding="utf-8")) == {
             "error": "artifact smoke requires frozen runtime",
         }
-        progress = output.with_suffix(".progress.jsonl")
+        progress = sorted(output.parent.glob("result.progress.*.json"))
         assert [
-            json.loads(line)
-            for line in progress.read_text(encoding="utf-8").splitlines()
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in progress
         ] == [
             {"stage": "smoke", "status": "started"},
             {

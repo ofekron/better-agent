@@ -59,10 +59,10 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_result(path: Path, payload: dict[str, Any]) -> None:
+def _write_new_json(path: Path, payload: dict[str, Any], label: str) -> None:
     if path.exists():
-        raise ExecutionContractError("artifact smoke output is invalid")
-    parent = _safe_output_parent(path, "output")
+        raise ExecutionContractError(f"artifact smoke {label} is invalid")
+    parent = _safe_output_parent(path, label)
     descriptor = os.open(
         parent / path.name,
         os.O_WRONLY
@@ -89,59 +89,36 @@ def _write_result(path: Path, payload: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
-def _progress_path(output: Path) -> Path:
-    return output.with_suffix(".progress.jsonl")
+def _write_result(path: Path, payload: dict[str, Any]) -> None:
+    _write_new_json(path, payload, "output")
 
 
-def _append_progress(
-    path: Path,
-    *,
-    stage: str,
-    status: str,
-    elapsed_ms: int | None = None,
-    error: str | None = None,
-) -> None:
-    parent = _safe_output_parent(path, "progress")
-    payload: dict[str, Any] = {
-        "stage": stage,
-        "status": status,
-    }
-    if elapsed_ms is not None:
-        payload["elapsed_ms"] = elapsed_ms
-    if error is not None:
-        payload["error"] = error
-    descriptor = os.open(
-        parent / path.name,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_APPEND
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        observed = os.fstat(descriptor)
-        if not stat.S_ISREG(observed.st_mode):
-            raise ExecutionContractError(
-                "artifact smoke progress path is unsafe",
-            )
-        data = (
-            json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
-        ).encode("utf-8")
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short artifact smoke progress write")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+class _ProgressJournal:
+    def __init__(self, output: Path) -> None:
+        self._output = output
+        self._sequence = 0
+
+    def record(
+        self,
+        *,
+        stage: str,
+        status: str,
+        elapsed_ms: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "status": status,
+        }
+        if elapsed_ms is not None:
+            payload["elapsed_ms"] = elapsed_ms
+        if error is not None:
+            payload["error"] = error
+        path = self._output.with_name(
+            f"{self._output.stem}.progress.{self._sequence:04d}.json",
+        )
+        _write_new_json(path, payload, "progress checkpoint")
+        self._sequence += 1
 
 
 def _probe(family: str, output: Path) -> int:
@@ -219,12 +196,14 @@ def _tamper_materialized_sidecar(
 
 def _materialize_snapshot(
     root: Path,
-    progress: Path,
+    progress: _ProgressJournal,
 ) -> tuple[RunnerLaunch, Path, Path, dict[str, int]]:
     run_dir = root / "snapshot"
+    progress.record(stage="snapshot-root", status="started")
     run_dir.mkdir(mode=0o700)
+    progress.record(stage="snapshot-root", status="completed")
     started = time.perf_counter_ns()
-    _append_progress(progress, stage="capture", status="started")
+    progress.record(stage="capture", status="started")
     runner = capture_runner_launch(
         run_dir=run_dir,
         executable_path=sys.executable,
@@ -243,19 +222,17 @@ def _materialize_snapshot(
         )
     captured = time.perf_counter_ns()
     capture_ms = (captured - started) // 1_000_000
-    _append_progress(
-        progress,
+    progress.record(
         stage="capture",
         status="completed",
         elapsed_ms=capture_ms,
     )
-    _append_progress(progress, stage="materialize", status="started")
+    progress.record(stage="materialize", status="started")
     with open_pinned_runner_launch(runner) as pinned:
         materialized_executable = Path(pinned.argv[0])
     materialized = time.perf_counter_ns()
     materialize_ms = (materialized - captured) // 1_000_000
-    _append_progress(
-        progress,
+    progress.record(
         stage="materialize",
         status="completed",
         elapsed_ms=materialize_ms,
@@ -282,15 +259,14 @@ def _run_family_probe(
     root: Path,
     runner: RunnerLaunch,
     materialized_executable: Path,
-    progress: Path,
+    progress: _ProgressJournal,
 ) -> tuple[dict[str, Any], int]:
     runner_module, _ = _RUNNERS[family]
     probe_output = root / f"{family}-probe.json"
     environment = dict(os.environ)
     environment["BETTER_AGENT_HOME"] = str(root / "state")
     started = time.perf_counter_ns()
-    _append_progress(
-        progress,
+    progress.record(
         stage=f"probe:{family}",
         status="started",
     )
@@ -340,8 +316,7 @@ def _run_family_probe(
         )
     assert runner.frozen_bundle is not None
     elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
-    _append_progress(
-        progress,
+    progress.record(
         stage=f"probe:{family}",
         status="completed",
         elapsed_ms=elapsed_ms,
@@ -357,15 +332,21 @@ def _run_family_probe(
     )
 
 
-def _smoke(output: Path) -> int:
+def _smoke(output: Path, progress: _ProgressJournal) -> int:
     if not getattr(sys, "frozen", False) or not hasattr(sys, "_MEIPASS"):
         raise ExecutionContractError("artifact smoke requires frozen runtime")
     started = time.perf_counter_ns()
-    progress = _progress_path(output)
-    with tempfile.TemporaryDirectory(
+    progress.record(stage="state-root", status="started")
+    state_root = ba_home()
+    progress.record(stage="state-root", status="completed")
+    progress.record(stage="temp-root", status="started")
+    temporary = tempfile.TemporaryDirectory(
         prefix="better-agent-artifact-smoke-",
-        dir=ba_home(),
-    ) as raw:
+        dir=state_root,
+    )
+    progress.record(stage="temp-root", status="completed")
+    try:
+        raw = temporary.name
         root = Path(raw)
         runner, executable, materialized_root, timings = (
             _materialize_snapshot(root, progress)
@@ -388,28 +369,29 @@ def _smoke(output: Path) -> int:
             elapsed for _, elapsed in probe_results.values()
         )
         tamper_started = time.perf_counter_ns()
-        _append_progress(progress, stage="tamper", status="started")
+        progress.record(stage="tamper", status="started")
         _tamper_materialized_sidecar(runner, materialized_root)
         timings["tamper"] = (
             time.perf_counter_ns() - tamper_started
         ) // 1_000_000
-        _append_progress(
-            progress,
+        progress.record(
             stage="tamper",
             status="completed",
             elapsed_ms=timings["tamper"],
         )
-        _append_progress(
-            progress,
+        progress.record(
             stage="windows-wrapper",
             status="started",
         )
         wrapper = _assert_windows_wrapper_rejected(root)
-        _append_progress(
-            progress,
+        progress.record(
             stage="windows-wrapper",
             status="completed",
         )
+    finally:
+        progress.record(stage="temp-cleanup", status="started")
+        temporary.cleanup()
+        progress.record(stage="temp-cleanup", status="completed")
     timings["total"] = (
         time.perf_counter_ns() - started
     ) // 1_000_000
@@ -422,11 +404,13 @@ def _smoke(output: Path) -> int:
             "windows_wrapper": wrapper,
         },
     )
-    _append_progress(progress, stage="smoke", status="completed")
     return 0
 
 
-def _execute(args: argparse.Namespace) -> int:
+def _execute(
+    args: argparse.Namespace,
+    progress: _ProgressJournal,
+) -> int:
     if not args.frozen_artifact_smoke:
         raise ExecutionContractError("artifact smoke mode is required")
     if args.artifact_probe:
@@ -437,18 +421,19 @@ def _execute(args: argparse.Namespace) -> int:
         raise ExecutionContractError(
             "artifact smoke family is probe-only",
         )
-    return _smoke(args.output)
+    return _smoke(args.output, progress)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
-    progress = _progress_path(args.output)
+    progress = _ProgressJournal(args.output)
     try:
-        _append_progress(progress, stage="smoke", status="started")
-        return _execute(args)
+        progress.record(stage="smoke", status="started")
+        result = _execute(args, progress)
+        progress.record(stage="smoke", status="completed")
+        return result
     except ExecutionContractError as exc:
-        _append_progress(
-            progress,
+        progress.record(
             stage="smoke",
             status="failed",
             error=str(exc),
