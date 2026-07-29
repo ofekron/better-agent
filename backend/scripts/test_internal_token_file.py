@@ -56,30 +56,36 @@ def test_internal_token_publication_is_atomic(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("returncode", "stdout", "expected"),
-    [(0, "private\n", True), (2, "", False), (0, "unexpected\n", False)],
+    ("observed", "expected"),
+    [(True, True), (False, False), (OSError("ACL read failed"), False)],
 )
 def test_windows_token_acl_validation_fails_closed(
-    monkeypatch, tmp_path, returncode, stdout, expected,
+    monkeypatch, tmp_path, observed, expected,
 ):
     captured = {}
 
-    def run(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(returncode=returncode, stdout=stdout)
+    class Security:
+        def has_private_acl(self, path, *, user_sid):
+            captured["path"] = path
+            captured["user_sid"] = user_sid
+            if isinstance(observed, BaseException):
+                raise observed
+            return observed
 
+    security = Security()
     monkeypatch.setattr(paths.os, "name", "nt")
-    monkeypatch.setattr(paths.subprocess, "run", run)
+    monkeypatch.setattr(paths, "_windows_security", lambda: security)
+    monkeypatch.setattr(
+        paths,
+        "_windows_current_user_sid",
+        lambda: "S-1-5-21-current",
+    )
     token_file = tmp_path / "internal token; harmless"
 
     assert paths.windows_path_has_private_acl(token_file) is expected
-    assert captured["command"][-1] == str(token_file)
-    assert str(token_file) not in captured["command"][-2]
-    assert captured["kwargs"] == {
-        "check": False,
-        "capture_output": True,
-        "text": True,
+    assert captured == {
+        "path": token_file,
+        "user_sid": "S-1-5-21-current",
     }
 
 

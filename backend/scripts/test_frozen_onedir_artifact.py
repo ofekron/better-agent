@@ -198,6 +198,9 @@ def test_frozen_bundle_excludes_optional_mcp_cli_surface() -> None:
 
 
 def test_windows_materialization_uses_acl_authority() -> None:
+    paths_source = (
+        ROOT / "backend" / "paths.py"
+    ).read_text(encoding="utf-8")
     bundle_source = (
         ROOT / "backend" / "provider_frozen_bundle.py"
     ).read_text(encoding="utf-8")
@@ -216,6 +219,10 @@ def test_windows_materialization_uses_acl_authority() -> None:
     ).read_text(encoding="utf-8")
     assert "make_private_directory(run_dir)" in pinned_source
     assert "make_private_directory(container)" in sdk_source
+    assert "SetNamedSecurityInfoW" in paths_source
+    assert "GetNamedSecurityInfoW" in paths_source
+    assert '"powershell"' not in paths_source
+    assert '"icacls"' not in paths_source
     assert "state_root = ba_home()" in smoke_source
     assert "dir=state_root" in smoke_source
     for stage in (

@@ -21,9 +21,10 @@ or compute paths on demand inside functions rather than at module
 scope.
 """
 
+from __future__ import annotations
+
 import os
 import stat
-import subprocess
 import threading
 from pathlib import Path
 
@@ -37,6 +38,7 @@ _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_UMASK = 0o077
 _SECURED_ROOTS: set[str] = set()
 _WINDOWS_CURRENT_USER_SID: str | None = None
+_WINDOWS_SECURITY: _WindowsSecurity | None = None
 _PRIMARY_HOME_ENV = "BETTER_AGENT_HOME"
 _LEGACY_HOME_ENV = "BETTER_CLAUDE_HOME"
 _DEFAULT_STATE_DIR = ".better-claude"
@@ -115,50 +117,372 @@ def _install_private_umask() -> None:
         os.umask(tighter)
 
 
+class _WindowsSecurity:
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER = 1
+    _SECURITY_DESCRIPTOR_REVISION = 1
+    _SE_FILE_OBJECT = 1
+    _OWNER_SECURITY_INFORMATION = 0x00000001
+    _DACL_SECURITY_INFORMATION = 0x00000004
+    _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+    _SE_DACL_PROTECTED = 0x1000
+    _ERROR_INSUFFICIENT_BUFFER = 122
+    _ACCESS_ALLOWED_ACE_TYPE = 0x00
+    _OTHER_ALLOW_ACE_TYPES = frozenset({0x04, 0x05, 0x09, 0x0B})
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self.ctypes = ctypes
+        self.wintypes = wintypes
+        self.advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class SidAndAttributes(ctypes.Structure):
+            _fields_ = [
+                ("Sid", ctypes.c_void_p),
+                ("Attributes", wintypes.DWORD),
+            ]
+
+        class TokenUser(ctypes.Structure):
+            _fields_ = [("User", SidAndAttributes)]
+
+        class Acl(ctypes.Structure):
+            _fields_ = [
+                ("AclRevision", ctypes.c_ubyte),
+                ("Sbz1", ctypes.c_ubyte),
+                ("AclSize", wintypes.WORD),
+                ("AceCount", wintypes.WORD),
+                ("Sbz2", wintypes.WORD),
+            ]
+
+        self.TokenUser = TokenUser
+        self.Acl = Acl
+        self._configure_functions()
+
+    def _configure_functions(self) -> None:
+        ctypes = self.ctypes
+        wintypes = self.wintypes
+        advapi32 = self.advapi32
+        kernel32 = self.kernel32
+
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+        advapi32.ConvertStringSidToSidW.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = (
+            wintypes.BOOL
+        )
+        advapi32.GetSecurityDescriptorDacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        advapi32.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi32.GetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi32.GetSecurityDescriptorControl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.WORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+        advapi32.GetAce.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi32.GetAce.restype = wintypes.BOOL
+        advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        advapi32.EqualSid.restype = wintypes.BOOL
+
+    def _raise_last_error(self, operation: str) -> None:
+        error = self.ctypes.get_last_error()
+        raise OSError(error, operation)
+
+    def _local_free(self, pointer: object) -> None:
+        if pointer:
+            self.kernel32.LocalFree(
+                self.ctypes.cast(pointer, self.ctypes.c_void_p),
+            )
+
+    def current_user_sid(self) -> str:
+        ctypes = self.ctypes
+        wintypes = self.wintypes
+        token = wintypes.HANDLE()
+        if not self.advapi32.OpenProcessToken(
+            self.kernel32.GetCurrentProcess(),
+            self._TOKEN_QUERY,
+            ctypes.byref(token),
+        ):
+            self._raise_last_error("OpenProcessToken failed")
+        try:
+            size = wintypes.DWORD()
+            ctypes.set_last_error(0)
+            sized = self.advapi32.GetTokenInformation(
+                token,
+                self._TOKEN_USER,
+                None,
+                0,
+                ctypes.byref(size),
+            )
+            if (
+                sized
+                or size.value == 0
+                or ctypes.get_last_error()
+                != self._ERROR_INSUFFICIENT_BUFFER
+            ):
+                self._raise_last_error("GetTokenInformation size failed")
+            buffer = ctypes.create_string_buffer(size.value)
+            if not self.advapi32.GetTokenInformation(
+                token,
+                self._TOKEN_USER,
+                buffer,
+                size,
+                ctypes.byref(size),
+            ):
+                self._raise_last_error("GetTokenInformation failed")
+            user = ctypes.cast(
+                buffer,
+                ctypes.POINTER(self.TokenUser),
+            ).contents
+            string_sid = ctypes.c_wchar_p()
+            if not self.advapi32.ConvertSidToStringSidW(
+                user.User.Sid,
+                ctypes.byref(string_sid),
+            ):
+                self._raise_last_error("ConvertSidToStringSidW failed")
+            try:
+                value = string_sid.value
+                if not value:
+                    raise OSError("current Windows user SID is empty")
+                return value
+            finally:
+                self._local_free(string_sid)
+        finally:
+            self.kernel32.CloseHandle(token)
+
+    def _sid_pointer(self, value: str) -> object:
+        pointer = self.ctypes.c_void_p()
+        if not self.advapi32.ConvertStringSidToSidW(
+            value,
+            self.ctypes.byref(pointer),
+        ):
+            self._raise_last_error("ConvertStringSidToSidW failed")
+        return pointer
+
+    def apply_private_acl(
+        self,
+        path: Path,
+        *,
+        user_sid: str,
+        directory: bool,
+    ) -> None:
+        ctypes = self.ctypes
+        wintypes = self.wintypes
+        inheritance = "OICI" if directory else ""
+        descriptor_text = (
+            "D:P"
+            f"(A;{inheritance};FA;;;{user_sid})"
+            f"(A;{inheritance};FA;;;SY)"
+            f"(A;{inheritance};FA;;;BA)"
+        )
+        descriptor = ctypes.c_void_p()
+        if not self.advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text,
+            self._SECURITY_DESCRIPTOR_REVISION,
+            ctypes.byref(descriptor),
+            None,
+        ):
+            self._raise_last_error(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW failed",
+            )
+        try:
+            present = wintypes.BOOL()
+            defaulted = wintypes.BOOL()
+            dacl = ctypes.c_void_p()
+            if not self.advapi32.GetSecurityDescriptorDacl(
+                descriptor,
+                ctypes.byref(present),
+                ctypes.byref(dacl),
+                ctypes.byref(defaulted),
+            ) or not present.value or not dacl.value:
+                raise OSError("private Windows DACL is unavailable")
+            error = self.advapi32.SetNamedSecurityInfoW(
+                str(path),
+                self._SE_FILE_OBJECT,
+                (
+                    self._DACL_SECURITY_INFORMATION
+                    | self._PROTECTED_DACL_SECURITY_INFORMATION
+                ),
+                None,
+                None,
+                dacl,
+                None,
+            )
+            if error:
+                raise OSError(error, "SetNamedSecurityInfoW failed")
+        finally:
+            self._local_free(descriptor)
+
+    def has_private_acl(self, path: Path, *, user_sid: str) -> bool:
+        ctypes = self.ctypes
+        wintypes = self.wintypes
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        error = self.advapi32.GetNamedSecurityInfoW(
+            str(path),
+            self._SE_FILE_OBJECT,
+            (
+                self._OWNER_SECURITY_INFORMATION
+                | self._DACL_SECURITY_INFORMATION
+            ),
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+        if error:
+            raise OSError(error, "GetNamedSecurityInfoW failed")
+        sid_pointers: list[object] = []
+        try:
+            control = wintypes.WORD()
+            revision = wintypes.DWORD()
+            if (
+                not owner.value
+                or not dacl.value
+                or not self.advapi32.GetSecurityDescriptorControl(
+                    descriptor,
+                    ctypes.byref(control),
+                    ctypes.byref(revision),
+                )
+                or not control.value & self._SE_DACL_PROTECTED
+            ):
+                return False
+            sid_pointers = [
+                self._sid_pointer(value)
+                for value in (
+                    user_sid,
+                    "S-1-5-18",
+                    "S-1-5-32-544",
+                )
+            ]
+            if not any(
+                self.advapi32.EqualSid(owner, allowed)
+                for allowed in sid_pointers
+            ):
+                return False
+            acl = ctypes.cast(
+                dacl,
+                ctypes.POINTER(self.Acl),
+            ).contents
+            current_user_allowed = False
+            for index in range(acl.AceCount):
+                ace = ctypes.c_void_p()
+                if not self.advapi32.GetAce(
+                    dacl,
+                    index,
+                    ctypes.byref(ace),
+                ):
+                    return False
+                ace_type = ctypes.cast(
+                    ace,
+                    ctypes.POINTER(ctypes.c_ubyte),
+                ).contents.value
+                if ace_type in self._OTHER_ALLOW_ACE_TYPES:
+                    return False
+                if ace_type != self._ACCESS_ALLOWED_ACE_TYPE:
+                    continue
+                ace_sid = ctypes.c_void_p(ace.value + 8)
+                if not any(
+                    self.advapi32.EqualSid(ace_sid, allowed)
+                    for allowed in sid_pointers
+                ):
+                    return False
+                if self.advapi32.EqualSid(ace_sid, sid_pointers[0]):
+                    current_user_allowed = True
+            return current_user_allowed
+        finally:
+            for sid in sid_pointers:
+                self._local_free(sid)
+            self._local_free(descriptor)
+
+
+def _windows_security() -> _WindowsSecurity:
+    global _WINDOWS_SECURITY
+    if _WINDOWS_SECURITY is None:
+        _WINDOWS_SECURITY = _WindowsSecurity()
+    return _WINDOWS_SECURITY
+
+
 def _windows_current_user_sid() -> str:
     global _WINDOWS_CURRENT_USER_SID
-    if _WINDOWS_CURRENT_USER_SID is not None:
-        return _WINDOWS_CURRENT_USER_SID
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    sid = result.stdout.strip()
-    if not sid:
-        raise RuntimeError("failed to resolve current Windows user SID")
-    _WINDOWS_CURRENT_USER_SID = sid
+    if _WINDOWS_CURRENT_USER_SID is None:
+        _WINDOWS_CURRENT_USER_SID = _windows_security().current_user_sid()
     return _WINDOWS_CURRENT_USER_SID
 
 
 def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
-    sid = _windows_current_user_sid()
-    inheritance = "(OI)(CI)" if directory else ""
-    subprocess.run(
-        [
-            "icacls",
-            str(path),
-            "/inheritance:r",
-            "/grant:r",
-            f"*{sid}:{inheritance}F",
-            "/grant:r",
-            f"*S-1-5-32-544:{inheritance}F",
-            "/grant:r",
-            f"*S-1-5-18:{inheritance}F",
-            "/remove:g",
-            "*S-1-1-0",
-            "*S-1-5-32-545",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+    _windows_security().apply_private_acl(
+        path,
+        user_sid=_windows_current_user_sid(),
+        directory=directory,
     )
 
 
@@ -174,47 +498,18 @@ def make_private_file(path: Path) -> None:
 def windows_path_has_private_acl(path: Path) -> bool:
     if os.name != "nt":
         return False
-    script = r"""
-$ErrorActionPreference = "Stop"
-$acl = Get-Acl -LiteralPath $args[0]
-$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$allowed = @($current, "S-1-5-18", "S-1-5-32-544")
-$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner) {
-    exit 2
-}
-foreach ($rule in $acl.GetAccessRules(
-    $true,
-    $true,
-    [System.Security.Principal.SecurityIdentifier]
-)) {
-    if (
-        $rule.AccessControlType -eq
-            [System.Security.AccessControl.AccessControlType]::Allow -and
-        $allowed -notcontains $rule.IdentityReference.Value
-    ) {
-        exit 3
-    }
-}
-Write-Output "private"
-"""
     try:
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                script,
-                str(path),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        return _windows_security().has_private_acl(
+            path,
+            user_sid=_windows_current_user_sid(),
         )
-    except OSError:
+    except (
+        AttributeError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ):
         return False
-    return result.returncode == 0 and result.stdout.strip() == "private"
 
 
 def make_private_directory(path: Path) -> None:
@@ -236,7 +531,7 @@ def make_private_directory(path: Path) -> None:
     if os.name == "nt":
         try:
             _set_windows_private_acl(path, directory=True)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (AttributeError, OSError, RuntimeError, ValueError) as exc:
             raise PermissionError(
                 "private directory ACL update failed",
             ) from exc
