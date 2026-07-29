@@ -19,6 +19,7 @@ _TMP_HOME = _test_home.isolate("bc-test-machine-node-sync-")
 import config_store  # noqa: E402
 import extension_api  # noqa: E402
 import extension_store  # noqa: E402
+import node_client  # noqa: E402
 import node_link  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import node_store  # noqa: E402
@@ -793,6 +794,117 @@ def test_harness_surface_is_registered_for_node_sync() -> None:
     assert "sync_harness_profile" in node_rpc_handlers._HANDLERS
 
 
+async def test_projection_generation_orders_old_slow_before_new_fast() -> None:
+    surfaces = (
+        ("sync_provider_config", "provider_state"),
+        ("sync_extension_config", "extension_state"),
+        ("sync_harness_profile", "harness_state"),
+    )
+    for method, param in surfaces:
+        applied: list[int] = []
+        old_started = asyncio.Event()
+        release_old = asyncio.Event()
+        new_entered_dispatch = asyncio.Event()
+        current_generation = 1
+        original_handler = node_rpc_handlers._HANDLERS[method]
+
+        async def apply_state(params: dict) -> dict:
+            version = params[param]["version"]
+            if version == 1:
+                old_started.set()
+                await release_old.wait()
+            applied.append(version)
+            return {"ok": True}
+
+        def guard(generation: int) -> None:
+            if generation != current_generation:
+                raise node_rpc_handlers.StaleProjectionGeneration()
+
+        async def dispatch_new():
+            new_entered_dispatch.set()
+            return await node_rpc_handlers.dispatch_rpc(
+                method,
+                {param: {"version": 2}},
+                assert_projection_current=lambda: guard(2),
+            )
+
+        node_rpc_handlers._HANDLERS[method] = apply_state
+        try:
+            old = asyncio.create_task(
+                node_rpc_handlers.dispatch_rpc(
+                    method,
+                    {param: {"version": 1}},
+                    assert_projection_current=lambda: guard(1),
+                )
+            )
+            await old_started.wait()
+            current_generation = 2
+            new = asyncio.create_task(dispatch_new())
+            await new_entered_dispatch.wait()
+            assert applied == [], (method, applied)
+            release_old.set()
+            await asyncio.gather(old, new)
+        finally:
+            release_old.set()
+            node_rpc_handlers._HANDLERS[method] = original_handler
+        assert applied == [1, 2], (method, applied)
+        try:
+            await node_rpc_handlers.dispatch_rpc(
+                method,
+                {param: {"version": 1}},
+                assert_projection_current=lambda: guard(1),
+            )
+        except node_rpc_handlers.StaleProjectionGeneration:
+            pass
+        else:
+            raise AssertionError(f"{method} accepted a stale queued projection")
+        assert applied == [1, 2], (method, applied)
+
+
+async def test_node_client_tracks_and_rejects_stale_rpc_tasks() -> None:
+    stale_client = node_client.NodeClient()
+    stale_client._connection_generation = 2
+    await stale_client._handle_rpc_request(
+        {
+            "request_id": "stale",
+            "method": "sync_harness_profile",
+            "params": {"harness_state": {}},
+        },
+        1,
+    )
+    assert stale_client._send_queue.empty()
+
+    active_client = node_client.NodeClient()
+    active_client._connection_generation = 1
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_dispatch = node_rpc_handlers.dispatch_rpc
+
+    async def blocked_dispatch(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    node_rpc_handlers.dispatch_rpc = blocked_dispatch  # type: ignore[assignment]
+    try:
+        await active_client._route_inbound(
+            {
+                "type": "rpc_request",
+                "request_id": "active",
+                "method": "sync_harness_profile",
+                "params": {"harness_state": {}},
+            },
+            1,
+        )
+        await started.wait()
+        assert len(active_client._rpc_tasks) == 1
+        await active_client.stop()
+        assert not active_client._rpc_tasks
+    finally:
+        release.set()
+        node_rpc_handlers.dispatch_rpc = original_dispatch  # type: ignore[assignment]
+
+
 async def _main() -> None:
     await test_sync_providers_all_nodes_reports_node_failures()
     await test_first_approval_uses_topology_cwd_roots()
@@ -818,6 +930,8 @@ async def _main() -> None:
     test_harness_sync_state_round_trips()
     test_harness_sync_state_refuses_foreign_schema()
     test_harness_surface_is_registered_for_node_sync()
+    await test_projection_generation_orders_old_slow_before_new_fast()
+    await test_node_client_tracks_and_rejects_stale_rpc_tasks()
 
 
 if __name__ == "__main__":
