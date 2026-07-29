@@ -593,6 +593,7 @@
   "session.unfiled": "未分類",
   "session.pinnedGroup": "ピン留め",
   "session.newSessionsGroup": "新規セッション",
+  "session.sessionsGroup": "セッション",
   "session.tags": "タグ",
   "session.advancedFilterPanel": "フィルター",
   "session.folderViewOn": "フォルダービュー — クリックでフラットリスト",

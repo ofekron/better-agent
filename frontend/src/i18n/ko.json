@@ -597,6 +597,7 @@
   "session.unfiled": "분류 안 됨",
   "session.pinnedGroup": "고정됨",
   "session.newSessionsGroup": "새 세션",
+  "session.sessionsGroup": "세션",
   "session.tags": "태그",
   "session.advancedFilterPanel": "필터",
   "session.folderViewOn": "폴더 보기 — 클릭하면 평면 목록으로",

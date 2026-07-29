@@ -618,6 +618,7 @@
   "session.unfiled": "Unfiled",
   "session.pinnedGroup": "Pinned",
   "session.newSessionsGroup": "New sessions",
+  "session.sessionsGroup": "Sessions",
   "session.tags": "Tags",
   "session.selectSession": "Select session",
   "session.selectedCount": "{{count}} selected",

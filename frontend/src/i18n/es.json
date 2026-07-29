@@ -597,6 +597,7 @@
   "session.unfiled": "Sin clasificar",
   "session.pinnedGroup": "Fijadas",
   "session.newSessionsGroup": "Sesiones nuevas",
+  "session.sessionsGroup": "Sesiones",
   "session.tags": "Etiquetas",
   "session.advancedFilterPanel": "Filtros",
   "session.folderViewOn": "Vista por carpeta — clic para lista plana",

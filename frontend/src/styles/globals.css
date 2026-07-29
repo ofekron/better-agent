@@ -1358,10 +1358,6 @@ select:focus-visible,
   color: var(--accent);
 }
 
-.session-unfiled-heading {
-  margin-top: 4px;
-}
-
 .session-new-folder-heading {
   margin-top: 4px;
   border: 1px dashed var(--border, var(--bg-hover));

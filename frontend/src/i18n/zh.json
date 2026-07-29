@@ -597,6 +597,7 @@
   "session.unfiled": "未归类",
   "session.pinnedGroup": "已置顶",
   "session.newSessionsGroup": "新会话",
+  "session.sessionsGroup": "会话",
   "session.tags": "标签",
   "session.advancedFilterPanel": "筛选",
   "session.folderViewOn": "文件夹视图 — 点击查看扁平列表",

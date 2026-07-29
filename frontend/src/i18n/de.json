@@ -593,6 +593,7 @@
   "session.unfiled": "Nicht zugeordnet",
   "session.pinnedGroup": "Angeheftet",
   "session.newSessionsGroup": "Neue Sitzungen",
+  "session.sessionsGroup": "Sitzungen",
   "session.tags": "Tags",
   "session.advancedFilterPanel": "Filter",
   "session.folderViewOn": "Ordneransicht — Klick für flache Liste",

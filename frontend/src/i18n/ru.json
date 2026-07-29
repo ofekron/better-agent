@@ -599,6 +599,7 @@
   "session.unfiled": "Без папки",
   "session.pinnedGroup": "Закреплённые",
   "session.newSessionsGroup": "Новые сессии",
+  "session.sessionsGroup": "Сессии",
   "session.tags": "Теги",
   "session.advancedFilterPanel": "Фильтры",
   "session.folderViewOn": "Просмотр по папкам — нажмите для плоского списка",
