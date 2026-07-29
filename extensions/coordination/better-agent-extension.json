@@ -32,7 +32,12 @@
     ]
   },
   "permissions": {
-    "internal_loopback": true
+    "internal_loopback": true,
+    "native_mcp": {
+      "better-agent-coordination": [
+        "global"
+      ]
+    }
   },
   "marketplace": {
     "product_id": "",

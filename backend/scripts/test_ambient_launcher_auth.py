@@ -193,9 +193,19 @@ def test_shipped_coordination_manifest_declares_the_opt_in() -> bool:
         json.loads(manifest_path.read_text(encoding="utf-8"))
     )
     item = manifest["entrypoints"]["mcp"][0]
-    ok = item["ambient_native"] is True and item["ambient_auth"] == "launcher"
-    print(f"{OK if ok else FAIL} shipped coordination manifest declares the ambient launcher-auth opt-in "
-          f"(ambient_native={item.get('ambient_native')}, ambient_auth={item.get('ambient_auth')!r})")
+    opted_in = item["ambient_native"] is True and item["ambient_auth"] == "launcher"
+    # Eligibility alone is not enough: without a permissions.native_mcp
+    # declaration the server can never be granted, so ambient exposure stays
+    # impossible no matter how the entrypoint is flagged.
+    server_id = item.get("replaces_builtin") or item["name"]
+    declarations = extension_store.native_mcp_declarations(
+        {"manifest": manifest, "source": {"install_path": str(manifest_path.parent)}}
+    )
+    declared = declarations.get((manifest["id"], server_id))
+    grantable = declared is not None and "global" in declared.scopes
+    ok = opted_in and grantable
+    print(f"{OK if ok else FAIL} shipped coordination manifest is ambient-eligible AND grantable "
+          f"(opted_in={opted_in}, grantable={grantable})")
     return ok
 
 
