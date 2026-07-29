@@ -144,6 +144,21 @@ class ThreadLoopHost:
                     logger.exception("%s work failed while cancelling", self._name)
             raise
 
+    async def run_blocking(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Await a blocking callable on this host's own executor.
+
+        The sync counterpart of `run`: same guarantee that the work
+        leaves the caller's loop, for subsystems whose work is plain
+        blocking code rather than a coroutine. Using the host's executor
+        rather than the default one keeps a slow subsystem from
+        starving every other `to_thread` caller in the process.
+        """
+        async def _call() -> Any:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: fn(*args))
+
+        return await self.run(_call)
+
     # -- facts ----------------------------------------------------------
 
     def publish_fact(
