@@ -284,11 +284,23 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                 return_value={"backend_routes": True},
             ),
             patch(
-                "extension_store.get_extension_settings",
+                "extension_store.get_extension_setting_values",
                 side_effect=lambda _extension_id: {
-                    "label": state["setting"],
-                    "access_token": "never-persist",
+                    "schema": record["manifest"]["entrypoints"]["settings"],
+                    "values": {
+                        "label": state["setting"],
+                        "access_token": "never-persist",
+                    },
                 },
+            ),
+            patch(
+                "extension_store.get_extension_settings",
+                side_effect=lambda _extension_id: (_ for _ in ()).throw(
+                    AssertionError(
+                        "turn dispatch must not call the OS-keychain-probing "
+                        "get_extension_settings; use get_extension_setting_values",
+                    ),
+                ),
             ),
             patch(
                 "extension_store.resolve_native_mcp_servers_for_context",

@@ -217,7 +217,13 @@ def _extension_projection(
     entrypoints = entrypoints if type(entrypoints) is dict else {}
     settings_schema = entrypoints.get("settings")
     settings_schema = settings_schema if type(settings_schema) is list else []
-    setting_values = extension_store.get_extension_settings(extension_id)
+    # Turn-dispatch hot path: use the non-probing accessor. Secret refs are
+    # emitted as opaque placeholders below and resolved later by the extension's
+    # own loopback config read (extension_store.resolve_all_settings) — this
+    # projection never needs `secret_present`, so it must not touch the OS
+    # keychain here.
+    setting_values = extension_store.get_extension_setting_values(extension_id)
+    setting_values = setting_values.get("values") if type(setting_values) is dict else {}
     setting_values = setting_values if type(setting_values) is dict else {}
     mcp_items = entrypoints.get("mcp")
     mcp_items = mcp_items if type(mcp_items) is list else []

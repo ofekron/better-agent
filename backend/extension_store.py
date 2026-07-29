@@ -7673,9 +7673,12 @@ def _setting_secret_account(extension_id: str, key: str) -> str:
     return f"{extension_id}:{key}"
 
 
-def get_extension_settings(extension_id: str) -> dict[str, Any]:
-    """Schema + current values for Settings UI. Secrets are write-only:
-    returned as ``None`` with a ``secret_present`` flag, never the value."""
+def get_extension_setting_values(extension_id: str) -> dict[str, Any]:
+    """Schema + current values, without probing the OS keychain. Secret-typed
+    values are always ``None`` (write-only) and carry no presence flag — use
+    ``get_extension_settings`` when the caller actually needs
+    ``secret_present``. Safe to call on a turn-dispatch hot path: touches
+    only local settings storage, never ``password_manager``/the OS keychain."""
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
     schema = _setting_schema_list(extension_id)
@@ -7683,17 +7686,30 @@ def get_extension_settings(extension_id: str) -> dict[str, Any]:
     stored_values = entry.get("values") if isinstance(entry, dict) else None
     stored_values = stored_values if isinstance(stored_values, dict) else {}
     values: dict[str, Any] = {}
-    secret_present: dict[str, bool] = {}
     for item in schema:
         key = item["key"]
         if item["type"] == "secret":
-            secret_present[key] = password_manager.has_service_password(
-                _SETTING_SECRET_SERVICE, _setting_secret_account(extension_id, key)
-            )
             values[key] = None
         else:
             values[key] = stored_values.get(key, item.get("default"))
-    return {"schema": schema, "values": values, "secret_present": secret_present}
+    return {"schema": schema, "values": values}
+
+
+def get_extension_settings(extension_id: str) -> dict[str, Any]:
+    """Schema + current values for Settings UI. Secrets are write-only:
+    returned as ``None`` with a ``secret_present`` flag (an OS keychain
+    probe), never the value. Not safe for a turn-dispatch hot path — use
+    ``get_extension_setting_values`` there instead."""
+    base = get_extension_setting_values(extension_id)
+    schema = base["schema"]
+    secret_present: dict[str, bool] = {
+        item["key"]: password_manager.has_service_password(
+            _SETTING_SECRET_SERVICE, _setting_secret_account(extension_id, item["key"])
+        )
+        for item in schema
+        if item["type"] == "secret"
+    }
+    return {"schema": schema, "values": base["values"], "secret_present": secret_present}
 
 
 def set_extension_setting(extension_id: str, key: str, value: Any) -> dict[str, Any]:

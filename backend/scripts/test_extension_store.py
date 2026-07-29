@@ -33,6 +33,7 @@ if _BACKEND not in sys.path:
 
 import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
+import password_manager  # noqa: E402
 import personal_harness_extension  # noqa: E402
 from json_store import read_json, write_json  # noqa: E402
 
@@ -3092,6 +3093,75 @@ def test_prune_extension_versions_keeps_active_and_newest_fallbacks() -> None:
         raise AssertionError(
             f"pruning retained {sorted(remaining)}, expected {sorted(expected)}"
         )
+
+
+def test_get_extension_setting_values_never_touches_os_keychain() -> None:
+    """Regression for the turn-dispatch crash where a locked/slow OS keychain
+    raised RuntimeError("OS credential read timed out") all the way up through
+    run_turn. Root cause: provider_runtime_plan_source._extension_projection
+    called extension_store.get_extension_settings(), a Settings-UI helper that
+    probes password_manager.has_service_password() (-> the OS keychain) for
+    every secret-typed setting, purely to compute a `secret_present` flag the
+    turn-dispatch projection never uses. get_extension_setting_values() is the
+    non-probing accessor the hot path must use instead; get_extension_settings()
+    (still used by the Settings UI) keeps the real probe."""
+    package = Path(tempfile.mkdtemp(prefix="bc-test-keychain-safe-ext-")) / "keychain-safe-ext"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.keychain-safe-ext",
+        "name": "Keychain safe ext",
+        "version": "0.1.0",
+        "description": "Fixture proving settings projection never blocks on the OS keychain.",
+        "surfaces": [],
+        "entrypoints": {
+            "settings": [
+                {"key": "label", "label": "Label", "type": "string", "default": "unset"},
+                {"key": "api_key", "label": "API key", "type": "secret"},
+            ],
+        },
+        "permissions": {},
+        "protocol": {"version": 1},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "keychain-safe-ext",
+            "ref": "",
+            "commit_sha": "synthetic-test",
+        },
+        persist=True,
+    )
+    extension_id = record["manifest"]["id"]
+    extension_store.set_enabled(extension_id, True)
+
+    def _timed_out(*_args, **_kwargs):
+        raise RuntimeError("OS credential read timed out")
+
+    original_has_service_password = password_manager.has_service_password
+    password_manager.has_service_password = _timed_out  # type: ignore[assignment]
+    try:
+        values = extension_store.get_extension_setting_values(extension_id)
+        if values["values"]["label"] != "unset" or values["values"]["api_key"] is not None:
+            raise AssertionError(f"unexpected non-probing values: {values}")
+
+        try:
+            extension_store.get_extension_settings(extension_id)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "get_extension_settings should still probe the OS keychain for "
+                "secret_present (this fixture only proves the turn-dispatch "
+                "accessor no longer does)"
+            )
+    finally:
+        password_manager.has_service_password = original_has_service_password  # type: ignore[assignment]
+        extension_store.uninstall(extension_id)
 
 
 def test_prune_extension_versions_tolerates_vanishing_dir() -> None:
@@ -6414,6 +6484,7 @@ if __name__ == "__main__":
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
         test_prune_extension_versions_tolerates_vanishing_dir()
+        test_get_extension_setting_values_never_touches_os_keychain()
     finally:
         extension_store.dependency_plan.verified_active_python = original_verified_active_python
         installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
