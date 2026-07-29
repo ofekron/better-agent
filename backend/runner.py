@@ -115,6 +115,7 @@ from communication_modes import (
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
 from provider_completion import classify_completion_after_progress
+from process_identity import process_identity_to_dict
 from runner_operation_host import internal_token_lease
 from runner_exit import hard_exit
 from trace_collector import aggregate_claude_turn_usage
@@ -650,6 +651,12 @@ def _materialize_claude_runtime_plugin(
         }, indent=2) + "\n",
         encoding="utf-8",
     )
+    for root, directories, files in os.walk(plugin_dir):
+        os.chmod(root, 0o555)
+        for directory in directories:
+            os.chmod(Path(root) / directory, 0o555)
+        for filename in files:
+            os.chmod(Path(root) / filename, 0o444)
     return {"type": "local", "path": str(plugin_dir)}
 
 
@@ -3015,8 +3022,13 @@ async def _run_one_turn(
                             _cli_proc = client._transport._process
                             _cli_pid = getattr(_cli_proc, "pid", None)
                             state["cli_pid"] = int(_cli_pid) if _cli_pid else None
+                            state["cli_identity"] = (
+                                process_identity_to_dict(int(_cli_pid))
+                                if _cli_pid else None
+                            )
                         except Exception:
                             state["cli_pid"] = None
+                            state["cli_identity"] = None
                         try:
                             _atomic_write_json(state_path, state)
                             log.info("state.json written: session_id=%s", sid)
@@ -3410,6 +3422,18 @@ def _claude_mcp_variants(
     return result
 
 
+def _claude_cli_extra_args(*, bare_config: bool) -> dict[str, None]:
+    args = {
+        "exclude-dynamic-system-prompt-sections": None,
+        "strict-mcp-config": None,
+    }
+    # Claude Code 2.1.x on Windows treats --bare as unauthenticated, so bare
+    # sessions isolate slash commands without using the provider's --bare flag.
+    if bare_config:
+        args["disable-slash-commands"] = None
+    return args
+
+
 async def _run(
     run_dir: Path,
     inputs: dict,
@@ -3768,13 +3792,7 @@ async def _run(
     # a turn at all.
     prompt = prepend_capability_context(prompt, inputs)
 
-    extra_args = {"exclude-dynamic-system-prompt-sections": None}
-    if _bare:
-        # Claude Code 2.1.x on Windows treats --bare as an unauthenticated
-        # environment for subscription auth, yielding "Not logged in" even
-        # when the regular CLI is logged in. Keep isolation via empty
-        # setting_sources, no runtime skill plugin, and disabled slash commands.
-        extra_args["disable-slash-commands"] = None
+    extra_args = _claude_cli_extra_args(bare_config=_bare)
 
     raw_provider_run_config = inputs.get("provider_run_config")
     provider_run_config = raw_provider_run_config if isinstance(raw_provider_run_config, dict) else {}

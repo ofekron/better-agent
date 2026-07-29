@@ -21,6 +21,29 @@ def capture_process_identity(pid: int) -> ProcessIdentity | None:
         return None
 
 
+def process_identity_to_dict(pid: int) -> dict[str, int | float] | None:
+    identity = capture_process_identity(pid)
+    if identity is None:
+        return None
+    return {
+        "pid": identity.pid,
+        "create_time": identity.create_time,
+    }
+
+
+def process_identity_from_dict(value: object) -> ProcessIdentity | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        identity = ProcessIdentity(
+            pid=int(value["pid"]),
+            create_time=float(value["create_time"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return identity if identity.pid > 0 else None
+
+
 def process_identity_is_live(identity: ProcessIdentity) -> bool:
     current = capture_process_identity(identity.pid)
     return current == identity

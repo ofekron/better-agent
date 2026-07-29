@@ -182,24 +182,18 @@ def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
                             "execution interpreter cannot be pinned",
                         )
                     continue
+                # Copy from the attested descriptor instead of hardlinking:
+                # os.link bumps the shared inode's ctime, which races every
+                # concurrent attestation of the same binary (identity capture
+                # and open-time checks both pin ctime).
+                from provider_pinned_launch import _copy_descriptor
+
                 target = root / f"{position}-{Path(argv[index]).name}"
-                try:
-                    os.link(chain.components[position].resolved_path, target)
-                except OSError as exc:
-                    raise ExecutionContractError(
-                        "execution component cannot be pinned",
-                    ) from exc
-                observed = target.stat()
-                expected = os.fstat(fd)
-                if (
-                    observed.st_dev != expected.st_dev
-                    or observed.st_ino != expected.st_ino
-                    or FileIdentity.capture(target).sha256
-                    != chain.components[position].sha256
-                ):
-                    raise ExecutionContractError(
-                        "execution component pin mismatch",
-                    )
+                _copy_descriptor(
+                    fd,
+                    target,
+                    chain.components[position],
+                )
                 argv[index] = str(target)
             yield PinnedLaunch(tuple(argv), ())
 

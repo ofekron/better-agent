@@ -11116,6 +11116,59 @@ async def _drain_prompt_handoffs() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _reconcile_queued_delivery_attempt(
+    session_id: str,
+    queued_id: str,
+    lifecycle_msg_id: str,
+    queued_attempt: int,
+) -> int:
+    import lifecycle_command_store
+
+    request_id = f"user-turn:{lifecycle_msg_id}:{queued_attempt}:begin"
+    transition = await asyncio.to_thread(
+        lifecycle_command_store.transition_for,
+        session_id,
+        request_id,
+    )
+    snapshot = coordinator.lifecycle_commands.snapshot(session_id)
+    active_identity = snapshot.identity
+    active_same_turn = (
+        active_identity is not None
+        and active_identity.lifecycle_message_id == lifecycle_msg_id
+    )
+    if transition is None and active_same_turn:
+        execution = snapshot.execution
+        if execution is not None and execution.phase not in {
+            "complete", "stopped", "failed", "aborted",
+        }:
+            raise RuntimeError(
+                "queued retry collides with an active recovered execution"
+            )
+        await coordinator.lifecycle_commands.finish_turn(
+            request_id=(
+                f"startup-reconcile:{lifecycle_msg_id}:{queued_attempt}:finish"
+            ),
+            session_id=session_id,
+            identity=active_identity,
+            outcome="failed",
+        )
+        return queued_attempt
+    if transition is None or active_same_turn:
+        return queued_attempt
+    if snapshot.identity is not None:
+        return queued_attempt
+    reserved = await asyncio.to_thread(
+        session_manager.reserve_queued_prompt_delivery_attempt,
+        session_id,
+        queued_id,
+    )
+    if reserved is None:
+        raise RuntimeError(
+            "queued prompt disappeared during startup attempt reconciliation"
+        )
+    return reserved
+
+
 async def _re_enqueue_queued_prompts() -> set[str]:
     """Re-enqueue accepted prompts that have not become user messages.
 
@@ -11184,6 +11237,12 @@ async def _re_enqueue_queued_prompts() -> set[str]:
                         qp_id,
                         {"lifecycle_msg_id": lifecycle_msg_id},
                     )
+                delivery_attempt = await _reconcile_queued_delivery_attempt(
+                    sid,
+                    qp_id,
+                    lifecycle_msg_id,
+                    int(qp.get("delivery_attempt") or 0),
+                )
 
                 if (
                     (client_id and client_id in existing_client_ids)
@@ -11220,6 +11279,7 @@ async def _re_enqueue_queued_prompts() -> set[str]:
                     "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                     "capability_contexts": qp.get("capability_contexts") or [],
                     "harness_profile_id": qp.get("harness_profile_id") or "",
+                    "_delivery_attempt": delivery_attempt,
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                     "collapse_key": qp.get("collapse_key") or "",
                     "collapse_policy": qp.get("collapse_policy") or "",
@@ -11298,10 +11358,6 @@ async def _recover_in_flight_task() -> None:
     startup_tasks: list[asyncio.Task] = []
     try:
         loop = asyncio.get_running_loop()
-        reenqueue_task = asyncio.create_task(
-            _re_enqueue_queued_prompts(),
-            name="startup-queued-prompt-rehydration",
-        )
         candidate_task = asyncio.create_task(
             asyncio.to_thread(pre_provider_orphan_candidates),
             name="startup-pre-provider-orphan-candidates",
@@ -11314,7 +11370,7 @@ async def _recover_in_flight_task() -> None:
             ),
             name="startup-provider-run-classification",
         )
-        startup_tasks.extend((reenqueue_task, candidate_task, recovery_task))
+        startup_tasks.extend((candidate_task, recovery_task))
         recovered = await recovery_task
         if recovered and not installation_profile.integrations_enabled():
             import extension_session_ownership
@@ -11388,7 +11444,7 @@ async def _recover_in_flight_task() -> None:
         # The gate protects provider-run ownership: classification and every
         # alive run must be registered before rehydrated prompts can start.
         await coordinator.turn_manager.reconcile_lifecycle_projection()
-        rehydrated_session_ids = await reenqueue_task
+        rehydrated_session_ids = await _re_enqueue_queued_prompts()
         for sid in sorted(rehydrated_session_ids):
             await coordinator.start_session_processor_async(sid)
         if recovered:

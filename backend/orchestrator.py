@@ -3706,23 +3706,8 @@ class Coordinator:
                 await self.dispatch_raw(_sid, event_dict)
             params["ws_callback"] = dispatch_ws
             is_review = params.pop("_review", False)
+            retry_params = None
             try:
-                if logical_turn_identity and logical_request_prefix:
-                    lifecycle_session = session_manager.get_fields(
-                        app_session_id,
-                        ("supervisor_enabled",),
-                    ) or {}
-                    await self.lifecycle_commands.begin_turn(
-                        request_id=f"{logical_request_prefix}:begin",
-                        session_id=app_session_id,
-                        identity=logical_turn_identity,
-                        execution_policy=(
-                            "sequential"
-                            if lifecycle_session.get("supervisor_enabled")
-                            else "single"
-                        ),
-                    )
-                    logical_turn_claimed = True
                 import startup_recovery_gate
                 if (
                     self._startup_recovery_can_overlap_session(app_session_id)
@@ -3741,6 +3726,22 @@ class Coordinator:
                 if item_id and await cleanup_cancelled_queue_item():
                     logical_turn_outcome = "stopped"
                     continue
+                if logical_turn_identity and logical_request_prefix:
+                    lifecycle_session = session_manager.get_fields(
+                        app_session_id,
+                        ("supervisor_enabled",),
+                    ) or {}
+                    await self.lifecycle_commands.begin_turn(
+                        request_id=f"{logical_request_prefix}:begin",
+                        session_id=app_session_id,
+                        identity=logical_turn_identity,
+                        execution_policy=(
+                            "sequential"
+                            if lifecycle_session.get("supervisor_enabled")
+                            else "single"
+                        ),
+                    )
+                    logical_turn_claimed = True
                 if is_review:
                     from orchs.supervisor import request_review
                     await request_review(
@@ -3821,32 +3822,6 @@ class Coordinator:
                     and any(item.get("id") == item_id for item in queued)
                 ):
                     retry_params = original_params
-                    retry_params["_delivery_attempt"] = int(
-                        retry_params.get("_delivery_attempt") or 0
-                    ) + 1
-                    pending = []
-                    while not q.empty():
-                        pending.append(q.get_nowait())
-                    q.put_nowait(retry_params)
-                    for pending_item in pending:
-                        q.put_nowait(pending_item)
-                    ids = self._queued_ids.setdefault(app_session_id, [])
-                    if item_id not in ids:
-                        ids.append(item_id)
-                    try:
-                        await self.dispatch_raw(app_session_id, {
-                            "type": "prompt_queued",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                "queued_id": item_id,
-                                "prompt_preview": retry_params.get("prompt", ""),
-                                "queue_position": 0,
-                                "client_id": retry_params.get("client_id"),
-                            },
-                        })
-                    except Exception:
-                        logger.debug("prompt retry queue emit failed", exc_info=True)
-                    await asyncio.sleep(min(2 ** retry_params["_delivery_attempt"], 30))
             finally:
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:
@@ -3911,6 +3886,40 @@ class Coordinator:
                                     outcome=logical_turn_outcome,
                                 )
                             )
+                if retry_params is not None:
+                    reserved_attempt = await asyncio.to_thread(
+                        session_manager.reserve_queued_prompt_delivery_attempt,
+                        app_session_id,
+                        item_id,
+                    )
+                    if reserved_attempt is None:
+                        raise RuntimeError(
+                            "queued prompt disappeared before retry reservation"
+                        )
+                    retry_params["_delivery_attempt"] = reserved_attempt
+                    pending = []
+                    while not q.empty():
+                        pending.append(q.get_nowait())
+                    q.put_nowait(retry_params)
+                    for pending_item in pending:
+                        q.put_nowait(pending_item)
+                    ids = self._queued_ids.setdefault(app_session_id, [])
+                    if item_id not in ids:
+                        ids.append(item_id)
+                    try:
+                        await self.dispatch_raw(app_session_id, {
+                            "type": "prompt_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                "queued_id": item_id,
+                                "prompt_preview": retry_params.get("prompt", ""),
+                                "queue_position": 0,
+                                "client_id": retry_params.get("client_id"),
+                            },
+                        })
+                    except Exception:
+                        logger.debug("prompt retry queue emit failed", exc_info=True)
+                    await asyncio.sleep(min(2 ** reserved_attempt, 30))
         # If the queue is empty, drop ourselves so a future submit can
         # spawn a fresh task. (Don't pop the queue itself — it may have
         # been swapped by a re-spawn race.)

@@ -383,31 +383,34 @@ class AgyProvider(SessionEventsProvider):
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
         try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=app_session_id,
-                resolved_harness_run_config=input_payload.get(
-                    "resolved_harness_run_config",
-                ),
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=backend_url,
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=app_session_id,
-                cwd=cwd,
-                model=model,
-                provider_id=self.id,
-                bare_config=bool(input_payload.get("bare_config")),
-                user_facing=bool(input_payload.get("user_facing"))
-                and not bool(input_payload.get("bare_config")),
-                disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
-                runtime_hydration=runtime_hydration,
-            ))
             with launch.open_runner() as pinned:
+                # Env is built after runner materialization: the runtime
+                # bootstrap issued inside build_better_agent_run_env is a
+                # short single-use lease that must start at spawn time.
+                env = self.finalize_run_env(
+                    self.build_env(),
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    resolved_harness_run_config=input_payload.get(
+                        "resolved_harness_run_config",
+                    ),
+                )
+                if extra_env:
+                    env.update(extra_env)
+                env.update(build_better_agent_run_env(
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    provider_id=self.id,
+                    bare_config=bool(input_payload.get("bare_config")),
+                    user_facing=bool(input_payload.get("user_facing"))
+                    and not bool(input_payload.get("bare_config")),
+                    disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
+                    runtime_hydration=runtime_hydration,
+                ))
                 pass_fds = (
                     {"pass_fds": pinned.pass_fds}
                     if os.name != "nt" and pinned.pass_fds

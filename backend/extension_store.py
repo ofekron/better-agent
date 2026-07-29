@@ -6234,8 +6234,12 @@ def required_profile_mcp_server_names(inputs: dict[str, Any]) -> set[str]:
             item_name = str(item.get("name") or "")
             if item_name not in selected_names:
                 continue
-            required.add(str(item.get("replaces_builtin") or item_name))
             mapped.add((extension_id, item_name))
+            # A selected server whose delivery gates (predicate, user_facing,
+            # bare) exclude it from this run cannot be required for this run.
+            if not _mcp_item_available_for_inputs(record, item, inputs):
+                continue
+            required.add(str(item.get("replaces_builtin") or item_name))
     for extension_id, selected in selected_by_extension.items():
         if not isinstance(selected, list):
             continue

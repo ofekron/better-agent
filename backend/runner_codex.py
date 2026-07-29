@@ -75,6 +75,7 @@ import extension_store
 import mcp_stdio_bridge
 from mcp_tool_discovery import tool_discovery
 from runs_dir import atomic_write_json
+from process_identity import process_identity_to_dict
 from runner_exit import hard_exit
 from env_compat import get_env
 from user_interaction_tool_contracts import (
@@ -545,7 +546,12 @@ async def _bridge_extension_mcp_dynamic_tools(
     bridge_configs = dict(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
     required_servers = extension_store.required_profile_mcp_server_names(inputs)
-    if missing_servers := sorted(required_servers - set(bridge_configs)):
+    # A required server is satisfied by EITHER a native bridge config or a
+    # config already delivered to Codex via provider_run_config (runtime/
+    # launcher/explicit deliveries merged by with_builtin_mcp_servers).
+    if missing_servers := sorted(
+        required_servers - set(bridge_configs) - set(configured_servers)
+    ):
         raise RuntimeError(
             "required extension MCP config unavailable: "
             + ", ".join(repr(name) for name in missing_servers)
@@ -612,12 +618,16 @@ async def _bridge_extension_mcp_dynamic_tools(
             if tool is None:
                 unavailable_reason = "exposed malformed tool declarations"
                 break
-            if (
-                tool["name"] in candidate_existing_names
-                or any(item["name"] == tool["name"] for item in prepared)
-            ):
+            if any(item["name"] == tool["name"] for item in prepared):
                 unavailable_reason = "exposed conflicting tool declarations"
                 break
+            if tool["name"] in candidate_existing_names:
+                # The name is already served by a registered tool (e.g. the
+                # builtin orchestration tool set powered by this same
+                # extension's backend role). The existing registration wins;
+                # skipping keeps the capability singular instead of failing
+                # the whole run for a required server.
+                continue
             prepared.append(tool)
         if not tools:
             unavailable_reason = "advertised no tools"
@@ -3670,6 +3680,9 @@ async def _run(run_dir: Path, inputs: dict, execution_contract, launch) -> int:
                             # can re-attach to a still-running CLI whose wrapper
                             # died, instead of declaring the run dead.
                             state["cli_pid"] = proc.pid
+                            state["cli_identity"] = process_identity_to_dict(
+                                proc.pid
+                            )
                             # Per-attempt rollout boundary for the ghost
                             # guard: thread.started is the first event of
                             # THIS attempt, so the file size at this moment

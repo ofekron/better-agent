@@ -191,4 +191,4 @@ export function groupEvents(
   return groups;
 }
 
-type EventRenderGroup = ReturnType<typeof groupEvents>[number];
+export type EventRenderGroup = ReturnType<typeof groupEvents>[number];

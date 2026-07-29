@@ -637,7 +637,6 @@ def test_runner_materialization_outlives_spawn_context() -> None:
             runner_module=runner_module,
             frozen=False,
         )
-
         with open_pinned_runner_launch(runner) as pinned:
             materialized_runner = Path(pinned.argv[1])
             process = subprocess.Popen(
@@ -654,6 +653,56 @@ def test_runner_materialization_outlives_spawn_context() -> None:
         assert marker.read_text(encoding="utf-8") == "ran"
 
 
+def test_runner_materialization_preserves_python_runtime_closure() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        run_dir = root / "run"
+        run_dir.mkdir()
+        runner_path = root / "runner_runtime_probe.py"
+        runner_path.write_text("print('runtime-closure-ok')\n", encoding="utf-8")
+        runner = capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=sys.executable,
+            runner_entry=runner_path,
+            runner_kind="openai",
+            runner_module="runner_runtime_probe",
+            frozen=False,
+        )
+
+        with open_pinned_runner_launch(runner) as pinned:
+            process = subprocess.run(
+                pinned.argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+
+        assert process.returncode == 0, process.stderr
+        assert process.stdout.strip() == "runtime-closure-ok"
+        if runner.development_runtime is not None:
+            runtime_root = (
+                run_dir
+                / Path(runner.development_runtime.root.resolved_path).name
+            )
+            materialized = (
+                runtime_root
+                / runner.development_runtime.executable_relative
+            )
+            assert materialized.is_file()
+            materialized.chmod(0o700)
+            materialized.write_bytes(b"tampered")
+            try:
+                with open_pinned_runner_launch(runner):
+                    pass
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError(
+                    "tampered interpreter runtime was accepted",
+                )
+
+
 TESTS = (
     test_external_config_symlink_is_exactly_attested,
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
@@ -663,6 +712,7 @@ TESTS = (
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,
     test_shebang_launch_pins_script_and_restricts_interpreter,
     test_runner_materialization_outlives_spawn_context,
+    test_runner_materialization_preserves_python_runtime_closure,
 )
 
 

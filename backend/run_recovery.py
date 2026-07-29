@@ -49,6 +49,11 @@ from provider_completion import (
     classify_completion_after_progress,
     completion_has_progress,
 )
+from proc_control import process_control
+from process_identity import (
+    process_identity_from_dict,
+    process_identity_is_live,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +123,72 @@ def _recovered_run_cancelled(desc: dict) -> bool:
         or desc.get("turn_cancelled")
         or (run_dir is not None and (run_dir / "cancel").exists())
     )
+
+
+def _orphaned_cli_identity_live(desc: dict, pid: int) -> bool:
+    from runs_dir import cli_liveness_corroborated
+
+    identity = process_identity_from_dict(desc.get("cli_identity"))
+    if (
+        identity is None
+        or identity.pid != pid
+        or not process_identity_is_live(identity)
+    ):
+        return False
+    processed_byte = desc.get("processed_byte")
+    if processed_byte is None:
+        processed_byte = desc.get("processed_byte_offset")
+    return cli_liveness_corroborated(
+        pid,
+        desc.get("jsonl_path"),
+        desc.get("jsonl_inode"),
+        processed_byte,
+    )
+
+
+def _recovered_run_recoverable(desc: dict, *, cancelled: bool) -> bool:
+    if cancelled:
+        return False
+    if not (bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))):
+        return False
+    pid = live_recovery_pid(desc)
+    if pid is None:
+        return True
+    if not process_control().pid_recoverable(pid):
+        return False
+    if bool(desc.get("orphaned_cli")):
+        return _orphaned_cli_identity_live(desc, pid)
+    identity = process_identity_from_dict(desc.get("runner_identity"))
+    if identity is None or identity.pid != pid:
+        return False
+    return process_identity_is_live(identity)
+
+
+async def _contain_cancelled_recovered_runner(desc: dict) -> None:
+    pid = live_recovery_pid(desc)
+    if pid is None or not process_control().pid_recoverable(pid):
+        return
+    if bool(desc.get("orphaned_cli")):
+        if not _orphaned_cli_identity_live(desc, pid):
+            return
+        await asyncio.to_thread(process_control().force_kill, pid)
+        if process_control().pid_recoverable(pid):
+            raise RuntimeError(
+                "cancelled orphaned CLI remained executable after containment"
+            )
+        return
+    identity = process_identity_from_dict(desc.get("runner_identity"))
+    if identity is None or identity.pid != pid:
+        raise RuntimeError(
+            "cancelled recovered runner has no verifiable process identity"
+        )
+    if not process_identity_is_live(identity):
+        return
+    await asyncio.to_thread(process_control().force_kill, pid)
+    if process_control().pid_recoverable(pid):
+        raise RuntimeError(
+            "cancelled recovered runner remained executable after containment"
+        )
 
 
 def _recovery_integration_parallelism(group_count: int) -> int:
@@ -1949,9 +2020,11 @@ async def _integrate_one_locked(
         )
         return
 
-    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = _recovered_run_cancelled(desc)
+    if cancelled:
+        await _contain_cancelled_recovered_runner(desc)
+    alive = _recovered_run_recoverable(desc, cancelled=cancelled)
     if has_complete:
         await asyncio.to_thread(
             _preserve_recoverable_partial_completion,

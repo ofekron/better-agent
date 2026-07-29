@@ -26,6 +26,7 @@ from provider_launch_identity import (
 class RunnerLaunch:
     launch: AttestedLaunch
     runner_entry: FileIdentity | None
+    development_runtime: FrozenBundleIdentity | None
     frozen_bundle: FrozenBundleIdentity | None
     runner_kind: str
     runner_module: str
@@ -36,6 +37,8 @@ class RunnerLaunch:
         _validate_launch(self.launch)
         if self.frozen_bundle is not None:
             self.frozen_bundle.validate()
+        if self.development_runtime is not None:
+            self.development_runtime.validate()
 
     def attest(self) -> bool:
         try:
@@ -54,6 +57,10 @@ class RunnerLaunch:
                 or self.runner_entry.attest()
             )
             and (
+                self.development_runtime is None
+                or self.development_runtime.attest()
+            )
+            and (
                 self.frozen_bundle is None
                 or self.frozen_bundle.attest()
             )
@@ -65,6 +72,11 @@ class RunnerLaunch:
             "runner_entry": (
                 file_identity_to_dict(self.runner_entry)
                 if self.runner_entry is not None
+                else None
+            ),
+            "development_runtime": (
+                self.development_runtime.to_dict()
+                if self.development_runtime is not None
                 else None
             ),
             "frozen_bundle": (
@@ -82,6 +94,7 @@ class RunnerLaunch:
         _require_object(raw, {
             "launch",
             "runner_entry",
+            "development_runtime",
             "frozen_bundle",
             "runner_kind",
             "runner_module",
@@ -92,6 +105,10 @@ class RunnerLaunch:
             or (
                 raw["runner_entry"] is not None
                 and type(raw["runner_entry"]) is not dict
+            )
+            or (
+                raw["development_runtime"] is not None
+                and type(raw["development_runtime"]) is not dict
             )
             or (
                 raw["frozen_bundle"] is not None
@@ -105,6 +122,11 @@ class RunnerLaunch:
             runner_entry=(
                 file_identity_from_dict(raw["runner_entry"])
                 if raw["runner_entry"] is not None
+                else None
+            ),
+            development_runtime=(
+                FrozenBundleIdentity.from_dict(raw["development_runtime"])
+                if raw["development_runtime"] is not None
                 else None
             ),
             frozen_bundle=(
@@ -153,6 +175,33 @@ def _package_parent(package_name: str) -> Path:
     return Path(locations[0]).resolve(strict=True).parent
 
 
+def _development_runtime(
+    executable: FileIdentity,
+) -> FrozenBundleIdentity | None:
+    try:
+        current = Path(sys.executable).resolve(strict=True)
+    except OSError:
+        return None
+    if Path(executable.resolved_path) != current:
+        return None
+    runtime_root = Path(sys.base_prefix).resolve(strict=True)
+    stdlib_root = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
+    site_packages = stdlib_root / "site-packages"
+    excluded = (
+        (
+            site_packages.relative_to(runtime_root).as_posix(),
+        )
+        if site_packages.exists() or site_packages.is_symlink()
+        else ()
+    )
+    return FrozenBundleIdentity.capture(
+        executable_path=executable.resolved_path,
+        bundle_root=runtime_root,
+        sidecar_root=stdlib_root,
+        excluded_relative_paths=excluded,
+    )
+
+
 def _validate_runner(value: RunnerLaunch) -> None:
     argv = value.launch.argv
     if (
@@ -181,6 +230,7 @@ def _validate_runner(value: RunnerLaunch) -> None:
         )
         if (
             value.runner_entry is not None
+            or value.development_runtime is not None
             or bundle is None
             or argv != expected
             or not _is_absolute_path(argv[2])
@@ -207,6 +257,25 @@ def _validate_runner(value: RunnerLaunch) -> None:
         value.runner_entry is None
         or value.frozen_bundle is not None
         or Path(value.runner_entry.resolved_path).stem != value.runner_module
+    ):
+        raise ExecutionContractError("incoherent runner launch")
+    runtime = value.development_runtime
+    if runtime is not None and (
+        (
+            Path(runtime.root.resolved_path)
+            / runtime.executable_relative
+        ) != Path(value.launch.components[0].resolved_path)
+        or not _same_resolved_file(
+            next(
+                (
+                    entry.file
+                    for entry in runtime.entries
+                    if entry.relative_path == runtime.executable_relative
+                ),
+                None,
+            ),
+            value.launch.components[0],
+        )
     ):
         raise ExecutionContractError("incoherent runner launch")
     if value.runner_kind == "claude":
@@ -268,6 +337,7 @@ def capture_runner_launch(
     executable = FileIdentity.capture(executable_path)
     if frozen:
         entry = None
+        development_runtime = None
         frozen_bundle = FrozenBundleIdentity.capture(
             executable_path=executable.resolved_path,
             bundle_root=frozen_bundle_root,
@@ -285,6 +355,7 @@ def capture_runner_launch(
         mode = "runner-frozen"
     else:
         entry = FileIdentity.capture(runner_entry)
+        development_runtime = _development_runtime(executable)
         frozen_bundle = None
     if not frozen and runner_kind == "claude":
         site_packages_root = Path(
@@ -330,6 +401,7 @@ def capture_runner_launch(
     value = RunnerLaunch(
         launch=launch,
         runner_entry=entry,
+        development_runtime=development_runtime,
         frozen_bundle=frozen_bundle,
         runner_kind=runner_kind,
         runner_module=runner_module,
@@ -375,6 +447,7 @@ def retarget_runner_launch(
     retargeted = RunnerLaunch(
         launch=launch,
         runner_entry=runner.runner_entry,
+        development_runtime=runner.development_runtime,
         frozen_bundle=runner.frozen_bundle,
         runner_kind=runner.runner_kind,
         runner_module=runner.runner_module,

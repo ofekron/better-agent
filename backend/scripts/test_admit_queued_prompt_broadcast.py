@@ -49,6 +49,40 @@ async def _run(failures: list[str]) -> None:
     sm.admit_queued_prompt(
         sid, {"id": "p1", "text": "hello", "client_id": "mobile-1"},
     )
+    _check(
+        sm.get(sid)["queued_prompts"][0]["delivery_attempt"] == 0,
+        "queued prompt admission initializes delivery attempt zero",
+        failures,
+    )
+    first_attempt = sm.reserve_queued_prompt_delivery_attempt(sid, "p1")
+    second_attempt = sm.reserve_queued_prompt_delivery_attempt(sid, "p1")
+    _check(
+        (first_attempt, second_attempt) == (1, 2),
+        "delivery attempts reserve monotonically",
+        failures,
+    )
+    _check(
+        sm.get(sid)["queued_prompts"][0]["delivery_attempt"] == 2,
+        "reserved delivery attempt is persisted in queue authority",
+        failures,
+    )
+    import session_queue_projection
+    import session_store
+    persisted = session_store.get_session(sid) or {}
+    projected = session_queue_projection.get(
+        sid,
+        storage_identity=sm._root_repository.storage_identity(),
+    ) or {}
+    _check(
+        persisted["queued_prompts"][0]["delivery_attempt"] == 2,
+        "cold root read observes reserved delivery attempt",
+        failures,
+    )
+    _check(
+        projected["queued_prompts"][0]["delivery_attempt"] == 2,
+        "durable queue projection observes reserved delivery attempt",
+        failures,
+    )
 
     queue_hits = [c for s, c in hits if s == sid and c.get("kind") == "queued_prompts_updated"]
     _check(

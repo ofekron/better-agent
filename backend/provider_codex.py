@@ -38,6 +38,7 @@ from provider import (
     schedule_loop_task,
 )
 import config_store
+from process_identity import process_identity_to_dict
 from extension_run_policy import (
     disabled_runtime_skills_for_run,
     resolve_extension_run_policy,
@@ -304,6 +305,8 @@ class RunState:
     turn_run_id: Optional[str] = None
     backend_state_flush_task: Optional[asyncio.Task] = None
     backend_state_flush_dirty: bool = False
+    runner_identity: Optional[dict] = None
+    cli_identity: Optional[dict] = None
 
 
 # ============================================================================
@@ -742,26 +745,6 @@ class CodexProvider(Provider):
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
         try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=app_session_id,
-                resolved_harness_run_config=resolved_harness_run_config,
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=backend_url,
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=app_session_id,
-                cwd=cwd,
-                model=model,
-                provider_id=self.id,
-                bare_config=_bare,
-                user_facing=bool(user_facing) and not _bare,
-                disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
-            ))
             from codex_execution_runtime import (
                 codex_runner_launch_from_artifact,
             )
@@ -771,6 +754,29 @@ class CodexProvider(Provider):
                 _execution.artifact,
             )
             with open_pinned_runner_launch(runner_launch) as pinned:
+                # Env is built after runner materialization: the runtime
+                # bootstrap issued inside build_better_agent_run_env is a
+                # short single-use lease that must start at spawn time.
+                env = self.finalize_run_env(
+                    self.build_env(),
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    resolved_harness_run_config=resolved_harness_run_config,
+                )
+                if extra_env:
+                    env.update(extra_env)
+                env.update(build_better_agent_run_env(
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    provider_id=self.id,
+                    bare_config=_bare,
+                    user_facing=bool(user_facing) and not _bare,
+                    disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
+                ))
                 pass_fds = (
                     {"pass_fds": pinned.pass_fds}
                     if os.name != "nt" and pinned.pass_fds
@@ -813,6 +819,7 @@ class CodexProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            runner_identity=process_identity_to_dict(popen.pid),
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
@@ -858,6 +865,7 @@ class CodexProvider(Provider):
 
         session_id = runner_state["session_id"]
         rs.session_id = session_id
+        rs.cli_identity = runner_state.get("cli_identity")
         jsonl_path_str = runner_state.get("jsonl_path") or runner_state.get("rollout_path")
         if not jsonl_path_str:
             from codex_native import resolve_rollout_path_polled
@@ -1362,6 +1370,8 @@ class CodexProvider(Provider):
             "persist_to": rs.persist_to or rs.app_session_id,
             "mode": rs.mode,
             "runner_pid": rs.popen.pid,
+            "runner_identity": rs.runner_identity,
+            "cli_identity": rs.cli_identity,
             "started_at": rs.started_at,
             "session_id": rs.session_id,
             "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
@@ -1456,6 +1466,8 @@ class CodexProvider(Provider):
                 desc.get("started_at")
                 or datetime.now(timezone.utc).isoformat()
             ),
+            runner_identity=desc.get("runner_identity"),
+            cli_identity=desc.get("cli_identity"),
             cancelled=bool(desc.get("cancelled", False)),
             turn_cancelled=bool(desc.get("turn_cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
@@ -1688,6 +1700,10 @@ class CodexProvider(Provider):
             recovered.append({
                 "run_id": child.name,
                 "pid": pid,
+                "runner_identity": bs.get("runner_identity"),
+                "cli_identity": (
+                    rs_disk.get("cli_identity") or bs.get("cli_identity")
+                ),
                 "alive": live_orphan,
                 "cli_pid": cli_pid,
                 "orphaned_cli": bool(orphaned_cli),

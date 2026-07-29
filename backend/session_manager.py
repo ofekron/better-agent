@@ -5125,6 +5125,7 @@ class SessionManager:
             return self._admit_queued_prompt_bound(sid, prompt)
 
     def _admit_queued_prompt_bound(self, sid: str, prompt: dict) -> dict:
+        prompt.setdefault("delivery_attempt", 0)
         client_id = prompt.get("client_id")
         projection_record: Optional[dict] = None
         result: dict = {
@@ -5257,6 +5258,66 @@ class SessionManager:
                 queued_len,
             )
         return result
+
+    def reserve_queued_prompt_delivery_attempt(
+        self, sid: str, queued_id: str,
+    ) -> Optional[int]:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._reserve_queued_prompt_delivery_attempt_bound(
+                sid, queued_id,
+            )
+
+    def _reserve_queued_prompt_delivery_attempt_bound(
+        self, sid: str, queued_id: str,
+    ) -> Optional[int]:
+        import session_queue_projection
+
+        projection: dict[str, Optional[dict]] = {}
+        reserved: list[int] = []
+
+        def _do(session: dict) -> None:
+            for prompt in session.setdefault("queued_prompts", []):
+                if prompt.get("id") != queued_id:
+                    continue
+                attempt = int(prompt.get("delivery_attempt") or 0) + 1
+                prompt["delivery_attempt"] = attempt
+                reserved.append(attempt)
+                return
+
+        result = self._run(
+            sid,
+            _do,
+            {"kind": "queued_prompts_updated"},
+            enrich=self._queue_projection_enricher(
+                projection, include_queued_prompts=True,
+            ),
+        )
+        if result is None or not reserved:
+            return None
+        root_id = self._root_id_for(sid)
+        if root_id is None:
+            raise RuntimeError(
+                f"session disappeared during delivery attempt reservation: {sid}"
+            )
+        self.flush_root_persist(root_id)
+        session = self.get(sid)
+        if session is None:
+            raise RuntimeError(
+                f"session disappeared after delivery attempt reservation: {sid}"
+            )
+        session_queue_projection.upsert_from_session(
+            session,
+            storage_identity=self._root_repository.storage_identity(),
+        )
+        queued_len = len(
+            (projection.get("record") or {}).get("queued_prompts") or []
+        )
+        self._set_queued_prompt_count(sid, queued_len)
+        return reserved[0]
 
     def remove_queued_prompt(
         self, sid: str, queued_id: Optional[str],

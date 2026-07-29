@@ -84,6 +84,9 @@ def _seed_run(
     claude_sid: str,
     *,
     cancelled: bool,
+    runner_pid: int = 0,
+    runner_identity: dict | None = None,
+    turn_cancelled: bool = False,
     mode: str = "native",
 ) -> str:
     """Seed an orphan run dir whose runner pid is dead. `cancelled` is
@@ -104,20 +107,22 @@ def _seed_run(
         "fork": False,
     }))
     (run_dir / "state.json").write_text(json.dumps({
-        "run_id": run_id, "mode": mode, "runner_pid": 0,
+        "run_id": run_id, "mode": mode, "runner_pid": runner_pid,
         "app_session_id": app_sid, "session_id": claude_sid,
         "jsonl_path": str(claude_jsonl), "pre_query_byte_offset": 0,
         "complete": False,
     }))
     (run_dir / "backend_state.json").write_text(json.dumps({
         "run_id": run_id, "app_session_id": app_sid, "mode": mode,
-        "runner_pid": 0, "session_id": claude_sid,
+        "runner_pid": runner_pid, "session_id": claude_sid,
+        "runner_identity": runner_identity,
         "jsonl_path": str(claude_jsonl),
         "processed_byte": claude_jsonl.stat().st_size,
         "cancelled": cancelled,
+        "turn_cancelled": turn_cancelled,
         "target_message_id": asst_id,
     }))
-    (run_dir / "pid").write_text("0")
+    (run_dir / "pid").write_text(str(runner_pid))
     return run_id
 
 
@@ -166,6 +171,100 @@ async def test_real_user_stop_preserved_across_recovery() -> bool:
     if asst.get("stopped_at") != "2026-06-20T10:00:00.000000":
         print(f"  real user-stop stopped_at not preserved: {asst.get('stopped_at')!r}")
         return False
+    return True
+
+
+async def test_cancelled_live_pid_is_not_readmitted() -> bool:
+    app_sid, asst_id = _seed_streaming_assistant("native")
+    run_id = _seed_run(
+        app_sid,
+        asst_id,
+        str(uuid.uuid4()),
+        cancelled=False,
+        runner_pid=os.getpid(),
+        turn_cancelled=True,
+    )
+    bridge = default_provider()
+    recovered = [
+        descriptor
+        for descriptor in bridge.recover_in_flight()
+        if descriptor.get("run_id") == run_id
+    ]
+    if len(recovered) != 1 or not recovered[0].get("alive"):
+        print(f"  live cancelled fixture was not recovered: {recovered!r}")
+        return False
+
+    class _ProcessControl:
+        @staticmethod
+        def pid_recoverable(pid: int) -> bool:
+            return False
+
+        @staticmethod
+        def force_kill(pid: int) -> None:
+            raise AssertionError("non-recoverable process was signalled")
+
+    import run_recovery
+    original = run_recovery.process_control
+    run_recovery.process_control = lambda: _ProcessControl()
+    try:
+        await integrate_recovered_runs(coordinator=None, recovered=recovered)
+    finally:
+        run_recovery.process_control = original
+
+    if run_id in bridge._runs:
+        print("  cancelled process was attached to the provider")
+        return False
+    if _asst(app_sid, asst_id).get("isStreaming") is True:
+        print("  cancelled process left the assistant streaming")
+        return False
+    return True
+
+
+async def test_cancelled_recovery_is_identity_safe() -> bool:
+    import run_recovery
+    from process_identity import process_identity_to_dict
+
+    identity = process_identity_to_dict(os.getpid())
+    if identity is None:
+        print("  could not capture test process identity")
+        return False
+    desc = {
+        "pid": os.getpid(),
+        "alive": True,
+        "runner_identity": identity,
+    }
+
+    class _ProcessControl:
+        killed = False
+
+        @classmethod
+        def pid_recoverable(cls, pid: int) -> bool:
+            return not cls.killed
+
+        @classmethod
+        def force_kill(cls, pid: int) -> None:
+            cls.killed = True
+
+    original = run_recovery.process_control
+    run_recovery.process_control = lambda: _ProcessControl()
+    try:
+        await run_recovery._contain_cancelled_recovered_runner(desc)
+        if not _ProcessControl.killed:
+            print("  verified cancelled runner was not contained")
+            return False
+        _ProcessControl.killed = False
+        try:
+            await run_recovery._contain_cancelled_recovered_runner({
+                "pid": os.getpid(),
+                "alive": True,
+            })
+        except RuntimeError:
+            pass
+        else:
+            print("  unverified cancelled runner did not fail closed")
+            return False
+    finally:
+        run_recovery.process_control = original
     return True
 
 
@@ -232,6 +331,10 @@ TESTS = [
         test_shutdown_killed_run_not_marked_stopped),
     ("real user-stop stopped_at is preserved across recovery",
         test_real_user_stop_preserved_across_recovery),
+    ("cancelled live pid is never readmitted",
+        test_cancelled_live_pid_is_not_readmitted),
+    ("cancelled recovery requires matching process identity",
+        test_cancelled_recovery_is_identity_safe),
     ("recovered successful run gets completed_at",
         test_recovered_success_gets_completed_at),
     ("recovered failed run gets assistant error",

@@ -691,6 +691,52 @@ async def test_identity_retirement_and_waiter_cleanup() -> None:
     await engine.close()
 
 
+async def test_retry_requires_fresh_durable_delivery_attempt() -> None:
+    engine = LifecycleCommandEngine(EventBus())
+    session_id = "durable-delivery-attempt"
+    turn = identity("durable-delivery-attempt")
+    await engine.begin_turn(
+        request_id="user-turn:message-durable-delivery-attempt:0:begin",
+        session_id=session_id,
+        identity=turn,
+    )
+    await engine.finish_turn(
+        request_id="user-turn:message-durable-delivery-attempt:0:finish",
+        session_id=session_id,
+        identity=turn,
+        outcome="failed",
+    )
+
+    await engine.begin_turn(
+        request_id="user-turn:message-durable-delivery-attempt:0:begin",
+        session_id=session_id,
+        identity=turn,
+    )
+    assert engine.snapshot(session_id).identity is None
+
+    await engine.begin_turn(
+        request_id="user-turn:message-durable-delivery-attempt:1:begin",
+        session_id=session_id,
+        identity=turn,
+    )
+    execution = ExecutionTurnIdentity(
+        "execution-durable-delivery-attempt",
+        "assistant-durable-delivery-attempt",
+        "native",
+    )
+    await engine.start_execution(
+        session_id,
+        execution_identity=execution,
+    )
+    assert engine.snapshot(session_id).execution is not None
+    await engine.abort_execution(
+        session_id,
+        execution_identity=execution,
+        outcome="failed",
+    )
+    await engine.close()
+
+
 async def test_store_initialization_and_atomic_compare_insert() -> None:
     session_id = "store-cas-session"
     snapshot = lifecycle_command_store.session_snapshot(session_id)
@@ -1103,6 +1149,7 @@ async def main() -> None:
     await test_cross_process_lease_crash_takeover()
     await test_at_least_once_effect_and_best_effort_notification()
     await test_identity_retirement_and_waiter_cleanup()
+    await test_retry_requires_fresh_durable_delivery_attempt()
     await test_store_initialization_and_atomic_compare_insert()
     await test_execution_subturn_state_matrix()
     test_v1_migration_and_atomic_rollback()

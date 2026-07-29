@@ -434,6 +434,22 @@ def build_better_agent_run_env(
     pythonpath = sdk_pythonpath(
         Path(__file__).resolve().parents[1], os.environ.get("PYTHONPATH", "")
     )
+    if not getattr(sys, "frozen", False):
+        # Dev runners execute a materialized copy of their entry under the
+        # run dir (open_pinned_runner_launch), so the backend checkout and
+        # its site-packages are no longer implied by the script location.
+        # The Claude runner runs isolated (-I) and takes these roots via
+        # argv; every other runner takes them here, like sdk/ already does.
+        import sysconfig
+
+        entries = [entry for entry in pythonpath.split(os.pathsep) if entry]
+        for root in (
+            str(Path(sysconfig.get_path("purelib")).resolve()),
+            str(Path(__file__).resolve().parent),
+        ):
+            if root not in entries:
+                entries.insert(0, root)
+        pythonpath = os.pathsep.join(entries)
     if pythonpath:
         env["PYTHONPATH"] = pythonpath
     if os.name == "nt":

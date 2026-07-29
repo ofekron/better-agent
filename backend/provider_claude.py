@@ -61,6 +61,7 @@ from provider import (
     runner_argv,
 )
 import config_store
+from process_identity import process_identity_to_dict
 from extension_run_policy import (
     disabled_runtime_skills_for_run,
     resolve_extension_run_policy,
@@ -284,6 +285,8 @@ class RunState:
     turn_run_id: Optional[str] = None
     root_id: Optional[str] = None
     cwd: str = ""
+    runner_identity: Optional[dict] = None
+    cli_identity: Optional[dict] = None
     # Set by Provider._cleanup_run when the run is deregistered (runner
     # process exited). start_run's wind-down gate awaits this before
     # spawning a --resume on the same native session.
@@ -1071,30 +1074,33 @@ class ClaudeProvider(Provider):
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
         try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=app_session_id,
-                resolved_harness_run_config=input_payload.get(
-                    "resolved_harness_run_config",
-                ),
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=input_payload["backend_url"],
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=app_session_id,
-                cwd=cwd,
-                model=model,
-                provider_id=self.id,
-                bare_config=_bare,
-                user_facing=bool(input_payload["user_facing"]) and not _bare,
-                disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
-                runtime_hydration=runtime_hydration,
-            ))
             with launch.open_runner() as pinned:
+                # Env is built after runner materialization: the runtime
+                # bootstrap issued inside build_better_agent_run_env is a
+                # short single-use lease that must start at spawn time.
+                env = self.finalize_run_env(
+                    self.build_env(),
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    resolved_harness_run_config=input_payload.get(
+                        "resolved_harness_run_config",
+                    ),
+                )
+                if extra_env:
+                    env.update(extra_env)
+                env.update(build_better_agent_run_env(
+                    backend_url=input_payload["backend_url"],
+                    internal_token=internal_token,
+                    run_id=run_id,
+                    app_session_id=app_session_id,
+                    cwd=cwd,
+                    model=model,
+                    provider_id=self.id,
+                    bare_config=_bare,
+                    user_facing=bool(input_payload["user_facing"]) and not _bare,
+                    disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
+                    runtime_hydration=runtime_hydration,
+                ))
                 pass_fds = (
                     {"pass_fds": pinned.pass_fds}
                     if os.name != "nt" and pinned.pass_fds
@@ -1146,6 +1152,7 @@ class ClaudeProvider(Provider):
             target_message_id=input_payload.get("target_message_id"),
             turn_run_id=input_payload.get("turn_run_id"),
             cwd=cwd,
+            runner_identity=process_identity_to_dict(popen.pid),
         )
         self._runs[run_id] = run_state
 
@@ -1217,6 +1224,7 @@ class ClaudeProvider(Provider):
 
         rs.session_id = session_id
         rs.jsonl_path = Path(jsonl_path_str)
+        rs.cli_identity = runner_state.get("cli_identity")
         if not rs.root_id:
             from session_manager import manager as session_manager
             rs.root_id = await asyncio.to_thread(
@@ -1796,6 +1804,8 @@ class ClaudeProvider(Provider):
             "persist_to": rs.persist_to or rs.app_session_id,
             "mode": rs.mode,
             "runner_pid": rs.popen.pid,
+            "runner_identity": rs.runner_identity,
+            "cli_identity": rs.cli_identity,
             "started_at": rs.started_at,
             "session_id": rs.session_id,
             "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
@@ -1866,6 +1876,8 @@ class ClaudeProvider(Provider):
             ),
             cancelled=bool(desc.get("cancelled", False)),
             turn_cancelled=bool(desc.get("turn_cancelled", False)),
+            runner_identity=desc.get("runner_identity"),
+            cli_identity=desc.get("cli_identity"),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
@@ -1975,6 +1987,11 @@ class ClaudeProvider(Provider):
             descriptor = {
                 "run_id": child.name,
                 "pid": pid,
+                "runner_identity": bs.get("runner_identity"),
+                "cli_identity": (
+                    (runner_state or {}).get("cli_identity")
+                    or bs.get("cli_identity")
+                ),
                 "alive": alive,
                 "session_id": session_id,
                 "jsonl_path": jsonl_path,

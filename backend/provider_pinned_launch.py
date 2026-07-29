@@ -190,6 +190,35 @@ def open_pinned_runner_launch(
     if not runner.frozen:
         if not runner.attest():
             raise ExecutionContractError("runner launch authority mismatch")
+        if runner.development_runtime is not None:
+            bundle_root = materialize_frozen_bundle(
+                runner.development_runtime,
+                frozen_bundle_destination(
+                    runner.development_runtime,
+                    run_dir,
+                ),
+            )
+            executable = (
+                bundle_root
+                / runner.development_runtime.executable_relative
+            )
+            assert runner.runner_entry is not None
+            with _open_file_identities((runner.runner_entry,)) as handles:
+                with _materialization_directory(run_dir) as raw:
+                    argv = list(runner.launch.argv)
+                    runner_index = runner.launch.component_argv_indexes[1]
+                    target = Path(raw) / (
+                        "1-" + Path(argv[runner_index]).name
+                    )
+                    _copy_descriptor(
+                        handles[0],
+                        target,
+                        runner.runner_entry,
+                    )
+                    argv[0] = str(executable)
+                    argv[runner_index] = str(target)
+                    yield PinnedLaunch(tuple(argv), ())
+            return
         with open_pinned_launch(
             runner.launch,
             materialization_root=run_dir,

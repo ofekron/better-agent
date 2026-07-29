@@ -3,8 +3,20 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
+
+_PORTABLE_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def normalize_provider_run_config(value: Optional[dict]) -> dict:
@@ -75,11 +87,30 @@ def merge_provider_run_configs(base: Optional[dict], override: Optional[dict]) -
 
 def write_skill_tree(root: Path, skills: dict) -> None:
     for name, value in skills.items():
-        if not isinstance(name, str) or not name.strip() or "/" in name or "\\" in name:
+        if (
+            not isinstance(name, str)
+            or _PORTABLE_SKILL_NAME.fullmatch(name) is None
+            or name in (".", "..")
+            or name.endswith(".")
+            or name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
+        ):
             raise ValueError(f"invalid skill name: {name!r}")
         skill_dir = root / name
         skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(_skill_text(name, value), encoding="utf-8")
+        target = skill_dir / "SKILL.md"
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=skill_dir,
+            prefix=".SKILL.md.",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(_skill_text(name, value))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def toml_literal(value: Any) -> str:

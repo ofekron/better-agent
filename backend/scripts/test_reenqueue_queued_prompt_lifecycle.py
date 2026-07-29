@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-reenqueue-lifecycle-")
@@ -15,11 +16,13 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import lifecycle_command_store  # noqa: E402
 import session_queue_projection  # noqa: E402
 
 
 class _SessionManager:
     def __init__(self) -> None:
+        self._root_repository = self
         self.session = {
             "id": "sid",
             "model": "m",
@@ -31,9 +34,13 @@ class _SessionManager:
                 "client_id": "client-1",
                 "disallowed_tools": ["Bash", "Edit"],
                 "orchestration_mode": "native",
+                "delivery_attempt": 1,
             }],
         }
         self.updated: list[tuple[str, str | None, dict]] = []
+
+    def storage_identity(self) -> str:
+        return "test-storage"
 
     def get(self, sid: str) -> dict | None:
         return self.session if sid == "sid" else None
@@ -59,6 +66,17 @@ class _SessionManager:
     def remove_queued_prompt(self, *_args) -> None:
         raise AssertionError("queued prompt should not be removed")
 
+    def reserve_queued_prompt_delivery_attempt(
+        self, sid: str, queued_id: str,
+    ) -> int:
+        for prompt in self.session["queued_prompts"]:
+            if prompt.get("id") == queued_id:
+                prompt["delivery_attempt"] = (
+                    int(prompt.get("delivery_attempt") or 0) + 1
+                )
+                return prompt["delivery_attempt"]
+        raise AssertionError("queued prompt missing")
+
     def rebuild_queued_prompt_counts(self) -> None:
         pass
 
@@ -67,6 +85,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
         self.start_processor_values: list[bool] = []
+        self.lifecycle_commands = SimpleNamespace(
+            snapshot=lambda _sid: SimpleNamespace(identity=None),
+        )
 
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
         # Startup re-enqueue runs against a cold coordinator; nothing is in-flight.
@@ -92,12 +113,17 @@ def main_test() -> int:
     real_coordinator = main.coordinator
     real_projection_list = session_queue_projection.list_queued_records
     real_projection_ensure = session_queue_projection.ensure_current_or_rebuild
+    real_transition_for = lifecycle_command_store.transition_for
     fake_session_manager = _SessionManager()
     fake_coordinator = _Coordinator()
     main.session_manager = fake_session_manager
     main.coordinator = fake_coordinator
-    session_queue_projection.list_queued_records = lambda: [fake_session_manager.session]
-    session_queue_projection.ensure_current_or_rebuild = lambda: False
+    session_queue_projection.list_queued_records = (
+        lambda **_kwargs: [fake_session_manager.session]
+    )
+    session_queue_projection.ensure_current_or_rebuild = lambda **_kwargs: False
+    no_transition = lambda *_args: None
+    lifecycle_command_store.transition_for = no_transition
     try:
         rehydrated_session_ids = asyncio.run(main._re_enqueue_queued_prompts())
         assert rehydrated_session_ids == {"sid"}
@@ -109,14 +135,53 @@ def main_test() -> int:
         assert isinstance(lifecycle_msg_id, str) and lifecycle_msg_id
         assert fake_coordinator.submitted[0][1]["lifecycle_msg_id"] == lifecycle_msg_id
         assert fake_coordinator.submitted[0][1]["disallowed_tools"] == ["Bash", "Edit"]
+        assert fake_coordinator.submitted[0][1]["_delivery_attempt"] == 1
         assert fake_session_manager.session["queued_prompts"][0][
             "lifecycle_msg_id"
         ] == lifecycle_msg_id
+
+        lifecycle_command_store.transition_for = lambda *_args: {"status": "done"}
+        try:
+            retired_attempt = asyncio.run(
+                main._reconcile_queued_delivery_attempt(
+                    "sid", "q1", lifecycle_msg_id, 1,
+                )
+            )
+        finally:
+            lifecycle_command_store.transition_for = no_transition
+        assert retired_attempt == 2
+        assert fake_session_manager.session["queued_prompts"][0][
+            "delivery_attempt"
+        ] == 2
+
+        active_identity = SimpleNamespace(
+            lifecycle_message_id=lifecycle_msg_id,
+        )
+        finished: list[str] = []
+
+        async def finish_turn(**_kwargs) -> None:
+            finished.append("finished")
+
+        fake_coordinator.lifecycle_commands = SimpleNamespace(
+            snapshot=lambda _sid: SimpleNamespace(
+                identity=active_identity,
+                execution=None,
+            ),
+            finish_turn=finish_turn,
+        )
+        active_attempt = asyncio.run(
+            main._reconcile_queued_delivery_attempt(
+                "sid", "q1", lifecycle_msg_id, 2,
+            )
+        )
+        assert active_attempt == 2
+        assert finished == ["finished"]
         print("PASS re-enqueue persists missing queued prompt lifecycle id")
         return 0
     finally:
         session_queue_projection.ensure_current_or_rebuild = real_projection_ensure
         session_queue_projection.list_queued_records = real_projection_list
+        lifecycle_command_store.transition_for = real_transition_for
         main.coordinator = real_coordinator
         main.session_manager = real_session_manager
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

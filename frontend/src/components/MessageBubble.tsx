@@ -39,7 +39,7 @@ import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../u
 import { providerNameForId, providerKindForId } from "../utils/providerCache";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
-import { AUTO_ACTION_OPEN_MAX, groupEvents } from "../lib/groupEvents";
+import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -983,7 +983,7 @@ function ModelFallbackEvent({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-type EventRenderGroups = ReturnType<typeof groupEvents>;
+type EventRenderGroups = EventRenderGroup[];
 
 function isActionLeadGroup(group: EventRenderGroup): boolean {
   return group.kind === "event" && (

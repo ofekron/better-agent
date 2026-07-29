@@ -42,6 +42,7 @@ from provider_runtime_plan_source import hydrate_frozen_provider_runtime_plan
 from proc_control import process_control
 from ingestion_versions import current_ingestion_version, marker_matches_current
 import config_store
+from process_identity import process_identity_to_dict
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
     iter_run_dirs,
@@ -92,6 +93,7 @@ class RunState:
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
     runner: str = ""
+    runner_identity: Optional[dict] = None
 
 
 # ============================================================================
@@ -182,33 +184,36 @@ class SessionEventsProvider(Provider):
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
         try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=inputs["app_session_id"],
-                resolved_harness_run_config=inputs.get(
-                    "resolved_harness_run_config",
-                ),
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=inputs["backend_url"],
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=inputs["app_session_id"],
-                cwd=inputs["cwd"],
-                model=inputs.get("model"),
-                provider_id=self.id,
-                bare_config=bool(inputs["bare_config"]),
-                user_facing=bool(inputs["user_facing"])
-                and not bool(inputs["bare_config"]),
-                disabled_builtin_extensions=inputs[
-                    "disabled_builtin_extensions"
-                ],
-                runtime_hydration=runtime_hydration,
-            ))
             with launch.open_runner() as pinned:
+                # Env is built after runner materialization: the runtime
+                # bootstrap issued inside build_better_agent_run_env is a
+                # short single-use lease that must start at spawn time.
+                env = self.finalize_run_env(
+                    self.build_env(),
+                    run_id=run_id,
+                    app_session_id=inputs["app_session_id"],
+                    resolved_harness_run_config=inputs.get(
+                        "resolved_harness_run_config",
+                    ),
+                )
+                if extra_env:
+                    env.update(extra_env)
+                env.update(build_better_agent_run_env(
+                    backend_url=inputs["backend_url"],
+                    internal_token=internal_token,
+                    run_id=run_id,
+                    app_session_id=inputs["app_session_id"],
+                    cwd=inputs["cwd"],
+                    model=inputs.get("model"),
+                    provider_id=self.id,
+                    bare_config=bool(inputs["bare_config"]),
+                    user_facing=bool(inputs["user_facing"])
+                    and not bool(inputs["bare_config"]),
+                    disabled_builtin_extensions=inputs[
+                        "disabled_builtin_extensions"
+                    ],
+                    runtime_hydration=runtime_hydration,
+                ))
                 pass_fds = (
                     {"pass_fds": pinned.pass_fds}
                     if os.name != "nt" and pinned.pass_fds
@@ -247,6 +252,7 @@ class SessionEventsProvider(Provider):
             target_message_id=inputs.get("target_message_id"),
             turn_run_id=inputs.get("turn_run_id"),
             runner=str(inputs.get("runner") or ""),
+            runner_identity=process_identity_to_dict(popen.pid),
         )
         self._runs[run_id] = state
         self._write_backend_state(state)
@@ -461,6 +467,7 @@ class SessionEventsProvider(Provider):
             "persist_to": rs.persist_to or rs.app_session_id,
             "mode": rs.mode,
             "runner_pid": rs.popen.pid,
+            "runner_identity": rs.runner_identity,
             "started_at": rs.started_at,
             "session_id": rs.session_id,
             "jsonl_path": str(rs.run_dir / "session_events.jsonl"),
@@ -532,6 +539,7 @@ class SessionEventsProvider(Provider):
                 desc.get("started_at")
                 or datetime.now(timezone.utc).isoformat()
             ),
+            runner_identity=desc.get("runner_identity"),
             cancelled=bool(desc.get("cancelled", False)),
             turn_cancelled=bool(desc.get("turn_cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
@@ -647,6 +655,7 @@ class SessionEventsProvider(Provider):
             recovered.append({
                 "run_id": child.name,
                 "pid": pid,
+                "runner_identity": bs.get("runner_identity"),
                 "alive": live_orphan,
                 "has_complete_json": has_complete_json,
                 "session_id": bs.get("session_id") or rs_disk.get("session_id"),

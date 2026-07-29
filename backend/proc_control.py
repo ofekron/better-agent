@@ -27,7 +27,9 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,10 @@ class ProcessControl(abc.ABC):
     def owned_group_id(self, pid: int) -> int:
         """Stable identifier for the detached tree rooted at ``pid``."""
         return pid
+
+    def pid_recoverable(self, pid: int) -> bool:
+        """True when an existing process can still make execution progress."""
+        return self.pid_alive(pid)
 
     def signal_owned_group(self, group_id: int) -> None:
         self.signal_stop(group_id)
@@ -165,6 +171,40 @@ class _PosixProcessControl(ProcessControl):
         except OSError:
             return False
         return True
+
+    def pid_recoverable(self, pid: int) -> bool:
+        if not self.pid_alive(pid):
+            return False
+        state = self._process_state(pid)
+        if state is None:
+            return True
+        return not state.startswith(("X", "Z")) and (
+            sys.platform != "darwin" or "E" not in state
+        )
+
+    @staticmethod
+    def _process_state(pid: int) -> str | None:
+        if sys.platform.startswith("linux"):
+            try:
+                fields = Path(f"/proc/{pid}/stat").read_text(
+                    encoding="utf-8",
+                ).rsplit(")", 1)[1].split()
+            except (IndexError, OSError, UnicodeError):
+                return None
+            return fields[0] if fields else None
+        if sys.platform == "darwin":
+            try:
+                observed = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            return observed.stdout.strip() or None
+        return None
 
     def signal_stop(self, pid: int) -> None:
         self._killpg(pid, signal.SIGTERM)

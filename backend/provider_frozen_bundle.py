@@ -148,6 +148,7 @@ class _ObservedBundleEntry:
 
 def _scan_observed_entries(
     root: Path,
+    excluded_paths: tuple[Path, ...] = (),
 ) -> tuple[_ObservedBundleEntry, ...]:
     entries: list[_ObservedBundleEntry] = []
 
@@ -159,6 +160,12 @@ def _scan_observed_entries(
         for child in children:
             path = Path(child.path)
             relative = path.relative_to(root)
+            if any(
+                relative == excluded
+                or relative.is_relative_to(excluded)
+                for excluded in excluded_paths
+            ):
+                continue
             relative_path = relative.as_posix()
             try:
                 observed = path.lstat()
@@ -220,9 +227,12 @@ def _scan_observed_entries(
     )
 
 
-def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
+def _scan_entries(
+    root: Path,
+    excluded_paths: tuple[Path, ...] = (),
+) -> tuple[FrozenBundleEntry, ...]:
     entries: list[FrozenBundleEntry] = []
-    for observed in _scan_observed_entries(root):
+    for observed in _scan_observed_entries(root, excluded_paths):
         identity = None
         if observed.kind == "file":
             identity = FileIdentity.capture(observed.path)
@@ -249,6 +259,7 @@ class FrozenBundleIdentity:
     root: DirectoryIdentity
     executable_relative: str
     sidecar_relative: str
+    excluded_relative_paths: tuple[str, ...]
     entries: tuple[FrozenBundleEntry, ...]
     fingerprint: str
 
@@ -262,6 +273,7 @@ class FrozenBundleIdentity:
         executable_path: str | Path,
         bundle_root: str | Path | None = None,
         sidecar_root: str | Path | None = None,
+        excluded_relative_paths: tuple[str, ...] = (),
     ) -> FrozenBundleIdentity:
         executable = Path(executable_path)
         if not executable.is_absolute():
@@ -281,7 +293,16 @@ class FrozenBundleIdentity:
         sidecar_relative = sidecar_path.resolve(strict=True).relative_to(
             resolved_root,
         ).as_posix()
-        entries = _scan_entries(resolved_root)
+        excluded = tuple(
+            sorted(
+                (
+                    _relative_path(path, "excluded path")
+                    for path in excluded_relative_paths
+                ),
+                key=PurePath.as_posix,
+            ),
+        )
+        entries = _scan_entries(resolved_root, excluded)
         root_after = DirectoryIdentity.capture(root_path)
         if root_before != root_after:
             raise ExecutionContractError(
@@ -291,6 +312,9 @@ class FrozenBundleIdentity:
             root=root_after,
             executable_relative=executable_relative,
             sidecar_relative=sidecar_relative,
+            excluded_relative_paths=tuple(
+                path.as_posix() for path in excluded
+            ),
             entries=entries,
             fingerprint="",
         )
@@ -298,6 +322,7 @@ class FrozenBundleIdentity:
             root=unsigned.root,
             executable_relative=unsigned.executable_relative,
             sidecar_relative=unsigned.sidecar_relative,
+            excluded_relative_paths=unsigned.excluded_relative_paths,
             entries=unsigned.entries,
             fingerprint=unsigned._computed_fingerprint(),
         )
@@ -316,6 +341,7 @@ class FrozenBundleIdentity:
                     Path(self.root.requested_path)
                     / self.sidecar_relative
                 ),
+                excluded_relative_paths=self.excluded_relative_paths,
             )
         except (ExecutionContractError, OSError, ValueError):
             return False
@@ -326,6 +352,7 @@ class FrozenBundleIdentity:
             "root": self.root.to_dict(),
             "executable_relative": self.executable_relative,
             "sidecar_relative": self.sidecar_relative,
+            "excluded_relative_paths": list(self.excluded_relative_paths),
             "entries": [entry.to_dict() for entry in self.entries],
             "fingerprint": self.fingerprint,
         }
@@ -338,15 +365,19 @@ class FrozenBundleIdentity:
                 "root",
                 "executable_relative",
                 "sidecar_relative",
+                "excluded_relative_paths",
                 "entries",
                 "fingerprint",
             },
             "frozen bundle identity",
         )
         entries = raw["entries"]
+        excluded = raw["excluded_relative_paths"]
         if (
             type(raw["root"]) is not dict
             or type(entries) is not list
+            or type(excluded) is not list
+            or any(type(path) is not str for path in excluded)
             or not entries
             or any(type(entry) is not dict for entry in entries)
         ):
@@ -358,6 +389,7 @@ class FrozenBundleIdentity:
                 "executable_relative",
             ),
             sidecar_relative=required_string(raw, "sidecar_relative"),
+            excluded_relative_paths=tuple(excluded),
             entries=tuple(
                 FrozenBundleEntry.from_dict(entry) for entry in entries
             ),
@@ -371,6 +403,7 @@ class FrozenBundleIdentity:
             "root": self.root.to_dict(),
             "executable_relative": self.executable_relative,
             "sidecar_relative": self.sidecar_relative,
+            "excluded_relative_paths": list(self.excluded_relative_paths),
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
@@ -438,6 +471,10 @@ def _validate_bundle(bundle: FrozenBundleIdentity) -> None:
         _relative_path(entry.relative_path, "entry path")
         for entry in bundle.entries
     )
+    excluded_paths = tuple(
+        _relative_path(path, "excluded path")
+        for path in bundle.excluded_relative_paths
+    )
     entries_by_path = {
         entry.relative_path: entry for entry in bundle.entries
     }
@@ -448,6 +485,14 @@ def _validate_bundle(bundle: FrozenBundleIdentity) -> None:
         or bundle.fingerprint != bundle._computed_fingerprint()
         or entry_paths != tuple(sorted(entry_paths, key=PurePath.as_posix))
         or len(set(entry_paths)) != len(entry_paths)
+        or excluded_paths
+        != tuple(sorted(excluded_paths, key=PurePath.as_posix))
+        or len(set(excluded_paths)) != len(excluded_paths)
+        or any(
+            entry == excluded or entry.is_relative_to(excluded)
+            for entry in entry_paths
+            for excluded in excluded_paths
+        )
         or executable not in entry_paths
         or sidecar not in entry_paths
         or entries_by_path.get(executable.as_posix()) is None
@@ -486,6 +531,7 @@ def _expected_layout(
 
 def _capture_layout(
     root: Path,
+    excluded_paths: tuple[Path, ...] = (),
 ) -> tuple[tuple[str, str, int, str | None], ...]:
     return tuple(
         (
@@ -494,7 +540,7 @@ def _capture_layout(
             entry.mode,
             entry.target,
         )
-        for entry in _scan_observed_entries(root)
+        for entry in _scan_observed_entries(root, excluded_paths)
     )
 
 
@@ -696,7 +742,13 @@ def materialize_frozen_bundle(
         )
     try:
         source_root = Path(bundle.root.resolved_path).resolve(strict=True)
-        if _capture_layout(source_root) != _expected_layout(bundle):
+        excluded_paths = tuple(
+            Path(path) for path in bundle.excluded_relative_paths
+        )
+        if _capture_layout(
+            source_root,
+            excluded_paths,
+        ) != _expected_layout(bundle):
             raise ExecutionContractError(
                 "frozen bundle source layout mismatch",
             )

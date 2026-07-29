@@ -866,10 +866,14 @@ def t_claude_materializes_runtime_skills_plugin() -> None:
         skill = home / ".agents" / "skills" / "get-requirements" / "SKILL.md"
         skill.parent.mkdir(parents=True)
         skill.write_text("---\nname: get-requirements\ndescription: Req.\n---\n# Req\n", encoding="utf-8")
+        skill.chmod(0o400)
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
         plugin = runner._materialize_claude_runtime_plugin(
             run_dir,
-            {"skills": {"reviewer": "Review carefully.\n"}},
+            {"skills": {
+                "get-requirements": "Override copied skill.\n",
+                "reviewer": "Review carefully.\n",
+            }},
             bare_config=False,
             skill_dirs={"get-requirements": skill.parent},
             agent_files={},
@@ -895,6 +899,71 @@ def t_claude_materializes_runtime_skills_plugin() -> None:
     check(
         "Review carefully." in (plugin_path / "skills" / "reviewer" / "SKILL.md").read_text(encoding="utf-8"),
         "Claude runtime skills plugin includes provider-run skill",
+    )
+    copied_skill = plugin_path / "skills" / "get-requirements" / "SKILL.md"
+    check(
+        "Override copied skill." in copied_skill.read_text(encoding="utf-8"),
+        "configured Claude skill atomically overrides read-only copied skill",
+    )
+    check(
+        copied_skill.stat().st_mode & 0o444 == 0o444,
+        "Claude runtime skills plugin is readable by the provider subprocess",
+    )
+    check(
+        plugin_path.stat().st_mode & 0o555 == 0o555,
+        "Claude runtime skills plugin directories are traversable",
+    )
+
+
+def t_provider_skill_names_and_atomic_replacement_are_safe() -> None:
+    root = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+    for name in (
+        ".",
+        "..",
+        " padded",
+        "padded ",
+        "nested/skill",
+        r"nested\skill",
+        "C:",
+        "C:skill",
+        "CON",
+        "nul.txt",
+        "trailing.",
+    ):
+        try:
+            provider_run_config.write_skill_tree(root, {name: "Unsafe.\n"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe provider skill name accepted: {name!r}")
+
+    skill_dir = root / "reviewer"
+    skill_dir.mkdir(parents=True)
+    collision = skill_dir / ".SKILL.md.tmp"
+    collision.write_text("owned by another writer\n", encoding="utf-8")
+    provider_run_config.write_skill_tree(root, {"reviewer": "Review carefully.\n"})
+    check(
+        collision.read_text(encoding="utf-8") == "owned by another writer\n",
+        "provider skill replacement does not reuse or remove another writer's temp file",
+    )
+    check(
+        (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        == "Review carefully.\n",
+        "provider skill replacement remains atomic with a pre-existing temp file",
+    )
+
+
+def t_claude_managed_mcp_config_is_authoritative() -> None:
+    regular = runner._claude_cli_extra_args(bare_config=False)
+    bare = runner._claude_cli_extra_args(bare_config=True)
+    check(
+        "strict-mcp-config" in regular and "strict-mcp-config" in bare,
+        "Claude rejects project and user MCP servers outside the frozen run artifact",
+    )
+    check(
+        "disable-slash-commands" not in regular
+        and "disable-slash-commands" in bare,
+        "Claude preserves the bare-only slash-command isolation",
     )
 
 
@@ -2146,6 +2215,8 @@ def main() -> int:
         ("codex runner inputs self-identify provider kind", t_codex_runner_inputs_self_identify_provider_kind),
         ("codex context strategy overrides auto compact", t_codex_context_strategy_overrides_auto_compact),
         ("claude materializes runtime skills plugin", t_claude_materializes_runtime_skills_plugin),
+        ("provider skill names and atomic replacement are safe", t_provider_skill_names_and_atomic_replacement_are_safe),
+        ("claude managed mcp config is authoritative", t_claude_managed_mcp_config_is_authoritative),
         ("codex open-file-panel dynamic tool", t_codex_open_file_panel_dynamic_tool),
         ("codex built-in tool schemas do not invite null defaults", t_codex_builtin_tool_schemas_do_not_invite_null_defaults),
         ("codex dynamic tools respect existing tool owners", t_codex_dynamic_tools_respect_existing_tool_owners),
