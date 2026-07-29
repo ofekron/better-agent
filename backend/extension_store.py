@@ -852,6 +852,35 @@ def _extension_record_sync_copy(record: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _reject_legacy_authority_replacement(
+    current_record: dict[str, Any] | None,
+    incoming_manifest: dict[str, Any],
+) -> None:
+    if not isinstance(current_record, dict):
+        return
+    current_manifest = current_record.get("manifest")
+    if not isinstance(current_manifest, dict):
+        return
+    current_permissions = current_manifest.get("permissions") or {}
+    incoming_permissions = incoming_manifest.get("permissions") or {}
+    current_scoped = bool(
+        current_permissions.get("capabilities")
+        or current_manifest.get("core_roles")
+    )
+    incoming_scoped = bool(
+        incoming_permissions.get("capabilities")
+        or incoming_manifest.get("core_roles")
+    )
+    if (
+        current_scoped
+        and not incoming_scoped
+        and incoming_permissions.get("internal_loopback") is True
+    ):
+        raise ExtensionError(
+            "sync artifact cannot replace scoped authority with internal_loopback"
+        )
+
+
 def _settings_without_secret_values(
     settings: dict[str, Any],
     extensions: dict[str, Any],
@@ -954,7 +983,11 @@ def export_extension_sync_state() -> dict[str, Any]:
     }
 
 
-def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) -> None:
+def _install_synced_artifact(
+    artifact: dict[str, Any],
+    records: dict[str, Any],
+    current_records: dict[str, Any],
+) -> None:
     extension_id = _safe_sync_artifact_name(str(artifact.get("extension_id") or ""))
     record = records.get(extension_id)
     if not isinstance(record, dict):
@@ -970,34 +1003,32 @@ def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) 
         raise ExtensionError(f"sync artifact sha mismatch for {extension_id}")
     current_source = record.get("source")
     source = copy.deepcopy(current_source) if isinstance(current_source, dict) else {}
-    version_key = str(
-        artifact.get("commit_sha")
-        or source.get("commit_sha")
-        or source.get("artifact_sha256")
-        or actual_sha
-    ).strip() or actual_sha
-    version_key = re.sub(r"[^A-Za-z0-9_.+-]", "_", version_key)[:128] or actual_sha
-    target = _install_root() / extension_id / "versions" / version_key
-    if target.exists():
-        shutil.rmtree(target)
+    target = _install_root() / extension_id / "versions" / actual_sha
+    staging = target.parent / f".sync-staging-{uuid.uuid4().hex}"
     try:
-        _safe_extract_tar_gz(archive, target)
-        manifest_path = target / "better-agent-extension.json"
+        _safe_extract_tar_gz(archive, staging)
+        manifest_path = staging / "better-agent-extension.json"
         if not manifest_path.is_file():
             raise ExtensionError(f"sync artifact for {extension_id} missing manifest")
         manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
         if manifest["id"] != extension_id:
             raise ExtensionError(f"sync artifact id mismatch for {extension_id}")
-        _validate_declared_files(manifest, target)
-        _install_python_requirements(target, manifest)
-        smoke_test = _run_extension_smoke_test(manifest, target)
-    except Exception:
-        shutil.rmtree(target, ignore_errors=True)
-        raise
+        _reject_legacy_authority_replacement(
+            current_records.get(extension_id),
+            manifest,
+        )
+        _validate_declared_files(manifest, staging)
+        _install_python_requirements(staging, manifest)
+        smoke_test = _run_extension_smoke_test(manifest, staging)
+        _write_package_completion(staging)
+        with _package_publish_lock(target):
+            _publish_package_dir(staging, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     record["manifest"] = manifest
     record["smoke_test"] = smoke_test
     source["install_path"] = str(target)
-    source.setdefault("commit_sha", version_key)
+    source.setdefault("commit_sha", str(artifact.get("commit_sha") or actual_sha))
     source["synced_artifact_sha256"] = actual_sha
     record["source"] = source
 
@@ -1039,6 +1070,7 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
         for extension_id, record in raw_extensions.items()
         if isinstance(record, dict)
     }
+    current_records = copy.deepcopy(_load().get("extensions") or {})
     for record in records.values():
         source = record.get("source")
         if isinstance(source, dict):
@@ -1057,7 +1089,7 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         try:
             extension_id = _safe_sync_artifact_name(str(artifact.get("extension_id") or ""))
-            _install_synced_artifact(artifact, records)
+            _install_synced_artifact(artifact, records, current_records)
         except Exception as exc:
             raw_extension_id = str(artifact.get("extension_id") or "")
             try:
@@ -1066,6 +1098,9 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
                 failure_id = f"artifact[{index}]"
             local_failures.append({"extension_id": failure_id, "error": str(exc)})
             logger.warning("extension sync artifact %r failed: %s", failure_id, exc)
+            current_record = current_records.get(failure_id)
+            if isinstance(current_record, dict):
+                records[failure_id] = copy.deepcopy(current_record)
             continue
         imported_artifacts.append(extension_id)
     next_store = {

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
+from fastapi.responses import JSONResponse
+from better_agent_sdk import BetterAgentHTTPError
 
 
 def _load_core_ba_home():
@@ -36,6 +38,24 @@ class ExtensionBackendContext:
     state_path: Path
     data_path: Path
     source: dict[str, str]
+
+
+def _new_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.exception_handler(BetterAgentHTTPError)
+    async def handle_core_http_error(_request, exc: BetterAgentHTTPError):
+        if 400 <= exc.status_code < 500:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
+        return JSONResponse(
+            status_code=502,
+            content={"detail": "Extension core capability failed"},
+        )
+
+    return app
 
 
 def _load_router(
@@ -188,7 +208,7 @@ async def _main_async() -> int:
     entrypoint = str(payload["entrypoint"])
     entrypoint_kind = str(payload.get("entrypoint_kind") or "file")
     source = {str(key): str(value) for key, value in dict(payload.get("source") or {}).items()}
-    app = FastAPI()
+    app = _new_app()
     app.include_router(
         _load_router(
             str(payload["extension_id"]),
@@ -223,7 +243,7 @@ async def _serve_persistent() -> int:
     if not spec_line:
         return 0
     spec = json.loads(spec_line)
-    app = FastAPI()
+    app = _new_app()
     app.include_router(
         _load_router(
             str(spec["extension_id"]),

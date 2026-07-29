@@ -25,6 +25,7 @@ _UNSET = object()
 # real 4xx/5xx from a live core) is never retried.
 _RETRY_BACKOFF: tuple[float, ...] = (0.1, 1.0, 5.0, 15.0, 30.0)
 _RETRY_JITTER = 0.3
+_MAX_HTTP_ERROR_BYTES = 64 * 1024
 
 
 def _urlopen_with_retry(request: "urllib.request.Request", *, timeout: float) -> bytes:
@@ -59,7 +60,15 @@ class BetterAgentError(RuntimeError):
     """Raised when core is unreachable or returns a non-JSON / non-2xx response."""
 
 
-def _http_error_message(exc: "urllib.error.HTTPError") -> str:
+class BetterAgentHTTPError(BetterAgentError):
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        suffix = f": {detail}" if detail else ""
+        super().__init__(f"core returned HTTP {status_code}{suffix}")
+
+
+def _http_error_detail(exc: "urllib.error.HTTPError") -> str:
     """Surface the core's error ``detail`` instead of the opaque HTTP reason.
 
     FastAPI returns ``{"detail": "..."}`` on 4xx/5xx; without this the caller
@@ -67,15 +76,14 @@ def _http_error_message(exc: "urllib.error.HTTPError") -> str:
     Falls back to the HTTP reason when the body is missing or not JSON."""
     detail = ""
     try:
-        body = exc.read()
-        if body:
+        body = exc.read(_MAX_HTTP_ERROR_BYTES + 1)
+        if body and len(body) <= _MAX_HTTP_ERROR_BYTES:
             parsed = json.loads(body.decode("utf-8"))
             raw = parsed.get("detail") if isinstance(parsed, dict) else parsed
-            detail = raw if isinstance(raw, str) else (json.dumps(raw) if raw else "")
+            detail = raw if isinstance(raw, str) else ""
     except Exception:
         detail = ""
-    suffix = f": {detail}" if detail else f": {exc.reason}"
-    return f"core returned HTTP {exc.code}{suffix}"
+    return detail or str(exc.reason)
 
 
 class Client:
@@ -117,7 +125,7 @@ class Client:
         try:
             raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            raise BetterAgentError(_http_error_message(exc)) from exc
+            raise BetterAgentHTTPError(exc.code, _http_error_detail(exc)) from exc
         except urllib.error.URLError as exc:
             raise BetterAgentError(f"core unreachable: {exc.reason}") from exc
         try:
@@ -134,7 +142,7 @@ class Client:
         try:
             raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            raise BetterAgentError(_http_error_message(exc)) from exc
+            raise BetterAgentHTTPError(exc.code, _http_error_detail(exc)) from exc
         except urllib.error.URLError as exc:
             raise BetterAgentError(f"core unreachable: {exc.reason}") from exc
         try:
