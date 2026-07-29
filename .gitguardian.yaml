@@ -1,0 +1,6 @@
+secret:
+  ignored_matches:
+  - match: 3539f91785ced39071f0e572bd94a593026f558cb5e603278c6b79899746f67f
+    name: test_extension_store.py:3146 password_manager.has_service_password monkeypatch
+      (function reference, not a credential)
+version: 2
