@@ -61,6 +61,8 @@ from event_shape import (
     project_content_snapshot,
     strip_synthetic_events,
 )
+from git_status_cache import cache as git_status_cache
+from node_op import node_op
 from paths import ba_home
 from i18n import t
 from prompt_templates import render_prompt
@@ -1309,103 +1311,6 @@ def _invalidate_session_list_user_prefs_cache() -> None:
     _session_list_user_prefs_cache = None
 
 
-_GIT_STATUS_TTL_SECONDS = 60.0
-_GIT_STATUS_STARTUP_WARM_LIMIT = 8
-_git_status_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_git_status_inflight: dict[tuple[str, str], asyncio.Task] = {}
-_git_status_cache_lock = asyncio.Lock()
-
-
-def _clear_git_status_cache(node_id: str | None = None, cwd: str | None = None) -> None:
-    if node_id is None and cwd is None:
-        _git_status_cache.clear()
-        return
-    for key in list(_git_status_cache):
-        key_node, key_cwd = key
-        if node_id is not None and key_node != node_id:
-            continue
-        if cwd is not None and key_cwd != cwd:
-            continue
-        _git_status_cache.pop(key, None)
-
-
-async def _cached_git_status(node_id: str, cwd: str) -> dict:
-    key = (node_id, cwd)
-    now = time.monotonic()
-    async with _git_status_cache_lock:
-        cached = _git_status_cache.get(key)
-        if cached and now - cached[0] <= _GIT_STATUS_TTL_SECONDS:
-            return dict(cached[1])
-        task = _git_status_inflight.get(key)
-        if cached:
-            if task is None:
-                task = asyncio.create_task(_file_op(node_id, "get_git_status", {"cwd": cwd}))
-                _git_status_inflight[key] = task
-                task.add_done_callback(
-                    lambda done, key=key: asyncio.create_task(
-                        _store_git_status_refresh(key, done),
-                    ),
-                )
-            return dict(cached[1])
-        if task is None:
-            task = asyncio.create_task(_file_op(node_id, "get_git_status", {"cwd": cwd}))
-            _git_status_inflight[key] = task
-
-    try:
-        result = await task
-    finally:
-        async with _git_status_cache_lock:
-            if _git_status_inflight.get(key) is task:
-                _git_status_inflight.pop(key, None)
-
-    if isinstance(result, dict):
-        async with _git_status_cache_lock:
-            _git_status_cache[key] = (time.monotonic(), dict(result))
-        return dict(result)
-    return result
-
-
-async def _store_git_status_refresh(
-    key: tuple[str, str],
-    task: asyncio.Task,
-) -> None:
-    try:
-        result = task.result()
-    except Exception:
-        result = None
-    async with _git_status_cache_lock:
-        if _git_status_inflight.get(key) is task:
-            _git_status_inflight.pop(key, None)
-        if isinstance(result, dict):
-            _git_status_cache[key] = (time.monotonic(), dict(result))
-
-
-async def _warm_recent_git_statuses() -> None:
-    try:
-        projects = await asyncio.to_thread(project_store.list_projects)
-    except Exception:
-        logger.debug("git-status startup warm: project list failed", exc_info=True)
-        return
-    warmed = 0
-    seen: set[tuple[str, str]] = set()
-    for project in projects:
-        node_id = str(project.get("node_id") or "primary")
-        cwd = str(project.get("path") or "")
-        if node_id != "primary" or not cwd:
-            continue
-        key = (node_id, cwd)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            await _cached_git_status(node_id, cwd)
-        except Exception:
-            logger.debug("git-status startup warm failed cwd=%s", cwd, exc_info=True)
-        warmed += 1
-        if warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT:
-            break
-
-
 def _shutdown_kill_runners_flag() -> Path:
     return ba_home() / "kill_runners_requested"
 
@@ -1906,6 +1811,8 @@ credential_clone_api.configure(coordinator.verify_internal_token)
 app.include_router(credential_clone_api.router)
 import testape_api  # noqa: E402
 app.include_router(testape_api.router)
+import git_api  # noqa: E402
+app.include_router(git_api.router)
 
 
 @app.post("/api/internal/runtime-operations")
@@ -3494,7 +3401,7 @@ async def pick_shortcuts(body: dict = Body(...)):
 #
 # INVARIANT: every endpoint takes an optional `node_id` (default
 # "primary" — the sentinel for the local node). They funnel through
-# `_file_op`, which dispatches locally OR via `node_link.rpc_call` for
+# `node_op`, which dispatches locally OR via `node_link.rpc_call` for
 # remote nodes. Single-machine deploys never see a topology lookup on
 # this path.
 
@@ -3504,7 +3411,7 @@ async def get_files(
     node_id: str = Query("primary"),
     max_depth: int = Query(1, ge=0, le=5),
 ):
-    return await _file_op(node_id, "get_file_tree", {"root": path, "max_depth": max_depth})
+    return await node_op(node_id, "get_file_tree", {"root": path, "max_depth": max_depth})
 
 
 @app.get("/api/browse")
@@ -3512,7 +3419,7 @@ async def browse_dir(
     path: str = Query(""),
     node_id: str = Query("primary"),
 ):
-    return await _file_op(node_id, "list_directories", {"path": path})
+    return await node_op(node_id, "list_directories", {"path": path})
 
 
 @app.get("/api/files/search")
@@ -3526,7 +3433,7 @@ async def search_files(
     if kind not in ("file", "dir"):
         kind = "file"
     sel = [m for m in (s.strip() for s in methods.split(",")) if m in ("path", "name", "symbols")]
-    return await _file_op(
+    return await node_op(
         node_id,
         "search_tree",
         {"root": root, "query": q, "kind": kind, "methods": sel},
@@ -3545,7 +3452,7 @@ async def create_file_entry(body: dict = Body(...)):
     if kind not in ("file", "directory"):
         raise HTTPException(status_code=400, detail="kind must be file or directory")
     method = "create_file" if kind == "file" else "create_directory"
-    return await _file_op(node_id, method, {"path": path})
+    return await node_op(node_id, method, {"path": path})
 
 
 def _require_session(session_id: str) -> dict:
@@ -6341,7 +6248,7 @@ async def get_project_config(
     cwd: str = Query(...),
     node_id: str = Query("primary"),
 ):
-    result = await _file_op(node_id, "scan_project_configs", {"cwd": cwd})
+    result = await node_op(node_id, "scan_project_configs", {"cwd": cwd})
     # rpc handler returns the raw scan dict; legacy endpoint shape
     # wraps it as {"files": ...}. Preserve that envelope.
     return {"files": result}
@@ -6352,7 +6259,7 @@ async def get_file(
     path: str = Query(...),
     node_id: str = Query("primary"),
 ):
-    return await _file_op(node_id, "get_file_content", {"path": path})
+    return await node_op(node_id, "get_file_content", {"path": path})
 
 
 @app.get("/api/file/metadata")
@@ -6360,7 +6267,7 @@ async def get_file_metadata(
     path: str = Query(...),
     node_id: str = Query("primary"),
 ):
-    return await _file_op(node_id, "get_file_metadata", {"path": path})
+    return await node_op(node_id, "get_file_metadata", {"path": path})
 
 
 @app.get("/api/file/draft")
@@ -6419,7 +6326,7 @@ async def _serve_raw_file(
     except Exception:
         is_local = node_id == "primary"
 
-    info = await _file_op(
+    info = await node_op(
         node_id, "get_raw_file_info",
         {"path": path, "allow_preview_types": allow_preview_types},
     )
@@ -6462,7 +6369,7 @@ async def _serve_raw_file(
             offset = start
             remaining = content_length
             while remaining > 0:
-                res = await _file_op(
+                res = await node_op(
                     node_id, "read_file_raw_range",
                     {"path": path, "start": offset,
                      "length": min(4 * 1024 * 1024, remaining),
@@ -6529,7 +6436,7 @@ async def preview_file(request: Request, token: str, node_id: str, file_path: st
 
 @app.post("/api/file")
 async def save_file(body: dict):
-    return await _file_op(
+    return await node_op(
         body.get("node_id") or "primary",
         "write_file_content",
         {"path": body["path"], "content": body["content"]},
@@ -6538,7 +6445,7 @@ async def save_file(body: dict):
 
 @app.post("/api/file-before-edit")
 async def get_file_before_edit(body: dict):
-    return await _file_op(
+    return await node_op(
         body.get("node_id") or "primary",
         "reconstruct_before_edit",
         {
@@ -6547,65 +6454,6 @@ async def get_file_before_edit(body: dict):
             "new_string": body.get("new_string", ""),
         },
     )
-
-
-@app.get("/api/git-status")
-async def get_git_status(
-    cwd: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return await _cached_git_status(node_id, cwd)
-
-
-@app.get("/api/git-tree")
-async def get_git_tree(
-    cwd: str = Query(...),
-    node_id: str = Query("primary"),
-    limit: int = Query(200, ge=1, le=500),
-):
-    return await _file_op(
-        node_id, "get_git_tree", {"cwd": cwd, "limit": limit},
-    )
-
-
-@app.get("/api/git-diff")
-async def get_git_diff(
-    path: str = Query(...),
-    cwd: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    # rpc handler returns {"diff": str|None}; pass through unchanged.
-    return await _file_op(
-        node_id, "get_file_diff", {"file_path": path, "cwd": cwd},
-    )
-
-
-@app.post("/api/git-commit")
-async def post_git_commit(body: dict):
-    node_id = body.get("node_id") or "primary"
-    cwd = body.get("cwd", "")
-    _clear_git_status_cache(node_id, cwd)
-    result = await _file_op(
-        node_id,
-        "git_commit",
-        {"cwd": cwd, "message": body.get("message", "")},
-    )
-    _clear_git_status_cache(node_id, cwd)
-    return result
-
-
-@app.post("/api/git-commit-and-push")
-async def post_git_commit_and_push(body: dict):
-    node_id = body.get("node_id") or "primary"
-    cwd = body.get("cwd", "")
-    _clear_git_status_cache(node_id, cwd)
-    result = await _file_op(
-        node_id,
-        "git_commit_and_push",
-        {"cwd": cwd, "message": body.get("message", "")},
-    )
-    _clear_git_status_cache(node_id, cwd)
-    return result
 
 
 @app.get("/api/hooks")
@@ -9978,53 +9826,6 @@ async def _node_offline_error(session: Optional[dict]) -> Optional[str]:
     return await _node_cwd_error(node_id, str((session or {}).get("cwd") or ""))
 
 
-async def _file_op(node_id: str, method: str, params: dict):
-    """REST-endpoint wrapper around `node_rpc_handlers.call_local_or_remote`
-    that translates plain exceptions to FastAPI HTTPExceptions.
-
-    Error translation:
-      `RuntimeError("...topology.yaml...")` → 400 (caller asked for a
-        non-primary node but no topology is configured)
-      NodeOffline          → 503
-      asyncio.TimeoutError → 504
-      RuntimeError         → 502 (remote handler raised)
-      FileNotFoundError    → 404
-      FileExistsError      → 409
-      PermissionError      → 403
-      ValueError           → 400
-    """
-    if node_id != "primary":
-        nodes_not_ready = extension_store.runtime_not_ready_message(
-            extension_store.extension_id_for_role('machine-nodes')
-        )
-        if nodes_not_ready is not None:
-            raise HTTPException(status_code=404, detail=nodes_not_ready)
-    import node_link
-    from node_rpc_handlers import call_local_or_remote
-    try:
-        return await call_local_or_remote(node_id, method, params)
-    except HTTPException:
-        raise
-    except node_link.NodeOffline as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"node {node_id!r} did not respond within timeout",
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        # RuntimeErrors come from the remote handler → 502.
-        raise HTTPException(status_code=502, detail=str(e))
-
-
 def _local_node_id_or_primary() -> str:
     """Resolve the local node's id without raising. Single-machine
     deploys (no topology.yaml) get the legacy `"primary"` sentinel."""
@@ -13276,7 +13077,7 @@ def _recovered_run_session_ids(recovered: list[dict]) -> set[str]:
 
 
 def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict]:
-    import startup_recovery_gate
+    import recovery_schedule
     queued_count_by_sid: dict[str, int] = {}
 
     def queued_priority_rank(desc: dict) -> int:
@@ -13290,7 +13091,7 @@ def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict
     return sorted(
         recovered,
         key=lambda desc: (
-            startup_recovery_gate.session_priority_rank(
+            recovery_schedule.priority_rank(
                 _recovered_run_session_id(desc),
             ),
             queued_priority_rank(desc),
@@ -14246,6 +14047,13 @@ async def on_startup():
     import recovery_manager
     recovery_manager.manager.start()
 
+    # The extension UI catalog gets its own thread too: recomputing the
+    # frontend projection is blocking store IO, and it must not run on
+    # the loop that serves the clients it is about to notify.
+    import extension_ui_manager
+    extension_ui_manager.manager.start()
+    extension_ui_manager.manager.bind(asyncio.get_running_loop())
+
     # Bind + reset the startup-task registry. `reset()` broadcasts a
     # `{cleared: true}` ping so any tab connected through a uvicorn
     # --reload drops its stale local map before we register fresh
@@ -14414,7 +14222,7 @@ async def on_startup():
         run_task(
             "git_status_warm",
             "startup_tasks.git_status_warm",
-            _warm_recent_git_statuses,
+            git_status_cache.warm_recent,
             in_thread=False,
         ),
         name="startup-git-status-warm",
@@ -14666,6 +14474,11 @@ async def on_shutdown():
         await asyncio.to_thread(recovery_manager.manager.stop)
     except Exception:
         logger.exception("recovery manager shutdown failed")
+    try:
+        import extension_ui_manager
+        await asyncio.to_thread(extension_ui_manager.manager.stop)
+    except Exception:
+        logger.exception("extension UI manager shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)

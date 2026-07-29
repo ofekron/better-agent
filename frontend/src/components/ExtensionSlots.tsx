@@ -151,11 +151,38 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
   return modules;
 }
 
+function sameModules(a: ExtensionFrontendModule[], b: ExtensionFrontendModule[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((left, index) => {
+    const right = b[index];
+    return (
+      left.extension_id === right.extension_id
+      && left.extension_name === right.extension_name
+      && left.slot === right.slot
+      && left.id === right.id
+      && left.label === right.label
+      && left.kind === right.kind
+      && left.module_url === right.module_url
+      && left.payments === right.payments
+      && left.marketplace_auth === right.marketplace_auth
+    );
+  });
+}
+
 export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCatalog {
   const [modules, setModules] = useState<ExtensionFrontendModule[]>([]);
   const [error, setError] = useState<ExtensionCatalogError | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState(false);
+
+  // Keep the previous array identity when this slot's modules did not
+  // move, so an extension changing elsewhere cannot churn this slot.
+  const applyEntrypoints = useCallback((payload: FrontendEntrypointPayload) => {
+    const next = flattenModules(payload, slot);
+    setModules((prev) => (sameModules(prev, next) ? prev : next));
+    setError(null);
+    setResetError(false);
+  }, [slot]);
 
   const refresh = useCallback(async () => {
     const { promise } = trackPromise(`extensions:frontend-modules:${slot}`, async () => {
@@ -186,9 +213,7 @@ export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCata
       return (await response.json()) as FrontendEntrypointPayload;
     });
     try {
-      setModules(flattenModules(await promise, slot));
-      setError(null);
-      setResetError(false);
+      applyEntrypoints(await promise);
     } catch (requestError) {
       const catalogError = (requestError as Error & { catalogError?: ExtensionCatalogError }).catalogError;
       setError(catalogError ?? {
@@ -198,7 +223,7 @@ export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCata
         revision: "",
       });
     }
-  }, [slot]);
+  }, [applyEntrypoints, slot]);
 
   const reset = useCallback(async () => {
     if (resetting || !error?.resetAvailable || !error.revision) return;
@@ -225,11 +250,20 @@ export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCata
 
   useEffect(() => {
     void refresh();
-    const off = eventBus.subscribe("extension.ui.frontend_modules", () => {
+    const off = eventBus.subscribe("extension.ui.frontend_modules", (payload) => {
+      // The backend's extension UI manager pushes the recomputed
+      // projection with the frame. A frame without one means it could
+      // not project the catalog — only then is a re-pull needed, and
+      // the REST error path is what surfaces the failure.
+      const framed = payload as FrontendEntrypointPayload | undefined;
+      if (framed && Array.isArray(framed.entrypoints)) {
+        applyEntrypoints(framed);
+        return;
+      }
       void refresh();
     });
     return off;
-  }, [refresh]);
+  }, [applyEntrypoints, refresh]);
 
   return { modules, error, resetting, resetError, reset };
 }

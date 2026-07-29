@@ -14,6 +14,7 @@ import extension_app_settings
 import extension_store
 import personal_harness_extension
 import extension_backend_loader
+import extension_ui_manager
 import marketplace_service
 import config_store
 import perf
@@ -260,7 +261,7 @@ def _extension_error(exc: extension_store.ExtensionError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-async def _broadcast_extension_changed(*topics: str) -> None:
+async def _broadcast_extension_changed(*topics: str, extension_id: str = "") -> None:
     from orchestrator import get_active_coordinator
 
     try:
@@ -273,7 +274,17 @@ async def _broadcast_extension_changed(*topics: str) -> None:
     coordinator = get_active_coordinator()
     if coordinator is not None:
         for topic in dict.fromkeys(topics or EXTENSION_CATALOG_TOPICS):
+            if topic == extension_ui_manager.UI_MODULES_CHANGED:
+                continue
             await coordinator.broadcast_global(topic, {})
+
+    # The UI catalog frame is owned by extension_ui_manager: any mutation
+    # may or may not move the projection, and only the manager's diff
+    # knows which. Announce the fact and let it decide.
+    extension_ui_manager.manager.publish_fact(
+        extension_ui_manager.EXTENSION_MUTATED,
+        payload={"extension_id": extension_id},
+    )
 
     try:
         import node_config_sync
@@ -1279,7 +1290,9 @@ async def set_extension_frontend_module_enabled(
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extension_changed("extension.ui.frontend_modules")
+    await _broadcast_extension_changed(
+        "extension.ui.frontend_modules", extension_id=extension_id
+    )
     return {"slot": slot, "id": module_id, "enabled": enabled}
 
 
@@ -1296,7 +1309,9 @@ async def set_extension_native_exposure(
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extension_changed("extension.config.native_exposure")
+    await _broadcast_extension_changed(
+        "extension.config.native_exposure", extension_id=extension_id
+    )
     return {"kind": kind, "name": name, "native_exposed": exposed}
 
 
@@ -1306,7 +1321,9 @@ async def set_extension_permission_grant(extension_id: str, permission: str, req
         record = extension_store.set_permission_grant(extension_id, permission, req.granted)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extension_changed("extension.config.permissions")
+    await _broadcast_extension_changed(
+        "extension.config.permissions", extension_id=extension_id
+    )
     return {"extension": record}
 
 
@@ -1316,5 +1333,7 @@ async def uninstall_extension(extension_id: str):
         extension_store.uninstall(extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
+    await _broadcast_extension_changed(
+        *EXTENSION_CATALOG_TOPICS, extension_id=extension_id
+    )
     return {"ok": True}
