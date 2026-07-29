@@ -28,8 +28,8 @@ from typing import Optional
 
 from orchs.jsonl_helpers import compute_jsonl_path
 from env_compat import get_env
-from execution_template import ExecutionArtifact, restore_prepared_execution
-from provider import StreamEvent, get_provider, start_prepared_run
+from execution_template import ExecutionArtifact, PreparedExecution
+from provider import Provider, StreamEvent, get_provider, start_prepared_run
 from session_manager import manager as session_manager
 import perf
 
@@ -52,6 +52,55 @@ class _RemoteRunCtx:
 
 
 _ctx_by_run: dict[str, _RemoteRunCtx] = {}
+
+
+def _local_node_backend_url() -> str:
+    configured = get_env("BETTER_CLAUDE_BACKEND_URL")
+    if configured:
+        return configured
+    raw_port = get_env("BETTER_CLAUDE_NODE_PORT", "8002")
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BETTER_CLAUDE_NODE_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("BETTER_CLAUDE_NODE_PORT must be between 1 and 65535")
+    return f"http://localhost:{port}"
+
+
+def _prepare_node_execution(
+    artifact: ExecutionArtifact,
+    provider: Provider,
+    *,
+    internal_token: str,
+    extra_env: dict[str, str] | None,
+    backend_url: str,
+) -> PreparedExecution:
+    arguments = artifact.template.arguments()
+    artifact.require_authority(provider.execution_authority_record(arguments))
+    execution = provider.prepare_run(
+        **arguments,
+        internal_token=internal_token,
+        extra_env=extra_env,
+        backend_url=backend_url,
+    )
+    node_artifact = execution.artifact
+    if (
+        node_artifact.template.arguments() != arguments
+        or node_artifact.provider_id != artifact.provider_id
+        or node_artifact.provider_kind != artifact.provider_kind
+        or node_artifact.provider_generation != artifact.provider_generation
+        or node_artifact.provider_revision != artifact.provider_revision
+    ):
+        run_id = arguments["run_id"]
+        from runs_dir import runs_root
+
+        provider._cleanup_failed_execution_payloads(
+            execution,
+            runs_root() / run_id,
+        )
+        raise ValueError("node-local execution preparation changed remote authority")
+    return execution
 
 
 # ============================================================================
@@ -94,14 +143,12 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         ):
             raise ValueError("remote execution envelope does not match artifact")
         provider = get_provider(artifact.provider_id)
-        execution = restore_prepared_execution(
+        execution = _prepare_node_execution(
             artifact,
+            provider,
             internal_token=__import__("node_runtime_auth").token(),
             extra_env=msg.get("extra_env"),
-            backend_url=get_env(
-                "BETTER_CLAUDE_BACKEND_URL",
-                "http://localhost:8000",
-            ),
+            backend_url=_local_node_backend_url(),
         )
     except (KeyError, RuntimeError, TypeError, ValueError) as exc:
         logger.error("node_rpc: invalid execution artifact: %s", exc)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 import capability_api
 import extension_backend_loader
+import machine_nodes_api
 from better_agent_sdk import Client
 
 
@@ -119,6 +121,36 @@ def test_private_feature_actions_are_registered_with_strict_schemas() -> None:
     for key in expected:
         schema = capability_api._ACTIONS[key].schema
         assert schema.model_config.get("extra") == "forbid"
+
+
+def test_machine_node_actions_bind_extracted_module(monkeypatch) -> None:
+    observed = {}
+
+    async def revoke(body, x_internal_token):
+        observed.update(body=body, token=x_internal_token)
+        return {"status": "revoked"}
+
+    monkeypatch.setattr(machine_nodes_api, "internal_revoke_node", revoke)
+    monkeypatch.setattr(
+        capability_api.extension_store,
+        "extension_id_for_role",
+        lambda role: "ofek.machine-nodes" if role == "machine-nodes" else None,
+    )
+    monkeypatch.setattr(
+        capability_api.extension_token_registry,
+        "mint",
+        lambda extension_id: f"token:{extension_id}",
+    )
+    action = capability_api._ACTIONS[("machine-nodes", "revoke")]
+    result = asyncio.run(
+        action.handler(action.schema.model_validate({"node_id": "lenovo"}))
+    )
+
+    assert result == {"status": "revoked"}
+    assert observed == {
+        "body": {"node_id": "lenovo"},
+        "token": "token:ofek.machine-nodes",
+    }
 
 
 def test_auto_tagging_update_rejects_unsupported_patch_fields() -> None:

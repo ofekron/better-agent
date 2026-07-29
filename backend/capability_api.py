@@ -1417,7 +1417,11 @@ def _register_machine_nodes() -> None:
             "machine-nodes",
             action,
             schema,
-            _main_action(function_name, extension_role="machine-nodes"),
+            _main_action(
+                function_name,
+                extension_role="machine-nodes",
+                module_name="machine_nodes_api",
+            ),
         )
 
 
