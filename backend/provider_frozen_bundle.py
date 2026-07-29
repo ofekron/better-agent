@@ -582,10 +582,7 @@ def _safe_materialization_parent(destination: Path) -> Path:
             "frozen bundle destination is unavailable",
         ) from exc
     unsafe_permissions = (
-        not windows_path_has_private_acl(
-            parent,
-            require_protected=False,
-        )
+        not windows_path_has_private_acl(parent)
         if os.name == "nt"
         else (
             bool(stat.S_IMODE(observed.st_mode) & 0o022)

@@ -195,7 +195,12 @@ def test_windows_materialization_uses_acl_authority() -> None:
     for source in (bundle_source, sdk_source):
         assert 'if os.name == "nt"' in source
         assert "windows_path_has_private_acl(" in source
-        assert "require_protected=False" in source
+        assert "require_protected=False" not in source
+    pinned_source = (
+        ROOT / "backend" / "provider_pinned_launch.py"
+    ).read_text(encoding="utf-8")
+    assert "make_private_directory(run_dir)" in pinned_source
+    assert "make_private_directory(container)" in sdk_source
     assert "dir=ba_home()" in smoke_source
 
 

@@ -22,6 +22,7 @@ scope.
 """
 
 import os
+import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -170,24 +171,16 @@ def make_private_file(path: Path) -> None:
     path.chmod(0o600)
 
 
-def windows_path_has_private_acl(
-    path: Path,
-    *,
-    require_protected: bool = True,
-) -> bool:
+def windows_path_has_private_acl(path: Path) -> bool:
     if os.name != "nt":
         return False
     script = r"""
 $ErrorActionPreference = "Stop"
 $acl = Get-Acl -LiteralPath $args[0]
-$requireProtected = $args[1] -eq "true"
 $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($current, "S-1-5-18", "S-1-5-32-544")
 $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-if (
-    ($requireProtected -and -not $acl.AreAccessRulesProtected) -or
-    $allowed -notcontains $owner
-) {
+if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner) {
     exit 2
 }
 foreach ($rule in $acl.GetAccessRules(
@@ -214,7 +207,6 @@ Write-Output "private"
                 "-Command",
                 script,
                 str(path),
-                str(require_protected).lower(),
             ],
             check=False,
             capture_output=True,
@@ -225,9 +217,31 @@ Write-Output "private"
     return result.returncode == 0 and result.stdout.strip() == "private"
 
 
-def _make_private(path: Path) -> None:
+def make_private_directory(path: Path) -> None:
+    try:
+        observed = path.lstat()
+        junction = bool(
+            getattr(path, "is_junction", lambda: False)(),
+        )
+    except OSError as exc:
+        raise PermissionError(
+            "private directory is unavailable",
+        ) from exc
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or stat.S_ISLNK(observed.st_mode)
+        or junction
+    ):
+        raise PermissionError("private directory must not redirect")
     if os.name == "nt":
-        _set_windows_private_acl(path, directory=True)
+        try:
+            _set_windows_private_acl(path, directory=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PermissionError(
+                "private directory ACL update failed",
+            ) from exc
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private directory ACL verification failed")
         return
     path.chmod(_PRIVATE_DIR_MODE)
 
@@ -305,7 +319,7 @@ def _resolve_home_uncached() -> Path:
         _ensure_default_alias(root)
     secured_key = str(root.resolve())
     if secured_key not in _SECURED_ROOTS:
-        _make_private(root)
+        make_private_directory(root)
         _SECURED_ROOTS.add(secured_key)
     _record_resolve_ms((_time.perf_counter() - t0) * 1000.0)
     return root

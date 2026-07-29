@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Iterator
 
 from codex_execution_common import ExecutionContractError
 from codex_execution_identity import FileIdentity
+from paths import make_private_directory
 from provider_frozen_bundle import (
     frozen_bundle_destination,
     materialize_frozen_bundle,
@@ -152,6 +154,12 @@ def open_pinned_runner_launch(
     run_dir = Path(runner.launch.argv[2])
     if not run_dir.is_absolute():
         raise ExecutionContractError("runner launch directory is invalid")
+    try:
+        make_private_directory(run_dir)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionContractError(
+            "runner launch directory cannot be secured",
+        ) from exc
     bundle_root = materialize_frozen_bundle(
         runner.frozen_bundle,
         frozen_bundle_destination(runner.frozen_bundle, run_dir),
