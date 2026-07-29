@@ -2,10 +2,9 @@
 
 import asyncio
 import collections
-import contextvars
 import copy
 from contextlib import asynccontextmanager
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import faulthandler
 import gzip
 import hashlib
@@ -62,6 +61,8 @@ from event_shape import (
     strip_synthetic_events,
 )
 from git_status_cache import cache as git_status_cache
+import hot_path_executor
+from hot_path_executor import hot_path, session_detail_path, session_list_path
 from node_op import node_op
 from remote_sessions_cache import cache as remote_sessions_cache
 from paths import ba_home
@@ -97,8 +98,6 @@ from requirements_query_runner import (
 import memory_store
 import user_input_store
 import device_token_store
-import file_panel_drafts
-import file_preview_urls
 import task_output_preview_urls
 import mobile_bundle_ticket
 import installation_capabilities
@@ -616,74 +615,6 @@ _SIDEBAR_DECORATED_CACHE_MAX = 1024
 _machine_nodes_enabled_cache: tuple[float, bool] | None = None
 _machine_nodes_enabled_refresh_task: asyncio.Task | None = None
 _MACHINE_NODES_ENABLED_TTL_SECONDS = 2.0
-_HOT_PATH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=8,
-    thread_name_prefix="hot-path",
-)
-_SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="session-detail",
-)
-_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="session-list",
-)
-
-
-async def _run_hot_path(name: str, fn, /, *args, **kwargs):
-    queued_at = time.perf_counter()
-    ctx = contextvars.copy_context()
-
-    def _call():
-        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        return ctx.run(fn, *args, **kwargs)
-
-    start = time.perf_counter()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _HOT_PATH_EXECUTOR,
-            _call,
-        )
-    finally:
-        perf.record(name, (time.perf_counter() - start) * 1000)
-
-
-async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
-    queued_at = time.perf_counter()
-    ctx = contextvars.copy_context()
-
-    def _call():
-        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        return ctx.run(fn, *args, **kwargs)
-
-    start = time.perf_counter()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _SESSION_DETAIL_EXECUTOR,
-            _call,
-        )
-    finally:
-        perf.record(name, (time.perf_counter() - start) * 1000)
-
-
-async def _run_session_list_hot_path(name: str, fn, /, *args, **kwargs):
-    queued_at = time.perf_counter()
-    ctx = contextvars.copy_context()
-
-    def _call():
-        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        return ctx.run(fn, *args, **kwargs)
-
-    start = time.perf_counter()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _SESSION_LIST_EXECUTOR,
-            _call,
-        )
-    finally:
-        perf.record(name, (time.perf_counter() - start) * 1000)
-
-
 def _streaming_assistant_message_id(session: dict) -> Optional[str]:
     messages = session.get("messages") if isinstance(session, dict) else None
     if not isinstance(messages, list):
@@ -1698,6 +1629,14 @@ import testape_api  # noqa: E402
 app.include_router(testape_api.router)
 import git_api  # noqa: E402
 app.include_router(git_api.router)
+import file_api  # noqa: E402
+app.include_router(file_api.router)
+import file_delivery  # noqa: E402
+import native_index_api  # noqa: E402
+import native_index_manager  # noqa: E402
+# Late-bound: the authority check is defined further down this module.
+native_index_api.configure(lambda: _internal_authority_is_valid())
+app.include_router(native_index_api.router)
 
 
 @app.post("/api/internal/runtime-operations")
@@ -2486,7 +2425,7 @@ async def _validate_optional_run_selector(
     )
     resolved_model = model
     if not resolved_model and provider_id:
-        provider = await _run_hot_path(
+        provider = await hot_path.run(
             "communication.validate_run_selector.get_provider",
             config_store.get_provider,
             provider_id,
@@ -2500,7 +2439,7 @@ async def _validate_optional_run_selector(
             )
     if not resolved_model:
         resolved_model = str((sender or {}).get("model") or "").strip()
-    await _run_hot_path(
+    await hot_path.run(
         "communication.validate_run_selector.validate_provider_model",
         _validate_provider_model,
         resolved_provider_id,
@@ -2848,104 +2787,6 @@ async def add_custom_model(body: dict):
     return record
 
 
-@app.post("/api/native-import")
-async def start_native_import(body: dict):
-    """Start a background job that ingests every native CLI session of
-    the given providers (all configured providers when `provider_ids` is
-    omitted) into Better Agent sessions. Single-flight. Returns current
-    job status. `limit` caps the number of NEW sessions imported."""
-    provider_ids = body.get("provider_ids") if isinstance(body, dict) else None
-    if provider_ids is not None and not isinstance(provider_ids, list):
-        raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
-    import native_import
-    return await asyncio.to_thread(
-        native_import.start_import,
-        provider_ids,
-        _parse_native_import_limit(body),
-        _parse_native_import_project_paths(body),
-    )
-
-
-@app.get("/api/native-import/status")
-async def native_import_status():
-    import native_import
-    return native_import.get_status()
-
-
-@app.get("/api/native-import/summary")
-async def native_import_summary(
-    provider_ids: Optional[str] = None,
-    all_projects: bool = False,
-):
-    """Counts-only preview of importable native sessions, grouped by
-    provider. Read-only; does not start a job. Returns grouped counts
-    instead of one row per session — a full Claude+Codex history is tens
-    of thousands of sessions and the row dump reached hundreds of MB."""
-    import native_import
-    ids = provider_ids.split(",") if provider_ids else None
-    project_paths = None if all_projects else native_import.loaded_project_paths()
-    return await native_import.count_native_sessions_async(ids, project_paths)
-
-
-def _parse_native_import_limit(body: dict):
-    raw = body.get("limit") if isinstance(body, dict) else None
-    if raw is None:
-        return None
-    try:
-        limit = int(raw)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="limit must be an integer")
-    if limit < 0:
-        raise HTTPException(status_code=400, detail="limit must be >= 0")
-    return limit or None
-
-
-def _parse_native_import_project_paths(body: dict) -> Optional[list[str]]:
-    import native_import
-    if isinstance(body, dict) and body.get("all_projects") is True:
-        return None
-    raw = body.get("project_paths") if isinstance(body, dict) else None
-    if raw is None:
-        return native_import.loaded_project_paths()
-    if not isinstance(raw, list):
-        raise HTTPException(status_code=400, detail="project_paths must be a list of paths or omitted")
-    return [str(p) for p in raw if isinstance(p, str) and p]
-
-
-@app.post("/api/internal/native-import")
-async def internal_start_native_import(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Internal-token-gated trigger for the native import. Runs the
-    import INSIDE the backend process, which is the only safe way when
-    the backend is live — a separate process writing session.json races
-    the backend's in-memory cache (it re-persists and clobbers the
-    render tree). Used by the CLI/import scripts."""
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    import native_import
-    provider_ids = body.get("provider_ids") if isinstance(body, dict) else None
-    if provider_ids is not None and not isinstance(provider_ids, list):
-        raise HTTPException(status_code=400, detail="provider_ids must be a list of ids or omitted")
-    return await asyncio.to_thread(
-        native_import.start_import,
-        provider_ids,
-        _parse_native_import_limit(body),
-        _parse_native_import_project_paths(body),
-    )
-
-
-@app.get("/api/internal/native-import/status")
-async def internal_native_import_status(
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    import native_import
-    return await asyncio.to_thread(native_import.get_status)
-
-
 @app.get("/api/models")
 async def get_models():
     """Projection/cache-only read. NEVER makes a provider I/O call."""
@@ -3208,7 +3049,7 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
 
 @app.get("/api/ui-selection")
 async def get_ui_selection():
-    return await _run_hot_path("ui_selection.get_all", ui_selection.get_all)
+    return await hot_path.run("ui_selection.get_all", ui_selection.get_all)
 
 
 @app.patch("/api/ui-selection")
@@ -3265,7 +3106,7 @@ async def patch_ui_selection(body: dict = Body(...)):
         return ui_selection.get_all()
 
     try:
-        snapshot = await _run_hot_path("ui_selection.patch", _patch_sync)
+        snapshot = await hot_path.run("ui_selection.patch", _patch_sync)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.broadcast_global("ui_selection_changed", snapshot)
@@ -3280,64 +3121,6 @@ async def pick_shortcuts(body: dict = Body(...)):
     assistant_text = body.get("assistant_text", "")
     shortcuts = await shortcut_picker.pick_shortcuts(assistant_text)
     return {"shortcuts": shortcuts}
-
-
-# ---- File browsing ----
-#
-# INVARIANT: every endpoint takes an optional `node_id` (default
-# "primary" — the sentinel for the local node). They funnel through
-# `node_op`, which dispatches locally OR via `node_link.rpc_call` for
-# remote nodes. Single-machine deploys never see a topology lookup on
-# this path.
-
-@app.get("/api/files")
-async def get_files(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-    max_depth: int = Query(1, ge=0, le=5),
-):
-    return await node_op(node_id, "get_file_tree", {"root": path, "max_depth": max_depth})
-
-
-@app.get("/api/browse")
-async def browse_dir(
-    path: str = Query(""),
-    node_id: str = Query("primary"),
-):
-    return await node_op(node_id, "list_directories", {"path": path})
-
-
-@app.get("/api/files/search")
-async def search_files(
-    root: str = Query(...),
-    q: str = Query(""),
-    kind: str = Query("file"),
-    methods: str = Query("path"),
-    node_id: str = Query("primary"),
-):
-    if kind not in ("file", "dir"):
-        kind = "file"
-    sel = [m for m in (s.strip() for s in methods.split(",")) if m in ("path", "name", "symbols")]
-    return await node_op(
-        node_id,
-        "search_tree",
-        {"root": root, "query": q, "kind": kind, "methods": sel},
-    )
-
-
-@app.post("/api/files/create")
-async def create_file_entry(body: dict = Body(...)):
-    path = body.get("path")
-    kind = body.get("kind")
-    node_id = body.get("node_id") or "primary"
-    if not isinstance(path, str) or not path.strip():
-        raise HTTPException(status_code=400, detail="path must be a non-empty string")
-    if not isinstance(node_id, str) or not node_id.strip():
-        raise HTTPException(status_code=400, detail="node_id must be a non-empty string")
-    if kind not in ("file", "directory"):
-        raise HTTPException(status_code=400, detail="kind must be file or directory")
-    method = "create_file" if kind == "file" else "create_directory"
-    return await node_op(node_id, method, {"path": path})
 
 
 def _require_session(session_id: str) -> dict:
@@ -6139,208 +5922,6 @@ async def get_project_config(
     return {"files": result}
 
 
-@app.get("/api/file")
-async def get_file(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return await node_op(node_id, "get_file_content", {"path": path})
-
-
-@app.get("/api/file/metadata")
-async def get_file_metadata(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return await node_op(node_id, "get_file_metadata", {"path": path})
-
-
-@app.get("/api/file/draft")
-async def get_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.read_draft(path, node_id)
-
-
-@app.post("/api/file/draft")
-async def save_file_draft(body: dict):
-    node_id = body.get("node_id") or "primary"
-    return file_panel_drafts.write_draft(
-        path=body["path"],
-        node_id=node_id,
-        content=body["content"],
-        base_identity=body.get("base_identity"),
-    )
-
-
-@app.delete("/api/file/draft")
-async def delete_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.delete_draft(path, node_id)
-
-
-@app.get("/api/file/raw")
-async def get_raw_file(
-    request: Request,
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    """Serve a binary file (PDF, video, audio) with correct Content-Type.
-    Supports HTTP Range requests for video seeking. For sessions hosted
-    on a worker-node the bytes are pulled over the node WS in base64
-    chunks (`read_file_raw_range`); local files stream straight off disk."""
-    return await _serve_raw_file(request, path, node_id)
-
-
-async def _serve_raw_file(
-    request: Request,
-    path: str,
-    node_id: str,
-    allow_preview_types: bool = False,
-):
-    """Shared raw-file streamer for /api/file/raw and the signed preview
-    route. `allow_preview_types` widens the extension allowlist to web
-    assets and is only ever set by the token-gated preview route — it is
-    deliberately not a query param on /api/file/raw."""
-    try:
-        from topology import local_node_id as _lid
-        is_local = node_id in ("primary", _lid())
-    except Exception:
-        is_local = node_id == "primary"
-
-    info = await node_op(
-        node_id, "get_raw_file_info",
-        {"path": path, "allow_preview_types": allow_preview_types},
-    )
-    size = info["size"]
-    mime = info["mime_type"]
-    file_path = Path(info["path"])
-
-    start, end, status = 0, size - 1, 200
-    range_header = request.headers.get("range") if hasattr(request, "headers") else None
-    if range_header:
-        import re as _re
-        match = _re.match(r"bytes=(\d+)-(\d*)", range_header)
-        if match:
-            start = int(match.group(1))
-            end = int(match.group(2)) if match.group(2) else size - 1
-            end = min(end, size - 1)
-            status = 206
-    content_length = end - start + 1
-
-    if is_local and status == 200:
-        from starlette.responses import FileResponse
-        return FileResponse(
-            file_path, media_type=mime, filename=file_path.name,
-        )
-
-    if is_local:
-        async def _sender():
-            with open(file_path, "rb") as f:
-                f.seek(start)
-                remaining = content_length
-                while remaining > 0:
-                    chunk = f.read(min(65536, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-    else:
-        async def _sender():
-            import base64
-            offset = start
-            remaining = content_length
-            while remaining > 0:
-                res = await node_op(
-                    node_id, "read_file_raw_range",
-                    {"path": path, "start": offset,
-                     "length": min(4 * 1024 * 1024, remaining),
-                     "allow_preview_types": allow_preview_types},
-                )
-                chunk = base64.b64decode(res["data_b64"])
-                if not chunk:
-                    break
-                offset += len(chunk)
-                remaining -= len(chunk)
-                yield chunk
-
-    headers = {
-        "Content-Length": str(content_length),
-        "Accept-Ranges": "bytes",
-        "Content-Type": mime,
-    }
-    if status == 206:
-        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-
-    from starlette.responses import StreamingResponse
-    return StreamingResponse(_sender(), status_code=status, headers=headers)
-
-
-@app.get("/api/file/preview-url")
-async def get_file_preview_url(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    """Mint a signed, expiring, directory-scoped preview URL (authed).
-    The preview iframe runs in an opaque origin that cannot send the
-    session cookie, so the URL's signature is the credential for the
-    /api/file/preview/ route."""
-    try:
-        return {"url": file_preview_urls.mint(path, node_id)}
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid preview path")
-
-
-@app.get("/api/file/preview/{token}/{node_id}/{file_path:path}")
-async def preview_file(request: Request, token: str, node_id: str, file_path: str):
-    """Serve a file for in-panel/new-tab HTML preview. Path-based routing
-    (unlike the query-based /api/file/raw) so relative asset URLs inside
-    the page resolve to sibling files naturally. Gated by the signed
-    token, confined to the signed directory tree. HTML/SVG responses
-    carry a CSP sandbox — scripts run in an opaque origin and cannot
-    reach Better Agent's origin, cookies, or DOM."""
-    try:
-        norm_path = file_preview_urls.verify(token, node_id, f"/{file_path}")
-    except ValueError:
-        raise HTTPException(status_code=403, detail="invalid preview token")
-    response = await _serve_raw_file(
-        request, norm_path, node_id, allow_preview_types=True,
-    )
-    response.headers["content-disposition"] = "inline"
-    mime = response.headers.get("content-type", "")
-    if mime.startswith("text/html") or mime.startswith("image/svg"):
-        response.headers["content-security-policy"] = (
-            "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads"
-        )
-        response.headers["x-content-type-options"] = "nosniff"
-    return response
-
-
-@app.post("/api/file")
-async def save_file(body: dict):
-    return await node_op(
-        body.get("node_id") or "primary",
-        "write_file_content",
-        {"path": body["path"], "content": body["content"]},
-    )
-
-
-@app.post("/api/file-before-edit")
-async def get_file_before_edit(body: dict):
-    return await node_op(
-        body.get("node_id") or "primary",
-        "reconstruct_before_edit",
-        {
-            "file_path": body.get("file_path", ""),
-            "old_string": body.get("old_string", ""),
-            "new_string": body.get("new_string", ""),
-        },
-    )
-
-
 @app.get("/api/hooks")
 async def get_hooks():
     try:
@@ -7854,7 +7435,7 @@ async def get_sessions(
         connected=(),
         status_filter=status_gate is not None,
     ):
-        page_source, total, content_scores = await _run_session_list_hot_path(
+        page_source, total, content_scores = await session_list_path.run(
             "sessions.list.search_local_page.worker",
             _build_local_search_page_for_sidebar,
             offset=offset,
@@ -7866,7 +7447,7 @@ async def get_sessions(
         )
         state_snapshot = None
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_session_list_hot_path(
+            page = await session_list_path.run(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 page_source,
@@ -7896,7 +7477,7 @@ async def get_sessions(
             accept_encoding=accept_encoding,
         )
     if not connected:
-        page, total = await _run_session_list_hot_path(
+        page, total = await session_list_path.run(
             "sessions.list.local_page_thread",
             _build_local_sessions_page_for_list,
             **filters,
@@ -7972,7 +7553,7 @@ async def get_sessions(
     else:
         if can_page_remote_local_order:
             with perf.timed("sessions.list.remote.local_order_candidates"):
-                out, local_total = await _run_session_list_hot_path(
+                out, local_total = await session_list_path.run(
                     "sessions.list.remote.local_order_candidates.worker",
                     _local_session_page_for_sidebar_preserving_order,
                     sort_by=effective_sort_by,
@@ -7994,7 +7575,7 @@ async def get_sessions(
                 local_page_candidates = out
         else:
             with perf.timed("sessions.list.local"):
-                out = await _run_session_list_hot_path(
+                out = await session_list_path.run(
                     "sessions.list.local.worker",
                     _local_session_summaries_for_sidebar,
                 )
@@ -8049,7 +7630,7 @@ async def get_sessions(
             if deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions:
                 end = offset + limit
                 with perf.timed("sessions.list.page_decorate"):
-                    page = await _run_session_list_hot_path(
+                    page = await session_list_path.run(
                         "sessions.list.page_decorate.worker",
                         _decorate_local_sidebar_sessions,
                         out[offset:end],
@@ -8153,7 +7734,7 @@ async def get_sessions(
                 limit=limit,
             )
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_session_list_hot_path(
+            page = await session_list_path.run(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 page_source,
@@ -8184,7 +7765,7 @@ async def get_sessions(
     ):
         end = offset + limit
         with perf.timed("sessions.list.page_decorate"):
-            page = await _run_session_list_hot_path(
+            page = await session_list_path.run(
                 "sessions.list.page_decorate.worker",
                 _decorate_local_sidebar_sessions,
                 out[offset:end],
@@ -8292,7 +7873,7 @@ async def get_sessions(
     if page_source is None:
         page_source = out[offset:end]
     with perf.timed("sessions.list.page_decorate"):
-        page = await _run_session_list_hot_path(
+        page = await session_list_path.run(
             "sessions.list.page_decorate.worker",
             _decorate_local_sidebar_sessions,
             page_source,
@@ -9372,7 +8953,7 @@ async def get_session_summaries(request: Request, ids: str = Query("")):
     )
     by_id = {str(session.get("id")): session for session in summaries if session.get("id")}
     ordered = [by_id[sid] for sid in requested_ids if sid in by_id]
-    page = await _run_hot_path(
+    page = await hot_path.run(
         "sessions.summaries.decorate.worker",
         _decorate_local_sidebar_sessions,
         ordered,
@@ -9501,7 +9082,7 @@ async def get_session(
     perf.record("sessions.detail.response_cache.miss", 1.0)
 
     worker_start = time.perf_counter()
-    tree = await _run_session_detail_hot_path(
+    tree = await session_detail_path.run(
         "sessions.detail.worker",
         _session_detail_snapshot_sync,
         session_id,
@@ -10358,7 +9939,7 @@ async def mark_session_opened(session_id: str):
     """Stamp `last_opened_at` after a client opens this session's chat view.
     Server-generated timestamp; does not bump `updated_at`."""
     at = datetime.now().isoformat()
-    session = await _run_hot_path(
+    session = await hot_path.run(
         "session.opened.set_last_opened_at",
         session_manager.set_last_opened_at,
         session_id,
@@ -12907,14 +12488,8 @@ async def _recover_in_flight_task() -> None:
             )
             if background_cold:
                 _enqueue_recovered_cold_runs(background_cold)
-        # Resume a native-session import that a restart interrupted. Spawns
-        # its own background thread; the idempotency registry makes resume
-        # duplicate-free. Best-effort — must never block startup.
-        try:
-            import native_import
-            native_import.resume_if_interrupted()
-        except Exception:
-            logger.exception("native_import: resume-on-startup failed")
+        # Resume a native-session import that a restart interrupted.
+        await native_index_manager.manager.resume_interrupted_import()
     except asyncio.CancelledError:
         if not gate_open:
             startup_recovery_gate.mark_recovery_failed("recovery cancelled")
@@ -13706,15 +13281,12 @@ async def on_startup():
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
 
-    # Native-transcript FTS index: spawn the background daemon that builds +
-    # refreshes it (throttled, non-blocking). Skipped in test mode so test
-    # backends don't scan the real ~/.claude/~/.codex corpus.
-    if not os.environ.get("BETTER_AGENT_TEST_MODE"):
-        try:
-            import native_transcript_index
-            native_transcript_index.ensure_started()
-        except Exception:
-            logger.debug("native transcript index worker failed to start", exc_info=True)
+    # Native-transcript domain: bring up its own thread, which in turn
+    # spawns the FTS index daemon. Test-mode skip lives in the manager.
+    native_index_manager.manager.start()
+    # Local file reads get their own thread so a large media stream
+    # never stalls the request loop.
+    file_delivery.host.start()
 
     # Install SIGINT flag so on_shutdown can distinguish Ctrl+C from
     # uvicorn reload (which sends SIGTERM, not SIGINT). The
@@ -14329,10 +13901,13 @@ async def on_shutdown():
     await _drain_prompt_handoffs()
     await coordinator.quiesce_prompt_processors()
     try:
-        import native_transcript_index
-        await asyncio.to_thread(native_transcript_index.shutdown)
+        await asyncio.to_thread(native_index_manager.manager.stop)
     except Exception:
-        logger.exception("native transcript index shutdown failed")
+        logger.exception("native index manager shutdown failed")
+    try:
+        await asyncio.to_thread(file_delivery.host.stop)
+    except Exception:
+        logger.exception("file delivery host shutdown failed")
     await schedule_ticker.shutdown()
     global _project_match_executor, _project_match_ready, _project_match_warm_task
     if _project_match_warm_task is not None:
@@ -14364,9 +13939,7 @@ async def on_shutdown():
         await asyncio.to_thread(extension_ui_manager.manager.stop)
     except Exception:
         logger.exception("extension UI manager shutdown failed")
-    _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    hot_path_executor.shutdown_all()
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
     # before hitting disk — without this drain a clean shutdown would
@@ -15982,7 +15555,7 @@ async def _ask_continue_and_expect_inbox_back_async(
         or str(body.get("target_worker_id") or "").strip()
     )
     if target_worker_pool and not has_exact_target:
-        target = await _run_hot_path(
+        target = await hot_path.run(
             "communication.ask_async.pick_pool_worker",
             _pick_pool_worker_for_sender,
             target_worker_pool,
@@ -16179,7 +15752,7 @@ async def _resolve_communication_target(body: dict) -> str:
     if target_session_id:
         return target_session_id
     if target_worker_id:
-        worker = await _run_hot_path(
+        worker = await hot_path.run(
             "communication.resolve_target.find_worker",
             _find_worker_by_agent_session_id,
             target_worker_id,
@@ -16187,7 +15760,7 @@ async def _resolve_communication_target(body: dict) -> str:
         if not worker:
             raise HTTPException(status_code=404, detail="target_worker_id does not exist")
         return str(worker.get("agent_session_id") or "")
-    target = await _run_hot_path(
+    target = await hot_path.run(
         "communication.resolve_target.pick_pool_worker",
         _pick_pool_worker_for_sender,
         target_worker_pool,
@@ -17803,7 +17376,7 @@ async def set_ask_choice(sid: str, msg_id: str, body: dict = Body(default={})):
 @app.get("/api/sessions/{session_id}/images/{filename}")
 async def get_session_image(session_id: str, filename: str):
     img_path = resolve_session_image_path(session_id, filename)
-    if not img_path.exists():
+    if not await file_delivery.host.exists(img_path):
         raise HTTPException(status_code=404, detail=t("error.image_not_found"))
     return FileResponse(img_path)
 

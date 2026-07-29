@@ -91,7 +91,7 @@ def test_sessions_filter_sort_stays_off_loop() -> None:
     helper_start = source.index("def _build_local_sessions_page_for_list(")
     helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "page, total = await _run_session_list_hot_path(\n            \"sessions.list.local_page_thread\"," in route_source
+    assert "page, total = await session_list_path.run(\n            \"sessions.list.local_page_thread\"," in route_source
     assert "_build_local_sessions_page_for_list," in route_source
     assert "await asyncio.to_thread(\n                _filter_sessions_for_list_preserving_order" in route_source
     assert "await asyncio.to_thread(\n                _filter_sort_sessions_for_list" in route_source

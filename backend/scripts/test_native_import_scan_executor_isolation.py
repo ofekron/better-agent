@@ -17,7 +17,7 @@ Fix: `native_import` now owns a small, dedicated `ThreadPoolExecutor`
 (`native_import._SCAN_EXECUTOR`) and routes the scan through
 `loop.run_in_executor(<dedicated>, ...)` instead of the shared default pool
 — the same isolation pattern as `jsonl_tailer._FILE_POLL_EXECUTOR`,
-`main._HOT_PATH_EXECUTOR`, and `extension_backend_loader._ROUNDTRIP_EXECUTOR`.
+`hot_path_executor.hot_path`, and `extension_backend_loader._ROUNDTRIP_EXECUTOR`.
 
 Two subtests:
 
