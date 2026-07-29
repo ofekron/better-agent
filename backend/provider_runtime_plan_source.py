@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError
-from provider_runtime_capability_model import frozen_json, normalize_plan
+from provider_runtime_capability_model import (
+    frozen_json,
+    normalize_plan,
+)
 from provider_runtime_plan_hydration import (
     apply_runtime_hydration,
     capture_runtime_hydration,
@@ -488,10 +491,7 @@ def _structural_provider_runtime_plan(
     harness = frozen_inputs.get("resolved_harness_run_config")
     harness = harness if type(harness) is dict else {}
     resolved_plan = normalize_plan({
-        "harness": _secret_free(
-            harness,
-            path="harness",
-        ),
+        "harness": harness,
         "tools": sorted(all_tools),
         "mcp_servers": servers,
     })

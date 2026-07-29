@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SnapshotTransport } from "../src/lib/snapshotTransport";
 import { useWebSocket } from "../src/hooks/useWebSocket";
@@ -92,7 +92,7 @@ describe("SnapshotTransport", () => {
     }
     transport.handle(payload.end, send, apply);
     expect(apply).not.toHaveBeenCalled();
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
     expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
       type: "snapshot_ack", data: { next_chunk: payload.chunks.length },
@@ -200,7 +200,7 @@ describe("SnapshotTransport", () => {
     transport.handle(resumedBegin, send, apply);
     payload.chunks.slice(1).forEach((chunk) => transport.handleBinary(chunk, send, apply));
     transport.handle(payload.end, send, apply);
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
   });
 
@@ -216,7 +216,7 @@ describe("SnapshotTransport", () => {
     transport.handle(payload.end, send, apply);
 
     expect(apply).not.toHaveBeenCalled();
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
     expect(apply).toHaveBeenCalledWith({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
     expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -426,7 +426,7 @@ describe("SnapshotTransport", () => {
     transport.handle(replacement.begin, send, apply);
     replacement.chunks.forEach((chunk) => transport.handle(chunk, send, apply));
     transport.handle(replacement.end, send, apply);
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
     expect(apply).toHaveBeenCalledWith({ type: "messages_replay", data: {
       app_session_id: "s1", messages: [{ id: "replacement" }],
@@ -450,7 +450,7 @@ describe("SnapshotTransport", () => {
     transport.handle(resumedBegin, send, apply);
     payload.chunks.slice(1).forEach((chunk) => transport.handle(chunk, send, apply));
     transport.handle(payload.end, send, apply);
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
   });
 
@@ -468,7 +468,7 @@ describe("SnapshotTransport", () => {
     await Promise.resolve();
     expect(uiWork).toHaveBeenCalledOnce();
     expect(apply).not.toHaveBeenCalled();
-    await settle();
+    await transport.whenIdle();
     expect(apply).toHaveBeenCalledOnce();
   });
 
@@ -483,7 +483,7 @@ describe("SnapshotTransport", () => {
     payload.chunks.forEach((chunk) => transport.handle(chunk, vi.fn(), apply));
     transport.handle(payload.end, vi.fn(), apply);
     expect(applied).toEqual([]);
-    await settle();
+    await transport.whenIdle();
     expect(applied).toEqual([
       { type: "messages_replay", data: { app_session_id: "s1", messages: [] } },
       live,
@@ -593,7 +593,7 @@ describe("SnapshotTransport", () => {
       return Promise.resolve();
     });
     transport.handle({ type: "snapshot_refresh_required", data: {
-      key: "stub_invalidated:global", event_type: "stub_invalidated",
+      key: "messages_replay:global", event_type: "messages_replay",
       revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID,
       reason: "overflow",
     } }, vi.fn(), apply);
@@ -614,10 +614,40 @@ describe("SnapshotTransport", () => {
     transport.handle({ type: "snapshot_refresh_complete", data: {
       refresh_id: REFRESH_ID, success: true, root_ids: ["A", "B"],
     } }, vi.fn(), apply);
-    await settle();
+    await transport.whenIdle();
     expect(applied).toEqual([aLive, forkLive]);
     expect(applied).not.toContain(staleB);
     expect(applied).not.toContain(staleFork);
+  });
+
+  it("waits for asynchronous reconciliation before reporting idle", async () => {
+    const transport = new SnapshotTransport();
+    let resolveApply!: () => void;
+    const applyComplete = new Promise<void>((resolve) => {
+      resolveApply = resolve;
+    });
+    const apply = vi.fn(() => applyComplete);
+    transport.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:A", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID,
+      reason: "too_large",
+    } }, vi.fn(), apply);
+    transport.handle({ type: "session_reconciled", data: {
+      root_id: "A", scope_sids: ["A"], snapshot_refresh_id: REFRESH_ID,
+    } }, vi.fn(), apply);
+    transport.handle({ type: "snapshot_refresh_complete", data: {
+      refresh_id: REFRESH_ID, success: true, root_ids: ["A"],
+    } }, vi.fn(), apply);
+
+    let idle = false;
+    const idleComplete = transport.whenIdle().then(() => {
+      idle = true;
+    });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    resolveApply();
+    await idleComplete;
+    expect(idle).toBe(true);
   });
 
   it("isolates concurrent refresh IDs until both authority boundaries complete", async () => {
@@ -762,7 +792,9 @@ describe("useWebSocket snapshot routing", () => {
     });
     expect(onMessagesReplay).not.toHaveBeenCalled();
     expect(onMessagesDelta).not.toHaveBeenCalled();
-    await act(async () => { await settle(); });
+    await act(async () => {
+      await waitFor(() => expect(onMessagesReplay).toHaveBeenCalledOnce());
+    });
     expect(onMessagesReplay).toHaveBeenCalledOnce();
     expect(onMessagesDelta).toHaveBeenCalledOnce();
     expect(onMessagesReplay.mock.invocationCallOrder[0]).toBeLessThan(
@@ -802,7 +834,7 @@ describe("useWebSocket snapshot routing", () => {
         refresh_id: REFRESH_ID, success: true, root_ids: ["s1"],
       } });
     });
-    expect(onSessionReconciled).toHaveBeenCalledWith("s1", true);
+    expect(onSessionReconciled).toHaveBeenCalledWith("s1");
     expect(onMessagesDelta).not.toHaveBeenCalled();
     await act(async () => { resolveRest(); await settle(); });
     expect(onMessagesDelta).toHaveBeenCalledOnce();
@@ -811,15 +843,14 @@ describe("useWebSocket snapshot routing", () => {
     ctrl.uninstall();
   });
 
-  it("routes verified replay, stub, and rewind frames through their existing callbacks", async () => {
+  it("routes verified replay and rewind frames through their existing callbacks", async () => {
     const ctrl = new MockWebSocketController();
     ctrl.install();
     const onMessagesReplay = vi.fn();
     const onMessagesDelta = vi.fn();
-    const onStubInvalidated = vi.fn();
     const onRewindComplete = vi.fn();
     const rendered = renderHook(() => useWebSocket("ws://test", {
-      onMessagesReplay, onMessagesDelta, onStubInvalidated, onRewindComplete,
+      onMessagesReplay, onMessagesDelta, onRewindComplete,
     }));
     await act(async () => { await Promise.resolve(); });
     const payload = await frames({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
@@ -832,28 +863,15 @@ describe("useWebSocket snapshot routing", () => {
       ctrl.getCurrent().deliver(payload.end as WSEvent);
     });
     expect(onMessagesReplay).not.toHaveBeenCalled();
-    await act(async () => { await settle(); });
+    await act(async () => {
+      await waitFor(() => expect(onMessagesReplay).toHaveBeenCalledOnce());
+    });
     expect(onMessagesReplay).toHaveBeenCalledOnce();
     expect(onMessagesReplay).toHaveBeenCalledWith("s1", []);
     expect(onMessagesDelta).toHaveBeenCalledOnce();
     expect(onMessagesReplay.mock.invocationCallOrder[0]).toBeLessThan(
       onMessagesDelta.mock.invocationCallOrder[0],
     );
-
-    const stub = { event_count: 1, last_events: [] };
-    const stubPayload = await frames({ type: "stub_invalidated", data: {
-      app_session_id: "s1", msg_id: "m1", stub,
-    } });
-    stubPayload.begin.data.snapshot_id = "snap-stub";
-    stubPayload.chunks.forEach((chunk) => { chunk.data.snapshot_id = "snap-stub"; });
-    stubPayload.end.data.snapshot_id = "snap-stub";
-    act(() => {
-      ctrl.getCurrent().deliver(stubPayload.begin as WSEvent);
-      stubPayload.chunks.forEach((chunk) => ctrl.getCurrent().deliver(chunk as WSEvent));
-      ctrl.getCurrent().deliver(stubPayload.end as WSEvent);
-    });
-    await act(async () => { await settle(); });
-    expect(onStubInvalidated).toHaveBeenCalledWith("s1", "m1", stub);
 
     const rewindPayload = await frames({
       type: "rewind_complete", data: { session_id: "s1", messages: [] },
@@ -866,7 +884,9 @@ describe("useWebSocket snapshot routing", () => {
       rewindPayload.chunks.forEach((chunk) => ctrl.getCurrent().deliver(chunk as WSEvent));
       ctrl.getCurrent().deliver(rewindPayload.end as WSEvent);
     });
-    await act(async () => { await settle(); });
+    await act(async () => {
+      await waitFor(() => expect(onRewindComplete).toHaveBeenCalled());
+    });
     expect(onRewindComplete).toHaveBeenCalledWith("s1", []);
     rendered.unmount();
     ctrl.uninstall();

@@ -59,7 +59,8 @@ def _copy_descriptor(
         output = os.open(target, flags, mode)
         created = True
         try:
-            os.fchmod(output, mode)
+            if os.name != "nt":
+                os.fchmod(output, mode)
             os.lseek(descriptor, 0, os.SEEK_SET)
             while True:
                 chunk = os.read(descriptor, 1024 * 1024)
@@ -108,31 +109,55 @@ def _trusted_system_interpreter(
 
 
 @contextmanager
-def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
+def _materialization_directory(
+    root: Path | None,
+) -> Iterator[str]:
+    if root is None:
+        with tempfile.TemporaryDirectory(prefix="better-agent-launch-") as raw:
+            yield raw
+        return
+    raw = tempfile.mkdtemp(prefix=".provider-launch-", dir=root)
+    os.chmod(raw, 0o700)
+    yield raw
+
+
+@contextmanager
+def open_pinned_launch(
+    launch: AttestedLaunch,
+    *,
+    materialization_root: Path | None = None,
+) -> Iterator[PinnedLaunch]:
     _validate_launch(launch)
     if not launch.launcher.attest_metadata():
         raise ExecutionContractError("provider launcher identity mismatch")
-    if os.name == "nt":
+    if os.name == "nt" and materialization_root is None:
         from codex_execution_launch import _open_windows_locked_components
 
         with _open_windows_locked_components(launch.components):
             yield PinnedLaunch(launch.argv, ())
         return
-    with _open_file_identities(launch.components) as handles:
-        with tempfile.TemporaryDirectory(
-            prefix="better-agent-launch-",
-        ) as raw:
+    if os.name == "nt":
+        from codex_execution_launch import _open_windows_locked_components
+
+        component_handles = _open_windows_locked_components(launch.components)
+    else:
+        component_handles = _open_file_identities(launch.components)
+    with component_handles as handles:
+        with _materialization_directory(materialization_root) as raw:
             argv = list(launch.argv)
             for position, (index, descriptor) in enumerate(
                 zip(launch.component_argv_indexes, handles),
             ):
                 source = launch.components[position]
-                if launch.mode == "posix-shebang" and position == 0:
-                    if not _trusted_system_interpreter(descriptor, source):
+                if os.name == "nt" and position == 0:
+                    continue
+                if launch.mode in {"posix-shebang", "runner-dev"} and position == 0:
+                    if _trusted_system_interpreter(descriptor, source):
+                        continue
+                    if launch.mode == "posix-shebang":
                         raise ExecutionContractError(
                             "provider interpreter cannot be executed safely",
                         )
-                    continue
                 target = Path(raw) / f"{position}-{Path(argv[index]).name}"
                 _copy_descriptor(descriptor, target, source)
                 argv[index] = str(target)
@@ -145,21 +170,15 @@ def open_pinned_runner_launch(
 ) -> Iterator[PinnedLaunch]:
     if not isinstance(runner, RunnerLaunch):
         raise ExecutionContractError("runner launch authority mismatch")
-    if not runner.frozen:
-        if not runner.attest():
-            raise ExecutionContractError("runner launch authority mismatch")
-        with open_pinned_launch(runner.launch) as pinned:
-            yield pinned
-        return
     try:
         runner.validate()
     except ExecutionContractError as exc:
         raise ExecutionContractError(
             "runner launch authority mismatch",
         ) from exc
-    if runner.frozen_bundle is None:
-        raise ExecutionContractError("frozen runner bundle authority is missing")
-    run_dir = Path(runner.launch.argv[2])
+    run_dir = Path(
+        runner.launch.argv[runner.launch.argv.index("--run-dir") + 1],
+    )
     if not run_dir.is_absolute():
         raise ExecutionContractError("runner launch directory is invalid")
     try:
@@ -168,6 +187,17 @@ def open_pinned_runner_launch(
         raise ExecutionContractError(
             "runner launch directory cannot be secured",
         ) from exc
+    if not runner.frozen:
+        if not runner.attest():
+            raise ExecutionContractError("runner launch authority mismatch")
+        with open_pinned_launch(
+            runner.launch,
+            materialization_root=run_dir,
+        ) as pinned:
+            yield pinned
+        return
+    if runner.frozen_bundle is None:
+        raise ExecutionContractError("frozen runner bundle authority is missing")
     bundle_root = materialize_frozen_bundle(
         runner.frozen_bundle,
         frozen_bundle_destination(runner.frozen_bundle, run_dir),

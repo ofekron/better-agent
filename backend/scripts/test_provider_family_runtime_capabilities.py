@@ -244,6 +244,58 @@ def test_artifact_manifest_and_hydration_are_secret_free() -> None:
             raise AssertionError("secret MCP configuration was persisted")
 
 
+def test_harness_secret_refs_survive_artifact_round_trip() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        state_home = root / "state"
+        run_dir = state_home / "runs" / "secret-ref-run"
+        run_dir.mkdir(parents=True)
+        refs = {
+            "example.extension": [
+                "extension-setting:example.extension:access_token",
+                "extension-setting:example.extension:api_key",
+            ],
+        }
+        plan = _plan()
+        plan["harness"]["secret_refs"] = refs
+        plan["harness"]["launcher_projection"] = {
+            "secret_refs": refs,
+        }
+        prepared, _sources = _snapshot(root, plan=plan)
+
+        assert prepared.plan["harness"]["secret_refs"] == refs
+        assert json.loads(prepared.payload)["plan"]["harness"][
+            "secret_refs"
+        ] == refs
+
+        previous = os.environ.get("BETTER_AGENT_HOME")
+        os.environ["BETTER_AGENT_HOME"] = str(state_home)
+        try:
+            stage_family_runtime_capabilities(
+                "secret-ref-run",
+                prepared,
+            )
+            install_staged_family_runtime_capabilities(
+                run_dir,
+                run_id="secret-ref-run",
+                manifest=prepared.manifest,
+            )
+            resolved = resolve_run_local_capabilities(
+                run_dir,
+                prepared.manifest,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous
+
+        assert resolved.plan["harness"]["secret_refs"] == refs
+        assert resolved.plan["harness"]["launcher_projection"][
+            "secret_refs"
+        ] == refs
+
+
 def test_path_symlink_and_payload_tamper_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -431,6 +483,7 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
 TESTS = (
     test_snapshot_is_immutable_across_every_authority_drift,
     test_artifact_manifest_and_hydration_are_secret_free,
+    test_harness_secret_refs_survive_artifact_round_trip,
     test_path_symlink_and_payload_tamper_fail_closed,
     test_prewarm_success_and_failure_preserve_capability_semantics,
     test_restart_clone_preserves_posix_and_windows_configs,

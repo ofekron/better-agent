@@ -2,6 +2,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 
+vi.mock("../src/components/FileCommentBar", () => ({
+  FileCommentBar: () => null,
+}));
+vi.mock("../src/components/FileDiscussionPanel", () => ({
+  FileDiscussionPanel: () => null,
+}));
+
 const { FileEditor } = await import("../src/components/FileEditor");
 
 afterEach(() => {

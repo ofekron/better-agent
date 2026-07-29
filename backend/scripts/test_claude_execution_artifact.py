@@ -56,10 +56,12 @@ def _write_executable(path: Path, body: str) -> None:
 def _provider(root: Path) -> tuple[ClaudeProvider, dict]:
     config_dir = root / "claude-config"
     config_dir.mkdir()
-    (config_dir / "settings.json").write_text(
+    shared_settings = root / "shared-settings.json"
+    shared_settings.write_text(
         '{"permissions":{"defaultMode":"dontAsk"}}',
         encoding="utf-8",
     )
+    (config_dir / "settings.json").symlink_to(shared_settings)
     record = config_store.add_provider({
         "kind": "claude",
         "name": "Claude artifact",
@@ -135,6 +137,20 @@ def _arguments(root: Path, session_id: str, run_id: str) -> dict:
             "profile_id": "frozen-profile",
             "profile_revision": "revision-1",
             "provider_run_config": {},
+            "secret_refs": {
+                "example.extension": [
+                    "extension-setting:example.extension:access_token",
+                    "extension-setting:example.extension:api_key",
+                ],
+            },
+            "launcher_projection": {
+                "secret_refs": {
+                    "example.extension": [
+                        "extension-setting:example.extension:access_token",
+                        "extension-setting:example.extension:api_key",
+                    ],
+                },
+            },
         },
         "turn_run_id": None,
         "disabled_builtin_extensions": [],
@@ -180,6 +196,34 @@ def test_prepare_freezes_claude_semantics_and_retry_authority() -> None:
             assert runner_input["resolved_harness_run_config"][
                 "profile_id"
             ] == "frozen-profile"
+            assert runner_input["resolved_harness_run_config"][
+                "secret_refs"
+            ]["example.extension"] == [
+                "extension-setting:example.extension:access_token",
+                "extension-setting:example.extension:api_key",
+            ]
+
+            provisioning_arguments = _arguments(
+                root,
+                session["id"],
+                str(uuid.uuid4()),
+            )
+            provisioning_arguments["source"] = "routine"
+            provisioning_arguments["user_facing"] = False
+            provisioning_arguments["provisioned_tool_profile"] = (
+                "scheduled-tools"
+            )
+            provisioning = provider.prepare_run(
+                **provisioning_arguments,
+            )
+            assert provisioning.artifact.runtime_policy["runner_input"][
+                "source"
+            ] == "routine"
+            assert provisioning.artifact.runtime_policy["runner_input"][
+                "resolved_harness_run_config"
+            ]["secret_refs"] == runner_input[
+                "resolved_harness_run_config"
+            ]["secret_refs"]
 
             arguments["prompt"] = "mutated after prepare"
             arguments["provider_run_config"]["mcp_servers"].clear()

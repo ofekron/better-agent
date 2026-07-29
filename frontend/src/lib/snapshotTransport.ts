@@ -219,6 +219,7 @@ export class SnapshotTransport {
   private pendingEncodedBytes = 0;
   private pendingBinaryBytes = 0;
   private readonly supersededKeys = new Set<string>();
+  private readonly pendingOperations = new Set<Promise<void>>();
   private readonly recoveries = new Map<string, {
     terminal: boolean;
     pending: Set<Promise<void>>;
@@ -244,7 +245,7 @@ export class SnapshotTransport {
       return true;
     }
     if (event.type === "snapshot_end") {
-      void this.end(event.data, send, apply);
+      this.track(this.end(event.data, send, apply));
       return true;
     }
     if (event.type === "snapshot_restart_required") {
@@ -325,7 +326,14 @@ export class SnapshotTransport {
       }, 10);
     });
     transfer.work = task.then(() => undefined, () => undefined);
+    this.track(transfer.work);
     return true;
+  }
+
+  async whenIdle(): Promise<void> {
+    while (this.pendingOperations.size > 0) {
+      await Promise.all([...this.pendingOperations]);
+    }
   }
 
   resume(send: SendFrame): void {
@@ -457,6 +465,15 @@ export class SnapshotTransport {
       this.pendingEncodedBytes -= payload.length;
     });
     transfer.work = task.then(() => undefined, () => undefined);
+    this.track(transfer.work);
+  }
+
+  private track(operation: Promise<void>): void {
+    this.pendingOperations.add(operation);
+    void operation.then(
+      () => this.pendingOperations.delete(operation),
+      () => this.pendingOperations.delete(operation),
+    );
   }
 
   private async acceptChunk(
@@ -640,16 +657,22 @@ export class SnapshotTransport {
       const item = this.ordered[0];
       if (item.kind === "snapshot") {
         if (item.transfer.state === "pending") return;
-        this.ordered.shift();
-        if (item.transfer.state === "ready" && item.transfer.readyEvent) {
-          apply(item.transfer.readyEvent);
+      this.ordered.shift();
+      if (item.transfer.state === "ready" && item.transfer.readyEvent) {
+          const result = apply(item.transfer.readyEvent);
+          if (result && typeof (result as Promise<void>).then === "function") {
+            this.track(Promise.resolve(result));
+          }
         }
         continue;
       }
       this.ordered.shift();
       this.bufferedLiveBytes -= item.bytes;
       this.bufferedLiveEvents -= 1;
-      apply(item.event);
+      const result = apply(item.event);
+      if (result && typeof (result as Promise<void>).then === "function") {
+        this.track(Promise.resolve(result));
+      }
     }
   }
 
@@ -762,6 +785,7 @@ export class SnapshotTransport {
     if (!result || typeof (result as Promise<void>).then !== "function") return;
     const pending = Promise.resolve(result);
     recovery.pending.add(pending);
+    this.track(pending);
     void pending.then(
       () => {
         recovery.pending.delete(pending);

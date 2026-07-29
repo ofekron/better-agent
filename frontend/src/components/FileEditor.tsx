@@ -17,6 +17,8 @@ type ViewMode = "diff" | "file";
 
 import { API } from "../api";
 const POLL_MS = 1500;
+const EMPTY_FILE_DISCUSSIONS: FileDiscussion[] = [];
+const EMPTY_SESSION_MESSAGES: ChatMessage[] = [];
 
 export interface FileAnchorComment {
   filePath: string;
@@ -79,8 +81,8 @@ export function FileEditor({
   onSubmitComment,
   pendingTagCount = 0,
   diskWritable = true,
-  fileDiscussions = [],
-  sessionMessages = [],
+  fileDiscussions = EMPTY_FILE_DISCUSSIONS,
+  sessionMessages = EMPTY_SESSION_MESSAGES,
   onStartDiscussion,
   onPatchDiscussion,
   onSendDiscussionMessage,

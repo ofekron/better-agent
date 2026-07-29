@@ -134,6 +134,56 @@ def test_config_dir_does_not_export_claude_env() -> None:
             os.environ["CLAUDE_CONFIG_DIR"] = old_claude_dir
 
 
+def _agy_prepare_arguments(
+    *,
+    run_id: str,
+    prompt: str,
+    cwd: Path,
+    app_session_id: str,
+    session_id: str | None = None,
+    provider_run_config: dict | None = None,
+    resolved_harness_run_config: dict | None = None,
+    source: str = "test",
+    user_facing: bool = False,
+    provisioned_tool_profile: str = "",
+) -> dict:
+    return {
+        "run_id": run_id,
+        "prompt": prompt,
+        "images": None,
+        "files": None,
+        "cwd": str(cwd),
+        "model": "Gemini Test (High)",
+        "reasoning_effort": None,
+        "session_id": session_id,
+        "mode": "native",
+        "app_session_id": app_session_id,
+        "source": source,
+        "disallowed_tools": None,
+        "setting_sources": None,
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "runner-fixture-token",
+        "fork": False,
+        "supervised": False,
+        "supervisor_agent_session_id": None,
+        "worker_agent_session_id": None,
+        "mssg_sender_session_id": None,
+        "is_worker": False,
+        "browser_harness_enabled": False,
+        "user_facing": user_facing,
+        "working_mode": None,
+        "extra_env": None,
+        "continuation_chain": None,
+        "provider_run_config": provider_run_config,
+        "capability_contexts": None,
+        "target_message_id": None,
+        "resolved_harness_run_config": resolved_harness_run_config,
+        "turn_run_id": None,
+        "disabled_builtin_extensions": [],
+        "provisioned_tool_profile": provisioned_tool_profile,
+    }
+
+
 def _run_prepared_agy(
     provider: AgyProvider,
     *,
@@ -152,41 +202,14 @@ def _run_prepared_agy(
         permission={"mode": "dontAsk"},
     )
     run_id = str(uuid.uuid4())
-    arguments = {
-        "run_id": run_id,
-        "prompt": prompt,
-        "images": None,
-        "files": None,
-        "cwd": str(cwd),
-        "model": "Gemini Test (High)",
-        "reasoning_effort": None,
-        "session_id": session_id,
-        "mode": "native",
-        "app_session_id": app_session["id"],
-        "source": "test",
-        "disallowed_tools": None,
-        "setting_sources": None,
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "runner-fixture-token",
-        "fork": False,
-        "supervised": False,
-        "supervisor_agent_session_id": None,
-        "worker_agent_session_id": None,
-        "mssg_sender_session_id": None,
-        "is_worker": False,
-        "browser_harness_enabled": False,
-        "user_facing": False,
-        "working_mode": None,
-        "extra_env": None,
-        "continuation_chain": None,
-        "provider_run_config": provider_run_config,
-        "capability_contexts": None,
-        "target_message_id": None,
-        "resolved_harness_run_config": None,
-        "turn_run_id": None,
-        "disabled_builtin_extensions": [],
-        "provisioned_tool_profile": "",
-    }
+    arguments = _agy_prepare_arguments(
+        run_id=run_id,
+        prompt=prompt,
+        cwd=cwd,
+        app_session_id=app_session["id"],
+        session_id=session_id,
+        provider_run_config=provider_run_config,
+    )
     execution = provider.prepare_run(**arguments)
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True)
@@ -237,6 +260,100 @@ def _run_prepared_agy(
         return run_dir, runner_main(run_dir)
     finally:
         stop_active_host()
+
+
+def test_agy_prepare_preserves_harness_secret_refs() -> None:
+    with tempfile.TemporaryDirectory(prefix="bc-test-agy-prepare-") as raw:
+        root = Path(raw)
+        bin_dir = root / "bin"
+        config_root = root / "config"
+        shared_settings = root / "shared-settings.json"
+        cwd = root / "cwd"
+        bin_dir.mkdir()
+        config_root.mkdir()
+        cwd.mkdir()
+        shared_settings.write_text("{}", encoding="utf-8")
+        (config_root / "settings.json").symlink_to(shared_settings)
+        _make_fake_agy(bin_dir)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        try:
+            record = config_store.add_provider({
+                "name": "AGY prepare fixture",
+                "kind": "agy",
+                "mode": "subscription",
+                "config_dir": str(config_root),
+            })
+            provider = AgyProvider(record)
+            app_session = session_manager.manager.create(
+                name="AGY prepare fixture",
+                cwd=str(cwd),
+                orchestration_mode="native",
+                source="test",
+                provider_id=record["id"],
+                model=None,
+                permission={"mode": "dontAsk"},
+            )
+            refs = {
+                "example.extension": [
+                    "extension-setting:example.extension:access_token",
+                    "extension-setting:example.extension:api_key",
+                ],
+            }
+            execution = provider.prepare_run(
+                **_agy_prepare_arguments(
+                    run_id=str(uuid.uuid4()),
+                    prompt="prepare only",
+                    cwd=cwd,
+                    app_session_id=app_session["id"],
+                    resolved_harness_run_config={
+                        "profile_id": "prepared-profile",
+                        "secret_refs": refs,
+                        "launcher_projection": {
+                            "secret_refs": refs,
+                        },
+                    },
+                ),
+            )
+            runner_input = execution.artifact.runtime_policy["runner_input"]
+            check(
+                runner_input["resolved_harness_run_config"][
+                    "secret_refs"
+                ] == refs,
+                "agy prepare preserves canonical harness secret refs",
+            )
+            routine_execution = provider.prepare_run(
+                **_agy_prepare_arguments(
+                    run_id=str(uuid.uuid4()),
+                    prompt="routine prepare only",
+                    cwd=cwd,
+                    app_session_id=app_session["id"],
+                    resolved_harness_run_config={
+                        "profile_id": "prepared-profile",
+                        "secret_refs": refs,
+                        "launcher_projection": {
+                            "secret_refs": refs,
+                        },
+                    },
+                    source="routine",
+                    user_facing=False,
+                    provisioned_tool_profile="scheduled-tools",
+                ),
+            )
+            routine_input = routine_execution.artifact.runtime_policy[
+                "runner_input"
+            ]
+            check(
+                routine_input["source"] == "routine"
+                and routine_input["provisioned_tool_profile"]
+                == "scheduled-tools"
+                and routine_input["resolved_harness_run_config"][
+                    "secret_refs"
+                ] == refs,
+                "agy routine prepare preserves canonical harness secret refs",
+            )
+        finally:
+            os.environ["PATH"] = old_path
 
 
 def test_model_fetch_and_runner() -> None:
@@ -700,6 +817,7 @@ def main() -> int:
     tests = [
         test_registry_and_capabilities,
         test_config_dir_does_not_export_claude_env,
+        test_agy_prepare_preserves_harness_secret_refs,
         test_model_fetch_and_runner,
         test_native_subagent_events_from_agy_db,
         test_agy_capability_context_labels_team_message,

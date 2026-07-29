@@ -30,6 +30,10 @@ from urllib.parse import quote, urlparse
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from env_compat import dual_env_many, get_env
+from extension_identifiers import (
+    EXTENSION_ID_RE as _ID_RE,
+    EXTENSION_SETTING_KEY_RE as _SETTING_KEY_RE,
+)
 from json_store import read_json, write_json
 from paths import ba_home
 import password_manager
@@ -58,7 +62,6 @@ _EXTENSION_INCIDENT_FUTURE_SKEW_SECONDS = 60.0
 _EXTENSION_INCIDENT_DEDUP_SECONDS = 20 * 60.0
 _EXTENSION_INCIDENT_IDS_PER_NODE = 2048
 
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _GIT_SCP_RE = re.compile(r"^git@[A-Za-z0-9_.-]+:[A-Za-z0-9_.~/-]+\.git$")
@@ -1886,7 +1889,6 @@ def _validate_page(value: Any) -> dict[str, Any]:
 
 
 _SETTING_TYPES = {"string", "number", "boolean", "secret"}
-_SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 _TAG_RULE_TAG_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _TAG_RULE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
