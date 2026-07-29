@@ -40,7 +40,7 @@ describe("message rendering", () => {
     setViewport(defaultViewport.width, defaultViewport.height);
   });
 
-  it("Ask description lives above the prompt and follows picker resolution", async () => {
+  it("reserves the chat header for an empty Ask session", async () => {
     const askEmpty = makeSession({
       id: ASK_SINGLETON_ID,
       name: "Ask",
@@ -48,11 +48,12 @@ describe("message rendering", () => {
       messages: [],
     });
     const hEmpty = await renderApp({ seed: { sessions: [askEmpty] } });
-    await hEmpty.selectSession(ASK_SINGLETON_ID);
-    expect(hEmpty.$(".input-area .ask-greeting")).not.toBeNull();
-    expect(hEmpty.$('[data-testid="chat-messages"] .ask-greeting')).toBeNull();
+    expect(hEmpty.$(".input-area .ask-greeting")).toBeNull();
+    expect(hEmpty.$('[data-testid="chat-messages"] .ask-hero-wrap')).not.toBeNull();
     hEmpty.unmount();
+  });
 
+  it("hides the Ask header while a picker result is unresolved", async () => {
     const askResult = {
       results: [{ id: "target", name: "Target", cwd: "/tmp", first_user_prompt: "" }],
       reasoning: "matching work",
@@ -71,12 +72,18 @@ describe("message rendering", () => {
       ],
     });
     const hPending = await renderApp({
-      seed: { sessions: [askPending, makeSession({ id: "target" })] },
+      seed: { sessions: [askPending] },
     });
-    await hPending.selectSession(ASK_SINGLETON_ID);
     expect(hPending.$(".input-area .ask-greeting")).toBeNull();
+    expect(hPending.$('[data-testid="chat-messages"] .ask-header-wrap')).toBeNull();
     hPending.unmount();
+  });
 
+  it("restores the compact Ask header after picker resolution", async () => {
+    const askResult = {
+      results: [{ id: "target", name: "Target", cwd: "/tmp", first_user_prompt: "" }],
+      reasoning: "matching work",
+    };
     const askResolved = makeSession({
       id: ASK_SINGLETON_ID,
       name: "Ask",
@@ -92,10 +99,11 @@ describe("message rendering", () => {
       ],
     });
     const hResolved = await renderApp({
-      seed: { sessions: [askResolved, makeSession({ id: "target" })] },
+      seed: { sessions: [askResolved] },
     });
-    await hResolved.selectSession(ASK_SINGLETON_ID);
-    expect(hResolved.$(".input-area .ask-greeting")).not.toBeNull();
+    expect(hResolved.$(".input-area .ask-greeting")).toBeNull();
+    expect(hResolved.$('[data-testid="chat-messages"] .ask-header-wrap')).not.toBeNull();
+    expect(hResolved.$('[data-testid="chat-messages"] .ask-hero-wrap')).toBeNull();
     hResolved.unmount();
   });
 

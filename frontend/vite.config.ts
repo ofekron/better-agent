@@ -3,23 +3,15 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createWebPlatformAliases } from './vite.web-platform-aliases'
 
 // Build-time version identifiers injected as global constants.
 function buildVersion(): string {
   try { return execSync('git rev-parse --short HEAD').toString().trim() } catch { return 'dev' }
 }
 
-const webPlatformAliases = {
-  '@capacitor-community/speech-recognition': fileURLToPath(new URL('./src/platform/web/speech-recognition.ts', import.meta.url)),
-  '@capacitor/app': fileURLToPath(new URL('./src/platform/web/capacitor-app.ts', import.meta.url)),
-  '@capacitor/browser': fileURLToPath(new URL('./src/platform/web/capacitor-browser.ts', import.meta.url)),
-  '@capacitor/core': fileURLToPath(new URL('./src/platform/web/capacitor-core.ts', import.meta.url)),
-  '@capacitor/filesystem': fileURLToPath(new URL('./src/platform/web/capacitor-filesystem.ts', import.meta.url)),
-  '@capacitor/preferences': fileURLToPath(new URL('./src/platform/web/capacitor-preferences.ts', import.meta.url)),
-  '@capacitor/push-notifications': fileURLToPath(new URL('./src/platform/web/push-notifications.ts', import.meta.url)),
-  '@capgo/capacitor-updater': fileURLToPath(new URL('./src/platform/web/capacitor-updater.ts', import.meta.url)),
-  'send-intent': fileURLToPath(new URL('./src/platform/web/send-intent.ts', import.meta.url)),
-}
+const frontendRoot = fileURLToPath(new URL('.', import.meta.url))
+const webPlatformAliases = createWebPlatformAliases(frontendRoot)
 
 const backendPort =
   process.env.BETTER_AGENT_BACKEND_PORT ||

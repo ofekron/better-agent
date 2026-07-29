@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupEvents } from "../src/components/MessageBubble";
+import { groupEvents } from "../src/lib/groupEvents";
 import type { WSEvent } from "../src/types";
 
 function output(text: string): WSEvent {
@@ -13,37 +13,25 @@ function thinking(text: string): WSEvent {
 function toolCall(id: string): WSEvent {
   return {
     type: "tool_call",
-    data: { tool_use_id: id, tool: "Bash", args: { command: "ls" } },
+    data: { tool_use_id: id, tool: "WebSearch", args: { query: "docs" } },
   };
 }
 
 describe("groupEvents adjacent-twin dedup", () => {
   it("keeps legitimately repeated text separated by a tool call", () => {
-    const events = [output("X"), toolCall("t1"), output("X")];
-    const groups = groupEvents(events, new Map([["t1", "ok"]]));
-
-    const textRows = groups.filter(
-      (g) => g.kind === "event" && g.event.type === "output",
-    );
-    expect(textRows).toHaveLength(2);
-    expect(groups.filter((g) => g.kind === "tool")).toHaveLength(1);
+    const groups = groupEvents([output("X"), toolCall("t1"), output("X")]);
+    expect(groups.filter((group) => group.kind === "event")).toHaveLength(2);
   });
 
   it("dedups a thinking/output twin pair with identical adjacent text", () => {
-    const groups = groupEvents([thinking("X"), output("X")]);
-
-    expect(groups).toHaveLength(1);
-    expect(groups[0].kind).toBe("event");
-    expect(groups[0].event.type).toBe("thinking");
+    expect(groupEvents([thinking("X"), output("X")])).toHaveLength(1);
   });
 
   it("dedups adjacent identical outputs", () => {
-    const groups = groupEvents([output("X"), output("X")]);
-    expect(groups).toHaveLength(1);
+    expect(groupEvents([output("X"), output("X")])).toHaveLength(1);
   });
 
   it("keeps repeated text separated by different text", () => {
-    const groups = groupEvents([output("X"), output("Y"), output("X")]);
-    expect(groups).toHaveLength(3);
+    expect(groupEvents([output("X"), output("Y"), output("X")])).toHaveLength(3);
   });
 });

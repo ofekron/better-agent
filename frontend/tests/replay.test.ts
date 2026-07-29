@@ -757,7 +757,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       () => h.raw.container.textContent?.includes("second") ?? false,
     );
 
-    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1"]);
+    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "a"]);
     const user = h.raw.container.querySelector(
       '[data-testid="user-message"][data-message-id="u1"]',
     );

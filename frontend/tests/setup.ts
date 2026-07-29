@@ -61,12 +61,6 @@ afterEach(() => {
 // etc. are out of scope and would otherwise pull
 // in megabytes of code or touch APIs happy-dom doesn't support.
 
-vi.mock("@monaco-editor/react", () => ({
-  default: () => null,
-  Editor: () => null,
-  DiffEditor: () => null,
-}));
-
 vi.mock("@uiw/react-markdown-preview", () => ({
   default: ({ source }: { source?: string }) =>
     React.createElement("div", { "data-test-md": "true" }, source ?? ""),

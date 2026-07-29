@@ -28,6 +28,10 @@ import { UserInteractionToastStack } from "./components/UserInteractionToastStac
 import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthPrompt";
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
+import {
+  firstAutoSelectableSession,
+  isAutoSelectableSession,
+} from "./autoSelectSession";
 import { editSingletonId } from "./projectStructureEditSession";
 import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
@@ -4113,7 +4117,8 @@ function AppMain({
           remembered,
         )
       : null;
-    if (!target) target = sessions.find((s) => !s.archived) ?? null;
+    if (target && !isAutoSelectableSession(target)) target = null;
+    if (!target) target = firstAutoSelectableSession(sessions);
     if (target) navigate(sessionPath(target.id));
   }, [
     route,
@@ -7160,8 +7165,8 @@ function AppMain({
           const askDescriptionNode =
             isAskView && !askHasPendingPrompt && !askHasUnresolvedResult
               ? askIsEmpty
-                ? <div className="ask-hero-wrap">{askGreetingSlots}</div>
-                : askGreetingSlots
+                ? <div className="ask-header-wrap ask-hero-wrap">{askGreetingSlots}</div>
+                : <div className="ask-header-wrap">{askGreetingSlots}</div>
               : undefined;
           const emptyFileEditPickerNode = emptyFileEditingSession ? (
             <div className="empty-file-edit-picker">

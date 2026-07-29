@@ -3,6 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 import { FileEditor } from "../src/components/FileEditor";
 
+vi.mock("../src/components/FileEditorPrimitives", () => ({
+  MarkdownFileEditor: ({ formattedTestId }: { formattedTestId: string }) => (
+    <div data-testid={formattedTestId} />
+  ),
+}));
+vi.mock("../src/components/FileCommentBar", () => ({
+  FileCommentBar: () => null,
+}));
+vi.mock("../src/components/FileDiscussionPanel", () => ({
+  FileDiscussionPanel: () => null,
+}));
+
 describe("FileEditor disk diff controls", () => {
   const filePath = "/tmp/example.md";
   let fileContent = "";

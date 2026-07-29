@@ -1,6 +1,7 @@
 import { act, render, type RenderResult } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import React from "react";
+import { afterEach } from "vitest";
 import App from "../../src/App";
 import type { Session, WSEvent } from "../../src/types";
 import { MockBackend, type BackendState } from "./mockBackend";
@@ -72,6 +73,12 @@ export interface Harness {
   click(selector: string): Promise<void>;
 }
 
+const activeHarnessTeardowns = new Set<() => void>();
+
+afterEach(() => {
+  for (const teardown of [...activeHarnessTeardowns].reverse()) teardown();
+});
+
 export async function renderApp(options: RenderAppOptions = {}): Promise<Harness> {
   const backend = new MockBackend();
   if (options.seed) backend.seed(options.seed);
@@ -91,6 +98,16 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
   });
 
   const result = render(React.createElement(App));
+  let active = true;
+  const teardown = () => {
+    if (!active) return;
+    active = false;
+    activeHarnessTeardowns.delete(teardown);
+    result.unmount();
+    wsController.uninstall();
+    backend.uninstall();
+  };
+  activeHarnessTeardowns.add(teardown);
   // Let the initial fetches + WS open + first effects flush.
   await flushAll();
 
@@ -189,11 +206,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     dropConnection: () => wsController.closeCurrent(),
     reopenConnection: () => wsController.reopenCurrent(),
     flush: flushAll,
-    unmount: () => {
-      result.unmount();
-      wsController.uninstall();
-      backend.uninstall();
-    },
+    unmount: teardown,
     raw: result,
     clickByText: async (text: string | RegExp) => {
       const re = text instanceof RegExp ? text : new RegExp(`^\\s*${escapeRegex(text)}\\s*$`);
