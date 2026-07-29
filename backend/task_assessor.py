@@ -19,6 +19,7 @@ import json
 import logging
 
 import task_script
+from event_bus import bus, BusEvent
 from stores import task_store
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,6 @@ async def _assess_completed_turn(coordinator, session_id: str) -> None:
 def bind(coordinator) -> None:
     """Subscribe the assessor to turn-complete. Idempotent — re-subscribes
     under a stable name so rebinding replaces, not duplicates."""
-    from event_bus import bus, BusEvent  # type: ignore
 
     async def _on_turn_complete(event: BusEvent) -> None:
         try:

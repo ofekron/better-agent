@@ -28,6 +28,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -52,22 +53,32 @@ def _violations_in(path: Path) -> list[tuple[int, str]]:
     return out
 
 
+# Directory names that never contain project source: virtualenvs,
+# vendored dependencies and bytecode caches.
+_EXCLUDED_DIRS = {"__pycache__", ".venv", ".venvs", "venv", "venvs", "site-packages"}
+
+
+def _is_project_source(rel: tuple[str, ...]) -> bool:
+    """True when a BACKEND-relative path is a production module to scan."""
+    if any(part in _EXCLUDED_DIRS for part in rel):
+        return False
+    # Test scripts are allowed to do anything.
+    if rel[0] == "scripts":
+        return False
+    # The bus itself is exempt.
+    return rel[-1] != "event_bus.py"
+
+
 def _iter_production_files() -> list[Path]:
     files: list[Path] = []
-    for p in BACKEND.rglob("*.py"):
-        rel = p.relative_to(BACKEND).parts
-        # Skip caches.
-        if any(part == "__pycache__" for part in rel):
-            continue
-        if any(part in {".venv", "venv"} for part in rel):
-            continue
-        # Skip test scripts — they're allowed to do anything.
-        if rel and rel[0] == "scripts":
-            continue
-        # Skip the bus itself.
-        if rel and rel[-1] == "event_bus.py":
-            continue
-        files.append(p)
+    for dirpath, dirnames, filenames in os.walk(BACKEND):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            p = Path(dirpath, name)
+            if _is_project_source(p.relative_to(BACKEND).parts):
+                files.append(p)
     return files
 
 
@@ -95,6 +106,34 @@ def main() -> int:
         "the docstring at the top of this test for rationale.",
     )
     return 1
+
+
+def test_excludes_virtualenvs_and_vendored_packages() -> None:
+    excluded = [
+        (".venv", "lib", "python3.12", "site-packages", "joblib", "x.py"),
+        (".venvs", "default", "lib", "site-packages", "joblib", "x.py"),
+        ("venv", "lib", "site-packages", "x.py"),
+        ("some", "site-packages", "joblib", "test", "x.py"),
+        ("__pycache__", "x.py"),
+        ("scripts", "x.py"),
+        ("event_bus.py",),
+    ]
+    for rel in excluded:
+        assert not _is_project_source(rel), rel
+    assert _is_project_source(("event_bus_subscribers.py",))
+    assert _is_project_source(("sub", "module.py"))
+
+
+def test_scan_covers_only_project_source() -> None:
+    files = _iter_production_files()
+    assert files
+    for p in files:
+        parts = p.relative_to(BACKEND).parts
+        assert not (set(parts) & _EXCLUDED_DIRS), p
+
+
+def test_guard_runs_without_decode_errors() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":
