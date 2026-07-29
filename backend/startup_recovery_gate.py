@@ -4,11 +4,12 @@ import asyncio
 import logging
 from typing import Optional
 
+import recovery_schedule
+
 _pending = False
 _failed: Optional[str] = None
 _ready: Optional[asyncio.Event] = None
 _session_ready: dict[str, asyncio.Event] = {}
-_priority_sessions: set[str] = set()
 _DEFAULT_WAIT_TIMEOUT_SECONDS: float | None = None
 _FOREIGN_LOOP_POLL_INTERVAL_SECONDS = 0.05
 _log = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ def begin_recovery() -> None:
     _failed = None
     _ready = asyncio.Event()
     _session_ready.clear()
-    _priority_sessions.clear()
+    recovery_schedule.reset_for_tests()
 
 
 def is_pending() -> bool:
@@ -93,12 +94,13 @@ def mark_session_recovery_done(app_session_id: str) -> None:
 
 
 def request_session_priority(app_session_id: str) -> None:
-    if app_session_id:
-        _priority_sessions.add(app_session_id)
+    """Promote a session the user just opened to the front of recovery."""
+    recovery_schedule.boost(app_session_id)
 
 
 def session_priority_rank(app_session_id: str | None) -> int:
-    return 0 if app_session_id and app_session_id in _priority_sessions else 1
+    """Rank for the cold/background batch ordering in main.py."""
+    return 0 if recovery_schedule.is_boosted(app_session_id) else 1
 
 
 def _ready_bound_to_running_loop(ready: asyncio.Event) -> bool:
@@ -199,4 +201,4 @@ def reset_for_tests() -> None:
     _failed = None
     _ready = None
     _session_ready.clear()
-    _priority_sessions.clear()
+    recovery_schedule.reset_for_tests()

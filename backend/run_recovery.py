@@ -17,6 +17,7 @@ from typing import Optional
 from weakref import WeakKeyDictionary
 
 import perf
+import recovery_schedule
 from execution_artifact_io import validate_execution_input_projection
 from execution_template import (
     ExecutionArtifact,
@@ -1036,6 +1037,12 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     the final assistant message. Independent session buckets are
     integrated with bounded parallelism so a slow replay/reattach for one
     session does not block reattaching runners for unrelated sessions.
+
+    Buckets are pulled from a `RecoverySchedule` heap, most recently
+    active session first, so a user reopening the app waits behind as
+    few unrelated sessions as possible. Opening a session mid-recovery
+    promotes it to the next pop (see `recovery_schedule.boost`); a
+    bucket already being integrated runs to completion.
     """
     groups: dict[str, list[dict]] = {}
     for desc in recovered:
@@ -1054,30 +1061,36 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
             parallelism,
         )
 
-    semaphore = asyncio.Semaphore(parallelism)
+    schedule = recovery_schedule.RecoverySchedule()
+    for session_key, descs in group_items:
+        schedule.push(session_key, descs, _run_order_key(_latest_run(descs)))
+    recovery_schedule.set_active(schedule)
 
-    async def _run_group(index: int, session_key: str, descs: list[dict]) -> None:
-        async with semaphore:
+    async def _drain(worker: int) -> None:
+        while True:
+            popped = schedule.pop()
+            if popped is None:
+                return
+            session_key, descs = popped
             try:
                 await _integrate_recovered_session_group(coordinator, descs, summary)
             except Exception:
                 logger.exception(
-                    "integrate_recovered_runs: session bucket %d (%s) failed",
-                    index,
+                    "integrate_recovered_runs: session bucket %s failed "
+                    "(worker %d)",
                     session_key,
+                    worker,
                 )
 
     try:
         tasks = [
-            asyncio.create_task(
-                _run_group(index, session_key, descs),
-                name=f"recover-integrate-{index}",
-            )
-            for index, (session_key, descs) in enumerate(group_items)
-        ]
+            asyncio.create_task(_drain(worker), name=f"recover-integrate-{worker}")
+            for worker in range(parallelism)
+        ] if group_items else []
         if tasks:
             await asyncio.gather(*tasks)
     finally:
+        recovery_schedule.set_active(None)
         summary.emit()
         if group_items:
             logger.info(
