@@ -93,17 +93,36 @@ function RunMetaChips({ meta }: { meta?: ModelRunMeta }) {
   );
 }
 
-/** Per-turn runtime-profile badge on an assistant bubble. Falls
- *  back to `fallbackMeta` (the session's current runtime profile)
- *  when the turn's own scaffold predates `run_meta` (no backfill) — the
- *  caller only supplies a fallback for the latest turn, where the
- *  session's current settings are guaranteed to match what it ran with. */
+/** Per-turn runtime-profile badge on an assistant bubble, consolidated
+ *  with the live "running" indicator for that same turn — one footer,
+ *  not two. Falls back to `fallbackMeta` (the session's current runtime
+ *  profile) when the turn's own scaffold predates `run_meta` (no
+ *  backfill) — the caller only supplies a fallback for the latest turn,
+ *  where the session's current settings are guaranteed to match what it
+ *  ran with.
+ *
+ *  `runs` (this message's backend run_state entries) can legitimately
+ *  stay non-empty after the message itself is finalized: the CLI
+ *  process is deliberately kept registered during its wind-down so
+ *  cancel/kill still resolves it (see backend provider_claude.py
+ *  `_watch_complete` — "Turn done, process still alive ... the run
+ *  stays registered"), which for some providers takes a long time.
+ *  That's internal process bookkeeping, not user-visible generation —
+ *  the running indicator must track the message's own completion
+ *  signal (`isStreaming`), not raw run-entry presence, or it lies
+ *  about still-generating long after the content is done. */
 function AssistantRunMeta({
   message,
   fallbackMeta,
+  runs,
+  sessionId,
+  workerLabelByDelegation,
 }: {
-  message: { run_meta?: ChatMessage["run_meta"] };
+  message: { run_meta?: ChatMessage["run_meta"]; isStreaming?: boolean; stopped_at?: string | null };
   fallbackMeta?: ModelRunMeta;
+  runs?: RunInfo[];
+  sessionId?: string;
+  workerLabelByDelegation?: Map<string, string>;
 }) {
   const meta = message.run_meta;
   const ownMeta: ModelRunMeta = meta
@@ -119,10 +138,22 @@ function AssistantRunMeta({
   // not only when the field itself is absent.
   const modeled =
     buildRunMetaParts(ownMeta).length > 0 ? ownMeta : fallbackMeta ?? {};
-  if (!buildRunMetaParts(modeled).length) return null;
+  const activeRuns = runs ?? [];
+  const showRunning =
+    !!message.isStreaming && (activeRuns.length > 0 || !message.stopped_at);
+  if (!buildRunMetaParts(modeled).length && !showRunning) return null;
   return (
-    <div className="message-box-footer assistant-run-meta-footer">
+    <div
+      className={`message-box-footer assistant-run-meta-footer${showRunning ? " is-running" : ""}`}
+    >
       <RunMetaChips meta={modeled} />
+      {showRunning && activeRuns.length > 0 && (
+        <RunBadgeStack
+          runs={activeRuns}
+          sessionId={sessionId}
+          workerLabelByDelegation={workerLabelByDelegation}
+        />
+      )}
     </div>
   );
 }
@@ -2695,38 +2726,19 @@ const AssistantMessage = memo(function AssistantMessage({
             </span>
           </div>
         )}
-        <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
-        {/* `runs` (this message's backend run_state entries) can legitimately
-         * stay non-empty after the message itself is finalized: the CLI
-         * process is deliberately kept registered during its wind-down so
-         * cancel/kill still resolves it (see backend provider_claude.py
-         * `_watch_complete` — "Turn done, process still alive ... the run
-         * stays registered"), which for some providers takes a long time.
-         * That's internal process bookkeeping, not user-visible generation
-         * — the badge must track the message's own completion signal
-         * (`isStreaming`), not raw run-entry presence, or it lies about
-         * still-generating long after the content is done. */}
-        {message.isStreaming &&
-          (runs.length > 0 || !message.stopped_at) && (
-          <div className="streaming-footer">
-            {runs.length > 0 ? (
-              <RunBadgeStack
-                runs={runs}
-                sessionId={sessionId}
-                workerLabelByDelegation={
-                  workers.length > 0
-                    ? new Map(
-                        workers.map((w) => [
-                          w.delegation_id,
-                          w.worker_description,
-                        ])
-                      )
-                    : undefined
-                }
-              />
-            ) : null}
-          </div>
-        )}
+        <AssistantRunMeta
+          message={message}
+          fallbackMeta={fallbackRunMeta}
+          runs={runs}
+          sessionId={sessionId}
+          workerLabelByDelegation={
+            workers.length > 0
+              ? new Map(
+                  workers.map((w) => [w.delegation_id, w.worker_description])
+                )
+              : undefined
+          }
+        />
       </div>
     </div>
   );

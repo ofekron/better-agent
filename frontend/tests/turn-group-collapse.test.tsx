@@ -1336,7 +1336,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     }
   });
 
-  it("renders the running indication after the provider chips", () => {
+  it("consolidates the running indication into the same footer as the provider chips", () => {
     const { container } = render(
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "live prompt" })}
@@ -1357,13 +1357,47 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    const providerChips = container.querySelector<HTMLElement>(".assistant-run-meta-footer");
-    const runningIndicator = container.querySelector<HTMLElement>(".streaming-footer");
+    const footer = container.querySelector<HTMLElement>(".assistant-run-meta-footer");
+    expect(footer).not.toBeNull();
+    expect(footer!.classList.contains("is-running")).toBe(true);
+
+    const providerChips = footer!.querySelector<HTMLElement>(".run-meta-chips");
+    const runningIndicator = footer!.querySelector<HTMLElement>(".run-badge-stack");
 
     expect(providerChips).not.toBeNull();
     expect(runningIndicator).not.toBeNull();
+    // No separate standalone running-indicator element remains.
+    expect(container.querySelector(".streaming-footer")).toBeNull();
     expect(
       providerChips!.compareDocumentPosition(runningIndicator!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("still shows provider/model chips alone once the turn is no longer running", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "done prompt" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "finished reply",
+          isStreaming: false,
+          run_meta: {
+            provider_id: "claude",
+            model: "claude-sonnet-4-6",
+            reasoning_effort: "high",
+          },
+        })}
+        defaultCollapsed={false}
+        sessionId="s1"
+        orchestrationMode="native"
+        runs={[]}
+      />,
+    );
+
+    const footer = container.querySelector<HTMLElement>(".assistant-run-meta-footer");
+    expect(footer).not.toBeNull();
+    expect(footer!.classList.contains("is-running")).toBe(false);
+    expect(footer!.querySelector(".run-meta-chips")).not.toBeNull();
+    expect(footer!.querySelector(".run-badge-stack")).toBeNull();
   });
 });

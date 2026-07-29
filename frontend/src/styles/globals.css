@@ -4857,14 +4857,6 @@ select:focus-visible,
   }
 }
 
-.streaming-footer {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-
 /* Backend-owned run-state badge stack. Replaces the lone blinking
  * `|` cursor as the "agent is running" indicator — labeled, animated,
  * and visible per active run (manager + N workers) on the bubble the
@@ -10165,8 +10157,26 @@ button.run-badge-clickable:focus-visible {
 .assistant-run-meta-footer {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 4px;
   opacity: 0.85;
+}
+
+.assistant-run-meta-footer .run-badge-stack {
+  animation: assistant-run-meta-footer-enter 0.18s ease-out;
+}
+
+@keyframes assistant-run-meta-footer-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .timeline-block-body {
