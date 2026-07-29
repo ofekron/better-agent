@@ -172,3 +172,50 @@ def capture_runner_launch(
     )
     _validate_runner(value)
     return value
+
+
+def retarget_runner_launch(
+    runner: RunnerLaunch,
+    run_dir: str | Path,
+) -> RunnerLaunch:
+    if not isinstance(runner, RunnerLaunch) or not runner.attest():
+        raise ExecutionContractError("runner launch authority is unavailable")
+    run_path = Path(run_dir)
+    if not run_path.is_absolute():
+        raise ExecutionContractError("run directory must be absolute")
+    run_dir_index = 2 if runner.frozen else 3
+    argv = list(runner.launch.argv)
+    if (
+        len(argv) <= run_dir_index
+        or argv[run_dir_index - 1] != "--run-dir"
+    ):
+        raise ExecutionContractError("incoherent runner launch")
+    argv[run_dir_index] = str(run_path.absolute())
+    launch = AttestedLaunch(
+        logical_command=runner.launch.logical_command,
+        platform=runner.launch.platform,
+        mode=runner.launch.mode,
+        argv=tuple(argv),
+        launcher=runner.launch.launcher,
+        components=runner.launch.components,
+        component_argv_indexes=runner.launch.component_argv_indexes,
+    )
+    _validate_launch(launch)
+    retargeted = RunnerLaunch(
+        launch=launch,
+        runner_entry=runner.runner_entry,
+        runner_kind=runner.runner_kind,
+        runner_module=runner.runner_module,
+        frozen=runner.frozen,
+    )
+    _validate_runner(retargeted)
+    if not retargeted.attest():
+        raise ExecutionContractError("runner launch authority changed")
+    return retargeted
+
+
+__all__ = [
+    "RunnerLaunch",
+    "capture_runner_launch",
+    "retarget_runner_launch",
+]

@@ -16,13 +16,20 @@ from provider_agy import AgyProvider  # noqa: E402
 from provider_execution_contract import provider_family_contract  # noqa: E402
 from provider_family_execution_runtime import (  # noqa: E402
     family_capability_manifest_from_artifact,
+    family_launch_from_artifact,
+)
+from provider_family_launch_attestation import (  # noqa: E402
+    FamilyLaunchAttestation,
+    capture_config_scope,
 )
 from provider_family_runtime_capabilities import (  # noqa: E402
     install_staged_family_runtime_capabilities,
     snapshot_family_runtime_capabilities,
     stage_family_runtime_capabilities,
 )
+from provider_launch_identity import capture_cli_launch  # noqa: E402
 from provider_openai import OpenAIProvider  # noqa: E402
+from provider_runner_launch import capture_runner_launch  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
@@ -615,6 +622,27 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
         "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
         "revision": 2,
     }
+    downstream = run_dir / "agy"
+    downstream.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    downstream.chmod(0o700)
+    config_root = run_dir / "config"
+    config_root.mkdir()
+    launch = FamilyLaunchAttestation.capture(
+        family="agy",
+        runner=capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=sys.executable,
+            runner_entry=Path(__file__).parent.parent / "runner_agy.py",
+            runner_kind="agy",
+            runner_module="runner_agy",
+            frozen=False,
+        ),
+        downstream=capture_cli_launch(
+            logical_command="agy",
+            launcher_path=downstream,
+        ),
+        config=capture_config_scope(root_path=config_root),
+    )
     prepared = prepare_execution(
         provider_record,
         run_id=run_id,
@@ -634,7 +662,10 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
         },
         provider_contract=provider_family_contract(
             provider_record,
-            payload={"runtime_capabilities": capabilities.manifest},
+            payload={
+                **launch.to_payload(),
+                "runtime_capabilities": capabilities.manifest,
+            },
         ),
     )
     atomic_write_json(run_dir / "input.json", input_payload)
@@ -668,6 +699,8 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
             self.target_payload = b""
             self.target_contract: dict = {}
             self.target_runner_input: dict = {}
+            self.target_launch = None
+            self.target_capability_manifest: dict = {}
 
         def start_run(self, *, execution, **_kwargs) -> bool:
             target_run_id = execution.start_arguments()["run_id"]
@@ -687,6 +720,14 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
             self.target_runner_input = execution.artifact.runtime_policy[
                 "runner_input"
             ]
+            self.target_launch = family_launch_from_artifact(
+                execution.artifact,
+            )
+            self.target_capability_manifest = (
+                family_capability_manifest_from_artifact(
+                    execution.artifact,
+                )
+            )
             self._runs[target_run_id] = _Run()
             return True
 
@@ -756,11 +797,30 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
     check("family retry preserves exact payload bytes", provider.target_payload == source_payload)
     check(
         "family retry preserves exact capability authority",
-        provider.target_contract == prepared.artifact.provider_contract,
+        provider.target_capability_manifest
+        == family_capability_manifest_from_artifact(prepared.artifact)
+        == capabilities.manifest,
     )
     check(
         "family retry updates frozen runner identity",
         provider.target_runner_input.get("run_id") != run_id,
+    )
+    source_launch = family_launch_from_artifact(prepared.artifact)
+    target_run_id = provider.target_runner_input["run_id"]
+    check(
+        "family retry rebuilds runner launch for target directory",
+        provider.target_launch is not None
+        and provider.target_launch.runner.launch.argv[3]
+        == str(runs_root() / target_run_id),
+    )
+    check(
+        "family retry preserves downstream authority",
+        provider.target_launch is not None
+        and provider.target_launch.downstream == source_launch.downstream,
+    )
+    check(
+        "family retry replaces stale provider contract",
+        provider.target_contract != prepared.artifact.provider_contract,
     )
 
 

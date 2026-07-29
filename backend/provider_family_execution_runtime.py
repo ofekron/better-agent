@@ -14,6 +14,7 @@ from execution_template import (
 )
 from provider_execution_contract import provider_family_contract
 from provider_family_launch_attestation import FamilyLaunchAttestation
+from provider_runner_launch import retarget_runner_launch
 from provider_family_runtime_capabilities import (
     PreparedRuntimeCapabilities,
     RunLocalCapabilities,
@@ -126,6 +127,22 @@ def retry_family_execution(
         )
     arguments = execution.start_arguments()
     arguments.update(overrides)
+    from runs_dir import runs_root
+
+    target_run_id = arguments["run_id"]
+    launch = family_launch_from_artifact(artifact)
+    retry_launch = FamilyLaunchAttestation.capture(
+        family=launch.family,
+        runner=retarget_runner_launch(
+            launch.runner,
+            runs_root() / target_run_id,
+        ),
+        downstream=launch.downstream,
+        config=launch.config,
+        critical_packages=launch.critical_packages,
+    )
+    contract_payload = _contract_payload(artifact)
+    contract_payload.update(retry_launch.to_payload())
     updated_input = json.loads(json.dumps(runner_input))
     for key, value in overrides.items():
         if key in updated_input:
@@ -142,7 +159,15 @@ def retry_family_execution(
             **runtime_policy,
             "runner_input": updated_input,
         },
-        provider_contract=artifact.provider_contract,
+        provider_contract=provider_family_contract(
+            {
+                "id": artifact.provider_id,
+                "kind": artifact.provider_kind,
+                "generation": artifact.provider_generation,
+                "revision": artifact.provider_revision,
+            },
+            payload=contract_payload,
+        ),
         **arguments,
     )
 
