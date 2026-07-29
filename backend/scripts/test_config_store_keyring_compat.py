@@ -205,6 +205,26 @@ def test_non_darwin_keyring_failures_normalize_to_runtime_error() -> None:
         keyring.delete_password = real_delete
 
 
+def test_non_darwin_keyring_uses_noninteractive_environment_key() -> None:
+    class Backend:
+        keyring_key = None
+
+    backend = Backend()
+    real_get_keyring = keyring.get_keyring
+    original = os.environ.get("KEYRING_PROPERTY_KEYRING_KEY")
+    keyring.get_keyring = lambda: backend
+    os.environ["KEYRING_PROPERTY_KEYRING_KEY"] = "headless-secret"
+    try:
+        assert oskeychain._keyring() is backend
+        assert backend.keyring_key == "headless-secret"
+    finally:
+        keyring.get_keyring = real_get_keyring
+        if original is None:
+            os.environ.pop("KEYRING_PROPERTY_KEYRING_KEY", None)
+        else:
+            os.environ["KEYRING_PROPERTY_KEYRING_KEY"] = original
+
+
 def test_macos_operations_use_stable_security_binary() -> None:
     calls = []
     real_platform = oskeychain.sys.platform

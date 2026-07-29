@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
 import subprocess
 import sys
 import threading
@@ -11,6 +12,16 @@ from typing import Optional
 
 _TIMEOUT = 5  # seconds — fail loud rather than hang on a locked keychain
 _NATIVE_INTERACTION_LOCK = threading.Lock()
+
+
+def _keyring():
+    import keyring
+
+    keyring_key = os.environ.get("KEYRING_PROPERTY_KEYRING_KEY", "")
+    backend = keyring.get_keyring()
+    if keyring_key and hasattr(type(backend), "keyring_key"):
+        backend.keyring_key = keyring_key
+    return keyring
 
 
 def _set_native_user_interaction(allowed: bool) -> None:
@@ -68,11 +79,10 @@ def _store_input(service: str, account: str, value: str) -> bytes:
 def store(service: str, account: str, value: str) -> None:
     """Write (replacing) one credential entry. Raises on failure."""
     if sys.platform != "darwin":
-        import keyring
         from keyring.errors import KeyringError
 
         try:
-            keyring.set_password(service, account, value)
+            _keyring().set_password(service, account, value)
         except KeyringError:
             raise RuntimeError("OS credential write was denied or unavailable") from None
         return
@@ -101,11 +111,10 @@ def get(
 ) -> Optional[str]:
     """Read one credential entry. Returns None when the entry is absent."""
     if sys.platform != "darwin":
-        import keyring
         from keyring.errors import KeyringError
 
         try:
-            return keyring.get_password(service, account)
+            return _keyring().get_password(service, account)
         except KeyringError:
             raise RuntimeError("OS credential read was denied or unavailable") from None
     timed_out = False
@@ -132,11 +141,10 @@ def get(
 def delete(service: str, account: str) -> None:
     """Delete one credential entry. Missing entries are already absent."""
     if sys.platform != "darwin":
-        import keyring
         from keyring.errors import KeyringError, PasswordDeleteError
 
         try:
-            keyring.delete_password(service, account)
+            _keyring().delete_password(service, account)
         except PasswordDeleteError:
             pass
         except KeyringError:
