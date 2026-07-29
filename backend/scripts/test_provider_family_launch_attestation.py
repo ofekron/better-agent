@@ -25,6 +25,7 @@ from provider_family_launch_attestation import (  # noqa: E402
     materialize_sdk_launch,
     open_pinned_launch,
 )
+from provider_pinned_launch import open_pinned_runner_launch  # noqa: E402
 from provider_runner_launch import RunnerLaunch  # noqa: E402
 
 
@@ -601,6 +602,58 @@ def test_shebang_launch_pins_script_and_restricts_interpreter() -> None:
             raise AssertionError("mutable interpreter executed by path")
 
 
+def test_runner_materialization_outlives_spawn_context() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        run_dir = root / "run"
+        run_dir.mkdir()
+        marker = root / "ran"
+        if os.name == "nt":
+            runner_path = root / "runner_better_agent.py"
+            runner_path.write_text(
+                "import pathlib, sys, time\n"
+                "time.sleep(0.1)\n"
+                "pathlib.Path(sys.argv[-1]).write_text('ran')\n",
+                encoding="utf-8",
+            )
+            executable = Path(sys.executable)
+            runner_kind = "openai"
+            runner_module = "runner_better_agent"
+        else:
+            runner_path = root / "runner_agy"
+            runner_path.write_text(
+                "sleep 0.1\n"
+                "printf ran > \"$3\"\n",
+                encoding="utf-8",
+            )
+            executable = Path("/bin/sh")
+            runner_kind = "agy"
+            runner_module = "runner_agy"
+        runner = capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=executable,
+            runner_entry=runner_path,
+            runner_kind=runner_kind,
+            runner_module=runner_module,
+            frozen=False,
+        )
+
+        with open_pinned_runner_launch(runner) as pinned:
+            materialized_runner = Path(pinned.argv[1])
+            process = subprocess.Popen(
+                [*pinned.argv, str(marker)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        assert materialized_runner.is_file()
+        assert materialized_runner.is_relative_to(run_dir)
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        assert marker.read_text(encoding="utf-8") == "ran"
+
+
 TESTS = (
     test_external_config_symlink_is_exactly_attested,
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
@@ -609,6 +662,7 @@ TESTS = (
     test_payload_round_trip_and_tamper_are_strict,
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,
     test_shebang_launch_pins_script_and_restricts_interpreter,
+    test_runner_materialization_outlives_spawn_context,
 )
 
 
