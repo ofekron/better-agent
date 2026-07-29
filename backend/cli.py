@@ -26,6 +26,8 @@ Usage:
   python cli.py --port 18765                  # where to look for an existing backend (default: run.sh's port)
   python cli.py login                          # authenticate once, store a token in the OS keychain
   python cli.py logout                         # forget the stored token for --port
+  python cli.py harness-profiles                # list harness profiles available on the backend
+  python cli.py --harness-profile ID -p "do X" # apply a harness profile to this session's turns
 """
 
 import argparse
@@ -478,21 +480,31 @@ def _create_backend_session(
     provider_id: Optional[str],
     worker_creation_policy: Optional[str],
     bare_config: bool,
+    harness_profile_id: Optional[str] = None,
 ) -> dict:
+    body = {
+        "name": "cli-default",
+        "model": model,
+        "cwd": cwd,
+        "orchestration_mode": mode or "team",
+        "source": "cli",
+        "provider_id": provider_id,
+        "worker_creation_policy": worker_creation_policy or "ask",
+        "bare_config": bare_config,
+    }
+    if harness_profile_id:
+        body["harness_profile_id"] = harness_profile_id
+    return _request_json(port, "/api/sessions", method="POST", body=body)
+
+
+def _apply_harness_profile(port: int, session_id: str, harness_profile_id: str) -> dict:
+    """PATCH the session's harness profile selection. Returns the updated
+    session fields (id, harness_profile_id, harness_profile_revision)."""
     return _request_json(
         port,
-        "/api/sessions",
-        method="POST",
-        body={
-            "name": "cli-default",
-            "model": model,
-            "cwd": cwd,
-            "orchestration_mode": mode or "team",
-            "source": "cli",
-            "provider_id": provider_id,
-            "worker_creation_policy": worker_creation_policy or "ask",
-            "bare_config": bare_config,
-        },
+        f"/api/sessions/{session_id}/harness-profile",
+        method="PATCH",
+        body={"harness_profile_id": harness_profile_id},
     )
 
 
@@ -506,6 +518,7 @@ def resolve_backend_session(
     provider_id: Optional[str],
     worker_creation_policy: Optional[str] = None,
     bare_config: bool = False,
+    harness_profile_id: Optional[str] = None,
 ) -> dict:
     if session_id:
         session = _fetch_backend_session(port, session_id)
@@ -513,6 +526,9 @@ def resolve_backend_session(
             raise SystemExit(f"error: session {session_id} not found")
         if provider_id and session.get("provider_id") != provider_id:
             raise SystemExit("error: --provider does not match the resumed session")
+        if harness_profile_id and session.get("harness_profile_id") != harness_profile_id:
+            _apply_harness_profile(port, str(session["id"]), harness_profile_id)
+            session["harness_profile_id"] = harness_profile_id
         return session
 
     for summary in _list_backend_sessions(port):
@@ -525,6 +541,9 @@ def resolve_backend_session(
             if existing_id:
                 existing = _fetch_backend_session(port, str(existing_id))
                 if existing:
+                    if harness_profile_id and existing.get("harness_profile_id") != harness_profile_id:
+                        _apply_harness_profile(port, str(existing["id"]), harness_profile_id)
+                        existing["harness_profile_id"] = harness_profile_id
                     return existing
 
     return _create_backend_session(
@@ -535,6 +554,7 @@ def resolve_backend_session(
         provider_id=provider_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
+        harness_profile_id=harness_profile_id,
     )
 
 
@@ -866,19 +886,30 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "command",
         nargs="?",
-        choices=["login", "logout"],
+        choices=["login", "logout", "harness-profiles"],
         default=None,
         help=(
             "login: authenticate once and store a bearer token in the OS "
             "keychain, scoped to --port, so later calls need no --token. "
-            "logout: forget the stored token for --port. Omit for the "
-            "normal REPL/one-shot chat behavior."
+            "logout: forget the stored token for --port. "
+            "harness-profiles: list harness profiles available on the "
+            "backend (id, name, base_profile_id). Omit for the normal "
+            "REPL/one-shot chat behavior."
         ),
     )
     p.add_argument("--username", help="username for `login` (prompted if omitted)")
     p.add_argument("-p", "--prompt", help="one-shot prompt (use '-' to read from stdin)")
     p.add_argument("--session", help="resume a specific session id")
     p.add_argument("--mode", choices=["team", "native"], help="orchestration mode")
+    p.add_argument(
+        "--harness-profile",
+        dest="harness_profile",
+        help=(
+            "harness profile id to apply to this session's turns "
+            "(see `bagent harness-profiles` for available ids; "
+            "default is the backend's default profile)"
+        ),
+    )
     p.add_argument("--cwd", default=os.getcwd(), help="working directory (default: $PWD)")
     p.add_argument("--provider", help="provider id or unique provider name")
     p.add_argument("--model", help="model id (default: provider/session default)")
@@ -934,13 +965,18 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-async def _async_main(args: argparse.Namespace) -> int:
+def _resolve_auth_token(port: int, token_arg: Optional[str]) -> Optional[str]:
     global _AUTH_TOKEN
     _AUTH_TOKEN = (
-        getattr(args, "token", None)
+        token_arg
         or os.environ.get("BETTER_CLAUDE_CLI_TOKEN")
-        or _load_stored_token(args.port)
+        or _load_stored_token(port)
     )
+    return _AUTH_TOKEN
+
+
+async def _async_main(args: argparse.Namespace) -> int:
+    _resolve_auth_token(args.port, getattr(args, "token", None))
     if args.json or args.no_color or not sys.stdout.isatty():
         _disable_colors()
     renderer: Renderer = JsonRenderer() if args.json else PrettyRenderer()
@@ -978,6 +1014,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         provider_id=provider_id,
         worker_creation_policy=args.worker_creation_policy,
         bare_config=bool(getattr(args, "bare_config", False)),
+        harness_profile_id=args.harness_profile or None,
     )
     mode = args.mode or session.get("orchestration_mode") or "team"
     model = args.model or session.get("model") or requested_model
@@ -1111,12 +1148,31 @@ def _do_logout(port: int) -> int:
     return 0
 
 
+def _do_list_harness_profiles(port: int) -> int:
+    data = _request_json(port, "/api/harness-profiles")
+    profiles = data.get("profiles") if isinstance(data, dict) else None
+    if not isinstance(profiles, list):
+        profiles = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        profile_id = profile.get("id") or ""
+        name = profile.get("name") or profile_id
+        base = profile.get("base_profile_id") or ""
+        suffix = f" (base: {base})" if base else ""
+        print(f"{profile_id}\t{name}{suffix}")
+    return 0
+
+
 def main() -> int:
     args = _parse_args()
     if args.command == "login":
         return _do_login(args.port, args.username)
     if args.command == "logout":
         return _do_logout(args.port)
+    if args.command == "harness-profiles":
+        _resolve_auth_token(args.port, args.token)
+        return _do_list_harness_profiles(args.port)
     try:
         return asyncio.run(_async_main(args))
     except KeyboardInterrupt:
