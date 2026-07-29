@@ -23,7 +23,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_role_dispatch() -> bool:
+def test_role_dispatch() -> None:
     cases = {
         (): "shell",
         ("--serve",): "backend",
@@ -34,25 +34,23 @@ def test_role_dispatch() -> bool:
     }
     for argv, expected in cases.items():
         got = _role(list(argv))
-        if got != expected:
-            print(f"  {argv}: expected {expected!r}, got {got!r}")
-            return False
-    return True
+        assert got == expected, f"{argv}: expected {expected!r}, got {got!r}"
 
 
-def test_diagnostic_argv_redacts_pair_intent() -> bool:
+def test_diagnostic_argv_redacts_pair_intent() -> None:
     argv = [
         "Better Agent",
         "betteragent://marketplace/pair?v=1&intent=secret-pair-token",
     ]
     redacted = redact_argv(argv)
-    return "secret-pair-token" not in " ".join(redacted)
+    assert "secret-pair-token" not in " ".join(redacted)
 
 
-def test_diagnostic_watchdog_has_an_exit_owner() -> bool:
+def test_diagnostic_watchdog_has_an_exit_owner() -> None:
     import inspect
     source = inspect.getsource(app_main._run_main)
-    return "finally:" in source and "_stop_diagnostics()" in source
+    assert "finally:" in source
+    assert "_stop_diagnostics()" in source
 
 
 TESTS = [
@@ -69,7 +67,8 @@ def main_run() -> int:
     failed = 0
     for name, fn in TESTS:
         try:
-            ok = fn()
+            fn()
+            ok = True
         except Exception as e:
             ok = False
             import traceback
