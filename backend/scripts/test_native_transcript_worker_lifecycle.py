@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -267,7 +268,259 @@ def _run() -> int:
     return 0
 
 
+# ─── worker root isolation (fail-closed) ───────────────────────────────────
+# Each named test owns a fresh isolated BETTER_AGENT_HOME and cleans it up.
+# `_configure_worker_roots` is the exact gate the detached worker runs at
+# startup, so exercising it directly also proves subprocess-side rejection.
+
+def _acquire_index():
+    import native_session_prompt_search as search
+    import native_transcript_index as index
+    return search, index
+
+
+def _write_user_transcript(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "type": "user",
+            "uuid": "u-" + path.stem,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": content},
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _test_in_root_symlink_escape_not_indexed() -> int:
+    """Headline: a symlink planted inside a native root must never let the
+    index walk reach a foreign file outside that root. ``rglob`` yields in-root
+    symlinked files on every CPython (and recurses into in-root dir symlinks
+    on 3.10-3.12); the walk's resolve()-under-root guard must skip both."""
+    home = _test_home.TestHome.acquire("ba-test-root-symlink-escape-")
+    state_root = Path(os.environ["BETTER_AGENT_HOME"]).resolve()
+    leaks: list[str] = []
+    try:
+        search, index = _acquire_index()
+        transcript_root = state_root / "transcripts"
+        transcript_root.mkdir(parents=True, exist_ok=True)
+        _write_user_transcript(transcript_root / "good.jsonl", "good-needle")
+
+        outside = Path(tempfile.mkdtemp(prefix="ba-root-escape-out-"))
+        try:
+            escaped = outside / "escaped.jsonl"
+            _write_user_transcript(escaped, "escaped-needle")
+            (transcript_root / "link.jsonl").symlink_to(escaped)
+            (transcript_root / "dirlink").symlink_to(outside)
+
+            index.set_roots_resolver(lambda: (
+                lambda: [(transcript_root, "claude")],
+                search._classify_root,
+                search._candidate_from_match,
+                search._is_native_transcript_path,
+            ))
+            try:
+                walked = index._stat_walk()
+            finally:
+                index.set_roots_resolver(None)
+
+            root_resolved = transcript_root.resolve()
+            for path, _tag, _mtime, _size in walked:
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    resolved = path
+                if resolved != root_resolved and root_resolved not in resolved.parents:
+                    leaks.append(str(resolved))
+            saw_good = any(p.resolve().name == "good.jsonl" for p, *_ in walked)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        home.release()
+    if not leaks and saw_good:
+        print("in_root_symlink_escape_not_indexed: PASS")
+        return 0
+    print(f"in_root_symlink_escape_not_indexed: FAIL "
+          f"(leaks={leaks}, saw_good={saw_good})")
+    return 1
+
+
+def _test_escape_root_outside_home_rejected_at_subprocess() -> int:
+    home = _test_home.TestHome.acquire("ba-test-root-outside-home-")
+    try:
+        _search, index = _acquire_index()
+        outside = Path(tempfile.mkdtemp(prefix="ba-root-out-"))
+        try:
+            raw = json.dumps([{"path": str(outside), "tag": "claude"}])
+            try:
+                index._configure_worker_roots(raw)
+            except ValueError:
+                print("escape_root_outside_home_rejected_at_subprocess: PASS")
+                return 0
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        home.release()
+    print("escape_root_outside_home_rejected_at_subprocess: FAIL (outside root accepted)")
+    return 1
+
+
+def _test_parent_traversal_root_rejected() -> int:
+    home = _test_home.TestHome.acquire("ba-test-root-traversal-")
+    state_root = Path(os.environ["BETTER_AGENT_HOME"]).resolve()
+    try:
+        _search, index = _acquire_index()
+        outside = Path(tempfile.mkdtemp(prefix="ba-root-trav-out-"))
+        try:
+            kids = state_root / "kids"
+            kids.mkdir(parents=True, exist_ok=True)
+            # absolute path with '..' that resolves to a sibling dir outside home
+            if outside.resolve().parent != state_root.parent:
+                print("parent_traversal_root_rejected: FAIL (fixture layout)")
+                return 1
+            traversal = kids / ".." / ".." / outside.name
+            raw = json.dumps([{"path": str(traversal), "tag": "claude"}])
+            try:
+                index._configure_worker_roots(raw)
+            except ValueError:
+                print("parent_traversal_root_rejected: PASS")
+                return 0
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        home.release()
+    print("parent_traversal_root_rejected: FAIL (traversal root accepted)")
+    return 1
+
+
+def _test_symlink_root_escape_rejected() -> int:
+    home = _test_home.TestHome.acquire("ba-test-root-symlink-")
+    state_root = Path(os.environ["BETTER_AGENT_HOME"]).resolve()
+    try:
+        _search, index = _acquire_index()
+        outside = Path(tempfile.mkdtemp(prefix="ba-root-sym-out-"))
+        try:
+            link = state_root / "escape-link"
+            link.symlink_to(outside)
+            raw = json.dumps([{"path": str(link), "tag": "claude"}])
+            try:
+                index._configure_worker_roots(raw)
+            except ValueError:
+                print("symlink_root_escape_rejected: PASS")
+                return 0
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        home.release()
+    print("symlink_root_escape_rejected: FAIL (symlink root accepted)")
+    return 1
+
+
+def _test_serialize_rejects_escaped_root() -> int:
+    """Plan B defense-in-depth: `_serialize_worker_roots` must refuse to emit a
+    root the worker would reject, so an escaped root can never reach argv."""
+    home = _test_home.TestHome.acquire("ba-test-root-serialize-")
+    try:
+        search, index = _acquire_index()
+        outside = Path(tempfile.mkdtemp(prefix="ba-root-ser-out-"))
+        try:
+            index.set_roots_resolver(lambda: (
+                lambda: [(outside, "claude")],
+                search._classify_root,
+                search._candidate_from_match,
+                search._is_native_transcript_path,
+            ))
+            try:
+                try:
+                    index._serialize_worker_roots()
+                except ValueError:
+                    print("serialize_rejects_escaped_root: PASS")
+                    return 0
+            finally:
+                index.set_roots_resolver(None)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        home.release()
+    print("serialize_rejects_escaped_root: FAIL (escaped root serialized)")
+    return 1
+
+
+def _test_cleanup_owns_worker_and_temp_home() -> int:
+    home = _test_home.TestHome.acquire("ba-test-cleanup-owns-")
+    state_root = Path(os.environ["BETTER_AGENT_HOME"]).resolve()
+    home_path = home.path
+    worker_pid = 0
+    ok_record = ok_live = ok_dead = False
+    try:
+        search, index = _acquire_index()
+        transcript_root = state_root / "transcripts"
+        transcript_root.mkdir(parents=True, exist_ok=True)
+        _write_user_transcript(transcript_root / "s.jsonl", "cleanup-needle")
+        index.set_roots_resolver(lambda: (
+            lambda: [(transcript_root, "claude")],
+            search._classify_root,
+            search._candidate_from_match,
+            search._is_native_transcript_path,
+        ))
+        try:
+            index.ensure_started()
+            record_path = state_root / "native_transcript_index.sqlite3.worker.pid"
+            ok_record = _wait_until(record_path.exists, 10.0)
+            if ok_record:
+                worker_pid = int(
+                    json.loads(record_path.read_text(encoding="utf-8"))["worker"]["pid"]
+                )
+            ok_live = bool(worker_pid) and psutil.pid_exists(worker_pid)
+            index.shutdown()
+            index.set_roots_resolver(None)
+            ok_dead = (
+                _wait_until(lambda: not psutil.pid_exists(worker_pid), 5.0)
+                if worker_pid else True
+            )
+        finally:
+            if worker_pid and psutil.pid_exists(worker_pid):
+                psutil.Process(worker_pid).kill()
+    finally:
+        home.release()
+    ok_removed = not Path(home_path).exists()
+    if ok_record and ok_live and ok_dead and ok_removed:
+        print("cleanup_owns_worker_and_temp_home: PASS")
+        return 0
+    print(f"cleanup_owns_worker_and_temp_home: FAIL "
+          f"(record={ok_record}, live={ok_live}, dead={ok_dead}, removed={ok_removed})")
+    return 1
+
+
+_ROOT_ISOLATION_TESTS = {
+    "in_root_symlink_escape_not_indexed": _test_in_root_symlink_escape_not_indexed,
+    "escape_root_outside_home_rejected_at_subprocess": _test_escape_root_outside_home_rejected_at_subprocess,
+    "parent_traversal_root_rejected": _test_parent_traversal_root_rejected,
+    "symlink_root_escape_rejected": _test_symlink_root_escape_rejected,
+    "serialize_rejects_escaped_root": _test_serialize_rejects_escaped_root,
+    "cleanup_owns_worker_and_temp_home": _test_cleanup_owns_worker_and_temp_home,
+}
+
+
+def _run_root_isolation() -> int:
+    failures: list[str] = []
+    for name, fn in _ROOT_ISOLATION_TESTS.items():
+        if fn():
+            failures.append(name)
+    if failures:
+        print(f"\nroot isolation: FAIL ({len(failures)} failed: {failures})")
+        return 1
+    print("\nroot isolation: PASS (all)")
+    return 0
+
+
 if __name__ == "__main__":
     if "--launcher" in sys.argv:
         raise SystemExit(_launcher())
+    if "--test" in sys.argv:
+        name = sys.argv[sys.argv.index("--test") + 1]
+        raise SystemExit(_ROOT_ISOLATION_TESTS[name]())
+    if "--root-isolation" in sys.argv:
+        raise SystemExit(_run_root_isolation())
     raise SystemExit(_run())

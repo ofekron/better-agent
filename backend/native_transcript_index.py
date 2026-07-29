@@ -884,16 +884,71 @@ def _roots_and_resolver():
     return _native_roots, _classify_root, _candidate_from_match, _is_native_transcript_path
 
 
-def _resolved_worker_roots() -> list[tuple[Path, str]]:
-    native_roots, _, _, _ = _roots_and_resolver()
-    return [(root.resolve(), tag) for root, tag in native_roots()]
+_ALLOWED_WORKER_TAGS = ("claude", "codex", "pi", "windsurf", "runs")
+
+
+def _validate_worker_root(path_str, tag, *, allow_real, state_root) -> Path:
+    """Fail-closed validation of a single worker root.
+
+    Returns the resolved directory Path; raises ``ValueError`` on any failure:
+    non-string/empty path or tag, relative path, unknown tag, a target that
+    does not exist or is not a directory, or a resolved root that is neither a
+    configured native transcript root nor (in test mode) contained within the
+    isolated state home.
+
+    Production native roots legitimately live OUTSIDE ``ba_home``
+    (``~/.claude/projects``, ``~/.codex/sessions``, ``~/.gemini``, the runs
+    dir), so confinement to ``ba_home`` is test-only. The production gate is
+    membership in the explicit configured allow-list (``allow_real``), never
+    path confinement — confining prod to ``ba_home`` would break indexing.
+    """
+    if not isinstance(path_str, str) or not path_str.strip():
+        raise ValueError("worker root requires a non-empty string path")
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("worker root requires a non-empty string tag")
+    path = Path(path_str)
+    if not path.is_absolute():
+        raise ValueError("worker root path must be absolute")
+    if tag not in _ALLOWED_WORKER_TAGS:
+        raise ValueError(f"worker root tag {tag!r} is not allowed")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("worker root must exist") from exc
+    if not resolved.is_dir():
+        raise ValueError("worker root must be a directory")
+    accepted = (resolved, tag) in allow_real
+    if not accepted and is_test_mode():
+        if resolved == state_root or state_root in resolved.parents:
+            accepted = True
+    if not accepted:
+        raise ValueError("worker root is not a configured native transcript root")
+    return resolved
+
+
+def _real_native_root_set() -> set[tuple[Path, str]]:
+    """The trusted allow-list of configured native transcript roots, resolved.
+    Always sourced from the real search module (not an overridden resolver) so
+    a monkeypatched resolver cannot widen the trust set."""
+    from native_session_prompt_search import _native_roots
+
+    return {(root.resolve(), tag) for root, tag in _native_roots()}
 
 
 def _serialize_worker_roots() -> str:
-    return json.dumps([
-        {"path": str(root), "tag": tag}
-        for root, tag in _resolved_worker_roots()
-    ])
+    # Defense in depth: validate every root through the same fail-closed gate
+    # the worker applies on startup, so a malformed/escaped root can never reach
+    # the worker subprocess argv even if the resolver was misconfigured.
+    native_roots, _, _, _ = _roots_and_resolver()
+    allow_real = _real_native_root_set()
+    state_root = ba_home().resolve()
+    validated: list[tuple[Path, str]] = []
+    for root, tag in native_roots():
+        resolved = _validate_worker_root(
+            str(root), tag, allow_real=allow_real, state_root=state_root,
+        )
+        validated.append((resolved, tag))
+    return json.dumps([{"path": str(root), "tag": tag} for root, tag in validated])
 
 
 def _configure_worker_roots(raw: str) -> None:
@@ -908,35 +963,19 @@ def _configure_worker_roots(raw: str) -> None:
         _candidate_from_match,
         _classify_root,
         _is_native_transcript_path,
-        _native_roots,
     )
 
-    default_roots = {
-        (root.resolve(), tag)
-        for root, tag in _native_roots()
-    }
+    allow_real = _real_native_root_set()
     state_root = ba_home().resolve()
-    allowed_tags = {"claude", "codex", "pi", "windsurf", "runs"}
     roots: list[tuple[Path, str]] = []
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError("worker root entries must be objects")
-        path_value = item.get("path")
-        tag = item.get("tag")
-        if not isinstance(path_value, str) or not isinstance(tag, str):
-            raise ValueError("worker root entries require string path and tag")
-        path = Path(path_value)
-        if not path.is_absolute() or tag not in allowed_tags:
-            raise ValueError("worker root path or tag is invalid")
-        resolved = path.resolve(strict=True)
-        if not resolved.is_dir():
-            raise ValueError("worker roots must be directories")
-        if is_test_mode():
-            if resolved != state_root and state_root not in resolved.parents:
-                raise ValueError("test worker root escapes BETTER_AGENT_HOME")
-        elif (resolved, tag) not in default_roots:
-            raise ValueError("worker root is not a configured native transcript root")
-        roots.append((resolved, tag))
+        resolved = _validate_worker_root(
+            item.get("path"), item.get("tag"),
+            allow_real=allow_real, state_root=state_root,
+        )
+        roots.append((resolved, item["tag"]))
 
     root_snapshot = tuple(roots)
     set_roots_resolver(lambda: (
@@ -947,20 +986,49 @@ def _configure_worker_roots(raw: str) -> None:
     ))
 
 
+def _under_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _stat_walk() -> list[tuple[Path, str, float, int]]:
     """Cheap glob+stat over every native root. No content reads (no codex
-    first-line peek) so this is the freshness check, not the parse."""
-    _native_roots, _classify_root, _, is_native_transcript_path = _roots_and_resolver()
-    out: list[tuple[Path, str, float, int]] = []
+    first-line peek) so this is the freshness check, not the parse.
+
+    Symlink-escape guard: ``rglob`` yields in-root symlinked files (every
+    CPython) and recurses into in-root directory symlinks (3.10-3.12), so a
+    symlink planted inside a root could otherwise pull in foreign transcripts.
+    Each match is resolved and must stay under one of the walked real roots;
+    anything that escapes is skipped. ``stat(follow_symlinks=False)`` avoids
+    stat-ing through a symlink as a second layer of defense.
+    """
+    _native_roots, _, _, is_native_transcript_path = _roots_and_resolver()
+    real_roots: list[tuple[Path, str]] = []
     for root, tag in _native_roots():
         if not root.exists():
             continue
+        try:
+            real_roots.append((root.resolve(), tag))
+        except OSError:
+            continue
+    real_targets = [root for root, _ in real_roots]
+    out: list[tuple[Path, str, float, int]] = []
+    for resolved_root, tag in real_roots:
         pattern = "*.pb" if tag == "windsurf" else "*.jsonl"
-        for path in root.rglob(pattern):
+        for path in resolved_root.rglob(pattern):
             if not is_native_transcript_path(path, tag):
                 continue
             try:
-                st = path.stat()
+                resolved_file = path.resolve()
+            except OSError:
+                continue
+            if not any(_under_root(resolved_file, r) for r in real_targets):
+                continue
+            try:
+                st = path.stat(follow_symlinks=False)
             except OSError:
                 continue
             out.append((path, tag, st.st_mtime, st.st_size))

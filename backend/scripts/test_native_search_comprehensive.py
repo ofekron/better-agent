@@ -1406,6 +1406,48 @@ def test_classify_root_unknown_defaults_claude() -> bool:
 # native_transcript_index
 # ============================================================================
 
+def test_malformed_worker_roots_rejected() -> bool:
+    """Worker root config must fail closed on every malformed/escaped shape.
+    Table-driven: each row must raise ValueError. ``_configure_worker_roots``
+    is the exact gate the detached worker runs at startup, so this also covers
+    subprocess-side rejection."""
+    file_target = _SCRATCH / f"not-a-dir-{_next_seq()}"
+    file_target.parent.mkdir(parents=True, exist_ok=True)
+    file_target.write_text("file")
+    existing_dir = _SCRATCH / f"a-dir-{_next_seq()}"
+    existing_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        ("not a list", "not-json-list", "{}"),
+        ("bad json", "bad-json", "["),
+        ("entry not object", "non-object", "[123]"),
+        ("missing path", "missing-path", '[{"tag": "claude"}]'),
+        ("missing tag", "missing-tag", '[{"path": "%s"}]' % existing_dir),
+        ("bad tag", "bad-tag",
+         '[{"path": "%s", "tag": "evil"}]' % existing_dir),
+        ("relative path", "relative",
+         '[{"path": "relative/dir", "tag": "claude"}]'),
+        ("non-existent", "non-existent",
+         '[{"path": "%s", "tag": "claude"}]' % (_SCRATCH / "missing-dir")),
+        ("non-dir", "non-dir",
+         '[{"path": "%s", "tag": "claude"}]' % file_target),
+    ]
+    orig_resolver = idx._roots_resolver_override
+    failures: list[str] = []
+    try:
+        for label, _slug, raw in rows:
+            try:
+                idx._configure_worker_roots(raw)
+            except ValueError:
+                continue
+            failures.append(label)
+    finally:
+        idx.set_roots_resolver(orig_resolver)
+    ok = not failures
+    print(f"{OK if ok else FAIL} malformed worker roots rejected "
+          f"(failed-closed on all={ok}; leaked={failures})")
+    return ok
+
+
 def test_idx_refresh_marks_covered_and_usable() -> bool:
     token = _idx_setup_roots()
     try:
@@ -2520,6 +2562,7 @@ def main_run() -> int:
         test_classify_root_claude,
         test_classify_root_unknown_defaults_claude,
         # native_transcript_index
+        test_malformed_worker_roots_rejected,
         test_idx_refresh_marks_covered_and_usable,
         test_idx_indexes_user_prompt,
         test_idx_drops_tool_result_lean,
