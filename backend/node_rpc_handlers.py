@@ -17,6 +17,7 @@ existence is enough to keep ingestion working.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import inspect
 import logging
 import os
@@ -462,16 +463,54 @@ async def handle_resume_stream(node_client, msg: dict) -> None:
 # the primary forwards a bogus path, the node refuses to step outside
 # its declared `cwd_roots` allowlist.
 # ============================================================================
-async def dispatch_rpc(method: str, params: dict) -> dict:
+class StaleProjectionGeneration(RuntimeError):
+    pass
+
+
+_PROJECTION_METHODS = {
+    "sync_provider_config",
+    "sync_extension_config",
+    "sync_harness_profile",
+}
+_projection_apply_locks: dict[
+    str,
+    tuple[asyncio.AbstractEventLoop, asyncio.Lock],
+] = {}
+
+
+def _projection_apply_lock(method: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    entry = _projection_apply_locks.get(method)
+    if entry is None or entry[0] is not loop:
+        entry = (loop, asyncio.Lock())
+        _projection_apply_locks[method] = entry
+    return entry[1]
+
+
+async def _invoke_rpc_handler(handler, params: dict) -> dict:
+    if inspect.iscoroutinefunction(handler):
+        return await handler(params)
+    return await asyncio.to_thread(handler, params)
+
+
+async def dispatch_rpc(
+    method: str,
+    params: dict,
+    *,
+    assert_projection_current: Callable[[], None] | None = None,
+) -> dict:
     """Single node-side RPC entry. Sync handlers run off-loop via
     `to_thread`; async handlers (provider run ops like `run_headless`
     / `rewind`) are awaited directly on the loop."""
     handler = _HANDLERS.get(method)
     if handler is None:
         raise ValueError(f"unknown rpc method: {method!r}")
-    if inspect.iscoroutinefunction(handler):
-        return await handler(params)
-    return await asyncio.to_thread(handler, params)
+    if method not in _PROJECTION_METHODS:
+        return await _invoke_rpc_handler(handler, params)
+    async with _projection_apply_lock(method):
+        if assert_projection_current is not None:
+            assert_projection_current()
+        return await _invoke_rpc_handler(handler, params)
 
 
 async def call_local_or_remote(

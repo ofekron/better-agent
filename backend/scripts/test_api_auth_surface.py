@@ -111,6 +111,7 @@ def _install_frontend_extension() -> str:
         },
         persist=True,
     )
+    extension_store.set_enabled(_FRONTEND_FIXTURE_ID, True)
     return _FRONTEND_FIXTURE_ID
 
 
@@ -119,23 +120,36 @@ def test_public_allowlist_is_exact() -> tuple[bool, str]:
         "/api/auth/login",
         "/api/auth/setup",
         "/api/auth/needs_setup",
+        "/api/auth/qr_grant",
+        "/api/auth/qr_redeem",
+        "/api/auth/refresh",
+        "/api/mobile/bundle/download",
     }
     if main._AUTH_PUBLIC_ROUTES != expected_routes:
         return False, f"unexpected public routes: {sorted(main._AUTH_PUBLIC_ROUTES)}"
     expected_artifact_routes = {"/api/desktop/status"}
     if main._AUTH_PUBLIC_ARTIFACT_ROUTES != expected_artifact_routes:
         return False, f"unexpected public artifact routes: {sorted(main._AUTH_PUBLIC_ARTIFACT_ROUTES)}"
-    expected_prefixes = ("/api/desktop/updates/", "/api/download/desktop/")
+    expected_prefixes = (
+        "/api/desktop/updates/",
+        "/api/download/desktop/",
+        "/api/file/preview/",
+    )
     if main._AUTH_PUBLIC_PREFIXES != expected_prefixes:
         return False, f"unexpected public prefixes: {main._AUTH_PUBLIC_PREFIXES!r}"
     expected_registered_public = {
         ("GET", "/api/auth/needs_setup"),
         ("POST", "/api/auth/login"),
         ("POST", "/api/auth/setup"),
+        ("GET", "/api/auth/qr_grant"),
+        ("POST", "/api/auth/qr_redeem"),
+        ("POST", "/api/auth/refresh"),
+        ("GET", "/api/mobile/bundle/download"),
         ("GET", "/api/desktop/status"),
         ("GET", "/api/desktop/updates/{rel_path:path}"),
         ("GET", "/api/download/desktop/macos"),
         ("GET", "/api/download/desktop/windows"),
+        ("GET", "/api/file/preview/{token}/{node_id}/{file_path:path}"),
         # Static UI bundle served public so cross-origin import() on the
         # native shell can load it without a cookie/bearer it cannot send.
         ("GET", "/api/extensions/{extension_id}/frontend/{asset_path:path}"),
@@ -151,7 +165,7 @@ def test_public_allowlist_is_exact() -> tuple[bool, str]:
 
 
 def test_websocket_surface_is_exact() -> tuple[bool, str]:
-    expected = {"/ws/chat", "/{_unknown_ws_path:path}"}
+    expected = {"/api/node/connect", "/ws/chat", "/{_unknown_ws_path:path}"}
     actual = _websocket_routes()
     if actual != expected:
         return False, f"unexpected websocket routes: {sorted(actual)}"
@@ -268,22 +282,29 @@ def test_extension_entrypoints_route_still_requires_auth() -> tuple[bool, str]:
     return res.status_code == 401, f"expected entrypoints 401, got {res.status_code}"
 
 
-def test_frontend_log_drops_info_noise() -> tuple[bool, str]:
+def test_frontend_log_requires_auth_and_accepts_authenticated() -> tuple[bool, str]:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
-    headers = {"Authorization": f"Bearer {auth.create_token('test')}"}
-    res = client.post(
+    payload = {
+        "level": "info",
+        "source": "console",
+        "message": "TESTAPE_SDK custom_state noisy",
+    }
+    unauthorized = client.post("/api/logs/frontend", json=payload)
+    if unauthorized.status_code != 401:
+        return False, f"unauthorized frontend log returned {unauthorized.status_code}"
+    authenticated = client.post(
         "/api/logs/frontend",
-        json={
-            "level": "info",
-            "source": "console",
-            "message": "TESTAPE_SDK custom_state noisy",
-        },
-        headers=headers,
+        json=payload,
+        headers={"Authorization": f"Bearer {auth.create_token('test')}"},
     )
-    if res.status_code != 200:
-        return False, f"expected 200, got {res.status_code}: {res.text[:120]}"
-    body = res.json()
-    return body.get("dropped") is True, f"expected dropped response, got {body!r}"
+    if authenticated.status_code != 200:
+        return False, (
+            f"authenticated frontend log returned {authenticated.status_code}: "
+            f"{authenticated.text[:120]}"
+        )
+    return authenticated.json() == {"ok": True}, (
+        f"unexpected authenticated response: {authenticated.json()!r}"
+    )
 
 
 TESTS = [
@@ -297,7 +318,10 @@ TESTS = [
     ("extension frontend asset is public", test_extension_frontend_asset_is_public),
     ("extension backend route still requires auth", test_extension_backend_route_still_requires_auth),
     ("extension entrypoints route still requires auth", test_extension_entrypoints_route_still_requires_auth),
-    ("frontend log drops info noise", test_frontend_log_drops_info_noise),
+    (
+        "frontend log requires auth and accepts authenticated",
+        test_frontend_log_requires_auth_and_accepts_authenticated,
+    ),
 ]
 
 

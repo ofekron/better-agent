@@ -58,6 +58,8 @@ class NodeClient:
         perf.register_queue("node.send", self._send_queue.qsize)
         self._sender_task: Optional[asyncio.Task] = None
         self._receiver_task: Optional[asyncio.Task] = None
+        self._rpc_tasks: set[asyncio.Task[None]] = set()
+        self._connection_generation = 0
         self._connected: asyncio.Event = asyncio.Event()
         self._stop: asyncio.Event = asyncio.Event()
         # node_offset counter; monotonic across reconnects for the
@@ -94,6 +96,13 @@ class NodeClient:
                 await self._sender_task
             except (asyncio.CancelledError, Exception):
                 pass
+            self._sender_task = None
+        tasks = list(self._rpc_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._rpc_tasks.clear()
 
     # ----- Outbound API for node code ------------------------------------
 
@@ -170,7 +179,11 @@ class NodeClient:
 
     # ----- Inbound dispatch (called by receiver loop) --------------------
 
-    async def _route_inbound(self, msg: dict) -> None:
+    async def _route_inbound(
+        self,
+        msg: dict,
+        connection_generation: int | None = None,
+    ) -> None:
         msg_type = msg.get("type")
         if msg_type == "ping":
             await self.send({"type": "pong", "ts": msg.get("ts", 0)})
@@ -194,27 +207,65 @@ class NodeClient:
             extension_incident_outbox.ack(str(msg.get("incident_id") or ""))
             return
         if msg_type == "rpc_request":
-            asyncio.create_task(self._handle_rpc_request(msg))
+            generation = (
+                self._connection_generation
+                if connection_generation is None
+                else connection_generation
+            )
+            task = asyncio.create_task(
+                self._handle_rpc_request(msg, generation),
+                name="node-rpc-request",
+            )
+            self._rpc_tasks.add(task)
+            task.add_done_callback(self._rpc_tasks.discard)
             return
         if msg_type == "restart":
             asyncio.create_task(rpc_handlers.handle_restart(self, msg))
             return
         logger.warning("node_client: unknown msg_type=%r", msg_type)
 
-    async def _handle_rpc_request(self, msg: dict) -> None:
+    def _assert_connection_generation(self, generation: int) -> None:
+        if generation != self._connection_generation:
+            raise rpc_handlers.StaleProjectionGeneration(
+                f"stale node connection generation {generation}; "
+                f"current generation is {self._connection_generation}"
+            )
+
+    async def _handle_rpc_request(
+        self,
+        msg: dict,
+        connection_generation: int,
+    ) -> None:
         request_id = msg.get("request_id")
         method = msg.get("method") or ""
         params = msg.get("params") or {}
         try:
-            result = await rpc_handlers.dispatch_rpc(method, params)
+            result = await rpc_handlers.dispatch_rpc(
+                method,
+                params,
+                assert_projection_current=lambda: self._assert_connection_generation(
+                    connection_generation
+                ),
+            )
+            self._assert_connection_generation(connection_generation)
             await self.send({
                 "type": "rpc_response",
                 "request_id": request_id,
                 "ok": True,
                 "result": result,
             })
+        except rpc_handlers.StaleProjectionGeneration:
+            logger.info(
+                "node_client: dropped stale rpc request method=%s generation=%d",
+                method,
+                connection_generation,
+            )
         except Exception as e:
             logger.exception("node_client: rpc handler raised (method=%s)", method)
+            try:
+                self._assert_connection_generation(connection_generation)
+            except rpc_handlers.StaleProjectionGeneration:
+                return
             await self.send({
                 "type": "rpc_response",
                 "request_id": request_id,
@@ -298,11 +349,16 @@ class NodeClient:
             ):
                 raise RuntimeError(f"primary handshake mismatch: {msg!r}")
 
+            self._connection_generation += 1
+            connection_generation = self._connection_generation
             self._connected.set()
             logger.info("node_client: connected to primary as %s", my_id)
 
             sender = asyncio.create_task(self._sender_loop(ws), name="node-sender")
-            receiver = asyncio.create_task(self._receiver_loop(ws), name="node-receiver")
+            receiver = asyncio.create_task(
+                self._receiver_loop(ws, connection_generation),
+                name="node-receiver",
+            )
             asyncio.create_task(
                 self._replay_extension_incidents(),
                 name="node-extension-incident-replay",
@@ -316,6 +372,9 @@ class NodeClient:
                 for t in (sender, receiver):
                     if not t.done():
                         t.cancel()
+                await asyncio.gather(sender, receiver, return_exceptions=True)
+                if self._connection_generation == connection_generation:
+                    self._connection_generation += 1
                 self._connected.clear()
                 self._ws = None
 
@@ -329,14 +388,14 @@ class NodeClient:
         for incident in extension_incident_outbox.pending():
             await self.send_extension_incident(incident)
 
-    async def _receiver_loop(self, ws) -> None:
+    async def _receiver_loop(self, ws, connection_generation: int) -> None:
         async for raw in ws:
             try:
                 msg = _from_json(raw)
             except Exception:
                 logger.exception("node_client: bad json from primary")
                 continue
-            await self._route_inbound(msg)
+            await self._route_inbound(msg, connection_generation)
 
 
 def _to_json(msg: dict) -> str:
