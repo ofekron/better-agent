@@ -486,7 +486,25 @@ def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
     )
 
 
+def _require_non_redirecting_path(path: Path, *, directory: bool) -> None:
+    try:
+        observed = path.lstat()
+        junction = bool(
+            getattr(path, "is_junction", lambda: False)(),
+        )
+    except OSError as exc:
+        raise PermissionError("private path is unavailable") from exc
+    expected_type = (
+        stat.S_ISDIR(observed.st_mode)
+        if directory
+        else stat.S_ISREG(observed.st_mode)
+    )
+    if not expected_type or stat.S_ISLNK(observed.st_mode) or junction:
+        raise PermissionError("private path must not redirect")
+
+
 def make_private_file(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=False)
     if os.name == "nt":
         if windows_path_has_private_acl(path):
             return
@@ -515,21 +533,7 @@ def windows_path_has_private_acl(path: Path) -> bool:
 
 
 def make_private_directory(path: Path) -> None:
-    try:
-        observed = path.lstat()
-        junction = bool(
-            getattr(path, "is_junction", lambda: False)(),
-        )
-    except OSError as exc:
-        raise PermissionError(
-            "private directory is unavailable",
-        ) from exc
-    if (
-        not stat.S_ISDIR(observed.st_mode)
-        or stat.S_ISLNK(observed.st_mode)
-        or junction
-    ):
-        raise PermissionError("private directory must not redirect")
+    _require_non_redirecting_path(path, directory=True)
     if os.name == "nt":
         if windows_path_has_private_acl(path):
             return

@@ -14,6 +14,26 @@ class _Directory:
         return False
 
 
+class _RegularFile:
+    def lstat(self) -> SimpleNamespace:
+        return SimpleNamespace(st_mode=stat.S_IFREG)
+
+    def is_junction(self) -> bool:
+        return False
+
+
+class _Redirect:
+    def __init__(self, mode: int, *, junction: bool = False) -> None:
+        self._mode = mode
+        self._junction = junction
+
+    def lstat(self) -> SimpleNamespace:
+        return SimpleNamespace(st_mode=self._mode)
+
+    def is_junction(self) -> bool:
+        return self._junction
+
+
 def test_secure_windows_directory_is_not_mutated() -> None:
     original_name = paths.os.name
     original_check = paths.windows_path_has_private_acl
@@ -61,7 +81,7 @@ def test_secure_windows_file_is_not_mutated() -> None:
     original_check = paths.windows_path_has_private_acl
     original_apply = paths._set_windows_private_acl
     applied: list[tuple[object, bool]] = []
-    target = object()
+    target = _RegularFile()
     paths.os.name = "nt"
     paths.windows_path_has_private_acl = lambda _path: True
     paths._set_windows_private_acl = (
@@ -77,8 +97,40 @@ def test_secure_windows_file_is_not_mutated() -> None:
     assert applied == []
 
 
+def test_windows_private_file_rejects_non_files_without_mutation() -> None:
+    original_name = paths.os.name
+    original_check = paths.windows_path_has_private_acl
+    original_apply = paths._set_windows_private_acl
+    applied: list[tuple[object, bool]] = []
+    paths.os.name = "nt"
+    paths.windows_path_has_private_acl = lambda _path: True
+    paths._set_windows_private_acl = (
+        lambda path, *, directory: applied.append((path, directory))
+    )
+    invalid = (
+        _Directory(),
+        _Redirect(stat.S_IFLNK),
+        _Redirect(stat.S_IFREG, junction=True),
+    )
+    try:
+        for target in invalid:
+            try:
+                paths.make_private_file(target)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("redirecting private file was accepted")
+    finally:
+        paths.os.name = original_name
+        paths.windows_path_has_private_acl = original_check
+        paths._set_windows_private_acl = original_apply
+
+    assert applied == []
+
+
 if __name__ == "__main__":
     test_secure_windows_directory_is_not_mutated()
     test_insecure_windows_directory_is_secured_and_verified()
     test_secure_windows_file_is_not_mutated()
+    test_windows_private_file_rejects_non_files_without_mutation()
     print("paths private directory regression: ok")
