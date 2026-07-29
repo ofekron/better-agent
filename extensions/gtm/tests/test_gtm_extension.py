@@ -45,6 +45,8 @@ def test_manifest_and_local_server() -> None:
         "gtm-rep",
         "gtm-closer",
         "gtm-mission-control",
+        "gtm-pmf-doctor",
+        "gtm-market-fit-canvas",
     ]
     for skill in validated["entrypoints"]["skills"]:
         assert (root / skill["path"] / "SKILL.md").is_file()

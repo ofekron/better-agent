@@ -2,8 +2,8 @@
   "kind": "better-agent-extension",
   "id": "ofek-dev.gtm",
   "name": "Go To Market",
-  "version": "0.2.0",
-  "description": "Go-to-market fleet — prospect research, copy, outreach, and closing skills, plus multi-channel publishing through the Postiz agents CLI.",
+  "version": "0.3.0",
+  "description": "Go-to-market fleet — product-market-fit diagnosis, prospect research, copy, outreach, and closing skills, plus multi-channel publishing through the Postiz agents CLI.",
   "surfaces": [
     "skills",
     "runtime_mcp"
@@ -34,6 +34,16 @@
         "name": "gtm-mission-control",
         "path": "skills/gtm-mission-control",
         "description": "Spawn and coordinate a multi-agent GTM team (scout/writer/rep/closer) on one objective."
+      },
+      {
+        "name": "gtm-pmf-doctor",
+        "path": "skills/gtm-pmf-doctor",
+        "description": "Diagnose product-market fit: symptom check, one binding bottleneck, one falsifiable experiment."
+      },
+      {
+        "name": "gtm-market-fit-canvas",
+        "path": "skills/gtm-market-fit-canvas",
+        "description": "Fill and stress-test the nine-block Market Fit Canvas, then name the weakest link in the chain."
       }
     ],
     "mcp": [
@@ -88,15 +98,36 @@
         "skills/gtm-writer/SKILL.md",
         "skills/gtm-rep/SKILL.md",
         "skills/gtm-closer/SKILL.md",
-        "skills/gtm-mission-control/SKILL.md"
+        "skills/gtm-mission-control/SKILL.md",
+        "skills/gtm-pmf-doctor/SKILL.md",
+        "skills/gtm-market-fit-canvas/SKILL.md"
       ],
       "python_modules": [
         "mcp.server"
       ]
     }
   },
-  "attribution": {
-    "source": "https://github.com/gtm-skills/gtm",
-    "license": "MIT"
-  }
+  "attribution": [
+    {
+      "skills": [
+        "gtm-scout",
+        "gtm-writer",
+        "gtm-rep",
+        "gtm-closer",
+        "gtm-mission-control"
+      ],
+      "source": "https://github.com/gtm-skills/gtm",
+      "license": "MIT",
+      "basis": "adapted"
+    },
+    {
+      "skills": [
+        "gtm-pmf-doctor",
+        "gtm-market-fit-canvas"
+      ],
+      "source": "https://www.doctormarket.fit",
+      "license": "none granted",
+      "basis": "frameworks referenced and credited; no source text reproduced"
+    }
+  ]
 }
