@@ -24,6 +24,32 @@ the bus validates the event's `schema_version` against the registry and
 raises `EventSchemaError` on mismatch — per CLAUDE.md "schema migrations
 are NOT supported", the operator wipes the persisted log to recover.
 
+**Cross-thread delivery.** A subscriber may pin itself to an event loop
+(`subscribe(..., bind_current_loop=True)`, or `bind_unpinned_to_current_loop()`
+once from the main loop at startup). A publish whose running loop is the
+subscriber's loop delivers inline and awaited, exactly as before — the
+main-loop-to-main-loop path is unchanged. A publish from any other
+thread hands the frame to the subscriber's loop instead.
+
+What that costs, stated plainly:
+
+- Cross-loop delivery is NOT awaited by the publisher. `publish()`
+  returns once every remote frame is handed off, not once it is
+  handled. A publisher that needs a subscriber's side effect to be
+  visible before it continues must be on that subscriber's loop.
+- Ordering is per-target FIFO in the order frames were handed off,
+  which for one publisher means priority order. There is no global
+  total order across targets, so the priority-10-before-priority-50
+  guarantee holds only when both subscribers share a delivery target.
+  The persistence-before-broadcast pair MUST stay co-located.
+- A target whose loop is closed, stopped, or `_TARGET_BUFFER_MAX`
+  behind drops frames and logs. Publishers never block on a foreign
+  loop.
+
+`publish_threadsafe()` is the entry point for a plain worker thread with
+no loop of its own; it skips unpinned subscribers rather than running
+loop-affine handlers off-loop.
+
 **Monotonic seq (A16).** The bus stamps a per-instance monotonic `seq`
 on every fresh publish so subscribers (and downstream readers of the
 persisted events.jsonl) can detect reordering and gaps. On replay, the
@@ -37,11 +63,18 @@ import asyncio
 import contextvars
 import fnmatch
 import logging
+import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# Cap on frames buffered for one delivery target. A target whose loop is
+# blocked or gone must never block or unbound-grow the publisher's thread,
+# so an over-full target drops its oldest frame and logs. Fail closed.
+_TARGET_BUFFER_MAX = 4096
 
 
 class EventSchemaError(Exception):
@@ -159,6 +192,91 @@ class _Sub:
     pattern: str
     handler: Handler
     name: str
+    # Loop this subscriber must run on. None means "run inline on
+    # whatever loop published", which is the pre-cross-thread behavior
+    # and the right default for handlers with no loop affinity.
+    loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+class _DeliveryTarget:
+    """Serialized hand-off of events onto one foreign event loop.
+
+    A single drain task per target pops a plain deque, so frames reach
+    the target in the order they were handed off — the ordering
+    guarantee is per-target FIFO, not a global total order across
+    targets.
+
+    The deque and its lock are plain threading primitives on purpose:
+    `asyncio.Queue` is bound to one loop and is not safe to fill from
+    another thread. `call_soon_threadsafe` is the only cross-loop call
+    made here, which is exactly what it is for.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._buffer: deque[tuple[_Sub, BusEvent]] = deque()
+        self._lock = threading.Lock()
+        self._draining = False
+        self._dropped = 0
+
+    def offer(self, sub: _Sub, event: BusEvent) -> None:
+        if self._loop.is_closed():
+            logger.warning(
+                "event_bus: dropping %s for %r — target loop is closed",
+                event.type, sub.name,
+            )
+            return
+        with self._lock:
+            while len(self._buffer) >= _TARGET_BUFFER_MAX:
+                self._buffer.popleft()
+                self._dropped += 1
+            self._buffer.append((sub, event))
+        try:
+            self._loop.call_soon_threadsafe(self._kick)
+        except RuntimeError:
+            # Loop shut down between the is_closed() check and here.
+            logger.warning(
+                "event_bus: dropping %s for %r — target loop stopped",
+                event.type, sub.name,
+            )
+
+    def _kick(self) -> None:
+        if self._draining:
+            return
+        self._draining = True
+        self._loop.create_task(self._drain(), name="event-bus-target-drain")
+
+    async def _drain(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    if not self._buffer:
+                        return
+                    sub, event = self._buffer.popleft()
+                    dropped, self._dropped = self._dropped, 0
+                if dropped:
+                    logger.warning(
+                        "event_bus: target dropped %d frame(s) before %s",
+                        dropped, event.type,
+                    )
+                try:
+                    await sub.handler(event)
+                except Exception:
+                    logger.exception(
+                        "event_bus subscriber %r raised on %s "
+                        "(cross-thread delivery)",
+                        sub.name, event.type,
+                    )
+        finally:
+            self._draining = False
+            with self._lock:
+                pending = bool(self._buffer)
+            if pending:
+                self._kick()
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._buffer)
 
 
 class EventBus:
@@ -178,6 +296,12 @@ class EventBus:
         # fast-forward this past their original seq so subsequent
         # fresh publishes stay monotone across restarts.
         self._seq_counter: int = 0
+        # Stamping now happens from arbitrary threads via
+        # `publish_threadsafe`, so `+= 1` is no longer the only writer
+        # and the GIL-atomicity argument above no longer covers it.
+        self._seq_lock = threading.Lock()
+        self._targets: dict[int, _DeliveryTarget] = {}
+        self._targets_lock = threading.Lock()
 
     def subscribe(
         self,
@@ -186,6 +310,8 @@ class EventBus:
         *,
         priority: int = 50,
         name: str,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        bind_current_loop: bool = False,
     ) -> None:
         """Register `handler` for events whose `type` matches `pattern`
         (fnmatch glob). Lower `priority` fires first. `name` is for
@@ -193,9 +319,43 @@ class EventBus:
 
         Subscribers are not de-duplicated by name — adding the same name
         twice creates two subscriptions. Caller's responsibility.
+
+        `loop` pins delivery to a specific event loop; `bind_current_loop`
+        pins it to the loop running at subscribe time. A handler with
+        neither runs inline on whichever loop published, which is the
+        right default only when the handler is loop-agnostic. Any
+        handler that touches loop-bound state (asyncio primitives, a
+        WebSocket, a store guarded by main-loop-only assumptions) MUST
+        pin itself, or a publish from another thread will run it on the
+        wrong loop.
         """
-        self._subs.append(_Sub(priority, pattern, handler, name))
+        if loop is None and bind_current_loop:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                raise RuntimeError(
+                    f"subscribe({name!r}, bind_current_loop=True) needs a "
+                    f"running loop",
+                ) from None
+        self._subs.append(_Sub(priority, pattern, handler, name, loop))
         self._reindex_subscribers()
+
+    def bind_unpinned_to_current_loop(self) -> int:
+        """Pin every not-yet-pinned subscriber to the running loop.
+
+        Most subscriptions are registered at import time, where there is
+        no running loop to capture. Call this once from the main loop
+        during startup — after that, a publish from any other thread
+        routes those handlers back to main instead of running them on
+        the publisher's loop. Returns the number pinned.
+        """
+        loop = asyncio.get_running_loop()
+        pinned = 0
+        for sub in self._subs:
+            if sub.loop is None:
+                sub.loop = loop
+                pinned += 1
+        return pinned
 
     def unsubscribe(self, name: str) -> int:
         """Remove every subscription with the given `name`. Returns the
@@ -271,6 +431,10 @@ class EventBus:
             replay completes stay monotone w.r.t. the replayed history.
             The replayed event's seq is NOT changed.
         """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
         if is_replay:
             expected = current_schema_version(event.type)
             if event.schema_version != expected:
@@ -294,8 +458,9 @@ class EventBus:
             if event.schema_version == 1 and registered != 1:
                 event.schema_version = registered
             if event.seq == 0:
-                self._seq_counter += 1
-                event.seq = self._seq_counter
+                with self._seq_lock:
+                    self._seq_counter += 1
+                    event.seq = self._seq_counter
             event.is_replay = False
 
         depth = _publish_depth.get()
@@ -307,6 +472,9 @@ class EventBus:
         token = _publish_depth.set(depth + 1)
         try:
             for sub in self._matching_subscribers(event.type):
+                if sub.loop is not None and sub.loop is not running:
+                    self._target_for(sub.loop).offer(sub, event)
+                    continue
                 try:
                     await sub.handler(event)
                 except Exception as exc:
@@ -353,11 +521,69 @@ class EventBus:
         finally:
             _publish_depth.reset(token)
 
+    def _target_for(self, loop: asyncio.AbstractEventLoop) -> _DeliveryTarget:
+        key = id(loop)
+        with self._targets_lock:
+            target = self._targets.get(key)
+            if target is None:
+                target = _DeliveryTarget(loop)
+                self._targets[key] = target
+            return target
+
+    def publish_threadsafe(self, event: BusEvent) -> None:
+        """Publish from a thread with no running event loop.
+
+        Fire-and-forget: the caller's thread never blocks on a foreign
+        loop and never learns whether subscribers succeeded. Handlers
+        pinned to a loop are handed off to it; unpinned handlers are
+        skipped and logged, because running them here would execute
+        loop-affine code on a plain worker thread.
+        """
+        registered = current_schema_version(event.type)
+        if event.schema_version == 1 and registered != 1:
+            event.schema_version = registered
+        if event.seq == 0:
+            with self._seq_lock:
+                self._seq_counter += 1
+                event.seq = self._seq_counter
+        event.is_replay = False
+        unpinned: list[str] = []
+        for sub in self._matching_subscribers(event.type):
+            if sub.loop is None:
+                unpinned.append(sub.name)
+                continue
+            self._target_for(sub.loop).offer(sub, event)
+        if unpinned:
+            logger.warning(
+                "event_bus: publish_threadsafe(%s) skipped unpinned "
+                "subscriber(s) %s — pin them with bind_current_loop or "
+                "bus.bind_unpinned_to_current_loop()",
+                event.type, ", ".join(sorted(unpinned)),
+            )
+
+    def pending_cross_thread(self) -> int:
+        """Frames handed off but not yet delivered. For shutdown checks
+        and tests."""
+        with self._targets_lock:
+            targets = list(self._targets.values())
+        return sum(target.pending() for target in targets)
+
+    def drop_delivery_targets(self) -> None:
+        """Forget every cross-thread target. Buffered frames are
+        discarded — call only during shutdown or test teardown."""
+        with self._targets_lock:
+            self._targets.clear()
+
     def describe(self) -> list[dict]:
         """Snapshot of registered subscribers. Used by debug endpoints
         and tests — order matches dispatch order."""
         return [
-            {"priority": s.priority, "pattern": s.pattern, "name": s.name}
+            {
+                "priority": s.priority,
+                "pattern": s.pattern,
+                "name": s.name,
+                "pinned": s.loop is not None,
+            }
             for s in self._subs
         ]
 
