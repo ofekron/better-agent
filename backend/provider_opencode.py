@@ -152,7 +152,7 @@ class OpencodeProvider(SessionEventsProvider):
         extra_env: Optional[dict[str, str]] = None,
         _execution,
         **_unused: Any,
-    ) -> None:
+    ) -> bool:
         del _unused
         self.start_session_events_execution(
             execution=_execution,
@@ -161,6 +161,7 @@ class OpencodeProvider(SessionEventsProvider):
             internal_token=internal_token,
             extra_env=extra_env,
         )
+        return True
 
     async def run_headless(
         self,

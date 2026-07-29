@@ -141,7 +141,7 @@ class OpenAIProvider(SessionEventsProvider):
         extra_env: Optional[dict[str, str]] = None,
         _execution,
         **_unused: Any,
-    ) -> None:
+    ) -> bool:
         del _unused
         self.start_session_events_execution(
             execution=_execution,
@@ -150,6 +150,7 @@ class OpenAIProvider(SessionEventsProvider):
             internal_token=internal_token,
             extra_env=extra_env,
         )
+        return True
 
     def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
         """Append a steering message for a live OpenAI turn.

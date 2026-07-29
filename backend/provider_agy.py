@@ -345,7 +345,7 @@ class AgyProvider(SessionEventsProvider):
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
         _execution,
-    ) -> None:
+    ) -> bool:
         del disallowed_tools, setting_sources
         del supervised, supervisor_agent_session_id, mssg_sender_session_id, is_worker
         del continuation_chain
@@ -453,6 +453,7 @@ class AgyProvider(SessionEventsProvider):
             self._bootstrap_run(rs),
             name=f"agy-bootstrap-{run_id[:8]}",
         )
+        return True
 
     async def run_headless(
         self,

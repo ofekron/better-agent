@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import stat
@@ -21,8 +22,13 @@ TEST_HOME = _test_home.TestHome.acquire(
 )
 
 import config_store  # noqa: E402
+import containment as containment_module  # noqa: E402
 from codex_execution_identity import file_identity_to_dict  # noqa: E402
-from execution_artifact_io import bind_execution_input  # noqa: E402
+from execution_artifact_io import (  # noqa: E402
+    bind_execution_input,
+    load_execution_artifact,
+)
+import execution_spawn_authority  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
 from provider_claude_execution import (  # noqa: E402
     attest_embedded_claude_sdk,
@@ -244,6 +250,70 @@ def test_prepare_freezes_claude_semantics_and_retry_authority() -> None:
                 prepared.artifact.runtime_policy
             )
         finally:
+            os.environ["PATH"] = old_path
+
+
+def test_start_run_consumes_the_admitted_execution() -> None:
+    class SpawnIntercepted(RuntimeError):
+        pass
+
+    class InterceptContainment:
+        def create(self, _run_id: str) -> None:
+            raise SpawnIntercepted
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        bin_dir = root / "bin"
+        _write_executable(bin_dir / "claude", "#!/bin/sh\nexit 0\n")
+        old_path = os.environ.get("PATH", "")
+        real_consume = (
+            execution_spawn_authority.consume_execution_spawn_authority
+        )
+        real_containment = containment_module.containment
+        consumed: list[str] = []
+        os.environ["PATH"] = os.pathsep.join((str(bin_dir), old_path))
+        loop = asyncio.new_event_loop()
+        try:
+            provider, session = _provider(root)
+            arguments = _arguments(root, session["id"], str(uuid.uuid4()))
+            prepared = provider.prepare_run(**arguments)
+
+            def consume(artifact, run_dir: Path) -> None:
+                assert artifact is prepared.artifact
+                assert load_execution_artifact(
+                    run_dir,
+                    validate_input=True,
+                ) == prepared.artifact
+                input_payload = json.loads(
+                    (run_dir / "input.json").read_text(encoding="utf-8"),
+                )
+                assert input_payload["execution_fingerprint"] == (
+                    prepared.artifact.fingerprint
+                )
+                real_consume(artifact, run_dir)
+                consumed.append(str(run_dir))
+
+            execution_spawn_authority.consume_execution_spawn_authority = (
+                consume
+            )
+            containment_module.containment = lambda: InterceptContainment()
+            try:
+                provider.start_run(
+                    execution=prepared,
+                    loop=loop,
+                    queue=asyncio.Queue(),
+                )
+            except SpawnIntercepted:
+                pass
+            else:
+                raise AssertionError("Claude spawn reached subprocess launch")
+            assert len(consumed) == 1
+        finally:
+            loop.close()
+            execution_spawn_authority.consume_execution_spawn_authority = (
+                real_consume
+            )
+            containment_module.containment = real_containment
             os.environ["PATH"] = old_path
 
 
@@ -669,6 +739,7 @@ def test_runner_has_no_mutable_runtime_authority_reads() -> None:
 
 TESTS = (
     test_prepare_freezes_claude_semantics_and_retry_authority,
+    test_start_run_consumes_the_admitted_execution,
     test_run_local_payload_rejects_tamper_and_materializes_sdk_cli,
     test_sdk_package_materialization_is_run_local_and_source_bound,
     test_frozen_runner_is_the_explicit_sdk_authority,

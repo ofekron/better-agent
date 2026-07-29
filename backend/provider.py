@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -792,12 +793,14 @@ class Provider(ABC):
                     return False
                 if execution.cancel_after_admission_requested:
                     return False
-                self._persist_and_start_execution(
+                started = self._persist_and_start_execution(
                     execution,
                     arguments=arguments,
                     loop=loop,
                     queue=queue,
                 )
+                if not started:
+                    return False
                 execution._mark_spawn_completed()
                 if execution.cancel_after_admission_requested:
                     self.cancel_turn(arguments["run_id"])
@@ -810,7 +813,7 @@ class Provider(ABC):
         arguments: dict[str, Any],
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue,
-    ) -> None:
+    ) -> bool:
         from runs_dir import atomic_write_json, runs_root
 
         run_id = arguments["run_id"]
@@ -833,21 +836,30 @@ class Provider(ABC):
             atomic_write_json(artifact_path, execution.artifact.to_dict())
         try:
             self._install_execution_payloads(execution, run_dir)
-            self._start_run(
+            started = self._start_run(
                 loop=loop,
                 queue=queue,
                 _execution=execution,
                 **arguments,
             )
+            if type(started) is not bool:
+                raise TypeError("_start_run must return bool")
         except BaseException:
-            self._cleanup_failed_execution_payloads(execution, run_dir)
-            try:
-                if tuple(run_dir.iterdir()) == (artifact_path,):
-                    artifact_path.unlink()
-                    run_dir.rmdir()
-            except OSError:
-                pass
+            self._cleanup_failed_start(execution, run_dir)
             raise
+        if not started:
+            self._cleanup_failed_start(execution, run_dir)
+        return started
+
+    def _cleanup_failed_start(
+        self,
+        execution: PreparedExecution,
+        run_dir: Path,
+    ) -> None:
+        try:
+            self._cleanup_failed_execution_payloads(execution, run_dir)
+        finally:
+            shutil.rmtree(run_dir)
 
     def _install_execution_payloads(
         self,
@@ -986,7 +998,7 @@ class Provider(ABC):
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
         _execution: PreparedExecution,
-    ) -> None: ...
+    ) -> bool: ...
 
     # ------------------------------------------------------------------
     # Run-registry bookkeeping — concrete defaults shared by every

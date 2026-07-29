@@ -601,7 +601,7 @@ class ClaudeProvider(Provider):
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
         _execution,
-    ) -> None:
+    ) -> bool:
         """Spawn `runner.py` detached and schedule a bootstrap task that,
         as soon as the runner writes `state.json`, starts a `FileTailer`
         on claude's own session jsonl and forwards translated events
@@ -652,6 +652,7 @@ class ClaudeProvider(Provider):
             internal_token=internal_token,
             extra_env=extra_env,
         )
+        return True
 
     def _session_start_lock(self, session_id: str) -> threading.Lock:
         """Per-native-session mutex guarding the wind-down gate's
@@ -1054,11 +1055,11 @@ class ClaudeProvider(Provider):
 
         _atomic_write_json(
             run_dir / "input.json",
-            bind_execution_input(_execution.artifact, input_payload),
+            bind_execution_input(execution.artifact, input_payload),
         )
         from execution_spawn_authority import consume_execution_spawn_authority
 
-        consume_execution_spawn_authority(_execution.artifact, run_dir)
+        consume_execution_spawn_authority(execution.artifact, run_dir)
         mode = input_payload["mode"]
         app_session_id = input_payload["app_session_id"]
         cwd = input_payload["cwd"]

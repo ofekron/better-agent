@@ -25,8 +25,11 @@ claude→result translation stays single-path.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 import logging
+import os
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +44,42 @@ from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
 
 logger = logging.getLogger(__name__)
+DEFAULT_REMOTE_ADMISSION_LEASE_SECONDS = 30.0
+
+
+def remote_admission_lease_seconds() -> float:
+    raw = os.environ.get("BETTER_AGENT_REMOTE_ADMISSION_LEASE_SECONDS")
+    if raw is None:
+        return DEFAULT_REMOTE_ADMISSION_LEASE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError("remote admission lease must be numeric") from exc
+    if not 1 <= value <= 300:
+        raise RuntimeError("remote admission lease must be between 1 and 300 seconds")
+    return value
+
+
+def resolve_remote_admission(
+    state: "_RemoteRunState",
+    *,
+    admitted: bool | None = None,
+    error: BaseException | None = None,
+) -> bool:
+    with state.admission_lock:
+        if state.admission.done():
+            return False
+        if state.admission_lease_handle is not None:
+            state.admission_lease_handle.cancel()
+            state.admission_lease_handle = None
+        try:
+            if error is not None:
+                state.admission.set_exception(error)
+            else:
+                state.admission.set_result(bool(admitted))
+        except Exception:
+            return False
+        return True
 
 
 @dataclass
@@ -68,6 +107,14 @@ class _RemoteRunState:
     persist_to: Optional[str] = None
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    admission: Future[bool] = field(default_factory=Future)
+    admission_lock: threading.Lock = field(default_factory=threading.Lock)
+    admission_lease_token: str = field(default_factory=lambda: str(uuid.uuid4()))
+    admission_lease_seconds: float = field(
+        default_factory=remote_admission_lease_seconds,
+    )
+    admission_lease_handle: Any = None
+    admission_expiry_cancel_task: asyncio.Task | None = None
 
 
 class _FakePopen:
@@ -93,6 +140,62 @@ class RemoteProviderProxy(Provider):
     supports_reasoning_effort = True
     reasoning_effort_options = CLAUDE_REASONING_EFFORTS
     default_reasoning_effort = DEFAULT_REASONING_EFFORT
+
+    def _arm_admission_lease(
+        self,
+        state: _RemoteRunState,
+        conn,
+    ) -> None:
+        def expire() -> None:
+            if not resolve_remote_admission(
+                state,
+                error=RuntimeError("remote admission lease expired"),
+            ):
+                return
+            state.finished = True
+            with self._lock:
+                self._runs.pop(state.run_id, None)
+            conn.runs.pop(state.run_id, None)
+            task = asyncio.create_task(
+                node_link.send_cancel_run(self.node_id, state.run_id)
+            )
+            state.admission_expiry_cancel_task = task
+
+            def consume(done: asyncio.Task) -> None:
+                try:
+                    done.result()
+                except node_link.NodeOffline:
+                    logger.debug(
+                        "remote admission expiry cancel found node offline"
+                    )
+                except Exception:
+                    logger.exception("remote admission expiry cancel failed")
+
+            task.add_done_callback(consume)
+
+        with state.admission_lock:
+            if state.admission.done():
+                return
+            if state.admission_lease_handle is not None:
+                state.admission_lease_handle.cancel()
+            scheduler = getattr(self, "_admission_scheduler", state.loop.call_later)
+            state.admission_lease_handle = scheduler(
+                state.admission_lease_seconds,
+                expire,
+            )
+
+    def _renew_admission_lease(
+        self,
+        state: _RemoteRunState,
+        token: object,
+    ) -> bool:
+        conn = node_store.get_connection(self.node_id)
+        if conn is None or conn.runs.get(state.run_id) is not state:
+            return False
+        if token != state.admission_lease_token:
+            return False
+        self._arm_admission_lease(state, conn)
+        return True
     # ASSUMPTION (v1): a worker-node always runs the Claude provider —
     # the KIND name encodes this. Capability flags inherit Provider's
     # defaults (`supports_fork=True`, `supports_manager_mode=True`,
@@ -212,7 +315,7 @@ class RemoteProviderProxy(Provider):
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
         _execution,
-    ) -> None:
+    ) -> bool:
         if mode == "manager":
             mode = "team"
         if mode not in ("native", "team"):
@@ -314,6 +417,10 @@ class RemoteProviderProxy(Provider):
             "execution_artifact": node_execution.artifact.to_dict(),
             "root_id": root_id,
             "extra_env": extra_env,
+            "admission_lease": {
+                "token": state.admission_lease_token,
+                "seconds": state.admission_lease_seconds,
+            },
         }
         # spawn_run send is async. If it raises (node disconnected
         # between the get_connection check and the actual ws.send), we
@@ -335,21 +442,13 @@ class RemoteProviderProxy(Provider):
                 except Exception:
                     pass
                 state.finished = True
+                resolve_remote_admission(state, error=e)
                 with self._lock:
                     self._runs.pop(run_id, None)
                 conn.runs.pop(run_id, None)
-                # The spawn never reached the node and the live queue
-                # got the error — finalize the run dir so recovery
-                # never tries to reconcile a run that never ran.
-                _finalize_remote_run_dir(
-                    run_dir,
-                    {"success": False, "session_id": session_id,
-                     "error": f"remote spawn failed: {type(e).__name__}: {e}",
-                     "token_usage": None,
-                     "finished_at": datetime.now().isoformat()},
-                    reconciled=True,
-                )
+        loop.call_soon_threadsafe(self._arm_admission_lease, state, conn)
         asyncio.run_coroutine_threadsafe(_send_or_fail(), loop)
+        return state.admission.result()
 
     # ------------------------------------------------------------------
     # cancel_run — ship cancel_run over WS; mark state cancelled. The
@@ -362,6 +461,14 @@ class RemoteProviderProxy(Provider):
         if rs is None:
             return False
         rs.cancelled = True
+        cancelled_pending = resolve_remote_admission(rs, admitted=False)
+        if cancelled_pending:
+            rs.finished = True
+            with self._lock:
+                self._runs.pop(run_id, None)
+            conn = node_store.get_connection(self.node_id)
+            if conn is not None:
+                conn.runs.pop(run_id, None)
         # Schedule onto the loop we captured at start_run — calling
         # asyncio.get_event_loop() from a sync context is deprecated
         # in Py 3.12+ and unreliable when cancel_run runs from a
@@ -378,7 +485,7 @@ class RemoteProviderProxy(Provider):
         return True
 
     # ------------------------------------------------------------------
-    # Stub the rest of the Provider ABC for v1.
+    # Remote implementations of the remaining Provider contract.
     # ------------------------------------------------------------------
     def build_env(self) -> dict[str, str]:
         # Never called for remote — the env is built on the node side.
@@ -386,6 +493,25 @@ class RemoteProviderProxy(Provider):
 
     def _write_backend_state(self, rs: Any) -> None:
         return None
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        del run_dir
+        run_id = execution.artifact.template.arguments()["run_id"]
+        with self._lock:
+            state = self._runs.pop(run_id, None)
+        if state is None:
+            return
+        state.finished = True
+        if state.admission_lease_handle is not None:
+            state.admission_lease_handle.cancel()
+            state.admission_lease_handle = None
+        conn = node_store.get_connection(self.node_id)
+        if conn is not None:
+            conn.runs.pop(run_id, None)
 
     def recover_in_flight(
         self,
@@ -450,6 +576,18 @@ class RemoteProviderProxy(Provider):
     @property
     def models(self) -> list[str]:
         return []
+
+
+def fail_connection_admissions(conn, reason: str) -> None:
+    for state in list(conn.runs.values()):
+        if getattr(state, "admission", None) is not None:
+            resolve_remote_admission(state, error=RuntimeError(reason))
+        state.finished = True
+        proxy = _proxies.get(getattr(state, "node_id", ""))
+        if proxy is not None:
+            with proxy._lock:
+                proxy._runs.pop(state.run_id, None)
+        conn.runs.pop(state.run_id, None)
 
 
 # ============================================================================
@@ -590,6 +728,29 @@ async def _on_run_control(
                 )
         return
     try:
+        if control_type == "admission_renew":
+            proxy._renew_admission_lease(rs, data.get("lease_token"))
+            return
+        if control_type == "admitted":
+            if data.get("lease_token") != rs.admission_lease_token:
+                return
+            resolve_remote_admission(rs, admitted=True)
+            return
+        if control_type == "error" and not rs.admission.done():
+            conn = node_store.get_connection(node_id)
+            if (
+                conn is None
+                or conn.runs.get(run_id) is not rs
+                or data.get("lease_token") != rs.admission_lease_token
+            ):
+                return
+            resolve_remote_admission(
+                rs,
+                error=RuntimeError(
+                    str(data.get("error") or "remote admission failed")
+                ),
+            )
+            return
         rs.queue.put_nowait(StreamEvent(type=control_type, data=data))
     except asyncio.QueueFull:
         logger.warning(

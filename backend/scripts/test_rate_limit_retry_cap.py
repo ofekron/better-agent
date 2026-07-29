@@ -30,19 +30,53 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import main  # noqa: E402
 import turn_manager  # noqa: E402
+import installation_profile  # noqa: E402
 import session_manager as _sm_mod  # noqa: E402
+import session_queue_projection  # noqa: E402
+from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
-from provider import StreamEvent  # noqa: E402
+from provider import Provider, StreamEvent, prepare_execution  # noqa: E402
+from provider_agy import AgyProvider  # noqa: E402
+from provider_claude import ClaudeProvider  # noqa: E402
+from provider_codex import CodexProvider  # noqa: E402
+from lifecycle_command_states import LifecycleCommandRejected  # noqa: E402
+from lifecycle_command_model import UserTurnIdentity  # noqa: E402
 
 _sm_mod.PERSIST_DEBOUNCE_S = 0.0
+installation_profile.integrations_enabled = lambda: True
+installation_profile.assert_orchestration_mode_allowed = lambda _mode: None
+session_queue_projection.note_persisted_tree = lambda *_args, **_kwargs: 0
+session_manager.flush_root_persist = lambda _root_id: None
 
 _ERR = 'Runtime 429: {"error":{"message":"Subscription window is exceeded"}}'
+_coordinator: Coordinator
 
 
 async def _noop_ws(event: dict) -> None:
     return None
+
+
+async def _run_turn_with_lifecycle(*, sid: str, lifecycle_id: str):
+    await _coordinator.lifecycle_commands.begin_turn(
+        request_id=f"{lifecycle_id}:begin",
+        session_id=sid,
+        identity=UserTurnIdentity(lifecycle_id, lifecycle_id),
+        execution_policy="sequential",
+    )
+    manager = _coordinator.user_prompt_manager
+    original = manager.get_in_flight_lifecycle_msg_id
+    manager.get_in_flight_lifecycle_msg_id = lambda _sid: lifecycle_id
+    try:
+        return await _coordinator.turn_manager.run_turn(
+            session=session_manager.get(sid),
+            prompt="hi", cli_prompt="hi", app_session_id=sid,
+            model="m", cwd="/tmp", ws_callback=_noop_ws, images=None,
+            trace_step_name="test", session_id_field="agent_session_id",
+            mode="native",
+        )
+    finally:
+        manager.get_in_flight_lifecycle_msg_id = original
 
 
 class _RateLimitProvider:
@@ -57,8 +91,13 @@ class _RateLimitProvider:
     KIND = "openai"
     _runs: dict = {}
 
-    def __init__(self) -> None:
+    def __init__(self, kind: str = "openai", *, fail_count: int | None = None) -> None:
+        self.id = f"retry-{kind}"
+        self.record = {"name": self.id}
+        self.KIND = kind
         self.start_calls = 0
+        self.fail_count = fail_count
+        self.prepared: list[dict] = []
 
     def is_running(self, run_id: str) -> bool:
         return False
@@ -68,47 +107,57 @@ class _RateLimitProvider:
         # reset ~now → orchestrator wait floor (5s) keeps each retry short.
         return datetime.now(timezone.utc)
 
-    def start_run(self, *, run_id, loop, queue, **kw):
+    def prepare_run(self, **arguments):
+        self.prepared.append(dict(arguments))
+        return prepare_execution(
+            {
+                "id": f"retry-{self.KIND}",
+                "kind": self.KIND,
+                "generation": "00000000-0000-4000-8000-000000000001",
+                "revision": 1,
+            },
+            **arguments,
+        )
+
+    def start_run(self, *, execution, loop, queue):
         self.start_calls += 1
+        execution._try_commit_spawn()
+        execution._mark_spawn_completed()
+        failed = self.fail_count is None or self.start_calls <= self.fail_count
         loop.call_soon_threadsafe(
             queue.put_nowait,
             StreamEvent("complete", {
-                "success": False, "error": _ERR,
+                "success": not failed, "error": _ERR if failed else None,
                 "session_id": None, "token_usage": None,
             }),
         )
+        return True
 
 
-def test_persistent_rate_limit_terminates_at_cap() -> bool:
+async def test_persistent_rate_limit_terminates_at_cap() -> bool:
     shutil.rmtree(os.path.join(_TMP_HOME, "sessions"), ignore_errors=True)
     cap = 2
     provider = _RateLimitProvider()
 
     original_cap = turn_manager._RATE_LIMIT_MAX_ATTEMPTS
-    original_provider_for = main.coordinator.provider_for_session
+    original_provider_for = _coordinator.provider_for_session
     turn_manager._RATE_LIMIT_MAX_ATTEMPTS = cap
-    main.coordinator.provider_for_session = lambda _sid: provider
+    _coordinator.provider_for_session = lambda _sid: provider
 
     root = session_manager.create(name="rl-cap", cwd="/tmp")
     sid = root["id"]
 
     try:
-        asyncio.run(asyncio.wait_for(
-            main.coordinator.turn_manager.run_turn(
-                session=session_manager.get(sid),
-                prompt="hi", cli_prompt="hi", app_session_id=sid,
-                model="m", cwd="/tmp", ws_callback=_noop_ws, images=None,
-                trace_step_name="test", session_id_field="agent_session_id",
-                mode="native",
-            ),
+        await asyncio.wait_for(
+            _run_turn_with_lifecycle(sid=sid, lifecycle_id="rl-cap-user"),
             timeout=90.0,
-        ))
+        )
     except asyncio.TimeoutError:
         print("\033[31mFAIL\033[0m rate-limit retry looped forever (no cap)")
         return False
     finally:
         turn_manager._RATE_LIMIT_MAX_ATTEMPTS = original_cap
-        main.coordinator.provider_for_session = original_provider_for
+        _coordinator.provider_for_session = original_provider_for
 
     # cap retries + 1 terminal attempt. Bounded, not unbounded.
     ok = provider.start_calls == cap + 1
@@ -120,9 +169,83 @@ def test_persistent_rate_limit_terminates_at_cap() -> bool:
     return ok
 
 
+async def test_outer_retry_identity_parity() -> bool:
+    for provider_type in (ClaudeProvider, CodexProvider, AgyProvider):
+        assert provider_type.start_run is Provider.start_run
+    original_provider_for = _coordinator.provider_for_session
+    original_wait = turn_manager._rate_limit_wait_seconds
+    original_elect = _coordinator.lifecycle_commands.elect_execution_attempt
+    turn_manager._rate_limit_wait_seconds = lambda _reset: 0.0
+    try:
+        for kind in ("claude", "codex", "agy"):
+            shutil.rmtree(os.path.join(_TMP_HOME, "sessions"), ignore_errors=True)
+            provider = _RateLimitProvider(kind, fail_count=1)
+            _coordinator.provider_for_session = lambda _sid, p=provider: p
+            elections: list[tuple[object, str]] = []
+
+            async def elect(session_id, *, execution_identity, provider_run_id):
+                previous_run_id = elections[-1][1] if elections else None
+                result = await original_elect(
+                    session_id,
+                    execution_identity=execution_identity,
+                    provider_run_id=provider_run_id,
+                )
+                elections.append((execution_identity, provider_run_id))
+                if previous_run_id is not None:
+                    try:
+                        await _coordinator.lifecycle_commands.finish_execution(
+                            session_id,
+                            execution_identity=execution_identity,
+                            provider_run_id=previous_run_id,
+                            outcome="failed",
+                        )
+                    except LifecycleCommandRejected:
+                        pass
+                    else:
+                        raise AssertionError("stale outer attempt terminal was accepted")
+                return result
+
+            _coordinator.lifecycle_commands.elect_execution_attempt = elect
+            root = session_manager.create(name=f"retry-{kind}", cwd="/tmp")
+            sid = root["id"]
+            await asyncio.wait_for(
+                _run_turn_with_lifecycle(
+                    sid=sid,
+                    lifecycle_id=f"retry-{kind}-user",
+                ),
+                timeout=30.0,
+            )
+            assert len(provider.prepared) == 2
+            run_ids = [item["run_id"] for item in provider.prepared]
+            assert run_ids[0] != run_ids[1]
+            assert [entry[1] for entry in elections] == run_ids
+            assert elections[0][0] == elections[1][0]
+    finally:
+        _coordinator.provider_for_session = original_provider_for
+        _coordinator.lifecycle_commands.elect_execution_attempt = original_elect
+        turn_manager._rate_limit_wait_seconds = original_wait
+    return True
+
+
+async def run_tests() -> bool:
+    global _coordinator
+    _coordinator = Coordinator()
+    await _coordinator.turn_manager.lifecycle.bind()
+    await _coordinator.lifecycle_commands.bind()
+    try:
+        return (
+            await test_persistent_rate_limit_terminates_at_cap()
+            and await test_outer_retry_identity_parity()
+        )
+    finally:
+        await _coordinator.quiesce_prompt_processors()
+        await _coordinator.lifecycle_commands.close()
+        await _coordinator.turn_manager.lifecycle.close()
+
+
 if __name__ == "__main__":
     try:
-        ok = test_persistent_rate_limit_terminates_at_cap()
+        ok = asyncio.run(run_tests())
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     raise SystemExit(0 if ok else 1)

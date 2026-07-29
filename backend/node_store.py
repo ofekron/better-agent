@@ -427,6 +427,16 @@ async def register(
         app_dirty=app_dirty,
         last_acked_offset=persisted,
     )
+    if prior is not None:
+        try:
+            from provider_remote import fail_connection_admissions
+
+            fail_connection_admissions(
+                prior,
+                f"node {spec.id!r} connection authority expired",
+            )
+        except Exception:
+            logger.exception("failed to expire replaced node admissions")
     global _state_version
     _conns[spec.id] = conn
     prev = _state.get(spec.id)
@@ -460,6 +470,15 @@ async def unregister(node_id: str) -> None:
     # everything else alone.
     if _conns.get(node_id) is not leaving:
         return
+    try:
+        from provider_remote import fail_connection_admissions
+
+        fail_connection_admissions(
+            leaving,
+            f"node {node_id!r} disconnected before run admission",
+        )
+    except Exception:
+        logger.exception("failed to resolve disconnected node admissions")
     global _state_version
     _conns.pop(node_id, None)
     prev = _state.get(node_id)
@@ -480,7 +499,17 @@ async def forget(node_id: str) -> None:
     won't re-materialize it from the orphan-fallback path."""
     global _state_version
     had_state = node_id in _state or node_id in _conns
-    _conns.pop(node_id, None)
+    leaving = _conns.pop(node_id, None)
+    if leaving is not None:
+        try:
+            from provider_remote import fail_connection_admissions
+
+            fail_connection_admissions(
+                leaving,
+                f"node {node_id!r} connection authority expired",
+            )
+        except Exception:
+            logger.exception("failed to expire forgotten node admissions")
     _state.pop(node_id, None)
     if had_state:
         _state_version += 1

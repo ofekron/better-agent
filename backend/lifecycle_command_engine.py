@@ -307,6 +307,19 @@ class LifecycleCommandEngine:
             provider_run_id=provider_run_id,
         )
 
+    async def elect_execution_attempt(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+    ) -> CommandResult:
+        return await self.bind_execution_run(
+            session_id,
+            execution_identity=execution_identity,
+            provider_run_id=provider_run_id,
+        )
+
     async def restore_execution_run(
         self,
         session_id: str,
@@ -334,6 +347,19 @@ class LifecycleCommandEngine:
             session_id,
             "confirm_execution_started",
             execution_identity,
+            provider_run_id=provider_run_id,
+        )
+
+    async def admit_execution_attempt(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+    ) -> CommandResult:
+        return await self.confirm_execution_started(
+            session_id,
+            execution_identity=execution_identity,
             provider_run_id=provider_run_id,
         )
 

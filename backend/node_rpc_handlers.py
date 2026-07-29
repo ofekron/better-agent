@@ -62,8 +62,27 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     root_id = msg.get("root_id")
     worker_agent_session_id = msg.get("worker_agent_session_id") or msg.get("app_session_id")
     cwd = msg.get("cwd")
+    lease = msg.get("admission_lease")
+    lease_token = lease.get("token") if isinstance(lease, dict) else None
+    lease_seconds = lease.get("seconds") if isinstance(lease, dict) else None
     if not all([run_id, root_id, cwd, worker_agent_session_id]):
         logger.error("node_rpc: spawn_run missing required field: %r", msg)
+        return
+    if (
+        not isinstance(lease_token, str)
+        or not lease_token
+        or type(lease_seconds) not in {int, float}
+        or not 1 <= float(lease_seconds) <= 300
+    ):
+        if isinstance(run_id, str) and run_id and isinstance(lease_token, str):
+            await node_client.send_run_control(
+                run_id=run_id,
+                control_type="error",
+                data={
+                    "error": "invalid remote admission lease",
+                    "lease_token": lease_token,
+                },
+            )
         return
     try:
         artifact = ExecutionArtifact.from_dict(msg["execution_artifact"])
@@ -89,7 +108,10 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         await node_client.send_run_control(
             run_id=str(run_id or ""),
             control_type="error",
-            data={"error": f"invalid execution artifact: {exc}"},
+            data={
+                "error": f"invalid execution artifact: {exc}",
+                "lease_token": lease_token,
+            },
         )
         return
 
@@ -102,6 +124,31 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     _ctx_by_run[run_id] = ctx
 
     loop = asyncio.get_running_loop()
+    lease_terminal = asyncio.Event()
+
+    async def renew_lease() -> None:
+        while not lease_terminal.is_set():
+            try:
+                await asyncio.wait_for(
+                    lease_terminal.wait(),
+                    timeout=float(lease_seconds) / 3,
+                )
+            except asyncio.TimeoutError:
+                await node_client.send_run_control(
+                    run_id=run_id,
+                    control_type="admission_renew",
+                    data={"lease_token": lease_token},
+                )
+
+    renewal_task = asyncio.create_task(
+        renew_lease(),
+        name=f"admission-renew-{run_id[:8]}",
+    )
+
+    async def stop_renewal() -> None:
+        lease_terminal.set()
+        renewal_task.cancel()
+        await asyncio.gather(renewal_task, return_exceptions=True)
     try:
         import startup_recovery_gate
         with perf.timed("node_rpc.provider_start_run.recovery_gate"):
@@ -122,21 +169,38 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         if not started:
             admitted = await asyncio.to_thread(execution.wait_for_admission)
             if not admitted:
+                await stop_renewal()
                 await node_client.send_run_control(
                     run_id=run_id,
                     control_type="error",
-                    data={"error": "remote run was cancelled before admission"},
+                    data={
+                        "error": "remote run was cancelled before admission",
+                        "lease_token": lease_token,
+                    },
                 )
                 _ctx_by_run.pop(run_id, None)
                 return
-    except Exception as e:
+    except BaseException as e:
+        await stop_renewal()
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
-        await node_client.send_run_control(
-            run_id=run_id,
-            control_type="error",
-            data={"error": f"{type(e).__name__}: {e}"},
-        )
+        try:
+            provider.cancel_run(run_id)
+        except Exception:
+            logger.exception("node_rpc: provider cancel after start failure failed")
+        try:
+            await asyncio.shield(node_client.send_run_control(
+                run_id=run_id,
+                control_type="error",
+                data={
+                    "error": f"{type(e).__name__}: {e}",
+                    "lease_token": lease_token,
+                },
+            ))
+        except Exception:
+            logger.exception("node_rpc: failed to report start failure")
         _ctx_by_run.pop(run_id, None)
+        if not isinstance(e, Exception):
+            raise
         return
 
     # Persist the spawn context next to the provider's run dir so a
@@ -152,12 +216,38 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             "worker_agent_session_id": worker_agent_session_id,
             "cwd": cwd,
         })
-    except Exception:
-        logger.exception("node_rpc: failed to persist remote_ctx for %s", run_id)
-
-    ctx.drain_task = asyncio.create_task(
-        _drain_queue(node_client, ctx), name=f"drain-{run_id[:8]}",
-    )
+        ctx.drain_task = asyncio.create_task(
+            _drain_queue(node_client, ctx), name=f"drain-{run_id[:8]}",
+        )
+        await stop_renewal()
+        await node_client.send_run_control(
+            run_id=run_id,
+            control_type="admitted",
+            data={"lease_token": lease_token},
+        )
+    except BaseException as e:
+        await stop_renewal()
+        logger.exception("node_rpc: failed to establish recovery ownership for %s", run_id)
+        try:
+            provider.cancel_run(run_id)
+        except Exception:
+            logger.exception("node_rpc: provider cancel after ownership failure failed")
+        if ctx.drain_task is not None:
+            ctx.drain_task.cancel()
+        _ctx_by_run.pop(run_id, None)
+        try:
+            await asyncio.shield(node_client.send_run_control(
+                run_id=run_id,
+                control_type="error",
+                data={
+                    "error": f"{type(e).__name__}: {e}",
+                    "lease_token": lease_token,
+                },
+            ))
+        except Exception:
+            logger.exception("node_rpc: failed to report ownership failure")
+        if not isinstance(e, Exception):
+            raise
 
 
 # ============================================================================

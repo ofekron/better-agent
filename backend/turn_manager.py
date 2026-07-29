@@ -3025,12 +3025,6 @@ class TurnManager:
                     },
                 })
             else:
-                if execution_identity is not None:
-                    await self._c.lifecycle_commands.bind_execution_run(
-                        app_session_id,
-                        execution_identity=execution_identity,
-                        provider_run_id=run_id,
-                    )
                 spawn_started = _time.monotonic()
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
@@ -3110,6 +3104,12 @@ class TurnManager:
                         run_id=run_id,
                         payload=admission_identity,
                     )
+                    if execution_identity is not None:
+                        await self._c.lifecycle_commands.elect_execution_attempt(
+                            app_session_id,
+                            execution_identity=execution_identity,
+                            provider_run_id=run_id,
+                        )
                     try:
                         admitted = await _to_turn_dispatch_thread(
                             start_prepared_run,
@@ -3169,18 +3169,24 @@ class TurnManager:
                         payload=admission_identity,
                     )
                     if not admitted:
-                        attempt_events.append({
-                            "type": "complete",
-                            "data": {
-                                "success": False,
-                                "error": "cancelled",
-                                "session_id": current_session_id,
-                                "token_usage": None,
-                            },
-                        })
-                        continue
+                        return {
+                            "success": False,
+                            "session_id": current_session_id,
+                            "events": [{
+                                "type": "complete",
+                                "data": {
+                                    "success": False,
+                                    "error": "cancelled",
+                                    "session_id": current_session_id,
+                                    "token_usage": None,
+                                },
+                            }],
+                            "error": t("runner.cancelled"),
+                            "token_usage": None,
+                            "provider_kind": provider_kind,
+                        }
                     if execution_identity is not None:
-                        await self._c.lifecycle_commands.confirm_execution_started(
+                        await self._c.lifecycle_commands.admit_execution_attempt(
                             app_session_id,
                             execution_identity=execution_identity,
                             provider_run_id=run_id,

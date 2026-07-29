@@ -658,7 +658,7 @@ class CodexProvider(Provider):
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
         _execution,
-    ) -> None:
+    ) -> bool:
         if mode == "manager":
             mode = "team"
         if mode not in ("native", "team"):
@@ -822,6 +822,7 @@ class CodexProvider(Provider):
             self._bootstrap_run(rs),
             name=f"codex-bootstrap-{run_id[:8]}",
         )
+        return True
 
     # ------------------------------------------------------------------
     # _bootstrap_run

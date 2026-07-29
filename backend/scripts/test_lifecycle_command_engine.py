@@ -787,12 +787,12 @@ async def test_execution_subturn_state_matrix() -> None:
         raise AssertionError("overlapping execution was accepted")
     assert engine.snapshot("execution-sequential").revision == overlap_revision
 
-    await engine.bind_execution_run(
+    await engine.elect_execution_attempt(
         "execution-sequential",
         execution_identity=first,
         provider_run_id="provider-1",
     )
-    await engine.bind_execution_run(
+    await engine.elect_execution_attempt(
         "execution-sequential",
         execution_identity=first,
         provider_run_id="provider-1b",
@@ -810,7 +810,7 @@ async def test_execution_subturn_state_matrix() -> None:
     else:
         raise AssertionError("stale provider attempt terminal was accepted")
     assert engine.snapshot("execution-sequential").revision == stale_attempt_revision
-    await engine.confirm_execution_started(
+    await engine.admit_execution_attempt(
         "execution-sequential",
         execution_identity=first,
         provider_run_id="provider-1b",
@@ -836,6 +836,9 @@ async def test_execution_subturn_state_matrix() -> None:
         execution_identity=first,
         provider_run_id="provider-1b",
     )
+    retried = engine.snapshot("execution-sequential")
+    assert retried.identity == sequential_turn
+    assert retried.execution.identity == first
     await engine.finish_execution(
         "execution-sequential",
         execution_identity=first,
