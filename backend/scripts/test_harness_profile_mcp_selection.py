@@ -40,11 +40,33 @@ DROPPED_EXT = "fixture.mcp-dropped"
 DROPPED_SERVER = "fixture-dropped-server"
 
 
+def _skill_name(extension_id: str) -> str:
+    return f"{extension_id}-skill"
+
+
+def _instruction_name(extension_id: str) -> str:
+    return f"{extension_id}-instruction"
+
+
 def _install_fixture(extension_id: str, mcp_name: str) -> None:
     """A minimal runtime-ready extension with one MCP entrypoint, installed
     through the store internals so the real readiness predicates apply."""
     package = Path(_TMP_HOME) / extension_id
     package.mkdir(parents=True, exist_ok=True)
+    skill_name = _skill_name(extension_id)
+    instruction_name = _instruction_name(extension_id)
+    skill_path = package / "skills" / skill_name
+    skill_path.mkdir(parents=True)
+    (skill_path / "SKILL.md").write_text(
+        f"---\nname: {skill_name}\ndescription: fixture\n---\nfixture",
+        encoding="utf-8",
+    )
+    instruction_path = package / "instructions" / f"{instruction_name}.md"
+    instruction_path.parent.mkdir(parents=True)
+    instruction_path.write_text(
+        f"INSTRUCTION FROM {extension_id}",
+        encoding="utf-8",
+    )
     manifest = extension_store.validate_manifest({
         "kind": extension_store.MANIFEST_KIND,
         "id": extension_id,
@@ -56,9 +78,24 @@ def _install_fixture(extension_id: str, mcp_name: str) -> None:
             "backend": "",
             "frontend": "",
             "mcp": [{"name": mcp_name, "command": "mcp-fixture", "args": [], "env": {}}],
+            "skills": [{
+                "name": skill_name,
+                "path": f"skills/{skill_name}",
+                "description": "fixture skill",
+            }],
+            "instructions": [{
+                "name": instruction_name,
+                "path": f"instructions/{instruction_name}.md",
+                "level": "global",
+            }],
+            "settings": [{
+                "key": "endpoint",
+                "label": "Endpoint",
+                "type": "string",
+                "default": f"https://{extension_id}.test",
+            }],
             "provider_capabilities": [],
             "frontend_modules": [],
-            "settings": [],
         },
         "permissions": {},
         "marketplace": {},
@@ -95,6 +132,17 @@ def _install_fixture(extension_id: str, mcp_name: str) -> None:
     # Enabled globally, so Default offers it and the profile is the only thing
     # that can take it away.
     extension_store.set_mcp_server_enabled(extension_id, mcp_name, True)
+    extension_store.set_runtime_skill_enabled(extension_id, skill_name, True)
+    extension_store.set_instruction_enabled(
+        extension_id,
+        level="global",
+        enabled=True,
+    )
+    extension_store.set_extension_setting(
+        extension_id,
+        "endpoint",
+        f"https://configured-{extension_id}.test",
+    )
 
 
 def _runtime_servers(profile_id: str | None) -> set[str]:
@@ -142,6 +190,61 @@ def test_profile_deselection_removes_the_server_from_the_run() -> None:
     )
 
 
+def test_disabled_extension_is_absent_from_authoritative_projection() -> None:
+    profile = harness_profile_store.create_profile({"name": "Disable Extension"})
+    profile = harness_profile_store.upsert_profile({
+        **profile,
+        "secret_refs": {
+            DROPPED_EXT: ["extension-setting:dropped:token"],
+            KEPT_EXT: ["extension-setting:kept:token"],
+        },
+    }, profile["id"])
+    harness_profile_store.apply_override_patch(
+        profile["id"],
+        [{
+            "path": ["disabled_builtin_extensions"],
+            "op": "set",
+            "value": {"add": [DROPPED_EXT], "remove": []},
+        }],
+        revision=profile["revision"],
+    )
+
+    snapshot = harness_profile_resolver.resolve_for_session({
+        "harness_profile_id": profile["id"],
+    })
+
+    assert DROPPED_EXT in snapshot["disabled_builtin_extensions"]
+    assert DROPPED_EXT not in snapshot["extension_mcp_servers"]
+    assert DROPPED_EXT not in snapshot["extension_revisions"]
+    assert DROPPED_EXT not in snapshot["extension_skills"]
+    assert DROPPED_EXT not in snapshot["extension_instruction_names"]
+    assert DROPPED_EXT not in snapshot["extension_setting_overlays"]
+    assert DROPPED_EXT not in snapshot["secret_refs"]
+    assert DROPPED_SERVER not in snapshot["extra_mcp_servers"]
+    assert DROPPED_EXT not in snapshot["launcher_projection"]["extension_mcp_servers"]
+    assert DROPPED_EXT not in snapshot["launcher_projection"]["extension_setting_overlays"]
+    assert DROPPED_EXT not in snapshot["launcher_projection"]["secret_refs"]
+    assert all(
+        block.get("extension_id") != DROPPED_EXT
+        for block in snapshot["instruction_blocks"]
+    )
+    assert f"INSTRUCTION FROM {DROPPED_EXT}" not in json.dumps(
+        snapshot["capability_contexts"]
+    )
+    assert KEPT_EXT in snapshot["extension_mcp_servers"]
+    assert KEPT_EXT in snapshot["extension_skills"]
+    assert KEPT_EXT in snapshot["extension_instruction_names"]
+    assert KEPT_EXT in snapshot["extension_setting_overlays"], snapshot[
+        "extension_setting_overlays"
+    ]
+    assert snapshot["secret_refs"][KEPT_EXT] == ["extension-setting:kept:token"]
+    assert f"INSTRUCTION FROM {KEPT_EXT}" in json.dumps(
+        snapshot["capability_contexts"]
+    )
+    assert DROPPED_SERVER not in _runtime_servers(profile["id"])
+    assert KEPT_SERVER in _runtime_servers(profile["id"])
+
+
 def test_run_without_a_resolved_profile_is_unfiltered() -> None:
     """Inputs that carry no resolved profile have no selection to honor —
     filtering them on an empty projection would strip every server."""
@@ -178,6 +281,7 @@ def main() -> int:
         _install_fixture(DROPPED_EXT, DROPPED_SERVER)
         test_default_offers_every_fixture_server()
         test_profile_deselection_removes_the_server_from_the_run()
+        test_disabled_extension_is_absent_from_authoritative_projection()
         test_run_without_a_resolved_profile_is_unfiltered()
         test_projection_that_governs_nothing_is_unfiltered()
     finally:
