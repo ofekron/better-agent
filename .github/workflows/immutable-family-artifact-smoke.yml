@@ -75,8 +75,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $ArtifactRoot "state") | Out-Null
           $env:BETTER_AGENT_HOME = Join-Path $ArtifactRoot "state"
           $Result = Join-Path $ArtifactRoot "result.json"
-          & "desktop\dist\Better Agent\Better Agent.exe" --frozen-artifact-smoke --output $Result
-          if ($LASTEXITCODE -ne 0) {
+          $Smoke = Start-Process `
+            -FilePath "desktop\dist\Better Agent\Better Agent.exe" `
+            -ArgumentList "--frozen-artifact-smoke", "--output", $Result `
+            -Wait `
+            -PassThru
+          if ($Smoke.ExitCode -ne 0) {
               if (Test-Path $Result) {
                   Get-Content $Result
               }

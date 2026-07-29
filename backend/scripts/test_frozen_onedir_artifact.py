@@ -158,6 +158,11 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     windows_smoke = next(
         step for step in steps if step.get("name") == "Smoke Windows artifact"
     )
+    assert "Start-Process" in windows_smoke["run"]
+    assert "-Wait" in windows_smoke["run"]
+    assert "-PassThru" in windows_smoke["run"]
+    assert "$Smoke.ExitCode" in windows_smoke["run"]
+    assert "$LASTEXITCODE" not in windows_smoke["run"]
     assert "state\\faulthandler.log" in windows_smoke["run"]
     upload = next(
         step for step in steps
