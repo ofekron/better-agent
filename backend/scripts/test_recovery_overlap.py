@@ -290,13 +290,13 @@ def test_startup_recovery_gate_first_waiter_foreign_loop_releases_promptly() -> 
 
         worker = asyncio.create_task(asyncio.to_thread(_foreign_wait))
         # This is the hazardous order: the first waiter is on a foreign loop,
-        # so asyncio.Event binds there before the main loop marks recovery done.
+        # and must still be released when the MAIN loop marks recovery done.
         for _ in range(40):
-            ready = startup_recovery_gate._ready  # intentionally white-boxed regression test
-            if result.get("started") and ready is not None and getattr(ready, "_loop", None) is not None:
+            if result.get("started") and startup_recovery_gate._ready.waiter_count():
                 break
             await asyncio.sleep(0.025)
-        bound_to_foreign = startup_recovery_gate._ready is not None and getattr(startup_recovery_gate._ready, "_loop", None) is not asyncio.get_running_loop()
+        # White-boxed: the waiter registered its own loop, which is not ours.
+        bound_to_foreign = startup_recovery_gate._ready.waiter_count() > 0
         startup_recovery_gate.mark_recovery_done()
         await asyncio.wait_for(worker, timeout=1.0)
         elapsed = float(result.get("elapsed") or 99.0)
@@ -334,11 +334,11 @@ def test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly() -> 
         worker = asyncio.create_task(asyncio.to_thread(_foreign_wait))
         for _ in range(40):
             ready = startup_recovery_gate._session_ready.get("sid-foreign")
-            if result.get("started") and ready is not None and getattr(ready, "_loop", None) is not None:
+            if result.get("started") and ready is not None and ready.waiter_count():
                 break
             await asyncio.sleep(0.025)
         ready = startup_recovery_gate._session_ready.get("sid-foreign")
-        bound_to_foreign = ready is not None and getattr(ready, "_loop", None) is not asyncio.get_running_loop()
+        bound_to_foreign = ready is not None and ready.waiter_count() > 0
         startup_recovery_gate.mark_session_recovery_done("sid-foreign")
         await asyncio.wait_for(worker, timeout=1.0)
         elapsed = float(result.get("elapsed") or 99.0)
