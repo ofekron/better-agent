@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def _offloaded(source: str, call: str) -> bool:
+    """True when `call` is handed to asyncio.to_thread, regardless of how the
+    argument list is wrapped across lines."""
+    return re.search(
+        r"asyncio\.to_thread\(\s*" + re.escape(call) + r"\b", source,
+    ) is not None
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return ".".join(reversed(parts))
 
 
 def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> None:
@@ -35,7 +56,7 @@ def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> No
 
         def visit_Call(self, node: ast.Call) -> None:
             if self.async_stack:
-                called = ast.get_source_segment(source, node.func) or ""
+                called = _dotted_name(node.func)
                 if called in forbidden:
                     violations.append(f"{node.lineno}:{self.async_stack[-1]}:{called}")
             self.generic_visit(node)
@@ -165,7 +186,7 @@ def test_provider_and_prefs_routes_stay_off_loop() -> None:
         "config_store.get_default_provider",
         "user_prefs.get_all",
     ):
-        assert f"await asyncio.to_thread({call}" in route_source or f"asyncio.to_thread({call}" in route_source
+        assert _offloaded(route_source, call)
 
 
 def test_project_update_and_hooks_routes_stay_off_loop() -> None:
@@ -177,8 +198,8 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
     assert "_require_builtin_runtime_extension(" in project_source
     assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" not in project_source
     assert (
-        source.count("await _require_project_structure_internal_async(x_internal_token)")
-        + source.count("await _require_project_updates_internal_async(x_internal_token)")
+        source.count("await _require_project_structure_internal_async(request, x_internal_token)")
+        + source.count("await _require_project_updates_internal_async(request, x_internal_token)")
     ) >= 9
     for route in (
         "internal_project_update_count",
@@ -193,8 +214,8 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
         route_end = source.index("@app.", route_start + 1)
         route_source = source[route_start:route_end]
         assert (
-            "await _require_project_structure_internal_async(x_internal_token)" in route_source
-            or "await _require_project_updates_internal_async(x_internal_token)" in route_source
+            "await _require_project_structure_internal_async(request, x_internal_token)" in route_source
+            or "await _require_project_updates_internal_async(request, x_internal_token)" in route_source
         )
         assert "await asyncio.to_thread(_require_project" not in route_source
     assert "await asyncio.to_thread(project_update_store.unseen_count" in project_source
@@ -232,7 +253,7 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
         "hook_store.upsert_hook",
         "hook_store.delete_hook",
     ):
-        assert f"await asyncio.to_thread({call}" in hooks_source
+        assert _offloaded(hooks_source, call)
 
 
 def test_session_ui_mutation_routes_stay_off_loop() -> None:
@@ -250,10 +271,7 @@ def test_session_ui_mutation_routes_stay_off_loop() -> None:
         "session_manager.set_archived",
         "session_manager.set_selectors",
     ):
-        assert (
-            f"asyncio.to_thread({call}" in route_source
-            or f"asyncio.to_thread(\n        {call}" in route_source
-    )
+        assert _offloaded(route_source, call)
     assert "session_manager.get_ref(session_id)" not in route_source
 
     panel_start = source.index("@app.post(\"/api/sessions/{session_id}/tags\")")
@@ -276,7 +294,7 @@ def test_session_ui_mutation_routes_stay_off_loop() -> None:
         "session_manager.remove_open_config_panel",
         "session_manager.set_open_config_panels",
     ):
-        assert f"asyncio.to_thread(\n        {call}" in panel_source or f"asyncio.to_thread({call}" in panel_source
+        assert _offloaded(panel_source, call)
 
 
 def test_core_create_session_validation_stays_off_loop() -> None:

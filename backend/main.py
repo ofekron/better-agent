@@ -31,7 +31,7 @@ except Exception:
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from fastapi import BackgroundTasks, Response
 from pathlib import Path
@@ -3146,6 +3146,24 @@ async def _session_exists(session_id: str) -> bool:
 
 async def _session_lite(session_id: str) -> dict | None:
     return await asyncio.to_thread(session_manager.get_lite, session_id)
+
+
+def _existing_session_ids(session_ids: Iterable[str]) -> set[str]:
+    return {sid for sid in session_ids if session_manager.exists(sid)}
+
+
+def _session_lite_by_id(session_ids: Iterable[str]) -> dict[str, dict | None]:
+    return {sid: session_manager.get_lite(sid) for sid in session_ids}
+
+
+async def _existing_session_ids_async(session_ids: Iterable[str]) -> set[str]:
+    return await asyncio.to_thread(_existing_session_ids, set(session_ids))
+
+
+async def _session_lite_by_id_async(
+    session_ids: Iterable[str],
+) -> dict[str, dict | None]:
+    return await asyncio.to_thread(_session_lite_by_id, set(session_ids))
 
 
 async def _require_session_async(session_id: str) -> dict:
@@ -12338,12 +12356,18 @@ async def _re_enqueue_queued_prompts() -> set[str]:
 
 
 async def _reconcile_missing_session_runs(cold: list[dict]) -> list[dict]:
+    candidate_sids = {
+        sid
+        for descriptor in cold
+        if (sid := _recovered_run_session_id(descriptor))
+    }
+    existing_sids = await _existing_session_ids_async(candidate_sids)
     missing_terminal = [
         descriptor
         for descriptor in cold
         if (
             (sid := _recovered_run_session_id(descriptor))
-            and not session_manager.exists(sid)
+            and sid not in existing_sids
             and (
                 bool(descriptor.get("has_complete_json"))
                 or bool(descriptor.get("cancelled"))
@@ -12403,9 +12427,15 @@ async def _recover_in_flight_task() -> None:
         if recovered and not installation_profile.integrations_enabled():
             import extension_session_ownership
             allowed: list[dict] = []
+            recovered_sids = {
+                sid
+                for descriptor in recovered
+                if (sid := str(descriptor.get("app_session_id") or ""))
+            }
+            lite_by_sid = await _session_lite_by_id_async(recovered_sids)
             for descriptor in recovered:
                 session_id = str(descriptor.get("app_session_id") or "")
-                session = session_manager.get_lite(session_id) if session_id else None
+                session = lite_by_sid.get(session_id) if session_id else None
                 native_user_session = bool(
                     session
                     and session.get("orchestration_mode") == "native"
