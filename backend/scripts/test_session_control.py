@@ -279,6 +279,31 @@ def test_endpoints() -> None:
                     "action": "selectors.set",
                     "payload": {
                         "app_session_id": sid,
+                        "model": "",
+                        "provider_id": "   ",
+                        "reasoning_effort": "none",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 200,
+                "capability transport ignores empty model/provider selectors",
+            )
+            if resp.status_code != 200:
+                raise AssertionError(resp.text)
+            check(
+                (session_manager.manager.get(sid) or {}).get("reasoning_effort")
+                == "none",
+                "capability transport persists reasoning effort with empty selectors",
+            )
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
                         "model": "model-two",
                     },
                 },

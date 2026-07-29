@@ -85,6 +85,11 @@ class _SessionSelectorsPayload(_StrictPayload):
     provider_id: str = ""
     reasoning_effort: str = ""
 
+    @field_validator("model", "provider_id")
+    @classmethod
+    def normalize_optional_selector(cls, value: str) -> str:
+        return value.strip()
+
 
 class _SessionContinuePayload(_StrictPayload):
     app_session_id: str = Field(min_length=1)
@@ -807,6 +812,7 @@ def _legacy_main_handler(
     *,
     action: str = "",
     exclude_unset: bool = False,
+    exclude_defaults: bool = False,
 ) -> Callable[[BaseModel], Awaitable[Any]]:
     async def handler(payload: BaseModel) -> Any:
         import main
@@ -814,6 +820,7 @@ def _legacy_main_handler(
         body = payload.model_dump(
             by_alias=True,
             exclude_unset=exclude_unset,
+            exclude_defaults=exclude_defaults,
         )
         if action:
             body["action"] = action
@@ -965,6 +972,7 @@ def _register_session_control() -> None:
             extension_id,
             "internal_session_control_selectors",
             exclude_unset=True,
+            exclude_defaults=True,
         ),
     )
     register(
