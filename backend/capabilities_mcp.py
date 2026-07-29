@@ -33,17 +33,31 @@ _INSTRUCTIONS = (
     "Better Agent runtime-capability management for this session. "
     "list_capabilities shows the scoped capabilities loadable here and which are active; "
     "load_capability(capability_id) makes a capability's MCP + skill available on the next "
-    "turn; release_capability(capability_id) removes it."
+    "turn; release_capability(capability_id) removes it. When run outside a Better Agent "
+    "session (no bound session), pass session_id explicitly to target a specific session."
 )
 
 
-def _post_capabilities(payload: dict) -> dict[str, Any]:
-    """POST an action to the core capabilities endpoint for the current
+def _target_session_id(session_id: str) -> str:
+    """The session a capabilities call acts on: an explicit `session_id`
+    argument (needed for an ambient/session-less launch, which has no
+    `BETTER_CLAUDE_APP_SESSION_ID` of its own) falls back to this process's
+    own bound session for the normal in-session case."""
+    explicit = (session_id or "").strip()
+    if explicit:
+        return explicit
+    return get_env("BETTER_CLAUDE_APP_SESSION_ID").strip()
+
+
+def _post_capabilities(payload: dict, *, session_id: str = "") -> dict[str, Any]:
+    """POST an action to the core capabilities endpoint for the target
     session. Core owns the active-capability write; this is the authorized
     trigger."""
     backend_url = require_env("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
     internal_token = require_env("BETTER_CLAUDE_INTERNAL_TOKEN")
-    app_session_id = require_env("BETTER_CLAUDE_APP_SESSION_ID")
+    app_session_id = _target_session_id(session_id)
+    if not app_session_id:
+        return {"success": False, "error": "session_id is required (no bound session)"}
     endpoint = f"{backend_url}/api/internal/sessions/{app_session_id}/capabilities"
     req = urllib.request.Request(
         endpoint,
@@ -75,22 +89,26 @@ def _safe_result(fn):
     return wrapper
 
 
-def list_capabilities_response() -> dict[str, Any]:
-    return _post_capabilities({"action": "list"})
+def list_capabilities_response(session_id: str = "") -> dict[str, Any]:
+    return _post_capabilities({"action": "list"}, session_id=session_id)
 
 
-def load_capability_response(capability_id: str) -> dict[str, Any]:
+def load_capability_response(capability_id: str, session_id: str = "") -> dict[str, Any]:
     capability_id = str(capability_id or "").strip()
     if not capability_id:
         return {"success": False, "error": "capability_id is required"}
-    return _post_capabilities({"action": "load", "capability_id": capability_id})
+    return _post_capabilities(
+        {"action": "load", "capability_id": capability_id}, session_id=session_id
+    )
 
 
-def release_capability_response(capability_id: str) -> dict[str, Any]:
+def release_capability_response(capability_id: str, session_id: str = "") -> dict[str, Any]:
     capability_id = str(capability_id or "").strip()
     if not capability_id:
         return {"success": False, "error": "capability_id is required"}
-    return _post_capabilities({"action": "release", "capability_id": capability_id})
+    return _post_capabilities(
+        {"action": "release", "capability_id": capability_id}, session_id=session_id
+    )
 
 
 def _specs() -> tuple[OperationSpec, ...]:
@@ -138,10 +156,16 @@ def _enabled() -> bool:
 
 
 def main() -> int:
+    # An ambient (session-less) launch has no per-run operation broker to
+    # route through -- the response functions already authenticate
+    # themselves directly over the internal loopback, so dispatch locally
+    # instead of through the broker that will never exist for this process.
+    ambient = get_env("BETTER_CLAUDE_AMBIENT_LAUNCH") == "1"
     return run_mcp_or_cli(
         "capabilities",
         _specs(),
         instructions=_INSTRUCTIONS,
+        local=ambient,
     )
 
 

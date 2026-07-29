@@ -177,13 +177,24 @@ def run_mcp_or_cli(
     specs: tuple[OperationSpec, ...],
     *,
     instructions: str = "",
+    local: bool = False,
 ) -> int:
+    """``local=True`` dispatches each tool call directly to its Python
+    handler instead of routing it through the per-run operation broker
+    (``RuntimeTransport``/``BETTER_CLAUDE_RUNTIME_BROKER``). There is no
+    broker outside a Better Agent-orchestrated run, so an ambient
+    (session-less) launch that never sets ``local=True`` fails every call
+    with "runtime broker is unavailable" even though the process starts and
+    ``tools/list`` succeeds -- the handshake working is not evidence the
+    tool works. Callers pass ``local=True`` only when they've verified their
+    handler talks to core through its OWN direct, already-authenticated
+    channel (e.g. the SDK ``Client``) rather than assuming the broker."""
     if sys.argv[1:2] == ["cli"]:
-        build_cli_app(name, specs)(args=sys.argv[2:])
+        build_cli_app(name, specs, local=local)(args=sys.argv[2:])
         return 0
     if sys.argv[1:]:
         raise SystemExit("expected no arguments for MCP mode or 'cli' for CLI mode")
-    build_mcp_server(name, specs, instructions=instructions).run("stdio")
+    build_mcp_server(name, specs, instructions=instructions, local=local).run("stdio")
     return 0
 
 

@@ -6641,6 +6641,11 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
+    if _is_ambient_launch(item, inputs):
+        # No per-run operation broker exists for a session-less launch --
+        # tell the server to dispatch tool calls locally instead of through
+        # a broker that will never be there (see run_mcp_or_cli's `local`).
+        base_env.update(dual_env_many({"BETTER_CLAUDE_AMBIENT_LAUNCH": "1"}))
     # An ambient launch that opted into launcher-mediated auth still mints a
     # token -- an extension-scoped one, never the core private token, so the
     # backend principal stays the extension and owner-based lock ops remain
