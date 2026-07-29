@@ -1163,14 +1163,6 @@ def _provider_kind(desc: dict | None) -> str:
     if desc and desc.get("provider_kind"):
         return str(desc.get("provider_kind"))
     provider_id = str((desc or {}).get("provider_id") or "")
-    if provider_id:
-        try:
-            import config_store
-            rec = config_store.get_provider(provider_id)
-            if rec and rec.get("kind"):
-                return str(rec["kind"])
-        except Exception:
-            pass
     if provider_id.startswith("codex"):
         return "codex"
     return "claude"

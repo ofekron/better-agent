@@ -1756,79 +1756,8 @@ class CodexProvider(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
-        self.assert_not_suspended(action="run headless work")
-        if no_tools:
-            raise NotImplementedError(
-                "Codex cannot guarantee a no-tools headless run",
-            )
-        from cli_paths import resolve_cli_binary
-
-        codex_bin = resolve_cli_binary("codex")
-        if not codex_bin:
-            logger.error("CodexProvider.run_headless: `codex` CLI not found")
-            return None
-
-        cmd: list[str] = [codex_bin, "exec", "--skip-git-repo-check"]
-        cmd += [
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-s", "danger-full-access",
-        ]
-        resume_target = resume_sid or session_id
-        if resume_target:
-            cmd += ["resume", resume_target, prompt]
-        else:
-            cmd.append(prompt)
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self.build_env(),
-                cwd=cwd,
-            )
-        except FileNotFoundError:
-            logger.error("CodexProvider.run_headless: `codex` CLI not found")
-            return None
-        except Exception:
-            logger.exception("CodexProvider.run_headless: spawn failed")
-            return None
-
-        try:
-            communicate = proc.communicate()
-            if timeout:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    communicate,
-                    timeout=timeout,
-                )
-            else:
-                stdout_bytes, stderr_bytes = await communicate
-        except asyncio.TimeoutError:
-            logger.error("CodexProvider.run_headless: timeout after %ss", timeout)
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            return None
-
-        if proc.returncode != 0:
-            logger.error(
-                "CodexProvider.run_headless: exited %s; stderr=%r",
-                proc.returncode, stderr_bytes[:500],
-            )
-            return None
-
-        stdout = stdout_bytes.decode(errors="replace").strip()
-        if not stdout:
-            return None
-        # Codex without --json outputs plain text
-        return {
-            "result": stdout,
-            "session_id": None,
-            "usage": {},
-            "total_cost_usd": 0.0,
-        }
+        del prompt, session_id, resume_sid, fork, cwd, timeout, no_tools
+        raise RuntimeError("Codex headless execution requires admitted authority")
 
     # ------------------------------------------------------------------
     # Rate-limit parsing
