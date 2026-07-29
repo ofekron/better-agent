@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
@@ -17,10 +18,13 @@ import extension_store
 import harness_profile_resolver
 import harness_profile_store
 import installation_profile
+import password_manager
 
 installation_profile.integrations_enabled = lambda: True
 
 _FIXTURE_BROWSER_HARNESS_EXTENSION_ID = "fixture.browser-harness"
+_FIXTURE_SECRET_SETTING_EXTENSION_ID = "fixture.secret-setting"
+_FIXTURE_SECRET_SETTING_EXTENSION_ID_2 = "fixture.secret-setting-2"
 
 
 def _install_browser_harness_extension_with_headless_setting() -> None:
@@ -163,6 +167,166 @@ def test_clearing_override_reverts_to_tracking_default() -> None:
     config_store.set_disabled_builtin_tools(["ask", "create_session"])
     tracked = harness_profile_resolver.resolve_profile("clear.me")
     assert tracked["disabled_builtin_tools"]["resolved"] == ["ask", "create_session"]
+
+
+def _install_secret_setting_extension(extension_id: str) -> None:
+    """Installs a minimal runtime-ready extension with a secret-typed
+    setting, so its settings write path exercises the OS-keychain probe
+    inside extension_store.get_extension_settings -> compute_default_profile
+    (secret_refs), same as a real credential-backed extension. Each caller
+    must pass its own extension_id: extension_store._save() deliberately
+    refuses to resurrect an id a prior uninstall() just removed unless
+    resurrect_extension_ids names it, so reusing one id across tests that
+    each install-then-uninstall would silently no-op the second install."""
+    package = Path(_TMP_HOME) / f"{extension_id}-package"
+    package.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": "Secret Setting Fixture",
+        "version": "1.0.0",
+        "description": "Secret Setting Fixture",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {
+            "backend": "",
+            "frontend": "",
+            "mcp": [],
+            "provider_capabilities": [],
+            "frontend_modules": [],
+            "settings": [
+                {"key": "api_key", "label": "API key", "type": "secret"},
+            ],
+        },
+        "permissions": {},
+        "marketplace": {},
+    }
+    manifest.setdefault("protocol", {
+        "version": 1,
+        "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+    })
+    validated = extension_store.validate_manifest(manifest)
+    (package / "better-agent-extension.json").write_text(json.dumps(validated), encoding="utf-8")
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_id] = {
+        "manifest": validated,
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": f"extensions/{extension_id}",
+            "ref": "",
+            "commit_sha": "secret-setting-fixture",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data, resurrect_extension_ids={extension_id})  # type: ignore[attr-defined]
+
+
+def test_secret_setting_write_eagerly_warms_default_profile_cache() -> None:
+    """Regression for turns crashing on a locked/slow OS keychain: a secret
+    setting write must pay the compute_default_profile() keychain-probe
+    cost itself (extension_store._invalidate_harness_profile_resolver_cache
+    now eagerly recomputes after invalidating), so the next unrelated turn's
+    resolve_for_session -> resolve_profile -> compute_default_profile() is a
+    warm cache hit and never touches password_manager."""
+    _install_secret_setting_extension(_FIXTURE_SECRET_SETTING_EXTENSION_ID)
+    try:
+        assert extension_store.is_extension_runtime_ready(_FIXTURE_SECRET_SETTING_EXTENSION_ID)
+        harness_profile_resolver.invalidate_cache()
+
+        stored: dict[str, str] = {}
+        probe_calls = 0
+
+        def counted_has_service_password(service: str, account: str) -> bool:
+            nonlocal probe_calls
+            probe_calls += 1
+            return account in stored
+
+        def fake_store_service_password(payload: dict) -> dict:
+            stored[payload["account"]] = payload["password"]
+            return {"service": payload["service"], "account": payload["account"]}
+
+        with (
+            patch("password_manager.has_service_password", side_effect=counted_has_service_password),
+            patch("password_manager.store_service_password", side_effect=fake_store_service_password),
+        ):
+            extension_store.set_extension_setting(
+                _FIXTURE_SECRET_SETTING_EXTENSION_ID, "api_key", "fixture-secret-value",
+            )
+            assert probe_calls > 0, "settings write should have probed the keychain at least once"
+            calls_after_write = probe_calls
+
+            # The write already resynthesized compute_default_profile() (and its
+            # secret_refs, which is what actually needs secret_present). The next
+            # caller — standing in for the next turn's resolve_for_session — must
+            # be a pure cache hit: zero further keychain probes.
+            default_profile = harness_profile_resolver.compute_default_profile()
+            assert probe_calls == calls_after_write, (
+                "compute_default_profile() after a settings write must not "
+                "re-probe the OS keychain — the write should have already "
+                "warmed the cache"
+            )
+            assert (
+                f"extension-setting:{_FIXTURE_SECRET_SETTING_EXTENSION_ID}:api_key"
+                in default_profile["extension_instances"][_FIXTURE_SECRET_SETTING_EXTENSION_ID][
+                    "secret_refs"
+                ]
+            )
+    finally:
+        # Must fully remove the fixture (not just leave it installed): any
+        # later test's unmocked compute_default_profile() would otherwise
+        # probe the real OS keychain for this extension's secret setting.
+        extension_store.uninstall(_FIXTURE_SECRET_SETTING_EXTENSION_ID)
+        harness_profile_resolver.invalidate_cache()
+
+
+def test_secret_setting_write_reports_saved_when_cache_warm_fails() -> None:
+    """The secret write (password_manager.store_service_password) durably
+    succeeds before the eager compute_default_profile() resynthesis runs. If
+    that resynthesis fails (e.g. the OS keychain times out), the caller must
+    see a normal extension_store.ExtensionError that says the value was
+    saved — not a raw RuntimeError that reads as "your write failed, retry
+    it" when it actually already landed."""
+    _install_secret_setting_extension(_FIXTURE_SECRET_SETTING_EXTENSION_ID_2)
+    try:
+        harness_profile_resolver.invalidate_cache()
+        store_calls: list[dict] = []
+
+        def fake_store_service_password(payload: dict) -> dict:
+            store_calls.append(payload)
+            return {"service": payload["service"], "account": payload["account"]}
+
+        def failing_has_service_password(*_args, **_kwargs) -> bool:
+            raise RuntimeError("OS credential read timed out")
+
+        with (
+            patch("password_manager.store_service_password", side_effect=fake_store_service_password),
+            patch("password_manager.has_service_password", side_effect=failing_has_service_password),
+        ):
+            try:
+                extension_store.set_extension_setting(
+                    _FIXTURE_SECRET_SETTING_EXTENSION_ID_2, "api_key", "fixture-secret-value",
+                )
+            except extension_store.ExtensionError as exc:
+                assert "was saved" in str(exc), f"error should say the value was saved: {exc}"
+            else:
+                raise AssertionError(
+                    "expected extension_store.ExtensionError when the eager cache "
+                    "warm fails, got no exception"
+                )
+        assert len(store_calls) == 1, "the secret write itself must still have gone through"
+    finally:
+        extension_store.uninstall(_FIXTURE_SECRET_SETTING_EXTENSION_ID_2)
+        harness_profile_resolver.invalidate_cache()
 
 
 def test_default_headless_reflects_extension_setting_write() -> None:
@@ -393,6 +557,8 @@ def main() -> int:
     test_unoverridden_field_tracks_default_live()
     test_clearing_override_reverts_to_tracking_default()
     test_default_headless_reflects_extension_setting_write()
+    test_secret_setting_write_eagerly_warms_default_profile_cache()
+    test_secret_setting_write_reports_saved_when_cache_warm_fails()
     test_default_profile_synthesis_is_cached_until_invalidated()
     test_run_snapshot_cache_tracks_selected_package_fingerprint()
     test_resolve_for_session_falls_back_to_default_profile()

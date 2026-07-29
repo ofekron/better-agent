@@ -7593,6 +7593,18 @@ def _invalidate_harness_profile_resolver_cache() -> None:
         harness_profile_resolver.invalidate_cache()
     except Exception:
         logger.debug("failed to invalidate harness profile resolver cache", exc_info=True)
+        return
+    # Eagerly resynthesize now, on the settings write that invalidated the
+    # cache, instead of leaving it cold for the next unrelated turn to pay
+    # for. compute_default_profile() is what probes the OS keychain for
+    # secret_present (extension_store.get_extension_settings, called from
+    # harness_profile_resolver._compute_default_profile_uncached) — turn
+    # dispatch (turn_manager.py -> resolve_for_session -> resolve_profile)
+    # must never be the first caller to pay that cost. Left uncaught: a
+    # write that changed a secret should visibly fail (and be retried) if
+    # the OS keychain can't be reached, rather than silently leaving the
+    # cache cold and deferring the same failure onto the next turn.
+    harness_profile_resolver.compute_default_profile()
 
 
 def _set_native_harness_value(
@@ -7741,7 +7753,19 @@ def set_extension_setting(extension_id: str, key: str, value: Any) -> dict[str, 
             password_manager.delete_service_password(
                 {"service": _SETTING_SECRET_SERVICE, "account": account}
             )
-        _invalidate_harness_profile_resolver_cache()
+        try:
+            _invalidate_harness_profile_resolver_cache()
+        except Exception as exc:
+            # The secret write above already durably succeeded — only the
+            # eager harness-profile resynthesis (which re-probes the OS
+            # keychain for secret_present) failed. Surface it as a normal
+            # ExtensionError (the API layer's existing, correctly-shaped
+            # error path) rather than letting a raw RuntimeError fall
+            # through to a generic 500, and say plainly that the value was
+            # saved so the caller doesn't retry a write that already landed.
+            raise ExtensionError(
+                f"settings.{key} was saved, but refreshing the harness profile failed: {exc}"
+            ) from exc
         return get_extension_settings(extension_id)
     coerced = _coerce_setting_value(value, spec["type"], key, enum=spec.get("enum"))
     data = _load_ext_settings()
