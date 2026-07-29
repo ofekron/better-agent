@@ -85,6 +85,41 @@ def _capabilities_server_config(
     return {**config, "args": [str(script)]}
 
 
+def _communicate_server_config(
+    env: dict[str, Any],
+    *,
+    include_tool_metadata: bool,
+) -> dict[str, Any]:
+    import sys
+    script = Path(__file__).with_name("communicate_mcp.py")
+    config = {
+        "command": sys.executable,
+        "env": env,
+    }
+    if include_tool_metadata:
+        config["tool_names"] = [
+            "chat",
+            "create_chat",
+            "create_session",
+            "create_sub_session",
+            "create_worker",
+            "delegate_task",
+            "delete_chat",
+            "ensure_named_worker",
+            "inbox",
+            "list_available_provider_models",
+            "mssg",
+            "ask",
+            "read_chat_history",
+            "read_inbox_history",
+            "set_chat_sender_policy",
+            "stop_turn",
+        ]
+    if getattr(sys, "frozen", False):
+        return {**config, "args": ["--communicate-mcp"]}
+    return {**config, "args": [str(script)]}
+
+
 def _runtime_broker_env(runtime_broker: Any) -> dict[str, Any]:
     return {
         "BETTER_AGENT_RUNTIME_BROKER": runtime_broker,
@@ -181,6 +216,37 @@ def with_builtin_mcp_servers(
         })
         servers["capabilities"] = _capabilities_server_config(
             cap_env,
+            include_tool_metadata=include_tool_metadata,
+        )
+
+    # Team-coordination tools for CLI-backed providers whose vendor CLI has
+    # no in-process function-calling hook of its own (unlike Codex/openai,
+    # which already implement this same tool set natively — registering it
+    # here too would just duplicate their existing tools). Scoped to actual
+    # team-mode turns specifically, not merely team_orchestration_enabled,
+    # so native-mode tool availability for these providers is unchanged.
+    if (
+        app_session_id
+        and broker
+        and not bare
+        and provider_kind in ("agy", "copilot")
+        and str(inputs.get("mode") or "") == "team"
+        and bool(inputs.get("team_orchestration_enabled"))
+    ):
+        mssg_sender_session_id = str(
+            inputs.get("mssg_sender_session_id") or app_session_id
+        ).strip()
+        communicate_env = _with_sdk_pythonpath({
+            **dual_env_many({
+                "BETTER_CLAUDE_BACKEND_URL": backend_url,
+                "BETTER_CLAUDE_CWD": cwd,
+                "BETTER_CLAUDE_MODEL": model,
+                "BETTER_CLAUDE_MSSG_SENDER_SESSION_ID": mssg_sender_session_id,
+            }),
+            **_runtime_broker_env(broker),
+        })
+        servers["communicate"] = _communicate_server_config(
+            communicate_env,
             include_tool_metadata=include_tool_metadata,
         )
 

@@ -48,7 +48,7 @@ def test_capability_matrix() -> bool:
     cls = _resolve_class("copilot")
     expected = {
         "supports_fork": False,
-        "supports_manager_mode": False,
+        "supports_manager_mode": True,
         "supports_rewind": True,
         "supports_steering": False,
         "supports_native_subagents": False,

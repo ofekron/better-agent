@@ -214,16 +214,17 @@ def fetch_copilot_models() -> list[str]:
 
 
 class CopilotProvider(SessionEventsProvider):
-    """GitHub Copilot CLI provider. Native-mode only: Copilot has no
-    non-interactive fork primitive, no in-process SDK MCP registration
-    (manager mode), no mid-turn steering, and no reasoning-effort flag.
-    Reuses SessionEventsProvider's RunState, tailer bootstrap, completion
-    watcher, and disk recovery — only the runner binary and env differ."""
+    """GitHub Copilot CLI provider. No non-interactive fork primitive, no
+    mid-turn steering, and no reasoning-effort flag. Team mode is supported
+    via the `copilot` CLI's native `--additional-mcp-config` MCP registration
+    (see runner_copilot.py), not an in-process SDK hook. Reuses
+    SessionEventsProvider's RunState, tailer bootstrap, completion watcher,
+    and disk recovery — only the runner binary and env differ."""
 
     KIND: ClassVar[str] = "copilot"
 
     supports_fork: ClassVar[bool] = False
-    supports_manager_mode: ClassVar[bool] = False
+    supports_manager_mode: ClassVar[bool] = True
     # Copilot has no rewind primitive, but we simulate one the way the family
     # does: clear the stored provider session id so the next turn starts
     # a fresh CLI session.

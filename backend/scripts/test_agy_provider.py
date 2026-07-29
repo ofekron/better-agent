@@ -108,7 +108,7 @@ def _make_fake_agy(bin_dir: Path) -> Path:
 def test_registry_and_capabilities() -> None:
     cls = _resolve_class("agy")
     check(cls is AgyProvider, "provider registry resolves agy")
-    check(cls.supports_manager_mode is False, "agy team mode is disabled")
+    check(cls.supports_manager_mode is True, "agy team mode is enabled")
     check(cls.supports_fork is False, "agy fork is disabled")
     check(cls.supports_native_subagents is True, "agy native subagents are enabled")
 
@@ -284,6 +284,15 @@ def test_agy_prepare_preserves_harness_secret_refs() -> None:
                 "mode": "subscription",
                 "config_dir": str(config_root),
             })
+            # Model validation reads the cached model list (single source of
+            # truth shared with session creation), not a live CLI probe —
+            # seed it the same way the periodic refresher would.
+            import models as models_mod
+            models_mod._update_cache(
+                record["id"],
+                models=["Gemini Test (High)", "Other Model"],
+                last_fetch_state="ok",
+            )
             provider = AgyProvider(record)
             app_session = session_manager.manager.create(
                 name="AGY prepare fixture",
@@ -377,6 +386,12 @@ def test_model_fetch_and_runner() -> None:
             "mode": "subscription",
             "config_dir": str(config_root),
         })
+        import models as models_mod
+        models_mod._update_cache(
+            record["id"],
+            models=["Gemini Test (High)", "Other Model"],
+            last_fetch_state="ok",
+        )
         provider = AgyProvider(record)
         cwd = Path(tempfile.mkdtemp(prefix="bc-test-agy-cwd-"))
         run_dir, code = _run_prepared_agy(

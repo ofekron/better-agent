@@ -27,7 +27,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
-from provider_session_events_runner import restore_session_events_runner
+from provider_session_events_runner import (
+    effective_mcp_servers,
+    restore_session_events_runner,
+)
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -313,7 +316,11 @@ def _prepend_capability_context(prompt: str, inputs: dict[str, Any]) -> str:
     return prepend_capability_context(prompt, inputs)
 
 
-async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
+async def _run(
+    run_dir: Path,
+    inputs: dict[str, Any],
+    capability_plan: dict[str, Any],
+) -> int:
     copilot_bin = inputs.pop("_provider_executable", None)
     if not copilot_bin:
         _fail(run_dir, "copilot CLI not found on PATH")
@@ -350,6 +357,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     # Allow the tools Copilot needs to act on the workspace autonomously
     # (required for non-interactive -p mode) and scope file access to cwd.
     argv += ["--allow-all-tools", "--add-dir", cwd, "--config-dir", str(config_dir)]
+    mcp_servers = effective_mcp_servers(capability_plan)
+    if mcp_servers:
+        mcp_config_path = run_dir / "mcp-config.json"
+        _write_json(mcp_config_path, {"mcpServers": mcp_servers})
+        argv += ["--additional-mcp-config", f"@{mcp_config_path}"]
     argv += ["-p", prompt]
 
     state: dict[str, Any] = {
@@ -526,7 +538,7 @@ def main(run_dir: Path) -> int:
         _fail(run_dir, f"failed to restore execution artifact: {exc}")
         return 1
     try:
-        return asyncio.run(_run(run_dir, inputs))
+        return asyncio.run(_run(run_dir, inputs, execution.capability_plan))
     except Exception as exc:
         logger.exception("runner_copilot top-level failure")
         _fail(run_dir, f"{type(exc).__name__}: {exc}")
