@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
+from mcp_tool_discovery import tool_discovery
 
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
@@ -1334,7 +1335,7 @@ async def _extension_mcp_tools_for_run(
         )
     tool_lists = await asyncio.gather(
         *(
-            _mcp_list_tools(server_name, config)
+            tool_discovery.discover(server_name, config, _mcp_list_tools)
             for server_name, config in config_items
         ),
         return_exceptions=True,
@@ -1357,6 +1358,7 @@ async def _extension_mcp_tools_for_run(
             raise RuntimeError(
                 f"required extension MCP {server_name!r} advertised no tools"
             )
+        server_schema_count = len(schemas)
         for tool in tools:
             raw_tool_name = str(tool.get("name") or "").strip()
             if not raw_tool_name:
@@ -1375,6 +1377,10 @@ async def _extension_mcp_tools_for_run(
                 "tool_name": raw_tool_name,
                 "config": config,
             }
+        if server_name in required_servers and len(schemas) == server_schema_count:
+            raise RuntimeError(
+                f"required extension MCP {server_name!r} exposed no usable tools",
+            )
     return schemas, handlers
 
 

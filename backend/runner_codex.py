@@ -73,6 +73,7 @@ import chat_store
 import inbox_store
 import extension_store
 import mcp_stdio_bridge
+from mcp_tool_discovery import tool_discovery
 from runs_dir import atomic_write_json
 from runner_exit import hard_exit
 from env_compat import get_env
@@ -543,6 +544,12 @@ async def _bridge_extension_mcp_dynamic_tools(
     )
     bridge_configs = dict(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
+    required_servers = extension_store.required_profile_mcp_server_names(inputs)
+    if missing_servers := sorted(required_servers - set(bridge_configs)):
+        raise RuntimeError(
+            "required extension MCP config unavailable: "
+            + ", ".join(repr(name) for name in missing_servers)
+        )
 
     async def probe(
         server_name: str,
@@ -551,7 +558,11 @@ async def _bridge_extension_mcp_dynamic_tools(
         call_config = dict(config)
         call_config["_server_name"] = server_name
         try:
-            return await mcp_stdio_bridge.mcp_list_tools(server_name, call_config), None
+            return await tool_discovery.discover(
+                server_name,
+                call_config,
+                mcp_stdio_bridge.mcp_list_tools,
+            ), None
         except Exception as exc:
             return [], exc
 
@@ -571,6 +582,11 @@ async def _bridge_extension_mcp_dynamic_tools(
         call_config["_server_name"] = server_name
         if probe_error is not None:
             bridge_errors.append((server_name, probe_error))
+            if server_name in required_servers:
+                raise RuntimeError(
+                    f"required extension MCP {server_name!r} tools/list failed: "
+                    f"{probe_error}",
+                ) from probe_error
             if same_extension:
                 configured_servers.pop(server_name, None)
             logger.warning(
@@ -580,18 +596,48 @@ async def _bridge_extension_mcp_dynamic_tools(
                 probe_error,
             )
             continue
-        if same_extension and isinstance(configured_config, dict):
-            for tool_name in configured_config.get("tool_names") or ():
-                existing_tool_names.discard(str(tool_name))
-        bridged_any = False
-        bridged_all = bool(tools)
+        configured_tool_names = {
+            str(tool_name)
+            for tool_name in (
+                configured_config.get("tool_names") or ()
+                if same_extension and isinstance(configured_config, dict)
+                else ()
+            )
+        }
+        candidate_existing_names = existing_tool_names - configured_tool_names
+        prepared: list[dict[str, Any]] = []
+        unavailable_reason = ""
         for item in tools:
             tool = _mcp_dynamic_tool(server_name, item)
             if tool is None:
-                bridged_all = False
-                continue
+                unavailable_reason = "exposed malformed tool declarations"
+                break
+            if (
+                tool["name"] in candidate_existing_names
+                or any(item["name"] == tool["name"] for item in prepared)
+            ):
+                unavailable_reason = "exposed conflicting tool declarations"
+                break
+            prepared.append(tool)
+        if not tools:
+            unavailable_reason = "advertised no tools"
+        if unavailable_reason:
+            if server_name in required_servers:
+                raise RuntimeError(
+                    f"required extension MCP {server_name!r} {unavailable_reason}",
+                )
+            if same_extension:
+                configured_servers.pop(server_name, None)
+            logger.warning(
+                "ambient extension MCP %r unavailable; continuing without it: %s",
+                server_name,
+                unavailable_reason,
+            )
+            continue
+        existing_tool_names.difference_update(configured_tool_names)
+        for tool in prepared:
             tool_name = tool["name"]
-            added = _add_dynamic_tool(
+            _add_dynamic_tool(
                 dynamic_tools,
                 tool_handlers,
                 tool,
@@ -602,23 +648,8 @@ async def _bridge_extension_mcp_dynamic_tools(
                 ),
                 existing_tool_names=existing_tool_names,
             )
-            bridged_any = bridged_any or added
-            bridged_all = bridged_all and added
-        if bridged_any and bridged_all and same_extension:
+        if same_extension:
             configured_servers.pop(server_name, None)
-        elif not bridged_any:
-            if same_extension:
-                configured_servers.pop(server_name, None)
-            reason = (
-                "tools/list returned no tools"
-                if not tools
-                else "tools/list returned no usable non-conflicting tools"
-            )
-            logger.warning(
-                "selected extension MCP %r unavailable; continuing without it: %s",
-                server_name,
-                reason,
-            )
     if bridge_configs:
         logger.info(
             "extension MCP bridge servers=%s dynamic_tools=%s errors=%s",

@@ -567,7 +567,7 @@ async def test_bridge_prunes_extension_owned_mcp_server_after_registration() -> 
     assert "testape" not in provider_run_config["mcp_servers"]
 
 
-async def test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridges() -> None:
+async def test_bridge_atomically_quarantines_partially_valid_ambient_server() -> None:
     original_launcher_configs = runner_codex.extension_store.native_mcp_server_configs
     original_mcp_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
 
@@ -622,8 +622,10 @@ async def test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridge
         runner_codex.extension_store.native_mcp_server_configs = original_launcher_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]
 
-    assert [tool["name"] for tool in dynamic_tools] == ["test_ui"]
-    assert "testape" in provider_run_config["mcp_servers"]
+    assert dynamic_tools == []
+    assert tool_handlers == {}
+    assert existing_tool_names == set()
+    assert "testape" not in provider_run_config["mcp_servers"]
 
 
 async def test_bridge_continues_when_selected_extension_cannot_list_tools() -> None:
@@ -797,6 +799,125 @@ async def test_bridge_quarantines_configured_extension_that_exposes_no_tools() -
         assert provider_run_config["mcp_servers"] == {}
     finally:
         runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
+
+
+async def test_bridge_fails_closed_for_required_same_extension_discovery() -> None:
+    original_configs = runner_codex.extension_store.native_mcp_server_configs
+    original_required = runner_codex.extension_store.required_profile_mcp_server_names
+    original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
+
+    def fake_configs(_inputs: dict, *, user_facing: bool, bare: bool):
+        return {
+            "testape": {
+                "command": "/resolved/testape-mcp",
+                "args": [],
+                "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
+            },
+        }
+
+    runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
+    runner_codex.extension_store.required_profile_mcp_server_names = lambda _inputs: {"testape"}  # type: ignore[method-assign]
+    try:
+        provider_run_config = {
+            "mcp_servers": {
+                "testape": {
+                    "command": "/resolved/testape-mcp",
+                    "args": [],
+                    "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
+                },
+            },
+        }
+
+        async def failed_list(_server_name: str, _config: dict):
+            raise RuntimeError("server startup failed")
+
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = failed_list  # type: ignore[assignment]
+        try:
+            await runner_codex._bridge_extension_mcp_dynamic_tools(
+                inputs={"provider_kind": "codex"},
+                provider_run_config=provider_run_config,
+                dynamic_tools=[],
+                tool_handlers={},
+                existing_tool_names=set(),
+                user_facing=True,
+                bare_config=False,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == (
+                "required extension MCP 'testape' tools/list failed: "
+                "server startup failed"
+            )
+        else:
+            raise AssertionError("required transport failure did not fail closed")
+        assert "testape" in provider_run_config["mcp_servers"]
+
+        async def empty_list(_server_name: str, _config: dict):
+            return []
+
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = empty_list  # type: ignore[assignment]
+        try:
+            await runner_codex._bridge_extension_mcp_dynamic_tools(
+                inputs={"provider_kind": "codex"},
+                provider_run_config=provider_run_config,
+                dynamic_tools=[],
+                tool_handlers={},
+                existing_tool_names=set(),
+                user_facing=True,
+                bare_config=False,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == (
+                "required extension MCP 'testape' advertised no tools"
+            )
+        else:
+            raise AssertionError("required empty discovery did not fail closed")
+        assert "testape" in provider_run_config["mcp_servers"]
+
+        async def malformed_list(_server_name: str, _config: dict):
+            return [{"name": "broken", "inputSchema": None}]
+
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = malformed_list  # type: ignore[assignment]
+        try:
+            await runner_codex._bridge_extension_mcp_dynamic_tools(
+                inputs={"provider_kind": "codex"},
+                provider_run_config=provider_run_config,
+                dynamic_tools=[],
+                tool_handlers={},
+                existing_tool_names=set(),
+                user_facing=True,
+                bare_config=False,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == (
+                "required extension MCP 'testape' "
+                "exposed malformed tool declarations"
+            )
+        else:
+            raise AssertionError("required malformed discovery did not fail closed")
+
+        runner_codex.extension_store.native_mcp_server_configs = (  # type: ignore[method-assign]
+            lambda _inputs, *, user_facing, bare: {}
+        )
+        try:
+            await runner_codex._bridge_extension_mcp_dynamic_tools(
+                inputs={"provider_kind": "codex"},
+                provider_run_config=provider_run_config,
+                dynamic_tools=[],
+                tool_handlers={},
+                existing_tool_names=set(),
+                user_facing=True,
+                bare_config=False,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == (
+                "required extension MCP config unavailable: 'testape'"
+            )
+        else:
+            raise AssertionError("missing required config did not fail closed")
+    finally:
+        runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
+        runner_codex.extension_store.required_profile_mcp_server_names = original_required  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
 
 
@@ -1222,11 +1343,12 @@ if __name__ == "__main__":
     asyncio.run(test_bridge_probes_extension_servers_concurrently())
     asyncio.run(test_bridge_preserves_custom_same_name_mcp_server())
     asyncio.run(test_bridge_prunes_extension_owned_mcp_server_after_registration())
-    asyncio.run(test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridges())
+    asyncio.run(test_bridge_atomically_quarantines_partially_valid_ambient_server())
     asyncio.run(test_bridge_continues_when_selected_extension_cannot_list_tools())
     asyncio.run(test_bridge_quarantines_configured_extension_that_cannot_list_tools())
     asyncio.run(test_bridge_continues_when_selected_extension_exposes_no_tools())
     asyncio.run(test_bridge_quarantines_configured_extension_that_exposes_no_tools())
+    asyncio.run(test_bridge_fails_closed_for_required_same_extension_discovery())
     asyncio.run(test_bridge_preserves_explicit_servers_when_no_extension_is_selected())
     asyncio.run(test_fresh_run_bridges_extension_mcp_before_thread_start())
     asyncio.run(test_app_server_resume_preserves_mcp_tool_timeout())

@@ -823,6 +823,9 @@ class ClaudeProvider(Provider):
                     ),
                 )
             ),
+            "required_mcp_server_names": sorted(
+                extension_store.required_profile_mcp_server_names(input_payload),
+            ),
         })
         return input_payload
 

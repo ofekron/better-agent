@@ -106,6 +106,7 @@ def _isolated_import_roots() -> (
 import chat_store
 import inbox_store
 import mcp_stdio_bridge
+from mcp_tool_discovery import tool_discovery
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -495,11 +496,7 @@ async def _mcp_json_request(
 
 
 async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    try:
-        result = await _mcp_json_request(config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S)
-    except Exception:
-        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
-        return []
+    result = await _mcp_json_request(config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S)
     tools = result.get("tools") or []
     return [item for item in tools if isinstance(item, dict)]
 
@@ -533,13 +530,41 @@ async def _mcp_call_tool(
 
 async def _bridge_native_extension_mcp_servers(
     configs: dict[str, dict[str, Any]],
+    *,
+    required_servers: set[str],
 ) -> dict[str, dict[str, Any]]:
     bridged: dict[str, dict[str, Any]] = {}
-    tool_lists = await asyncio.gather(*(
-        _mcp_list_tools(server_name, config)
-        for server_name, config in configs.items()
-    ))
+    configured_servers = set(configs)
+    if missing_servers := sorted(required_servers - configured_servers):
+        raise RuntimeError(
+            "required extension MCP config unavailable: "
+            + ", ".join(repr(name) for name in missing_servers)
+        )
+    tool_lists = await asyncio.gather(
+        *(
+            tool_discovery.discover(server_name, config, _mcp_list_tools)
+            for server_name, config in configs.items()
+        ),
+        return_exceptions=True,
+    )
     for (server_name, config), tools in zip(configs.items(), tool_lists):
+        if isinstance(tools, BaseException):
+            if not isinstance(tools, Exception):
+                raise tools
+            if server_name in required_servers:
+                raise RuntimeError(
+                    f"required extension MCP {server_name!r} tools/list failed: {tools}",
+                ) from tools
+            logger.warning(
+                "ambient extension MCP %s tools/list failed",
+                server_name,
+                exc_info=(type(tools), tools, tools.__traceback__),
+            )
+            continue
+        if server_name in required_servers and not tools:
+            raise RuntimeError(
+                f"required extension MCP {server_name!r} advertised no tools",
+            )
         sdk_tools = []
         for item in tools:
             raw_tool_name = str(item.get("name") or "").strip()
@@ -559,6 +584,10 @@ async def _bridge_native_extension_mcp_servers(
                 str(item.get("description") or f"{server_name} MCP tool {raw_tool_name}"),
                 input_schema,
             )(_handler))
+        if server_name in required_servers and not sdk_tools:
+            raise RuntimeError(
+                f"required extension MCP {server_name!r} exposed no usable tools",
+            )
         if sdk_tools:
             bridged[server_name] = create_sdk_mcp_server(
                 name=server_name,
@@ -3714,7 +3743,10 @@ async def _run(
             if "native" in variants
         }
         for _extension_mcp_name, _extension_mcp_config in (
-            await _bridge_native_extension_mcp_servers(native_configs)
+            await _bridge_native_extension_mcp_servers(
+                native_configs,
+                required_servers=set(inputs.get("required_mcp_server_names") or []),
+            )
         ).items():
             mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
     if not _bare:
