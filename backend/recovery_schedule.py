@@ -116,6 +116,13 @@ def is_boosted(session_key: str | None) -> bool:
     return bool(session_key) and session_key in _boosted
 
 
+def priority_rank(session_key: str | None) -> int:
+    """Sort key for callers that order buckets themselves rather than
+    popping this heap — the cold/background batches in main. Lower
+    sorts first, matching the heap's own ranking."""
+    return _PROMOTED_RANK if is_boosted(session_key) else _DEFAULT_RANK
+
+
 def reset_for_tests() -> None:
     global _active
     _boosted.clear()

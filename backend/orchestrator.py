@@ -59,6 +59,7 @@ from trace_collector import (
     extract_token_usage,
     merge_token_usages,
 )
+import loop_affinity
 from session_manager import manager as session_manager
 from sync_wait_graph import SyncWaitGraph
 # user_msg_lifecycle emits routed through UserPromptManager — no
@@ -3707,10 +3708,19 @@ class Coordinator:
             is_review = params.pop("_review", False)
             try:
                 if logical_turn_identity and logical_request_prefix:
+                    lifecycle_session = session_manager.get_fields(
+                        app_session_id,
+                        ("supervisor_enabled",),
+                    ) or {}
                     await self.lifecycle_commands.begin_turn(
                         request_id=f"{logical_request_prefix}:begin",
                         session_id=app_session_id,
                         identity=logical_turn_identity,
+                        execution_policy=(
+                            "sequential"
+                            if lifecycle_session.get("supervisor_enabled")
+                            else "single"
+                        ),
                     )
                     logical_turn_claimed = True
                 import startup_recovery_gate
@@ -3867,14 +3877,21 @@ class Coordinator:
                 ):
                     if self._session_cancelled.get(app_session_id):
                         logical_turn_outcome = "stopped"
-                    await asyncio.shield(
-                        self.lifecycle_commands.finish_turn(
+                    lifecycle_snapshot = self.lifecycle_commands.snapshot(
+                        app_session_id,
+                    )
+                    if (
+                        lifecycle_snapshot.identity == logical_turn_identity
+                        and lifecycle_snapshot.execution is None
+                    ):
+                        await asyncio.shield(
+                            self.lifecycle_commands.finish_turn(
                             request_id=f"{logical_request_prefix}:finish",
                             session_id=app_session_id,
                             identity=logical_turn_identity,
                             outcome=logical_turn_outcome,
+                            )
                         )
-                    )
         # If the queue is empty, drop ourselves so a future submit can
         # spawn a fresh task. (Don't pop the queue itself — it may have
         # been swapped by a re-spawn race.)
@@ -4126,7 +4143,7 @@ class Coordinator:
         # running loop. Binding to the caller's loop dropped the fact
         # entirely on that path, so native_files_manager never learned a
         # subscriber detached and kept its tailers open.
-        session_manager.schedule_on_bound_loop(
+        loop_affinity.schedule_on_main(
             bus.publish(
                 BusEvent(
                     type="native_files.demand",
@@ -4195,7 +4212,7 @@ class Coordinator:
             # Scheduling on the bound loop reaps the tailer task on that
             # path too; previously it was dropped and the task was left
             # for the loop to collect on its own.
-            session_manager.schedule_on_bound_loop(
+            loop_affinity.schedule_on_main(
                 self._await_tailer_stop(root_id, task),
             )
 

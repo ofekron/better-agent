@@ -36,6 +36,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+import loop_affinity
 import perf
 from session_manager import manager as session_manager
 from user_msg_lifecycle import emit_received
@@ -324,7 +325,7 @@ class OrchestrationStrategy(ABC):
         # Binding to the caller's loop would either lose the emit (no
         # running loop) or strand it on a loop the bus subscribers do
         # not live on.
-        if not session_manager.schedule_on_bound_loop(
+        if not loop_affinity.schedule_on_main(
             emit_received(
                 app_session_id=app_session_id,
                 lifecycle_msg_id=lifecycle_msg_id,

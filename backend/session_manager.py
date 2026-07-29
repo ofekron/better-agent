@@ -34,6 +34,8 @@ import re
 import threading
 import time
 import uuid
+
+import loop_affinity
 from dataclasses import dataclass
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
@@ -761,37 +763,17 @@ class SessionManager:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the event loop. Call once at backend startup."""
         self._loop = loop
+        loop_affinity.bind_main_loop(loop)
 
     def schedule_on_bound_loop(self, coro) -> bool:
-        """Run `coro` on the bound loop from any thread. False if it
-        could not be scheduled (no loop bound yet, or torn down).
+        """Run `coro` on this manager's loop from any thread.
 
-        This is the one sanctioned way for synchronous, possibly
-        off-main-thread code to reach the event loop. `loop.create_task`
-        is NOT thread-safe and corrupts the loop's task list when called
-        from another thread; `run_coroutine_threadsafe` is the primitive
-        that is. Callers here include `_fire` (reachable from
-        `to_thread`-wrapped subscribers) and the strategy lifecycle emit
-        in `orchs/base.py`, which runs inside `apply_event` on whichever
-        thread is replaying.
+        Cross-loop scheduling is `loop_affinity`'s job, not session
+        management's — this stays only so the manager's own loop, which
+        tests rebind independently of the process-wide one, is the
+        target.
         """
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            coro.close()
-            return False
-        try:
-            if asyncio.get_running_loop() is loop:
-                loop.create_task(coro)
-                return True
-        except RuntimeError:
-            pass
-        try:
-            asyncio.run_coroutine_threadsafe(coro, loop)
-            return True
-        except RuntimeError:
-            # Loop torn down between the check and the submit.
-            coro.close()
-            return False
+        return loop_affinity.schedule_on(self._loop, coro)
 
     def bind_pin_predicate(
         self, fn: Callable[[str, set], bool],

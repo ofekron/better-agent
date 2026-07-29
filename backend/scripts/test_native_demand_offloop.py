@@ -101,7 +101,7 @@ def test_orchestrator_no_longer_binds_to_the_calling_loop() -> None:
     demand = source.index("def _publish_native_demand")
     stop = source.index("def _maybe_stop_wire_tailer")
     body = source[demand:demand + 1600] + source[stop:stop + 1600]
-    assert "schedule_on_bound_loop" in body
+    assert "loop_affinity.schedule_on_main" in body
     # The old shape: give up when the caller has no loop.
     assert "asyncio.get_running_loop()\n        except RuntimeError:\n            return" not in body
 

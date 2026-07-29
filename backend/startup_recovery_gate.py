@@ -94,13 +94,14 @@ def mark_session_recovery_done(app_session_id: str) -> None:
 
 
 def request_session_priority(app_session_id: str) -> None:
-    """Promote a session the user just opened to the front of recovery."""
+    """Promote a session the user just opened to the front of recovery.
+
+    Ordering belongs to `recovery_schedule`; this gate owns readiness
+    only. Kept as a thin forward because waiting for a session is the
+    natural place to learn the user wants it — callers reach the gate,
+    not the schedule.
+    """
     recovery_schedule.boost(app_session_id)
-
-
-def session_priority_rank(app_session_id: str | None) -> int:
-    """Rank for the cold/background batch ordering in main.py."""
-    return 0 if recovery_schedule.is_boosted(app_session_id) else 1
 
 
 def _ready_bound_to_running_loop(ready: asyncio.Event) -> bool:

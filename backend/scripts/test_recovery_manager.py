@@ -83,6 +83,39 @@ def test_run_falls_back_inline_when_manager_is_down() -> None:
     asyncio.run(scenario())
 
 
+def test_cancel_does_not_abandon_in_flight_work() -> None:
+    """Startup relied on join-on-cancel before the scan moved here:
+    shutdown must not tear the manager down under a half-done scan."""
+    import time
+
+    manager = rm_mod.RecoveryManager()
+    manager.start()
+    state = {"finished": False}
+    try:
+        async def scenario():
+            async def work():
+                def blocking():
+                    time.sleep(0.6)
+                    state["finished"] = True
+                    return "done"
+
+                return await asyncio.to_thread(blocking)
+
+            task = asyncio.create_task(manager.run(work))
+            await asyncio.sleep(0.15)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            # The cancel waited for the work instead of abandoning it.
+            assert state["finished"] is True
+
+        asyncio.run(scenario())
+    finally:
+        manager.stop()
+
+
 def test_start_and_stop_are_idempotent() -> None:
     manager = rm_mod.RecoveryManager()
     manager.start()
