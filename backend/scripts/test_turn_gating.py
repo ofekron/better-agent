@@ -373,7 +373,7 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
             return prepare_execution({
                 "id": "turn-gating-loopback",
                 "kind": self.KIND,
-                "generation": "turn-gating-loopback",
+                "generation": "14ad268e-d622-46e9-bff1-f28d35c876aa",
                 "revision": 1,
             }, **kw)
 
@@ -461,7 +461,7 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
             return prepare_execution({
                 "id": "turn-gating-durable-target",
                 "kind": self.KIND,
-                "generation": "turn-gating-durable-target",
+                "generation": "087565ff-542a-4a96-8398-e4e65bf1b6a0",
                 "revision": 1,
             }, **kw)
 
