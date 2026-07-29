@@ -20,6 +20,7 @@ Usage:
   python cli.py --session SID                 # resume a specific session
   python cli.py --mode native|manager         # override session's stored mode
   python cli.py --cwd /path                   # default: $PWD
+  python cli.py --node lenovo --cwd C:\\repo   # run on a connected worker node
   python cli.py --provider Z.AI --model glm-5.1
   python cli.py --json                        # jsonl pass-through, no colors
   python cli.py --no-color
@@ -478,6 +479,7 @@ def _create_backend_session(
     model: str,
     mode: Optional[str],
     provider_id: Optional[str],
+    node_id: str,
     worker_creation_policy: Optional[str],
     bare_config: bool,
     harness_profile_id: Optional[str] = None,
@@ -489,6 +491,7 @@ def _create_backend_session(
         "orchestration_mode": mode or "team",
         "source": "cli",
         "provider_id": provider_id,
+        "node_id": node_id,
         "worker_creation_policy": worker_creation_policy or "ask",
         "bare_config": bare_config,
     }
@@ -512,10 +515,11 @@ def resolve_backend_session(
     *,
     port: int,
     session_id: Optional[str],
-    cwd: str,
+    cwd: Optional[str],
     model: str,
     mode: Optional[str],
     provider_id: Optional[str],
+    node_id: Optional[str] = None,
     worker_creation_policy: Optional[str] = None,
     bare_config: bool = False,
     harness_profile_id: Optional[str] = None,
@@ -526,6 +530,10 @@ def resolve_backend_session(
             raise SystemExit(f"error: session {session_id} not found")
         if provider_id and session.get("provider_id") != provider_id:
             raise SystemExit("error: --provider does not match the resumed session")
+        if node_id and (session.get("node_id") or "primary") != node_id:
+            raise SystemExit("error: --node does not match the resumed session")
+        if cwd and session.get("cwd") != cwd:
+            raise SystemExit("error: --cwd does not match the resumed session")
         if harness_profile_id and session.get("harness_profile_id") != harness_profile_id:
             _apply_harness_profile(port, str(session["id"]), harness_profile_id)
             session["harness_profile_id"] = harness_profile_id
@@ -535,6 +543,7 @@ def resolve_backend_session(
         if (
             summary.get("name") == "cli-default"
             and summary.get("cwd") == cwd
+            and (summary.get("node_id") or "primary") == (node_id or "primary")
             and (not provider_id or summary.get("provider_id") == provider_id)
         ):
             existing_id = summary.get("id")
@@ -552,6 +561,7 @@ def resolve_backend_session(
         model=model,
         mode=mode,
         provider_id=provider_id,
+        node_id=node_id or "primary",
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
         harness_profile_id=harness_profile_id,
@@ -910,7 +920,12 @@ def _parse_args() -> argparse.Namespace:
             "default is the backend's default profile)"
         ),
     )
-    p.add_argument("--cwd", default=os.getcwd(), help="working directory (default: $PWD)")
+    p.add_argument("--cwd", help="working directory (default: $PWD for primary sessions)")
+    p.add_argument(
+        "--node",
+        dest="node_id",
+        help="worker node id for new sessions (default: primary)",
+    )
     p.add_argument("--provider", help="provider id or unique provider name")
     p.add_argument("--model", help="model id (default: provider/session default)")
     p.add_argument("--json", action="store_true", help="emit raw jsonl events instead of pretty output")
@@ -975,13 +990,32 @@ def _resolve_auth_token(port: int, token_arg: Optional[str]) -> Optional[str]:
     return _AUTH_TOKEN
 
 
+def _resolve_cli_cwd(cwd: Optional[str], node_id: Optional[str]) -> Optional[str]:
+    if cwd is None:
+        if node_id and node_id != "primary":
+            raise SystemExit("error: --cwd is required when creating a remote-node session")
+        return None
+    if not node_id or node_id == "primary":
+        return os.path.abspath(cwd)
+    from node_path_authority import NodePathError, absolute_node_path
+
+    try:
+        absolute_node_path(cwd)
+    except NodePathError as exc:
+        raise SystemExit(f"error: invalid --cwd for node {node_id!r}: {exc}") from exc
+    return cwd
+
+
 async def _async_main(args: argparse.Namespace) -> int:
     _resolve_auth_token(args.port, getattr(args, "token", None))
     if args.json or args.no_color or not sys.stdout.isatty():
         _disable_colors()
     renderer: Renderer = JsonRenderer() if args.json else PrettyRenderer()
 
-    cwd = os.path.abspath(args.cwd)
+    node_id = str(args.node_id or "").strip() or None
+    requested_cwd = _resolve_cli_cwd(args.cwd, node_id)
+    if not args.session and requested_cwd is None:
+        requested_cwd = os.path.abspath(os.getcwd())
     reachable = _probe_backend(args.port)
     if reachable is None:
         print(
@@ -1008,14 +1042,16 @@ async def _async_main(args: argparse.Namespace) -> int:
     session = resolve_backend_session(
         port=args.port,
         session_id=args.session,
-        cwd=cwd,
+        cwd=requested_cwd,
         model=requested_model,
         mode=args.mode,
         provider_id=provider_id,
+        node_id=node_id,
         worker_creation_policy=args.worker_creation_policy,
         bare_config=bool(getattr(args, "bare_config", False)),
         harness_profile_id=args.harness_profile or None,
     )
+    cwd = str(session["cwd"])
     mode = args.mode or session.get("orchestration_mode") or "team"
     model = args.model or session.get("model") or requested_model
     known_workers = _load_known_workers_file(args.known_workers_file)
@@ -1028,7 +1064,8 @@ async def _async_main(args: argparse.Namespace) -> int:
     if not args.json:
         sys.stdout.write(
             f"{DIM}session {session['id'][:8]} · "
-            f"{mode} mode · cwd={_truncate(cwd, 60)}{RESET}\n"
+            f"{mode} mode · node={session.get('node_id') or 'primary'} · "
+            f"cwd={_truncate(cwd, 60)}{RESET}\n"
             f"{banner}\n"
         )
         sys.stdout.flush()

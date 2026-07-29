@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import functools
 import hashlib
 import json
@@ -295,23 +296,37 @@ def _module_available(module: str) -> bool:
         return False
 
 
+def _probe_runtime_module(python: Path, module: str) -> None:
+    subprocess.run(
+        [str(python), "-c", f"import {module}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
 def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
-    try:
-        subprocess.run(
-            [
-                str(_python_in(env_dir)),
-                "-c",
-                ";".join(f"import {name}" for name in probes),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DependencyPlanError(
-            "backend dependency environment is missing required runtime modules"
-        ) from exc
+    if not probes:
+        return
+    python = _python_in(env_dir)
+    failures: list[tuple[str, BaseException]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(probes), 8)) as executor:
+        pending = {
+            executor.submit(_probe_runtime_module, python, module): module
+            for module in probes
+        }
+        for future in concurrent.futures.as_completed(pending):
+            try:
+                future.result()
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append((pending[future], exc))
+    if not failures:
+        return
+    modules = ", ".join(sorted(module for module, _ in failures))
+    raise DependencyPlanError(
+        f"backend dependency environment failed runtime module probes: {modules}"
+    ) from failures[0][1]
 
 
 def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:
