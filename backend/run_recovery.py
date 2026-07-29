@@ -3107,7 +3107,10 @@ async def _retry_recovered_run(
         "continuation_chain": continuation_chain,
         "target_message_id": msg_id,
     }
-    if original_artifact.provider_kind in {"codex", "fugu"}:
+    if (
+        fresh_continuation_reason is None
+        and original_artifact.provider_kind in {"codex", "fugu"}
+    ):
         from codex_execution_runtime import (
             clone_codex_runtime_agent_payload,
             codex_runtime_agent_manifest,
@@ -3119,11 +3122,56 @@ async def _retry_recovered_run(
             target_run_id=new_run_id,
             manifest=codex_runtime_agent_manifest(original_artifact),
         )
-    restored_execution = restore_prepared_execution(
-        original_artifact,
-        internal_token=coordinator.internal_token,
-        extra_env=None,
-    ).retry(**retry_overrides)
+    if (
+        fresh_continuation_reason is None
+        and original_artifact.provider_kind in {"claude", "agy"}
+    ):
+        from provider_family_execution_runtime import (
+            family_capability_manifest_from_artifact,
+        )
+        from provider_family_runtime_capabilities import (
+            clone_family_runtime_capabilities,
+        )
+
+        await asyncio.to_thread(
+            clone_family_runtime_capabilities,
+            run_dir,
+            target_run_id=new_run_id,
+            manifest=family_capability_manifest_from_artifact(
+                original_artifact,
+            ),
+        )
+    if fresh_continuation_reason is None:
+        restored_execution = restore_prepared_execution(
+            original_artifact,
+            internal_token=coordinator.internal_token,
+            extra_env=None,
+        )
+        if original_artifact.provider_kind in {"claude", "agy"}:
+            from provider_family_execution_runtime import (
+                retry_family_execution,
+            )
+
+            restored_execution = retry_family_execution(
+                restored_execution,
+                **retry_overrides,
+            )
+        else:
+            restored_execution = restored_execution.retry(
+                **retry_overrides,
+            )
+    else:
+        fresh_arguments = {
+            **original_arguments,
+            **retry_overrides,
+            "internal_token": coordinator.internal_token,
+            "extra_env": None,
+            "backend_url": None,
+        }
+        restored_execution = await asyncio.to_thread(
+            provider.prepare_run,
+            **fresh_arguments,
+        )
     try:
         started = await asyncio.to_thread(
             start_prepared_run,

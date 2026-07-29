@@ -23,7 +23,7 @@ from provider_family_execution_runtime import (  # noqa: E402
     resolve_family_execution_payload,
 )
 from provider_runtime_plan_source import (  # noqa: E402
-    hydrate_structural_provider_runtime_plan,
+    hydrate_frozen_provider_runtime_plan,
 )
 from runner_agy import _agy_worker_events, _materialize_agy_run_home, main as runner_main  # noqa: E402
 from runner_operation_host import stop_active_host  # noqa: E402
@@ -198,14 +198,8 @@ def _run_prepared_agy(
         execution.artifact,
         run_dir,
     )
-    capability_plan = hydrate_structural_provider_runtime_plan(
-        runner_input,
-        "agy",
-        expected={
-            "resolved_plan": capabilities.plan,
-            "extension_state": capabilities.extension_state,
-            "installation_decisions": capabilities.installation_decisions,
-        },
+    capability_plan = hydrate_frozen_provider_runtime_plan(
+        capabilities.plan,
     )
     env = build_better_agent_run_env(
         backend_url=runner_input["backend_url"],

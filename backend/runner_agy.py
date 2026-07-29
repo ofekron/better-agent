@@ -16,11 +16,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
+from env_compat import get_env
 from provider_run_config import symlink_home_overlay, write_skill_tree
 from provider_family_execution_runtime import (
     FamilyExecutionRuntime,
     restore_family_runner_runtime,
 )
+from provider_runtime_plan_source import hydrate_runner_operation_broker
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -1235,7 +1237,13 @@ def _effective_mcp_servers(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
         selected = next(
             (
                 variants[key]
-                for key in ("explicit", "runtime", "launcher", "native")
+                for key in (
+                    "effective",
+                    "explicit",
+                    "runtime",
+                    "launcher",
+                    "native",
+                )
                 if type(variants.get(key)) is dict
             ),
             None,
@@ -1269,8 +1277,12 @@ def _runtime_capabilities(
     }
     if hydration["skill_dirs"] != expected_skills:
         raise RuntimeError("AGY runtime skill hydration is invalid")
-    return (
+    plan = hydrate_runner_operation_broker(
         hydration["capability_plan"],
+        get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip(),
+    )
+    return (
+        plan,
         {
             name: Path(path)
             for name, path in expected_skills.items()

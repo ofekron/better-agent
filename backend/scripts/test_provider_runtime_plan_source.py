@@ -13,14 +13,13 @@ sys.path.insert(0, str(ROOT))
 
 from provider_runtime_capability_model import reject_secrets  # noqa: E402
 from provider_runtime_plan_source import (  # noqa: E402
-    hydrate_structural_provider_runtime_plan,
+    hydrate_frozen_provider_runtime_plan,
+    hydrate_runner_operation_broker,
     selected_runtime_agent_sources,
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
 )
 from codex_execution_common import ExecutionContractError  # noqa: E402
-
-
 def _record(package: Path) -> dict:
     return {
         "enabled": True,
@@ -118,7 +117,7 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                     "explicit": {
                         "command": "/bin/echo",
                         "args": ["ready"],
-                        "env": {"API_TOKEN": "never-persist"},
+                        "env": {"LABEL": "explicit"},
                         "tool_names": ["explicit_tool"],
                     },
                 },
@@ -129,7 +128,6 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                     "extension_setting_overlays": {
                         "example.extension": {
                             "label": {"value": "prepared"},
-                            "access_token": {"value": "never-persist"},
                         },
                     },
                 },
@@ -142,6 +140,7 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                     "command": "/bin/echo",
                     "args": ["runtime"],
                     "env": {
+                        "BETTER_CLAUDE_EXTENSION_ID": "example.extension",
                         "BETTER_CLAUDE_INTERNAL_TOKEN": "never-persist",
                         "LABEL": state["label"],
                     },
@@ -200,15 +199,17 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                 "extension_store.native_mcp_launcher_server_configs",
                 return_value={},
             ),
+            patch(
+                "extension_token_registry.mint",
+                return_value="never-persist",
+            ),
         )
         with ExitStack() as stack:
             for runtime_patch in patches:
                 stack.enter_context(runtime_patch)
             prepared = structural_provider_runtime_plan(inputs, "claude")
-            hydrated = hydrate_structural_provider_runtime_plan(
-                inputs,
-                "claude",
-                expected=prepared,
+            hydrated = hydrate_frozen_provider_runtime_plan(
+                prepared["resolved_plan"],
             )
             explicit_server = next(
                 server
@@ -220,12 +221,22 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
                 for server in hydrated["mcp_servers"]
                 if server["name"] == "example-mcp"
             )
-            assert explicit_server["config"]["explicit"]["env"]["API_TOKEN"] == (
-                "never-persist"
-            )
+            assert explicit_server["config"]["explicit"]["env"]["LABEL"] == "explicit"
             assert runtime_server["config"]["runtime"]["env"][
                 "BETTER_CLAUDE_INTERNAL_TOKEN"
             ] == "never-persist"
+            inputs["provider_run_config"]["mcp_servers"]["explicit"]["env"][
+                "API_TOKEN"
+            ] = "untyped-secret"
+            try:
+                structural_provider_runtime_plan(inputs, "claude")
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("untyped runtime secret was accepted")
+            inputs["provider_run_config"]["mcp_servers"]["explicit"]["env"].pop(
+                "API_TOKEN",
+            )
             state["profile"]["generation"] = "mutated"
             state["store"] = (99, 99)
             state["settings_fp"] = (98, 98)
@@ -238,16 +249,9 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             inputs["resolved_harness_run_config"]["launcher_projection"][
                 "extension_setting_overlays"
             ]["example.extension"]["label"]["value"] = "mutated"
-            try:
-                hydrate_structural_provider_runtime_plan(
-                    inputs,
-                    "claude",
-                    expected=prepared,
-                )
-            except ExecutionContractError:
-                pass
-            else:
-                raise AssertionError("runtime plan drift was hydrated")
+            assert hydrate_frozen_provider_runtime_plan(
+                prepared["resolved_plan"],
+            ) == hydrated
 
         encoded = json.dumps(prepared, sort_keys=True)
         assert "never-persist" not in encoded
@@ -286,15 +290,89 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
         )
         runtime_config = runtime_server["config"]["runtime"]
         assert runtime_config["env"]["BETTER_CLAUDE_INTERNAL_TOKEN_ref"] == {
-            "kind": "runtime_value",
-            "path_sha256": (
-                "983b6a26a7df885e2cffee06feb98e27"
-                "cd143ffd97c1369343c796cf1a031a65"
-            ),
+            "kind": "extension_identity",
+            "extension_id": "example.extension",
         }
+
+
+def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> None:
+    inputs = {
+        "app_session_id": "session-id",
+        "backend_url": "http://127.0.0.1:8000",
+        "cwd": "/tmp",
+        "model": "agy-model",
+        "provider_id": "agy-provider",
+        "provider_kind": "agy",
+        "user_facing": True,
+        "bare_config": False,
+        "working_mode": "file_editing",
+        "provider_run_config": {"mcp_servers": {}},
+        "resolved_harness_run_config": {},
+    }
+    with (
+        patch("installation_profile.integrations_enabled", return_value=True),
+        patch("installation_profile.load", return_value={}),
+        patch(
+            "installation_profile.capabilities",
+            return_value={"integrations_enabled": True},
+        ),
+        patch("extension_store.runtime_mcp_server_configs", return_value={}),
+        patch("extension_store.native_mcp_server_configs", return_value={}),
+        patch(
+            "extension_store.native_mcp_launcher_server_configs",
+            return_value={},
+        ),
+        patch("extension_store.list_extensions", return_value=[]),
+        patch("extension_store.store_fingerprint", return_value=(1, 2)),
+        patch(
+            "extension_store.extension_settings_fingerprint",
+            return_value=(3, 4),
+        ),
+        patch(
+            "extension_store.resolve_native_mcp_servers_for_context",
+            return_value={},
+        ),
+    ):
+        prepared = structural_provider_runtime_plan(inputs, "agy")
+
+    servers = {
+        server["name"]: server
+        for server in prepared["resolved_plan"]["mcp_servers"]
+    }
+    assert set(servers) == {"ui", "open-config-panel", "capabilities"}
+    assert servers["ui"]["tool_names"] == [
+        "open_file_panel",
+        "request_user_approval",
+        "request_user_input",
+        "start_file_discussion",
+    ]
+    assert servers["open-config-panel"]["tool_names"] == [
+        "open_config_panel",
+    ]
+    assert servers["capabilities"]["tool_names"] == [
+        "list_capabilities",
+        "load_capability",
+        "release_capability",
+    ]
+    encoded = json.dumps(prepared, sort_keys=True)
+    assert "must-not-persist" not in encoded
+    assert "unix:/tmp/runtime-broker.sock" not in encoded
+    hydrated = hydrate_runner_operation_broker(
+        prepared["resolved_plan"],
+        "unix:/tmp/runtime-broker.sock",
+    )
+    for server in hydrated["mcp_servers"]:
+        env = server["config"]["effective"]["env"]
+        assert env["BETTER_AGENT_RUNTIME_BROKER"] == (
+            "unix:/tmp/runtime-broker.sock"
+        )
+        assert env["BETTER_CLAUDE_RUNTIME_BROKER"] == (
+            "unix:/tmp/runtime-broker.sock"
+        )
 
 
 if __name__ == "__main__":
     test_selected_sources_are_exact_and_respect_gates()
     test_structural_plan_freezes_drift_and_references_secrets()
+    test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration()
     print("PASS provider runtime plan source")

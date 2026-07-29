@@ -47,6 +47,12 @@ def capture_runtime_hydration(
 def _is_hydration_reference(value: Any) -> bool:
     if type(value) is not dict:
         return False
+    if set(value) == {"kind", "extension_id"}:
+        return (
+            value["kind"] == "extension_identity"
+            and type(value["extension_id"]) is str
+            and bool(value["extension_id"])
+        )
     if set(value) == {"kind", "path_sha256"}:
         return (
             value["kind"] == "runtime_value"

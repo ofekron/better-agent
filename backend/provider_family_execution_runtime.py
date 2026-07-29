@@ -109,6 +109,44 @@ def prepare_family_execution(
     return execution
 
 
+def retry_family_execution(
+    execution: PreparedExecution,
+    **overrides: Any,
+) -> PreparedExecution:
+    if not isinstance(execution, PreparedExecution):
+        raise ExecutionContractError("invalid family retry execution")
+    artifact = execution.artifact
+    if artifact.provider_kind not in {"claude", "agy"}:
+        raise ExecutionContractError("invalid family retry provider")
+    runtime_policy = artifact.runtime_policy
+    runner_input = runtime_policy.get("runner_input")
+    if type(runner_input) is not dict:
+        raise ExecutionContractError(
+            "frozen family runner input is unavailable",
+        )
+    arguments = execution.start_arguments()
+    arguments.update(overrides)
+    updated_input = json.loads(json.dumps(runner_input))
+    for key, value in overrides.items():
+        if key in updated_input:
+            updated_input[key] = json.loads(json.dumps(value))
+    return prepare_execution(
+        {
+            "id": artifact.provider_id,
+            "kind": artifact.provider_kind,
+            "generation": artifact.provider_generation,
+            "revision": artifact.provider_revision,
+        },
+        routing_session_id=artifact.routing_session_id,
+        runtime_policy={
+            **runtime_policy,
+            "runner_input": updated_input,
+        },
+        provider_contract=artifact.provider_contract,
+        **arguments,
+    )
+
+
 def install_family_execution_payload(
     execution: PreparedExecution,
     run_dir: Path,
@@ -189,5 +227,6 @@ __all__ = [
     "prepare_family_execution",
     "release_staged_family_execution",
     "resolve_family_execution_payload",
+    "retry_family_execution",
     "restore_family_runner_runtime",
 ]

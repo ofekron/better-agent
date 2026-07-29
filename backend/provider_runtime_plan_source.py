@@ -15,6 +15,7 @@ from provider_runtime_plan_hydration import (
 
 
 _FAMILIES = frozenset({"claude", "agy"})
+_RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|auth|authorization|credential|password|secret|token)($|_)",
 )
@@ -285,18 +286,62 @@ def _tool_names(config: Mapping[str, Any]) -> list[str]:
     })
 
 
+def _contains_untyped_runtime_secret(value: Any) -> bool:
+    if type(value) is list:
+        return any(_contains_untyped_runtime_secret(item) for item in value)
+    if type(value) is not dict:
+        return False
+    if (
+        set(value) == {"kind", "path_sha256"}
+        and value.get("kind") == "runtime_value"
+    ):
+        return True
+    return any(
+        _contains_untyped_runtime_secret(item)
+        for item in value.values()
+    )
+
+
 def _config_without_tool_metadata(
     config: Mapping[str, Any],
     *,
     path: str,
-    hydration: dict[str, str] | None,
 ) -> dict:
     stripped = {
         key: value
         for key, value in config.items()
         if key not in {"tool_names", "tools"}
     }
-    return _secret_free(stripped, path=path, hydration=hydration)
+    env = stripped.get("env")
+    env = dict(env) if type(env) is dict else None
+    if env is not None:
+        extension_id = str(
+            env.get("BETTER_AGENT_EXTENSION_ID")
+            or env.get("BETTER_CLAUDE_EXTENSION_ID")
+            or ""
+        ).strip()
+        for key in (
+            "BETTER_AGENT_INTERNAL_TOKEN",
+            "BETTER_CLAUDE_INTERNAL_TOKEN",
+        ):
+            if not env.get(key):
+                continue
+            if not extension_id:
+                raise ExecutionContractError(
+                    "runtime MCP secret lacks typed authority",
+                )
+            env.pop(key)
+            env[f"{key}_ref"] = {
+                "kind": "extension_identity",
+                "extension_id": extension_id,
+            }
+        stripped["env"] = env
+    clean = _secret_free(stripped, path=path)
+    if _contains_untyped_runtime_secret(clean):
+        raise ExecutionContractError(
+            "runtime MCP secret lacks typed authority",
+        )
+    return clean
 
 
 def _explicit_mcp_configs(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -329,27 +374,51 @@ def _structural_provider_runtime_plan(
     import installation_profile
 
     explicit = _explicit_mcp_configs(frozen_inputs)
-    runtime = extension_store.runtime_mcp_server_configs(
-        frozen_inputs,
-        user_facing=user_facing,
-        bare=bare,
-    )
-    native = extension_store.native_mcp_server_configs(
-        frozen_inputs,
-        user_facing=user_facing,
-        bare=bare,
-    )
-    launcher = extension_store.native_mcp_launcher_server_configs(
-        frozen_inputs,
-        user_facing=user_facing,
-        bare=bare,
-    )
-    delivery_maps = {
-        "explicit": explicit,
-        "runtime": runtime,
-        "native": native,
-        "launcher": launcher,
-    }
+    if provider_kind == "agy":
+        from builtin_mcp_config import with_builtin_mcp_servers
+
+        runtime = extension_store.runtime_mcp_server_configs(
+            frozen_inputs,
+            user_facing=user_facing,
+            bare=bare,
+        )
+        launcher = extension_store.native_mcp_launcher_server_configs(
+            frozen_inputs,
+            user_facing=user_facing,
+            bare=bare,
+        )
+        effective = with_builtin_mcp_servers(
+            frozen_inputs,
+            {"mcp_servers": explicit},
+            runtime_broker=_RUNNER_OPERATION_BROKER_REF,
+            integrations_enabled=installation_profile.integrations_enabled(),
+            runtime_mcp_servers=runtime,
+            launcher_mcp_servers=launcher,
+            include_tool_metadata=True,
+        )["mcp_servers"]
+        delivery_maps = {"effective": effective}
+    else:
+        runtime = extension_store.runtime_mcp_server_configs(
+            frozen_inputs,
+            user_facing=user_facing,
+            bare=bare,
+        )
+        native = extension_store.native_mcp_server_configs(
+            frozen_inputs,
+            user_facing=user_facing,
+            bare=bare,
+        )
+        launcher = extension_store.native_mcp_launcher_server_configs(
+            frozen_inputs,
+            user_facing=user_facing,
+            bare=bare,
+        )
+        delivery_maps = {
+            "explicit": explicit,
+            "runtime": runtime,
+            "native": native,
+            "launcher": launcher,
+        }
     names = sorted({
         name
         for configs in delivery_maps.values()
@@ -376,7 +445,6 @@ def _structural_provider_runtime_plan(
                 delivery: _config_without_tool_metadata(
                     config,
                     path=f"mcp_servers.{name}.{delivery}",
-                    hydration=hydration,
                 )
                 for delivery, config in variants.items()
             },
@@ -471,29 +539,75 @@ def structural_provider_runtime_plan(
     return projection
 
 
-def hydrate_structural_provider_runtime_plan(
-    inputs: dict[str, Any],
-    provider_kind: str,
-    *,
-    expected: Mapping[str, Any],
+def hydrate_frozen_provider_runtime_plan(
+    plan: Mapping[str, Any],
 ) -> dict[str, Any]:
-    frozen_expected = _json_copy(expected, label="expected runtime projection")
-    current, hydration = _structural_provider_runtime_plan(
-        inputs,
-        provider_kind,
+    frozen = normalize_plan(
+        _json_copy(plan, label="runtime capability plan"),
     )
-    if current != frozen_expected:
-        raise ExecutionContractError(
-            "runtime capability authority changed after preparation",
-        )
-    return apply_runtime_hydration(
-        current["resolved_plan"],
-        hydration,
+    references: dict[str, dict[str, str]] = {}
+
+    def collect(value: Any) -> None:
+        if (
+            type(value) is dict
+            and set(value) == {"kind", "extension_id"}
+            and value.get("kind") == "extension_identity"
+        ):
+            references[value["extension_id"]] = value
+            return
+        if type(value) is list:
+            for item in value:
+                collect(item)
+            return
+        if type(value) is dict:
+            for item in value.values():
+                collect(item)
+
+    collect(frozen)
+    hydration: dict[str, str] = {}
+    if references:
+        import extension_token_registry
+
+        for extension_id, reference in references.items():
+            capture_runtime_hydration(
+                hydration,
+                reference,
+                extension_token_registry.mint(extension_id),
+            )
+    return apply_runtime_hydration(frozen, hydration)
+
+
+def hydrate_runner_operation_broker(
+    plan: Mapping[str, Any],
+    address: str,
+) -> dict[str, Any]:
+    prefix, separator, target = (
+        address.partition(":")
+        if type(address) is str
+        else ("", "", "")
     )
+    if (
+        not separator
+        or prefix not in {"unix", "pipe"}
+        or not target
+    ):
+        raise ExecutionContractError("runner operation broker is unavailable")
+
+    def hydrate(value: Any) -> Any:
+        if value == _RUNNER_OPERATION_BROKER_REF:
+            return address
+        if type(value) is list:
+            return [hydrate(item) for item in value]
+        if type(value) is dict:
+            return {key: hydrate(item) for key, item in value.items()}
+        return value
+
+    return hydrate(_json_copy(plan, label="runtime capability plan"))
 
 
 __all__ = [
-    "hydrate_structural_provider_runtime_plan",
+    "hydrate_frozen_provider_runtime_plan",
+    "hydrate_runner_operation_broker",
     "selected_runtime_agent_sources",
     "selected_runtime_skill_sources",
     "structural_provider_runtime_plan",

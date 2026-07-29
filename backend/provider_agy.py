@@ -32,7 +32,7 @@ from provider_family_launch_attestation import (
     capture_runner_launch,
 )
 from provider_runtime_plan_source import (
-    hydrate_structural_provider_runtime_plan,
+    hydrate_frozen_provider_runtime_plan,
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
 )
@@ -357,14 +357,8 @@ class AgyProvider(SessionEventsProvider):
         input_payload = _execution.artifact.runtime_policy.get("runner_input")
         if type(input_payload) is not dict:
             raise RuntimeError("frozen AGY runner input is unavailable")
-        hydrated_plan = hydrate_structural_provider_runtime_plan(
-            input_payload,
-            self.KIND,
-            expected={
-                "resolved_plan": capabilities.plan,
-                "extension_state": capabilities.extension_state,
-                "installation_decisions": capabilities.installation_decisions,
-            },
+        hydrated_plan = hydrate_frozen_provider_runtime_plan(
+            capabilities.plan,
         )
         runtime_hydration = {
             "capability_plan": hydrated_plan,
