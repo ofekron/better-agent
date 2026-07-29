@@ -96,6 +96,7 @@ def _install_team_gate_extension() -> None:
             "commit_sha": "team-test",
         },
         persist=True,
+        force_enabled=True,
     )
 
 
