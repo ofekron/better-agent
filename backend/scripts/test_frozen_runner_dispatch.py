@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +30,7 @@ if _BACKEND not in sys.path:
 
 from provider import runner_argv          # noqa: E402
 from app_entry import _dispatch, _env_port  # noqa: E402
+from env_compat import agent_env_name  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -116,24 +118,60 @@ def test_dispatch() -> bool:
 
 
 def test_env_port() -> bool:
-    os.environ.pop("BA_TEST_PORT", None)
-    if _env_port("BA_TEST_PORT", 8000) != 8000:
-        print("  missing env should use default")
-        return False
-    os.environ["BA_TEST_PORT"] = "9123"
-    if _env_port("BA_TEST_PORT", 8000) != 9123:
-        print("  env override was not used")
-        return False
-    for value in ("0", "70000", "abc"):
-        os.environ["BA_TEST_PORT"] = value
+    legacy_name = "BETTER_CLAUDE_TEST_PORT"
+    canonical_name = agent_env_name(legacy_name)
+    original = {
+        name: os.environ.get(name)
+        for name in (canonical_name, legacy_name)
+    }
+
+    def available_ports(count: int) -> list[int]:
+        sockets: list[socket.socket] = []
         try:
-            _env_port("BA_TEST_PORT", 8000)
-        except (RuntimeError, ValueError):
-            continue
-        print(f"  expected invalid port to fail: {value}")
-        return False
-    os.environ.pop("BA_TEST_PORT", None)
-    return True
+            for _ in range(count):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sockets.append(sock)
+                sock.bind(("127.0.0.1", 0))
+            return [int(sock.getsockname()[1]) for sock in sockets]
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    try:
+        os.environ.pop(canonical_name, None)
+        os.environ.pop(legacy_name, None)
+        default, legacy_port, canonical_port = available_ports(3)
+        if _env_port(legacy_name, default) != default:
+            print("  missing env should use default")
+            return False
+
+        os.environ[legacy_name] = str(legacy_port)
+        os.environ[canonical_name] = str(canonical_port)
+        if _env_port(legacy_name, default) != canonical_port:
+            print("  canonical env override was not used")
+            return False
+
+        os.environ.pop(canonical_name, None)
+        if _env_port(legacy_name, default) != legacy_port:
+            print("  legacy env fallback was not used")
+            return False
+
+        os.environ.pop(legacy_name, None)
+        for value in ("0", "70000", "abc"):
+            os.environ[canonical_name] = value
+            try:
+                _env_port(legacy_name, default)
+            except (RuntimeError, ValueError):
+                continue
+            print(f"  expected invalid port to fail: {value}")
+            return False
+        return True
+    finally:
+        for name, value in original.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 TESTS = [
