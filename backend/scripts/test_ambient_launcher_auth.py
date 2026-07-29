@@ -176,6 +176,64 @@ def test_ambient_launch_resolves_and_mints_an_extension_scoped_token() -> bool:
     return ok
 
 
+def test_brokered_extension_still_mints_a_token_on_a_genuine_ambient_launch() -> bool:
+    """A brokered extension_id (coordination, session-bridge, session-control,
+    marketplace) normally authenticates in-session via the runtime broker, not
+    a self-minted token -- but the runtime broker only exists inside a
+    BA-orchestrated run. On a genuinely ambient (session-less) launch there is
+    no broker to fall back to, so ambient_auth='launcher' must still mint an
+    extension-scoped token exactly as it does for a non-brokered extension.
+    Regression test: brokered-ness used to unconditionally suppress minting
+    (`manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS`, with no ambient
+    carve-out), so the shipped coordination extension's `ambient_auth:
+    "launcher"` opt-in silently resolved with no token at all -- it deleted
+    the entrypoint's ambient path in production."""
+    _record(ambient_auth="launcher")
+    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+    original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
+    extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
+    try:
+        config = extension_store.resolve_native_mcp_server_config(
+            extension_id=EXT_ID, server_name=SERVER_ID, inputs=AMBIENT_INPUTS,
+        )
+        env = dict((config or {}).get("env") or {})
+        token = env.get("BETTER_CLAUDE_INTERNAL_TOKEN") or ""
+        import extension_token_registry
+        scoped = bool(token) and extension_token_registry.resolve(token) == EXT_ID
+    finally:
+        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
+    ok = bool(config) and scoped
+    print(f"{OK if ok else FAIL} a brokered extension_id still mints an extension-scoped token "
+          f"on a genuine ambient launch (config={bool(config)}, extension_scoped={scoped})")
+    _cleanup()
+    return ok
+
+
+def test_brokered_extension_in_session_still_relies_on_the_broker() -> bool:
+    """The fix must not widen self-minting into the normal in-session path for
+    brokered extensions -- only the genuinely ambient (no app_session_id)
+    launch gets the carve-out. A session-bound resolution for a brokered
+    extension must still NOT self-mint."""
+    _record(ambient_auth="launcher")
+    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+    original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
+    extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
+    session_inputs = {**AMBIENT_INPUTS, "app_session_id": "real-session-id", "user_facing": True}
+    try:
+        config = extension_store.resolve_native_mcp_server_config(
+            extension_id=EXT_ID, server_name=SERVER_ID, inputs=session_inputs,
+        )
+        env = dict((config or {}).get("env") or {})
+        token_absent = "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
+    finally:
+        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
+    ok = bool(config) and token_absent
+    print(f"{OK if ok else FAIL} a brokered extension_id in a real session still relies on the "
+          f"broker, not a self-minted token (config={bool(config)}, token_absent={token_absent})")
+    _cleanup()
+    return ok
+
+
 def test_without_the_opt_in_ambient_resolution_is_unavailable() -> bool:
     _record(ambient_auth="")
     record = extension_store.get_extension(EXT_ID)

@@ -6648,7 +6648,10 @@ def _runtime_mcp_server_config_for_item(
     if (
         needs_identity_token(record)
         and (not _is_ambient_launch(item, inputs) or _ambient_launcher_auth(item))
-        and manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
+        and (
+            manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
+            or _is_ambient_launch(item, inputs)
+        )
     ):
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
