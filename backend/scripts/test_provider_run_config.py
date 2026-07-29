@@ -1046,10 +1046,17 @@ def t_agy_materializes_isolated_home() -> None:
     Path.home = staticmethod(lambda: real_home)  # type: ignore[method-assign]
     try:
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-        env = runner_agy._materialize_agy_run_home(run_dir, {
-            "mcp_servers": {"demo": {"command": "echo"}},
-            "skills": {"reviewer": "Review.\n"},
-        }, cwd=str(real_home))
+        env = runner_agy._materialize_agy_run_home(
+            run_dir,
+            {
+                "mcp_servers": {"demo": {"command": "echo"}},
+                "skills": {"reviewer": "Review.\n"},
+            },
+            config_root=real_cli,
+            settings={"security": {"auth": {"selectedType": "oauth-personal"}}},
+            mcp_servers={"demo": {"command": "echo"}},
+            skill_dirs={},
+        )
     finally:
         Path.home = original_home  # type: ignore[method-assign]
     overlay = Path(env["HOME"])
@@ -1886,6 +1893,9 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     agy_src = (Path(_BACKEND) / "provider_agy.py").read_text(encoding="utf-8")
+    family_runtime_src = (
+        Path(_BACKEND) / "provider_family_execution_runtime.py"
+    ).read_text(encoding="utf-8")
     check(
         '"user_facing": bool(user_facing)' in codex_src,
         "Codex provider persists user_facing into runner input",
@@ -1899,16 +1909,16 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists provider_kind into runner input",
     )
     check(
-        '"user_facing": bool(user_facing)' in agy_src,
-        "AGY provider persists user_facing into runner input",
+        "runner_input = self._build_runner_input(start_arguments)" in agy_src,
+        "AGY provider builds one authoritative runner input",
     )
     check(
         '"browser_harness_enabled": bool(browser_harness_enabled)' in codex_src,
         "Codex provider persists browser_harness_enabled into runner input",
     )
     check(
-        '"browser_harness_enabled": bool(browser_harness_enabled)' in agy_src,
-        "AGY provider persists browser_harness_enabled into runner input",
+        'runtime_policy={"runner_input": dict(runner_input)}' in family_runtime_src,
+        "AGY family artifact freezes the authoritative runner input",
     )
     check(
         '"context_strategy": user_prefs.get_context_strategy()' in codex_src,
@@ -1932,17 +1942,16 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists provisioned tool profile into runner input",
     )
     check(
-        "disabled_builtin_extensions=disabled_builtin_extensions," in agy_src
-        and 'input_payload["disabled_builtin_extensions"]' in agy_src,
-        "AGY provider persists disabled built-in extensions into runner input",
+        "payload.update(run_policy)" in agy_src,
+        "AGY runner input includes the resolved extension run policy",
     )
     check(
-        '"worker_working_mode": (worker_record or {}).get("working_mode")' in agy_src,
-        "AGY provider persists worker working mode into runner input",
+        '"worker_working_mode": worker_record.get("working_mode")' in agy_src,
+        "AGY runner input freezes worker working mode",
     )
     check(
-        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in agy_src,
-        "AGY provider persists provisioned tool profile into runner input",
+        '"provider_kind": self.KIND' in agy_src,
+        "AGY runner input self-identifies its provider kind",
     )
     claude_src = (Path(_BACKEND) / "provider_claude.py").read_text(encoding="utf-8")
     check(
@@ -2006,7 +2015,7 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         )
         update_call = (
             "payload.update(run_policy)"
-            if filename == "provider_remote.py"
+            if filename in {"provider_agy.py", "provider_remote.py"}
             else "input_payload.update(run_policy)"
         )
         check(
