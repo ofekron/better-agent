@@ -9,7 +9,6 @@ Run with:
 """
 from __future__ import annotations
 
-import json
 import shutil
 import sys
 import time
@@ -39,6 +38,7 @@ import harness_profile_store  # noqa: E402
 import installation_profile  # noqa: E402
 import main  # noqa: E402
 import working_mode  # noqa: E402
+from _test_extension import install_backend_feature  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 # Bypass the installation-setup gate (unrelated to this test) so the request
@@ -98,38 +98,24 @@ file_editor._ensure_file_edit_base = _fake_ensure_file_edit_base  # type: ignore
 
 
 def _install_and_enable_file_edit_extension() -> None:
-    """Installs + enables the builtin File Edit extension identity directly
-    via the store internals, mirroring the fixture pattern used by
-    scripts/test_builtin_extension_gates.install_gate_extension and
-    scripts/test_harness_profile_resolver_default._install_browser_harness_extension_with_headless_setting."""
-    package = TMP_HOME / "private-fixtures" / extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID
-    if package.exists():
-        shutil.rmtree(package)
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID,
-        "name": extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID,
-        "version": "1.0.0",
-        "description": extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID,
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
-        package_dir=package,
-        source={
-            "type": "better_agent_local",
-            "repo_url": str(package.parent),
-            "extension_path": package.name,
-            "ref": "",
-            "commit_sha": extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID,
-        },
-        persist=True,
+    install_backend_feature(TMP_HOME, extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID)
+
+
+def test_extension_fixture_rejects_traversal_before_deletion() -> None:
+    sentinel = TMP_HOME / "sentinel"
+    sentinel.mkdir()
+    marker = sentinel / "marker"
+    marker.write_text("preserve", encoding="utf-8")
+    try:
+        install_backend_feature(TMP_HOME, "../sentinel")
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("extension fixture accepted a traversal id")
+    check(
+        marker.read_text(encoding="utf-8") == "preserve",
+        "extension fixture rejects traversal before filesystem deletion",
     )
-    extension_store.set_enabled(extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID, True)
 
 
 def check(condition: bool, message: str) -> None:
@@ -295,6 +281,7 @@ def test_disabled_builtin_extensions_override_blocks_gate(client: TestClient) ->
 
 def main_run() -> int:
     try:
+        test_extension_fixture_rejects_traversal_before_deletion()
         with TestClient(main.app) as client:
             client.headers.update({
                 "Authorization": f"Bearer {auth.create_token('test')}",
