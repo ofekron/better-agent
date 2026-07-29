@@ -1387,21 +1387,26 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("default_session", "requirement_analysis")
     runner_src = (Path(_BACKEND) / "runner.py").read_text(encoding="utf-8")
+    claude_provider_src = (
+        Path(_BACKEND) / "provider_claude.py"
+    ).read_text(encoding="utf-8")
     check(
-        "extension_store.runtime_mcp_server_configs(" in runner_src,
-        "Claude runner gates extension MCP registration through shared runtime config",
+        "hydrate_frozen_provider_runtime_plan(" in claude_provider_src
+        and "hydrate_runner_operation_broker(" in runner_src,
+        "Claude spawn hydrates only volatile frozen-plan references",
     )
     check(
         '"session-bridge" in _active_builtin_mcp_servers' not in runner_src,
         "Claude session bridge public fallback is absent",
     )
     check(
-        "runtime_mcp_server_configs(" in runner_src,
-        "Claude runner injects installed extension MCP servers",
+        "structural_provider_runtime_plan(" in claude_provider_src,
+        "Claude provider freezes installed extension MCP servers before spawn",
     )
     check(
-        "extension_store.native_mcp_server_configs(" in runner_src,
-        "Claude runner injects native-delivery extension MCP servers",
+        "runtime_mcp_server_configs(" not in runner_src
+        and "native_mcp_server_configs(" not in runner_src,
+        "Claude runner never re-projects mutable extension MCP state",
     )
     check(
         "native_mcp_launcher_server_configs(" in (Path(_BACKEND) / "builtin_mcp_config.py").read_text(encoding="utf-8"),

@@ -165,6 +165,7 @@ def test_prepare_freezes_claude_semantics_and_retry_authority() -> None:
                 for package in launch.critical_packages
             )
             assert manifest["family"] == "claude"
+            assert runner_input["run_id"] == arguments["run_id"]
             assert runner_input["model"] == "claude-opus-4-6"
             assert runner_input["reasoning_effort"] == "high"
             assert runner_input["permission"] == {"mode": "dontAsk"}

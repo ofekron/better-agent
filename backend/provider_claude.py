@@ -810,6 +810,7 @@ class ClaudeProvider(Provider):
         claude_sdk_effort(input_payload.get("reasoning_effort"))
         integrations_enabled = installation_profile.integrations_enabled()
         input_payload.update({
+            "run_id": start_arguments["run_id"],
             "backend_url": resolved_backend_url,
             "context_strategy": user_prefs.get_context_strategy(),
             "mode": mode,
