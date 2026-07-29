@@ -1632,6 +1632,10 @@ import internal_guards  # noqa: E402
 internal_guards.configure(lambda: coordinator.bound_request_principal())
 import assistant_ui_api  # noqa: E402
 app.include_router(assistant_ui_api.router)
+import ask_ui_api  # noqa: E402
+app.include_router(ask_ui_api.router)
+import machine_nodes_api  # noqa: E402
+app.include_router(machine_nodes_api.router)
 import memory_api  # noqa: E402
 app.include_router(memory_api.router)
 import requirements_api  # noqa: E402
@@ -2517,30 +2521,6 @@ async def get_startup_tasks():
     Authoritative state lives in `startup_task_registry` (in-memory)."""
     from startup_tasks import startup_task_registry
     return startup_task_registry.list()
-
-
-def _require_machine_nodes_internal(x_internal_token: str) -> None:
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('machine-nodes'))
-
-
-@app.post("/api/internal/machine-nodes/list")
-async def internal_get_nodes(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    """Snapshot of the multi-machine topology + live connection state.
-    Returns an empty list (no topology configured) for single-machine
-    deployments rather than raising. Frontend uses this to render
-    node-status badges and the per-worker node selector."""
-    try:
-        import node_store
-        return await asyncio.to_thread(node_store.snapshot)
-    except Exception:
-        logger.exception("get_nodes failed")
-        return []
 
 
 @app.get("/api/providers")
@@ -7705,84 +7685,6 @@ async def internal_session_organization_update_session(
     return {"session_id": session_id, "organization": org}
 
 
-def _require_ask_internal(x_internal_token: str) -> None:
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.BUILTIN_ASK_EXTENSION_ID)
-
-
-@app.post("/api/internal/ask-ui/search")
-async def internal_ask_ui_search(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_ask_internal(x_internal_token)
-    body = body or {}
-    query = (body.get("query") or "").strip()
-    if not query:
-        raise HTTPException(
-            status_code=400, detail="query must be a non-empty string",
-        )
-    max_results = body.get("max_results")
-    timeout = body.get("timeout")
-    kwargs: dict = {}
-    if isinstance(max_results, int) and max_results > 0:
-        kwargs["max_results"] = max_results
-    if isinstance(timeout, (int, float)) and timeout > 0:
-        kwargs["timeout"] = float(timeout)
-    for key in ("provider_id", "model", "reasoning_effort", "node_id"):
-        val = body.get(key)
-        if isinstance(val, str) and val.strip():
-            kwargs[key] = val.strip()
-    return await session_search.search(query, **kwargs)
-
-
-@app.post("/api/internal/ask-ui/search-sessions")
-async def internal_ask_ui_search_sessions(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_ask_internal(x_internal_token)
-    body = body or {}
-    query = (body.get("query") or "").strip()
-    if not query:
-        raise HTTPException(
-            status_code=400, detail="query must be a non-empty string",
-        )
-    max_results = body.get("max_results")
-    timeout = body.get("timeout")
-    kwargs: dict = {}
-    if isinstance(max_results, int) and max_results > 0:
-        kwargs["max_results"] = max_results
-    if isinstance(timeout, (int, float)) and timeout > 0:
-        kwargs["timeout"] = float(timeout)
-    for key in ("provider_id", "model", "reasoning_effort", "node_id", "cwd"):
-        val = body.get(key)
-        if isinstance(val, str) and val.strip():
-            kwargs[key] = val.strip()
-    folder = body.get("folder")
-    if isinstance(folder, str) and folder.strip():
-        kwargs["folder_id"] = folder.strip()
-    raw_tags = body.get("tags")
-    if isinstance(raw_tags, list):
-        cleaned_tags = [t for t in raw_tags if isinstance(t, str) and t.strip()]
-        if cleaned_tags:
-            kwargs["tag_ids"] = cleaned_tags
-    result = await session_search.run_search_sessions_session(query, **kwargs)
-    return await asyncio.to_thread(
-        session_search.canonical_search_response, result,
-    )
-
-
-@app.post("/api/internal/ask-ui/ensure")
-async def internal_ask_ui_ensure(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_ask_internal(x_internal_token)
-    return await session_search.ensure_ask_session()
-
-
 def _tree_has_loaded_events(tree: dict) -> bool:
     stack = [tree]
     while stack:
@@ -8526,28 +8428,6 @@ async def _node_offline_error(session: Optional[dict]) -> Optional[str]:
             f"onto the primary version and resend."
         )
     return await _node_cwd_error(node_id, str((session or {}).get("cwd") or ""))
-
-
-def _local_node_id_or_primary() -> str:
-    """Resolve the local node's id without raising. Single-machine
-    deploys (no topology.yaml) get the legacy `"primary"` sentinel."""
-    try:
-        from topology import local_node_id as _lid
-        return _lid()
-    except Exception:
-        return "primary"
-
-
-@app.post("/api/internal/machine-nodes/local-node-id")
-async def internal_get_local_node_id(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    """Tells the frontend which node snapshot entry corresponds
-    to "this backend's host" — used to render the "(host)"
-    badge in pickers and to compute `is_local` for default-pick rules."""
-    return {"node_id": _local_node_id_or_primary()}
 
 
 @app.post("/api/sessions")
@@ -18076,124 +17956,6 @@ async def internal_deny_pending_approval(
 # flow above. All three are gated by the standard `/api/*` auth middleware,
 # so only an authenticated operator can act.
 # ============================================================================
-
-@app.post("/api/internal/machine-nodes/pending")
-async def internal_list_pending_nodes(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    """Worker-nodes currently awaiting registration approval. Used by the
-    frontend on mount / WS reconnect to (re)render the approval popup.
-
-    Secrets never leave the server — only the display fingerprint does."""
-    import node_link
-    with perf.timed("internal.machine_nodes.pending"):
-        pending = node_link.public_pending_nodes_cached()
-        if pending is None:
-            pending = await asyncio.to_thread(node_link.public_pending_nodes)
-        return {
-            "pending_nodes": pending,
-        }
-
-
-@app.post("/api/internal/machine-nodes/approve")
-async def internal_approve_pending_node(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    """Approve a node registration: persist it to the registry (so future
-    reconnects auto-authenticate with its secret) and, if the node is
-    holding its WS open right now, let it connect immediately."""
-    node_id = (body or {}).get("node_id")
-    if not isinstance(node_id, str) or not node_id:
-        raise HTTPException(status_code=400, detail="node_id is required")
-    import node_link
-    rec, reason = await node_link.approve_registration(node_id)
-    if reason == "missing":
-        raise HTTPException(status_code=404, detail=t("error.node_request_not_found"))
-    if reason == "expired":
-        raise HTTPException(status_code=410, detail=t("error.node_request_expired"))
-    if reason == "already_resolved":
-        return {"status": rec.get("status"), "record": node_link._public_rec(rec), "idempotent": True}
-    return {"status": "approved", "record": node_link._public_rec(rec)}
-
-
-@app.post("/api/internal/machine-nodes/deny")
-async def internal_deny_pending_node(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    node_id = (body or {}).get("node_id")
-    if not isinstance(node_id, str) or not node_id:
-        raise HTTPException(status_code=400, detail="node_id is required")
-    import node_link
-    rec, reason = await node_link.deny_registration(node_id)
-    if reason == "missing":
-        raise HTTPException(status_code=404, detail=t("error.node_request_not_found"))
-    if reason == "expired":
-        raise HTTPException(status_code=410, detail=t("error.node_request_expired"))
-    if reason == "already_resolved":
-        return {"status": rec.get("status"), "record": node_link._public_rec(rec), "idempotent": True}
-    return {"status": "denied", "record": node_link._public_rec(rec)}
-
-
-@app.post("/api/internal/machine-nodes/revoke")
-async def internal_revoke_node(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    node_id = (body or {}).get("node_id")
-    if not isinstance(node_id, str) or not node_id:
-        raise HTTPException(status_code=400, detail="node_id is required")
-    """Revoke a node: drops it from the dynamic registry or static
-    topology.yaml. Cleans up node_store state and fires WS broadcast."""
-    import node_registry_store
-    import node_store
-    import topology
-
-    if node_registry_store.remove(node_id):
-        await node_store.forget(node_id)
-        return {"status": "revoked", "node_id": node_id}
-
-    try:
-        removed = topology.remove_node(node_id)
-    except topology.TopologyError:
-        raise HTTPException(
-            status_code=500,
-            detail="topology.yaml is malformed — cannot delete node",
-        )
-    if not removed:
-        raise HTTPException(status_code=404, detail=t("error.node_request_not_found"))
-
-    await node_store.forget(node_id)
-    return {"status": "revoked", "node_id": node_id}
-
-
-@app.post("/api/internal/machine-nodes/restart")
-async def internal_restart_node(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_machine_nodes_internal(x_internal_token)
-    node_id = (body or {}).get("node_id")
-    if not isinstance(node_id, str) or not node_id:
-        raise HTTPException(status_code=400, detail="node_id is required")
-    """Tell a connected worker-node to restart its process."""
-    import node_link
-
-    try:
-        await node_link.send_restart(node_id)
-    except node_link.NodeOffline:
-        raise HTTPException(
-            status_code=409,
-            detail="Node is not connected",
-        )
-    return {"status": "restart_sent", "node_id": node_id}
-
 
 @app.get("/api/version")
 async def version():
