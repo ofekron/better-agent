@@ -62,7 +62,9 @@ def test_node_credential_session_subprocess_round_trip(tmp_path) -> None:
     }
     code = (
         "import json, credential_session_client as client; "
-        "stored = client.request('store', 'provider-a', value='secret-a'); "
+        "stored = client.request("
+        "'compare_set', 'provider-a', expected_value='', value='secret-a'"
+        "); "
         "read = client.request('read', 'provider-a'); "
         "print(json.dumps({'stored': stored, 'read': read}))"
     )
@@ -80,7 +82,7 @@ def test_node_credential_session_subprocess_round_trip(tmp_path) -> None:
     finally:
         session.stop()
     assert json.loads(process.stdout) == {
-        "stored": {"status": "available"},
+        "stored": {"status": "available", "applied": True},
         "read": {"status": "available", "value": "secret-a"},
     }
 

@@ -217,7 +217,7 @@ class ProviderCredentialBroker:
     ) -> dict[str, str | bool]:
         try:
             with self._keychain_lock:
-                current = self._credential_store.read(provider_id)
+                current = self._credential_store.read(provider_id) or ""
                 if current != expected_value:
                     status = "available" if current else "missing"
                     self._remember(
