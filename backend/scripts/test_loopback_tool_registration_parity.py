@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import _test_home
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-_test_home.isolate("bc-test-loopback-tool-parity-")
+_TEST_HOME = _test_home.TestHome.acquire("bc-test-loopback-tool-parity-")
+atexit.register(_TEST_HOME.release)
 os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 import runner  # noqa: E402
@@ -24,11 +27,65 @@ def _tool_name(tool) -> str:
     return str(getattr(tool, "name", "") or getattr(tool, "__name__", ""))
 
 
+def _runtime_stub():
+    return SimpleNamespace(
+        capabilities=SimpleNamespace(
+            installation_decisions={
+                "capabilities": {"integrations_enabled": True},
+            },
+        ),
+    )
+
+
+def _successful_turn() -> dict:
+    return {
+        "discovered_sid": None,
+        "total_usage": None,
+        "error": None,
+        "cancelled": False,
+        "sdk_output_parts": [],
+        "final_success": True,
+        "context_window": None,
+        "outstanding_tasks": set(),
+    }
+
+
+def _claude_inputs(*, bare: bool, team: bool = False) -> dict:
+    return {
+        "prompt": "reply",
+        "images": [],
+        "files": [],
+        "cwd": "/tmp",
+        "model": "sonnet",
+        "permission": {"mode": "bypassPermissions"},
+        "session_id": None,
+        "mode": "native",
+        "app_session_id": "sender-1",
+        "disallowed_tools": [
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            *TIMER_TOOLS,
+            *BACKGROUND_WORK_TOOLS,
+        ],
+        "setting_sources": [],
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "tok",
+        "fork": False,
+        "supervised": False,
+        "browser_harness_enabled": False,
+        "user_facing": False,
+        "bare_config": bare,
+        "team_orchestration_enabled": team,
+    }
+
+
 def test_claude_native_non_user_registers_loopback_tools() -> None:
     captured_servers: dict[str, list[str]] = {}
     original_create_server = runner.create_sdk_mcp_server
     original_client = runner.ClaudeSDKClient
     original_run_one_turn = runner._run_one_turn
+    original_runtime_capabilities = runner._runtime_capabilities
 
     def fake_create_sdk_mcp_server(*, name: str, version: str, tools: list):
         captured_servers[name] = [_tool_name(tool) for tool in tools]
@@ -45,52 +102,29 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
             return None
 
     async def fake_run_one_turn(**_kwargs):
-        return {
-            "discovered_sid": None,
-            "total_usage": None,
-            "error": None,
-            "cancelled": False,
-            "sdk_output_parts": [],
-            "final_success": True,
-            "context_window": None,
-            "outstanding_tasks": set(),
-        }
+        return _successful_turn()
+
+    def fake_runtime_capabilities(_run_dir, _inputs, _runtime):
+        return ({"mcp_servers": []}, {}, {}, "/fake/claude")
 
     runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
     runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
+    runner._runtime_capabilities = fake_runtime_capabilities  # type: ignore[assignment]
     try:
-        run_dir = Path(tempfile.mkdtemp(prefix="claude-loopback-run-"))
-        code = asyncio.run(runner._run(run_dir, {
-            "prompt": "reply",
-            "images": [],
-            "files": [],
-            "cwd": "/tmp",
-            "model": "sonnet",
-            "permission": {"mode": "bypassPermissions"},
-            "session_id": None,
-            "mode": "native",
-            "app_session_id": "sender-1",
-            "disallowed_tools": [
-                "AskUserQuestion",
-                "EnterPlanMode",
-                "ExitPlanMode",
-                *TIMER_TOOLS,
-                *BACKGROUND_WORK_TOOLS,
-            ],
-            "setting_sources": [],
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "tok",
-            "fork": False,
-            "supervised": False,
-            "browser_harness_enabled": False,
-            "user_facing": False,
-            "bare_config": False,
-        }))
+        with tempfile.TemporaryDirectory(prefix="claude-loopback-run-") as raw:
+            code = asyncio.run(
+                runner._run(
+                    Path(raw),
+                    _claude_inputs(bare=False, team=True),
+                    _runtime_stub(),
+                ),
+            )
     finally:
         runner.create_sdk_mcp_server = original_create_server  # type: ignore[assignment]
         runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
+        runner._runtime_capabilities = original_runtime_capabilities  # type: ignore[assignment]
 
     assert code == 0
     assert "mssg" in captured_servers["communicate"]
@@ -109,9 +143,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     original_create_server = runner.create_sdk_mcp_server
     original_client = runner.ClaudeSDKClient
     original_run_one_turn = runner._run_one_turn
-    original_runtime_configs = runner.extension_store.runtime_mcp_server_configs
-    original_native_configs = runner.extension_store.native_mcp_server_configs
-    original_launcher_configs = runner.extension_store.native_mcp_launcher_server_configs
+    original_runtime_capabilities = runner._runtime_capabilities
     original_mcp_list_tools = runner._mcp_list_tools
     original_mcp_call_tool = runner._mcp_call_tool
 
@@ -122,7 +154,6 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
 
     class FakeClient:
         def __init__(self, *, options):
-            self.options = options
             captured_options["mcp_servers"] = options.mcp_servers
 
         async def connect(self):
@@ -132,40 +163,42 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
             return None
 
     async def fake_run_one_turn(**_kwargs):
-        return {
-            "discovered_sid": None,
-            "total_usage": None,
-            "error": None,
-            "cancelled": False,
-            "sdk_output_parts": [],
-            "final_success": True,
-            "context_window": None,
-            "outstanding_tasks": set(),
-        }
+        return _successful_turn()
 
-    def fake_runtime_configs(_inputs, *, user_facing: bool, bare: bool):
-        assert user_facing is False
-        assert bare is True
-        return {"runtime-owned": {"type": "runtime"}}
-
-    def fake_native_configs(_inputs, *, user_facing: bool, bare: bool):
-        assert user_facing is False
-        assert bare is True
-        return {
-            "testape": {
-                "command": "/fake/testape-mcp",
-                "args": [],
-                "env": {"BETTER_CLAUDE_EXTENSION_ID": "ofek.testape", "BETTER_CLAUDE_BARE_CONFIG": "1"},
+    def fake_runtime_capabilities(_run_dir, _inputs, _runtime):
+        return (
+            {
+                "mcp_servers": [
+                    {
+                        "name": "runtime-owned",
+                        "config": {
+                            "runtime": {"type": "runtime"},
+                            "native": {
+                                "command": "/fake/native-runtime-owned",
+                                "args": [],
+                                "env": {},
+                            },
+                        },
+                    },
+                    {
+                        "name": "testape",
+                        "config": {
+                            "native": {
+                                "command": "/fake/testape-mcp",
+                                "args": [],
+                                "env": {
+                                    "BETTER_CLAUDE_EXTENSION_ID": "ofek.testape",
+                                    "BETTER_CLAUDE_BARE_CONFIG": "1",
+                                },
+                            },
+                        },
+                    },
+                ],
             },
-            "runtime-owned": {
-                "command": "/fake/native-runtime-owned",
-                "args": [],
-                "env": {},
-            },
-        }
-
-    def fake_launcher_configs(_inputs, *, user_facing: bool, bare: bool):
-        raise AssertionError("bare Claude bridge must not use launcher configs for tools/list")
+            {},
+            {},
+            "/fake/claude",
+        )
 
     async def fake_mcp_list_tools(server_name: str, config: dict):
         assert server_name in {"testape", "runtime-owned"}
@@ -196,47 +229,31 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
     runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
-    runner.extension_store.runtime_mcp_server_configs = fake_runtime_configs  # type: ignore[method-assign]
-    runner.extension_store.native_mcp_server_configs = fake_native_configs  # type: ignore[method-assign]
-    runner.extension_store.native_mcp_launcher_server_configs = fake_launcher_configs  # type: ignore[method-assign]
+    runner._runtime_capabilities = fake_runtime_capabilities  # type: ignore[assignment]
     runner._mcp_list_tools = fake_mcp_list_tools  # type: ignore[assignment]
     runner._mcp_call_tool = fake_mcp_call_tool  # type: ignore[assignment]
     try:
-        run_dir = Path(tempfile.mkdtemp(prefix="claude-bare-extension-mcp-run-"))
-        code = asyncio.run(runner._run(run_dir, {
-            "prompt": "reply",
-            "images": [],
-            "files": [],
-            "cwd": "/tmp",
-            "model": "sonnet",
-            "permission": {"mode": "bypassPermissions"},
-            "session_id": None,
-            "mode": "native",
-            "app_session_id": "sender-1",
-            "disallowed_tools": [
-                "AskUserQuestion",
-                "EnterPlanMode",
-                "ExitPlanMode",
-                *TIMER_TOOLS,
-                *BACKGROUND_WORK_TOOLS,
-            ],
-            "setting_sources": [],
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "tok",
-            "fork": False,
-            "supervised": False,
-            "browser_harness_enabled": False,
-            "user_facing": False,
-            "bare_config": True,
-        }))
-        call_result = asyncio.run(captured_tools["testape"][0].handler({"task": "check", "repo_path": "/repo"}))
+        with tempfile.TemporaryDirectory(
+            prefix="claude-bare-extension-mcp-run-",
+        ) as raw:
+            code = asyncio.run(
+                runner._run(
+                    Path(raw),
+                    _claude_inputs(bare=True),
+                    _runtime_stub(),
+                ),
+            )
+        call_result = asyncio.run(
+            captured_tools["testape"][0].handler({
+                "task": "check",
+                "repo_path": "/repo",
+            }),
+        )
     finally:
         runner.create_sdk_mcp_server = original_create_server  # type: ignore[assignment]
         runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
-        runner.extension_store.runtime_mcp_server_configs = original_runtime_configs  # type: ignore[method-assign]
-        runner.extension_store.native_mcp_server_configs = original_native_configs  # type: ignore[method-assign]
-        runner.extension_store.native_mcp_launcher_server_configs = original_launcher_configs  # type: ignore[method-assign]
+        runner._runtime_capabilities = original_runtime_capabilities  # type: ignore[assignment]
         runner._mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]
         runner._mcp_call_tool = original_mcp_call_tool  # type: ignore[assignment]
 
