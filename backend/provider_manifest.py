@@ -34,11 +34,8 @@ class ProviderSpec:
     runner_module: str | None
     # Which crash-recovery replay reader run_recovery uses: "claude" (session
     # jsonl + subagent splice), "codex" (rollout + context_window), or
-    # "session_events" (session_events.jsonl, Claude-shaped). NOTE: fugu is
-    # codex-based but currently recovers via the "claude" reader (it writes
-    # provider_kind="fugu", which historically fell to the else branch). This
-    # preserves that behavior; it is a pre-existing latent bug, flagged for a
-    # separate fix — do not "correct" it here without recovery test coverage.
+    # "session_events" (session_events.jsonl, Claude-shaped). Fugu uses the
+    # Codex rollout reader because its native runner is runner_codex.
     recovery_family: str
     # Has an installable external CLI (drives the setup wizard). openai is
     # in-process (no CLI); fugu has no verified install command yet — both
