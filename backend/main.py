@@ -20391,12 +20391,6 @@ async def websocket_chat(websocket: WebSocket):
                     await _send_message_error(_file_error)
                     continue
 
-                # Sample the active provider RIGHT NOW so the next CLI spawn
-                # inherits the right ANTHROPIC_API_KEY / BASE_URL / CONFIG_DIR.
-                # Switching provider in the UI between turns must take effect
-                # on the very next turn without a backend restart.
-                await asyncio.to_thread(config_store.apply_env_vars)
-
                 model = msg.get("model")
                 cwd = msg.get("cwd", os.path.expanduser("~"))
                 app_session_id = msg.get("app_session_id")
@@ -20859,6 +20853,10 @@ async def websocket_chat(websocket: WebSocket):
                     images_count=len(images),
                     orchestration_mode=orchestration_mode,
                 )
+                # Sample the active provider after the acceptance fact so
+                # environment refresh cannot delay the running projection.
+                # This remains before durable admission and CLI spawn.
+                await asyncio.to_thread(config_store.apply_env_vars)
                 params = {
                     "prompt": prompt,
                     "app_session_id": app_session_id,
