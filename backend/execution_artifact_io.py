@@ -14,12 +14,32 @@ from execution_template import (
 _REQUIRED_INPUT_PROJECTION = frozenset({
     "app_session_id",
     "cwd",
+    "execution_fingerprint",
     "mode",
     "model",
     "prompt",
     "provider_id",
     "session_id",
 })
+
+
+def bind_execution_input(
+    artifact: ExecutionArtifact,
+    input_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if type(input_payload) is not dict:
+        raise ExecutionAuthorityError("run input projection must be an object")
+    if "execution_fingerprint" in input_payload:
+        raise ExecutionAuthorityError(
+            "run input already contains execution authority",
+        )
+    bound = dict(input_payload)
+    bound.setdefault("provider_id", artifact.provider_id)
+    bound["execution_fingerprint"] = artifact.fingerprint
+    validate_execution_input_projection(artifact, bound)
+    return bound
+
+
 def validate_execution_input_projection(
     artifact: ExecutionArtifact,
     input_payload: Mapping[str, Any],
@@ -28,7 +48,18 @@ def validate_execution_input_projection(
         raise ExecutionAuthorityError("run input projection must be an object")
     if _REQUIRED_INPUT_PROJECTION - set(input_payload):
         raise ExecutionAuthorityError("run input projection is incomplete")
-    validate_recovery_input(artifact, input_payload)
+    if input_payload["execution_fingerprint"] != artifact.fingerprint:
+        raise ExecutionAuthorityError(
+            "run input conflicts with execution authority: fingerprint",
+        )
+    validate_recovery_input(
+        artifact,
+        {
+            key: input_payload[key]
+            for key in _REQUIRED_INPUT_PROJECTION
+            if key != "execution_fingerprint"
+        },
+    )
 
 
 def load_execution_artifact(

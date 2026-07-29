@@ -1047,7 +1047,12 @@ class ClaudeProvider(Provider):
                 for name, path in capabilities.skill_dirs.items()
             },
         }
-        _atomic_write_json(run_dir / "input.json", input_payload)
+        from execution_artifact_io import bind_execution_input
+
+        _atomic_write_json(
+            run_dir / "input.json",
+            bind_execution_input(_execution.artifact, input_payload),
+        )
         mode = input_payload["mode"]
         app_session_id = input_payload["app_session_id"]
         cwd = input_payload["cwd"]

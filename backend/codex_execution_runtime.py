@@ -16,10 +16,13 @@ from codex_execution_common import (
     sha256_fd,
 )
 from codex_execution_identity import FileIdentity
+from execution_artifact_io import (
+    load_execution_artifact,
+    validate_execution_input_projection,
+)
 from execution_template import (
     ExecutionArtifact,
     ExecutionAuthorityError,
-    validate_recovery_input,
 )
 
 
@@ -633,23 +636,14 @@ def restore_codex_runner_inputs(
 ) -> tuple[dict[str, Any], CodexExecutionContract]:
     if type(hydrated_input) is not dict:
         raise ExecutionAuthorityError("Codex runner input must be an object")
-    artifact_path = run_dir / "execution.json"
-    if artifact_path.is_symlink():
-        raise ExecutionAuthorityError("Codex execution authority is invalid")
-    try:
-        encoded = json.loads(artifact_path.read_text(encoding="utf-8"))
-        artifact = ExecutionArtifact.from_dict(encoded)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ExecutionAuthorityError(
-            "Codex execution authority is unreadable",
-        ) from exc
+    artifact = load_execution_artifact(run_dir, validate_input=False)
+    validate_execution_input_projection(artifact, hydrated_input)
     if artifact.provider_kind not in {"codex", "fugu"}:
         raise ExecutionAuthorityError("Codex execution provider is invalid")
     if set(hydrated_input) & _LEGACY_CODEX_AUTHORITY_KEYS:
         raise ExecutionAuthorityError(
             "runner input contains a second Codex authority",
         )
-    validate_recovery_input(artifact, hydrated_input)
     policy = codex_runtime_policy(artifact)
     contract = codex_contract_from_artifact(artifact)
     volatile = {

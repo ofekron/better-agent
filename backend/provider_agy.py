@@ -17,6 +17,7 @@ import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from env_compat import get_env
+from execution_artifact_io import bind_execution_input
 from provider import build_better_agent_run_env, schedule_loop_task
 from provider_family_execution_runtime import (
     cleanup_failed_family_execution,
@@ -368,7 +369,12 @@ class AgyProvider(SessionEventsProvider):
                 for name, path in capabilities.skill_dirs.items()
             },
         }
-        (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
+        from runs_dir import atomic_write_json
+
+        atomic_write_json(
+            run_dir / "input.json",
+            bind_execution_input(_execution.artifact, input_payload),
+        )
 
         containment().create(run_id)
         stdout_fp = (run_dir / "stdout.log").open("ab")

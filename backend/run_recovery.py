@@ -17,10 +17,11 @@ from typing import Optional
 from weakref import WeakKeyDictionary
 
 import perf
+from execution_artifact_io import validate_execution_input_projection
 from execution_template import (
     ExecutionArtifact,
+    ExecutionAuthorityError,
     restore_prepared_execution,
-    validate_recovery_input,
     validate_recovery_sessions,
 )
 from provider import RecoveredPopen, live_recovery_pid, start_prepared_run
@@ -3001,17 +3002,29 @@ async def _retry_recovered_run(
         original_artifact = ExecutionArtifact.from_dict(
             json.loads(artifact_path.read_text(encoding="utf-8")),
         )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"recovered run {desc.get('run_id')} has no valid execution authority",
-        ) from exc
-    validate_recovery_input(original_artifact, inp)
+        validate_execution_input_projection(original_artifact, inp)
+        validate_recovery_sessions(
+            original_artifact,
+            routing_session_id=app_sid,
+            persist_session_id=persist_sid,
+        )
+    except (
+        ExecutionAuthorityError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        logger.exception(
+            "recovered run %s has no valid execution authority",
+            desc.get("run_id"),
+        )
+        await _mark_reconciled_terminal_async(
+            str(desc.get("run_id") or run_dir.name),
+            desc,
+            "invalid execution authority",
+        )
+        return
     original_arguments = original_artifact.template.arguments()
-    validate_recovery_sessions(
-        original_artifact,
-        routing_session_id=app_sid,
-        persist_session_id=persist_sid,
-    )
 
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()

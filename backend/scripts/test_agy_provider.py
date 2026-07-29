@@ -193,7 +193,12 @@ def _run_prepared_agy(
     atomic_write_json(run_dir / "execution.json", execution.artifact.to_dict())
     install_family_execution_payload(execution, run_dir)
     runner_input = execution.artifact.runtime_policy["runner_input"]
-    atomic_write_json(run_dir / "input.json", runner_input)
+    from execution_artifact_io import bind_execution_input
+
+    atomic_write_json(
+        run_dir / "input.json",
+        bind_execution_input(execution.artifact, runner_input),
+    )
     _launch, capabilities = resolve_family_execution_payload(
         execution.artifact,
         run_dir,

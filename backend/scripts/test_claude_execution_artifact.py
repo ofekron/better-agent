@@ -22,6 +22,7 @@ TEST_HOME = _test_home.TestHome.acquire(
 
 import config_store  # noqa: E402
 from codex_execution_identity import file_identity_to_dict  # noqa: E402
+from execution_artifact_io import bind_execution_input  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
 from provider_claude_execution import (  # noqa: E402
     attest_embedded_claude_sdk,
@@ -227,7 +228,10 @@ def test_run_local_payload_rejects_tamper_and_materializes_sdk_cli() -> None:
             )
             atomic_write_json(
                 run_dir / "input.json",
-                prepared.artifact.runtime_policy["runner_input"],
+                bind_execution_input(
+                    prepared.artifact,
+                    prepared.artifact.runtime_policy["runner_input"],
+                ),
             )
             provider._install_execution_payloads(prepared, run_dir)
 
@@ -511,7 +515,10 @@ def test_frozen_runner_is_the_explicit_sdk_authority() -> None:
             )
             atomic_write_json(
                 run_dir / "input.json",
-                prepared.artifact.runtime_policy["runner_input"],
+                bind_execution_input(
+                    prepared.artifact,
+                    prepared.artifact.runtime_policy["runner_input"],
+                ),
             )
             provider._install_execution_payloads(prepared, run_dir)
             runtime = restore_family_runner_runtime(run_dir)

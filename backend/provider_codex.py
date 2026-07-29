@@ -719,7 +719,12 @@ class CodexProvider(Provider):
         input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
             input_payload, app_session_id,
         )
-        _atomic_write_json(run_dir / "input.json", input_payload)
+        from execution_artifact_io import bind_execution_input
+
+        _atomic_write_json(
+            run_dir / "input.json",
+            bind_execution_input(_execution.artifact, input_payload),
+        )
 
         from containment import containment
         containment().create(run_id)

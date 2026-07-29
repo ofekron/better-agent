@@ -218,7 +218,7 @@ def resolve_family_execution_payload(
 def restore_family_runner_runtime(
     run_dir: Path,
 ) -> FamilyExecutionRuntime:
-    artifact = load_execution_artifact(run_dir, validate_input=False)
+    artifact = load_execution_artifact(run_dir, validate_input=True)
     launch, capabilities = resolve_family_execution_payload(
         artifact,
         run_dir,
@@ -232,6 +232,7 @@ def restore_family_runner_runtime(
     runner_input = artifact.runtime_policy.get("runner_input")
     if type(runner_input) is not dict or type(input_projection) is not dict:
         raise ExecutionContractError("frozen family runner input is unavailable")
+    input_projection.pop("execution_fingerprint", None)
     if input_projection != runner_input:
         raise ExecutionContractError(
             "family runner input conflicts with execution authority",

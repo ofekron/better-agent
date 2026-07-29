@@ -233,6 +233,8 @@ def test_nested_contract_must_match_enclosing_artifact() -> None:
 
 
 def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
+    from execution_artifact_io import bind_execution_input
+
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         run_dir = root / "run"
@@ -250,14 +252,14 @@ def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
             json.dumps(prepared.artifact.to_dict()),
             encoding="utf-8",
         )
-        poisoned = {
+        poisoned = bind_execution_input(prepared.artifact, {
             **prepared.artifact.template.arguments(),
-            "model": "poisoned-model",
-            "provider_kind": "fugu",
             "codex_config_overrides": ['model_provider="sakana"'],
             "internal_token": "volatile-token",
             "backend_url": "http://127.0.0.1:8000",
-        }
+        })
+        poisoned["model"] = "poisoned-model"
+        poisoned["provider_kind"] = "fugu"
 
         try:
             restore_codex_runner_inputs(run_dir, poisoned)
@@ -266,11 +268,11 @@ def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
         else:
             raise AssertionError("poisoned runner input was accepted")
 
-        valid = {
+        valid = bind_execution_input(prepared.artifact, {
             **prepared.artifact.template.arguments(),
             "internal_token": "volatile-token",
             "backend_url": "http://127.0.0.1:8000",
-        }
+        })
         restored, contract = restore_codex_runner_inputs(run_dir, valid)
         assert restored["model"] == "gpt-5.5"
         assert restored["permission"] == prepared.artifact.runtime_policy["permission"]

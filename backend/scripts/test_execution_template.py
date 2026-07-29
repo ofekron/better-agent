@@ -26,6 +26,10 @@ from execution_template import (  # noqa: E402
     validate_recovery_input,
     validate_recovery_sessions,
 )
+from execution_artifact_io import (  # noqa: E402
+    bind_execution_input,
+    load_execution_artifact,
+)
 from provider import Provider  # noqa: E402
 import runs_dir  # noqa: E402
 
@@ -198,9 +202,6 @@ def test_recovery_input_is_diagnostic_only_and_must_match_artifact() -> None:
         ("model", "different-model"),
         ("reasoning_effort", "low"),
         ("mode", "manager"),
-        ("provider_run_config", {}),
-        ("capability_contexts", []),
-        ("resolved_harness_run_config", {}),
         ("provider_id", "other-provider"),
     ):
         legacy = dict(original)
@@ -210,6 +211,52 @@ def test_recovery_input_is_diagnostic_only_and_must_match_artifact() -> None:
         except ExecutionAuthorityError:
             continue
         raise AssertionError(f"recovery accepted mutated {key}")
+
+
+def test_run_input_is_bound_to_exact_execution_authority() -> None:
+    first = prepare_execution(_record(), **_arguments()).artifact
+    second = prepare_execution(
+        _record(revision=5),
+        **{
+            **_arguments(),
+            "run_id": "504f29c0-8dd6-4cd9-8679-54a56943250c",
+        },
+    ).artifact
+    payload = bind_execution_input(first, first.template.arguments())
+    assert payload["execution_fingerprint"] == first.fingerprint
+    assert "provider_generation" not in payload
+    assert "provider_revision" not in payload
+
+    with tempfile.TemporaryDirectory() as raw:
+        run_dir = Path(raw)
+        runs_dir.atomic_write_json(
+            run_dir / "execution.json",
+            first.to_dict(),
+        )
+        runs_dir.atomic_write_json(run_dir / "input.json", payload)
+        assert load_execution_artifact(
+            run_dir,
+            validate_input=True,
+        ) == first
+
+        stale = bind_execution_input(second, second.template.arguments())
+        runs_dir.atomic_write_json(run_dir / "input.json", stale)
+        try:
+            load_execution_artifact(run_dir, validate_input=True)
+        except ExecutionAuthorityError:
+            pass
+        else:
+            raise AssertionError("cross-run input authority was accepted")
+
+        missing = dict(payload)
+        missing.pop("execution_fingerprint")
+        runs_dir.atomic_write_json(run_dir / "input.json", missing)
+        try:
+            load_execution_artifact(run_dir, validate_input=True)
+        except ExecutionAuthorityError:
+            pass
+        else:
+            raise AssertionError("unbound legacy input authority was accepted")
 
 
 def test_retry_preserves_authority_and_original_frozen_inputs() -> None:
@@ -628,6 +675,7 @@ TESTS = (
     test_prepared_execution_is_detached_secret_free_and_authority_bound,
     test_artifact_round_trip_is_strict_and_fingerprint_bound,
     test_recovery_input_is_diagnostic_only_and_must_match_artifact,
+    test_run_input_is_bound_to_exact_execution_authority,
     test_retry_preserves_authority_and_original_frozen_inputs,
     test_provider_start_run_is_shared_final_template,
     test_provider_boundary_uses_frozen_execution_without_blocking_config_replace,

@@ -1,5 +1,6 @@
 import contextlib
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -11,6 +12,7 @@ _test_home.isolate("bc_test_retarget_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_recovery  # noqa: E402
+from execution_artifact_io import bind_execution_input  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
 from provider_agy import AgyProvider  # noqa: E402
 from provider_execution_contract import provider_family_contract  # noqa: E402
@@ -72,6 +74,13 @@ def _write_execution_artifact(
         provisioned_tool_profile=payload.get("provisioned_tool_profile", ""),
     )
     atomic_write_json(run_dir / "execution.json", prepared.artifact.to_dict())
+    atomic_write_json(
+        run_dir / "input.json",
+        bind_execution_input(prepared.artifact, {
+            **prepared.artifact.template.arguments(),
+            **payload,
+        }),
+    )
 
 
 def check(name: str, ok: bool) -> None:
@@ -456,7 +465,6 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "disabled_builtin_extensions": ["recovery.disabled"],
         "provisioned_tool_profile": "",
     }
-    atomic_write_json(run_dir / "input.json", input_payload)
     _write_execution_artifact(run_dir, run_id, input_payload, kind="remote")
     fake_sm = _FakeSessionManager({
         "agent_session_id": "provider-sid",
@@ -582,6 +590,34 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     )
 
 
+def test_unbound_recovered_input_is_terminal() -> None:
+    print("T7legacy unbound recovered input is terminal")
+    run_id = "retry-unbound-legacy"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"prompt": "legacy retry", "cwd": "/tmp"}
+    _write_execution_artifact(run_dir, run_id, payload)
+    bound = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+    bound.pop("execution_fingerprint")
+    atomic_write_json(run_dir / "input.json", bound)
+
+    asyncio.run(run_recovery._retry_recovered_run(
+        coordinator=None,
+        provider=None,
+        desc={"run_id": run_id},
+        run_dir=run_dir,
+        app_sid="sid",
+        persist_sid="sid",
+        msg_id="msg-1",
+        recovering_msg_id="msg-1",
+    ))
+
+    check(
+        "legacy run authority is terminally classified",
+        (run_dir / "reconciled.marker").exists(),
+    )
+
+
 def test_family_retry_clones_exact_runtime_capabilities() -> None:
     print("T7a family retry clones exact runtime capabilities")
     run_id = "family-retry-capabilities"
@@ -658,6 +694,9 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
                 **input_payload,
                 "run_id": run_id,
                 "session_id": "agy-provider-sid",
+                "mode": "native",
+                "app_session_id": "sid",
+                "provider_id": provider_record["id"],
             },
         },
         provider_contract=provider_family_contract(
@@ -668,7 +707,13 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
             },
         ),
     )
-    atomic_write_json(run_dir / "input.json", input_payload)
+    atomic_write_json(
+        run_dir / "input.json",
+        bind_execution_input(
+            prepared.artifact,
+            prepared.artifact.runtime_policy["runner_input"],
+        ),
+    )
     atomic_write_json(run_dir / "execution.json", prepared.artifact.to_dict())
     stage_family_runtime_capabilities(run_id, capabilities)
     install_staged_family_runtime_capabilities(
@@ -833,7 +878,6 @@ def test_recovered_retry_cancelled_during_backoff_does_not_spawn() -> None:
         "prompt": "do not retry me",
         "cwd": "/tmp",
     }
-    atomic_write_json(run_dir / "input.json", input_payload)
     _write_execution_artifact(run_dir, run_id, input_payload)
     fake_sm = _FakeSessionManager({
         "messages": [
@@ -918,7 +962,6 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
         "prompt": "retry safely",
         "cwd": "/tmp",
     }
-    atomic_write_json(run_dir / "input.json", input_payload)
     _write_execution_artifact(run_dir, run_id, input_payload)
 
     class _Run:
@@ -1050,7 +1093,6 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
         "model": "gpt",
         "continuation_chain": [],
     }
-    atomic_write_json(run_dir / "input.json", input_payload)
     _write_execution_artifact(run_dir, run_id, input_payload)
     fake_sm = _FakeSessionManager({
         "agent_session_id": "newer-session-global-sid",
@@ -1227,6 +1269,7 @@ def main() -> int:
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
+        test_unbound_recovered_input_is_terminal()
         test_family_retry_clones_exact_runtime_capabilities()
         test_recovered_retry_cancelled_during_backoff_does_not_spawn()
         test_recovered_retry_spawn_boundaries_cleanup()

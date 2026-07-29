@@ -305,7 +305,7 @@ def test_extra_env_rejects_launch_runtime_and_authority_collisions() -> None:
 
 
 def test_family_artifact_and_input_projection_fail_closed() -> None:
-    from execution_artifact_io import load_execution_artifact
+    from execution_artifact_io import bind_execution_input, load_execution_artifact
     from provider_execution_contract import provider_family_contract
 
     for kind in ("claude", "agy"):
@@ -325,7 +325,10 @@ def test_family_artifact_and_input_projection_fail_closed() -> None:
                 encoding="utf-8",
             )
             (run_dir / "input.json").write_text(
-                json.dumps(_input_projection(artifact)),
+                json.dumps(bind_execution_input(
+                    artifact,
+                    _input_projection(artifact),
+                )),
                 encoding="utf-8",
             )
             assert load_execution_artifact(
@@ -333,7 +336,10 @@ def test_family_artifact_and_input_projection_fail_closed() -> None:
                 validate_input=True,
             ) == artifact
 
-            poisoned_input = _input_projection(artifact)
+            poisoned_input = bind_execution_input(
+                artifact,
+                _input_projection(artifact),
+            )
             poisoned_input["cwd"] = "/tampered"
             (run_dir / "input.json").write_text(
                 json.dumps(poisoned_input),

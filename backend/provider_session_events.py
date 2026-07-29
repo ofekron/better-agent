@@ -169,7 +169,12 @@ class SessionEventsProvider(Provider):
                 for name, path in capabilities.skill_dirs.items()
             },
         }
-        _atomic_write_json(run_dir / "input.json", inputs)
+        from execution_artifact_io import bind_execution_input
+
+        _atomic_write_json(
+            run_dir / "input.json",
+            bind_execution_input(execution.artifact, inputs),
+        )
         containment().create(run_id)
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
