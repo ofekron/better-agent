@@ -35,6 +35,8 @@ calls `client.interrupt()` on sight.
 import argparse
 import asyncio
 import contextvars
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -50,10 +52,60 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, NoReturn, Optional
 
+
+def _isolated_import_roots() -> (
+    tuple[Path | None, Path | None, tuple[Path, ...]]
+):
+    if __name__ != "__main__" or getattr(sys, "frozen", False):
+        return None, None, ()
+    if not sys.flags.isolated:
+        raise RuntimeError("Claude runner requires isolated Python")
+    if (
+        len(sys.argv) != 9
+        or sys.argv[1] != "--run-dir"
+        or sys.argv[3] != "--backend-root"
+        or sys.argv[5] != "--site-packages-root"
+        or sys.argv[7] != "--application-sdk-root"
+    ):
+        raise RuntimeError("Claude runner bootstrap arguments are invalid")
+    run_dir = Path(sys.argv[2])
+    backend_root = Path(sys.argv[4])
+    dependency_roots = (
+        Path(sys.argv[6]),
+        Path(sys.argv[8]),
+    )
+    if (
+        not run_dir.is_absolute()
+        or not backend_root.is_absolute()
+        or any(not root.is_absolute() for root in dependency_roots)
+    ):
+        raise RuntimeError("Claude runner bootstrap paths must be absolute")
+    backend_root = backend_root.resolve(strict=True)
+    dependency_roots = tuple(
+        root.resolve(strict=True)
+        for root in dependency_roots
+    )
+    if (
+        not backend_root.is_dir()
+        or any(not root.is_dir() for root in dependency_roots)
+    ):
+        raise RuntimeError("Claude runner backend root is invalid")
+    sys.path[:0] = [
+        str(backend_root),
+        *(str(root) for root in dependency_roots),
+    ]
+    return run_dir.absolute(), backend_root, dependency_roots
+
+
+(
+    _BOOTSTRAP_RUN_DIR,
+    _BOOTSTRAP_BACKEND_ROOT,
+    _BOOTSTRAP_DEPENDENCY_ROOTS,
+) = _isolated_import_roots()
+
 import chat_store
 import inbox_store
 import mcp_stdio_bridge
-import claude_agent_sdk
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -118,6 +170,119 @@ from provider_pinned_launch import MaterializedSdkLaunch
 
 
 CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime"
+
+
+def _import_attested_claude_sdk():
+    global _BOOTSTRAPPED_RUNTIME
+    if _BOOTSTRAP_RUN_DIR is None:
+        return importlib.import_module("claude_agent_sdk")
+    runtime = restore_family_runner_runtime(_BOOTSTRAP_RUN_DIR)
+    runner_launch = runtime.launch.runner
+    if (
+        runtime.launch.family != "claude"
+        or Path(runner_launch.launch.argv[4]).absolute()
+        != _BOOTSTRAP_RUN_DIR
+        or Path(runner_launch.runner_entry.resolved_path).parent
+        != _BOOTSTRAP_BACKEND_ROOT
+        or tuple(
+            Path(runner_launch.launch.argv[index]).resolve(strict=True)
+            for index in (8, 10)
+        )
+        != _BOOTSTRAP_DEPENDENCY_ROOTS
+    ):
+        raise RuntimeError("Claude runner bootstrap authority mismatch")
+    if runner_launch.frozen:
+        embedded = next(
+            (
+                package
+                for package in runtime.launch.critical_packages
+                if package.package_name
+                == "claude_agent_sdk.embedded_runner"
+            ),
+            None,
+        )
+        if (
+            embedded is None
+            or not attest_embedded_claude_sdk(embedded, runner_launch)
+        ):
+            raise RuntimeError(
+                "embedded Claude Agent SDK bootstrap authority mismatch",
+            )
+    else:
+        if any(
+            name == "claude_agent_sdk"
+            or name.startswith("claude_agent_sdk.")
+            for name in sys.modules
+        ):
+            raise RuntimeError("Claude Agent SDK loaded before attestation")
+        package = next(
+            (
+                candidate
+                for candidate in runtime.launch.critical_packages
+                if candidate.package_name == "claude_agent_sdk"
+            ),
+            None,
+        )
+        package_root = (
+            _BOOTSTRAP_RUN_DIR / "claude-sdk" / "claude_agent_sdk"
+        ).resolve(strict=True)
+        if (
+            package is None
+            or not attest_materialized_claude_sdk_package(
+                package,
+                package_root,
+            )
+        ):
+            raise RuntimeError(
+                "Claude Agent SDK bootstrap authority mismatch",
+            )
+        sys.dont_write_bytecode = True
+        sys.path.insert(0, str(package_root.parent))
+        importlib.invalidate_caches()
+        spec = importlib.util.find_spec("claude_agent_sdk")
+        locations = tuple(spec.submodule_search_locations or ()) if spec else ()
+        if (
+            spec is None
+            or spec.origin is None
+            or Path(spec.origin).resolve(strict=True)
+            != package_root / "__init__.py"
+            or tuple(
+                Path(location).resolve(strict=True)
+                for location in locations
+            )
+            != (package_root,)
+        ):
+            raise RuntimeError(
+                "Claude Agent SDK bootstrap import path mismatch",
+            )
+    module = importlib.import_module("claude_agent_sdk")
+    imported_paths = tuple(
+        Path(str(candidate.__file__)).resolve(strict=True)
+        for name, candidate in sys.modules.items()
+        if (
+            name == "claude_agent_sdk"
+            or name.startswith("claude_agent_sdk.")
+        )
+        and getattr(candidate, "__file__", None)
+    )
+    if not runner_launch.frozen and (
+        not imported_paths
+        or any(
+            not imported_path.is_relative_to(package_root)
+            for imported_path in imported_paths
+        )
+        or not attest_materialized_claude_sdk_package(
+            package,
+            package_root,
+        )
+    ):
+        raise RuntimeError("Claude Agent SDK import authority mismatch")
+    _BOOTSTRAPPED_RUNTIME = runtime
+    return module
+
+
+_BOOTSTRAPPED_RUNTIME: FamilyExecutionRuntime | None = None
+claude_agent_sdk = _import_attested_claude_sdk()
 
 
 def _claude_cache_env() -> dict[str, str]:
@@ -3965,7 +4130,10 @@ def main(run_dir: Path) -> NoReturn:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
 
     try:
-        runtime = restore_family_runner_runtime(run_dir)
+        runtime = (
+            _BOOTSTRAPPED_RUNTIME
+            or restore_family_runner_runtime(run_dir)
+        )
         inputs = dict(runtime.inputs)
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
@@ -3995,5 +4163,8 @@ def main(run_dir: Path) -> NoReturn:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--backend-root", type=Path)
+    parser.add_argument("--site-packages-root", type=Path)
+    parser.add_argument("--application-sdk-root", type=Path)
     args = parser.parse_args()
     main(args.run_dir)

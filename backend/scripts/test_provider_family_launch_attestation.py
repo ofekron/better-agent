@@ -103,6 +103,15 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             frozen=False,
             platform="win32",
         )
+        claude_dev = capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=python,
+            runner_entry=claude_runner,
+            runner_kind="claude",
+            runner_module="runner",
+            frozen=False,
+            platform="darwin",
+        )
         frozen_agy = capture_runner_launch(
             run_dir=run_dir,
             executable_path=python,
@@ -129,6 +138,22 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             str(run_dir),
         )
         assert dev.launch.component_argv_indexes == (0, 1)
+        assert claude_dev.launch.argv == (
+            str(python.resolve()),
+            "-I",
+            str(claude_runner.resolve()),
+            "--run-dir",
+            str(run_dir),
+            "--backend-root",
+            str(root.resolve()),
+            "--site-packages-root",
+            claude_dev.launch.argv[8],
+            "--application-sdk-root",
+            claude_dev.launch.argv[10],
+        )
+        assert claude_dev.launch.component_argv_indexes == (0, 2)
+        assert Path(claude_dev.launch.argv[8]).is_absolute()
+        assert Path(claude_dev.launch.argv[10]).is_absolute()
         assert frozen_agy.launch.argv == (
             str(python.resolve()),
             "--run-dir",

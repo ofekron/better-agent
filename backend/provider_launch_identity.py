@@ -316,7 +316,10 @@ def _validate_launch(launch: AttestedLaunch) -> None:
         or launch.components[-1] != launch.launcher
     ):
         raise ExecutionContractError("incoherent Windows command launch")
-    if launch.mode == "runner-dev" and indexes != (0, 1):
+    if launch.mode == "runner-dev" and (
+        indexes not in {(0, 1), (0, 2)}
+        or (indexes == (0, 2) and launch.argv[1] != "-I")
+    ):
         raise ExecutionContractError("incoherent development runner launch")
     if launch.mode == "runner-frozen" and indexes != (0,):
         raise ExecutionContractError("incoherent frozen runner launch")

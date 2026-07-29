@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -72,6 +74,16 @@ def _is_absolute_path(value: str) -> bool:
     )
 
 
+def _package_parent(package_name: str) -> Path:
+    spec = importlib.util.find_spec(package_name)
+    locations = tuple(spec.submodule_search_locations or ()) if spec else ()
+    if len(locations) != 1:
+        raise ExecutionContractError(
+            f"{package_name} package root is unavailable",
+        )
+    return Path(locations[0]).resolve(strict=True).parent
+
+
 def _validate_runner(value: RunnerLaunch) -> None:
     argv = value.launch.argv
     if (
@@ -104,15 +116,43 @@ def _validate_runner(value: RunnerLaunch) -> None:
         ):
             raise ExecutionContractError("incoherent runner launch")
         return
-    if (
-        argv != (
+    if value.runner_kind == "claude":
+        expected = (
+            value.launch.components[0].resolved_path,
+            "-I",
+            value.runner_entry.resolved_path,
+            "--run-dir",
+            argv[4] if len(argv) >= 5 else "",
+            "--backend-root",
+            str(Path(value.runner_entry.resolved_path).parent),
+            "--site-packages-root",
+            argv[8] if len(argv) >= 9 else "",
+            "--application-sdk-root",
+            argv[10] if len(argv) >= 11 else "",
+        )
+        expected_indexes = (0, 2)
+        run_dir_index = 4
+    else:
+        expected = (
             value.launch.components[0].resolved_path,
             value.runner_entry.resolved_path,
             "--run-dir",
             argv[3] if len(argv) >= 4 else "",
         )
+        expected_indexes = (0, 1)
+        run_dir_index = 3
+    if (
+        argv != expected
         or value.launch.components[1] != value.runner_entry
-        or not _is_absolute_path(argv[3])
+        or value.launch.component_argv_indexes != expected_indexes
+        or not _is_absolute_path(argv[run_dir_index])
+        or (
+            value.runner_kind == "claude"
+            and (
+                not _is_absolute_path(argv[8])
+                or not _is_absolute_path(argv[10])
+            )
+        )
     ):
         raise ExecutionContractError("incoherent runner launch")
 
@@ -143,6 +183,27 @@ def capture_runner_launch(
         components = (executable,)
         indexes = (0,)
         mode = "runner-frozen"
+    elif runner_kind == "claude":
+        site_packages_root = Path(
+            sysconfig.get_path("purelib"),
+        ).resolve(strict=True)
+        application_sdk_root = _package_parent("better_agent_sdk")
+        argv = [
+            executable.resolved_path,
+            "-I",
+            entry.resolved_path,
+            "--run-dir",
+            str(run_path.absolute()),
+            "--backend-root",
+            str(Path(entry.resolved_path).parent),
+            "--site-packages-root",
+            str(site_packages_root),
+            "--application-sdk-root",
+            str(application_sdk_root),
+        ]
+        components = (executable, entry)
+        indexes = (0, 2)
+        mode = "runner-dev"
     else:
         argv = [
             executable.resolved_path,
@@ -183,7 +244,13 @@ def retarget_runner_launch(
     run_path = Path(run_dir)
     if not run_path.is_absolute():
         raise ExecutionContractError("run directory must be absolute")
-    run_dir_index = 2 if runner.frozen else 3
+    run_dir_index = (
+        2
+        if runner.frozen
+        else 4
+        if runner.runner_kind == "claude"
+        else 3
+    )
     argv = list(runner.launch.argv)
     if (
         len(argv) <= run_dir_index

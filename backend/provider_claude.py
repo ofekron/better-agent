@@ -1082,13 +1082,6 @@ class ClaudeProvider(Provider):
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
                 runtime_hydration=runtime_hydration,
             ))
-            if sdk_root is not None:
-                inherited_pythonpath = env.get("PYTHONPATH", "")
-                env["PYTHONPATH"] = str(sdk_root.parent) + (
-                    os.pathsep + inherited_pythonpath
-                    if inherited_pythonpath
-                    else ""
-                )
             with launch.open_runner() as pinned:
                 pass_fds = (
                     {"pass_fds": pinned.pass_fds}

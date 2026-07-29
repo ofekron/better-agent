@@ -248,6 +248,47 @@ def test_run_local_payload_rejects_tamper_and_materializes_sdk_cli() -> None:
             assert package_root.name == "claude_agent_sdk"
             assert (package_root / "__init__.py").is_file()
 
+            poison = root / "poison"
+            poison.mkdir()
+            sitecustomize_marker = root / "sitecustomize-loaded"
+            sdk_marker = root / "shadow-sdk-loaded"
+            (poison / "sitecustomize.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sitecustomize_marker)!r}).touch()\n",
+                encoding="utf-8",
+            )
+            shadow_sdk = poison / "claude_agent_sdk"
+            shadow_sdk.mkdir()
+            (shadow_sdk / "__init__.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sdk_marker)!r}).touch()\n",
+                encoding="utf-8",
+            )
+            isolated_env = os.environ.copy()
+            isolated_env["PYTHONPATH"] = str(poison)
+            isolated_env.pop("BETTER_CLAUDE_RUNTIME_BROKER", None)
+            with runtime.launch.open_runner() as pinned:
+                assert pinned.argv[1] == "-I"
+                isolated = subprocess.run(
+                    list(pinned.argv),
+                    cwd=root,
+                    env=isolated_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=20,
+                )
+            assert isolated.returncode != 0
+            assert not sitecustomize_marker.exists()
+            assert not sdk_marker.exists()
+            assert (run_dir / "complete.json").is_file(), isolated.stderr
+            isolated_completion = json.loads(
+                (run_dir / "complete.json").read_text(encoding="utf-8"),
+            )
+            assert "runtime bootstrap is unavailable" in (
+                isolated_completion["error"]
+            )
+
             hydration = {
                 "agent_files": {
                     name: str(path)
