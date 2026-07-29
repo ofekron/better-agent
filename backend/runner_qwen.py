@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
+from builtin_mcp_config import native_mcp_runtime_env
 from capability_contexts import prepend_capability_context
 import harness_run_projection
 from continuation import normalize_context_overflow_error
@@ -61,16 +61,16 @@ from runner_session_events import (
     _normalize_unknown,
     _sum_usage,
 )
+from provider_session_events_runner import (
+    effective_mcp_servers,
+    restore_session_events_runner,
+)
 from runs_dir import atomic_write_json
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_qwen_cli() -> Optional[str]:
-    from cli_paths import resolve_cli_binary
-
-    return resolve_cli_binary("qwen")
 
 
 # Better Agent stores the family permission mode with an underscore
@@ -286,15 +286,19 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     run_env = os.environ.copy()
     runner_inputs = _qwen_runner_inputs(inputs)
     run_env.update(native_mcp_runtime_env(runner_inputs))
-    provider_run_config = with_builtin_mcp_servers(
-        runner_inputs,
-        inputs.get("provider_run_config") or {},
-    )
+    capability_plan = inputs.pop("_capability_plan", None)
+    if type(capability_plan) is not dict:
+        _fail(run_dir, "frozen capability plan is unavailable")
+        return 1
+    provider_run_config = {
+        **(inputs.get("provider_run_config") or {}),
+        "mcp_servers": effective_mcp_servers(capability_plan),
+    }
     scoped_env = _materialize_qwen_run_home(run_dir, provider_run_config)
     if scoped_env:
         run_env.update(scoped_env)
 
-    qwen_bin = _resolve_qwen_cli()
+    qwen_bin = inputs.pop("_provider_executable", None)
     if not qwen_bin:
         _fail(run_dir, "qwen CLI not found on PATH")
         return 1
@@ -637,12 +641,11 @@ def main(run_dir: Path) -> int:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
 
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
-        from runner_operation_host import hydrate_runner_inputs
-        inputs = hydrate_runner_inputs(inputs, run_dir)
+        execution = restore_session_events_runner(run_dir)
+        inputs = execution.inputs
         inputs = harness_run_projection.apply_to_inputs(inputs)
-    except Exception as e:
-        _fail(run_dir, f"failed to read input.json: {e}")
+    except Exception as exc:
+        _fail(run_dir, f"failed to restore execution artifact: {exc}")
         return 1
 
     try:

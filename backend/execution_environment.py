@@ -6,21 +6,29 @@ from typing import Any
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _PROTECTED_KEYS = frozenset({
+    "AMP_API_KEY",
+    "AMP_URL",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "COMSPEC",
+    "CURSOR_API_KEY",
     "DYLD_INSERT_LIBRARIES",
     "GEMINI_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
     "GOOGLE_API_KEY",
     "HOME",
     "LD_PRELOAD",
+    "KIMI_API_KEY",
+    "KIMI_BASE_URL",
     "NODE_OPTIONS",
     "NODE_PATH",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
     "PATH",
     "PATHEXT",
     "PYTHONHOME",
@@ -37,8 +45,6 @@ _PROTECTED_PREFIXES = (
     "CLAUDE_CODE_",
     "CODEX_",
 )
-
-
 def validate_extra_env(value: Any) -> None:
     if value is None:
         return

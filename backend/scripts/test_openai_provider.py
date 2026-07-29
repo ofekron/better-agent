@@ -220,12 +220,14 @@ def test_better_agent_runner_preserves_zai_reasoning_in_history():
                 "capability_contexts": [],
                 "disabled_builtin_tools": [],
                 "disabled_builtin_extensions": [],
+                "_capability_plan": {"mcp_servers": []},
             }
             rc = asyncio.run(runner._run(run_dir, inputs))
             state = json.loads((run_dir / "state.json").read_text())
             second_run_dir = Path(d) / "run-2"
             second_run_dir.mkdir()
             inputs["session_id"] = state["session_id"]
+            inputs["_capability_plan"] = {"mcp_servers": []}
             rc2 = asyncio.run(runner._run(second_run_dir, inputs))
             history = json.loads(runner._session_path(state["session_id"]).read_text())
     finally:
@@ -246,6 +248,86 @@ def test_better_agent_runner_preserves_zai_reasoning_in_history():
     assistant = [m for m in history["messages"] if m.get("role") == "assistant"][-1]
     assert assistant["content"] == "answer"
     assert assistant["reasoning_content"] == "think step"
+
+
+def test_openai_team_execution_freezes_manager_runner_semantics():
+    execution_mod = _mod("provider_session_events_execution")
+    execution_template = _mod("execution_template")
+    runner = _mod("runner_better_agent")
+    mode_projection = execution_mod._mode_projection(
+        execution_mod.strategy_for("openai"),
+        "team",
+    )
+    assert mode_projection == {
+        "canonical_mode": "team",
+        "mode": "manager",
+    }
+    inputs = {
+        **mode_projection,
+        "app_session_id": "team-session",
+        "backend_url": "http://127.0.0.1:8000",
+        "bare_config": True,
+        "disabled_builtin_tools": [],
+        "disallowed_tools": [],
+        "integrations_enabled": True,
+        "internal_token": "runtime-only-token",
+        "team_orchestration_enabled": True,
+        "user_facing": False,
+    }
+    loopback_enabled = runner._loopback_tools_enabled(
+        interactive=True,
+        integrations_enabled=True,
+        bare_config=True,
+        mode=inputs["mode"],
+        team_orchestration_enabled=True,
+    )
+    assert loopback_enabled is True
+    schemas = runner._tool_schemas_for_run(
+        inputs=inputs,
+        capabilities_enabled=False,
+        loopback_enabled=loopback_enabled,
+        team_manager_enabled=inputs["mode"] == "manager",
+        team_orchestration_enabled=True,
+        user_facing=False,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    assert "create_worker" in {
+        schema["function"]["name"]
+        for schema in schemas
+    }
+    handlers = runner._build_loopback_tool_handlers(
+        inputs,
+        cwd="/workspace",
+        model="model",
+        lock_registry=runner.LockRegistry(),
+    )
+    assert "create_worker" in handlers
+    prepared = execution_template.prepare_execution(
+        {
+            "id": "openai-team",
+            "kind": "openai",
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "revision": 1,
+        },
+        run_id="openai-team-run",
+        prompt="coordinate",
+        cwd="/workspace",
+        model="model",
+        reasoning_effort=None,
+        session_id=None,
+        mode="team",
+        app_session_id="team-session",
+        runtime_policy={
+            "runner_input": {
+                **inputs,
+                "internal_token": "",
+            },
+        },
+    )
+    frozen = prepared.artifact.runtime_policy["runner_input"]
+    assert frozen["canonical_mode"] == "team"
+    assert frozen["mode"] == "manager"
 
 
 def test_event_emitter_buffers_tool_call_until_arguments_render():
@@ -460,7 +542,7 @@ def test_bash_tool_scrubs_provider_and_internal_secrets():
     assert env.get("SAFE_VISIBLE_FOR_TEST") == "ok"
 
 
-def test_openai_loopback_retries_disk_token_after_forbidden(monkeypatch):
+def test_openai_loopback_retries_disk_token_after_forbidden():
     runner = _mod("runner_better_agent")
     authority_owner = _mod("runner_operation_host")
     spawn_token = "A" * 43
@@ -496,7 +578,8 @@ def test_openai_loopback_retries_disk_token_after_forbidden(monkeypatch):
             )
         return Response()
 
-    monkeypatch.setattr(runner.urllib.request, "urlopen", fake_urlopen)
+    original_urlopen = runner.urllib.request.urlopen
+    runner.urllib.request.urlopen = fake_urlopen
     try:
         assert runner._post_loopback_sync(
             {},
@@ -525,6 +608,7 @@ def test_openai_loopback_retries_disk_token_after_forbidden(monkeypatch):
         ) == {"success": True}
     finally:
         authority_owner.stop_active_host()
+        runner.urllib.request.urlopen = original_urlopen
 
     assert recovered == {"success": True}
     assert seen_tokens == [
@@ -600,21 +684,16 @@ def test_openai_loopback_surfaces_http_error_detail():
 
 def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
     runner = _mod("runner_better_agent")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
     original_call = runner._mcp_call_tool
     calls = []
-
-    def fake_configs(inputs, *, user_facing, bare):
-        assert user_facing is True
-        assert bare is False
-        return {
-            "better-agent-requirements": {
-                "command": sys.executable,
-                "args": ["-c", "pass"],
-                "env": {},
-            },
-        }
+    configs = {
+        "better-agent-requirements": {
+            "command": sys.executable,
+            "args": ["-c", "pass"],
+            "env": {},
+        },
+    }
 
     async def fake_list(server_name, config):
         assert server_name == "better-agent-requirements"
@@ -633,13 +712,11 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
         return json.dumps({"success": True, "count": 1})
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
         runner._mcp_call_tool = fake_call
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
-            {"cwd": "/repo"},
-            user_facing=True,
-            bare=False,
+            configs,
+            required_servers=set(),
             used_names=set(),
         ))
         canonical_name = "mcp__better-agent-requirements__get_requirements"
@@ -670,7 +747,6 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
             ))
             emitter.close()
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
         runner._mcp_call_tool = original_call
 
@@ -683,15 +759,12 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
 
 def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
     runner = _mod("runner_better_agent")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {
-            "alpha": {"command": sys.executable},
-            "beta": {"command": sys.executable},
-            "gamma": {"command": sys.executable},
-        }
+    configs = {
+        "alpha": {"command": sys.executable},
+        "beta": {"command": sys.executable},
+        "gamma": {"command": sys.executable},
+    }
 
     async def fake_list(server_name, config):
         await asyncio.sleep(0.15)
@@ -702,18 +775,15 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
         }]
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
         started = time.monotonic()
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
-            {"cwd": "/repo"},
-            user_facing=True,
-            bare=False,
+            configs,
+            required_servers=set(),
             used_names=set(),
         ))
         elapsed = time.monotonic() - started
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
 
     assert elapsed < 0.30
@@ -731,25 +801,16 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
 
 def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools():
     runner = _mod("runner_better_agent")
-    extension_store = _mod("extension_store")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
-    original_required = extension_store.required_profile_mcp_server_names
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {
-            "better-agent-session-control": {"command": sys.executable},
-        }
+    configs = {
+        "better-agent-session-control": {"command": sys.executable},
+    }
 
     async def fake_list(server_name, config):
         raise RuntimeError("MCP server closed stdout: import failed")
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
-        extension_store.required_profile_mcp_server_names = lambda inputs: {
-            "better-agent-session-control",
-        }
         with pytest.raises(
             RuntimeError,
             match=(
@@ -758,33 +819,21 @@ def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools(
             ),
         ):
             asyncio.run(runner._extension_mcp_tools_for_run(
-                {
-                    "resolved_harness_run_config": {
-                        "profile_id": "better-agent-qa-fresh",
-                    },
-                },
-                user_facing=True,
-                bare=False,
+                configs,
+                required_servers={"better-agent-session-control"},
                 used_names=set(),
             ))
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
-        extension_store.required_profile_mcp_server_names = original_required
 
 
 def test_openai_runner_keeps_ambient_mcp_failures_isolated():
     runner = _mod("runner_better_agent")
-    extension_store = _mod("extension_store")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
-    original_required = extension_store.required_profile_mcp_server_names
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {
-            "broken": {"command": sys.executable},
-            "healthy": {"command": sys.executable},
-        }
+    configs = {
+        "broken": {"command": sys.executable},
+        "healthy": {"command": sys.executable},
+    }
 
     async def fake_list(server_name, config):
         if server_name == "broken":
@@ -796,19 +845,14 @@ def test_openai_runner_keeps_ambient_mcp_failures_isolated():
         }]
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
-        extension_store.required_profile_mcp_server_names = lambda inputs: set()
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
-            {},
-            user_facing=True,
-            bare=False,
+            configs,
+            required_servers=set(),
             used_names=set(),
         ))
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
-        extension_store.required_profile_mcp_server_names = original_required
 
     assert [schema["function"]["name"] for schema in schemas] == [
         "mcp__healthy__observe",
@@ -818,102 +862,58 @@ def test_openai_runner_keeps_ambient_mcp_failures_isolated():
 
 def test_openai_runner_rejects_profile_selected_mcp_without_tools():
     runner = _mod("runner_better_agent")
-    extension_store = _mod("extension_store")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
-    original_required = extension_store.required_profile_mcp_server_names
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {"empty": {"command": sys.executable}}
+    configs = {"empty": {"command": sys.executable}}
 
     async def fake_list(server_name, config):
         return []
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
-        extension_store.required_profile_mcp_server_names = lambda inputs: {"empty"}
         with pytest.raises(
             RuntimeError,
             match="required extension MCP 'empty' advertised no tools",
         ):
             asyncio.run(runner._extension_mcp_tools_for_run(
-                {
-                    "resolved_harness_run_config": {
-                        "profile_id": "required-profile",
-                    },
-                },
-                user_facing=True,
-                bare=False,
+                configs,
+                required_servers={"empty"},
                 used_names=set(),
             ))
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
-        extension_store.required_profile_mcp_server_names = original_required
 
 
 def test_openai_runner_fails_closed_when_required_mcp_selection_cannot_resolve():
     runner = _mod("runner_better_agent")
-    extension_store = _mod("extension_store")
-    original_configs = runner._extension_mcp_server_configs_for_run
-    original_required = extension_store.required_profile_mcp_server_names
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {"ambient": {"command": sys.executable}}
-
-    def fail_required(inputs):
-        raise ValueError("profile projection unreadable")
-
-    try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
-        extension_store.required_profile_mcp_server_names = fail_required
-        with pytest.raises(
-            RuntimeError,
-            match=(
-                "required extension MCP selection resolution failed: "
-                "profile projection unreadable"
-            ),
-        ):
-            asyncio.run(runner._extension_mcp_tools_for_run(
-                {},
-                user_facing=True,
-                bare=False,
-                used_names=set(),
-            ))
-    finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
-        extension_store.required_profile_mcp_server_names = original_required
+    with pytest.raises(
+        RuntimeError,
+        match="required extension MCP config unavailable: 'required'",
+    ):
+        asyncio.run(runner._extension_mcp_tools_for_run(
+            {"ambient": {"command": sys.executable}},
+            required_servers={"required"},
+            used_names=set(),
+        ))
 
 
 def test_openai_runner_propagates_mcp_discovery_cancellation():
     runner = _mod("runner_better_agent")
-    extension_store = _mod("extension_store")
-    original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
-    original_required = extension_store.required_profile_mcp_server_names
-
-    def fake_configs(inputs, *, user_facing, bare):
-        return {"cancelled": {"command": sys.executable}}
+    configs = {"cancelled": {"command": sys.executable}}
 
     async def fake_list(server_name, config):
         raise asyncio.CancelledError()
 
     try:
-        runner._extension_mcp_server_configs_for_run = fake_configs
         runner._mcp_list_tools = fake_list
-        extension_store.required_profile_mcp_server_names = lambda inputs: {"cancelled"}
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(runner._extension_mcp_tools_for_run(
-                {},
-                user_facing=True,
-                bare=False,
+                configs,
+                required_servers={"cancelled"},
                 used_names=set(),
             ))
     finally:
-        runner._extension_mcp_server_configs_for_run = original_configs
         runner._mcp_list_tools = original_list
-        extension_store.required_profile_mcp_server_names = original_required
 
 
 def test_openai_runner_lists_real_profile_selected_session_control_tools():
@@ -954,10 +954,28 @@ def test_openai_runner_lists_real_profile_selected_session_control_tools():
     }
 
     try:
+        required_servers = extension_store.required_profile_mcp_server_names(inputs)
+        extension_servers = {
+            "better-agent-session-control": (
+                extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID,
+                "better-agent-session-control",
+            ),
+            "better-agent-coordination": (
+                extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
+                "ofek-dev-coordination",
+            ),
+        }
+        configs = {
+            server_name: extension_store.resolve_native_mcp_server_config(
+                extension_id=extension_servers[server_name][0],
+                server_name=extension_servers[server_name][1],
+                inputs=inputs,
+            )
+            for server_name in required_servers
+        }
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
-            inputs,
-            user_facing=True,
-            bare=False,
+            configs,
+            required_servers=required_servers,
             used_names=set(),
         ))
     finally:
@@ -1141,6 +1159,7 @@ def test_openai_runner_requirements_wait_true_uses_long_mcp_timeout():
 
 def test_openai_attach_recovered_run_schedules_bootstrap():
     provider_mod = _mod("provider_openai")
+    session_events_mod = _mod("provider_session_events")
     provider = provider_mod.OpenAIProvider({
         "id": "openai-test",
         "kind": "openai",
@@ -1156,10 +1175,10 @@ def test_openai_attach_recovered_run_schedules_bootstrap():
         scheduled.append((loop, coro, name))
         coro.close()
 
-    original_schedule = provider_mod.schedule_loop_task
+    original_schedule = session_events_mod.schedule_loop_task
     original_bootstrap = provider._bootstrap_run
     try:
-        provider_mod.schedule_loop_task = fake_schedule
+        session_events_mod.schedule_loop_task = fake_schedule
         provider._bootstrap_run = fake_bootstrap
         queue = asyncio.Queue()
         ok = provider.attach_recovered_run(
@@ -1178,7 +1197,7 @@ def test_openai_attach_recovered_run_schedules_bootstrap():
             loop=asyncio.new_event_loop(),
         )
     finally:
-        provider_mod.schedule_loop_task = original_schedule
+        session_events_mod.schedule_loop_task = original_schedule
         provider._bootstrap_run = original_bootstrap
         if scheduled:
             scheduled[0][0].close()

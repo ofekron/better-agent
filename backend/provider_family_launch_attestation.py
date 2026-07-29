@@ -32,12 +32,14 @@ from provider_pinned_launch import (
     PinnedLaunch,
     materialize_sdk_launch,
     open_pinned_launch,
+    open_pinned_runner_launch,
 )
 from provider_runner_launch import RunnerLaunch, capture_runner_launch
+from provider_manifest import artifact_family_kinds
 
 
 ATTESTATION_SCHEMA = 1
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -303,7 +305,7 @@ class FamilyLaunchAttestation:
     @contextmanager
     def open_runner(self) -> Iterator[PinnedLaunch]:
         self._assert_attested()
-        with open_pinned_launch(self.runner.launch) as pinned:
+        with open_pinned_runner_launch(self.runner) as pinned:
             yield pinned
 
     @contextmanager
@@ -433,4 +435,5 @@ __all__ = [
     "capture_runner_launch",
     "materialize_sdk_launch",
     "open_pinned_launch",
+    "open_pinned_runner_launch",
 ]

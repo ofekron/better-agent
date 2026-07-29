@@ -36,9 +36,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
-from cli_paths import resolve_cli_binary
 from runner_errors import CATEGORY_AUTH, classify, resume_session_mismatch
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
+from provider_session_events_runner import restore_session_events_runner
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -280,7 +280,7 @@ async def _fork_thread(amp_bin: str, thread_id: str, cwd: str) -> tuple[Optional
 
 
 async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
-    amp_bin = resolve_cli_binary("amp")
+    amp_bin = inputs.pop("_provider_executable", None)
     if not amp_bin:
         _fail(run_dir, "amp CLI not found on PATH")
         return 1
@@ -548,11 +548,10 @@ def main(run_dir: Path) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
-        from runner_operation_host import hydrate_runner_inputs
-        inputs = hydrate_runner_inputs(inputs, run_dir)
+        execution = restore_session_events_runner(run_dir)
+        inputs = execution.inputs
     except Exception as exc:
-        _fail(run_dir, f"failed to read input.json: {exc}")
+        _fail(run_dir, f"failed to restore execution artifact: {exc}")
         return 1
     try:
         return asyncio.run(_run(run_dir, inputs))

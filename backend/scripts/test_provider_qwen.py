@@ -87,17 +87,13 @@ def test_build_env_clears_foreign_providers() -> bool:
 
 
 def test_build_env_api_key_mode_sets_openai_vars() -> bool:
-    real_status = provider_qwen.config_store.provider_credential_status
-    provider_qwen.config_store.provider_credential_status = lambda _provider_id: "available"
-    try:
-        env = _mk(
-            mode="api_key",
-            api_key="sk-test",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            _credential_authoritative=True,
-        ).build_env()
-    finally:
-        provider_qwen.config_store.provider_credential_status = real_status
+    env = _mk(
+        mode="api_key",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        _credential_authoritative=True,
+        _credential_status="available",
+    ).build_env()
     sub_env = _mk().build_env()
     return (
         env.get("OPENAI_API_KEY") == "sk-test"
@@ -360,24 +356,21 @@ def test_materializes_selected_extension_mcp_in_scoped_home() -> bool:
         )
 
 
-def test_run_projects_qwen_provider_kind_before_mcp_resolution() -> bool:
+def test_run_uses_frozen_mcp_resolution() -> bool:
     original_runtime_env = runner_qwen.native_mcp_runtime_env
-    original_with_builtin = runner_qwen.with_builtin_mcp_servers
-    original_resolve_cli = runner_qwen._resolve_qwen_cli
+    original_effective = runner_qwen.effective_mcp_servers
     seen: dict = {}
 
     def fake_runtime_env(inputs: dict) -> dict:
         seen["runtime_kind"] = inputs.get("provider_kind")
         return {}
 
-    def fake_with_builtin(inputs: dict, config: dict) -> dict:
-        seen["config_kind"] = inputs.get("provider_kind")
-        seen["config"] = config
-        return config
+    def fake_effective(plan: dict) -> dict:
+        seen["plan"] = plan
+        return {"frozen": {"command": "frozen-mcp"}}
 
     runner_qwen.native_mcp_runtime_env = fake_runtime_env  # type: ignore[assignment]
-    runner_qwen.with_builtin_mcp_servers = fake_with_builtin  # type: ignore[assignment]
-    runner_qwen._resolve_qwen_cli = lambda: None  # type: ignore[assignment]
+    runner_qwen.effective_mcp_servers = fake_effective  # type: ignore[assignment]
     try:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -385,17 +378,17 @@ def test_run_projects_qwen_provider_kind_before_mcp_resolution() -> bool:
                 "prompt": "check",
                 "cwd": str(run_dir),
                 "provider_run_config": {"skills": {"implement": "instructions"}},
+                "_capability_plan": {"frozen": True},
+                "_provider_executable": None,
             }))
     finally:
         runner_qwen.native_mcp_runtime_env = original_runtime_env  # type: ignore[assignment]
-        runner_qwen.with_builtin_mcp_servers = original_with_builtin  # type: ignore[assignment]
-        runner_qwen._resolve_qwen_cli = original_resolve_cli  # type: ignore[assignment]
+        runner_qwen.effective_mcp_servers = original_effective  # type: ignore[assignment]
 
     return (
         code == 1
         and seen["runtime_kind"] == "qwen"
-        and seen["config_kind"] == "qwen"
-        and seen["config"] == {"skills": {"implement": "instructions"}}
+        and seen["plan"] == {"frozen": True}
     )
 
 
@@ -419,7 +412,7 @@ TESTS = [
     ("models_fetch_parses_real_cli", test_models_fetch_parses_real_cli),
     ("rate_limit_keywords_extended", test_rate_limit_keywords_extended),
     ("materializes_selected_extension_mcp_in_scoped_home", test_materializes_selected_extension_mcp_in_scoped_home),
-    ("run_projects_qwen_provider_kind_before_mcp_resolution", test_run_projects_qwen_provider_kind_before_mcp_resolution),
+    ("run_uses_frozen_mcp_resolution", test_run_uses_frozen_mcp_resolution),
 ]
 
 

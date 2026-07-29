@@ -25,6 +25,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -257,17 +258,11 @@ def test_skips_user_and_system_roles() -> bool:
 
 
 def test_capability_context_labels_team_message() -> bool:
-    prompt = runner_kimi._prepend_capability_context("<mssg>done</mssg>", {
-        "source": "mssg",
-        "capability_contexts": [{
-            "name": "Runtime",
-            "category": "system",
-            "content": "Use runtime context.",
-        }],
-    })
+    from capability_contexts import prompt_heading_for_source
+
     return (
-        "## Message\n\n<mssg>" in prompt
-        and "## User prompt\n\n<mssg>" not in prompt
+        prompt_heading_for_source("mssg") == "Message"
+        and prompt_heading_for_source("team_ask") == "Ask"
     )
 
 
@@ -284,13 +279,15 @@ def _run_runner_with_fake_kimi(script_body: str, inputs: dict) -> tuple[int, Pat
     _write_fake_kimi(bin_dir, script_body)
     run_dir = td / "run"
     run_dir.mkdir()
-    (run_dir / "input.json").write_text(json.dumps(inputs), encoding="utf-8")
-    old_path = os.environ["PATH"]
-    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
-    try:
-        rc = runner_kimi.main(run_dir)
-    finally:
-        os.environ["PATH"] = old_path
+    rc = asyncio.run(runner_kimi._run(run_dir, {
+        **inputs,
+        "_provider_executable": str(bin_dir / "kimi"),
+        "_capability_plan": {
+            "harness": {},
+            "tools": [],
+            "mcp_servers": [],
+        },
+    }))
     return rc, run_dir
 
 

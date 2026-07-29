@@ -12,9 +12,10 @@ from provider_runtime_plan_hydration import (
     apply_runtime_hydration,
     capture_runtime_hydration,
 )
+from provider_manifest import artifact_family_kinds
 
 
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|auth|authorization|credential|password|secret|token)($|_)",
@@ -286,9 +287,9 @@ def _tool_names(config: Mapping[str, Any]) -> list[str]:
     })
 
 
-def _contains_untyped_runtime_secret(value: Any) -> bool:
+def _contains_unavailable_runtime_secret(value: Any) -> bool:
     if type(value) is list:
-        return any(_contains_untyped_runtime_secret(item) for item in value)
+        return any(_contains_unavailable_runtime_secret(item) for item in value)
     if type(value) is not dict:
         return False
     if (
@@ -296,8 +297,13 @@ def _contains_untyped_runtime_secret(value: Any) -> bool:
         and value.get("kind") == "runtime_value"
     ):
         return True
+    if (
+        set(value) == {"kind", "extension_id", "key_sha256"}
+        and value.get("kind") == "extension_setting"
+    ):
+        return True
     return any(
-        _contains_untyped_runtime_secret(item)
+        _contains_unavailable_runtime_secret(item)
         for item in value.values()
     )
 
@@ -337,7 +343,7 @@ def _config_without_tool_metadata(
             }
         stripped["env"] = env
     clean = _secret_free(stripped, path=path)
-    if _contains_untyped_runtime_secret(clean):
+    if _contains_unavailable_runtime_secret(clean):
         raise ExecutionContractError(
             "runtime MCP secret lacks typed authority",
         )
@@ -361,11 +367,10 @@ def _explicit_mcp_configs(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]
 def _structural_provider_runtime_plan(
     inputs: dict[str, Any],
     provider_kind: str,
-) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     if type(inputs) is not dict or provider_kind not in _FAMILIES:
         raise ExecutionContractError("invalid provider runtime plan source")
     frozen_inputs = _json_copy(inputs, label="provider runtime inputs")
-    hydration: dict[str, str] = {}
     bare = bool(frozen_inputs.get("bare_config"))
     user_facing = bool(frozen_inputs.get("user_facing"))
 
@@ -374,7 +379,7 @@ def _structural_provider_runtime_plan(
     import installation_profile
 
     explicit = _explicit_mcp_configs(frozen_inputs)
-    if provider_kind == "agy":
+    if provider_kind != "claude":
         from builtin_mcp_config import with_builtin_mcp_servers
 
         runtime = extension_store.runtime_mcp_server_configs(
@@ -467,10 +472,10 @@ def _structural_provider_runtime_plan(
     overlays = launcher_projection.get("extension_setting_overlays")
     overlays = overlays if type(overlays) is dict else {}
     extensions = [
-            projected
-            for record in extension_store.list_extensions(include_hidden=True)
-            if (
-            projected := _extension_projection(record, overlays, hydration)
+        projected
+        for record in extension_store.list_extensions(include_hidden=True)
+        if (
+            projected := _extension_projection(record, overlays, None)
         ) is not None
     ]
     extensions.sort(key=lambda item: item["id"])
@@ -486,11 +491,14 @@ def _structural_provider_runtime_plan(
         "harness": _secret_free(
             harness,
             path="harness",
-            hydration=hydration,
         ),
         "tools": sorted(all_tools),
         "mcp_servers": servers,
     })
+    if _contains_unavailable_runtime_secret(resolved_plan):
+        raise ExecutionContractError(
+            "runtime plan secret lacks typed authority",
+        )
     extension_state = {
         "store_fingerprint": list(extension_store.store_fingerprint()),
         "settings_fingerprint": list(
@@ -499,7 +507,6 @@ def _structural_provider_runtime_plan(
         "native_grants": _secret_free(
             native_grants,
             path="native_grants",
-            hydration=hydration,
         ),
         "extensions": extensions,
     }
@@ -507,12 +514,10 @@ def _structural_provider_runtime_plan(
         "profile": _secret_free(
             installation_profile.load(),
             path="installation.profile",
-            hydration=hydration,
         ),
         "capabilities": _secret_free(
             installation_profile.capabilities(),
             path="installation.capabilities",
-            hydration=hydration,
         ),
     }
     return {
@@ -525,18 +530,17 @@ def _structural_provider_runtime_plan(
             installation_decisions,
             label="installation profile decisions",
         )),
-    }, hydration
+    }
 
 
 def structural_provider_runtime_plan(
     inputs: dict[str, Any],
     provider_kind: str,
 ) -> dict[str, dict[str, Any]]:
-    projection, _hydration = _structural_provider_runtime_plan(
+    return _structural_provider_runtime_plan(
         inputs,
         provider_kind,
     )
-    return projection
 
 
 def hydrate_frozen_provider_runtime_plan(

@@ -81,7 +81,11 @@ class _BrokerExecutor:
                 "version": 1,
                 "kind": "invoke",
                 "operation": operation,
-                "payload": request.model_dump(mode="json", by_alias=True),
+                "payload": request.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_unset=True,
+                ),
                 "request_id": f"operation_{uuid.uuid4().hex}",
                 "generation": self._generation,
             },

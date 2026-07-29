@@ -30,6 +30,7 @@ def test_role_dispatch() -> bool:
         ("--serve-node",): "backend",
         ("--run-dir", "/runs/x"): "backend",
         ("--run-dir", "/runs/x", "--runner-kind", "agy"): "backend",
+        ("--frozen-artifact-smoke", "--output", "/tmp/result"): "backend",
     }
     for argv, expected in cases.items():
         got = _role(list(argv))

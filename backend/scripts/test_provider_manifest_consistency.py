@@ -55,14 +55,33 @@ def test_copilot_dispatchable_in_frozen_app():
 
 def test_recovery_families():
     # Lock the recovery-reader mapping. session-events family = runners
-    # writing a Claude-shaped session_events.jsonl; codex = rollout reader; fugu
-    # currently uses the claude reader (pre-existing, flagged in the manifest).
+    # writing a Claude-shaped session_events.jsonl; codex family = rollout
+    # reader, including Fugu's runner_codex execution path.
     assert pm.session_events_family_kinds() == frozenset({
         "agy", "copilot", "openai",
         "pi", "qwen", "cursor", "kimi", "amp", "opencode",
     })
-    assert {k for k, s in pm.SPECS.items() if s.recovery_family == "codex"} == {"codex"}
-    assert pm.spec_for("fugu").recovery_family == "claude"
+    assert {
+        kind for kind, spec in pm.SPECS.items()
+        if spec.recovery_family == "codex"
+    } == {"codex", "fugu"}
+    assert pm.runner_module_for("fugu") == "runner_codex"
+
+
+def test_execution_artifact_coverage():
+    from execution_artifact_io import requires_execution_artifact
+
+    local = {
+        kind
+        for kind, spec in pm.SPECS.items()
+        if not spec.virtual
+    }
+    assert pm.artifact_family_kinds() == local - {"codex", "fugu"}
+    assert {
+        kind
+        for kind in local
+        if requires_execution_artifact(kind)
+    } == local
 
 
 def test_installable_matches_installers():
@@ -166,6 +185,7 @@ if __name__ == "__main__":
     test_resolve_class_matches_manifest()
     test_runner_modules_importable()
     test_recovery_families()
+    test_execution_artifact_coverage()
     test_installable_matches_installers()
     test_uses_claude_env_matches()
     test_codex_only_gates()

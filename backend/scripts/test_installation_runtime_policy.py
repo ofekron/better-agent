@@ -171,6 +171,27 @@ def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
     )
 
 
+def test_base_runtime_provisions_extension_mcp_sdk() -> None:
+    plan = dependency_plan.resolve_plan(
+        {"providers": []},
+        profile={"status": "active", "mode": installation_profile.DEFAULT},
+    )
+
+    assert "mcp.server.fastmcp" in plan["probes"]
+    requirements = (BACKEND / "requirements.txt").read_text(encoding="utf-8")
+    assert "-r ../sdk/runtime-requirements.txt" in requirements.splitlines()
+    sdk_requirements = (
+        ROOT / "sdk" / "runtime-requirements.txt"
+    ).read_text(encoding="utf-8")
+    assert "mcp>=1.29.0,<2" in sdk_requirements.splitlines()
+    spec = (ROOT / "desktop" / "BetterAgent.spec").read_text(encoding="utf-8")
+    assert '"mcp"' in spec, "packaged installations must collect the MCP SDK"
+    assert (
+        '(os.path.join(_SDK, "runtime-requirements.txt"), "sdk"),'
+        in spec
+    ), "packaged private environments require the canonical SDK constraints"
+
+
 def test_unknown_active_provider_requirement_fails_closed() -> None:
     _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     _ack_profile_for_dependency_tests()
@@ -1020,6 +1041,7 @@ if __name__ == "__main__":
     test_profile_selection_acknowledgement()
     test_installer_selection_keeps_user_configured_providers()
     test_runtime_plan_uses_pending_selection_then_active_config()
+    test_base_runtime_provisions_extension_mcp_sdk()
     test_unknown_active_provider_requirement_fails_closed()
     test_suspended_provider_requirement_is_included()
     test_unknown_suspended_provider_requirement_fails_closed()

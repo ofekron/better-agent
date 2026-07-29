@@ -35,6 +35,7 @@ datas = [
     (os.path.join(_REPO, "frontend", "dist"), "frontend_dist"),
     (os.path.join(_BACKEND, "prompts"), "prompts"),
     (os.path.join(_BACKEND, "provisioning", "prompts"), os.path.join("prompts", "provisioning")),
+    (os.path.join(_SDK, "runtime-requirements.txt"), "sdk"),
 ]
 datas.extend(
     (os.path.join(_REPO, relative_path), relative_path)
@@ -53,6 +54,7 @@ hiddenimports = [
     # must be listed here explicitly.
     "main", "main_node", "app_entry", "runner",
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
+    "provider_frozen_artifact_smoke", "provider_frozen_bundle",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "deep_link", "activation_server", "macos_url_handler",
     "updater", "update_delta", "pyxdelta", "_version",
@@ -74,9 +76,19 @@ def _without_python_sources(_datas):
     ]
 
 
+def _without_optional_mcp_cli(_module_name):
+    return (
+        _module_name != "mcp.cli"
+        and not _module_name.startswith("mcp.cli.")
+    )
+
+
 for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "watchfiles", "fastapi",
-             "starlette", "webview", "tufup"):
-    _d, _b, _h = collect_all(_pkg)
+             "starlette", "webview", "tufup", "mcp"):
+    _d, _b, _h = collect_all(
+        _pkg,
+        filter_submodules=_without_optional_mcp_cli,
+    )
     datas += _without_python_sources(_d)
     binaries += _b
     hiddenimports += _h

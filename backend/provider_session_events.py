@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,11 +26,21 @@ from provider import (
     RecoveredPopen,
     StreamEvent,
     await_line_tailer_drained,
+    build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
     schedule_loop_task,
 )
-from ingestion_versions import marker_matches_current
+from containment import containment
+from provider_family_execution_runtime import (
+    cleanup_failed_family_execution,
+    install_family_execution_payload,
+    release_staged_family_execution,
+    resolve_family_execution_payload,
+)
+from provider_runtime_plan_source import hydrate_frozen_provider_runtime_plan
+from proc_control import process_control
+from ingestion_versions import current_ingestion_version, marker_matches_current
 import config_store
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
@@ -81,6 +91,7 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    runner: str = ""
 
 
 # ============================================================================
@@ -109,6 +120,133 @@ class SessionEventsProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+
+    def prepare_run(self, **start_arguments: Any):
+        from provider_session_events_execution import (
+            prepare_session_events_execution,
+        )
+
+        return prepare_session_events_execution(self, start_arguments)
+
+    def _install_execution_payloads(self, execution, run_dir: Path) -> None:
+        install_family_execution_payload(execution, run_dir)
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        cleanup_failed_family_execution(execution, run_dir)
+
+    def _release_execution_authority(self, execution) -> None:
+        release_staged_family_execution(execution)
+
+    def start_session_events_execution(
+        self,
+        *,
+        execution,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+        internal_token: str | None,
+        extra_env: dict[str, str] | None,
+    ) -> None:
+        arguments = execution.start_arguments()
+        run_id = arguments["run_id"]
+        run_dir = _runs_root() / run_id
+        launch, capabilities = resolve_family_execution_payload(
+            execution.artifact,
+            run_dir,
+        )
+        inputs = execution.artifact.runtime_policy.get("runner_input")
+        if type(inputs) is not dict:
+            raise RuntimeError("frozen session-events runner input is unavailable")
+        hydrated_plan = hydrate_frozen_provider_runtime_plan(capabilities.plan)
+        runtime_hydration = {
+            "capability_plan": hydrated_plan,
+            "prewarm_status": capabilities.prewarm_status,
+            "skill_dirs": {
+                name: str(path)
+                for name, path in capabilities.skill_dirs.items()
+            },
+        }
+        _atomic_write_json(run_dir / "input.json", inputs)
+        containment().create(run_id)
+        stdout_fp = (run_dir / "stdout.log").open("ab")
+        stderr_fp = (run_dir / "stderr.log").open("ab")
+        try:
+            env = self.finalize_run_env(
+                self.build_env(),
+                run_id=run_id,
+                app_session_id=inputs["app_session_id"],
+                resolved_harness_run_config=inputs.get(
+                    "resolved_harness_run_config",
+                ),
+            )
+            if extra_env:
+                env.update(extra_env)
+            env.update(build_better_agent_run_env(
+                backend_url=inputs["backend_url"],
+                internal_token=internal_token,
+                run_id=run_id,
+                app_session_id=inputs["app_session_id"],
+                cwd=inputs["cwd"],
+                model=inputs.get("model"),
+                provider_id=self.id,
+                bare_config=bool(inputs["bare_config"]),
+                user_facing=bool(inputs["user_facing"])
+                and not bool(inputs["bare_config"]),
+                disabled_builtin_extensions=inputs[
+                    "disabled_builtin_extensions"
+                ],
+                runtime_hydration=runtime_hydration,
+            ))
+            with launch.open_runner() as pinned:
+                pass_fds = (
+                    {"pass_fds": pinned.pass_fds}
+                    if os.name != "nt" and pinned.pass_fds
+                    else {}
+                )
+                popen = subprocess.Popen(
+                    list(pinned.argv),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_fp,
+                    stderr=stderr_fp,
+                    cwd=inputs["cwd"],
+                    env=env,
+                    **pass_fds,
+                    **process_control().detach_spawn_kwargs(),
+                    **containment().spawn_kwargs(run_id),
+                )
+        except BaseException:
+            containment().teardown(run_id)
+            raise
+        finally:
+            stdout_fp.close()
+            stderr_fp.close()
+        containment().after_spawn(run_id, popen.pid)
+        state = RunState(
+            run_id=run_id,
+            run_dir=run_dir,
+            popen=popen,
+            mode=inputs["canonical_mode"],
+            app_session_id=inputs["app_session_id"],
+            queue=queue,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            persist_to=(
+                inputs.get("worker_agent_session_id")
+                or inputs["app_session_id"]
+            ),
+            target_message_id=inputs.get("target_message_id"),
+            turn_run_id=inputs.get("turn_run_id"),
+            runner=str(inputs.get("runner") or ""),
+        )
+        self._runs[run_id] = state
+        self._write_backend_state(state)
+        schedule_loop_task(
+            loop,
+            self._bootstrap_run(state),
+            name=f"{self.KIND}-bootstrap-{run_id[:8]}",
+        )
 
     # ------------------------------------------------------------------
     # _bootstrap_run — wait for state.json, then tail session_events.jsonl
@@ -324,7 +462,9 @@ class SessionEventsProvider(Provider):
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "provider_id": self.id,
-            "runner": self.record.get("runner"),
+            "provider_kind": self.KIND,
+            "ingestion_version": current_ingestion_version(self.KIND),
+            "runner": rs.runner,
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)
@@ -389,6 +529,7 @@ class SessionEventsProvider(Provider):
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
+            runner=str(desc.get("runner") or ""),
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
@@ -518,6 +659,7 @@ class SessionEventsProvider(Provider):
                 "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
+                "runner": bs.get("runner"),
                 "recovered_as": "live_orphan" if live_orphan else "dead_orphan",
             })
 

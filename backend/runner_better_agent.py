@@ -78,6 +78,10 @@ from user_interaction_tool_contracts import (
 from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
 from runner_operation_host import internal_token_lease
+from provider_session_events_runner import (
+    effective_mcp_servers,
+    restore_session_events_runner,
+)
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 
@@ -1165,31 +1169,6 @@ def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) 
     return candidate
 
 
-def _extension_mcp_server_configs_for_run(
-    inputs: dict,
-    *,
-    user_facing: bool,
-    bare: bool,
-) -> dict[str, dict[str, Any]]:
-    try:
-        import extension_store
-    except Exception:
-        return {}
-    configs: dict[str, dict[str, Any]] = {}
-    for name, config in extension_store.runtime_mcp_server_configs(
-        inputs, user_facing=user_facing, bare=bare,
-    ).items():
-        configs.setdefault(name, config)
-    for name, config in extension_store.native_mcp_server_configs(
-        inputs, user_facing=user_facing, bare=bare,
-    ).items():
-        if extension_store.is_reserved_mcp_server_name(name):
-            configs[name] = config
-            continue
-        configs.setdefault(name, config)
-    return configs
-
-
 def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -1335,25 +1314,15 @@ async def _mcp_call_tool(spec: dict[str, Any], args: dict[str, Any]) -> str:
 
 
 async def _extension_mcp_tools_for_run(
-    inputs: dict,
+    configs: dict[str, dict[str, Any]],
     *,
-    user_facing: bool,
-    bare: bool,
+    required_servers: set[str],
     used_names: set[str],
 ) -> tuple[list[dict], dict[str, dict[str, Any]]]:
     schemas: list[dict] = []
     handlers: dict[str, dict[str, Any]] = {}
-    configs = list(_extension_mcp_server_configs_for_run(
-        inputs, user_facing=user_facing, bare=bare,
-    ).items())
-    import extension_store
-    try:
-        required_servers = extension_store.required_profile_mcp_server_names(inputs)
-    except Exception as exc:
-        raise RuntimeError(
-            f"required extension MCP selection resolution failed: {exc}"
-        ) from exc
-    configured_servers = {server_name for server_name, _ in configs}
+    config_items = list(configs.items())
+    configured_servers = set(configs)
     if missing_servers := sorted(required_servers - configured_servers):
         raise RuntimeError(
             "required extension MCP config unavailable: "
@@ -1362,11 +1331,11 @@ async def _extension_mcp_tools_for_run(
     tool_lists = await asyncio.gather(
         *(
             _mcp_list_tools(server_name, config)
-            for server_name, config in configs
+            for server_name, config in config_items
         ),
         return_exceptions=True,
     )
-    for (server_name, config), tools in zip(configs, tool_lists):
+    for (server_name, config), tools in zip(config_items, tool_lists):
         if isinstance(tools, BaseException):
             if not isinstance(tools, Exception):
                 raise tools
@@ -1658,7 +1627,11 @@ def _post_loopback_sync(
         try:
             return _request_once(token_lease.token)
         except urllib.error.HTTPError as e:
-            if e.code == 403 and token_lease.refresh_after_forbidden():
+            if (
+                e.code == 403
+                and time.monotonic() < deadline
+                and token_lease.refresh_after_forbidden()
+            ):
                 continue
             raise_loopback_http_error(
                 e,
@@ -2227,13 +2200,9 @@ def _build_loopback_tool_handlers(
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
-    try:
-        import extension_store
-        team_orchestration_ready = extension_store.is_extension_runtime_ready(
-            extension_store.extension_id_for_role('team-orchestration')
-        )
-    except Exception:
-        team_orchestration_ready = False
+    team_orchestration_ready = (
+        inputs.get("team_orchestration_enabled") is True
+    )
     if (inputs.get("mode") or "native") == "manager" and team_orchestration_ready:
         handlers["create_worker"] = create_worker
     if team_orchestration_ready and "ensure_named_worker" not in disabled:
@@ -2255,12 +2224,7 @@ def _build_loopback_tool_handlers(
         handlers["request_user_approval"] = request_user_approval
         if inputs.get("working_mode") == "file_editing":
             handlers["start_file_discussion"] = start_file_discussion
-    try:
-        coordination_ready = extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_COORDINATION_EXTENSION_ID
-        )
-    except Exception:
-        coordination_ready = False
+    coordination_ready = inputs.get("coordination_enabled") is True
     if coordination_ready:
         handlers["lock_ops"] = lock_ops
     return handlers
@@ -2333,6 +2297,10 @@ async def _stream_chat(
 # --------------------------------------------------------------------------
 
 async def _run(run_dir: Path, inputs: dict) -> int:
+    capability_plan = inputs.pop("_capability_plan", None)
+    if type(capability_plan) is not dict:
+        _fail(run_dir, "frozen capability plan is unavailable")
+        return 1
     cwd_str = inputs.get("cwd")
     if not cwd_str:
         _fail(run_dir, "missing cwd")
@@ -2362,8 +2330,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Capability-management tools ride the same backend channel and are stripped
     # from bare (TestApe-isolated) sessions, matching runner.py / the stdio
     # capabilities MCP injected for the CLI providers.
-    import installation_profile
-    integrations_enabled = installation_profile.integrations_enabled()
+    integrations_enabled = inputs.get("integrations_enabled") is True
     capabilities_enabled = (
         integrations_enabled
         and interactive
@@ -2375,17 +2342,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # manager mode; file_editing is the working_mode the file-panel edits in.
     mode = inputs.get("mode") or "native"
     team_manager_enabled = mode == "manager"
-    try:
-        import extension_store
-        team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-            extension_store.extension_id_for_role('team-orchestration')
-        )
-        coordination_enabled = extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_COORDINATION_EXTENSION_ID
-        )
-    except Exception:
-        team_orchestration_enabled = False
-        coordination_enabled = False
+    team_orchestration_enabled = (
+        inputs.get("team_orchestration_enabled") is True
+    )
+    coordination_enabled = inputs.get("coordination_enabled") is True
     loopback_enabled = _loopback_tools_enabled(
         interactive=interactive,
         integrations_enabled=integrations_enabled,
@@ -2406,9 +2366,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         coordination_enabled=coordination_enabled,
     )
     extension_mcp_schemas, extension_mcp_handlers = await _extension_mcp_tools_for_run(
-        inputs,
-        user_facing=bool(user_facing and app_session_id),
-        bare=bool(inputs.get("bare_config")),
+        effective_mcp_servers(capability_plan),
+        required_servers=set(inputs.get("required_mcp_server_names") or []),
         used_names=_schema_tool_names(tool_schemas),
     )
     tool_schemas.extend(extension_mcp_schemas)
@@ -3037,9 +2996,11 @@ def main(run_dir: Path) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
-        from runner_operation_host import hydrate_runner_inputs
-        inputs = hydrate_runner_inputs(inputs, run_dir)
+        execution = restore_session_events_runner(
+            run_dir,
+            materialize_provider=False,
+        )
+        inputs = execution.inputs
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

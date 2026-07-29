@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from codex_execution_common import ExecutionContractError, SHA256_RE
 from codex_execution_identity import file_identity_from_dict
 from provider_family_launch_attestation import CriticalPackageIdentity
+from provider_manifest import artifact_family_kinds
 from provider_runtime_capability_model import (
     CAPABILITY_MANIFEST_SCHEMA,
     CAPABILITY_PAYLOAD_NAME,
@@ -52,7 +53,7 @@ def validate_runtime_capability_manifest(
         raise ExecutionContractError("invalid runtime capability manifest")
     if (
         raw["schema"] != CAPABILITY_MANIFEST_SCHEMA
-        or raw["family"] not in {"claude", "agy"}
+        or raw["family"] not in artifact_family_kinds()
         or raw["path"] != CAPABILITY_PAYLOAD_NAME
         or type(raw["sha256"]) is not str
         or not SHA256_RE.fullmatch(raw["sha256"])
@@ -65,7 +66,7 @@ def validate_runtime_capability_manifest(
         or type(raw["agent_count"]) is not int
         or not 0 <= raw["agent_count"] <= MAX_AGENTS
         or (
-            raw["family"] == "agy"
+            raw["family"] != "claude"
             and raw["agent_count"] != 0
         )
         or type(raw["extension_ids"]) is not list

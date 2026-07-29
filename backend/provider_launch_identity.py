@@ -32,7 +32,6 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _LAUNCH_MODES = frozenset({
     "native",
     "posix-shebang",
-    "windows-command",
     "runner-dev",
     "runner-frozen",
 })
@@ -308,15 +307,10 @@ def _validate_launch(launch: AttestedLaunch) -> None:
         for marker in SECRET_NAMES
     ):
         raise ExecutionContractError("secret launch argument is not allowed")
-    if launch.mode == "windows-command" and (
-        len(launch.argv) != 5
-        or indexes != (0, 4)
-        or tuple(value.lower() for value in launch.argv[1:4])
-        != ("/d", "/s", "/c")
-        or launch.components[-1] != launch.launcher
+    if launch.mode == "runner-dev" and (
+        indexes not in {(0, 1), (0, 2)}
+        or (indexes == (0, 2) and launch.argv[1] != "-I")
     ):
-        raise ExecutionContractError("incoherent Windows command launch")
-    if launch.mode == "runner-dev" and indexes != (0, 1):
         raise ExecutionContractError("incoherent development runner launch")
     if launch.mode == "runner-frozen" and indexes != (0,):
         raise ExecutionContractError("incoherent frozen runner launch")
@@ -366,34 +360,21 @@ def capture_cli_launch(
     platform: str | None = None,
     command_processor: str | Path | None = None,
 ) -> AttestedLaunch:
+    effective_platform = platform or sys.platform
+    if effective_platform.lower().startswith("win") and (
+        Path(launcher_path).suffix.lower() in {".cmd", ".bat"}
+    ):
+        raise ExecutionContractError(
+            "Windows command wrappers require complete chain authority",
+        )
     launcher = FileIdentity.capture(launcher_path)
     target = Path(launcher.resolved_path)
-    effective_platform = platform or sys.platform
     if effective_platform.lower().startswith("win") and (
         target.suffix.lower() in {".cmd", ".bat"}
     ):
-        if command_processor is None:
-            raise ExecutionContractError(
-                "Windows command processor must be resolved before capture",
-            )
-        processor = FileIdentity.capture(command_processor)
-        launch = AttestedLaunch(
-            logical_command=logical_command,
-            platform=effective_platform,
-            mode="windows-command",
-            argv=(
-                processor.resolved_path,
-                "/d",
-                "/s",
-                "/c",
-                launcher.resolved_path,
-            ),
-            launcher=launcher,
-            components=(processor, launcher),
-            component_argv_indexes=(0, 4),
+        raise ExecutionContractError(
+            "Windows command wrappers require complete chain authority",
         )
-        _validate_launch(launch)
-        return launch
     tokens = _read_attested_shebang(launcher)
     if not tokens:
         launch = AttestedLaunch(

@@ -61,6 +61,32 @@ if (-not (Test-Path $Exe)) {
     throw "build failed: '$Exe' was not produced"
 }
 
+Write-Host "==> Verifying the immutable frozen execution artifact"
+$SmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
+    "better-agent-artifact-smoke-" + [guid]::NewGuid().ToString("N")
+)
+New-Item -ItemType Directory -Path $SmokeRoot | Out-Null
+$PreviousBetterAgentHome = $env:BETTER_AGENT_HOME
+try {
+    $env:BETTER_AGENT_HOME = Join-Path $SmokeRoot "state"
+    $SmokeResult = Join-Path $SmokeRoot "result.json"
+    & $Exe --frozen-artifact-smoke --output $SmokeResult
+    if ($LASTEXITCODE -ne 0) {
+        throw "immutable frozen execution artifact smoke failed"
+    }
+    & $Python -c "import json,sys; value=json.load(open(sys.argv[1], encoding='utf-8')); assert set(value['families']) == {'claude', 'agy'}" $SmokeResult
+    if ($LASTEXITCODE -ne 0) {
+        throw "immutable frozen execution artifact result is invalid"
+    }
+} finally {
+    if ($null -eq $PreviousBetterAgentHome) {
+        Remove-Item Env:BETTER_AGENT_HOME -ErrorAction SilentlyContinue
+    } else {
+        $env:BETTER_AGENT_HOME = $PreviousBetterAgentHome
+    }
+    Remove-Item -Recurse -Force $SmokeRoot
+}
+
 if ($env:BA_SIGN_THUMBPRINT) {
     Write-Host "==> Authenticode-signing the executable"
     # Sign the launcher exe (and ideally every bundled .exe/.dll). Requires

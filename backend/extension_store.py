@@ -3537,12 +3537,26 @@ def _extension_python(install_root: Path, *, has_dependency_environment: bool) -
         ) from exc
 
 
+def _sdk_runtime_requirements_path() -> Path:
+    frozen_root = str(getattr(sys, "_MEIPASS", "") or "")
+    if frozen_root:
+        return Path(frozen_root) / "sdk" / "runtime-requirements.txt"
+    return (
+        Path(__file__).resolve().parent.parent
+        / "sdk"
+        / "runtime-requirements.txt"
+    )
+
+
 def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None:
     requirements = list(manifest.get("entrypoints", {}).get("python_requirements") or [])
     if not requirements:
         return
     if os.environ.get("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL") == "1":
         return
+    sdk_requirements = _sdk_runtime_requirements_path()
+    if not sdk_requirements.is_file():
+        raise ExtensionError("extension SDK runtime requirements are unavailable")
     venv_dir = target / ".venv"
     try:
         backend_python = dependency_plan.verified_active_python(
@@ -3565,7 +3579,15 @@ def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None
         raise ExtensionError(f"extension dependency environment creation failed: {detail}")
     python = _venv_python(venv_dir)
     result = subprocess.run(
-        [str(python), "-m", "pip", "install", *requirements],
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(sdk_requirements),
+            *requirements,
+        ],
         check=False,
         capture_output=True,
         text=True,

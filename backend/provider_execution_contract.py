@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from provider_manifest import artifact_family_kinds
+
 
 FAMILY_CONTRACT_SCHEMA = 1
-_FAMILY_TYPES = frozenset({"claude", "agy"})
+_FAMILY_TYPES = artifact_family_kinds()
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|authorization|credential|password|secret|token)($|_)",
 )
@@ -112,11 +114,12 @@ def _decode_family(raw: Mapping[str, Any]) -> _FrozenContract:
     return _FrozenContract(_canonical_json(raw))
 
 
-_CODECS: Mapping[str, Callable[[Mapping[str, Any]], _FrozenContract]] = MappingProxyType({
-    "agy": _decode_family,
-    "claude": _decode_family,
-    "codex": _decode_codex,
-})
+_CODECS: Mapping[str, Callable[[Mapping[str, Any]], _FrozenContract]] = (
+    MappingProxyType({
+        **{kind: _decode_family for kind in _FAMILY_TYPES},
+        "codex": _decode_codex,
+    })
+)
 
 
 def freeze_provider_contract(

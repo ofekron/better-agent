@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 import continuation  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import extension_token_registry  # noqa: E402
 import installation_profile  # noqa: E402
 import session_manager  # noqa: E402
 
@@ -249,6 +250,71 @@ def test_endpoints() -> None:
             )
             check(resp.status_code == 200, f"selectors still allows reasoning_effort-only ({resp.status_code})")
 
+            capability_token = extension_token_registry.mint(
+                extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID
+            )
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
+                        "reasoning_effort": "none",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 200,
+                "capability transport preserves absent model/provider selectors",
+            )
+            if resp.status_code != 200:
+                raise AssertionError(resp.text)
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
+                        "model": "",
+                        "provider_id": "   ",
+                        "reasoning_effort": "none",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 200,
+                "capability transport ignores empty model/provider selectors",
+            )
+            if resp.status_code != 200:
+                raise AssertionError(resp.text)
+            check(
+                (session_manager.manager.get(sid) or {}).get("reasoning_effort")
+                == "none",
+                "capability transport persists reasoning effort with empty selectors",
+            )
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
+                        "model": "model-two",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 409,
+                "capability transport preserves explicit forbidden model switches",
+            )
+            if resp.status_code != 409:
+                raise AssertionError(resp.text)
+
             # Bad internal token is forbidden.
             resp = client.post(
                 "/api/internal/session-control/continue-fresh",
@@ -260,11 +326,46 @@ def test_endpoints() -> None:
             session_manager.manager.delete(sid)
 
 
+def test_runtime_operation_ignores_empty_model_provider_defaults() -> None:
+    import runtime_operations
+    from better_agent_sdk.surfaces import request_model_for_callable
+
+    server = runtime_operations._load_bundled_server("session-control")
+    switch_model = next(
+        item.handler for item in server._specs() if item.name == "switch_model"
+    )
+    model = request_model_for_callable(
+        "runtime_session_control_switch_model",
+        switch_model,
+    )
+
+    values = runtime_operations._session_control_values(model(
+        model="",
+        provider_id="   ",
+        reasoning_effort="none",
+    ))
+    check(
+        values == {"reasoning_effort": "none"},
+        "runtime operation drops only empty model/provider selectors",
+    )
+
+    forbidden = runtime_operations._session_control_values(model(
+        model="forbidden",
+        provider_id="",
+        reasoning_effort="none",
+    ))
+    check(
+        forbidden == {"model": "forbidden", "reasoning_effort": "none"},
+        "runtime operation preserves explicit forbidden model selector",
+    )
+
+
 def main_runner() -> int:
     test_continuation_requested_flag_roundtrip()
     test_agent_requested_continuation_prompt()
     test_session_control_extension_validates_and_injects()
     test_endpoints()
+    test_runtime_operation_ignores_empty_model_provider_defaults()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURES:")
         for f in FAILURES:

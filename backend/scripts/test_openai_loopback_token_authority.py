@@ -326,3 +326,39 @@ def test_runtime_operation_retry_is_bounded_and_redacted(
     assert seen_tokens == [SPAWN_TOKEN, ROTATED_TOKEN]
     assert SPAWN_TOKEN not in str(exc.value)
     assert ROTATED_TOKEN not in str(exc.value)
+
+
+def test_runtime_operation_refreshes_multiple_generations_and_redacts_history(
+    monkeypatch, token_authority,
+):
+    tokens = (SPAWN_TOKEN, ROTATED_TOKEN, "C" * 43)
+    write_token(token_authority, tokens[1])
+    seen_tokens = []
+
+    def reject(req, *args, **kwargs):
+        token = req.headers.get("X-internal-token")
+        seen_tokens.append(token)
+        if token == tokens[1]:
+            write_token(token_authority, tokens[2])
+        raise forbidden(req, f"rejected {' '.join(tokens)}")
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", reject)
+    host = authority_owner._RunnerOperationHost(
+        token_authority / "run",
+        {
+            "backend_url": BACKEND_URL,
+            "internal_token": SPAWN_TOKEN,
+            "app_session_id": "session",
+            "provider_id": "provider",
+            "cwd": str(token_authority),
+        },
+        authority_owner._ACTIVE_TOKEN_AUTHORITY,
+    )
+    from runtime_broker import BrokerRequest
+
+    with pytest.raises(RuntimeError) as exc:
+        host._handle(BrokerRequest(version=1, kind="catalog"))
+    detail = str(exc.value)
+    assert seen_tokens == list(tokens)
+    assert detail.count("[redacted]") == len(tokens)
+    assert not any(token in detail for token in tokens)

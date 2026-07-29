@@ -25,6 +25,7 @@ from execution_template import (  # noqa: E402
     prepare_execution,
 )
 from provider import Provider  # noqa: E402
+from provider_manifest import artifact_family_kinds  # noqa: E402
 
 
 _CREDENTIALS: dict[str, str] = {}
@@ -146,7 +147,7 @@ class _Provider(Provider):
 def test_family_contract_codec_is_strict_immutable_and_tamper_bound() -> None:
     from provider_execution_contract import provider_family_contract
 
-    for kind in ("claude", "agy"):
+    for kind in artifact_family_kinds():
         record = _record(kind)
         prepared = prepare_execution(
             record,
@@ -266,6 +267,11 @@ def test_extra_env_rejects_launch_runtime_and_authority_collisions() -> None:
         "PYTHONPATH",
         "CLAUDE_CONFIG_DIR",
         "ANTHROPIC_API_KEY",
+        "AMP_API_KEY",
+        "AMP_URL",
+        "CURSOR_API_KEY",
+        "KIMI_API_KEY",
+        "GITHUB_TOKEN",
         "BETTER_AGENT_INTERNAL_TOKEN",
     ):
         try:

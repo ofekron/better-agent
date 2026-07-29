@@ -1,7 +1,9 @@
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-fugu-")
@@ -13,8 +15,10 @@ import config_store  # noqa: E402
 from provider import ProviderCredentialError, _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_fugu import FUGU_MODELS, FuguProvider  # noqa: E402
+from provider_openai import OpenAIProvider  # noqa: E402
 from provider_runtime import _preserved_env_keys  # noqa: E402
 from runner_codex import _build_app_server_argv  # noqa: E402
+from run_recovery import _recovery_family  # noqa: E402
 
 
 def check(cond: bool, msg: str) -> None:
@@ -142,6 +146,59 @@ def test_fugu_runner_rejects_non_authoritative_key() -> None:
     raise AssertionError("Fugu runner must reject unmanaged keys")
 
 
+def test_runner_backend_state_projects_recovery_family() -> None:
+    def state(run_dir: Path) -> SimpleNamespace:
+        run_dir.mkdir(parents=True)
+        return SimpleNamespace(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=SimpleNamespace(pid=os.getpid()),
+            mode="native",
+            app_session_id="app-session",
+            persist_to="app-session",
+            started_at="2026-07-29T00:00:00Z",
+            session_id=None,
+            jsonl_path=run_dir / "events.jsonl",
+            processed_line=0,
+            processed_byte_offset=0,
+            cancelled=False,
+            turn_cancelled=False,
+            target_message_id=None,
+            turn_run_id=None,
+            child_sources={},
+        )
+
+    native_dir = Path(_TMP_HOME) / "native-fugu"
+    FuguProvider({
+        "id": "fugu-provider",
+        "kind": "fugu",
+        "runner": "native",
+    })._write_backend_state(state(native_dir))
+    native = json.loads(
+        (native_dir / "backend_state.json").read_text(encoding="utf-8"),
+    )
+    check(native["provider_kind"] == "fugu", "native Fugu persists its runtime kind")
+    check(_recovery_family(native) == "codex", "native Fugu replays Codex rollout")
+
+    better_agent_dir = Path(_TMP_HOME) / "better-agent-fugu"
+    OpenAIProvider({
+        "id": "fugu-provider",
+        "kind": "fugu",
+        "runner": "better_agent_runner",
+    })._write_backend_state(state(better_agent_dir))
+    better_agent = json.loads(
+        (better_agent_dir / "backend_state.json").read_text(encoding="utf-8"),
+    )
+    check(
+        better_agent["provider_kind"] == "openai",
+        "Better Agent Fugu persists its runtime kind",
+    )
+    check(
+        _recovery_family(better_agent) == "session_events",
+        "Better Agent Fugu replays normalized session events",
+    )
+
+
 def test_fugu_not_auto_installable() -> None:
     # The fugu installer is a `git clone HEAD | bash` bootstrap that is not
     # hash-pinnable, so it MUST NOT be wired into the setup wizard's
@@ -163,6 +220,7 @@ def main() -> int:
         test_fugu_disables_image_generation_tool,
         test_fugu_runner_uses_only_broker_authoritative_key,
         test_fugu_runner_rejects_non_authoritative_key,
+        test_runner_backend_state_projects_recovery_family,
         test_fugu_not_auto_installable,
     ]
     for test in tests:

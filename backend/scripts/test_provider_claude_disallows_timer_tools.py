@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +11,7 @@ import _test_home
 _test_home.isolate("bc-timer-tools-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config_store
 from provider_claude import ClaudeProvider, TIMER_TOOLS
 
 
@@ -23,12 +23,13 @@ class _Popen:
 
 
 def main() -> int:
-    provider = ClaudeProvider({
-        "id": "timer-tools-test",
+    provider_record = config_store.add_provider({
+        "name": "Timer tools test",
         "kind": "claude",
-        "generation": "5a2b93bb-adc6-4e8a-bcf9-78839101bcb7",
-        "revision": 0,
+        "mode": "subscription",
+        "config_dir": "$HOME/.claude",
     })
+    provider = ClaudeProvider(provider_record)
     run_id = "timer-tools-run"
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -41,7 +42,11 @@ def main() -> int:
         patch("provider_claude.subprocess.Popen", return_value=_Popen()),
         patch.object(provider, "_bootstrap_run", fake_bootstrap),
         patch.object(provider, "_write_backend_state"),
-        patch("provider_claude.schedule_loop_task", side_effect=lambda _loop, coro, **_kwargs: coro.close()),
+        patch.object(provider, "require_runtime_credential"),
+        patch(
+            "provider_claude.schedule_loop_task",
+            side_effect=lambda _loop, coro, **_kwargs: coro.close(),
+        ),
         patch("containment.containment") as containment,
     ):
         containment.return_value.create.return_value = None

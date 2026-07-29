@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -54,28 +55,34 @@ class InternalTokenLease:
     ) -> None:
         self._bootstrap_token = bootstrap_token
         self._authority = authority
-        self._refreshed = False
         self.token = (
             authority.current(bootstrap_token)
             if authority is not None
             else None
         ) or bootstrap_token
+        self._observed_tokens = list(dict.fromkeys((
+            bootstrap_token,
+            self.token,
+        )))
 
     def refresh_after_forbidden(self) -> bool:
-        if self._authority is None or self._refreshed:
+        if self._authority is None:
             return False
-        self._refreshed = True
         refreshed = self._authority.refresh_after_forbidden(
             bootstrap_token=self._bootstrap_token,
             rejected_token=self.token,
         )
-        if refreshed is None:
+        if refreshed is None or any(
+            hmac.compare_digest(refreshed, observed)
+            for observed in self._observed_tokens
+        ):
             return False
         self.token = refreshed
+        self._observed_tokens.append(refreshed)
         return True
 
     def redact_values(self) -> tuple[str, ...]:
-        return self._bootstrap_token, self.token
+        return tuple(self._observed_tokens)
 
 
 def _read_backend_internal_token() -> str | None:
@@ -198,6 +205,7 @@ class _RunnerOperationHost:
             self._bootstrap_token,
             self._token_authority,
         )
+        deadline = time.monotonic() + 24 * 60 * 60
 
         def request_once() -> dict[str, Any]:
             http_request = urllib.request.Request(
@@ -211,24 +219,21 @@ class _RunnerOperationHost:
             )
             with urllib.request.urlopen(
                 http_request,
-                timeout=24 * 60 * 60,
+                timeout=max(1.0, deadline - time.monotonic()),
             ) as response:
                 return json.loads(response.read().decode("utf-8"))
 
-        try:
-            value = request_once()
-        except urllib.error.HTTPError as error:
-            if error.code == 403 and lease.refresh_after_forbidden():
-                try:
-                    value = request_once()
-                except urllib.error.HTTPError as retry_error:
-                    from loopback_http import raise_loopback_http_error
-
-                    raise_loopback_http_error(
-                        retry_error,
-                        redact_values=lease.redact_values(),
-                    )
-            else:
+        while True:
+            try:
+                value = request_once()
+                break
+            except urllib.error.HTTPError as error:
+                if (
+                    error.code == 403
+                    and time.monotonic() < deadline
+                    and lease.refresh_after_forbidden()
+                ):
+                    continue
                 from loopback_http import raise_loopback_http_error
 
                 raise_loopback_http_error(

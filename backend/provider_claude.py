@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -64,6 +65,35 @@ from extension_run_policy import (
     disabled_runtime_skills_for_run,
     resolve_extension_run_policy,
 )
+from provider_claude_execution import (
+    attest_embedded_claude_sdk,
+    capture_claude_sdk_package,
+    capture_embedded_claude_sdk,
+    materialize_claude_sdk_package,
+)
+from provider_family_execution_runtime import (
+    cleanup_failed_family_execution,
+    install_family_execution_payload,
+    prepare_family_execution,
+    release_staged_family_execution,
+    resolve_family_execution_payload,
+)
+from provider_family_launch_attestation import (
+    FamilyLaunchAttestation,
+    capture_cli_launch,
+    capture_config_scope,
+    capture_runner_launch,
+)
+from provider_family_runtime_capabilities import (
+    snapshot_family_runtime_capabilities,
+)
+from codex_execution_identity import file_identity_to_dict
+from provider_runtime_plan_source import (
+    hydrate_frozen_provider_runtime_plan,
+    selected_runtime_agent_sources,
+    selected_runtime_skill_sources,
+    structural_provider_runtime_plan,
+)
 
 # Session-record fields _build_input_payload resolves run behavior from. Any
 # record field a run-policy resolver reads MUST be listed here, or it silently
@@ -91,7 +121,12 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Constants
 # ============================================================================
-from paths import ba_home, user_home
+from paths import (
+    ba_home,
+    encode_cwd,
+    resolve_provider_config_dir,
+    user_home,
+)
 
 
 # Re-exports for back-compat with run_recovery + any out-of-tree
@@ -308,6 +343,117 @@ class ClaudeProvider(Provider):
             lambda: sum(rs.queue.qsize() for rs in self._runs.values()),
         )
 
+    def prepare_run(self, **start_arguments: Any):
+        runner_input = self._build_prepared_runner_input(start_arguments)
+        run_id = start_arguments["run_id"]
+        run_dir = _runs_root() / run_id
+        from cli_paths import resolve_cli_binary
+
+        claude_binary = resolve_cli_binary("claude")
+        if not claude_binary:
+            raise RuntimeError("claude CLI not found on PATH")
+        authority = self.execution_authority_record(start_arguments)
+        config_root = resolve_provider_config_dir(
+            str(authority.get("config_dir") or ".claude"),
+        )
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_root = config_root.resolve(strict=True)
+        resume_path = None
+        session_id = runner_input.get("session_id")
+        if session_id and not runner_input.get("fork"):
+            candidate = (
+                config_root
+                / "projects"
+                / encode_cwd(runner_input["cwd"])
+                / f"{session_id}.jsonl"
+            )
+            if candidate.is_file():
+                resume_path = candidate
+        config = capture_config_scope(
+            root_path=config_root,
+            config_paths=tuple(
+                config_root / name
+                for name in (
+                    ".credentials.json",
+                    "settings.json",
+                    "settings.local.json",
+                )
+            ),
+            resume_path=resume_path,
+        )
+        runner_launch = capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=sys.executable,
+            runner_entry=_RUNNER_PATH,
+            runner_kind=self.KIND,
+            runner_module="runner",
+            frozen=bool(getattr(sys, "frozen", False)),
+        )
+        sdk_authority = (
+            capture_embedded_claude_sdk(runner_launch)
+            if runner_launch.frozen
+            else capture_claude_sdk_package()
+        )
+        launch = FamilyLaunchAttestation.capture(
+            family=self.KIND,
+            runner=runner_launch,
+            downstream=capture_cli_launch(
+                logical_command=self.KIND,
+                launcher_path=claude_binary,
+                search_path=os.environ.get("PATH"),
+                platform=sys.platform,
+                command_processor=os.environ.get("COMSPEC"),
+            ),
+            config=config,
+            critical_packages=(sdk_authority,),
+        )
+        if not launch.attest():
+            raise RuntimeError(
+                "Claude launch authority changed during preparation",
+            )
+        projection = structural_provider_runtime_plan(
+            runner_input,
+            self.KIND,
+        )
+        capabilities = snapshot_family_runtime_capabilities(
+            family=self.KIND,
+            skill_sources=selected_runtime_skill_sources(
+                runner_input["cwd"],
+                bool(runner_input["bare_config"]),
+                runner_input["disabled_runtime_skills"],
+            ),
+            agent_sources=selected_runtime_agent_sources(
+                self.KIND,
+                bool(runner_input["bare_config"]),
+            ),
+            resolved_plan=projection["resolved_plan"],
+            extension_state=projection["extension_state"],
+            installation_decisions=projection["installation_decisions"],
+            package_identities=(sdk_authority,),
+        )
+        return prepare_family_execution(
+            authority,
+            start_arguments=start_arguments,
+            runner_input=runner_input,
+            launch=launch,
+            capabilities=capabilities,
+        )
+
+    def _install_execution_payloads(self, execution, run_dir: Path) -> None:
+        install_family_execution_payload(execution, run_dir)
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        cleanup_failed_family_execution(execution, run_dir)
+        for name in ("claude-cli", "claude-sdk"):
+            shutil.rmtree(run_dir / name, ignore_errors=True)
+
+    def _release_execution_authority(self, execution) -> None:
+        release_staged_family_execution(execution)
+
     def build_env(self) -> dict[str, str]:
         """Compose the subprocess env for any claude CLI / runner spawn
         owned by this provider. Inherits the FastAPI process's env as
@@ -466,57 +612,46 @@ class ClaudeProvider(Provider):
         serialized this call behind any previous run on the same native
         session before authority persistence.
         """
-        if mode == "team":
-            mode = "manager"
-        if mode not in ("native", "manager"):
-            raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
-        if self.defunct:
-            raise RuntimeError(
-                f"provider {self.id} is defunct (record deleted); "
-                "cannot start new runs"
-            )
-        self.assert_not_suspended(action="start new runs")
-        del _execution
-
-        spawn_kwargs = dict(
-            run_id=run_id,
-            prompt=prompt,
-            images=images,
-            files=files,
-            cwd=cwd,
+        del (
+            run_id,
+            prompt,
+            images,
+            files,
+            cwd,
+            model,
+            reasoning_effort,
+            session_id,
+            mode,
+            app_session_id,
+            source,
+            disallowed_tools,
+            setting_sources,
+            backend_url,
+            fork,
+            supervised,
+            supervisor_agent_session_id,
+            worker_agent_session_id,
+            mssg_sender_session_id,
+            is_worker,
+            browser_harness_enabled,
+            user_facing,
+            working_mode,
+            continuation_chain,
+            provider_run_config,
+            capability_contexts,
+            target_message_id,
+            resolved_harness_run_config,
+            turn_run_id,
+            disabled_builtin_extensions,
+            provisioned_tool_profile,
+        )
+        self._spawn_run(
+            execution=_execution,
             loop=loop,
             queue=queue,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            session_id=session_id,
-            mode=mode,
-            app_session_id=app_session_id,
-            source=source,
-            disallowed_tools=disallowed_tools,
-            setting_sources=setting_sources,
-            backend_url=backend_url,
             internal_token=internal_token,
-            fork=fork,
-            supervised=supervised,
-            supervisor_agent_session_id=supervisor_agent_session_id,
-            worker_agent_session_id=worker_agent_session_id,
-            mssg_sender_session_id=mssg_sender_session_id,
-            is_worker=is_worker,
-            browser_harness_enabled=browser_harness_enabled,
-            user_facing=user_facing,
-            working_mode=working_mode,
             extra_env=extra_env,
-            continuation_chain=continuation_chain,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            target_message_id=target_message_id,
-            resolved_harness_run_config=resolved_harness_run_config,
-            turn_run_id=turn_run_id,
-            disabled_builtin_extensions=disabled_builtin_extensions,
-            provisioned_tool_profile=provisioned_tool_profile,
         )
-
-        self._spawn_run(**spawn_kwargs)
 
     def _session_start_lock(self, session_id: str) -> threading.Lock:
         """Per-native-session mutex guarding the wind-down gate's
@@ -608,6 +743,88 @@ class ClaudeProvider(Provider):
                     "failed to enqueue deferred-start failure for run %s",
                     spawn_kwargs.get("run_id"),
                 )
+
+    def _build_prepared_runner_input(
+        self,
+        start_arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        input_payload, _bare, mode, resolved_backend_url = (
+            self._build_input_payload(
+                prompt=start_arguments["prompt"],
+                images=start_arguments.get("images"),
+                files=start_arguments.get("files"),
+                cwd=start_arguments["cwd"],
+                model=start_arguments.get("model"),
+                reasoning_effort=start_arguments.get("reasoning_effort"),
+                session_id=start_arguments.get("session_id"),
+                mode=start_arguments["mode"],
+                app_session_id=start_arguments["app_session_id"],
+                source=start_arguments.get("source"),
+                disallowed_tools=start_arguments.get("disallowed_tools"),
+                setting_sources=start_arguments.get("setting_sources"),
+                backend_url=start_arguments.get("backend_url"),
+                internal_token=start_arguments.get("internal_token"),
+                fork=bool(start_arguments.get("fork")),
+                supervised=bool(start_arguments.get("supervised")),
+                supervisor_agent_session_id=start_arguments.get(
+                    "supervisor_agent_session_id",
+                ),
+                worker_agent_session_id=start_arguments.get(
+                    "worker_agent_session_id",
+                ),
+                mssg_sender_session_id=start_arguments.get(
+                    "mssg_sender_session_id",
+                ),
+                is_worker=bool(start_arguments.get("is_worker")),
+                browser_harness_enabled=bool(
+                    start_arguments.get("browser_harness_enabled"),
+                ),
+                user_facing=bool(start_arguments.get("user_facing")),
+                continuation_chain=start_arguments.get(
+                    "continuation_chain",
+                ),
+                provider_run_config=start_arguments.get(
+                    "provider_run_config",
+                ),
+                capability_contexts=start_arguments.get(
+                    "capability_contexts",
+                ),
+                target_message_id=start_arguments.get("target_message_id"),
+                turn_run_id=start_arguments.get("turn_run_id"),
+                disabled_builtin_extensions=start_arguments.get(
+                    "disabled_builtin_extensions",
+                ),
+                provisioned_tool_profile=str(
+                    start_arguments.get("provisioned_tool_profile") or "",
+                ),
+                resolved_harness_run_config=start_arguments.get(
+                    "resolved_harness_run_config",
+                ),
+            )
+        )
+        from reasoning_effort import claude_sdk_effort
+        import extension_store
+        import installation_profile
+        import user_prefs
+
+        claude_sdk_effort(input_payload.get("reasoning_effort"))
+        integrations_enabled = installation_profile.integrations_enabled()
+        input_payload.update({
+            "run_id": start_arguments["run_id"],
+            "backend_url": resolved_backend_url,
+            "context_strategy": user_prefs.get_context_strategy(),
+            "mode": mode,
+            "provider_kind": self.KIND,
+            "team_orchestration_enabled": (
+                integrations_enabled
+                and extension_store.is_extension_runtime_ready(
+                    extension_store.extension_id_for_role(
+                        "team-orchestration",
+                    ),
+                )
+            ),
+        })
+        return input_payload
 
     def _build_input_payload(
         self,
@@ -740,145 +957,104 @@ class ClaudeProvider(Provider):
         input_payload.update(run_policy)
         return input_payload, _bare, mode, resolved_backend_url
 
-    def _prewarm_extension_mcp_ready(
-        self, input_payload: dict[str, Any], app_session_id: str,
-    ) -> dict[str, str | dict[str, Any] | None]:
-        """Concurrently ensures every user-facing runtime MCP daemon this
-        turn will need is warm, bounded above the CLI's own ~2-6s MCP
-        snapshot wait so a session's first (cold-daemon) turn still has
-        a fighting chance, while capping this turn's worst-case added
-        latency. Runs in `_spawn_run`'s own worker thread (no event loop
-        present here), same as the fully resolved `input_payload` this
-        method reads is only available at this exact point in the spawn
-        path (assembled a few lines above by `_build_input_payload`) --
-        NOT earlier in `turn_manager._drive_cli_run`, which never holds
-        the full resolved-inputs shape `extension_store` needs.
-        """
-        if input_payload.get("bare_config") or not input_payload.get("user_facing"):
-            return {}
-        from extension_store import runtime_mcp_prewarm_targets
-
-        targets = runtime_mcp_prewarm_targets(input_payload)
-        if not targets:
-            return {}
-
-        async def _one(target: dict[str, Any]) -> tuple[str, str | dict[str, Any] | None]:
-            from mcp_prewarm import supervisor as mcp_prewarm_supervisor
-
-            fingerprint = mcp_prewarm_supervisor.compute_fingerprint(
-                target["real_config"], target["extension_record"],
-            )
-            try:
-                result = await mcp_prewarm_supervisor.ensure_daemon_ready(
-                    app_session_id,
-                    target["extension_id"],
-                    target["server_name"],
-                    target["real_config"],
-                    fingerprint,
-                    bound_seconds=8.0,
-                )
-            except Exception:
-                logger.exception(
-                    "mcp_prewarm: daemon-ready check raised for %s/%s",
-                    target["extension_id"], target["server_name"],
-                )
-                return target["server_name"], None
-            return target["server_name"], result.ready_map_value()
-
-        async def _gather() -> dict[str, str | dict[str, Any] | None]:
-            pairs = await asyncio.gather(*(_one(t) for t in targets))
-            return dict(pairs)
-
-        return _run_coro_blocking(_gather())
-
     def _spawn_run(
         self,
         *,
-        run_id: str,
-        prompt: str,
-        images: Optional[list],
-        files: Optional[list],
-        cwd: str,
+        execution,
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue,
-        model: Optional[str],
-        reasoning_effort: Optional[str],
-        session_id: Optional[str],
-        mode: str,
-        app_session_id: str,
-        source: Optional[str],
-        disallowed_tools: Optional[list[str]],
-        setting_sources: Optional[list[str]],
-        backend_url: Optional[str],
         internal_token: Optional[str],
-        fork: bool,
-        supervised: bool,
-        supervisor_agent_session_id: Optional[str],
-        worker_agent_session_id: Optional[str],
-        mssg_sender_session_id: Optional[str],
-        is_worker: bool,
-        browser_harness_enabled: bool,
-        user_facing: bool,
-        working_mode: Optional[str],
         extra_env: Optional[dict[str, str]],
-        continuation_chain: Optional[list[str]],
-        provider_run_config: Optional[dict],
-        capability_contexts: Optional[list[dict]],
-        target_message_id: Optional[str],
-        turn_run_id: Optional[str],
-        disabled_builtin_extensions: Optional[list[str]],
-        provisioned_tool_profile: str,
-        resolved_harness_run_config: Optional[dict] = None,
     ) -> None:
-        """Post-gate spawn body: write input.json, create containment,
-        Popen the runner, register RunState, schedule bootstrap."""
+        input_payload = execution.artifact.runtime_policy.get("runner_input")
+        if type(input_payload) is not dict:
+            raise RuntimeError("frozen Claude runner input is unavailable")
+        run_id = input_payload["run_id"]
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-
-        input_payload, _bare, mode, resolved_backend_url = (
-            self._build_input_payload(
-                prompt=prompt,
-                images=images,
-                files=files,
-                cwd=cwd,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                session_id=session_id,
-                mode=mode,
-                app_session_id=app_session_id,
-                source=source,
-                disallowed_tools=disallowed_tools,
-                setting_sources=setting_sources,
-                backend_url=backend_url,
-                internal_token=internal_token,
-                fork=fork,
-                supervised=supervised,
-                supervisor_agent_session_id=supervisor_agent_session_id,
-                worker_agent_session_id=worker_agent_session_id,
-                mssg_sender_session_id=mssg_sender_session_id,
-                is_worker=is_worker,
-                browser_harness_enabled=browser_harness_enabled,
-                user_facing=user_facing,
-                continuation_chain=continuation_chain,
-                provider_run_config=provider_run_config,
-                capability_contexts=capability_contexts,
-                target_message_id=target_message_id,
-                turn_run_id=turn_run_id,
-                disabled_builtin_extensions=disabled_builtin_extensions,
-                provisioned_tool_profile=provisioned_tool_profile,
-                resolved_harness_run_config=resolved_harness_run_config,
+        launch, capabilities = resolve_family_execution_payload(
+            execution.artifact,
+            run_dir,
+        )
+        cli_root = run_dir / "claude-cli"
+        cli_root.mkdir(mode=0o700)
+        materialized_cli = launch.materialize_sdk(cli_root)
+        sdk_root = None
+        if launch.runner.frozen:
+            embedded_sdk = next(
+                (
+                    package
+                    for package in launch.critical_packages
+                    if package.package_name
+                    == "claude_agent_sdk.embedded_runner"
+                ),
+                None,
             )
-        )
-        input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
-            input_payload, app_session_id,
-        )
-        (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
+            if (
+                embedded_sdk is None
+                or not attest_embedded_claude_sdk(
+                    embedded_sdk,
+                    launch.runner,
+                )
+            ):
+                raise RuntimeError(
+                    "embedded Claude Agent SDK authority is unavailable",
+                )
+            sdk_authority = {
+                "kind": "embedded_runner",
+                "runner_sha256": launch.runner.launch.components[0].sha256,
+            }
+        else:
+            sdk_package = next(
+                (
+                    package
+                    for package in launch.critical_packages
+                    if package.package_name == "claude_agent_sdk"
+                ),
+                None,
+            )
+            if sdk_package is None:
+                raise RuntimeError(
+                    "Claude Agent SDK authority is unavailable",
+                )
+            sdk_root = materialize_claude_sdk_package(
+                sdk_package,
+                run_dir / "claude-sdk",
+            )
+            sdk_authority = {
+                "kind": "materialized_package",
+                "package_root": str(sdk_root),
+            }
+        runtime_hydration = {
+            "agent_files": {
+                name: str(path)
+                for name, path in capabilities.agent_files.items()
+            },
+            "capability_plan": hydrate_frozen_provider_runtime_plan(
+                capabilities.plan,
+            ),
+            "claude_cli": {
+                "executable_path": materialized_cli.executable_path,
+                "files": [
+                    file_identity_to_dict(identity)
+                    for identity in materialized_cli.files
+                ],
+            },
+            "prewarm_status": capabilities.prewarm_status,
+            "sdk_authority": sdk_authority,
+            "skill_dirs": {
+                name: str(path)
+                for name, path in capabilities.skill_dirs.items()
+            },
+        }
+        _atomic_write_json(run_dir / "input.json", input_payload)
+        mode = input_payload["mode"]
+        app_session_id = input_payload["app_session_id"]
+        cwd = input_payload["cwd"]
+        model = input_payload.get("model")
+        _bare = bool(input_payload["bare_config"])
 
         from containment import containment
-        # Create the escape-proof container BEFORE spawn so the runner (and
-        # every descendant, nested to infinity) is enrolled at birth.
-        # Fail-closed: raises ContainmentUnavailable on a guaranteed platform
-        # without the mechanism (e.g. Linux without a delegated cgroup).
         containment().create(run_id)
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
@@ -887,12 +1063,14 @@ class ClaudeProvider(Provider):
                 self.build_env(),
                 run_id=run_id,
                 app_session_id=app_session_id,
-                resolved_harness_run_config=resolved_harness_run_config,
+                resolved_harness_run_config=input_payload.get(
+                    "resolved_harness_run_config",
+                ),
             )
             if extra_env:
                 env.update(extra_env)
             env.update(build_better_agent_run_env(
-                backend_url=resolved_backend_url,
+                backend_url=input_payload["backend_url"],
                 internal_token=internal_token,
                 run_id=run_id,
                 app_session_id=app_session_id,
@@ -900,22 +1078,27 @@ class ClaudeProvider(Provider):
                 model=model,
                 provider_id=self.id,
                 bare_config=_bare,
-                user_facing=bool(user_facing) and not _bare,
+                user_facing=bool(input_payload["user_facing"]) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
+                runtime_hydration=runtime_hydration,
             ))
-            popen = subprocess.Popen(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="claude"),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                cwd=cwd,
-                env=env,
-                # detach: runner roots its own process tree so we can kill
-                # it as a unit later (POSIX process group / Win32 taskkill).
-                **_process_control().detach_spawn_kwargs(),
-                # containment: Linux preexec_fn joins the cgroup before exec.
-                **containment().spawn_kwargs(run_id),
-            )
+            with launch.open_runner() as pinned:
+                pass_fds = (
+                    {"pass_fds": pinned.pass_fds}
+                    if os.name != "nt" and pinned.pass_fds
+                    else {}
+                )
+                popen = subprocess.Popen(
+                    list(pinned.argv),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_fp,
+                    stderr=stderr_fp,
+                    cwd=cwd,
+                    env=env,
+                    **pass_fds,
+                    **_process_control().detach_spawn_kwargs(),
+                    **containment().spawn_kwargs(run_id),
+                )
         except Exception:
             stdout_fp.close()
             stderr_fp.close()
@@ -942,11 +1125,14 @@ class ClaudeProvider(Provider):
             # Stamped at spawn (resume sid or None) so the wind-down
             # gate sees this run before state.json lands; bootstrap
             # overwrites with the discovered sid.
-            session_id=session_id,
+            session_id=input_payload.get("session_id"),
             started_at=datetime.now(timezone.utc).isoformat(),
-            persist_to=worker_agent_session_id or app_session_id,
-            target_message_id=target_message_id,
-            turn_run_id=turn_run_id,
+            persist_to=(
+                input_payload.get("worker_agent_session_id")
+                or app_session_id
+            ),
+            target_message_id=input_payload.get("target_message_id"),
+            turn_run_id=input_payload.get("turn_run_id"),
             cwd=cwd,
         )
         self._runs[run_id] = run_state

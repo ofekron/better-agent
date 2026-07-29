@@ -42,6 +42,22 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+echo "==> Verifying the immutable frozen execution artifact"
+SMOKE_ROOT="$(mktemp -d)"
+cleanup_smoke() {
+  rm -rf "$SMOKE_ROOT"
+}
+trap cleanup_smoke EXIT
+BETTER_AGENT_HOME="$SMOKE_ROOT/state" \
+  "$APP/Contents/MacOS/Better Agent" \
+  --frozen-artifact-smoke \
+  --output "$SMOKE_ROOT/result.json"
+"$VENV/bin/python" -c \
+  'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); assert set(value["families"]) == {"claude", "agy"}' \
+  "$SMOKE_ROOT/result.json"
+cleanup_smoke
+trap - EXIT
+
 echo "==> Building the credential authority"
 "$DIR/build_credential_authority.sh" >/dev/null
 

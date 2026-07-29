@@ -205,7 +205,7 @@ def _register_session_control_tools(register: Register) -> None:
             payload: BaseModel,
             path: str = path,
         ) -> Any:
-            values = payload.model_dump(by_alias=True)
+            values = _session_control_values(payload)
             values["app_session_id"] = operation_authority.current_principal().app_session_id
             return await _call_route(
                 path,
@@ -221,6 +221,17 @@ def _register_session_control_tools(register: Register) -> None:
             handler,
             _control_policy(),
         )
+
+
+def _session_control_values(payload: BaseModel) -> dict[str, Any]:
+    values = payload.model_dump(by_alias=True, exclude_defaults=True)
+    for selector in ("model", "provider_id"):
+        value = str(values.get(selector) or "").strip()
+        if value:
+            values[selector] = value
+        else:
+            values.pop(selector, None)
+    return values
 
 
 def _register_session_bridge_tools(register: Register) -> None:
