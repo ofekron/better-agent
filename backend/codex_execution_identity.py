@@ -280,6 +280,7 @@ class ConfigIdentity:
             parent_stat = parent.stat()
             if (
                 parent != Path(self.parent_path)
+                or parent_stat.st_mode != self.parent_mode
                 or self._parent_routing_identity(parent_stat)
                 != self.parent_routing_identity
             ):
@@ -289,18 +290,7 @@ class ConfigIdentity:
             return False
         except OSError:
             return False
-        return current == self
-
-    @property
-    def parent_identity(self) -> tuple[int, ...]:
-        return (
-            self.parent_mode,
-            self.parent_size,
-            self.parent_mtime_ns,
-            self.parent_ctime_ns,
-            self.parent_device,
-            self.parent_inode,
-        )
+        return current.config_file == self.config_file
 
     @property
     def parent_routing_identity(self) -> tuple[int, int, int]:
@@ -327,10 +317,12 @@ class ConfigIdentity:
             if not candidate.absolute().is_relative_to(root):
                 return False
             resolved_parent = candidate.parent.resolve(strict=True)
+            parent_stat = resolved_parent.stat()
             if (
                 not resolved_parent.is_relative_to(root)
                 or resolved_parent != Path(self.parent_path)
-                or self._parent_routing_identity(resolved_parent.stat())
+                or parent_stat.st_mode != self.parent_mode
+                or self._parent_routing_identity(parent_stat)
                 != self.parent_routing_identity
             ):
                 return False

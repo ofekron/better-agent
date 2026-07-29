@@ -17,6 +17,7 @@ from codex_execution import (  # noqa: E402
     ExecutionContractError,
     build_codex_execution_contract,
 )
+from codex_execution_contract import codex_authority_paths  # noqa: E402
 from scripts.codex_execution_test_support import (  # noqa: E402
     provider,
     write_executable,
@@ -66,6 +67,30 @@ def test_contract_is_deterministic_secret_free_and_config_bound() -> None:
         assert "api_key" not in serialized
         assert contract.attest()
 
+        (config_dir / "unrelated-cache.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        assert contract.attest()
+
+        agents_dir = config_dir / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "unexpected.toml").write_text(
+            "enabled=true",
+            encoding="utf-8",
+        )
+        assert not contract.attest()
+
+        (agents_dir / "unexpected.toml").unlink()
+        agents_dir.rmdir()
+        assert contract.attest()
+
+        original_mode = config_dir.stat().st_mode & 0o777
+        config_dir.chmod(original_mode ^ 0o010)
+        assert not contract.attest()
+        config_dir.chmod(original_mode)
+        assert contract.attest()
+
         config_file.write_text('model_provider = "other"\n', encoding="utf-8")
         assert not contract.attest()
 
@@ -103,6 +128,27 @@ def test_config_path_escape_and_secret_selectors_are_rejected() -> None:
             pass
         else:
             raise AssertionError("secret selectors must never enter the contract")
+
+
+def test_agent_authority_membership_is_frozen() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        config_dir = root / "config"
+        agents_dir = config_dir / "agents"
+        agents_dir.mkdir(parents=True)
+        agent_file = agents_dir / "reviewer.toml"
+        agent_file.write_text("enabled=true", encoding="utf-8")
+        executable = root / "codex"
+        write_executable(executable, b"native")
+        contract = build_codex_execution_contract(
+            provider(config_dir),
+            launcher_path=str(executable),
+            config_paths=codex_authority_paths(config_dir.resolve()),
+        )
+
+        assert contract.attest()
+        agent_file.unlink()
+        assert not contract.attest()
 
 
 def test_secret_arguments_and_url_query_are_rejected() -> None:
@@ -301,6 +347,7 @@ CONTRACT_TESTS = (
     test_facade_exports_stable_execution_api,
     test_contract_is_deterministic_secret_free_and_config_bound,
     test_config_path_escape_and_secret_selectors_are_rejected,
+    test_agent_authority_membership_is_frozen,
     test_secret_arguments_and_url_query_are_rejected,
     test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint,
     test_deserialization_reconstructs_exact_shebang_arguments,

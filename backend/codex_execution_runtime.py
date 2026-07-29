@@ -9,7 +9,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from codex_execution_contract import CodexExecutionContract
+from codex_execution_contract import (
+    CodexExecutionContract,
+    codex_authority_paths,
+)
 from codex_execution_common import (
     ExecutionContractError,
     binary_open_flags,
@@ -69,22 +72,6 @@ def codex_provider_contract(
             ),
         ),
     }
-
-
-def codex_authority_paths(config_root: Path) -> tuple[str, ...]:
-    paths = [
-        config_root / "AGENTS.md",
-        config_root / "auth.json",
-        config_root / "config.toml",
-    ]
-    agents_root = config_root / "agents"
-    if agents_root.is_dir():
-        paths.extend(
-            candidate
-            for candidate in agents_root.rglob("*")
-            if candidate.is_file() or candidate.is_symlink()
-        )
-    return tuple(str(path) for path in sorted(paths))
 
 
 def codex_contract_from_artifact(

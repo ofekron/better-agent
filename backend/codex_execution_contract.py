@@ -200,14 +200,58 @@ class CodexExecutionContract:
         return contract
 
     def attest(self) -> bool:
-        return self.launch_chain.attest() and all(
-            identity.attest() for identity in self.config
+        return (
+            self.launch_chain.attest()
+            and _attest_agent_authority_membership(self.config)
+            and all(identity.attest() for identity in self.config)
         )
 
     def attest_metadata(self) -> bool:
-        return self.launch_chain.attest_metadata() and all(
-            identity.attest_metadata() for identity in self.config
+        return (
+            self.launch_chain.attest_metadata()
+            and _attest_agent_authority_membership(self.config)
+            and all(identity.attest_metadata() for identity in self.config)
         )
+
+
+def codex_authority_paths(config_root: Path) -> tuple[str, ...]:
+    paths = [
+        config_root / "AGENTS.md",
+        config_root / "auth.json",
+        config_root / "config.toml",
+        *_codex_agent_authority_paths(config_root),
+    ]
+    return tuple(str(path) for path in sorted(paths))
+
+
+def _codex_agent_authority_paths(config_root: Path) -> tuple[Path, ...]:
+    agents_root = config_root / "agents"
+    if agents_root.is_symlink():
+        return (agents_root,)
+    if not agents_root.is_dir():
+        return ()
+    return tuple(
+        candidate
+        for candidate in agents_root.rglob("*")
+        if candidate.is_file() or candidate.is_symlink()
+    )
+
+
+def _attest_agent_authority_membership(
+    config: tuple[ConfigIdentity, ...],
+) -> bool:
+    tracked = {Path(identity.config_path) for identity in config}
+    roots = {Path(identity.root_path) for identity in config}
+    for root in roots:
+        agents_root = root / "agents"
+        expected = {
+            path
+            for path in tracked
+            if path.is_relative_to(agents_root)
+        }
+        if set(_codex_agent_authority_paths(root)) != expected:
+            return False
+    return True
 
 
 def _clean_environment_selectors(
