@@ -18,9 +18,16 @@ def _function_source(path: Path, name: str) -> str:
 
 def test_queue_record_survives_until_user_message_persist() -> None:
     processor = _function_source(BACKEND / "orchestrator.py", "_run_session_processor")
-    before_handle = processor.split("await self.handle_prompt", 1)[0]
-    removals = before_handle.count("session_manager.remove_queued_prompt")
-    assert removals == 2, f"unexpected pre-delivery queue removals: {removals}"
+    delivery_gate = processor[
+        processor.index("await self.turn_manager.wait_for_clear_runs"):
+        processor.index("if is_review:")
+    ]
+    assert "await consume_queue_item()" not in delivery_gate
+    assert "if item_id and await cleanup_cancelled_queue_item():" in delivery_gate
+    initializer = _function_source(BACKEND / "orchestrator.py", "_init_turn_messages")
+    assert initializer.index("append_user_msg(") < initializer.index(
+        "remove_queued_prompt(app_session_id, queue_item_id)",
+    )
     assert "batched = [params]" not in processor
 
 
