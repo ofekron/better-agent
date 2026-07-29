@@ -196,6 +196,7 @@ _DEFAULT_MARKETPLACE_PUBLIC_KEY = "a61a192e23f0f0898fa096ae64e0d22d853eb0701e2c9
 _MARKETPLACE_USER_AGENT = "BetterAgentMarketplace/1.0"
 _MARKETPLACE_QUERY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/#-]{0,119}$")
 _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
+_SMOKE_IMPORT_OWNER_DEADLINE_SECONDS = 60
 _MARKETPLACE_PREVIEW_TTL_SECONDS = 5 * 60.0
 _MAX_MARKETPLACE_PREVIEWS = 256
 _MARKETPLACE_PREVIEWS: dict[str, tuple[float, str, dict[str, Any]]] = {}
@@ -4534,8 +4535,9 @@ def _run_python_module_smoke(
         static_payload = dict(static_modules)
     else:
         static_payload = {module: "" for module in (static_modules or set())}
+    ready_marker = "BETTER_AGENT_SMOKE_READY"
     code = (
-        "import importlib, importlib.util, json, py_compile, sys\n"
+        "import importlib, importlib.util, json, os, py_compile, sys\n"
         "from pathlib import Path\n"
         "static = json.loads(sys.argv[2])\n"
         "root = Path(sys.argv[3]).resolve()\n"
@@ -4559,6 +4561,9 @@ def _run_python_module_smoke(
         "        py_compile.compile(str(path), doraise=True)\n"
         "        continue\n"
         "    importlib.import_module(module)\n"
+        f"sys.stdout.write({ready_marker!r} + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "os._exit(0)\n"
     )
     result = subprocess.run(
         [
@@ -4572,12 +4577,14 @@ def _run_python_module_smoke(
         check=False,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=_SMOKE_IMPORT_OWNER_DEADLINE_SECONDS,
         env=_smoke_subprocess_env(python_path_parts),
     )
     if result.returncode != 0:
         detail = _scrub((result.stderr or result.stdout or "module import failed").strip())
         raise ExtensionError(f"protocol.smoke_test.python_modules failed: {detail}")
+    if ready_marker not in (result.stdout or "").splitlines():
+        raise ExtensionError("protocol.smoke_test.python_modules failed: readiness not acknowledged")
 
 
 def _run_extension_smoke_test(manifest: dict[str, Any], package_dir: Path) -> dict[str, Any]:

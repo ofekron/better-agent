@@ -30,11 +30,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 import time
+from pathlib import Path
+from unittest.mock import patch
 
 import _test_home
+import _test_installation
+
 _TMP_HOME = _test_home.isolate("bc-test-uid-idx-")
+_test_installation.activate(Path(_TMP_HOME), provider="claude")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -116,15 +120,26 @@ def _run() -> bool:
     rid = session_manager._root_id_for(sid)
     ctx = ApplyEventCtx(root_id=sid, run_id="r")
     N = 5000
+    apply_event_body = strategy.apply_event.__wrapped__
     session_manager._batches[rid] = {"_phantom": True, "bump_updated_at": False}
     try:
-        t0 = time.perf_counter()
-        for i in range(N):
-            strategy.apply_event(
-                app_session_id=sid, msg=msg,
-                event=_ev(f"u-{i}"), ctx=ctx, source_is_provider_stream=False,
-            )
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        with (
+            patch.object(strategy, "_append_event"),
+            patch.object(
+                strategy,
+                "_refresh_message_content_from_event_projection",
+            ),
+            patch("session_event_extensions.apply_event"),
+        ):
+            t0 = time.perf_counter()
+            for i in range(N):
+                apply_event_body(
+                    strategy,
+                    app_session_id=sid, msg=msg,
+                    event=_ev(f"u-{i}"), ctx=ctx,
+                    source_is_provider_stream=False,
+                )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
     finally:
         session_manager._batches.pop(rid, None)
     results.append(
@@ -142,11 +157,21 @@ def _run() -> bool:
     # 2) Idempotent replay.
     session_manager._batches[rid] = {"_phantom": True, "bump_updated_at": False}
     try:
-        for i in range(N):
-            strategy.apply_event(
-                app_session_id=sid, msg=msg,
-                event=_ev(f"u-{i}"), ctx=ctx, source_is_provider_stream=False,
-            )
+        with (
+            patch.object(strategy, "_append_event"),
+            patch.object(
+                strategy,
+                "_refresh_message_content_from_event_projection",
+            ),
+            patch("session_event_extensions.apply_event"),
+        ):
+            for i in range(N):
+                apply_event_body(
+                    strategy,
+                    app_session_id=sid, msg=msg,
+                    event=_ev(f"u-{i}"), ctx=ctx,
+                    source_is_provider_stream=False,
+                )
     finally:
         session_manager._batches.pop(rid, None)
     results.append(

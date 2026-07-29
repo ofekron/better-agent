@@ -36,6 +36,7 @@ if _BACKEND not in sys.path:
 import session_store  # noqa: E402
 import session_manager as session_manager_module  # noqa: E402
 import messages_delta_compaction  # noqa: E402
+import main as backend_main  # noqa: E402
 from grouped_durability_writer import DurabilityReceipt  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -414,23 +415,33 @@ def _run() -> bool:
     msg.pop("_uid_idx", None)
     msg.pop("events", None)
 
-    # Alternating write/read smoke metric. This is deliberately not a
-    # contention proof: the persistence coordinator's lock-release
-    # contract is covered by its lifecycle integration suite.
+    # Alternating write/read smoke metric for the authoritative session-detail
+    # tree owner used by the REST route. This is deliberately not a contention
+    # proof: the persistence coordinator's lock-release contract is covered by
+    # its lifecycle integration suite.
     rest_latencies: list[float] = []
     for _ in range(30):
         session_manager.set_pinned(sid, True)
+        session_manager.flush_root_persist(sid)
         t0 = time.perf_counter()
-        _ = session_manager.get_root_tree_paginated(sid, msg_limit=50)
+        tree = backend_main._session_detail_snapshot_sync(
+            sid,
+            msg_limit=50,
+            exchange_count=None,
+            include_cache_key=True,
+        )
         rest_latencies.append((time.perf_counter() - t0) * 1000.0)
+        assert tree is not None
+        assert tree.get("id") == sid
+        assert tree.get("_detail_response_cache_key_parts")
         session_manager.set_pinned(sid, False)
+        session_manager.flush_root_persist(sid)
 
     rest_latencies.sort()
     p95 = rest_latencies[int(len(rest_latencies) * 0.95)]
-    # The cache-hit path is a deep_copy of the trimmed tree. With
-    # 3000 events on msg.events the deepcopy itself is the dominant
-    # cost. The 200ms smoke ceiling catches gross read-side regressions
-    # without conflating this sequential check with lock contention.
+    # The 200ms smoke ceiling catches gross regressions in the current
+    # stubbed-tree snapshot/cache path without measuring the retired full-event
+    # paginated clone path.
     results.append(
         (f"REST p95 < 200ms across alternating writes",
          p95 < 200.0,
