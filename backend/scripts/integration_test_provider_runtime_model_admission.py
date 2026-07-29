@@ -33,6 +33,16 @@ from model_execution_admission import (  # noqa: E402
     issue_model_admission,
 )
 from provider_execution_contract import provider_family_contract  # noqa: E402
+from provider_family_launch_attestation import (  # noqa: E402
+    FamilyLaunchAttestation,
+    capture_cli_launch,
+    capture_config_scope,
+    capture_runner_launch,
+)
+from provider_family_runtime_capabilities import (  # noqa: E402
+    family_runtime_capability_payload,
+    snapshot_family_runtime_capabilities,
+)
 from provider_manifest import SPECS  # noqa: E402
 from provider import Provider  # noqa: E402
 
@@ -68,8 +78,13 @@ def _artifact(
     *,
     descriptor: dict | None,
     model: str | None = "model",
+    contract_payload: dict | None = None,
 ) -> ExecutionArtifact:
-    contract = _family_contract(record)
+    contract = (
+        _family_contract(record)
+        if contract_payload is None
+        else provider_family_contract(record, payload=contract_payload)
+    )
     return ExecutionArtifact.create(
         record,
         _template(model),
@@ -79,6 +94,55 @@ def _artifact(
             else {}
         ),
         provider_contract=contract,
+    )
+
+
+def _spawn_attested_artifact(
+    record: dict,
+    *,
+    descriptor: dict | None,
+) -> ExecutionArtifact:
+    root = Path(tempfile.mkdtemp(
+        prefix="spawn-authority-",
+        dir=TEST_HOME,
+    ))
+    run_dir = root / "run"
+    config_dir = root / "config"
+    downstream = root / "claude"
+    run_dir.mkdir(parents=True)
+    config_dir.mkdir()
+    _write_executable(downstream)
+    launch = FamilyLaunchAttestation.capture(
+        family="claude",
+        runner=capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=sys.executable,
+            runner_entry=BACKEND / "runner.py",
+            runner_kind="claude",
+            runner_module="runner",
+            frozen=False,
+        ),
+        downstream=capture_cli_launch(
+            logical_command="claude",
+            launcher_path=downstream,
+        ),
+        config=capture_config_scope(root_path=config_dir),
+    )
+    capabilities = snapshot_family_runtime_capabilities(
+        family="claude",
+        skill_sources={},
+        agent_sources={},
+        resolved_plan={"harness": {}, "tools": [], "mcp_servers": []},
+        extension_state={},
+        installation_decisions={},
+    )
+    return _artifact(
+        record,
+        descriptor=descriptor,
+        contract_payload={
+            **launch.to_payload(),
+            **family_runtime_capability_payload(capabilities),
+        },
     )
 
 
@@ -180,7 +244,10 @@ def test_rejection_precedes_credential_hydration_and_spawn() -> None:
 
     record = _record("claude")
     provider = ProbeProvider(record)
-    execution = _artifact(record, descriptor=None)
+    execution = _spawn_attested_artifact(record, descriptor=None)
+    from execution_spawn_authority import attest_execution_spawn_authority
+
+    attest_execution_spawn_authority(execution)
     import config_store
 
     hydration_calls = 0
