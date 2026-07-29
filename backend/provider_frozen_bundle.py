@@ -501,29 +501,52 @@ def attest_materialized_frozen_bundle(
     bundle: FrozenBundleIdentity,
     destination: str | Path,
 ) -> bool:
+    return _materialized_bundle_attestation_failure(
+        bundle,
+        destination,
+    ) is None
+
+
+def _materialized_bundle_attestation_failure(
+    bundle: FrozenBundleIdentity,
+    destination: str | Path,
+) -> str | None:
     target = Path(destination)
     if not target.is_absolute() or target.is_symlink():
-        return False
+        return "destination path is invalid"
     try:
         resolved = target.resolve(strict=True)
         if not resolved.is_dir():
-            return False
-        if _capture_layout(resolved) != _expected_layout(bundle):
-            return False
+            return "destination is not a directory"
+        observed_layout = _capture_layout(resolved)
+        expected_layout = _expected_layout(bundle)
+        if observed_layout != expected_layout:
+            if tuple(item[0] for item in observed_layout) != tuple(
+                item[0] for item in expected_layout
+            ):
+                return "destination paths differ"
+            mismatch = next(
+                expected[0]
+                for expected, observed in zip(
+                    expected_layout,
+                    observed_layout,
+                )
+                if expected != observed
+            )
+            return f"destination layout differs at {mismatch}"
         for entry in bundle.entries:
             if entry.file is None:
                 continue
             observed = FileIdentity.capture(
                 resolved / entry.relative_path,
             )
-            if (
-                observed.size != entry.file.size
-                or observed.sha256 != entry.file.sha256
-            ):
-                return False
-        return True
+            if observed.size != entry.file.size:
+                return f"destination size differs at {entry.relative_path}"
+            if observed.sha256 != entry.file.sha256:
+                return f"destination hash differs at {entry.relative_path}"
+        return None
     except (ExecutionContractError, OSError):
-        return False
+        return "destination is unreadable"
 
 
 def _copy_attested_file(
@@ -656,10 +679,15 @@ def materialize_frozen_bundle(
         ) from exc
     target = Path(destination)
     if target.exists() and not target.is_symlink():
-        if attest_materialized_frozen_bundle(bundle, target):
+        attestation_failure = _materialized_bundle_attestation_failure(
+            bundle,
+            target,
+        )
+        if attestation_failure is None:
             return target.resolve(strict=True)
         raise ExecutionContractError(
-            "materialized frozen bundle identity mismatch",
+            "materialized frozen bundle identity mismatch: "
+            + attestation_failure,
         )
     try:
         source_root = Path(bundle.root.resolved_path).resolve(strict=True)
@@ -701,9 +729,14 @@ def materialize_frozen_bundle(
         )
         for entry in directories:
             os.chmod(temporary / entry.relative_path, entry.mode)
-        if not attest_materialized_frozen_bundle(bundle, temporary):
+        attestation_failure = _materialized_bundle_attestation_failure(
+            bundle,
+            temporary,
+        )
+        if attestation_failure is not None:
             raise ExecutionContractError(
-                "materialized frozen bundle identity mismatch",
+                "materialized frozen bundle identity mismatch: "
+                + attestation_failure,
             )
         os.rename(temporary, target)
     except BaseException:
