@@ -301,7 +301,7 @@ def test_codex_rollout_tailer_reads_file_off_loop() -> None:
 
 def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "_SESSIONS_DIR = bc_home() / \"sessions\"" in source
+    assert "_SESSIONS_DIR" not in source
     start = source.index("def _ref_ctx_for_root(")
     end = source.index("class EventIngester:", start)
     helper_source = source[start:end]
@@ -311,6 +311,7 @@ def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     root_dir_start = source.index("def _root_dir(")
     root_dir_end = source.index("def _events_path(", root_dir_start)
     root_dir_source = source[root_dir_start:root_dir_end]
+    assert "session_store.session_file_path(root_id)" in root_dir_source
     assert "bc_home()" not in root_dir_source
     assert "ba_home()" not in root_dir_source
 
@@ -441,15 +442,15 @@ def test_continuation_start_boundary_runs_off_loop() -> None:
     startup_start = source.index("        loop = asyncio.get_running_loop()")
     startup_end = source.index("        async def _clear_continuation_active()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "_session_rec = await asyncio.to_thread(\n            session_manager.get," in startup_source
-    assert "provider = await asyncio.to_thread(\n            self._c.provider_for_run," in startup_source
+    assert "_session_rec = await _to_turn_dispatch_thread(\n            session_manager.get," in startup_source
+    assert "provider = await _to_turn_dispatch_thread(\n            self._c.provider_for_run," in startup_source
     assert '_session_rec_chain = (_session_rec or {}).get("continuation_chain") or []' in startup_source
     assert "session_manager.get(primary_session_id or app_session_id)" not in startup_source
 
     clear_start = source.index("        async def _clear_continuation_active()")
     context_start = source.index("        def _should_preempt_context_continuation_sync()", clear_start)
     clear_source = source[clear_start:context_start]
-    assert "await asyncio.to_thread(\n                session_manager.set_msg_continuation_active" in clear_source
+    assert "await _to_turn_dispatch_thread(\n                session_manager.set_msg_continuation_active" in clear_source
 
     sync_start = source.index("        def _start_continuation_sync(")
     context_async_start = source.index("        async def _start_context_continuation(", sync_start)
@@ -461,24 +462,24 @@ def test_continuation_start_boundary_runs_off_loop() -> None:
         context_async_start:
         source.index("        def _should_preempt_selector_change_continuation_sync()", context_async_start)
     ]
-    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in context_source
+    assert "continuation = await _to_turn_dispatch_thread(\n                _start_continuation_sync," in context_source
     assert "start_continuation_for(" not in context_source
     assert "session_manager.set_msg_continuation_active(" not in context_source
 
     selector_start = source.index("        async def _start_selector_change_continuation(")
     selector_source = source[selector_start:source.index("        while True:", selector_start)]
-    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in selector_source
+    assert "continuation = await _to_turn_dispatch_thread(\n                _start_continuation_sync," in selector_source
     assert "start_continuation_for(" not in selector_source
     assert "session_manager.set_msg_continuation_active(" not in selector_source
 
     refresh_start = source.index("        async def _refresh_provider_context()")
     refresh_source = source[refresh_start:selector_start]
-    assert "_session_rec = await asyncio.to_thread(\n                session_manager.get," in refresh_source
-    assert "provider = await asyncio.to_thread(\n                self._c.provider_for_session," in refresh_source
+    assert "_session_rec = await _to_turn_dispatch_thread(\n                session_manager.get," in refresh_source
+    assert "provider = await _to_turn_dispatch_thread(\n                self._c.provider_for_session," in refresh_source
 
     strategy_start = source.index("        async def _context_strategy_is_continuation()")
     strategy_source = source[strategy_start:refresh_start]
-    assert "await asyncio.to_thread(user_prefs.get_context_strategy)" in strategy_source
+    assert "await _to_turn_dispatch_thread(user_prefs.get_context_strategy)" in strategy_source
     overflow_start = source.index("            # \u2500\u2500 Context-window overflow", selector_start)
     overflow_end = source.index("            if (not success", overflow_start + 1)
     overflow_source = source[overflow_start:overflow_end]
@@ -714,7 +715,10 @@ def test_root_session_write_does_not_resolve_root_id() -> None:
     write_start = source.index("def write_session_full(")
     write_end = source.index("def delete_session(", write_start)
     write_source = source[write_start:write_end]
-    assert 'path = _sessions_dir() / f"{root[\'id\']}.json"' in write_source
+    assert "return _write_session_full_bound(" in write_source
+    assert "storage_identity=storage_identity" in write_source
+    assert 'path = storage_dir / f"{root[\'id\']}.json"' in write_source
+    assert 'path = _root_file_path(root["id"])' in write_source
     assert "_session_path(root[\"id\"])" not in write_source
     assert "_resolve_root_id(root" not in write_source
 
@@ -968,7 +972,6 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         "provider_claude.py",
         "provider_codex.py",
         "provider_session_events.py",
-        "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
         start = source.index("async def _watch_complete(")
@@ -1023,10 +1026,6 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
             ("async def _watch_complete(", "async def _emit_complete_from_file("),
         ),
         "provider_session_events.py": (
-            ("async def _bootstrap_run(", "if runner_state is None:"),
-            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
-        ),
-        "provider_openai.py": (
             ("async def _bootstrap_run(", "if runner_state is None:"),
             ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
         ),
@@ -1187,7 +1186,8 @@ def test_message_summary_reader_filters_requested_message_ids() -> None:
 
 def test_event_summary_sidecar_load_populates_memory_cache() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "_EVENT_SUMMARIES_VERSION = 5" in source
+    assert "_EVENT_SUMMARIES_VERSION = " in source
+    assert 'sidecar.get("summary_version") != _EVENT_SUMMARIES_VERSION' in source
     assert "def _valid_seq_offsets(" in source
     assert "isinstance(item, bool)" in source
     start = source.index("def _summaries_state(")
@@ -1251,7 +1251,8 @@ def test_written_journal_projection_avoids_full_event_list_copy() -> None:
     start = source.index("    def apply_written_journal_event(")
     end = source.index("    def _root_id_for(", start)
     projection_source = source[start:end]
-    assert "event_uuid = _event_uuid_safe" in projection_source
+    assert "changed = strategy.apply_event(" in projection_source
+    assert "before_len = len(strategy._events_list(msg))" in projection_source
     assert "before = copy.deepcopy(strategy._events_list(msg))" not in projection_source
     assert '"msg": _copy_jsonish(msg)' not in projection_source
     assert "compact_message_delta_payload(msg)" in projection_source
@@ -1380,7 +1381,7 @@ def test_models_catalog_uses_fingerprinted_in_process_cache() -> None:
     assert "return models, cached_retired, has_cache, cached" in helper_source
 
     catalog_start = source.index("def models_catalog(")
-    catalog_end = source.index("async def refresh_one(", catalog_start)
+    catalog_end = source.index("# Write-side:", catalog_start)
     catalog_source = source[catalog_start:catalog_end]
     assert "models, retired, has_cache, cached = _read_catalog_models(rec)" in catalog_source
     after_helper = catalog_source.split("models, retired, has_cache, cached = _read_catalog_models(rec)", 1)[1]
@@ -1456,11 +1457,15 @@ def test_team_ask_status_writes_run_off_loop() -> None:
     start = source.index("async def ask_team_message(")
     end = source.index("    def _team_message_turn_response(", start)
     ask_source = source[start:end]
-    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in ask_source
-    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in ask_source
-    assert "queue_item = await asyncio.to_thread(\n                    team_messaging.queue_payload" in ask_source
-    assert "await asyncio.to_thread(\n                    session_manager.add_queued_prompt" in ask_source
-    assert "cli_prompt = await asyncio.to_thread(\n                    team_messaging.format_team_message_prompt" in ask_source
+    for call in (
+        "team_messaging.validate_message_route",
+        "team_messaging.build_message_metadata",
+        "team_messaging.queue_payload",
+        "session_manager.add_queued_prompt",
+        "team_messaging.format_team_message_prompt",
+    ):
+        call_index = ask_source.index(call)
+        assert "await asyncio.to_thread(" in ask_source[max(0, call_index - 80):call_index]
     assert "await ask_status_store.write_status_async(" in ask_source
     assert "session_manager.add_queued_prompt(" not in ask_source
     assert "cli_prompt = team_messaging.format_team_message_prompt(" not in ask_source
@@ -1506,17 +1511,21 @@ def test_known_worker_projection_uses_field_reads() -> None:
 
 def test_session_exists_uses_index_without_cold_root_load() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    resolve_start = source.index("    def _root_id_for(self, sid: str)")
+    resolve_end = source.index("    def root_id_for(", resolve_start)
+    resolve_source = source[resolve_start:resolve_end]
     start = source.index("    def exists(self, sid: str) -> bool:")
     end = source.index("    def get_field(", start)
     exists_source = source[start:end]
-    assert "session_store._resolve_root_id(sid)" in exists_source
-    assert "session_store._loaded_root_id_for(sid)" in exists_source
-    assert "session_store.session_file_fingerprint(sid)" in exists_source
-    assert exists_source.index("session_store._loaded_root_id_for(sid)") < exists_source.index(
-        "session_store.session_file_fingerprint(sid)"
+    assert "rid = self._root_id_for(sid)" in exists_source
+    assert "self._root_repository.loaded_root_id_for(sid)" in resolve_source
+    assert "self._root_repository.root_version(sid)" in resolve_source
+    assert "self._root_repository.resolve_root_id(sid)" in resolve_source
+    assert resolve_source.index("self._root_repository.loaded_root_id_for(sid)") < resolve_source.index(
+        "self._root_repository.root_version(sid)"
     )
-    assert exists_source.index("session_store.session_file_fingerprint(sid)") < exists_source.index(
-        "session_store._resolve_root_id(sid)"
+    assert resolve_source.index("self._root_repository.root_version(sid)") < resolve_source.index(
+        "self._root_repository.resolve_root_id(sid)"
     )
     assert "self._load_root(" not in exists_source
     assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
@@ -1644,7 +1653,6 @@ def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
         "provider_claude.py",
         "provider_codex.py",
         "provider_session_events.py",
-        "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
         start = source.index("    def recover_in_flight(")
@@ -1673,7 +1681,6 @@ def test_provider_prune_uses_shared_scandir_helper() -> None:
         "provider_claude.py",
         "provider_codex.py",
         "provider_session_events.py",
-        "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
         start = source.index("    def prune_old_runs(")
@@ -1747,10 +1754,11 @@ def test_jsonl_cursor_advance_is_synchronous_and_non_blocking() -> None:
     assert "self.on_cursor_advance(self.processed_offset)" in notify_source
     assert "run_in_executor" not in notify_source
 
+    # OpenAI and the other session-events providers inherit the single
+    # callback implementation from provider_session_events.py.
     for provider_file, callback_marker in (
         ("provider_claude.py", "def _on_tailer_progress("),
         ("provider_session_events.py", "def _on_cursor("),
-        ("provider_openai.py", "def _on_cursor("),
     ):
         provider_source = (ROOT / provider_file).read_text(encoding="utf-8")
         cb_start = provider_source.index(callback_marker)
@@ -2813,8 +2821,9 @@ def test_event_summary_scan_reuses_full_scan_cache() -> None:
     max_start = source.index("def _scan_max_seq(")
     max_end = source.index("    @staticmethod\n    def _affects_render_projection", max_start)
     max_source = source[max_start:max_end]
-    assert "all_entries: list[dict] = []" in max_source
-    assert "self._full_scan_cache[root_id] = (cur_offset, all_entries)" in max_source
+    assert "entries: list[dict] = []" in max_source
+    assert "cur_offset = self._parse_events_range(" in max_source
+    assert "self._remember_full_scan_cache_locked(root_id, cur_offset, entries)" in max_source
     assert "self._seq_offsets[root_id] = seq_offsets" in max_source
 
     summary_start = source.index("def _scan_summaries(")
@@ -2922,7 +2931,7 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     cache_end = source.index("_GIT_STATUS_TTL_SECONDS", cache_start)
     cache_source = source[cache_start:cache_end]
     assert "tuple[float, bytes, tuple[int, int, int]]" in source
-    assert "return _sessions_list_response(cached[1])" in cache_source
+    assert "return _json_response_maybe_gzip(cached[1], accept_encoding)" in cache_source
     assert "json.dumps(" in cache_source
     assert "copy.deepcopy" not in cache_source
     assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
@@ -3290,14 +3299,14 @@ def test_session_detail_has_split_perf_timers() -> None:
     miss_cache_source = route_source[miss_cache_start:miss_cache_end]
     assert "_session_event_meta(" not in miss_cache_source
     assert "_session_event_file_fingerprint(" not in miss_cache_source
-    assert "return await _json_bytes_response_async(tree)" in route_source
-    json_response_start = source.index("def _json_bytes_response(")
-    json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
-    json_response_source = source[json_response_start:json_response_end]
-    assert "separators=(\",\", \":\")" in json_response_source
-    assert "Response(content=content, media_type=\"application/json\")" in json_response_source
-    assert "async def _json_bytes_response_async(" in json_response_source
-    assert "content = await asyncio.to_thread(" in json_response_source
+    assert "content = await _session_detail_cache_put_async(cache_key, tree)" in route_source
+    assert "content = (await asyncio.to_thread(\n            json.dumps" in route_source
+    assert "return await asyncio.to_thread(\n        _json_response_maybe_gzip" in route_source
+    cache_start = source.index("async def _session_detail_cache_put_async(")
+    cache_end = source.index("def _session_detail_simple_cache_key_from_full(", cache_start)
+    cache_source = source[cache_start:cache_end]
+    assert "content_text = await asyncio.to_thread(\n        json.dumps" in cache_source
+    assert "separators=(\",\", \":\")" in cache_source
     for timer in (
         "sessions.detail.root_id",
         "sessions.detail.event_meta",
@@ -3402,7 +3411,7 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     write_start = source.index("def write_session_full(")
     write_end = source.index("def list_sessions(", write_start)
     write_source = source[write_start:write_end]
-    assert "root_mtime_ns=file_signature[0] if file_signature is not None else None" in write_source
+    assert "root_mtime_ns=file_signature[3] if file_signature is not None else None" in write_source
     assert "sync_sidecar=bool(root.get(\"forks\"))" in write_source
 
 
@@ -3497,7 +3506,8 @@ def test_summary_index_indexes_seen_sidecars_once() -> None:
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
     assert "seen_cursor_ids: set[str] = set()" in build_source
-    assert "for p in _sessions_dir().iterdir():" in build_source
+    assert "for storage_dir in _session_storage_dirs():" in build_source
+    assert "entries = list(storage_dir.iterdir())" in build_source
     assert ".glob(\"*.summary.json\")" not in build_source
     assert ".glob(\"*.seen.json\")" not in build_source
     assert "read_seen_cursors(sid) if sid in seen_cursor_ids else {}" in build_source
@@ -3525,7 +3535,8 @@ def test_session_store_sessions_dir_is_env_aware_cached() -> None:
     sessions_dir_start = source.index("def _sessions_dir()")
     sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
     sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
-    assert "resolved = ba_home() / \"sessions\"" in sessions_dir_source
+    assert 'resolved = _STORAGE_IDENTITY.get() or (ba_home() / "sessions")' in sessions_dir_source
+    assert "_active_storage_identity != resolved" in sessions_dir_source
     assert "if _SESSIONS_DIR == resolved:" in sessions_dir_source
     assert "_reset_home_scoped_caches()" in sessions_dir_source
     ensure_start = source.index("def _ensure_dir()")
@@ -3820,15 +3831,17 @@ def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> 
     recover_start = source.index("async def _recover_in_flight_task()")
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
-    reenqueue = recover_source.index("await _re_enqueue_queued_prompts()")
-    scan = recover_source.index("pre_provider_orphan_candidates")
+    reenqueue = recover_source.index("reenqueue_task = asyncio.create_task(")
+    scan = recover_source.index("candidate_task = asyncio.create_task(")
+    register = recover_source.index("startup_recovery_gate.register_session_recovery")
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
     integrate = recover_source.index("await integrate_recovered_runs(coordinator, batch)")
+    await_reenqueue = recover_source.index("rehydrated_session_ids = await reenqueue_task")
     start_processors = recover_source.index(
         "await coordinator.start_session_processor_async(sid)",
     )
-    assert reenqueue < scan < integrate
-    assert integrate < opened < start_processors
+    assert reenqueue < scan < register < opened
+    assert opened < integrate < await_reenqueue < start_processors
     assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
 
 
@@ -3908,7 +3921,7 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
     assert "_builtin_extension_runtime_ready_fast" not in route_source
     assert "_builtin_extension_runtime_ready(" not in route_source
     helper_start = source.index("def _machine_nodes_enabled_cached(")
-    helper_end = source.index("def _sessions_list_response(", helper_start)
+    helper_end = source.index("def _json_response_maybe_gzip(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "asyncio.create_task(_refresh())" in helper_source
     assert "await asyncio.to_thread(\n                        _builtin_extension_runtime_ready" in helper_source
@@ -3962,7 +3975,7 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert route_source.index("sessions.list.projected_first_page_merge") < route_source.index(
         'with perf.timed("sessions.list.filter_sort")'
     )
-    assert "_sessions_list_response(\n                    json.dumps(" in route_source
+    assert "_json_response_maybe_gzip(\n                    json.dumps(" in route_source
 
 
 def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
@@ -4115,11 +4128,11 @@ def test_session_detail_response_bytes_are_cached() -> None:
     assert "_session_detail_response_cache" in source
     assert "_SESSION_DETAIL_RESPONSE_CACHE_MAX = 64" in source
     assert "def _session_detail_cache_get(" in source
-    assert "def _session_detail_cache_put(" in source
+    assert "async def _session_detail_cache_put_async(" in source
     assert "def _session_detail_response_cache_key_sync(" in source
     assert "_SESSION_DETAIL_RESPONSE_TTL_SECONDS" not in source
     cache_get_start = source.index("def _session_detail_cache_get(")
-    cache_get_end = source.index("def _session_detail_cache_put(", cache_get_start)
+    cache_get_end = source.index("async def _session_detail_cache_put_async(", cache_get_start)
     cache_get_source = source[cache_get_start:cache_get_end]
     assert "time.monotonic()" not in cache_get_source
     route_start = source.index("async def get_session(")
@@ -4151,10 +4164,10 @@ def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     retry_source = source[retry_start:retry_end]
     assert "await asyncio.to_thread(\n            _recovery_target_snapshot" in finalize_source
     assert "await asyncio.to_thread(\n                    session_manager.set_msg_recovering" in finalize_source
-    assert "await asyncio.to_thread(\n                coordinator.turn_manager.run_state_add" in integrate_source
-    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in retry_source
+    assert "await _to_thread_joined(\n                coordinator.turn_manager.run_state_add" in integrate_source
+    assert "await asyncio.to_thread(\n            turn_manager.run_state_add" in retry_source
     assert "\n            coordinator.turn_manager.run_state_add(" not in integrate_source
-    assert "\n    coordinator.turn_manager.run_state_add(" not in retry_source
+    assert "\n        turn_manager.run_state_add(" not in retry_source
     assert "session_manager.get(persist_sid)" not in finalize_source
     assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
 
@@ -4398,7 +4411,8 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
     route_start = source.index("async def list_extensions(")
     route_end = source.index("@router.get(\"/builtin-ids\")", route_start)
     route_source = source[route_start:route_end]
-    assert 'cache_key = (extension_store.store_fingerprint(), include_hidden)' in route_source
+    assert "fingerprint = await _extension_store_fingerprint_async()" in route_source
+    assert "cache_key = (fingerprint, include_hidden)" in route_source
     assert '_projection_response_cache_get("list", cache_key)' in route_source
     assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
     assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
@@ -4464,14 +4478,14 @@ def test_team_message_dispatch_uses_dedicated_executor() -> None:
     assert "asyncio.to_thread(" not in team_message_source
     for call in (
         "team_messaging.validate_message_route",
+        "inbox_store.send",
         "team_messaging.build_message_metadata",
         "team_messaging.queue_payload",
         "session_manager.add_queued_prompt",
         "session_manager.remove_queued_prompt",
     ):
-        assert f"_to_team_message_thread(\n" in team_message_source
-        assert call in team_message_source
-    assert team_message_source.count("_to_team_message_thread(") == 5
+        call_index = team_message_source.index(call)
+        assert "_to_team_message_thread(" in team_message_source[max(0, call_index - 100):call_index]
     # cli_prompt is NOT recomputed via a second format_team_message_prompt
     # call — `queue_payload` already computed it once internally, and a
     # second identical call was found (via live timing instrumentation) to
@@ -4558,10 +4572,12 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
 
 def test_startup_extension_package_resolution_stays_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("import extension_package_loader")
+    startup_start = source.index("async def on_startup()")
+    start = source.index("import extension_package_loader", startup_start)
     end = source.index("extension_store.extension_id_for_role(\"requirements\")", start)
     region = source[start:end]
-    assert "await asyncio.to_thread(\n                extension_package_loader.ensure_package_importable," in region
+    package_call = region.index("extension_package_loader.ensure_package_importable,")
+    assert "await asyncio.to_thread(" in region[max(0, package_call - 80):package_call]
     assert "\n            extension_package_loader.ensure_package_importable(" not in region
 
     prewarm = (ROOT / "requirement_prewarm.py").read_text(encoding="utf-8")
