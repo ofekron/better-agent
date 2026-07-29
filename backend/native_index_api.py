@@ -7,35 +7,14 @@ never choose where the work runs — the manager owns both.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException
 
-from i18n import t
+from internal_guards import require_internal
 from native_index_manager import manager
 
 router = APIRouter(tags=["native-import"])
-
-_authority_is_valid: Callable[[], bool] | None = None
-
-
-def configure(authority_is_valid: Callable[[], bool]) -> None:
-    """Inject the internal-authority check.
-
-    The check reads the principal bound to the request by the auth gate;
-    the X-Internal-Token header is declared on the routes so a missing
-    header is rejected before the handler runs, but the header value
-    itself is not what grants authority.
-    """
-    global _authority_is_valid
-    _authority_is_valid = authority_is_valid
-
-
-def _require_internal() -> None:
-    # Fail closed: an unconfigured router grants nothing.
-    if _authority_is_valid is None or not _authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
 
 def _parse_provider_ids(body: dict) -> Optional[list[str]]:
@@ -116,7 +95,7 @@ async def internal_start_native_import(
     is live — a separate process writing session.json races the backend's
     in-memory cache (it re-persists and clobbers the render tree). Used by
     the CLI/import scripts."""
-    _require_internal()
+    require_internal()
     return await _start(body)
 
 
@@ -124,5 +103,5 @@ async def internal_start_native_import(
 async def internal_native_import_status(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    _require_internal()
+    require_internal()
     return await manager.import_status()

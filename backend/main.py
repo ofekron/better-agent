@@ -1297,7 +1297,6 @@ import file_editor
 import project_config
 import session_search
 import session_bridge
-import assistant_ui
 import coordination
 import project_update_store
 import project_structure_edit_session
@@ -1629,13 +1628,27 @@ import testape_api  # noqa: E402
 app.include_router(testape_api.router)
 import git_api  # noqa: E402
 app.include_router(git_api.router)
+import internal_guards  # noqa: E402
+internal_guards.configure(lambda: coordinator.bound_request_principal())
+import assistant_ui_api  # noqa: E402
+app.include_router(assistant_ui_api.router)
+import memory_api  # noqa: E402
+app.include_router(memory_api.router)
+import requirements_api  # noqa: E402
+app.include_router(requirements_api.router)
+import prompt_engineer_api  # noqa: E402
+prompt_engineer_api.configure(
+    coordinator.submit_prompt_async,
+    coordinator.cancel_session,
+    lambda sid: _session_lite(sid),
+    lambda sid, **kw: _publish_worker_fanout_required(sid, **kw),
+)
+app.include_router(prompt_engineer_api.router)
 import file_api  # noqa: E402
 app.include_router(file_api.router)
 import file_delivery  # noqa: E402
 import native_index_api  # noqa: E402
 import native_index_manager  # noqa: E402
-# Late-bound: the authority check is defined further down this module.
-native_index_api.configure(lambda: _internal_authority_is_valid())
 app.include_router(native_index_api.router)
 
 
@@ -1673,9 +1686,7 @@ def _require_builtin_extension(extension_id: str) -> None:
 
 
 def _require_builtin_runtime_extension(extension_id: str) -> None:
-    not_ready_msg = extension_store.runtime_not_ready_message(extension_id)
-    if not_ready_msg is not None:
-        raise HTTPException(status_code=404, detail=not_ready_msg)
+    internal_guards.require_builtin_runtime_extension(extension_id)
 
 
 # Auth routes reachable without credentials (you authenticate TO reach
@@ -3786,7 +3797,7 @@ async def delete_project_mapping(group_id: str):
 
 
 def _internal_authority_is_valid() -> bool:
-    return coordinator.bound_request_principal() is not None
+    return internal_guards.authority_is_valid()
 
 
 def _internal_authority_extension_id() -> str | None:
@@ -4820,264 +4831,6 @@ async def internal_extension_call(
     )
 
 
-def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-
-    query = body.get("query")
-    if not isinstance(query, str) or not query.strip():
-        raise HTTPException(status_code=400, detail="query must be a non-empty string")
-    cwd = body.get("cwd", "")
-    if not isinstance(cwd, str):
-        raise HTTPException(status_code=400, detail="cwd must be a string")
-    cwds = body.get("cwds")
-    if cwds is not None and (
-        not isinstance(cwds, list) or any(not isinstance(item, str) for item in cwds)
-    ):
-        raise HTTPException(status_code=400, detail="cwds must be a list of strings")
-    all_projects = body.get("all_projects", False)
-    if not isinstance(all_projects, bool):
-        raise HTTPException(status_code=400, detail="all_projects must be a boolean")
-    return {
-        "query": query,
-        "cwd": cwd,
-        "cwds": cwds,
-        "all_projects": all_projects,
-    }
-
-
-def _requirements_query_debug_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    query = payload.get("query") if isinstance(payload.get("query"), str) else ""
-    query_bytes = query.encode("utf-8", "surrogatepass")
-    return {
-        "query_sha256": hashlib.sha256(query_bytes).hexdigest()[:16],
-        "query_len": len(query),
-        "cwd": payload.get("cwd") or "",
-        "cwds_count": len(payload.get("cwds") or []),
-        "all_projects": bool(payload.get("all_projects")),
-    }
-
-
-async def _cancel_requirements_processor_delegation(request_id: str, delegation_id: str) -> None:
-    if not delegation_id:
-        return
-    from provisioning.dispatch import request_delegation_cancel
-
-    signalled = await asyncio.to_thread(request_delegation_cancel, delegation_id)
-    logger.info(
-        "requirements_processor_caller_cancel_stop request_id=%s delegation_id=%s signalled=%s",
-        request_id,
-        delegation_id,
-        signalled,
-    )
-
-
-async def _run_processed_requirements_payload(
-    payload: dict[str, Any],
-    *,
-    request_id: str = "",
-    queue_admission: bool = False,
-) -> dict[str, Any]:
-    import requirement_context
-    if queue_admission:
-        import startup_recovery_gate
-        await _mark_requirements_job_phase(
-            request_id,
-            "waiting_for_recovery",
-            "Waiting for backend recovery",
-        )
-        await startup_recovery_gate.wait_for_recovery_ready(timeout=None)
-    debug_fields = _requirements_query_debug_fields(payload)
-    delegation_id = ""
-    if request_id:
-        delegation_id = str(payload.get("delegation_id") or "").strip()
-        if not delegation_id:
-            delegation_id = extension_jobs.delegation_id(
-                "requirements",
-                "processed",
-                request_id,
-                requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
-            )
-    await _mark_requirements_job_phase(
-        request_id,
-        "preparing_local_context",
-        "Preparing local requirement context",
-    )
-    await run_requirements_query(
-        "requirements.processed.prepare",
-        requirement_context.prepare_requirements_local_read_context,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        requires_projection=True,
-    )
-    try:
-        # Poll-driven jobs queue for a worker instead of failing admission at
-        # the sync hot-path budget. wait=True fires and the sync endpoint keep
-        # the short budget so the caller's own timeout stays authoritative.
-        admission_kwargs = (
-            {"admission_timeout_seconds": PROCESSOR_RESULT_TIMEOUT_SECONDS}
-            if queue_admission
-            else {}
-        )
-        processed = await run_requirements_processor_query(
-            "requirements.processed.processor",
-            requirement_context._run_requirements_processor,
-            executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
-            **admission_kwargs,
-            **payload,
-            debug_request_id=request_id,
-            delegation_id=delegation_id,
-            on_queued=functools.partial(
-                _mark_requirements_job_phase,
-                request_id,
-                "queued_for_processor",
-                "Waiting for a requirements processor slot",
-            ),
-            on_admitted=functools.partial(
-                _mark_requirements_job_phase,
-                request_id,
-                "processor_running",
-                "Requirements processor is running",
-            ),
-            on_caller_cancelled=functools.partial(
-                _cancel_requirements_processor_delegation,
-                request_id,
-                delegation_id,
-            ),
-        )
-    except TimeoutError as exc:
-        if request_id:
-            logger.warning(
-                "requirements_async_processor_timeout request_id=%s query_sha256=%s "
-                "query_len=%s cwd=%s cwds_count=%s all_projects=%s",
-                request_id,
-                debug_fields["query_sha256"],
-                debug_fields["query_len"],
-                debug_fields["cwd"],
-                debug_fields["cwds_count"],
-                debug_fields["all_projects"],
-            )
-        recovered = await asyncio.to_thread(
-            requirement_context.recover_processed_requirements_from_delegation,
-            request_id=request_id,
-            payload={**payload, "delegation_id": delegation_id},
-        )
-        processed = recovered or requirement_context.processor_failure_result(exc)
-    await _mark_requirements_job_phase(
-        request_id,
-        "finalizing",
-        "Finalizing processed requirements",
-    )
-    return await run_requirements_query(
-        "requirements.processed.finalize",
-        requirement_context.build_processed_requirements_response,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        **payload,
-        processed=processed,
-    )
-
-
-async def _mark_requirements_job_phase(request_id: str, phase: str, message: str) -> None:
-    if not request_id:
-        return
-    try:
-        await asyncio.to_thread(
-            extension_jobs.persist_phase,
-            "requirements",
-            "processed",
-            request_id,
-            phase,
-            message,
-            **_requirements_processor_queue_fields(),
-        )
-    except (OSError, TypeError, ValueError):
-        logger.warning(
-            "requirements_async_phase_persist_failed request_id=%s phase=%s",
-            request_id,
-            phase,
-        )
-
-
-def _requirements_processor_queue_fields() -> dict[str, Any]:
-    try:
-        from requirements_query_runner import processor_admission_state
-
-        state = processor_admission_state()
-    except Exception:
-        logger.debug("requirements processor queue state unavailable", exc_info=True)
-        return {}
-    return {
-        "processor_queue_depth": int(state.get("queue_depth") or 0),
-        "processor_active_permits": int(state.get("active_permits") or 0),
-        "processor_available_permits": int(state.get("available_permits") or 0),
-        "processor_oldest_queue_age_ms": float(state.get("oldest_queue_age_ms") or 0.0),
-    }
-
-
-async def _recover_requirements_async_result(
-    request_id: str,
-) -> dict[str, Any] | None:
-    import requirement_context
-
-    record = extension_jobs.read_record("requirements", "processed", request_id)
-    if not isinstance(record, dict):
-        return None
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    from provisioning.dispatch import recover_delegation_result
-
-    dispatch_result = await asyncio.to_thread(
-        recover_delegation_result,
-        str(record.get("delegation_id") or ""),
-    )
-    if dispatch_result is None:
-        return None
-    await _mark_requirements_job_phase(
-        request_id,
-        "recovering_processor_result",
-        "Recovering completed processor result",
-    )
-    recovered = await asyncio.to_thread(
-        requirement_context.parse_processed_requirements_from_dispatch_result,
-        request_id=request_id,
-        payload={**payload, "delegation_id": record.get("delegation_id")},
-        dispatch_result=dispatch_result,
-    )
-    if recovered is None:
-        return None
-    await _mark_requirements_job_phase(
-        request_id,
-        "finalizing",
-        "Finalizing processed requirements",
-    )
-    result = await run_requirements_query(
-        "requirements.processed.recover_finalize",
-        requirement_context.build_processed_requirements_response,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        **payload,
-        processed=recovered,
-    )
-    return await asyncio.to_thread(
-        extension_jobs.persist_complete,
-        "requirements",
-        "processed",
-        request_id,
-        result,
-    )
-
-
-@app.post("/api/internal/get-requirements")
-async def internal_get_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-    return await _run_processed_requirements_payload(payload)
-
-
 def _core_mcp_job_payload(body: dict) -> dict[str, Any]:
     return {
         key: value
@@ -5254,374 +5007,6 @@ async def internal_mcp_job_results(
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
     return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
-
-
-@app.post("/api/internal/get-requirements/fire")
-async def internal_fire_get_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    return await fire_processed_requirements_for_caller(body, caller_extension="internal")
-
-
-async def fire_processed_requirements_for_caller(
-    body: dict,
-    *,
-    caller_extension: str,
-) -> dict[str, Any]:
-    payload = _validate_processed_requirements_body(body)
-    wait = body.get("wait", False)
-    if not isinstance(wait, bool):
-        raise HTTPException(status_code=400, detail="wait must be a boolean")
-
-    extension_jobs.cleanup("requirements", "processed")
-    idempotency_key = body.get("idempotency_key", "")
-    if not isinstance(idempotency_key, str) or len(idempotency_key) > 128:
-        raise HTTPException(status_code=400, detail="invalid idempotency_key")
-    if idempotency_key and any(
-        not (ch.isalnum() or ch in ("-", "_")) for ch in idempotency_key
-    ):
-        raise HTTPException(status_code=400, detail="invalid idempotency_key")
-    canonical_payload = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8", "surrogatepass")
-    payload_digest = hashlib.sha256(canonical_payload).hexdigest()
-    request_id = (
-        hashlib.sha256(
-            f"{caller_extension}\0{idempotency_key}".encode("utf-8", "surrogatepass")
-        ).hexdigest()
-        if idempotency_key
-        else uuid.uuid4().hex
-    )
-    import requirement_context
-
-    delegation_id = extension_jobs.delegation_id(
-        "requirements",
-        "processed",
-        request_id,
-        requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
-    )
-    debug_fields = _requirements_query_debug_fields(payload)
-    logger.info(
-        "requirements_async_fire request_id=%s query_sha256=%s query_len=%s "
-        "cwd=%s cwds_count=%s all_projects=%s wait=%s",
-        request_id,
-        debug_fields["query_sha256"],
-        debug_fields["query_len"],
-        debug_fields["cwd"],
-        debug_fields["cwds_count"],
-        debug_fields["all_projects"],
-        wait,
-    )
-    metadata = {
-        "delegation_id": delegation_id,
-        "phase": "created",
-        "message": "Requirements job created",
-        **_requirements_processor_queue_fields(),
-    }
-    if idempotency_key:
-        try:
-            found = extension_jobs.get_or_fire_idempotent(
-                "requirements", "processed", request_id, payload,
-                functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
-                payload_digest=payload_digest,
-                caller_extension=caller_extension,
-                metadata=metadata,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if isinstance(found, dict):
-            return found
-        task = found
-    else:
-        task = extension_jobs.fire(
-            "requirements", "processed", request_id, payload,
-            functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
-            metadata=metadata,
-        )
-    if not wait:
-        record = extension_jobs.read_record("requirements", "processed", request_id)
-        if isinstance(record, dict):
-            return extension_jobs.response_from_record(record)
-        return {"success": True, "id": request_id, "status": "running", "ready": False}
-    try:
-        result = await asyncio.shield(task)
-    except Exception as exc:
-        return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
-    return await asyncio.to_thread(
-        extension_jobs.persist_complete,
-        "requirements",
-        "processed",
-        request_id,
-        result,
-    )
-
-
-@app.post("/api/internal/get-requirements/results")
-async def internal_get_requirements_results(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    return await get_processed_requirements_results_for_caller(
-        body, caller_extension="internal",
-    )
-
-
-async def get_processed_requirements_results_for_caller(
-    body: dict,
-    *,
-    caller_extension: str,
-) -> dict[str, Any]:
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-    request_id = body.get("id")
-    if not isinstance(request_id, str) or not request_id.strip():
-        raise HTTPException(status_code=400, detail="id is required")
-    wait = body.get("wait", 0.0)
-    if not isinstance(wait, (int, float)) or isinstance(wait, bool) or wait < 0:
-        raise HTTPException(status_code=400, detail="wait must be a non-negative number of seconds")
-
-    extension_jobs.cleanup("requirements", "processed")
-    request_id = request_id.strip()
-    try:
-        extension_jobs.job_path("requirements", "processed", request_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    record = extension_jobs.read_record("requirements", "processed", request_id)
-    record_caller = record.get("caller_extension") if isinstance(record, dict) else None
-    if record_caller and record_caller != caller_extension:
-        raise HTTPException(status_code=404, detail="unknown id")
-    recovered = await _recover_requirements_async_result(request_id)
-    if recovered is not None:
-        return recovered
-    found = extension_jobs.get_or_resume(
-        "requirements",
-        "processed",
-        request_id,
-        functools.partial(_run_processed_requirements_payload, queue_admission=True),
-    )
-    if found is None:
-        return {"success": False, "error": "unknown id"}
-    if isinstance(found, dict):
-        return _with_running_requirements_native_session_files(found, request_id)
-    task = found
-    try:
-        result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
-    except asyncio.TimeoutError:
-        record = extension_jobs.read_record("requirements", "processed", request_id)
-        if isinstance(record, dict):
-            response = extension_jobs.response_from_record(record)
-            return _with_running_requirements_native_session_files(response, request_id)
-        response = {"success": True, "id": request_id, "status": "running", "ready": False}
-        return _with_running_requirements_native_session_files(response, request_id)
-    except Exception as exc:
-        return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
-    return await asyncio.to_thread(
-        extension_jobs.persist_complete,
-        "requirements",
-        "processed",
-        request_id,
-        result,
-    )
-
-
-def _with_running_requirements_native_session_files(
-    response: dict[str, Any],
-    request_id: str,
-) -> dict[str, Any]:
-    if response.get("ready") is not False:
-        return response
-
-    import delegation_status_store
-    import requirement_context
-
-    delegation_id = str(response.get("delegation_id") or "").strip()
-    if not delegation_id:
-        delegation_id = extension_jobs.delegation_id(
-            "requirements",
-            "processed",
-            request_id,
-            requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
-        )
-    status = delegation_status_store.read_status(delegation_id)
-    path = status.get("jsonl_path") if isinstance(status, dict) else None
-    paths = [path] if isinstance(path, str) and path else []
-    return {**response, "native_session_file_paths": paths}
-
-
-@app.post("/api/internal/get-requirements/unit-fts")
-async def internal_requirements_unit_fts(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-    fields = body.get("fields")
-    if fields is not None and (
-        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
-    ):
-        raise HTTPException(status_code=400, detail="fields must be a list of strings")
-    include_all_fields = body.get("include_all_fields", False)
-    if not isinstance(include_all_fields, bool):
-        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
-
-    return await run_supervised_requirements_search(
-        "requirements.unit_fts",
-        "unit_fts",
-        query=payload["query"],
-        cwd=payload["cwd"],
-        cwds=payload["cwds"],
-        all_projects=payload["all_projects"],
-        fields=fields,
-        include_all_fields=include_all_fields,
-    )
-
-
-@app.post("/api/internal/get-requirements/unit-vector")
-async def internal_requirements_unit_vector(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-    fields = body.get("fields")
-    if fields is not None and (
-        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
-    ):
-        raise HTTPException(status_code=400, detail="fields must be a list of strings")
-    include_all_fields = body.get("include_all_fields", False)
-    if not isinstance(include_all_fields, bool):
-        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
-
-    return await run_supervised_requirements_search(
-        "requirements.unit_vector",
-        "unit_vector",
-        query=payload["query"],
-        cwd=payload["cwd"],
-        cwds=payload["cwds"],
-        all_projects=payload["all_projects"],
-        fields=fields,
-        include_all_fields=include_all_fields,
-    )
-
-
-@app.post("/api/internal/get-requirements/thread-fts")
-async def internal_requirements_thread_fts(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-    fields = body.get("fields")
-    if fields is not None and (
-        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
-    ):
-        raise HTTPException(status_code=400, detail="fields must be a list of strings")
-    include_all_fields = body.get("include_all_fields", False)
-    if not isinstance(include_all_fields, bool):
-        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
-
-    return await run_supervised_requirements_search(
-        "requirements.thread_fts",
-        "thread_fts",
-        query=payload["query"],
-        cwd=payload["cwd"],
-        cwds=payload["cwds"],
-        all_projects=payload["all_projects"],
-        fields=fields,
-        include_all_fields=include_all_fields,
-    )
-
-
-@app.post("/api/internal/get-requirements/thread-vector")
-async def internal_requirements_thread_vector(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-    fields = body.get("fields")
-    if fields is not None and (
-        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
-    ):
-        raise HTTPException(status_code=400, detail="fields must be a list of strings")
-    include_all_fields = body.get("include_all_fields", False)
-    if not isinstance(include_all_fields, bool):
-        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
-
-    response = await run_supervised_requirements_search(
-        "requirements.thread_vector",
-        "thread_vector_search",
-        query=payload["query"],
-        cwd=payload["cwd"],
-        cwds=payload["cwds"],
-        all_projects=payload["all_projects"],
-        fields=fields,
-        include_all_fields=include_all_fields,
-    )
-    if response.get("reason") in {"source_missing", "index_not_ready_or_stale"}:
-        import requirement_prewarm
-
-        requirement_prewarm.request_thread_vector_projection()
-    return response
-
-
-@app.post("/api/internal/get-requirements/index-sql")
-async def internal_requirements_index_sql(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-    sql = body.get("sql")
-    if not isinstance(sql, str) or not sql.strip():
-        raise HTTPException(status_code=400, detail="sql must be a non-empty string")
-
-    response = await run_supervised_requirements_search(
-        "requirements.index_sql",
-        "index_sql",
-        sql=sql,
-    )
-    from fastapi.responses import JSONResponse
-
-    serialize_started = time.perf_counter()
-    rendered = JSONResponse(response)
-    perf.record(
-        "requirements.index_sql.response_serialize",
-        (time.perf_counter() - serialize_started) * 1000.0,
-    )
-
-    class _TimedIndexSqlResponse(JSONResponse):
-        async def __call__(self, scope, receive, send):
-            wire_started = time.perf_counter()
-            try:
-                await super().__call__(scope, receive, send)
-            finally:
-                perf.record(
-                    "requirements.index_sql.socket_write",
-                    (time.perf_counter() - wire_started) * 1000.0,
-                )
-
-    timed = _TimedIndexSqlResponse(content=None)
-    timed.body = rendered.body
-    timed.raw_headers = rendered.raw_headers
-    return timed
 
 
 def _latest_user_task_text(session: dict) -> str:
@@ -5824,83 +5209,6 @@ async def internal_auto_tagging(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     raise HTTPException(status_code=400, detail="unknown auto-tagging action")
-
-
-@app.post("/api/internal/get-requirements/search")
-async def internal_search_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-
-    rg_args = body.get("rg_args")
-    query = body.get("query", "")
-    if rg_args is not None and (
-        not isinstance(rg_args, list) or any(not isinstance(arg, str) for arg in rg_args)
-    ):
-        raise HTTPException(status_code=400, detail="rg_args must be a list of strings")
-    if not isinstance(query, str):
-        raise HTTPException(status_code=400, detail="query must be a string")
-    if rg_args is not None and query.strip():
-        raise HTTPException(status_code=400, detail="provide either rg_args or query, not both")
-    if rg_args is None and not query.strip():
-        raise HTTPException(status_code=400, detail="rg_args or query is required")
-    cwd = body.get("cwd", "")
-    if not isinstance(cwd, str):
-        raise HTTPException(status_code=400, detail="cwd must be a string")
-    cwds = body.get("cwds")
-    if cwds is not None and (
-        not isinstance(cwds, list) or any(not isinstance(item, str) for item in cwds)
-    ):
-        raise HTTPException(status_code=400, detail="cwds must be a list of strings")
-    all_projects = body.get("all_projects", False)
-    if not isinstance(all_projects, bool):
-        raise HTTPException(status_code=400, detail="all_projects must be a boolean")
-    fields = body.get("fields")
-    if fields is not None and (
-        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
-    ):
-        raise HTTPException(status_code=400, detail="fields must be a list of strings")
-    include_all_fields = body.get("include_all_fields", False)
-    if not isinstance(include_all_fields, bool):
-        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
-    include_unprocessed_prompts = body.get("include_unprocessed_prompts", False)
-    if not isinstance(include_unprocessed_prompts, bool):
-        raise HTTPException(status_code=400, detail="include_unprocessed_prompts must be a boolean")
-    provider_native_only = body.get("provider_native_only", True)
-    if not isinstance(provider_native_only, bool):
-        raise HTTPException(status_code=400, detail="provider_native_only must be a boolean")
-    compare = body.get("compare", False)
-    if not isinstance(compare, bool):
-        raise HTTPException(status_code=400, detail="compare must be a boolean")
-    max_matches = body.get("max_matches")
-    if max_matches is not None and (
-        not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
-    ):
-        raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
-
-    return await run_supervised_requirements_search(
-        "requirements.search",
-        "unit_rg",
-        rg_args=rg_args,
-        query=query,
-        cwd=cwd,
-        cwds=cwds,
-        all_projects=all_projects,
-        fields=fields,
-        include_all_fields=include_all_fields,
-        include_unprocessed_prompts=include_unprocessed_prompts,
-        provider_native_only=provider_native_only,
-        compare=compare,
-        max_matches=max_matches,
-    )
-
-
-# ── Project structure edit session ──────────────────────────────
 
 
 @app.post("/api/internal/project-structure-edit/status")
@@ -8473,96 +7781,6 @@ async def internal_ask_ui_ensure(
 ):
     _require_ask_internal(x_internal_token)
     return await session_search.ensure_ask_session()
-
-
-def _require_assistant_internal(x_internal_token: str) -> None:
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('assistant'))
-
-
-@app.post("/api/internal/assistant-ui/ensure")
-async def internal_assistant_ui_ensure(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    board_preamble = None
-    if isinstance(body, dict) and "board_preamble" in body:
-        board_preamble = str(body.get("board_preamble") or "")
-    sess = await asyncio.to_thread(assistant_ui.ensure_singleton, board_preamble)
-    return {"id": sess["id"], "name": sess.get("name"), "cwd": sess.get("cwd")}
-
-
-@app.post("/api/internal/assistant-ui/ensure-monitor")
-async def internal_assistant_ui_ensure_monitor(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    board_preamble = None
-    if isinstance(body, dict) and "board_preamble" in body:
-        board_preamble = str(body.get("board_preamble") or "")
-    sess = await asyncio.to_thread(assistant_ui.ensure_monitor, board_preamble)
-    return {"id": sess["id"], "name": sess.get("name"), "cwd": sess.get("cwd")}
-
-
-@app.post("/api/internal/assistant-ui/search")
-async def internal_assistant_ui_search(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    return await assistant_ui.search(
-        str(body.get("query") or ""),
-        max_results=int(body.get("max_results") or 10),
-    )
-
-
-@app.post("/api/internal/assistant-ui/resolve-ba-session")
-async def internal_assistant_ui_resolve_ba_session(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    return await assistant_ui.resolve_ba_session(str(body.get("session_id") or ""))
-
-
-@app.post("/api/internal/assistant-ui/adopt-native-session")
-async def internal_assistant_ui_adopt_native_session(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    return await assistant_ui.adopt_native_session(
-        str(body.get("session_id") or ""),
-        transcript_path=str(body.get("transcript_path") or ""),
-    )
-
-
-@app.post("/api/internal/assistant-ui/delegate")
-async def internal_assistant_ui_delegate(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    target = str(body.get("target_session_id") or "").strip()
-    prompt = str(body.get("prompt") or "").strip()
-    if not target or not prompt:
-        raise HTTPException(status_code=400, detail="target_session_id and prompt are required")
-    return await assistant_ui.delegate(target, prompt)
-
-
-@app.post("/api/internal/assistant-ui/last-turn")
-async def internal_assistant_ui_last_turn(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    sid = str(body.get("session_id") or "").strip()
-    if not sid:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    return await asyncio.to_thread(assistant_ui.last_turn, sid)
 
 
 def _tree_has_loaded_events(tree: dict) -> bool:
@@ -11542,179 +10760,6 @@ async def set_config_panels(session_id: str, body: dict):
         session_id, panels, client_id=body.get("client_id"),
     )
     return {"panels": panels}
-
-
-def _require_prompt_engineer_internal(x_internal_token: str) -> None:
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('prompt-engineer'))
-
-
-@app.post("/api/internal/prompt-engineer/start")
-async def internal_prompt_engineering_start(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_prompt_engineer_internal(x_internal_token)
-    body = body or {}
-    session_id = str(body.get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    # Empty drafts are valid — claude starts the prompt from scratch.
-    draft = body.get("draft") or ""
-    mode = body.get("mode") or "fork"
-    if mode not in ("fork", "new"):
-        raise HTTPException(status_code=400, detail=t("error.mode_must_be_fork_or_new"))
-    try:
-        result = await prompt_engineer.start(session_id, draft, mode)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=t("error.parent_session_not_found"))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    # Sample provider env so the eng-session CLI spawn inherits the right
-    # ANTHROPIC_API_KEY / BASE_URL / CONFIG_DIR. Mirrors fork_and_send.
-    await asyncio.to_thread(config_store.apply_env_vars)
-
-    eng_id = result["eng_session_id"]
-    eng_session = result["session"] or {}
-    # Only fire the meta-prompt on a fresh start. On resume the eng
-    # session already had its turn 1 (and possibly many subsequent ones)
-    # — re-firing would tell claude "you are refining a prompt" again
-    # mid-conversation and corrupt the thread.
-    if result.get("meta_prompt") is not None:
-        await coordinator.submit_prompt_async(eng_id, {
-            "prompt": result["meta_prompt"],
-            "app_session_id": eng_id,
-            "model": eng_session.get("model"),
-            "cwd": eng_session.get("cwd"),
-            "ws_callback": None,
-            "images": None,
-            "orchestration_mode": eng_session.get("orchestration_mode"),
-            "client_id": body.get("client_id"),
-        })
-
-    return {
-        "eng_session_id": eng_id,
-        "temp_file_path": result["temp_file_path"],
-        "original_content": result["original_content"],
-        "session": eng_session,
-        "resumed": bool(result.get("resumed", False)),
-    }
-
-
-@app.post("/api/internal/prompt-engineer/get")
-async def internal_prompt_engineering_get(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_prompt_engineer_internal(x_internal_token)
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    payload = prompt_engineer.get_for_parent(session_id)
-    if payload is None:
-        raise HTTPException(
-            status_code=404, detail=t("error.no_live_eng_session"),
-        )
-    return {
-        "eng_session_id": payload["eng_session_id"],
-        "temp_file_path": payload["temp_file_path"],
-        "original_content": payload["original_content"],
-        "session": payload["session"],
-        "resumed": True,
-    }
-
-
-@app.post("/api/internal/prompt-engineer/comment")
-async def internal_prompt_engineering_comment(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_prompt_engineer_internal(x_internal_token)
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    if not prompt_engineer.is_eng_session(session_id):
-        raise HTTPException(status_code=404, detail=t("error.not_eng_session"))
-    body = body or {}
-    try:
-        file_path = body["file_path"]
-        start_line = int(body["start_line"])
-        end_line = int(body["end_line"])
-        start_col = int(body["start_col"])
-        end_col = int(body["end_col"])
-        comment = body["comment"]
-    except (KeyError, TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=t("error.missing_invalid_field", e=str(e)))
-
-    message = prompt_engineer.format_comment(
-        file_path, start_line, end_line, start_col, end_col, comment,
-    )
-    eng_session = await _session_lite(session_id) or {}
-    await asyncio.to_thread(config_store.apply_env_vars)
-    await coordinator.submit_prompt_async(session_id, {
-        "prompt": message,
-        "app_session_id": session_id,
-        "model": eng_session.get("model"),
-        "cwd": eng_session.get("cwd"),
-        "ws_callback": None,
-        "images": None,
-        "orchestration_mode": eng_session.get("orchestration_mode"),
-        "client_id": body.get("client_id"),
-    })
-    return {"submitted": True}
-
-
-@app.post("/api/internal/prompt-engineer/result")
-async def internal_prompt_engineering_result(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_prompt_engineer_internal(x_internal_token)
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    if not prompt_engineer.is_eng_session(session_id):
-        raise HTTPException(status_code=404, detail=t("error.not_eng_session"))
-    try:
-        content = await prompt_engineer.finalize(session_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=t("error.temp_file_missing"))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    sess = await _session_lite(session_id) or {}
-    meta = sess.get("working_mode_meta") or {}
-    return {
-        "content": content,
-        "parent_session_id": meta.get("parent_session_id"),
-        "original_content": meta.get("original_content", ""),
-    }
-
-
-@app.post("/api/internal/prompt-engineer/cleanup")
-async def internal_prompt_engineering_cleanup(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_prompt_engineer_internal(x_internal_token)
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    if not prompt_engineer.is_eng_session(session_id):
-        raise HTTPException(status_code=404, detail=t("error.not_eng_session"))
-    await coordinator.cancel_session(session_id)
-    ok = await prompt_engineer.cleanup(session_id)
-    await _publish_worker_fanout_required(
-        session_id,
-        op_label="prompt-eng cleanup",
-        caller_scope=True,
-        remove_worker=True,
-        outer_log_msg="worker fan-out failed during prompt-eng cleanup",
-    )
-    return {"deleted": ok}
 
 
 # ── File editing mode ──────────────────────────────────────────────
@@ -16178,76 +15223,6 @@ def _validate_user_approval_prompt(raw_prompt: Any) -> str:
     return prompt[:2000]
 
 
-_MEMORY_TYPES = ("user", "feedback", "project", "reference")
-_MEMORY_SCOPE_TYPES = ("global", "project", "folder")
-_MEMORY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
-
-
-def _validate_memory_proposal(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=400, detail="memory_proposal must be an object")
-    action = str(raw.get("action") or "add").strip()
-    if action not in ("add", "edit"):
-        raise HTTPException(status_code=400, detail="memory_proposal.action must be add or edit")
-    name = str(raw.get("name") or "").strip().lower()
-    if not _MEMORY_NAME_RE.match(name):
-        raise HTTPException(
-            status_code=400,
-            detail="memory_proposal.name must be lowercase kebab-case, 1-80 chars",
-        )
-    description = str(raw.get("description") or "").strip()
-    if not description:
-        raise HTTPException(status_code=400, detail="memory_proposal.description is required")
-    if "\n" in description or "\r" in description:
-        # Frontmatter is one field per line; an embedded newline (e.g.
-        # "ok\n---\nHACKED: yes") terminates the YAML block early and lets
-        # the rest of the description masquerade as frontmatter/content.
-        raise HTTPException(status_code=400, detail="memory_proposal.description must be a single line")
-    mem_type = str(raw.get("type") or "").strip()
-    if mem_type not in _MEMORY_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"memory_proposal.type must be one of {', '.join(_MEMORY_TYPES)}",
-        )
-    content = str(raw.get("content") or "").strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="memory_proposal.content is required")
-    scope_type = str(raw.get("scope_type") or "").strip()
-    if scope_type not in _MEMORY_SCOPE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"memory_proposal.scope_type must be one of {', '.join(_MEMORY_SCOPE_TYPES)}",
-        )
-    scope_path = str(raw.get("scope_path") or "").strip()
-    if "\n" in scope_path or "\r" in scope_path:
-        raise HTTPException(status_code=400, detail="memory_proposal.scope_path must be a single line")
-    if scope_type in ("project", "folder") and not scope_path:
-        raise HTTPException(
-            status_code=400,
-            detail="memory_proposal.scope_path is required for project/folder scope",
-        )
-    if scope_type == "global":
-        scope_path = ""
-    proposal = {
-        "action": action,
-        "name": name[:80],
-        "description": description[:300],
-        "type": mem_type,
-        "content": content[:8000],
-        "scope_type": scope_type,
-        "scope_path": scope_path[:1000],
-    }
-    if action == "edit":
-        target_slug = str(raw.get("target_slug") or "").strip().lower()
-        if not _MEMORY_NAME_RE.match(target_slug):
-            raise HTTPException(
-                status_code=400,
-                detail="memory_proposal.target_slug must be lowercase kebab-case, 1-80 chars",
-            )
-        proposal["target_slug"] = target_slug[:80]
-    return proposal
-
-
 async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> None:
     app_session_id = str(payload.get("app_session_id") or "").strip()
     if not app_session_id:
@@ -16329,7 +15304,7 @@ async def put_memory(scope_type: str, slug: str, body: dict):
     # writes, so a direct user edit can't write unbounded content that an
     # agent proposal couldn't.
     try:
-        proposal = _validate_memory_proposal({
+        proposal = memory_api.validate_memory_proposal({
             "action": "add",
             "name": slug,
             "description": body.get("description"),
@@ -16399,7 +15374,7 @@ async def resolve_user_input(request_id: str, body: dict):
             raise HTTPException(status_code=400, detail="approved must be a boolean")
         response = {"approved": approved}
         if approved:
-            response["memory_proposal"] = _validate_memory_proposal(body.get("edited"))
+            response["memory_proposal"] = memory_api.validate_memory_proposal(body.get("edited"))
     else:
         if not isinstance(body.get("answers"), dict):
             raise HTTPException(status_code=400, detail="answers object is required")
@@ -16467,7 +15442,7 @@ async def internal_request_user_input(
             questions = _validate_user_input_questions(body.get("questions"))
             prompt = ""
         elif kind == "memory":
-            memory_proposal = _validate_memory_proposal(body.get("memory_proposal"))
+            memory_proposal = memory_api.validate_memory_proposal(body.get("memory_proposal"))
             questions = []
             prompt = ""
         else:
@@ -16530,72 +15505,6 @@ async def internal_request_user_input(
     if completed.get("kind") in ("approval", "memory"):
         result["approved"] = False
     return result
-
-
-@app.post("/api/internal/memory/write")
-async def internal_memory_write(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    """Persist an already-approved memory proposal. Called by the memory
-    extension's MCP server after the user approves (and possibly edits) a
-    `propose_memory_add`/`propose_memory_edit` pending request -- never
-    called directly by an agent without going through that approval gate."""
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    try:
-        proposal = _validate_memory_proposal(body.get("memory_proposal"))
-    except HTTPException as exc:
-        return {"success": False, "error": str(exc.detail)}
-    try:
-        memory = await asyncio.to_thread(
-            memory_store.write_memory,
-            scope_type=proposal["scope_type"],
-            scope_path=proposal["scope_path"],
-            slug=proposal.get("target_slug") or proposal["name"],
-            description=proposal["description"],
-            mem_type=proposal["type"],
-            content=proposal["content"],
-        )
-    except memory_store.MemoryStoreError as exc:
-        return {"success": False, "error": str(exc)}
-    return {"success": True, "memory": memory}
-
-
-@app.post("/api/internal/memory/list")
-async def internal_memory_list(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    cwd = str(body.get("cwd") or "").strip()
-    if not cwd:
-        return {"success": False, "error": "cwd is required"}
-    scopes = await asyncio.to_thread(memory_store.memories_for_cwd, cwd)
-    return {"success": True, "scopes": scopes}
-
-
-@app.post("/api/internal/memory/delete")
-async def internal_memory_delete(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    scope_type = str(body.get("scope_type") or "").strip()
-    scope_path = str(body.get("scope_path") or "").strip()
-    slug = str(body.get("slug") or "").strip()
-    try:
-        deleted = await asyncio.to_thread(
-            memory_store.delete_memory,
-            scope_type=scope_type,
-            scope_path=scope_path,
-            slug=slug,
-        )
-    except memory_store.MemoryStoreError as exc:
-        return {"success": False, "error": str(exc)}
-    return {"success": deleted}
 
 
 @app.post("/api/internal/open-config-panel")

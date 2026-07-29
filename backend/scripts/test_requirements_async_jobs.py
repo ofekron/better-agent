@@ -315,9 +315,10 @@ def test_running_progress_does_not_overwrite_terminal_records() -> None:
 def test_results_timeout_returns_persisted_running_progress() -> None:
     async def scenario():
         import main
+        import requirements_api
 
-        original_auth = main._internal_authority_is_valid
-        original_gate = main._require_builtin_runtime_extension
+        original_auth = requirements_api.require_internal
+        original_gate = requirements_api.require_builtin_runtime_extension
         original_role = main.extension_store.extension_id_for_role
         started = asyncio.Event()
 
@@ -327,8 +328,8 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
             return {}
 
         try:
-            main._internal_authority_is_valid = lambda: True
-            main._require_builtin_runtime_extension = lambda _extension_id: None
+            requirements_api.require_internal = lambda: None
+            requirements_api.require_builtin_runtime_extension = lambda _extension_id: None
             main.extension_store.extension_id_for_role = lambda _role: "requirements"
             _fire("job-results-progress", {"query": "q"}, _holds)
             await started.wait()
@@ -337,7 +338,7 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
                 "queued_for_processor",
                 "Waiting for a requirements processor slot",
             )
-            response = await main.internal_get_requirements_results(
+            response = await requirements_api.internal_get_requirements_results(
                 {"id": "job-results-progress", "wait": 0},
                 x_internal_token="test",
             )
@@ -345,8 +346,8 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
             assert response["phase"] == "queued_for_processor"
             assert response["message"] == "Waiting for a requirements processor slot"
         finally:
-            main._internal_authority_is_valid = original_auth
-            main._require_builtin_runtime_extension = original_gate
+            requirements_api.require_internal = original_auth
+            requirements_api.require_builtin_runtime_extension = original_gate
             main.extension_store.extension_id_for_role = original_role
             for task in jobs._JOBS.values():
                 task.cancel()
@@ -357,9 +358,10 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
 def test_running_results_include_native_session_file_paths() -> None:
     async def scenario():
         import main
+        import requirements_api
 
-        original_auth = main._internal_authority_is_valid
-        original_gate = main._require_builtin_runtime_extension
+        original_auth = requirements_api.require_internal
+        original_gate = requirements_api.require_builtin_runtime_extension
         original_role = main.extension_store.extension_id_for_role
         original_read_status = delegation_status_store.read_status
         started = asyncio.Event()
@@ -370,8 +372,8 @@ def test_running_results_include_native_session_file_paths() -> None:
             return {}
 
         try:
-            main._internal_authority_is_valid = lambda: True
-            main._require_builtin_runtime_extension = lambda _extension_id: None
+            requirements_api.require_internal = lambda: None
+            requirements_api.require_builtin_runtime_extension = lambda _extension_id: None
             main.extension_store.extension_id_for_role = lambda _role: "requirements"
             delegation_status_store.read_status = lambda _delegation_id: {
                 "jsonl_path": "/native/processor-session.jsonl",
@@ -384,7 +386,7 @@ def test_running_results_include_native_session_file_paths() -> None:
             )
             await started.wait()
 
-            response = await main.internal_get_requirements_results(
+            response = await requirements_api.internal_get_requirements_results(
                 {"id": "job-results-native-path", "wait": 0},
                 x_internal_token="test",
             )
@@ -394,8 +396,8 @@ def test_running_results_include_native_session_file_paths() -> None:
                 "/native/processor-session.jsonl",
             ]
         finally:
-            main._internal_authority_is_valid = original_auth
-            main._require_builtin_runtime_extension = original_gate
+            requirements_api.require_internal = original_auth
+            requirements_api.require_builtin_runtime_extension = original_gate
             main.extension_store.extension_id_for_role = original_role
             delegation_status_store.read_status = original_read_status
             for task in jobs._JOBS.values():
@@ -407,6 +409,7 @@ def test_running_results_include_native_session_file_paths() -> None:
 def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
     async def scenario():
         import main
+        import requirements_api
 
         original_persist_running = main.extension_jobs.persist_running
         original_prepare = requirement_context.prepare_requirements_local_read_context
@@ -430,7 +433,7 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
             requirement_context.prepare_requirements_local_read_context = _prepare
             requirement_context._run_requirements_processor = _processor
             requirement_context.build_processed_requirements_response = _build
-            result = await main._run_processed_requirements_payload(
+            result = await requirements_api._run_processed_requirements_payload(
                 {"query": "q", "cwd": "/repo", "cwds": [], "all_projects": False},
                 request_id="job-phase-fail",
                 queue_admission=False,
@@ -448,10 +451,11 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
 def test_phase_progress_includes_processor_queue_state() -> None:
     async def scenario():
         import main
+        import requirements_api
 
-        original_state = main._requirements_processor_queue_fields
+        original_state = requirements_api._requirements_processor_queue_fields
         try:
-            main._requirements_processor_queue_fields = lambda: {
+            requirements_api._requirements_processor_queue_fields = lambda: {
                 "processor_queue_depth": 3,
                 "processor_active_permits": 7,
                 "processor_available_permits": 2,
@@ -465,10 +469,10 @@ def test_phase_progress_includes_processor_queue_state() -> None:
                     "delegation_id": _delegation_id("job-queue-state"),
                     "phase": "created",
                     "message": "created",
-                    **main._requirements_processor_queue_fields(),
+                    **requirements_api._requirements_processor_queue_fields(),
                 },
             )
-            await main._mark_requirements_job_phase(
+            await requirements_api._mark_requirements_job_phase(
                 "job-queue-state",
                 "queued_for_processor",
                 "Waiting for a requirements processor slot",
@@ -479,7 +483,7 @@ def test_phase_progress_includes_processor_queue_state() -> None:
             assert record["processor_available_permits"] == 2
             assert record["processor_oldest_queue_age_ms"] == 1250.5
         finally:
-            main._requirements_processor_queue_fields = original_state
+            requirements_api._requirements_processor_queue_fields = original_state
             for task in jobs._JOBS.values():
                 task.cancel()
 
@@ -489,6 +493,7 @@ def test_phase_progress_includes_processor_queue_state() -> None:
 def test_processor_on_queued_observes_registered_waiter() -> None:
     async def scenario():
         import main
+        import requirements_api
         from requirements_query_runner import (
             REQUIREMENTS_PROCESSOR_EXECUTOR,
             run_requirements_processor_query,
@@ -497,7 +502,7 @@ def test_processor_on_queued_observes_registered_waiter() -> None:
         observed: dict[str, object] = {}
 
         async def on_queued():
-            observed.update(main._requirements_processor_queue_fields())
+            observed.update(requirements_api._requirements_processor_queue_fields())
 
         def _processor():
             return {"text": ""}
@@ -783,6 +788,7 @@ def test_results_recovery_persists_completed_async_job() -> None:
 
     async def scenario():
         import main
+        import requirements_api
 
         request_id = "job-results-recover"
         delegation_id = _delegation_id(request_id)
@@ -801,7 +807,7 @@ def test_results_recovery_persists_completed_async_job() -> None:
                 "sdk_output": '{"requirements":[{"text":"results endpoint recovers"}]}',
             },
         )
-        recovered = await main._recover_requirements_async_result(request_id)
+        recovered = await requirements_api._recover_requirements_async_result(request_id)
         assert isinstance(recovered, dict)
         assert recovered["status"] == "complete"
         assert recovered["result"]["success"] is True

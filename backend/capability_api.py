@@ -1014,14 +1014,14 @@ def _register_session_bridge() -> None:
 def _register_requirements() -> None:
     def handler(function_name: str) -> Callable[[BaseModel], Awaitable[Any]]:
         async def invoke(payload: BaseModel) -> Any:
-            import main
+            import requirements_api
 
             extension_id = extension_store.extension_id_for_role("requirements")
             if not extension_id:
                 raise HTTPException(
                     status_code=503, detail="requirements extension is unavailable"
                 )
-            fn = getattr(main, function_name)
+            fn = getattr(requirements_api, function_name)
             result = fn(
                 payload.model_dump(),
                 x_internal_token=extension_token_registry.mint(extension_id),
@@ -1031,17 +1031,17 @@ def _register_requirements() -> None:
         return invoke
 
     async def fire(payload: BaseModel) -> Any:
-        import main
+        import requirements_api
 
-        return await main.fire_processed_requirements_for_caller(
+        return await requirements_api.fire_processed_requirements_for_caller(
             payload.model_dump(),
             caller_extension=_CAPABILITY_CALLER.get(),
         )
 
     async def results(payload: BaseModel) -> Any:
-        import main
+        import requirements_api
 
-        return await main.get_processed_requirements_results_for_caller(
+        return await requirements_api.get_processed_requirements_results_for_caller(
             payload.model_dump(),
             caller_extension=_CAPABILITY_CALLER.get(),
         )
@@ -1068,11 +1068,18 @@ def _main_action(
     function_name: str,
     *,
     extension_role: str = "",
+    module_name: str = "main",
 ) -> Callable[[BaseModel], Awaitable[Any]]:
-    async def invoke(payload: BaseModel) -> Any:
-        import main
+    """Bind a capability action to a route handler.
 
-        fn = getattr(main, function_name)
+    `module_name` names the module that owns the handler; it is still
+    `main` for everything that has not been extracted into its own
+    router yet.
+    """
+    async def invoke(payload: BaseModel) -> Any:
+        import importlib
+
+        fn = getattr(importlib.import_module(module_name), function_name)
         kwargs: dict[str, Any] = {}
         if extension_role:
             extension_id = extension_store.extension_id_for_role(extension_role)
@@ -1130,7 +1137,11 @@ def _register_prompt_engineer() -> None:
             "prompt-engineer",
             action,
             schema,
-            _main_action(function_name, extension_role="prompt-engineer"),
+            _main_action(
+                function_name,
+                extension_role="prompt-engineer",
+                module_name="prompt_engineer_api",
+            ),
         )
 
 
@@ -1157,12 +1168,31 @@ def _register_private_workflows() -> None:
         "headless-generate": (_AssistantHeadlessPayload, "internal_headless_generate"),
         "ask": (_AssistantAskPayload, "internal_ask"),
     }
+    # The assistant-ui handlers moved to their own router; the rest of
+    # this group is still owned by main.
+    assistant_ui_owned = {
+        "internal_assistant_ui_ensure",
+        "internal_assistant_ui_ensure_monitor",
+        "internal_assistant_ui_search",
+        "internal_assistant_ui_resolve_ba_session",
+        "internal_assistant_ui_adopt_native_session",
+        "internal_assistant_ui_delegate",
+        "internal_assistant_ui_last_turn",
+    }
     for action, (schema, function_name) in assistant_actions.items():
         register(
             "assistant",
             action,
             schema,
-            _main_action(function_name, extension_role="assistant"),
+            _main_action(
+                function_name,
+                extension_role="assistant",
+                module_name=(
+                    "assistant_ui_api"
+                    if function_name in assistant_ui_owned
+                    else "main"
+                ),
+            ),
         )
     register(
         "composer-fill",

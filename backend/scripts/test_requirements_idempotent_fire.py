@@ -21,13 +21,14 @@ paths.engage_test_home(HOME)
 
 import extension_jobs  # noqa: E402
 import main  # noqa: E402
+import requirements_api  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 
 
 async def _scenario() -> None:
-    original = main._run_processed_requirements_payload
-    original_validate = main._validate_processed_requirements_body
-    original_require = main._require_builtin_runtime_extension
+    original = requirements_api._run_processed_requirements_payload
+    original_validate = requirements_api._validate_processed_requirements_body
+    original_require = requirements_api.require_builtin_runtime_extension
     calls: list[str] = []
     release = asyncio.Event()
 
@@ -38,17 +39,17 @@ async def _scenario() -> None:
         await release.wait()
         return {"success": True, "requirements": [], "count": 0}
 
-    main._run_processed_requirements_payload = runner
-    main._validate_processed_requirements_body = lambda body: {
+    requirements_api._run_processed_requirements_payload = runner
+    requirements_api._validate_processed_requirements_body = lambda body: {
         key: body.get(key, default)
         for key, default in (("query", ""), ("cwd", ""), ("cwds", []), ("all_projects", False))
     }
-    main._require_builtin_runtime_extension = lambda *_args, **_kwargs: None
+    requirements_api.require_builtin_runtime_extension = lambda *_args, **_kwargs: None
     try:
         body = {"query": "same", "wait": False, "idempotency_key": "extract-1"}
         first, duplicate = await asyncio.gather(
-            main.fire_processed_requirements_for_caller(body, caller_extension="assistant.one"),
-            main.fire_processed_requirements_for_caller(body, caller_extension="assistant.one"),
+            requirements_api.fire_processed_requirements_for_caller(body, caller_extension="assistant.one"),
+            requirements_api.fire_processed_requirements_for_caller(body, caller_extension="assistant.one"),
         )
         assert first["id"] == duplicate["id"]
         await asyncio.sleep(0)
@@ -56,7 +57,7 @@ async def _scenario() -> None:
         assert main._has_restart_blocking_agent_work() is True
 
         try:
-            await main.fire_processed_requirements_for_caller(
+            await requirements_api.fire_processed_requirements_for_caller(
                 {**body, "query": "changed"}, caller_extension="assistant.one",
             )
         except HTTPException as exc:
@@ -64,13 +65,13 @@ async def _scenario() -> None:
         else:
             raise AssertionError("changed payload reused an idempotency identity")
 
-        other = await main.fire_processed_requirements_for_caller(
+        other = await requirements_api.fire_processed_requirements_for_caller(
             body, caller_extension="assistant.two",
         )
         await asyncio.sleep(0)
         assert other["id"] != first["id"]
         try:
-            await main.get_processed_requirements_results_for_caller(
+            await requirements_api.get_processed_requirements_results_for_caller(
                 {"id": first["id"], "wait": 0}, caller_extension="assistant.two",
             )
         except HTTPException as exc:
@@ -79,7 +80,7 @@ async def _scenario() -> None:
             raise AssertionError("one extension observed another extension's job")
 
         extension_jobs._JOBS.clear()
-        retried = await main.fire_processed_requirements_for_caller(
+        retried = await requirements_api.fire_processed_requirements_for_caller(
             body, caller_extension="assistant.one",
         )
         assert retried["id"] == first["id"]
@@ -88,15 +89,15 @@ async def _scenario() -> None:
         release.set()
         await asyncio.sleep(0.05)
     finally:
-        main._run_processed_requirements_payload = original
-        main._validate_processed_requirements_body = original_validate
-        main._require_builtin_runtime_extension = original_require
+        requirements_api._run_processed_requirements_payload = original
+        requirements_api._validate_processed_requirements_body = original_validate
+        requirements_api.require_builtin_runtime_extension = original_require
         startup_recovery_gate.reset_for_tests()
 
 
 async def _recovery_gate_scenario() -> None:
-    original = main._run_processed_requirements_payload
-    original_validate = main._validate_processed_requirements_body
+    original = requirements_api._run_processed_requirements_payload
+    original_validate = requirements_api._validate_processed_requirements_body
     started = asyncio.Event()
 
     async def runner(payload, *, request_id="", queue_admission=False):
@@ -105,14 +106,14 @@ async def _recovery_gate_scenario() -> None:
         started.set()
         return {"success": True, "requirements": [], "count": 0}
 
-    main._run_processed_requirements_payload = runner
-    main._validate_processed_requirements_body = lambda body: {
+    requirements_api._run_processed_requirements_payload = runner
+    requirements_api._validate_processed_requirements_body = lambda body: {
         key: body.get(key, default)
         for key, default in (("query", ""), ("cwd", ""), ("cwds", []), ("all_projects", False))
     }
     startup_recovery_gate.begin_recovery()
     try:
-        await main.fire_processed_requirements_for_caller(
+        await requirements_api.fire_processed_requirements_for_caller(
             {"query": "gated", "wait": False, "idempotency_key": "extract-gated"},
             caller_extension="assistant.one",
         )
@@ -121,8 +122,8 @@ async def _recovery_gate_scenario() -> None:
         startup_recovery_gate.mark_recovery_done()
         await asyncio.wait_for(started.wait(), timeout=1)
     finally:
-        main._run_processed_requirements_payload = original
-        main._validate_processed_requirements_body = original_validate
+        requirements_api._run_processed_requirements_payload = original
+        requirements_api._validate_processed_requirements_body = original_validate
         startup_recovery_gate.reset_for_tests()
 
 
