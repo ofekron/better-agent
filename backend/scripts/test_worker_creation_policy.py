@@ -29,16 +29,21 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _install_team_gate_extension() -> None:
+    extension_id = (
+        extension_store.extension_id_for_role('team-orchestration')
+        or "test.team-orchestration"
+    )
     package = Path(_TMP_HOME) / "team-orchestration-fixture"
     if package.exists():
         shutil.rmtree(package)
     package.mkdir(parents=True, exist_ok=True)
     manifest = {
         "kind": extension_store.MANIFEST_KIND,
-        "id": extension_store.extension_id_for_role('team-orchestration'),
+        "id": extension_id,
         "name": "Team orchestration",
         "version": "1.0.0",
         "description": "test fixture",
+        "core_roles": ["team-orchestration"],
         "surfaces": ["backend_feature"],
         "entrypoints": {},
         "permissions": {},
@@ -56,6 +61,7 @@ def _install_team_gate_extension() -> None:
             "commit_sha": "team-test",
         },
         persist=True,
+        force_enabled=True,
     )
 
 

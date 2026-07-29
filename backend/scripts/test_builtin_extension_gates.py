@@ -29,7 +29,9 @@ import main  # noqa: E402
 import auth  # noqa: E402
 
 
-def install_gate_extension(extension_id: str, permissions: dict | None = None) -> None:
+def install_gate_extension(
+    extension_id: str, permissions: dict | None = None, *, core_role: str | None = None
+) -> None:
     package = TMP_HOME / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -45,6 +47,8 @@ def install_gate_extension(extension_id: str, permissions: dict | None = None) -
         "permissions": permissions or {},
         "marketplace": {},
     }
+    if core_role:
+        manifest["core_roles"] = [core_role]
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     extension_store._install_from_package_dir(  # type: ignore[attr-defined]
         package_dir=package,
@@ -56,7 +60,17 @@ def install_gate_extension(extension_id: str, permissions: dict | None = None) -
             "commit_sha": extension_id,
         },
         persist=True,
+        force_enabled=True,
     )
+
+
+def _role_extension_id(role: str) -> str:
+    """Resolve a core role to its installed extension id, falling back to a
+    synthetic test id when the role isn't owned by anything yet.
+    extension_id_for_role() only resolves active (enabled) extensions, so
+    callers must cache this return value and reuse it across
+    install/enable/disable transitions rather than re-querying the role."""
+    return extension_store.extension_id_for_role(role) or f"test.{role}"
 
 
 def check(condition: bool, message: str) -> None:
@@ -88,8 +102,9 @@ def test_get_ask_session_lazily_ensures_virtual_session(client: TestClient) -> N
 
 
 def test_disabled_project_structure_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.extension_id_for_role('project-structure'))
-    extension_store.set_enabled(extension_store.extension_id_for_role('project-structure'), False)
+    project_structure_id = _role_extension_id("project-structure")
+    install_gate_extension(project_structure_id, core_role="project-structure")
+    extension_store.set_enabled(project_structure_id, False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/project-updates/count",
@@ -121,13 +136,25 @@ def test_runtime_unready_extensions_block_routes(client: TestClient) -> None:
 
 def test_project_update_substrate_does_not_require_runtime_ready(client: TestClient) -> None:
     import extension_token_registry
+    # This test doesn't depend on an earlier test having installed
+    # project-structure: it installs its own fixture so extension_id_for_role
+    # resolves regardless of run order.
+    project_structure_id = _role_extension_id("project-structure")
+    # The internal-token auth middleware requires internal_loopback on any
+    # extension identity calling /api/internal/*, so the fixture must declare
+    # it to exercise this route via project-structure's own minted token.
+    install_gate_extension(
+        project_structure_id,
+        {"internal_loopback": True},
+        core_role="project-structure",
+    )
     # Identity is token-derived: act as project-structure via ITS minted token.
-    ps_token = extension_token_registry.mint(extension_store.extension_id_for_role('project-structure'))
+    ps_token = extension_token_registry.mint(project_structure_id)
     original_enabled = main._builtin_extension_enabled
     original_runtime_ready = main._builtin_extension_runtime_ready
     try:
         main._builtin_extension_enabled = (
-            lambda extension_id: extension_id == extension_store.extension_id_for_role('project-structure')
+            lambda extension_id: extension_id == project_structure_id
         )
         main._builtin_extension_runtime_ready = lambda _extension_id: False
         response = client.post(
@@ -159,8 +186,9 @@ def test_disabled_ask_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
-    extension_store.set_enabled(extension_store.extension_id_for_role('team-orchestration'), False)
+    team_orchestration_id = _role_extension_id("team-orchestration")
+    install_gate_extension(team_orchestration_id, core_role="team-orchestration")
+    extension_store.set_enabled(team_orchestration_id, False)
     internal_token = getattr(main.coordinator, "internal_token", "")
 
     response = client.post(
@@ -227,8 +255,9 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_machine_nodes_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.extension_id_for_role('machine-nodes'))
-    extension_store.set_enabled(extension_store.extension_id_for_role('machine-nodes'), False)
+    machine_nodes_id = _role_extension_id("machine-nodes")
+    install_gate_extension(machine_nodes_id, core_role="machine-nodes")
+    extension_store.set_enabled(machine_nodes_id, False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/machine-nodes/list",
@@ -272,16 +301,21 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     )
     check(response.status_code == 404, "disabled coordination blocks lock_ops")
     checks = [
-        (extension_store.extension_id_for_role('credential-broker'), "post", "/api/internal/credential-ui/pending", {}),
-        (extension_store.extension_id_for_role('supervisor'), "post", "/api/internal/supervisor/default-prompt", {}),
+        (_role_extension_id('credential-broker'), 'credential-broker', "post", "/api/internal/credential-ui/pending", {}),
+        (_role_extension_id('supervisor'), 'supervisor', "post", "/api/internal/supervisor/default-prompt", {}),
         # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
         # the gate, a pure-public checkout (constant None) lets any core-token
         # holder through the `None != None` identity check.
-        (extension_store.extension_id_for_role('agent-board'), "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
+        (_role_extension_id('agent-board'), 'agent-board', "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
     ]
     import extension_token_registry
-    for extension_id, method, path, payload in checks:
-        install_gate_extension(extension_id)
+    for extension_id, core_role, method, path, payload in checks:
+        # internal_loopback lets the fixture's own minted token clear the
+        # internal-token auth middleware, so the request reaches the
+        # deeper disabled-extension gate this test is actually exercising.
+        install_gate_extension(
+            extension_id, {"internal_loopback": True}, core_role=core_role
+        )
         extension_store.set_enabled(extension_id, False)
         # Identity is token-derived: act as the gated builtin via ITS token so
         # we exercise the disabled-gate (404), not the wrong-identity gate (403).
