@@ -401,20 +401,24 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
         pass
 
     async def _go() -> dict:
-        return await tm._drive_cli_run(
-            prompt="reply to sender",
-            cwd="/tmp",
-            model="sonnet",
-            session_id=None,
-            ws_callback=_ws,
-            app_session_id=sid,
-            cancel_event=asyncio.Event(),
-            session_id_field="agent_session_id",
-            mode="native",
-            user_initiated=False,
-            turn_run_id="turn-loopback",
-            lifecycle_message_id="lifecycle-loopback",
-        )
+        await tm.lifecycle.bind()
+        try:
+            return await tm._drive_cli_run(
+                prompt="reply to sender",
+                cwd="/tmp",
+                model="sonnet",
+                session_id=None,
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                user_initiated=False,
+                turn_run_id="turn-loopback",
+                lifecycle_message_id="lifecycle-loopback",
+            )
+        finally:
+            await tm.lifecycle.close()
 
     result = asyncio.run(_go())
     check("result success", result.get("success") is True)
@@ -495,19 +499,26 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
     async def _ws(_e):
         pass
 
-    result = asyncio.run(tm._drive_cli_run(
-        prompt="p",
-        cwd="/tmp",
-        model="sonnet",
-        session_id=None,
-        ws_callback=_ws,
-        app_session_id=sid,
-        cancel_event=asyncio.Event(),
-        session_id_field="agent_session_id",
-        mode="native",
-        turn_run_id=turn_run_id,
-        lifecycle_message_id="lifecycle-flush-target",
-    ))
+    async def _go() -> dict:
+        await tm.lifecycle.bind()
+        try:
+            return await tm._drive_cli_run(
+                prompt="p",
+                cwd="/tmp",
+                model="sonnet",
+                session_id=None,
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id=turn_run_id,
+                lifecycle_message_id="lifecycle-flush-target",
+            )
+        finally:
+            await tm.lifecycle.close()
+
+    result = asyncio.run(_go())
     submitted_state = tm._run_state[sid][0]
     check("result success", result.get("success") is True)
     check("target assistant durable before start_run", durable_checks == [True])
