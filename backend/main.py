@@ -16656,6 +16656,8 @@ def _pool_worker_context_for_prompt(*, body: dict, bc_session_id: str, descripti
         "<messaging>",
         "Use mssg(target_session_id, message) to coordinate with pool peers that have a session_id.",
         IN_TURN_REPLY_INSTRUCTION,
+        "Use inbox(recipient_session_id, message) to return final results requested by async ask or delegate_task.",
+        "Call inbox() to read your own pending results.",
         "</messaging>",
         "</worker_pool>",
     ])
