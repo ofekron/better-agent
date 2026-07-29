@@ -17946,7 +17946,11 @@ def mount_frontend(target_app: FastAPI, *, dist_dir: Path | None = None) -> None
     async def _spa_fallback(request: _Request, _exc):
         p = request.url.path
         if p.startswith("/api/") or p.startswith("/ws/"):
-            return _JSONResponse({"detail": "Not Found"}, status_code=404)
+            # Preserve handler-raised diagnostics (e.g. internal-guard
+            # "X is not installed") instead of flattening every API 404
+            # to a generic body that hides the real refusal reason.
+            detail = getattr(_exc, "detail", None) or "Not Found"
+            return _JSONResponse({"detail": detail}, status_code=404)
         # Hashed bundles must 404 for real: serving index.html as a module
         # script makes the browser throw an opaque MIME error instead of a
         # clean missing-chunk failure.

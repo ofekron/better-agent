@@ -20,7 +20,7 @@ os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import main  # noqa: E402
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
@@ -32,6 +32,11 @@ def run() -> None:
         (dist_dir / "assets" / "real-abc123.js").write_text("export default 1;", encoding="utf-8")
 
         app = FastAPI()
+
+        @app.get("/api/guarded")
+        def _guarded():
+            raise HTTPException(status_code=404, detail="Machine nodes is not installed")
+
         main.mount_frontend(app, dist_dir=dist_dir)
         client = TestClient(app)
 
@@ -51,6 +56,13 @@ def run() -> None:
         r = client.get("/api/definitely-not-a-route-zzz")
         assert r.status_code == 404
         assert r.json() == {"detail": "Not Found"}
+
+        r = client.get("/api/guarded")
+        assert r.status_code == 404
+        assert r.json() == {"detail": "Machine nodes is not installed"}, (
+            "API 404 handler must preserve HTTPException detail, "
+            f"got {r.json()}"
+        )
 
         r = client.get("/")
         assert r.status_code == 200 and "shell" in r.text
