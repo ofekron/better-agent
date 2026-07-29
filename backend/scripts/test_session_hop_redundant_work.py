@@ -44,7 +44,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import _test_home
+import _test_installation
+
 _TMP_HOME = _test_home.isolate("bc-test-hop-perf-")
+_test_installation.activate(Path(_TMP_HOME), provider="claude")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -53,6 +56,12 @@ if _BACKEND not in sys.path:
 
 from session_manager import manager as session_manager  # noqa: E402
 import event_ingester as ei_mod  # noqa: E402
+from event_bus import BusEvent, bus  # noqa: E402
+from event_bus_subscribers import (  # noqa: E402
+    await_session_content_projection,
+    register_default_subscribers,
+    shutdown_session_content_projection,
+)
 
 event_ingester = ei_mod.event_ingester
 
@@ -739,7 +748,8 @@ def test_ws_replay_stale_debug_is_debug_gated() -> bool:
     return True
 
 
-def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
+async def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
+    register_default_subscribers()
     sess = session_manager.create(
         name="team-stub", model="glm-5.1", cwd="/tmp",
         orchestration_mode="team",
@@ -758,12 +768,12 @@ def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
     })
     session_manager.append_assistant_msg(sid, {
         "id": latest_id, "role": "assistant", "content": "",
-        "events": [], "isStreaming": False,
+        "events": [], "isStreaming": True,
     })
     for i in range(5):
-        event_ingester.ingest(
-            sid, sid=sid, event_type="manager_event",
-            data={
+        await bus.publish(BusEvent(
+            type="manager_event", root_id=sid, sid=sid, msg_id=old_id,
+            payload={
                 "event": {
                     "type": "agent_message",
                     "data": {
@@ -773,12 +783,11 @@ def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
                     },
                 },
             },
-            source="test", msg_id=old_id,
-        )
+        ))
     for i in range(3):
-        event_ingester.ingest(
-            sid, sid=sid, event_type="manager_event",
-            data={
+        await bus.publish(BusEvent(
+            type="manager_event", root_id=sid, sid=sid, msg_id=latest_id,
+            payload={
                 "event": {
                     "type": "agent_message",
                     "data": {
@@ -788,8 +797,24 @@ def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
                     },
                 },
             },
-            source="test", msg_id=latest_id,
-        )
+        ))
+
+    await await_session_content_projection(sid)
+    projected = session_manager.get_ref(sid) or {}
+    projected_messages = projected.get("messages") or []
+    projected_old = next(
+        (m for m in projected_messages if m.get("id") == old_id), {},
+    )
+    projected_latest = next(
+        (m for m in projected_messages if m.get("id") == latest_id), {},
+    )
+    projected_counts = (
+        len(projected_old.get("events") or []),
+        len(projected_latest.get("events") or []),
+    )
+    if projected_counts != (5, 3):
+        print(f"  projected event counts={projected_counts}")
+        return False
 
     calls = 0
     original = session_manager._hydrate_cached_root_events
@@ -840,9 +865,10 @@ async def _amain() -> int:
         ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
         ("ws event cursor uses server floor", test_ws_event_cursor_uses_server_floor),
         ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),
+    ]
+    async_tests: list[tuple[str, object]] = [
         ("stubbed team tree skips full event hydration", test_stubbed_team_tree_skips_full_event_hydration),
     ]
-    async_tests: list[tuple[str, object]] = []
 
     fails = 0
     for name, fn in sync_tests:
@@ -873,6 +899,7 @@ def main() -> int:
     try:
         fails = asyncio.run(_amain())
     finally:
+        shutdown_session_content_projection()
         try:
             shutil.rmtree(_TMP_HOME, ignore_errors=True)
         except Exception:
