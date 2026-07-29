@@ -469,30 +469,6 @@ def _validate_bundle(bundle: FrozenBundleIdentity) -> None:
             )
 
 
-def _expected_content(
-    bundle: FrozenBundleIdentity,
-) -> tuple[tuple[Any, ...], ...]:
-    values: list[tuple[Any, ...]] = []
-    for entry in bundle.entries:
-        if entry.kind == "file":
-            assert entry.file is not None
-            values.append((
-                entry.relative_path,
-                entry.kind,
-                entry.mode,
-                entry.file.size,
-                entry.file.sha256,
-            ))
-        else:
-            values.append((
-                entry.relative_path,
-                entry.kind,
-                entry.mode,
-                entry.target,
-            ))
-    return tuple(values)
-
-
 def _expected_layout(
     bundle: FrozenBundleIdentity,
 ) -> tuple[tuple[str, str, int, str | None], ...]:
@@ -521,31 +497,6 @@ def _capture_layout(
     )
 
 
-def _capture_materialized_content(
-    root: Path,
-) -> tuple[tuple[Any, ...], ...]:
-    entries = _scan_entries(root)
-    values: list[tuple[Any, ...]] = []
-    for entry in entries:
-        if entry.kind == "file":
-            assert entry.file is not None
-            values.append((
-                entry.relative_path,
-                entry.kind,
-                entry.mode,
-                entry.file.size,
-                entry.file.sha256,
-            ))
-        else:
-            values.append((
-                entry.relative_path,
-                entry.kind,
-                entry.mode,
-                entry.target,
-            ))
-    return tuple(values)
-
-
 def attest_materialized_frozen_bundle(
     bundle: FrozenBundleIdentity,
     destination: str | Path,
@@ -557,9 +508,20 @@ def attest_materialized_frozen_bundle(
         resolved = target.resolve(strict=True)
         if not resolved.is_dir():
             return False
-        return _capture_materialized_content(resolved) == _expected_content(
-            bundle,
-        )
+        if _capture_layout(resolved) != _expected_layout(bundle):
+            return False
+        for entry in bundle.entries:
+            if entry.file is None:
+                continue
+            observed = FileIdentity.capture(
+                resolved / entry.relative_path,
+            )
+            if (
+                observed.size != entry.file.size
+                or observed.sha256 != entry.file.sha256
+            ):
+                return False
+        return True
     except (ExecutionContractError, OSError):
         return False
 
