@@ -17,6 +17,8 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME), provider="codex")
 from fastapi import FastAPI  # noqa: E402
 from starlette.routing import Route, WebSocketRoute  # noqa: E402
 from starlette.testclient import TestClient, WebSocketDisconnect  # noqa: E402
