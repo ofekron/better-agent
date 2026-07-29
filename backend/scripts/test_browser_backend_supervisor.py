@@ -47,7 +47,13 @@ def _port_accepts(port: int) -> bool:
         return False
 
 
-def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
+def _fake_checkout(
+    root: Path,
+    probe_path: Path,
+    *,
+    read: bool,
+    descendant_pid_path: Path | None = None,
+) -> Path:
     backend = root / "backend"
     python_path = backend / ".venvs" / "test" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
@@ -66,9 +72,18 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
         encoding="utf-8",
     )
     operation = "read" if read else "status"
+    descendant_setup = ""
+    if descendant_pid_path is not None:
+        descendant_setup = (
+            "descendant = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)'])\n"
+            f"open({str(descendant_pid_path)!r}, 'w', encoding='utf-8').write("
+            "str(descendant.pid))\n"
+        )
     (backend / "main.py").write_text(
         "import json, os, subprocess, sys\n"
-        "fd_before = os.environ.get('BETTER_AGENT_CREDENTIAL_SESSION_FD')\n"
+        + descendant_setup
+        + "fd_before = os.environ.get('BETTER_AGENT_CREDENTIAL_SESSION_FD')\n"
         "import credential_session_client as client\n"
         f"response = client.request({operation!r}, 'provider-browser-test')\n"
         "child = subprocess.run([sys.executable, '-c', "
@@ -79,20 +94,39 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
         "'fd_after': 'BETTER_AGENT_CREDENTIAL_SESSION_FD' in os.environ, "
         "'child_available': child.stdout.strip(), 'response': response}) + '\\n')\n"
         "import asyncio\n"
-        "from fastapi import FastAPI\n"
-        "from starlette.responses import StreamingResponse\n"
-        "app = FastAPI()\n"
-        "@app.get('/healthz')\n"
-        "def healthz(): return {'ok': True}\n"
-        "@app.get('/held')\n"
-        "async def held():\n"
-        " async def stream():\n"
-        "  yield b'open\\n'\n"
+        "async def app(scope, receive, send):\n"
+        " if scope['type'] == 'lifespan':\n"
+        "  while True:\n"
+        "   message = await receive()\n"
+        "   if message['type'] == 'lifespan.startup':\n"
+        "    await send({'type': 'lifespan.startup.complete'})\n"
+        "   elif message['type'] == 'lifespan.shutdown':\n"
+        "    await send({'type': 'lifespan.shutdown.complete'})\n"
+        "    return\n"
+        " if scope['path'] == '/held':\n"
+        "  await send({'type': 'http.response.start', 'status': 200, 'headers': []})\n"
+        "  await send({'type': 'http.response.body', 'body': b'open\\n', 'more_body': True})\n"
         "  await asyncio.Event().wait()\n"
-        " return StreamingResponse(stream())\n",
+        " await send({'type': 'http.response.start', 'status': 200, 'headers': []})\n"
+        " await send({'type': 'http.response.body', 'body': b'{\"ok\":true}'})\n",
         encoding="utf-8",
     )
     return root
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    status = result.stdout.strip()
+    return result.returncode == 0 and bool(status) and not status.startswith("Z")
 
 
 def _stop_generation(supervisor: BrowserBackendSupervisor) -> None:
@@ -413,6 +447,56 @@ def test_graceful_drain_timeout_allows_next_generation(temp_root: Path) -> None:
         supervisor.shutdown()
 
 
+def test_forced_backend_death_reaps_generation_descendants(temp_root: Path) -> None:
+    if os.name == "nt":
+        return
+    descendant_pid_path = temp_root / "descendant.pid"
+    checkout = _fake_checkout(
+        temp_root / "descendant-checkout",
+        temp_root / "descendant-probe.jsonl",
+        read=False,
+        descendant_pid_path=descendant_pid_path,
+    )
+    supervisor = BrowserBackendSupervisor(
+        checkout,
+        {
+            **os.environ,
+            "BETTER_AGENT_HOME": str(temp_root / "descendant-state"),
+            "BETTER_CLAUDE_HOME": str(temp_root / "descendant-state"),
+            "PYTHONPATH": f"{ROOT}:{ROOT / 'backend'}:{ROOT / 'desktop'}",
+        },
+    )
+    port = _free_port()
+    try:
+        generation = supervisor.handle({
+            "op": "start",
+            "checkout": str(checkout),
+            "host": "127.0.0.1",
+            "port": port,
+        })
+        _wait_until(descendant_pid_path.exists)
+        descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+        assert _pid_running(descendant_pid)
+
+        os.kill(generation["pid"], signal.SIGKILL)
+        _wait_until(
+            lambda: supervisor.handle({"op": "status"}).get("terminal") is True
+        )
+        _wait_until(lambda: not _pid_running(descendant_pid))
+    finally:
+        supervisor.shutdown()
+
+
+def test_windows_generation_uses_kill_on_close_job() -> None:
+    source = (ROOT / "desktop" / "backend_process_owner.py").read_text(
+        encoding="utf-8"
+    )
+    assert "CREATE_NEW_PROCESS_GROUP" in source
+    assert "AssignProcessToJobObject" in source
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in source
+    assert "TerminateJobObject" in source
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-browser-supervisor-") as raw_temp_root:
         temp_root = Path(raw_temp_root)
@@ -426,6 +510,8 @@ def main() -> None:
             test_control_server_rejects_unrelated_callers(temp_root)
             test_controller_crash_stops_supervisor_and_backend(temp_root)
             test_graceful_drain_timeout_allows_next_generation(temp_root)
+            test_forced_backend_death_reaps_generation_descendants(temp_root)
+            test_windows_generation_uses_kill_on_close_job()
         finally:
             if previous_home is None:
                 os.environ.pop("BETTER_AGENT_HOME", None)

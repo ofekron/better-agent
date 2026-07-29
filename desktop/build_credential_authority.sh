@@ -20,6 +20,7 @@ SOURCES=(
   "$DIR/CredentialAuthority.spec"
   "$DIR/credential_supervisor_main.py"
   "$DIR/browser_backend_supervisor.py"
+  "$DIR/backend_process_owner.py"
   "$DIR/credential_session.py"
   "$REPO/backend/headless_keyring.py"
   "$REPO/backend/provider_credentials.py"

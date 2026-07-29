@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from backend_process_owner import BackendProcessOwner
 from credential_session import ProviderCredentialBroker, ProviderCredentialSession
 
 _MAX_CONTROL_BYTES = 32 * 1024
@@ -129,6 +130,7 @@ class BrowserBackendSupervisor:
         self._broker = ProviderCredentialBroker()
         self._session: ProviderCredentialSession | None = None
         self._proc: subprocess.Popen[str] | None = None
+        self._owner: BackendProcessOwner | None = None
         self._last_exit_code: int | None = None
         self._generation_id = ""
         self._generation_started_at: float | None = None
@@ -201,6 +203,7 @@ class BrowserBackendSupervisor:
                 "--ws-per-message-deflate",
                 "false",
             ]
+            proc: subprocess.Popen[str] | None = None
             try:
                 proc = subprocess.Popen(
                     command,
@@ -210,14 +213,32 @@ class BrowserBackendSupervisor:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    **BackendProcessOwner.spawn_kwargs(),
                     **session.backend_popen_kwargs(),
                 )
+                owner = BackendProcessOwner(proc)
             except Exception:
+                if proc is not None and proc.poll() is None:
+                    try:
+                        if os.name == "nt":
+                            subprocess.run(
+                                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=10,
+                                check=False,
+                            )
+                        else:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                    except (OSError, subprocess.SubprocessError):
+                        proc.kill()
+                    proc.wait(timeout=10)
                 session.stop()
                 raise
             session.revoke_backend_inheritance()
             self._session = session
             self._proc = proc
+            self._owner = owner
             self._last_exit_code = None
             self._generation_id = uuid.uuid4().hex
             self._generation_started_at = time.time()
@@ -230,7 +251,7 @@ class BrowserBackendSupervisor:
             ).start()
             threading.Thread(
                 target=self._watch_generation,
-                args=(proc, session, generation_id),
+                args=(proc, owner, session, generation_id),
                 name="browser-backend-watch",
                 daemon=True,
             ).start()
@@ -257,10 +278,12 @@ class BrowserBackendSupervisor:
     def _watch_generation(
         self,
         proc: subprocess.Popen[str],
+        owner: BackendProcessOwner,
         session: ProviderCredentialSession,
         generation_id: str,
     ) -> None:
         returncode = proc.wait()
+        owner.close()
         with self._lock:
             session.stop()
             if self._proc is proc:
@@ -268,6 +291,7 @@ class BrowserBackendSupervisor:
                 self._last_generation_id = generation_id
                 self._generation_id = ""
                 self._proc = None
+                self._owner = None
                 self._session = None
 
     def _status(self) -> dict[str, Any]:
@@ -293,33 +317,41 @@ class BrowserBackendSupervisor:
             }
 
     def _signal_backend(self, requested_signal: object) -> None:
-        signals = {"INT": signal.SIGINT, "TERM": signal.SIGTERM, "KILL": signal.SIGKILL}
+        signals = {"INT": signal.SIGINT, "TERM": signal.SIGTERM, "KILL": None}
         if requested_signal not in signals:
             raise ValueError("invalid signal")
         with self._lock:
             proc = self._proc
-            if proc is not None and proc.poll() is None:
-                proc.send_signal(signals[requested_signal])
+            owner = self._owner
+            if proc is not None and owner is not None and proc.poll() is None:
+                owner.signal(signals[requested_signal])
 
     def _retire_generation_locked(self) -> None:
         session = self._session
+        owner = self._owner
         self._session = None
+        self._owner = None
         self._proc = None
         self._generation_id = ""
         self._generation_started_at = None
         if session is not None:
             session.stop()
+        if owner is not None:
+            owner.close()
 
     def shutdown(self) -> None:
         self._stopping.set()
         with self._lock:
             proc = self._proc
+            owner = self._owner
         if proc is not None and proc.poll() is None:
-            proc.terminate()
+            if owner is not None:
+                owner.signal(signal.SIGTERM)
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                if owner is not None:
+                    owner.signal(None)
                 proc.wait()
         with self._lock:
             self._retire_generation_locked()
