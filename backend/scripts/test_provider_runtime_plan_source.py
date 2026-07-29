@@ -237,6 +237,18 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             inputs["provider_run_config"]["mcp_servers"]["explicit"]["env"].pop(
                 "API_TOKEN",
             )
+            inputs["resolved_harness_run_config"]["authorization"] = (
+                "never-persist"
+            )
+            try:
+                structural_provider_runtime_plan(inputs, "claude")
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError(
+                    "unauthorized harness secret reached the runtime plan",
+                )
+            inputs["resolved_harness_run_config"].pop("authorization")
             state["profile"]["generation"] = "mutated"
             state["store"] = (99, 99)
             state["settings_fp"] = (98, 98)
