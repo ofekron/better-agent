@@ -35,6 +35,7 @@ datas = [
     (os.path.join(_REPO, "frontend", "dist"), "frontend_dist"),
     (os.path.join(_BACKEND, "prompts"), "prompts"),
     (os.path.join(_BACKEND, "provisioning", "prompts"), os.path.join("prompts", "provisioning")),
+    (os.path.join(_SDK, "runtime-requirements.txt"), "sdk"),
 ]
 datas.extend(
     (os.path.join(_REPO, relative_path), relative_path)
@@ -75,7 +76,7 @@ def _without_python_sources(_datas):
 
 
 for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "watchfiles", "fastapi",
-             "starlette", "webview", "tufup"):
+             "starlette", "webview", "tufup", "mcp"):
     _d, _b, _h = collect_all(_pkg)
     datas += _without_python_sources(_d)
     binaries += _b
