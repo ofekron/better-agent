@@ -16,7 +16,7 @@ def _load_module():
     sys.path.insert(0, str(public_root / "sdk"))
     sys.path.insert(0, str(public_root / "backend"))
     path = Path(__file__).resolve().parents[1] / "mcp" / "server.py"
-    spec = importlib.util.spec_from_file_location("postiz_extension_mcp", path)
+    spec = importlib.util.spec_from_file_location("gtm_extension_mcp", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -34,10 +34,26 @@ def test_manifest_and_local_server() -> None:
     import extension_store
 
     validated = extension_store.validate_manifest(manifest)
-    assert manifest["surfaces"] == ["runtime_mcp"]
+    assert manifest["id"] == "ofek-dev.gtm"
+    assert manifest["surfaces"] == ["skills", "runtime_mcp"]
     assert manifest["permissions"] == {"internal_loopback": True}
     assert manifest["entrypoints"]["mcp"][0]["requires_backend_auth"] is True
     assert validated["entrypoints"]["settings"][1]["type"] == "secret"
+    assert [skill["name"] for skill in validated["entrypoints"]["skills"]] == [
+        "gtm-scout",
+        "gtm-writer",
+        "gtm-rep",
+        "gtm-closer",
+        "gtm-mission-control",
+    ]
+    for skill in validated["entrypoints"]["skills"]:
+        assert (root / skill["path"] / "SKILL.md").is_file()
+    required = manifest["protocol"]["smoke_test"]["required_paths"]
+    assert "mcp/server.py" in required
+    for skill in validated["entrypoints"]["skills"]:
+        assert f"{skill['path']}/SKILL.md" in required
+    for relative in required:
+        assert (root / relative).exists()
     tool = module.build_server()._tool_manager.get_tool("posts_create")
     block_schema = tool.parameters["$defs"]["PostBlock"]
     assert block_schema["required"] == ["content"]

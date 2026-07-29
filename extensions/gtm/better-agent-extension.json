@@ -1,11 +1,12 @@
 {
   "kind": "better-agent-extension",
-  "id": "ofek-dev.gtm-skills-ba-extension",
-  "name": "GTM Skills",
-  "version": "0.1.0",
-  "description": "Go-to-market agent fleet — research, copy, outreach, and closing skills adapted from the open-source GTM Skills library (gtm-skills/gtm, MIT).",
+  "id": "ofek-dev.gtm",
+  "name": "Go To Market",
+  "version": "0.2.0",
+  "description": "Go-to-market fleet — prospect research, copy, outreach, and closing skills, plus multi-channel publishing through the Postiz agents CLI.",
   "surfaces": [
-    "skills"
+    "skills",
+    "runtime_mcp"
   ],
   "entrypoints": {
     "skills": [
@@ -34,26 +35,64 @@
         "path": "skills/gtm-mission-control",
         "description": "Spawn and coordinate a multi-agent GTM team (scout/writer/rep/closer) on one objective."
       }
+    ],
+    "mcp": [
+      {
+        "name": "postiz",
+        "python": "mcp/server.py",
+        "args": [],
+        "env": {},
+        "user_facing": true,
+        "bare_allowed": false,
+        "requires_backend_auth": true
+      }
+    ],
+    "settings": [
+      {
+        "key": "auth_mode",
+        "label": "Authentication mode",
+        "type": "string",
+        "default": "oauth",
+        "enum": [
+          "oauth",
+          "api_key"
+        ],
+        "help": "Use OAuth credentials created by postiz auth:login, or a Postiz API key."
+      },
+      {
+        "key": "api_key",
+        "label": "API key",
+        "type": "secret",
+        "help": "Used only when authentication mode is api_key."
+      },
+      {
+        "key": "api_url",
+        "label": "API URL",
+        "type": "string",
+        "default": "https://api.postiz.com",
+        "help": "HTTPS Postiz endpoint, or HTTP on a literal loopback host for local self-hosting."
+      }
     ]
   },
-  "permissions": {},
-  "marketplace": {
-    "product_id": "",
-    "subscription_required": false,
-    "entitlement_url": ""
+  "permissions": {
+    "internal_loopback": true
   },
+  "marketplace": {},
   "protocol": {
     "version": 1,
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",
+        "mcp/server.py",
         "skills/gtm-scout/SKILL.md",
         "skills/gtm-writer/SKILL.md",
         "skills/gtm-rep/SKILL.md",
         "skills/gtm-closer/SKILL.md",
         "skills/gtm-mission-control/SKILL.md"
       ],
-      "python_modules": []
+      "python_modules": [
+        "mcp.server"
+      ]
     }
   },
   "attribution": {
