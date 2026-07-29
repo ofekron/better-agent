@@ -144,6 +144,8 @@ from orchestration_tool_schemas import (
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
     harness_profile_wire_fields as _harness_profile_wire_fields,
+    normalize_runtime_profile_runner as _normalize_runtime_profile_runner,
+    runtime_profile_runner_input_property as _runtime_profile_runner_input_property,
 )
 from provider_catalog_mcp import available_provider_models_response
 from user_interaction_tool_contracts import (
@@ -877,10 +879,10 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the new session. Defaults to the creating session's effort.",
         },
-        "runner": {
-            "type": ["string", "null"],
-            "description": "OPTIONAL — runner for the new session. Defaults to the creating session's runner.",
-        },
+        "runner": _runtime_profile_runner_input_property(
+            nullable=True,
+            description="OPTIONAL — runner for the new session. Defaults to the creating session's runner.",
+        ),
         "cwd": {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
@@ -2031,6 +2033,13 @@ def _build_create_session_tool(
                 "content": [{"type": "text", "text": "name is required"}],
                 "is_error": True,
             }
+        try:
+            selected_runner = _normalize_runtime_profile_runner(args.get("runner"))
+        except ValueError as exc:
+            return {
+                "content": [{"type": "text", "text": str(exc)}],
+                "is_error": True,
+            }
         node_id = args.get("node_id")
         if node_id in ("", "null"):
             node_id = None
@@ -2041,7 +2050,7 @@ def _build_create_session_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
-            "runner": str(args.get("runner") or "").strip() or None,
+            "runner": selected_runner,
             "orchestration_mode": args.get("orchestration_mode") or "native",
             "node_id": node_id,
             "folder_id": args.get("folder_id"),

@@ -69,6 +69,8 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
     harness_profile_wire_fields as _harness_profile_wire_fields,
+    normalize_runtime_profile_runner as _normalize_runtime_profile_runner,
+    runtime_profile_runner_input_property as _runtime_profile_runner_input_property,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
 from user_interaction_tool_contracts import (
@@ -978,7 +980,9 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
         "reasoning_effort": {"type": "string"},
-        "runner": {"type": "string"},
+        "runner": _runtime_profile_runner_input_property(
+            description="OPTIONAL — runner for the new session. Defaults to the creating session's runner.",
+        ),
         "mcp_servers": {
             "type": "array",
             "items": {"type": "string"},
@@ -1997,6 +2001,10 @@ def _build_loopback_tool_handlers(
         name = str(args.get("name") or "").strip()
         if not name:
             return _dynamic_tool_text_result("name is required", success=False)
+        try:
+            selected_runner = _normalize_runtime_profile_runner(args.get("runner"))
+        except ValueError as exc:
+            return _dynamic_tool_text_result(str(exc), success=False)
         node_id = args.get("node_id")
         if node_id in ("", "null"):
             node_id = None
@@ -2010,7 +2018,7 @@ def _build_loopback_tool_handlers(
                     "provider_id": str(args.get("provider_id") or "").strip() or None,
                     "model": str(args.get("model") or "").strip(),
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
-                    "runner": str(args.get("runner") or "").strip() or None,
+                    "runner": selected_runner,
                     "orchestration_mode": args.get("orchestration_mode") or "native",
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
