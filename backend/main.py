@@ -13124,8 +13124,7 @@ async def _recover_in_flight_task() -> None:
             name="startup-pre-provider-orphan-candidates",
         )
         recovery_task = asyncio.create_task(
-            _to_thread_join_on_cancel(
-                recover_all_in_flight,
+            _scan_recovered_runs(
                 loop,
                 candidate_targets=None,
                 live_only=True,
@@ -13206,8 +13205,7 @@ async def _recover_in_flight_task() -> None:
         if recovered:
             if cold:
                 _enqueue_recovered_cold_runs(cold)
-        background_recovered = await _to_thread_join_on_cancel(
-            recover_all_in_flight,
+        background_recovered = await _scan_recovered_runs(
             loop,
             candidate_targets=None,
             exclude_live=True,
@@ -13429,6 +13427,34 @@ async def _promote_recovered_session(app_session_id: str) -> None:
     finally:
         async with _RECOVERED_COLD_LOCK:
             _RECOVERED_COLD_ACTIVE.discard(app_session_id)
+
+
+async def _scan_recovered_runs(loop, **kwargs) -> list[dict]:
+    """Run the provider scan/classify phase on the recovery thread.
+
+    The scan is pure file IO, pid checks and JSON parsing: every
+    provider's `recover_in_flight` ignores the loop it is handed, and
+    nothing in the phase touches the coordinator. That makes it the one
+    part of recovery that can leave the main loop wholesale, which
+    matters because it is also the long pole at startup.
+
+    Only the SCAN moves. Integration stays on the main loop — it reaches
+    loop-bound state (the per-session prompt queue, `turn_manager`'s
+    cancel events, the reattach queue handed to the runner) that cannot
+    be awaited from another loop.
+
+    `loop` is still the MAIN loop and is passed through unchanged, so a
+    provider that starts using it gets the loop the rest of the backend
+    lives on rather than recovery's private one.
+    """
+    import recovery_manager
+
+    def factory():
+        return _to_thread_join_on_cancel(
+            recover_all_in_flight, loop, **kwargs,
+        )
+
+    return await recovery_manager.manager.run(factory)
 
 
 async def _to_thread_join_on_cancel(fn, *args, **kwargs):
@@ -14200,6 +14226,25 @@ async def on_startup():
         await coordinator.turn_manager.lifecycle.bind()
     except Exception:
         logger.exception("event_bus subscriber registration failed")
+    await coordinator.lifecycle_commands.bind()
+
+    # Pin every subscriber registered so far to this loop. Subscribers
+    # register at import time, where there is no loop to capture; until
+    # they are pinned, a publish from another thread would run them on
+    # the publisher's loop. Anything registered after this point stays
+    # unpinned and keeps the old inline behavior, which is correct for
+    # loop-agnostic handlers.
+    try:
+        pinned = event_bus.bind_unpinned_to_current_loop()
+        logger.info("event_bus: pinned %d subscriber(s) to the main loop", pinned)
+    except Exception:
+        logger.exception("event_bus subscriber pinning failed")
+
+    # Recovery gets its own thread, loop, and executor so a long
+    # run-directory scan or replay does not compete with request
+    # handlers. Started before the recovery startup task is dispatched.
+    import recovery_manager
+    recovery_manager.manager.start()
 
     # Bind + reset the startup-task registry. `reset()` broadcasts a
     # `{cleared: true}` ping so any tab connected through a uvicorn
@@ -14614,6 +14659,13 @@ async def on_shutdown():
     except Exception:
         logger.exception("provider task shutdown failed")
     await asyncio.to_thread(shutdown_recovery_lease_executor)
+    try:
+        import recovery_manager
+        # Off the main loop: stop() joins the recovery thread, and
+        # joining from the loop we are shutting down would stall it.
+        await asyncio.to_thread(recovery_manager.manager.stop)
+    except Exception:
+        logger.exception("recovery manager shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -14650,6 +14702,10 @@ async def on_shutdown():
         event_ingester.close_all()
     except Exception:
         logger.exception("EventIngester close_all failed")
+    try:
+        await coordinator.lifecycle_commands.close()
+    except Exception:
+        logger.exception("lifecycle command authority shutdown failed")
     release_backend_instance_lock()
     # Multi-machine: cancel the offset coalescer + final-flush every
     # dirty node. Without this, intentional-shutdown races could leave
