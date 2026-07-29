@@ -919,6 +919,9 @@ def test_openai_runner_lists_real_profile_selected_session_control_tools():
                     extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID: [
                         "better-agent-session-control",
                     ],
+                    extension_store.BUILTIN_COORDINATION_EXTENSION_ID: [
+                        "ofek-dev-coordination",
+                    ],
                 },
             },
         },
@@ -940,6 +943,7 @@ def test_openai_runner_lists_real_profile_selected_session_control_tools():
     }
     assert "mcp__better-agent-session-control__switch_model" in tool_names
     assert "mcp__better-agent-session-control__continue_in_fresh_context" in tool_names
+    assert "mcp__better-agent-coordination__lock_ops" in tool_names
     assert handlers["mcp__better-agent-session-control__switch_model"][
         "server_name"
     ] == "better-agent-session-control"

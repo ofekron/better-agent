@@ -6543,6 +6543,7 @@ def _runtime_mcp_server_config_for_item(
         "args": [
             "-m",
             "better_agent_sdk.script_entrypoint",
+            str(install_root),
             str(script),
             *list(item.get("args") or []),
         ],
