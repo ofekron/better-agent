@@ -73,11 +73,16 @@ class AdmissionLifecycleMachine:
         if self.execution is None:
             self.state = "cancelled"
             return
+        # Record the cancel on the single authoritative signal in every
+        # branch. A cancel that races with admission resolution on another
+        # thread must still leave the Event set so the provider's pre-spawn
+        # gates (and the post-spawn teardown safety net) honour it instead
+        # of spawning an untracked runner.
+        self.execution._request_cancel_after_admission()
         if self.execution.admission_pending:
             self.execution._mark_cancelled()
             self.state = "cancelled"
             return
-        self.execution._request_cancel_after_admission()
         self.state = "cancellation_requested"
 
 

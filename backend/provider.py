@@ -790,6 +790,8 @@ class Provider(ABC):
                 self._admit_execution(execution)
                 if not execution._try_commit_spawn():
                     return False
+                if execution.cancel_after_admission_requested:
+                    return False
                 self._persist_and_start_execution(
                     execution,
                     arguments=arguments,

@@ -529,6 +529,9 @@ class PreparedExecution:
         return self._admission.done() and self._admission.exception() is None and not self._admission.result()
 
     def _try_commit_spawn(self) -> bool:
+        if self._cancel_after_admission.is_set():
+            self._resolve_admission(result=False)
+            return False
         self._resolve_admission(result=True)
         return self._admission.exception() is None and self._admission.result()
 
