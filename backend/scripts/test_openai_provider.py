@@ -12,10 +12,13 @@ Two layers:
 Uses a temp BETTER_AGENT_HOME so no real session state is touched.
 """
 
+import atexit
 import asyncio
+import inspect
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -28,6 +31,7 @@ from live_llm_test_guard import require_live_llm_tests
 
 # Set BETTER_AGENT_HOME BEFORE importing backend modules.
 _TMP_HOME = tempfile.mkdtemp(prefix="openai_test_home_")
+atexit.register(shutil.rmtree, _TMP_HOME, ignore_errors=True)
 os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
 os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 
@@ -1268,6 +1272,45 @@ def test_read_allows_declared_runtime_skill_files_only():
             runtime_skills._discover_skills = original_discover
 
 
+def _standalone_tests():
+    tests = [
+        (name, fn)
+        for name, fn in sorted(globals().items())
+        if name.startswith("test_") and callable(fn)
+    ]
+    incompatible = [
+        name
+        for name, fn in tests
+        if inspect.signature(fn).parameters
+    ]
+    if incompatible:
+        raise RuntimeError(
+            "standalone OpenAI tests cannot require pytest fixtures: "
+            + ", ".join(incompatible)
+        )
+    return tests
+
+
+def test_openai_standalone_dispatch_accepts_every_test():
+    names = {name for name, _fn in _standalone_tests()}
+    assert "test_openai_loopback_retries_disk_token_after_forbidden" in names
+
+
+def test_openai_standalone_dispatch_rejects_pytest_fixtures():
+    def fixture_dependent(monkeypatch):
+        return monkeypatch
+
+    globals()["test_fixture_dependent_probe"] = fixture_dependent
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="test_fixture_dependent_probe",
+        ):
+            _standalone_tests()
+    finally:
+        globals().pop("test_fixture_dependent_probe", None)
+
+
 @pytest.mark.live_llm
 def test_live_turn_against_endpoint():
     if not require_live_llm_tests("live OpenAI-compatible provider test"):
@@ -1309,15 +1352,14 @@ def test_live_turn_against_endpoint():
 
 if __name__ == "__main__":
     failed = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"PASS {name}")
-            except Exception as e:
-                failed += 1
-                import traceback
-                traceback.print_exc()
-                print(f"FAIL {name}: {e}")
+    for name, fn in _standalone_tests():
+        try:
+            fn()
+            print(f"PASS {name}")
+        except Exception as e:
+            failed += 1
+            import traceback
+            traceback.print_exc()
+            print(f"FAIL {name}: {e}")
     print(f"\n{'ALL PASS' if not failed else f'{failed} FAILED'}")
     sys.exit(1 if failed else 0)
