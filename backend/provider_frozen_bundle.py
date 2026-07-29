@@ -16,7 +16,6 @@ from codex_execution_common import (
     canonical_json,
     required_integer,
     required_string,
-    sha256_fd,
 )
 from codex_execution_identity import (
     FileIdentity,
@@ -137,8 +136,19 @@ def _validate_entry(entry: FrozenBundleEntry) -> None:
         _safe_symlink_target(relative, entry.target or "")
 
 
-def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
-    entries: list[FrozenBundleEntry] = []
+@dataclass(frozen=True)
+class _ObservedBundleEntry:
+    path: Path
+    relative_path: str
+    kind: str
+    mode: int
+    target: str | None = None
+
+
+def _scan_observed_entries(
+    root: Path,
+) -> tuple[_ObservedBundleEntry, ...]:
+    entries: list[_ObservedBundleEntry] = []
 
     def scan(directory: Path) -> None:
         try:
@@ -170,7 +180,8 @@ def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
                         "frozen bundle symlink escapes bundle",
                     )
                 entries.append(
-                    FrozenBundleEntry(
+                    _ObservedBundleEntry(
+                        path=path,
                         relative_path=relative_path,
                         kind="symlink",
                         mode=mode,
@@ -180,7 +191,8 @@ def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
                 continue
             if stat.S_ISDIR(observed.st_mode):
                 entries.append(
-                    FrozenBundleEntry(
+                    _ObservedBundleEntry(
+                        path=path,
                         relative_path=relative_path,
                         kind="directory",
                         mode=mode,
@@ -192,17 +204,12 @@ def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
                 raise ExecutionContractError(
                     "frozen bundle contains unsupported file type",
                 )
-            identity = FileIdentity.capture(path)
-            if Path(identity.resolved_path) != path.resolve(strict=True):
-                raise ExecutionContractError(
-                    "frozen bundle file escapes bundle",
-                )
             entries.append(
-                FrozenBundleEntry(
+                _ObservedBundleEntry(
+                    path=path,
                     relative_path=relative_path,
                     kind="file",
                     mode=mode,
-                    file=identity,
                 ),
             )
 
@@ -212,6 +219,30 @@ def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
     )
 
 
+def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
+    entries: list[FrozenBundleEntry] = []
+    for observed in _scan_observed_entries(root):
+        identity = None
+        if observed.kind == "file":
+            identity = FileIdentity.capture(observed.path)
+            if Path(identity.resolved_path) != observed.path.resolve(
+                strict=True,
+            ):
+                raise ExecutionContractError(
+                    "frozen bundle file escapes bundle",
+                )
+        entries.append(
+            FrozenBundleEntry(
+                relative_path=observed.relative_path,
+                kind=observed.kind,
+                mode=observed.mode,
+                file=identity,
+                target=observed.target,
+            ),
+        )
+    return tuple(entries)
+
+
 @dataclass(frozen=True)
 class FrozenBundleIdentity:
     root: DirectoryIdentity
@@ -219,6 +250,9 @@ class FrozenBundleIdentity:
     sidecar_relative: str
     entries: tuple[FrozenBundleEntry, ...]
     fingerprint: str
+
+    def validate(self) -> None:
+        _validate_bundle(self)
 
     @classmethod
     def capture(
@@ -266,7 +300,7 @@ class FrozenBundleIdentity:
             entries=unsigned.entries,
             fingerprint=unsigned._computed_fingerprint(),
         )
-        _validate_bundle(value)
+        value.validate()
         return value
 
     def attest(self) -> bool:
@@ -328,7 +362,7 @@ class FrozenBundleIdentity:
             ),
             fingerprint=required_string(raw, "fingerprint"),
         )
-        _validate_bundle(value)
+        value.validate()
         return value
 
     def _unsigned_dict(self) -> dict[str, Any]:
@@ -459,6 +493,34 @@ def _expected_content(
     return tuple(values)
 
 
+def _expected_layout(
+    bundle: FrozenBundleIdentity,
+) -> tuple[tuple[str, str, int, str | None], ...]:
+    return tuple(
+        (
+            entry.relative_path,
+            entry.kind,
+            entry.mode,
+            entry.target,
+        )
+        for entry in bundle.entries
+    )
+
+
+def _capture_layout(
+    root: Path,
+) -> tuple[tuple[str, str, int, str | None], ...]:
+    return tuple(
+        (
+            entry.relative_path,
+            entry.kind,
+            entry.mode,
+            entry.target,
+        )
+        for entry in _scan_observed_entries(root)
+    )
+
+
 def _capture_materialized_content(
     root: Path,
 ) -> tuple[tuple[Any, ...], ...]:
@@ -516,17 +578,16 @@ def _copy_attested_file(
         try:
             observed = os.fstat(source)
             if (
-                observed.st_dev != identity.device
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_dev != identity.device
                 or observed.st_ino != identity.inode
                 or observed.st_size != identity.size
                 or observed.st_mtime_ns != identity.mtime_ns
                 or observed.st_ctime_ns != identity.ctime_ns
-                or sha256_fd(source) != identity.sha256
             ):
                 raise ExecutionContractError(
                     "frozen bundle file identity mismatch",
                 )
-            os.lseek(source, 0, os.SEEK_SET)
             output = os.open(
                 destination,
                 os.O_WRONLY
@@ -538,7 +599,9 @@ def _copy_attested_file(
             )
             try:
                 os.fchmod(output, entry.mode)
+                digest = hashlib.sha256()
                 while chunk := os.read(source, 1024 * 1024):
+                    digest.update(chunk)
                     view = memoryview(chunk)
                     while view:
                         written = os.write(output, view)
@@ -548,8 +611,14 @@ def _copy_attested_file(
                 os.fsync(output)
             finally:
                 os.close(output)
+            after = os.fstat(source)
             if (
-                sha256_fd(source) != identity.sha256
+                after.st_dev != observed.st_dev
+                or after.st_ino != observed.st_ino
+                or after.st_size != observed.st_size
+                or after.st_mtime_ns != observed.st_mtime_ns
+                or after.st_ctime_ns != observed.st_ctime_ns
+                or digest.hexdigest() != identity.sha256
                 or not identity.attest_metadata()
             ):
                 raise ExecutionContractError(
@@ -604,8 +673,14 @@ def materialize_frozen_bundle(
     bundle: FrozenBundleIdentity,
     destination: str | Path,
 ) -> Path:
-    if not isinstance(bundle, FrozenBundleIdentity) or not bundle.attest():
+    if not isinstance(bundle, FrozenBundleIdentity):
         raise ExecutionContractError("frozen bundle authority mismatch")
+    try:
+        bundle.validate()
+    except ExecutionContractError as exc:
+        raise ExecutionContractError(
+            "frozen bundle authority mismatch",
+        ) from exc
     target = Path(destination)
     if target.exists() and not target.is_symlink():
         if attest_materialized_frozen_bundle(bundle, target):
@@ -613,6 +688,16 @@ def materialize_frozen_bundle(
         raise ExecutionContractError(
             "materialized frozen bundle identity mismatch",
         )
+    try:
+        source_root = Path(bundle.root.resolved_path).resolve(strict=True)
+        if _capture_layout(source_root) != _expected_layout(bundle):
+            raise ExecutionContractError(
+                "frozen bundle source layout mismatch",
+            )
+    except OSError as exc:
+        raise ExecutionContractError(
+            "frozen bundle source layout mismatch",
+        ) from exc
     parent = _safe_materialization_parent(target)
     target = parent / target.name
     temporary = Path(tempfile.mkdtemp(prefix=".frozen-runner.", dir=parent))

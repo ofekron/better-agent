@@ -89,11 +89,16 @@ def capture_claude_sdk_package(
 def capture_embedded_claude_sdk(
     runner: RunnerLaunch,
 ) -> CriticalPackageIdentity:
+    try:
+        runner.validate()
+    except (AttributeError, ExecutionContractError) as exc:
+        raise ExecutionContractError(
+            "embedded Claude SDK requires frozen runner",
+        ) from exc
     if (
         not isinstance(runner, RunnerLaunch)
         or not runner.frozen
         or runner.frozen_bundle is None
-        or not runner.frozen_bundle.attest()
     ):
         raise ExecutionContractError("embedded Claude SDK requires frozen runner")
     executable = runner.launch.components[0]
@@ -117,6 +122,10 @@ def attest_embedded_claude_sdk(
     package: CriticalPackageIdentity,
     runner: RunnerLaunch,
 ) -> bool:
+    try:
+        runner.validate()
+    except (AttributeError, ExecutionContractError):
+        return False
     return (
         isinstance(package, CriticalPackageIdentity)
         and isinstance(runner, RunnerLaunch)
@@ -125,8 +134,7 @@ def attest_embedded_claude_sdk(
         and package.package_name == _EMBEDDED_SDK_PACKAGE
         and package.root == runner.frozen_bundle.root
         and package.files == (runner.launch.components[0],)
-        and runner.frozen_bundle.attest()
-        and package.attest()
+        and package.files[0].attest_metadata()
     )
 
 

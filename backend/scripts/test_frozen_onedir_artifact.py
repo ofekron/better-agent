@@ -87,6 +87,18 @@ def test_complete_bundle_round_trip_and_materialization() -> None:
             destination / restored.executable_relative
         ).read_bytes() == b"frozen-executable"
         assert materialize_frozen_bundle(restored, destination) == materialized
+        source_entry = next(
+            entry for entry in restored.entries
+            if entry.kind == "file"
+            and entry.relative_path != restored.executable_relative
+        )
+        source = root / source_entry.relative_path
+        source.chmod(source_entry.mode | stat.S_IWUSR)
+        source.write_bytes(b"source-drift")
+        assert materialize_frozen_bundle(
+            restored,
+            destination,
+        ) == materialized
         source_paths = {
             entry.relative_path for entry in restored.entries
         }
@@ -202,6 +214,8 @@ def test_windows_materialization_uses_acl_authority() -> None:
     assert "make_private_directory(run_dir)" in pinned_source
     assert "make_private_directory(container)" in sdk_source
     assert "dir=ba_home()" in smoke_source
+    assert smoke_source.count("open_pinned_runner_launch(") == 1
+    assert '"timings_ms": timings' in smoke_source
 
 
 def test_artifact_smoke_failure_is_structured() -> None:

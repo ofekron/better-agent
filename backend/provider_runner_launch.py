@@ -31,11 +31,22 @@ class RunnerLaunch:
     runner_module: str
     frozen: bool
 
+    def validate(self) -> None:
+        _validate_runner(self)
+        _validate_launch(self.launch)
+        if self.frozen_bundle is not None:
+            self.frozen_bundle.validate()
+
     def attest(self) -> bool:
         try:
-            _validate_runner(self)
+            self.validate()
         except ExecutionContractError:
             return False
+        if self.frozen:
+            return (
+                self.frozen_bundle is not None
+                and self.frozen_bundle.attest()
+            )
         return (
             self.launch.attest()
             and (
@@ -116,6 +127,22 @@ def _is_absolute_path(value: str) -> bool:
     )
 
 
+def _same_resolved_file(
+    left: FileIdentity | None,
+    right: FileIdentity,
+) -> bool:
+    return (
+        left is not None
+        and left.resolved_path == right.resolved_path
+        and left.sha256 == right.sha256
+        and left.size == right.size
+        and left.mtime_ns == right.mtime_ns
+        and left.ctime_ns == right.ctime_ns
+        and left.device == right.device
+        and left.inode == right.inode
+    )
+
+
 def _package_parent(package_name: str) -> Path:
     spec = importlib.util.find_spec(package_name)
     locations = tuple(spec.submodule_search_locations or ()) if spec else ()
@@ -161,6 +188,18 @@ def _validate_runner(value: RunnerLaunch) -> None:
                 Path(bundle.root.resolved_path)
                 / bundle.executable_relative
             ) != Path(value.launch.components[0].resolved_path)
+            or not _same_resolved_file(
+                next(
+                    (
+                        entry.file
+                        for entry in bundle.entries
+                        if entry.relative_path
+                        == bundle.executable_relative
+                    ),
+                    None,
+                ),
+                value.launch.components[0],
+            )
         ):
             raise ExecutionContractError("incoherent runner launch")
         return

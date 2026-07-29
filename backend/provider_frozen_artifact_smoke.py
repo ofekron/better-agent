@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from provider_claude_execution import (
 from provider_frozen_bundle import attest_materialized_frozen_bundle
 from provider_launch_identity import capture_cli_launch
 from provider_pinned_launch import open_pinned_runner_launch
-from provider_runner_launch import capture_runner_launch
+from provider_runner_launch import RunnerLaunch, capture_runner_launch
 from paths import ba_home
 
 
@@ -158,42 +159,60 @@ def _tamper_materialized_sidecar(
         raise ExecutionContractError("materialized sidecar tamper was accepted")
 
 
-def _run_family_probe(
-    family: str,
+def _materialize_snapshot(
     root: Path,
-) -> dict[str, Any]:
-    runner_module, runner_entry = _RUNNERS[family]
-    run_dir = root / family
+) -> tuple[RunnerLaunch, Path, Path, dict[str, int]]:
+    run_dir = root / "snapshot"
     run_dir.mkdir(mode=0o700)
+    started = time.perf_counter_ns()
     runner = capture_runner_launch(
         run_dir=run_dir,
         executable_path=sys.executable,
-        runner_entry=runner_entry,
-        runner_kind=family,
-        runner_module=runner_module,
+        runner_entry=_RUNNERS["claude"][1],
+        runner_kind="claude",
+        runner_module="runner",
         frozen=True,
         platform=sys.platform,
     )
-    if runner.frozen_bundle is None or not runner.attest():
+    captured = time.perf_counter_ns()
+    if runner.frozen_bundle is None:
         raise ExecutionContractError("frozen runner authority is unavailable")
-    embedded_sdk = None
-    if family == "claude":
-        embedded_sdk = capture_embedded_claude_sdk(runner)
-        if not attest_embedded_claude_sdk(embedded_sdk, runner):
-            raise ExecutionContractError(
-                "embedded Claude SDK authority mismatch",
-            )
+    embedded_sdk = capture_embedded_claude_sdk(runner)
+    if not attest_embedded_claude_sdk(embedded_sdk, runner):
+        raise ExecutionContractError(
+            "embedded Claude SDK authority mismatch",
+        )
     with open_pinned_runner_launch(runner) as pinned:
         materialized_executable = Path(pinned.argv[0])
+    materialized = time.perf_counter_ns()
     executable_depth = len(
         Path(runner.frozen_bundle.executable_relative).parts,
     )
     materialized_root = materialized_executable.parents[
         executable_depth - 1
     ]
+    return (
+        runner,
+        materialized_executable,
+        materialized_root,
+        {
+            "capture": (captured - started) // 1_000_000,
+            "materialize": (materialized - captured) // 1_000_000,
+        },
+    )
+
+
+def _run_family_probe(
+    family: str,
+    root: Path,
+    runner: RunnerLaunch,
+    materialized_executable: Path,
+) -> tuple[dict[str, Any], int]:
+    runner_module, _ = _RUNNERS[family]
     probe_output = root / f"{family}-probe.json"
     environment = dict(os.environ)
     environment["BETTER_AGENT_HOME"] = str(root / "state")
+    started = time.perf_counter_ns()
     completed = subprocess.run(
         [
             str(materialized_executable),
@@ -238,33 +257,61 @@ def _run_family_probe(
         raise ExecutionContractError(
             f"{family} artifact probe result is incomplete",
         )
-    _tamper_materialized_sidecar(runner, materialized_root)
-    return {
-        "bundle_fingerprint": runner.frozen_bundle.fingerprint,
-        "embedded_sdk": embedded_sdk is not None,
-        "materialized_boot": True,
-        "sidecar_tamper": "rejected",
-    }
+    assert runner.frozen_bundle is not None
+    return (
+        {
+            "bundle_fingerprint": runner.frozen_bundle.fingerprint,
+            "embedded_sdk": family == "claude",
+            "materialized_boot": True,
+            "sidecar_tamper": "rejected",
+        },
+        (time.perf_counter_ns() - started) // 1_000_000,
+    )
 
 
 def _smoke(output: Path) -> int:
     if not getattr(sys, "frozen", False) or not hasattr(sys, "_MEIPASS"):
         raise ExecutionContractError("artifact smoke requires frozen runtime")
+    started = time.perf_counter_ns()
     with tempfile.TemporaryDirectory(
         prefix="better-agent-artifact-smoke-",
         dir=ba_home(),
     ) as raw:
         root = Path(raw)
-        results = {
-            family: _run_family_probe(family, root)
+        runner, executable, materialized_root, timings = (
+            _materialize_snapshot(root)
+        )
+        probe_results = {
+            family: _run_family_probe(
+                family,
+                root,
+                runner,
+                executable,
+            )
             for family in _RUNNERS
         }
+        results = {
+            family: result
+            for family, (result, _) in probe_results.items()
+        }
+        timings["probes"] = sum(
+            elapsed for _, elapsed in probe_results.values()
+        )
+        tamper_started = time.perf_counter_ns()
+        _tamper_materialized_sidecar(runner, materialized_root)
+        timings["tamper"] = (
+            time.perf_counter_ns() - tamper_started
+        ) // 1_000_000
         wrapper = _assert_windows_wrapper_rejected(root)
+    timings["total"] = (
+        time.perf_counter_ns() - started
+    ) // 1_000_000
     _write_result(
         output,
         {
             "families": results,
             "platform": sys.platform,
+            "timings_ms": timings,
             "windows_wrapper": wrapper,
         },
     )

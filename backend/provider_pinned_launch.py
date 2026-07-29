@@ -143,12 +143,20 @@ def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
 def open_pinned_runner_launch(
     runner: RunnerLaunch,
 ) -> Iterator[PinnedLaunch]:
-    if not isinstance(runner, RunnerLaunch) or not runner.attest():
+    if not isinstance(runner, RunnerLaunch):
         raise ExecutionContractError("runner launch authority mismatch")
     if not runner.frozen:
+        if not runner.attest():
+            raise ExecutionContractError("runner launch authority mismatch")
         with open_pinned_launch(runner.launch) as pinned:
             yield pinned
         return
+    try:
+        runner.validate()
+    except ExecutionContractError as exc:
+        raise ExecutionContractError(
+            "runner launch authority mismatch",
+        ) from exc
     if runner.frozen_bundle is None:
         raise ExecutionContractError("frozen runner bundle authority is missing")
     run_dir = Path(runner.launch.argv[2])
