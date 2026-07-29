@@ -29,6 +29,7 @@ import perf
 from event_bus import BusEvent, EventBus, bus
 from event_shape import RENDER_EVENT_TYPES, frontend_events_from_journal_rows
 from event_ingester import event_ingester
+import loop_affinity
 
 EVENT_JOURNAL_EVENT = "event_journal.event"
 EVENT_JOURNAL_TURN_MESSAGE_SET = "event_journal.turn_message_set"
@@ -576,15 +577,7 @@ class EventJournalWriter:
         loop = _event_journal_loop
         if loop is None or loop.is_closed():
             return
-        coroutine = self._publish_written(written, run_id=run_id)
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is loop:
-            loop.create_task(coroutine)
-        else:
-            asyncio.run_coroutine_threadsafe(coroutine, loop)
+        loop_affinity.schedule_on(loop, self._publish_written(written, run_id=run_id))
 
     def _schedule_failed(self, event: Event, exc: Exception) -> None:
         if self._bus is None:
@@ -592,15 +585,7 @@ class EventJournalWriter:
         loop = _event_journal_loop
         if loop is None or loop.is_closed():
             return
-        coroutine = self._publish_failed_event(event, exc)
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is loop:
-            loop.create_task(coroutine)
-        else:
-            asyncio.run_coroutine_threadsafe(coroutine, loop)
+        loop_affinity.schedule_on(loop, self._publish_failed_event(event, exc))
 
     async def _publish_failed_event(self, event: Event, exc: Exception) -> None:
         if self._bus is None:
