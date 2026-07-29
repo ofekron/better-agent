@@ -57,6 +57,9 @@ def _normalize(value: str | None) -> str:
 
 
 class ProviderCredentialStore:
+    def __init__(self, keychain=oskeychain) -> None:
+        self._keychain = keychain
+
     def read(self, provider_id: str) -> str | None:
         account = _account(provider_id)
         canonical = self._read_candidate(
@@ -90,18 +93,22 @@ class ProviderCredentialStore:
 
     def delete(self, provider_id: str) -> None:
         account = _account(provider_id)
-        oskeychain.delete(CANONICAL_PROVIDER_SERVICE, account)
+        self._keychain.delete(CANONICAL_PROVIDER_SERVICE, account)
         for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
-            oskeychain.native_delete(service, account)
+            self._keychain.native_delete(service, account)
 
     def migrate_flat(self, provider_id: str) -> str | None:
         account = _account(provider_id)
-        canonical = _normalize(oskeychain.get(CANONICAL_PROVIDER_SERVICE, account))
+        canonical = _normalize(
+            self._keychain.get(CANONICAL_PROVIDER_SERVICE, account)
+        )
         if canonical:
             self._delete_flat()
             return canonical
         for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-            value = _normalize(oskeychain.native_get(service, LEGACY_FLAT_ACCOUNT))
+            value = _normalize(
+                self._keychain.native_get(service, LEGACY_FLAT_ACCOUNT)
+            )
             if not value:
                 continue
             self.store(provider_id, value)
@@ -109,10 +116,9 @@ class ProviderCredentialStore:
             return value
         return None
 
-    @staticmethod
-    def _delete_flat() -> None:
+    def _delete_flat(self) -> None:
         for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-            oskeychain.native_delete(service, LEGACY_FLAT_ACCOUNT)
+            self._keychain.native_delete(service, LEGACY_FLAT_ACCOUNT)
 
     def _migrate_legacy(self, provider_id: str, account: str) -> str | None:
         for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
@@ -126,7 +132,7 @@ class ProviderCredentialStore:
     def _store_canonical(self, provider_id: str, value: str) -> str:
         account = _account(provider_id)
         candidate = ProviderCredentialCandidate(CANONICAL_PROVIDER_SERVICE, account)
-        oskeychain.store(candidate.service, candidate.account, value)
+        self._keychain.store(candidate.service, candidate.account, value)
         verified = self._read_candidate(candidate)
         if verified != value:
             raise RuntimeError("canonical provider credential verification failed")
@@ -144,12 +150,11 @@ class ProviderCredentialStore:
         ):
             raise ValueError("invalid provider credential candidate")
 
-    @staticmethod
-    def _read_candidate(candidate: ProviderCredentialCandidate) -> str:
+    def _read_candidate(self, candidate: ProviderCredentialCandidate) -> str:
         reader = (
-            oskeychain.get
+            self._keychain.get
             if candidate.service == CANONICAL_PROVIDER_SERVICE
-            else oskeychain.native_get
+            else self._keychain.native_get
         )
         try:
             return _normalize(reader(candidate.service, candidate.account))
@@ -159,7 +164,7 @@ class ProviderCredentialStore:
     def _cleanup_legacy(self, account: str) -> None:
         for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
             try:
-                oskeychain.native_delete(service, account)
+                self._keychain.native_delete(service, account)
             except RuntimeError:
                 logger.warning(
                     "legacy provider credential cleanup failed for %s/%s",

@@ -4,6 +4,8 @@ import argparse
 import signal
 import threading
 
+from credential_session import ProviderCredentialBroker
+from node_credential_store import node_provider_credential_store
 from supervisor import BackendSupervisor
 
 
@@ -15,7 +17,13 @@ def run(
     install_signal_handlers: bool = True,
 ) -> int:
     stopping = stopping or threading.Event()
-    supervisor = supervisor or BackendSupervisor(role="node", port=port)
+    supervisor = supervisor or BackendSupervisor(
+        role="node",
+        port=port,
+        credential_broker=ProviderCredentialBroker(
+            node_provider_credential_store(),
+        ),
+    )
 
     def stop(*_: object) -> None:
         stopping.set()

@@ -56,7 +56,29 @@ def test_insecure_windows_directory_is_secured_and_verified() -> None:
     assert applied == [(target, True)]
 
 
+def test_secure_windows_file_is_not_mutated() -> None:
+    original_name = paths.os.name
+    original_check = paths.windows_path_has_private_acl
+    original_apply = paths._set_windows_private_acl
+    applied: list[tuple[object, bool]] = []
+    target = object()
+    paths.os.name = "nt"
+    paths.windows_path_has_private_acl = lambda _path: True
+    paths._set_windows_private_acl = (
+        lambda path, *, directory: applied.append((path, directory))
+    )
+    try:
+        paths.make_private_file(target)
+    finally:
+        paths.os.name = original_name
+        paths.windows_path_has_private_acl = original_check
+        paths._set_windows_private_acl = original_apply
+
+    assert applied == []
+
+
 if __name__ == "__main__":
     test_secure_windows_directory_is_not_mutated()
     test_insecure_windows_directory_is_secured_and_verified()
+    test_secure_windows_file_is_not_mutated()
     print("paths private directory regression: ok")

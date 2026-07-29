@@ -50,6 +50,61 @@ class FakeSupervisor:
         self.calls.append(("shutdown", kill_runners))
 
 
+def test_default_launcher_injects_node_credential_authority(monkeypatch) -> None:
+    store = object()
+    broker = object()
+    supervisor = FakeSupervisor(
+        exits=[0],
+        requested_restarts=[False],
+        restart_results=[],
+        recovery_results=[False],
+    )
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        node_source_launcher,
+        "node_provider_credential_store",
+        lambda: store,
+    )
+
+    def credential_broker(requested_store):
+        observed["store"] = requested_store
+        return broker
+
+    def backend_supervisor(*, role, port, credential_broker):
+        observed.update({
+            "role": role,
+            "port": port,
+            "broker": credential_broker,
+        })
+        return supervisor
+
+    monkeypatch.setattr(
+        node_source_launcher,
+        "ProviderCredentialBroker",
+        credential_broker,
+    )
+    monkeypatch.setattr(
+        node_source_launcher,
+        "BackendSupervisor",
+        backend_supervisor,
+    )
+
+    result = node_source_launcher.run(
+        8002,
+        stopping=threading.Event(),
+        install_signal_handlers=False,
+    )
+
+    assert result == 1
+    assert observed == {
+        "store": store,
+        "role": "node",
+        "port": 8002,
+        "broker": broker,
+    }
+
+
 def test_requested_restart_uses_fresh_supervised_generation() -> None:
     supervisor = FakeSupervisor(
         exits=[0, 7],

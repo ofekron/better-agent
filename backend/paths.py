@@ -488,6 +488,8 @@ def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
 
 def make_private_file(path: Path) -> None:
     if os.name == "nt":
+        if windows_path_has_private_acl(path):
+            return
         _set_windows_private_acl(path, directory=False)
         if not windows_path_has_private_acl(path):
             raise PermissionError("private file ACL verification failed")

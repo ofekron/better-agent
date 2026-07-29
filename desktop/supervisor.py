@@ -379,7 +379,13 @@ def kill_port_listeners(port: int, *, timeout: float = 5.0) -> bool:
 class BackendSupervisor:
     """Spawns and supervises the backend child process."""
 
-    def __init__(self, role: BackendRole = "primary", port: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        role: BackendRole = "primary",
+        port: Optional[int] = None,
+        *,
+        credential_broker: ProviderCredentialBroker | None = None,
+    ) -> None:
         self.role = role
         self.port = port or (NODE_PORT if role == "node" else BACKEND_PORT)
         self.health_url = self._health_url()
@@ -387,7 +393,7 @@ class BackendSupervisor:
         self._backend_logger: Optional[logging.Logger] = None
         self._daemon_host = None
         self._daemon_host_thread: Optional[threading.Thread] = None
-        self._credential_broker = ProviderCredentialBroker()
+        self._credential_broker = credential_broker or ProviderCredentialBroker()
         self._credential_session: ProviderCredentialSession | None = None
         self._active_checkout = _REPO_ROOT.resolve()
         self._generation_started_at: float | None = None
