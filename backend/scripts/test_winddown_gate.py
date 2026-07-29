@@ -19,6 +19,7 @@ import shutil
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,14 +30,40 @@ _TEST_HOME = Path(tempfile.mkdtemp(prefix="ba-winddown-gate-"))
 paths.engage_test_home(_TEST_HOME)
 
 import provider_claude  # noqa: E402
+from execution_template import prepare_execution  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
 
 NATIVE_SID = "native-session-under-test"
 APP_SID = "app-session-under-test"
+PROVIDER_GENERATION = "0aee8bee-e4c9-4e2a-8d66-84eb6ad1d0cc"
 
 
 def _make_provider() -> ClaudeProvider:
-    return ClaudeProvider({"id": "test-provider", "kind": "claude"})
+    record = {
+        "id": "test-provider",
+        "kind": "claude",
+        "generation": PROVIDER_GENERATION,
+        "revision": 1,
+    }
+    provider = ClaudeProvider(record)
+
+    @contextmanager
+    def authority_context(_execution, _start_arguments):
+        yield record
+
+    def persist_and_start(execution, *, arguments, loop, queue):
+        provider._spawn_run(
+            execution=execution,
+            loop=loop,
+            queue=queue,
+            internal_token=arguments["internal_token"],
+            extra_env=arguments["extra_env"],
+        )
+
+    provider._execution_authority_context = authority_context  # type: ignore[method-assign]
+    provider.require_runtime_credential = lambda: None  # type: ignore[method-assign]
+    provider._persist_and_start_execution = persist_and_start  # type: ignore[method-assign]
+    return provider
 
 
 class _FakePopen:
@@ -104,27 +131,33 @@ def _spawn_kwargs(run_id: str, loop, queue) -> dict:
     )
 
 
+def _start_prepared(prov: ClaudeProvider, **kwargs) -> bool:
+    loop = kwargs.pop("loop")
+    queue = kwargs.pop("queue")
+    execution = prepare_execution(prov.record, **kwargs)
+    return prov.start_run(execution=execution, loop=loop, queue=queue)
+
+
 def _install_spawn_recorder(prov: ClaudeProvider, record: list, *, hold: float = 0.0):
     """Replace `_spawn_run` with a recorder that registers the run the
     way the real spawn does, so the gate sees it as a live blocker."""
     concurrent = {"max": 0, "now": 0}
     guard = threading.Lock()
 
-    def fake_spawn(**kwargs):
-        run_id = kwargs["run_id"]
+    def fake_spawn(*, execution, **_kwargs):
+        arguments = execution.start_arguments()
+        run_id = arguments["run_id"]
         with guard:
             concurrent["now"] += 1
             concurrent["max"] = max(concurrent["max"], concurrent["now"])
         record.append(run_id)
-        # The real `_spawn_run` builds the input payload, writes
-        # input.json, and launches the process BEFORE registering the
-        # run — that gap is the window in which an unsynchronized second
-        # caller sees no blocker and spawns a second CLI on the same
-        # native session.
+        # The real `_spawn_run` materializes the attested execution and
+        # launches the process before registering the run. The gate must
+        # serialize that entire interval.
         if hold:
             import time
             time.sleep(hold)
-        prov._runs[run_id] = _FakeRunState(run_id, kwargs.get("session_id"))
+        prov._runs[run_id] = _FakeRunState(run_id, arguments["session_id"])
         with guard:
             concurrent["now"] -= 1
 
@@ -143,7 +176,7 @@ async def test_parked_run_reports_running() -> None:
 
     queue: asyncio.Queue = asyncio.Queue()
     await asyncio.to_thread(
-        prov.start_run, **_spawn_kwargs("parked-1", loop, queue)
+        _start_prepared, prov, **_spawn_kwargs("parked-1", loop, queue)
     )
 
     assert spawned == [], f"parked run must not spawn yet, got {spawned}"
@@ -178,10 +211,10 @@ async def test_simultaneous_release_does_not_double_spawn() -> None:
     queue: asyncio.Queue = asyncio.Queue()
     await asyncio.gather(
         asyncio.to_thread(
-            prov.start_run, **_spawn_kwargs("parked-a", loop, queue)
+            _start_prepared, prov, **_spawn_kwargs("parked-a", loop, queue)
         ),
         asyncio.to_thread(
-            prov.start_run, **_spawn_kwargs("parked-b", loop, queue)
+            _start_prepared, prov, **_spawn_kwargs("parked-b", loop, queue)
         ),
     )
     assert spawned == [], "both runs must park behind the live blocker"
@@ -212,7 +245,7 @@ async def test_cancelled_parked_run_is_dropped() -> None:
 
     queue: asyncio.Queue = asyncio.Queue()
     await asyncio.to_thread(
-        prov.start_run, **_spawn_kwargs("parked-x", loop, queue)
+        _start_prepared, prov, **_spawn_kwargs("parked-x", loop, queue)
     )
     assert prov.is_running("parked-x") is True
 
@@ -246,7 +279,7 @@ async def test_cancel_turn_reaches_parked_run() -> None:
     queue: asyncio.Queue = asyncio.Queue()
     kwargs = _spawn_kwargs("parked-c", loop, queue)
     kwargs["turn_run_id"] = "turn-run-under-test"
-    await asyncio.to_thread(prov.start_run, **kwargs)
+    await asyncio.to_thread(_start_prepared, prov, **kwargs)
     assert prov.is_running("parked-c") is True
 
     assert prov.cancel_turn("turn-run-under-test") is True, (
@@ -300,7 +333,7 @@ async def test_hung_runner_releases_gate() -> None:
     try:
         queue: asyncio.Queue = asyncio.Queue()
         await asyncio.to_thread(
-            prov.start_run, **_spawn_kwargs("after-hung", loop, queue)
+            _start_prepared, prov, **_spawn_kwargs("after-hung", loop, queue)
         )
         assert spawned == [], "the new turn must park behind the hung run"
 
@@ -339,7 +372,7 @@ async def test_cancel_turn_drops_every_parked_attempt() -> None:
     for run_id in ("attempt-1", "attempt-2"):
         kwargs = _spawn_kwargs(run_id, loop, asyncio.Queue())
         kwargs["turn_run_id"] = "shared-turn"
-        await asyncio.to_thread(prov.start_run, **kwargs)
+        await asyncio.to_thread(_start_prepared, prov, **kwargs)
     assert len(prov._parked_runs) == 2
 
     assert prov.cancel_turn("shared-turn") is True
@@ -388,7 +421,9 @@ async def test_recovered_run_is_never_signalled() -> None:
 
     try:
         await asyncio.to_thread(
-            prov.start_run, **_spawn_kwargs("after-recovered", loop, asyncio.Queue())
+            _start_prepared,
+            prov,
+            **_spawn_kwargs("after-recovered", loop, asyncio.Queue()),
         )
         await asyncio.wait_for(prov._watch_process_exit(recovered), timeout=10)
 
