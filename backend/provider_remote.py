@@ -167,6 +167,9 @@ class RemoteProviderProxy(Provider):
             **canonical_arguments,
         )
 
+    def _assert_execution_provider(self, artifact) -> None:
+        del artifact
+
     # ------------------------------------------------------------------
     # start_run — ship spawn_run over WS, register local proxy state.
     # ------------------------------------------------------------------

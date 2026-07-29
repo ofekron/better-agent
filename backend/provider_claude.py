@@ -314,16 +314,15 @@ class ClaudeProvider(Provider):
         a base (PATH, HOME, BETTER_CLAUDE_*, etc.) and overlays the
         provider record's auth/config_dir.
 
-        Snapshots `self.record` into a local var so a concurrent
-        provider-config edit (which atomically swaps the record dict)
-        can't expose this caller to a half-replaced state.
+        Uses the start-admitted runtime snapshot when a run is active and the
+        current provider record for non-run operations.
         """
         self.require_runtime_credential()
         env = os.environ.copy()
         home = user_home()
         env["HOME"] = str(home)
         env.pop("CLAUDE_CODE_SIMPLE", None)
-        record = self.record  # atomic snapshot of the dict reference
+        record = self.runtime_record()
         if record.get("mode") == "api_key":
             api_key = record.get("api_key") or ""
             if api_key:

@@ -28,6 +28,9 @@ def main() -> None:
             bare_config=False,
             user_facing=True,
             disabled_builtin_extensions=[],
+            runtime_hydration={
+                "provider_identity": "hydration-secret",
+            },
         )
         assert "BETTER_AGENT_INTERNAL_TOKEN" not in env
         assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
@@ -36,6 +39,9 @@ def main() -> None:
             {"version": 1, "kind": "catalog"}
         )
         assert response["secret"] == "not-exported"
+        assert response["runtime_hydration"] == {
+            "provider_identity": "hydration-secret",
+        }
         try:
             RuntimeTransport(address).request({"version": 1, "kind": "catalog"})
         except Exception:
@@ -52,6 +58,10 @@ def main() -> None:
             if path.is_file()
         ]
         assert all(b"not-exported" not in path.read_bytes() for path in state_files)
+        assert all(
+            b"hydration-secret" not in path.read_bytes()
+            for path in state_files
+        )
         for runner_name in ("runner.py", "runner_codex.py", "runner_better_agent.py"):
             runner_source = Path(__file__).parents[1].joinpath(runner_name).read_text()
             assert "_load_internal_token" not in runner_source

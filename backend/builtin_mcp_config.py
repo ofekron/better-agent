@@ -11,7 +11,7 @@ import harness_run_projection
 from env_compat import dual_env_many, get_env
 
 
-def _with_sdk_pythonpath(env: dict[str, str]) -> dict[str, str]:
+def _with_sdk_pythonpath(env: dict[str, Any]) -> dict[str, Any]:
     sdk = Path(__file__).resolve().parents[1] / "sdk"
     if not sdk.is_dir():
         return env
@@ -22,36 +22,92 @@ def _with_sdk_pythonpath(env: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _open_file_panel_server_config(env: dict[str, str]) -> dict[str, Any]:
+def _open_file_panel_server_config(
+    env: dict[str, Any],
+    *,
+    include_tool_metadata: bool,
+) -> dict[str, Any]:
     import sys
     script = Path(__file__).with_name("open_file_panel_mcp.py")
-    return {
+    tools = [
+        "open_file_panel",
+        "request_user_approval",
+        "request_user_input",
+    ]
+    if env.get("BETTER_CLAUDE_FILE_EDITING") == "1":
+        tools.append("start_file_discussion")
+    config = {
         "command": sys.executable,
         "args": [str(script)],
         "env": env,
     }
+    if include_tool_metadata:
+        config["tool_names"] = sorted(tools)
+    return config
 
 
-def _open_config_panel_server_config(env: dict[str, str]) -> dict[str, Any]:
+def _open_config_panel_server_config(
+    env: dict[str, Any],
+    *,
+    include_tool_metadata: bool,
+) -> dict[str, Any]:
     import sys
     script = Path(__file__).with_name("open_config_panel_mcp.py")
-    return {
+    config = {
         "command": sys.executable,
         "args": [str(script)],
         "env": env,
     }
+    if include_tool_metadata:
+        config["tool_names"] = ["open_config_panel"]
+    return config
 
 
-def _capabilities_server_config(env: dict[str, str]) -> dict[str, Any]:
+def _capabilities_server_config(
+    env: dict[str, Any],
+    *,
+    include_tool_metadata: bool,
+) -> dict[str, Any]:
     import sys
     script = Path(__file__).with_name("capabilities_mcp.py")
+    config = {
+        "command": sys.executable,
+        "env": env,
+    }
+    if include_tool_metadata:
+        config["tool_names"] = [
+            "list_capabilities",
+            "load_capability",
+            "release_capability",
+        ]
     if getattr(sys, "frozen", False):
-        return {"command": sys.executable, "args": ["--capabilities-mcp"], "env": env}
-    return {"command": sys.executable, "args": [str(script)], "env": env}
+        return {**config, "args": ["--capabilities-mcp"]}
+    return {**config, "args": [str(script)]}
 
 
-def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
-    if not installation_profile.integrations_enabled():
+def _runtime_broker_env(runtime_broker: Any) -> dict[str, Any]:
+    return {
+        "BETTER_AGENT_RUNTIME_BROKER": runtime_broker,
+        "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
+    }
+
+
+def with_builtin_mcp_servers(
+    inputs: dict,
+    provider_run_config: dict,
+    *,
+    runtime_broker: Any = None,
+    integrations_enabled: bool | None = None,
+    runtime_mcp_servers: dict[str, dict[str, Any]] | None = None,
+    launcher_mcp_servers: dict[str, dict[str, Any]] | None = None,
+    include_tool_metadata: bool = False,
+) -> dict:
+    enabled = (
+        installation_profile.integrations_enabled()
+        if integrations_enabled is None
+        else integrations_enabled
+    )
+    if not enabled:
         return provider_run_config
     config = {
         **provider_run_config,
@@ -65,7 +121,16 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
         or get_env("BETTER_CLAUDE_BACKEND_URL")
         or "http://localhost:8000"
     ).strip()
-    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
+    broker = (
+        get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
+        if runtime_broker is None
+        else runtime_broker
+    )
+    if broker and (
+        type(broker) is not str
+        and broker != {"kind": "runner_operation_broker"}
+    ):
+        raise ValueError("runtime broker reference is invalid")
     cwd = str(inputs.get("cwd") or "")
     model = str(inputs.get("model") or "")
     provider_id = str(inputs.get("provider_id") or "").strip()
@@ -73,50 +138,77 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("user_facing")) and not bare
 
-    base_env = _with_sdk_pythonpath(dual_env_many({
-        "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
-        "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
-        "BETTER_CLAUDE_CWD": cwd,
-        "BETTER_CLAUDE_MODEL": model,
-        "BETTER_CLAUDE_PROVIDER_ID": provider_id,
-        "BETTER_CLAUDE_FILE_EDITING": "1" if inputs.get("working_mode") == "file_editing" else "0",
-    }))
-    if user_facing and app_session_id and runtime_broker:
+    base_env = _with_sdk_pythonpath({
+        **dual_env_many({
+            "BETTER_CLAUDE_BACKEND_URL": backend_url,
+            "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
+            "BETTER_CLAUDE_CWD": cwd,
+            "BETTER_CLAUDE_MODEL": model,
+            "BETTER_CLAUDE_PROVIDER_ID": provider_id,
+            "BETTER_CLAUDE_FILE_EDITING": (
+                "1"
+                if inputs.get("working_mode") == "file_editing"
+                else "0"
+            ),
+        }),
+        **_runtime_broker_env(broker),
+    })
+    if user_facing and app_session_id and broker:
         import provider_manifest
         _spec = provider_manifest.spec_for(provider_kind)
         if _spec is None or _spec.hosts_ui_mcp:
-            servers["ui"] = _open_file_panel_server_config(base_env)
-        servers["open-config-panel"] = _open_config_panel_server_config(base_env)
+            servers["ui"] = _open_file_panel_server_config(
+                base_env,
+                include_tool_metadata=include_tool_metadata,
+            )
+        servers["open-config-panel"] = _open_config_panel_server_config(
+            base_env,
+            include_tool_metadata=include_tool_metadata,
+        )
 
     # Capability management — let the model scope its own session (load/release/
     # list scoped capabilities). Internal, non-bare sessions only; bare sessions
     # are deliberately capability-stripped. Independent of user_facing so
     # headless/worker turns can self-scope too (matches runner.py's Claude path).
-    if app_session_id and runtime_broker and not bare:
-        cap_env = _with_sdk_pythonpath(dual_env_many({
-            "BETTER_CLAUDE_BACKEND_URL": backend_url,
-            "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
-            "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
-            "BETTER_CLAUDE_BARE_CONFIG": "0",
-        }))
-        servers["capabilities"] = _capabilities_server_config(cap_env)
+    if app_session_id and broker and not bare:
+        cap_env = _with_sdk_pythonpath({
+            **dual_env_many({
+                "BETTER_CLAUDE_BACKEND_URL": backend_url,
+                "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
+                "BETTER_CLAUDE_BARE_CONFIG": "0",
+            }),
+            **_runtime_broker_env(broker),
+        })
+        servers["capabilities"] = _capabilities_server_config(
+            cap_env,
+            include_tool_metadata=include_tool_metadata,
+        )
 
-    for name, server_config in extension_store.runtime_mcp_server_configs(
-        inputs,
-        user_facing=bool(user_facing and app_session_id),
-        bare=bare,
-    ).items():
+    runtime_servers = (
+        extension_store.runtime_mcp_server_configs(
+            inputs,
+            user_facing=bool(user_facing and app_session_id),
+            bare=bare,
+        )
+        if runtime_mcp_servers is None
+        else runtime_mcp_servers
+    )
+    for name, server_config in runtime_servers.items():
         if extension_store.is_reserved_mcp_server_name(name):
             servers[name] = server_config
             continue
         servers.setdefault(name, server_config)
 
-    for name, server_config in extension_store.native_mcp_launcher_server_configs(
-        inputs,
-        user_facing=bool(user_facing and app_session_id),
-        bare=bare,
-    ).items():
+    launcher_servers = (
+        extension_store.native_mcp_launcher_server_configs(
+            inputs,
+            user_facing=bool(user_facing and app_session_id),
+            bare=bare,
+        )
+        if launcher_mcp_servers is None
+        else launcher_mcp_servers
+    )
+    for name, server_config in launcher_servers.items():
         if extension_store.is_reserved_mcp_server_name(name):
             servers[name] = server_config
             continue

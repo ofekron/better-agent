@@ -13,6 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import run_recovery  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
 from provider_agy import AgyProvider  # noqa: E402
+from provider_execution_contract import provider_family_contract  # noqa: E402
+from provider_family_execution_runtime import (  # noqa: E402
+    family_capability_manifest_from_artifact,
+)
+from provider_family_runtime_capabilities import (  # noqa: E402
+    install_staged_family_runtime_capabilities,
+    snapshot_family_runtime_capabilities,
+    stage_family_runtime_capabilities,
+)
 from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
@@ -441,7 +450,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "provisioned_tool_profile": "",
     }
     atomic_write_json(run_dir / "input.json", input_payload)
-    _write_execution_artifact(run_dir, run_id, input_payload, kind="claude")
+    _write_execution_artifact(run_dir, run_id, input_payload, kind="openai")
     fake_sm = _FakeSessionManager({
         "agent_session_id": "provider-sid",
         "messages": [
@@ -455,7 +464,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         popen = _Popen()
 
     class _Provider:
-        KIND = "claude"
+        KIND = "openai"
 
         def __init__(self) -> None:
             self._runs = {}
@@ -551,7 +560,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
     check(
         "provider startup monitoring registered",
-        coordinator.turn_manager.submitted == [("sid", new_run_id, "claude")],
+        coordinator.turn_manager.submitted == [("sid", new_run_id, "openai")],
     )
     check("retry-pending and submitted state emitted", coordinator.turn_manager.emitted == ["sid", "sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
@@ -563,6 +572,195 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check(
         "retry preserves disabled extensions",
         provider.kwargs.get("disabled_builtin_extensions") == ["recovery.disabled"],
+    )
+
+
+def test_family_retry_clones_exact_runtime_capabilities() -> None:
+    print("T7a family retry clones exact runtime capabilities")
+    run_id = "family-retry-capabilities"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    input_payload = {
+        "prompt": "retry with the prepared scheduler",
+        "cwd": "/tmp",
+        "model": "agy-frozen",
+    }
+    capabilities = snapshot_family_runtime_capabilities(
+        family="agy",
+        skill_sources={},
+        agent_sources={},
+        resolved_plan={
+            "harness": {"instructions": ["frozen scheduler harness"]},
+            "tools": ["scheduler_run"],
+            "mcp_servers": [{
+                "name": "scheduler",
+                "transport": "stdio",
+                "config": {
+                    "command": "scheduler",
+                    "args": ["serve"],
+                },
+                "tool_names": ["scheduler_run"],
+                "prewarm": {
+                    "eligible": False,
+                    "readiness_required": False,
+                },
+            }],
+        },
+        extension_state={"scheduler": {"enabled": True}},
+        installation_decisions={"profile": "frozen"},
+    )
+    provider_record = {
+        "id": "agy-provider",
+        "kind": "agy",
+        "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
+        "revision": 2,
+    }
+    prepared = prepare_execution(
+        provider_record,
+        run_id=run_id,
+        prompt=input_payload["prompt"],
+        cwd=input_payload["cwd"],
+        model=input_payload["model"],
+        reasoning_effort=None,
+        session_id="agy-provider-sid",
+        mode="native",
+        app_session_id="sid",
+        runtime_policy={
+            "runner_input": {
+                **input_payload,
+                "run_id": run_id,
+                "session_id": "agy-provider-sid",
+            },
+        },
+        provider_contract=provider_family_contract(
+            provider_record,
+            payload={"runtime_capabilities": capabilities.manifest},
+        ),
+    )
+    atomic_write_json(run_dir / "input.json", input_payload)
+    atomic_write_json(run_dir / "execution.json", prepared.artifact.to_dict())
+    stage_family_runtime_capabilities(run_id, capabilities)
+    install_staged_family_runtime_capabilities(
+        run_dir,
+        run_id=run_id,
+        manifest=capabilities.manifest,
+    )
+    source_payload = (
+        run_dir / capabilities.manifest["path"]
+    ).read_bytes()
+    fake_sm = _FakeSessionManager({
+        "agent_session_id": "agy-provider-sid",
+        "messages": [
+            {"id": "msg-1", "role": "assistant", "events": []},
+        ],
+    })
+
+    class _Run:
+        class _Popen:
+            pid = None
+        popen = _Popen()
+
+    class _Provider:
+        KIND = "agy"
+
+        def __init__(self) -> None:
+            self._runs = {}
+            self.target_payload = b""
+            self.target_contract: dict = {}
+            self.target_runner_input: dict = {}
+
+        def start_run(self, *, execution, **_kwargs) -> bool:
+            target_run_id = execution.start_arguments()["run_id"]
+            target_run_dir = runs_root() / target_run_id
+            target_run_dir.mkdir(parents=True, exist_ok=False)
+            install_staged_family_runtime_capabilities(
+                target_run_dir,
+                run_id=target_run_id,
+                manifest=family_capability_manifest_from_artifact(
+                    execution.artifact,
+                ),
+            )
+            self.target_payload = (
+                target_run_dir / capabilities.manifest["path"]
+            ).read_bytes()
+            self.target_contract = execution.artifact.provider_contract or {}
+            self.target_runner_input = execution.artifact.runtime_policy[
+                "runner_input"
+            ]
+            self._runs[target_run_id] = _Run()
+            return True
+
+    class _TurnManager:
+        def __init__(self) -> None:
+            self.active_run_ids = {}
+            self.cancel_events = {}
+
+        def run_state_add(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_retrying(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_provider_submitted(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_set_pid(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def emit_run_state(self, _sid: str) -> None:
+            pass
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.turn_manager = _TurnManager()
+            self._session_cancelled = {}
+            self.internal_token = "retry-token"
+
+    async def _skip_backoff(awaitable, *, timeout: float):
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    def _create_task(coro, *, name=None):
+        coro.close()
+        return None
+
+    original_sm = run_recovery.session_manager
+    original_wait_for = run_recovery.asyncio.wait_for
+    original_create_task = run_recovery.asyncio.create_task
+    try:
+        run_recovery.session_manager = fake_sm
+        run_recovery.asyncio.wait_for = _skip_backoff
+        run_recovery.asyncio.create_task = _create_task
+        provider = _Provider()
+        asyncio.run(run_recovery._retry_recovered_run(
+            coordinator=_Coordinator(),
+            provider=provider,
+            desc={
+                "run_id": run_id,
+                "app_session_id": "sid",
+                "persist_to": "sid",
+                "mode": "native",
+                "session_id": "agy-provider-sid",
+            },
+            run_dir=run_dir,
+            app_sid="sid",
+            persist_sid="sid",
+            msg_id="msg-1",
+            recovering_msg_id="msg-1",
+        ))
+    finally:
+        run_recovery.session_manager = original_sm
+        run_recovery.asyncio.wait_for = original_wait_for
+        run_recovery.asyncio.create_task = original_create_task
+
+    check("family retry preserves exact payload bytes", provider.target_payload == source_payload)
+    check(
+        "family retry preserves exact capability authority",
+        provider.target_contract == prepared.artifact.provider_contract,
+    )
+    check(
+        "family retry updates frozen runner identity",
+        provider.target_runner_input.get("run_id") != run_id,
     )
 
 
@@ -835,11 +1033,27 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
         def __init__(self) -> None:
             self._runs = {}
             self.kwargs: dict = {}
+            self.prepared = 0
+            self.runtime_policy: dict = {}
+
+        def prepare_run(self, **kwargs):
+            self.prepared += 1
+            return prepare_execution(
+                {
+                    "id": "codex-provider",
+                    "kind": "codex",
+                    "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
+                    "revision": 2,
+                },
+                runtime_policy={"fresh_capabilities": True},
+                **kwargs,
+            )
 
         def start_run(self, *, execution, **_kwargs) -> None:
             kwargs = execution.start_arguments()
             run_id = kwargs["run_id"]
             self.kwargs = kwargs
+            self.runtime_policy = execution.artifact.runtime_policy
             self._runs[run_id] = _Run()
             return True
 
@@ -893,6 +1107,11 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
         run_recovery.asyncio.create_task = original_create_task
 
     check("fresh recovery omits resume sid", provider.kwargs.get("session_id") is None)
+    check("fresh recovery prepares new authority", provider.prepared == 1)
+    check(
+        "fresh recovery uses new capability authority",
+        provider.runtime_policy.get("fresh_capabilities") is True,
+    )
     check(
         "fresh recovery persists old sid in chain",
         fake_sm.sess.get("continuation_chain") == ["old-provider-sid"],
@@ -948,6 +1167,7 @@ def main() -> int:
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
+        test_family_retry_clones_exact_runtime_capabilities()
         test_recovered_retry_cancelled_during_backoff_does_not_spawn()
         test_recovered_retry_spawn_boundaries_cleanup()
         test_recovered_capability_change_starts_fresh_continuation()

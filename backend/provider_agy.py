@@ -5,22 +5,44 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
-import config_store
 from extension_run_policy import (
-    disabled_runtime_skills_for_run,
     resolve_extension_run_policy,
 )
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
+from env_compat import get_env
+from provider import build_better_agent_run_env, schedule_loop_task
+from provider_family_execution_runtime import (
+    cleanup_failed_family_execution,
+    install_family_execution_payload,
+    prepare_family_execution,
+    release_staged_family_execution,
+    resolve_family_execution_payload,
+)
+from provider_family_launch_attestation import (
+    FamilyLaunchAttestation,
+    capture_cli_launch,
+    capture_config_scope,
+    capture_runner_launch,
+)
+from provider_runtime_plan_source import (
+    hydrate_frozen_provider_runtime_plan,
+    selected_runtime_skill_sources,
+    structural_provider_runtime_plan,
+)
+from provider_family_runtime_capabilities import (
+    snapshot_family_runtime_capabilities,
+)
 from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
+from paths import resolve_provider_config_dir
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +58,20 @@ AGY_MODELS = [
     "Claude Opus 4.6 (Thinking)",
     "GPT-OSS 120B (Medium)",
 ]
+
+RUN_CONFIG_SESSION_FIELDS = (
+    "active_capability_ids",
+    "bare_config",
+    "disabled_builtin_extensions",
+    "disabled_builtin_tools",
+    "disabled_runtime_skills",
+    "extra_mcp_servers",
+    "harness_profile_id",
+    "orchestration_mode",
+    "permission",
+    "provider_id",
+    "working_mode",
+)
 
 
 def fetch_agy_models() -> list[str]:
@@ -83,6 +119,192 @@ class AgyProvider(SessionEventsProvider):
         env.pop("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", None)
         return self.finalize_env(env)
 
+    def prepare_run(self, **start_arguments: Any):
+        runner_input = self._build_runner_input(start_arguments)
+        run_id = start_arguments["run_id"]
+        run_dir = _runs_root() / run_id
+        agy_binary = resolve_cli_binary("agy")
+        if not agy_binary:
+            raise RuntimeError("agy CLI not found on PATH")
+        authority = self.execution_authority_record(start_arguments)
+        config_root = resolve_provider_config_dir(
+            str(authority.get("config_dir") or ".gemini/antigravity-cli"),
+        )
+        config_root.mkdir(parents=True, exist_ok=True)
+        resume_path = (
+            config_root
+            / "conversations"
+            / f"{start_arguments['session_id']}.db"
+            if start_arguments.get("session_id")
+            else None
+        )
+        if resume_path is not None and not resume_path.is_file():
+            resume_path = None
+        config_scope = capture_config_scope(
+            root_path=config_root,
+            config_paths=(config_root / "settings.json",),
+            resume_path=resume_path,
+        )
+        settings_path = config_root / "settings.json"
+        if settings_path.is_file():
+            try:
+                agy_settings = json.loads(
+                    settings_path.read_text(encoding="utf-8"),
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("AGY settings are unreadable") from exc
+            if type(agy_settings) is not dict:
+                raise RuntimeError("AGY settings must contain an object")
+        else:
+            agy_settings = {}
+        launch = FamilyLaunchAttestation.capture(
+            family=self.KIND,
+            runner=capture_runner_launch(
+                run_dir=run_dir,
+                executable_path=sys.executable,
+                runner_entry=_RUNNER_PATH,
+                runner_kind=self.KIND,
+                runner_module="runner_agy",
+                frozen=bool(getattr(sys, "frozen", False)),
+            ),
+            downstream=capture_cli_launch(
+                logical_command=self.KIND,
+                launcher_path=agy_binary,
+                search_path=os.environ.get("PATH"),
+                platform=sys.platform,
+                command_processor=os.environ.get("COMSPEC"),
+            ),
+            config=config_scope,
+        )
+        if not launch.attest():
+            raise RuntimeError("AGY launch authority changed during preparation")
+        projection = structural_provider_runtime_plan(
+            runner_input,
+            self.KIND,
+        )
+        capabilities = snapshot_family_runtime_capabilities(
+            family=self.KIND,
+            skill_sources=selected_runtime_skill_sources(
+                runner_input["cwd"],
+                bool(runner_input["bare_config"]),
+                runner_input["disabled_runtime_skills"],
+            ),
+            agent_sources={},
+            resolved_plan=projection["resolved_plan"],
+            extension_state=projection["extension_state"],
+            installation_decisions=projection["installation_decisions"],
+        )
+        runner_input["agy_config_root"] = str(config_root)
+        runner_input["agy_settings"] = agy_settings
+        return prepare_family_execution(
+            authority,
+            start_arguments=start_arguments,
+            runner_input=runner_input,
+            launch=launch,
+            capabilities=capabilities,
+        )
+
+    def _build_runner_input(
+        self,
+        start_arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        mode = start_arguments["mode"]
+        if mode == "manager":
+            mode = "team"
+        if mode not in ("native", "team"):
+            raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
+        if start_arguments.get("reasoning_effort"):
+            raise NotImplementedError(
+                "agy provider does not support reasoning effort.",
+            )
+        if mode == "team":
+            raise NotImplementedError("agy provider does not support team mode.")
+        if start_arguments.get("fork"):
+            raise NotImplementedError("agy provider does not support fork.")
+        model = start_arguments.get("model")
+        available = fetch_agy_models()
+        if model and model not in available:
+            raise ValueError(
+                f"model {model!r} is not available for the AGY provider. "
+                f"Available: {', '.join(available)}."
+            )
+
+        from session_manager import manager as session_manager
+
+        app_session_id = start_arguments["app_session_id"]
+        worker_session_id = start_arguments.get("worker_agent_session_id")
+        session_record = session_manager.get_fields(
+            app_session_id,
+            RUN_CONFIG_SESSION_FIELDS,
+        )
+        worker_record = (
+            session_manager.get_fields(
+                worker_session_id,
+                RUN_CONFIG_SESSION_FIELDS,
+            )
+            if worker_session_id
+            else {}
+        )
+        from permission import resolve_for_run
+
+        permission = resolve_for_run(
+            sess_rec=session_record,
+            worker_sess_rec=worker_record,
+            is_worker=bool(worker_session_id),
+            fallback_kind=self.KIND,
+        )
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=start_arguments.get(
+                "resolved_harness_run_config",
+            ),
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=start_arguments.get("provider_run_config"),
+            capability_contexts=start_arguments.get("capability_contexts"),
+            disabled_builtin_extensions=start_arguments.get(
+                "disabled_builtin_extensions",
+            ),
+        )
+        bare = bool(run_policy["bare_config"])
+        backend_url = (
+            start_arguments.get("backend_url")
+            or get_env("BETTER_CLAUDE_BACKEND_URL")
+            or "http://localhost:8000"
+        )
+        payload = {
+            key: value
+            for key, value in start_arguments.items()
+            if key not in {"extra_env", "internal_token"}
+        }
+        payload.update({
+            "backend_url": backend_url,
+            "internal_token": "",
+            "mode": mode,
+            "provider_id": self.id,
+            "provider_kind": self.KIND,
+            "permission": permission,
+            "bare_config": bare,
+            "working_mode": session_record.get("working_mode"),
+            "worker_working_mode": worker_record.get("working_mode"),
+            "context_strategy": user_prefs.get_context_strategy(),
+        })
+        payload.update(run_policy)
+        return payload
+
+    def _install_execution_payloads(self, execution, run_dir: Path) -> None:
+        install_family_execution_payload(execution, run_dir)
+
+    def _cleanup_failed_execution_payloads(
+        self,
+        execution,
+        run_dir: Path,
+    ) -> None:
+        cleanup_failed_family_execution(execution, run_dir)
+
+    def _release_execution_authority(self, execution) -> None:
+        release_staged_family_execution(execution)
+
     def _start_run(
         self,
         *,
@@ -126,78 +348,26 @@ class AgyProvider(SessionEventsProvider):
         del disallowed_tools, setting_sources
         del supervised, supervisor_agent_session_id, mssg_sender_session_id, is_worker
         del continuation_chain
-        if mode == "manager":
-            mode = "team"
-        if mode not in ("native", "team"):
-            raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
-        if self.defunct:
-            raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
-        self.assert_not_suspended(action="start new runs")
-        if reasoning_effort:
-            raise NotImplementedError("agy provider does not support reasoning effort.")
-        if mode == "team":
-            raise NotImplementedError("agy provider does not support team mode.")
-        if fork:
-            raise NotImplementedError("agy provider does not support fork.")
-
-        available = self.available_models()
-        if model and model not in available:
-            raise ValueError(
-                f"model {model!r} is not available for the AGY provider. "
-                f"Available: {', '.join(available)}."
-            )
-
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        from session_manager import manager as _sm
-        session_record = _sm.get(app_session_id) or {}
-        worker_record = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        run_policy = resolve_extension_run_policy(
-            resolved_harness_run_config=resolved_harness_run_config,
-            session_record=session_record,
-            worker_record=worker_record,
-            provider_kind=self.KIND,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            disabled_builtin_extensions=disabled_builtin_extensions,
+        launch, capabilities = resolve_family_execution_payload(
+            _execution.artifact,
+            run_dir,
         )
-        _bare = bool(run_policy["bare_config"])
-        from permission import resolve_for_run as _resolve_perm
-        _permission = _resolve_perm(
-            sess_rec=session_record,
-            worker_sess_rec=worker_record,
-            is_worker=bool(worker_agent_session_id),
-            fallback_kind=self.KIND,
+        input_payload = _execution.artifact.runtime_policy.get("runner_input")
+        if type(input_payload) is not dict:
+            raise RuntimeError("frozen AGY runner input is unavailable")
+        hydrated_plan = hydrate_frozen_provider_runtime_plan(
+            capabilities.plan,
         )
-        input_payload = {
-            "prompt": prompt,
-            "images": images or [],
-            "files": files or [],
-            "cwd": cwd,
-            "model": model,
-            "session_id": session_id,
-            "mode": mode,
-            "source": source or "",
-            "app_session_id": app_session_id,
-            "backend_url": backend_url or "",
-            "internal_token": "",
-            "provider_id": self.id,
-            "browser_harness_enabled": bool(browser_harness_enabled),
-            "user_facing": bool(user_facing),
-            "worker_agent_session_id": worker_agent_session_id,
-            "permission": _permission,
-            "bare_config": _bare,
-            "working_mode": session_record.get("working_mode"),
-            "worker_working_mode": (worker_record or {}).get("working_mode"),
-            "context_strategy": user_prefs.get_context_strategy(),
-            "target_message_id": target_message_id,
-            "turn_run_id": turn_run_id,
-            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_runtime_skills": disabled_runtime_skills_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
+        runtime_hydration = {
+            "capability_plan": hydrated_plan,
+            "prewarm_status": capabilities.prewarm_status,
+            "skill_dirs": {
+                name: str(path)
+                for name, path in capabilities.skill_dirs.items()
+            },
         }
-        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         containment().create(run_id)
@@ -208,7 +378,9 @@ class AgyProvider(SessionEventsProvider):
                 self.build_env(),
                 run_id=run_id,
                 app_session_id=app_session_id,
-                resolved_harness_run_config=resolved_harness_run_config,
+                resolved_harness_run_config=input_payload.get(
+                    "resolved_harness_run_config",
+                ),
             )
             if extra_env:
                 env.update(extra_env)
@@ -220,20 +392,29 @@ class AgyProvider(SessionEventsProvider):
                 cwd=cwd,
                 model=model,
                 provider_id=self.id,
-                bare_config=_bare,
-                user_facing=bool(user_facing) and not _bare,
+                bare_config=bool(input_payload.get("bare_config")),
+                user_facing=bool(input_payload.get("user_facing"))
+                and not bool(input_payload.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
+                runtime_hydration=runtime_hydration,
             ))
-            popen = subprocess.Popen(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="agy"),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                cwd=cwd,
-                env=env,
-                **_process_control().detach_spawn_kwargs(),
-                **containment().spawn_kwargs(run_id),
-            )
+            with launch.open_runner() as pinned:
+                pass_fds = (
+                    {"pass_fds": pinned.pass_fds}
+                    if os.name != "nt" and pinned.pass_fds
+                    else {}
+                )
+                popen = subprocess.Popen(
+                    list(pinned.argv),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_fp,
+                    stderr=stderr_fp,
+                    cwd=cwd,
+                    env=env,
+                    **pass_fds,
+                    **_process_control().detach_spawn_kwargs(),
+                    **containment().spawn_kwargs(run_id),
+                )
         except Exception:
             stdout_fp.close()
             stderr_fp.close()

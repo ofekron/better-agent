@@ -121,16 +121,6 @@ def _validate_attachments(value: Any, field_name: str) -> None:
             raise ValueError(f"{field_name}[{index}].size must be a non-negative integer")
 
 
-def _validate_extra_env(value: Any) -> None:
-    if value is None:
-        return
-    if type(value) is not dict or any(
-        type(key) is not str or type(item) is not str
-        for key, item in value.items()
-    ):
-        raise ValueError("extra_env must be a string map or null")
-
-
 def _reject_embedded_secrets(value: Any, field_name: str) -> None:
     if type(value) is list:
         for item in value:
@@ -184,35 +174,15 @@ def _freeze_provider_contract(
     provider: Mapping[str, Any],
     value: Mapping[str, Any] | None,
 ) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not dict or set(value) != {"type", "contract"}:
-        raise ExecutionAuthorityError("invalid provider execution contract")
-    if value["type"] != "codex" or type(value["contract"]) is not dict:
-        raise ExecutionAuthorityError("unsupported provider execution contract")
-    from codex_execution_contract import CodexExecutionContract
+    from provider_execution_contract import (
+        ProviderExecutionContractError,
+        freeze_provider_contract,
+    )
 
-    contract = CodexExecutionContract.from_dict(value["contract"])
-    expected = (
-        provider.get("id"),
-        provider.get("kind"),
-        provider.get("generation"),
-        provider.get("revision"),
-    )
-    actual = (
-        contract.provider_id,
-        contract.provider_kind,
-        contract.provider_generation,
-        contract.provider_revision,
-    )
-    if actual != expected:
-        raise ExecutionAuthorityError(
-            "provider execution contract authority mismatch",
-        )
-    return _canonical_json({
-        "type": "codex",
-        "contract": contract.to_dict(),
-    })
+    try:
+        return freeze_provider_contract(provider, value)
+    except ProviderExecutionContractError as exc:
+        raise ExecutionAuthorityError(str(exc)) from exc
 
 
 def _normalize_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -303,7 +273,9 @@ def _normalize_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
         _reject_embedded_secrets(normalized[key], key)
     if normalized["internal_token"] is not None and type(normalized["internal_token"]) is not str:
         raise ValueError("internal_token must be a string or null")
-    _validate_extra_env(normalized["extra_env"])
+    from execution_environment import validate_extra_env
+
+    validate_extra_env(normalized["extra_env"])
     for key in (
         "fork",
         "supervised",

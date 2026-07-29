@@ -2213,7 +2213,12 @@ def hydrate_provider_execution(
     *,
     expected_generation: str,
     expected_revision: int,
-) -> Optional[dict]:
+) -> Optional["ProviderExecutionHydration"]:
+    from provider_execution_authority import (
+        ProviderExecutionCredential,
+        ProviderExecutionHydration,
+    )
+
     state = _load_state()
     for provider in state.get("providers", []):
         if provider.get("id") != provider_id:
@@ -2225,18 +2230,28 @@ def hydrate_provider_execution(
             expected_generation,
             expected_revision,
         )
-        hydrated = dict(provider)
-        api_key = (
-            _read_api_key(provider_id)
-            if provider.get("mode") == "api_key"
-            else ""
-        )
-        hydrated["api_key"] = api_key
+        credential = None
         if provider.get("mode") == "api_key":
-            hydrated["_credential_authoritative"] = bool(
-                provider_credential_authority_available() and api_key
+            api_key = _read_api_key(provider_id)
+            authority_available = provider_credential_authority_available()
+            status = (
+                "blocked"
+                if not authority_available
+                else "available"
+                if api_key
+                else "missing"
             )
-        return hydrated
+            credential = ProviderExecutionCredential(
+                provider_id=provider_id,
+                provider_generation=expected_generation,
+                provider_revision=expected_revision,
+                status=status,
+                api_key=api_key,
+            )
+        return ProviderExecutionHydration.create(
+            dict(provider),
+            credential,
+        )
     return None
 
 

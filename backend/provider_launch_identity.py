@@ -1,0 +1,452 @@
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import shutil
+import stat
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator, Mapping
+
+from codex_execution_common import (
+    ExecutionContractError,
+    SECRET_NAMES,
+    required_integer,
+    required_string,
+    sha256_and_first_line_fd,
+    sha256_fd,
+    stable_stat_identity,
+    symlink_chain,
+)
+from codex_execution_identity import (
+    FileIdentity,
+    file_identity_from_dict,
+    file_identity_to_dict,
+)
+
+
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_LAUNCH_MODES = frozenset({
+    "native",
+    "posix-shebang",
+    "windows-command",
+    "runner-dev",
+    "runner-frozen",
+})
+
+
+def _require_object(
+    raw: Mapping[str, Any],
+    expected: set[str],
+    label: str,
+) -> None:
+    if type(raw) is not dict or set(raw) != expected:
+        raise ExecutionContractError(f"invalid {label}")
+
+
+@dataclass(frozen=True)
+class DirectoryIdentity:
+    requested_path: str
+    resolved_path: str
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    device: int
+    inode: int
+    symlink_chain: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def capture(cls, raw_path: str | Path) -> DirectoryIdentity:
+        requested = Path(raw_path)
+        if not requested.is_absolute():
+            raise ExecutionContractError("authority directory must be absolute")
+        try:
+            chain_before = symlink_chain(requested)
+            resolved_before = requested.resolve(strict=True)
+            before = resolved_before.stat()
+            chain_after = symlink_chain(requested)
+            resolved_after = requested.resolve(strict=True)
+            after = resolved_after.stat()
+        except (OSError, RuntimeError) as exc:
+            raise ExecutionContractError(
+                "authority directory is unavailable",
+            ) from exc
+        if (
+            not stat.S_ISDIR(after.st_mode)
+            or chain_before != chain_after
+            or resolved_before != resolved_after
+            or stable_stat_identity(before) != stable_stat_identity(after)
+        ):
+            raise ExecutionContractError(
+                "authority directory changed during identity capture",
+            )
+        return cls(
+            requested_path=str(requested.absolute()),
+            resolved_path=str(resolved_after),
+            mode=after.st_mode,
+            size=after.st_size,
+            mtime_ns=after.st_mtime_ns,
+            ctime_ns=after.st_ctime_ns,
+            device=after.st_dev,
+            inode=after.st_ino,
+            symlink_chain=chain_after,
+        )
+
+    def attest(self) -> bool:
+        try:
+            return DirectoryIdentity.capture(self.requested_path) == self
+        except ExecutionContractError:
+            return False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requested_path": self.requested_path,
+            "resolved_path": self.resolved_path,
+            "mode": self.mode,
+            "size": self.size,
+            "mtime_ns": self.mtime_ns,
+            "ctime_ns": self.ctime_ns,
+            "device": self.device,
+            "inode": self.inode,
+            "symlink_chain": [list(item) for item in self.symlink_chain],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> DirectoryIdentity:
+        _require_object(raw, {
+            "requested_path",
+            "resolved_path",
+            "mode",
+            "size",
+            "mtime_ns",
+            "ctime_ns",
+            "device",
+            "inode",
+            "symlink_chain",
+        }, "directory identity")
+        requested_path = required_string(raw, "requested_path")
+        resolved_path = required_string(raw, "resolved_path")
+        integers = {
+            key: required_integer(raw, key)
+            for key in (
+                "mode",
+                "size",
+                "mtime_ns",
+                "ctime_ns",
+                "device",
+                "inode",
+            )
+        }
+        chain = raw["symlink_chain"]
+        if (
+            not Path(requested_path).is_absolute()
+            or not Path(resolved_path).is_absolute()
+            or not stat.S_ISDIR(integers["mode"])
+            or any(value < 0 for value in integers.values())
+            or type(chain) is not list
+            or any(
+                type(item) is not list
+                or len(item) != 2
+                or any(type(value) is not str for value in item)
+                for item in chain
+            )
+        ):
+            raise ExecutionContractError("invalid directory identity")
+        return cls(
+            requested_path=requested_path,
+            resolved_path=resolved_path,
+            symlink_chain=tuple((item[0], item[1]) for item in chain),
+            **integers,
+        )
+
+
+def _verify_file_handle(fd: int, identity: FileIdentity) -> None:
+    observed = os.fstat(fd)
+    if (
+        observed.st_dev != identity.device
+        or observed.st_ino != identity.inode
+        or observed.st_size != identity.size
+        or observed.st_mtime_ns != identity.mtime_ns
+        or observed.st_ctime_ns != identity.ctime_ns
+        or sha256_fd(fd) != identity.sha256
+    ):
+        raise ExecutionContractError("execution component identity mismatch")
+
+
+@contextmanager
+def _open_file_identities(
+    identities: tuple[FileIdentity, ...],
+) -> Iterator[tuple[int, ...]]:
+    handles: list[int] = []
+    try:
+        for identity in identities:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(identity.resolved_path, flags)
+            except OSError as exc:
+                raise ExecutionContractError(
+                    "execution component is unavailable",
+                ) from exc
+            handles.append(descriptor)
+            _verify_file_handle(descriptor, identity)
+        yield tuple(handles)
+    finally:
+        for descriptor in handles:
+            os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class AttestedLaunch:
+    logical_command: str
+    platform: str
+    mode: str
+    argv: tuple[str, ...]
+    launcher: FileIdentity
+    components: tuple[FileIdentity, ...]
+    component_argv_indexes: tuple[int, ...]
+
+    def attest(self) -> bool:
+        return self.launcher.attest() and all(
+            component.attest() for component in self.components
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "logical_command": self.logical_command,
+            "platform": self.platform,
+            "mode": self.mode,
+            "argv": list(self.argv),
+            "launcher": file_identity_to_dict(self.launcher),
+            "components": [
+                file_identity_to_dict(component)
+                for component in self.components
+            ],
+            "component_argv_indexes": list(self.component_argv_indexes),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> AttestedLaunch:
+        _require_object(raw, {
+            "logical_command",
+            "platform",
+            "mode",
+            "argv",
+            "launcher",
+            "components",
+            "component_argv_indexes",
+        }, "attested launch")
+        argv = raw["argv"]
+        components = raw["components"]
+        indexes = raw["component_argv_indexes"]
+        if (
+            type(argv) is not list
+            or not argv
+            or any(type(value) is not str for value in argv)
+            or type(components) is not list
+            or not components
+            or any(type(value) is not dict for value in components)
+            or type(indexes) is not list
+            or any(type(value) is not int for value in indexes)
+            or type(raw["launcher"]) is not dict
+        ):
+            raise ExecutionContractError("invalid attested launch")
+        launch = cls(
+            logical_command=required_string(raw, "logical_command"),
+            platform=required_string(raw, "platform"),
+            mode=required_string(raw, "mode"),
+            argv=tuple(argv),
+            launcher=file_identity_from_dict(raw["launcher"]),
+            components=tuple(
+                file_identity_from_dict(component) for component in components
+            ),
+            component_argv_indexes=tuple(indexes),
+        )
+        _validate_launch(launch)
+        return launch
+
+
+def _validate_launch(launch: AttestedLaunch) -> None:
+    indexes = launch.component_argv_indexes
+    if (
+        not _SAFE_NAME_RE.fullmatch(launch.logical_command)
+        or not launch.platform
+        or "\x00" in launch.platform
+        or "\n" in launch.platform
+        or launch.mode not in _LAUNCH_MODES
+        or not launch.argv
+        or not launch.components
+        or len(indexes) != len(launch.components)
+        or indexes != tuple(sorted(set(indexes)))
+        or indexes[0] != 0
+        or any(index < 0 or index >= len(launch.argv) for index in indexes)
+        or any("\x00" in value or "\n" in value for value in launch.argv)
+    ):
+        raise ExecutionContractError("incoherent attested launch")
+    for index, component in zip(indexes, launch.components):
+        if launch.argv[index] != component.resolved_path:
+            raise ExecutionContractError("incoherent attested launch component")
+    if launch.mode == "native" and (
+        len(launch.argv) != 1
+        or indexes != (0,)
+        or launch.components[0] != launch.launcher
+    ):
+        raise ExecutionContractError("incoherent native launch")
+    if launch.mode == "posix-shebang" and (
+        len(launch.components) != 2
+        or indexes != (0, len(launch.argv) - 1)
+        or launch.components[-1] != launch.launcher
+    ):
+        raise ExecutionContractError("incoherent shebang launch")
+    if launch.mode == "posix-shebang" and any(
+        marker in value.lower()
+        for value in launch.argv[1:-1]
+        for marker in SECRET_NAMES
+    ):
+        raise ExecutionContractError("secret launch argument is not allowed")
+    if launch.mode == "windows-command" and (
+        len(launch.argv) != 5
+        or indexes != (0, 4)
+        or tuple(value.lower() for value in launch.argv[1:4])
+        != ("/d", "/s", "/c")
+        or launch.components[-1] != launch.launcher
+    ):
+        raise ExecutionContractError("incoherent Windows command launch")
+    if launch.mode == "runner-dev" and indexes != (0, 1):
+        raise ExecutionContractError("incoherent development runner launch")
+    if launch.mode == "runner-frozen" and indexes != (0,):
+        raise ExecutionContractError("incoherent frozen runner launch")
+    if launch.mode.startswith("runner-") and (
+        launch.components[0] != launch.launcher
+    ):
+        raise ExecutionContractError("incoherent runner launcher")
+
+
+def _read_attested_shebang(identity: FileIdentity) -> tuple[str, ...]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(identity.resolved_path, flags)
+        try:
+            observed = os.fstat(descriptor)
+            digest, first_line = sha256_and_first_line_fd(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ExecutionContractError("provider launcher is unreadable") from exc
+    if (
+        observed.st_dev != identity.device
+        or observed.st_ino != identity.inode
+        or observed.st_size != identity.size
+        or observed.st_mtime_ns != identity.mtime_ns
+        or observed.st_ctime_ns != identity.ctime_ns
+        or digest != identity.sha256
+    ):
+        raise ExecutionContractError("provider launcher identity mismatch")
+    if not first_line.startswith(b"#!"):
+        return ()
+    try:
+        values = shlex.split(first_line[2:].decode("utf-8").strip())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ExecutionContractError("provider launcher shebang is invalid") from exc
+    if not values:
+        raise ExecutionContractError("provider launcher shebang is empty")
+    return tuple(values)
+
+
+def capture_cli_launch(
+    *,
+    logical_command: str,
+    launcher_path: str | Path,
+    search_path: str | None = None,
+    platform: str | None = None,
+    command_processor: str | Path | None = None,
+) -> AttestedLaunch:
+    launcher = FileIdentity.capture(launcher_path)
+    target = Path(launcher.resolved_path)
+    effective_platform = platform or sys.platform
+    if effective_platform.lower().startswith("win") and (
+        target.suffix.lower() in {".cmd", ".bat"}
+    ):
+        if command_processor is None:
+            raise ExecutionContractError(
+                "Windows command processor must be resolved before capture",
+            )
+        processor = FileIdentity.capture(command_processor)
+        launch = AttestedLaunch(
+            logical_command=logical_command,
+            platform=effective_platform,
+            mode="windows-command",
+            argv=(
+                processor.resolved_path,
+                "/d",
+                "/s",
+                "/c",
+                launcher.resolved_path,
+            ),
+            launcher=launcher,
+            components=(processor, launcher),
+            component_argv_indexes=(0, 4),
+        )
+        _validate_launch(launch)
+        return launch
+    tokens = _read_attested_shebang(launcher)
+    if not tokens:
+        launch = AttestedLaunch(
+            logical_command=logical_command,
+            platform=effective_platform,
+            mode="native",
+            argv=(launcher.resolved_path,),
+            launcher=launcher,
+            components=(launcher,),
+            component_argv_indexes=(0,),
+        )
+        _validate_launch(launch)
+        return launch
+    interpreter_token = tokens[0]
+    interpreter_args = tokens[1:]
+    if interpreter_token == "/usr/bin/env":
+        if (
+            len(interpreter_args) != 1
+            or interpreter_args[0].startswith("-")
+            or search_path is None
+        ):
+            raise ExecutionContractError("provider env shebang is ambiguous")
+        resolved_interpreter = shutil.which(
+            interpreter_args[0],
+            path=search_path,
+        )
+        if resolved_interpreter is None:
+            raise ExecutionContractError("provider interpreter is unavailable")
+        shebang_args: tuple[str, ...] = ()
+    else:
+        interpreter_path = Path(interpreter_token)
+        if not interpreter_path.is_absolute():
+            raise ExecutionContractError("provider interpreter is unavailable")
+        try:
+            resolved_interpreter = str(interpreter_path.resolve(strict=True))
+        except OSError as exc:
+            raise ExecutionContractError(
+                "provider interpreter is unavailable",
+            ) from exc
+        shebang_args = interpreter_args
+    interpreter = FileIdentity.capture(resolved_interpreter)
+    launch = AttestedLaunch(
+        logical_command=logical_command,
+        platform=effective_platform,
+        mode="posix-shebang",
+        argv=(
+            interpreter.resolved_path,
+            *shebang_args,
+            launcher.resolved_path,
+        ),
+        launcher=launcher,
+        components=(interpreter, launcher),
+        component_argv_indexes=(0, len(shebang_args) + 1),
+    )
+    _validate_launch(launch)
+    return launch
