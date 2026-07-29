@@ -997,6 +997,69 @@ def test_openai_runner_lists_real_profile_selected_session_control_tools():
     ] == "better-agent-session-control"
 
 
+def test_required_profile_mcp_server_names_excludes_not_runtime_ready_extension():
+    # Regression: required_profile_mcp_server_names used to mark a selected
+    # extension's server "required" even while it was not runtime-ready, but
+    # _mcp_server_configs_for_delivery (the actual config source) always
+    # skipped not-ready extensions. That asymmetry made _extension_mcp_tools_for_run
+    # raise "required extension MCP config unavailable" deterministically for
+    # every turn during a mid-startup/reload window, until the extension
+    # became ready. required_profile_mcp_server_names must never require a
+    # server that _mcp_server_configs_for_delivery would not deliver.
+    extension_store = _mod("extension_store")
+    installation_profile = _mod("installation_profile")
+    test_installation = _mod("_test_installation")
+    test_installation.activate(Path(_TMP_HOME))
+    installation_profile.capture_active_capabilities()
+    original_verified_python = extension_store.dependency_plan.verified_active_python
+    extension_store.dependency_plan.verified_active_python = lambda backend_dir: Path(
+        sys.executable
+    )
+    data = extension_store._load()
+    extension_store._ensure_public_extensions(data)
+    extension_store._save(data)
+    inputs = {
+        "mode": "native",
+        "app_session_id": "session-control-not-ready",
+        "working_mode": "native",
+        "user_facing": True,
+        "backend_url": "http://127.0.0.1:9",
+        "internal_token": "test-token",
+        "resolved_harness_run_config": {
+            "profile_id": "better-agent-qa-fresh",
+            "launcher_projection": {
+                "extension_selection_authoritative": True,
+                "extension_mcp_servers": {
+                    extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID: [
+                        "better-agent-session-control",
+                    ],
+                },
+            },
+        },
+    }
+
+    original_ready = extension_store._record_runtime_ready
+
+    def not_ready(record):
+        manifest = record.get("manifest") or {}
+        if str(manifest.get("id") or "") == extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID:
+            return False
+        return original_ready(record)
+
+    try:
+        extension_store._record_runtime_ready = not_ready
+        required_servers = extension_store.required_profile_mcp_server_names(inputs)
+        delivered_configs = extension_store.native_mcp_server_configs(
+            inputs, user_facing=True, bare=False,
+        )
+    finally:
+        extension_store._record_runtime_ready = original_ready
+        extension_store.dependency_plan.verified_active_python = original_verified_python
+
+    assert "better-agent-session-control" not in required_servers
+    assert "better-agent-session-control" not in delivered_configs
+
+
 def test_openai_runner_mcp_tool_names_are_canonical_bounded_and_unique():
     runner = _mod("runner_better_agent")
     used_names = {"mcp__server__tool"}

@@ -6230,11 +6230,22 @@ def required_profile_mcp_server_names(inputs: dict[str, Any]) -> set[str]:
             for name in selected
             if str(name or "").strip()
         }
+        # An extension that isn't runtime-ready delivers no MCP configs (see
+        # the matching gate in _mcp_server_configs_for_delivery). A selection
+        # can't be "required" for tool discovery unless it will actually be
+        # delivered, or every mid-startup/reload window would fail every
+        # turn closed on a server that was never going to be configured.
+        # The entrypoint is still marked "mapped" so the not-installed
+        # fallback below (for extensions with no active record at all)
+        # doesn't re-require it.
+        record_ready = _record_runtime_ready(record)
         for item in _stored_mcp_entrypoints(record):
             item_name = str(item.get("name") or "")
             if item_name not in selected_names:
                 continue
             mapped.add((extension_id, item_name))
+            if not record_ready:
+                continue
             # A selected server whose delivery gates (predicate, user_facing,
             # bare) exclude it from this run cannot be required for this run.
             if not _mcp_item_available_for_inputs(record, item, inputs):
