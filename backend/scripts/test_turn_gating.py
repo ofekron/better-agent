@@ -38,6 +38,7 @@ from turn_helpers import _is_transient_error, _retry_attempt_limit  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
+from execution_template import prepare_execution  # noqa: E402
 import config_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
@@ -368,15 +369,27 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
         KIND = "codex"
         _runs: dict = {}
 
-        def start_run(self, **kw):
+        def prepare_run(self, **kw):
+            return prepare_execution({
+                "id": "turn-gating-loopback",
+                "kind": self.KIND,
+                "generation": "turn-gating-loopback",
+                "revision": 1,
+            }, **kw)
+
+        def start_run(self, *, execution, loop, queue):
+            if not execution._try_commit_spawn():
+                return False
+            kw = execution.start_arguments()
             captured.append(kw)
-            kw["loop"].call_soon_threadsafe(
-                kw["queue"].put_nowait,
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
                 type("E", (), {
                     "type": "complete",
                     "data": {"success": True, "session_id": None, "token_usage": None},
                 })(),
             )
+            return True
 
         def is_running(self, _run_id: str) -> bool:
             return False
@@ -444,7 +457,18 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
         KIND = "codex"
         _runs: dict = {}
 
-        def start_run(self, **kw):
+        def prepare_run(self, **kw):
+            return prepare_execution({
+                "id": "turn-gating-durable-target",
+                "kind": self.KIND,
+                "generation": "turn-gating-durable-target",
+                "revision": 1,
+            }, **kw)
+
+        def start_run(self, *, execution, loop, queue):
+            if not execution._try_commit_spawn():
+                return False
+            kw = execution.start_arguments()
             target_message_id = kw.get("target_message_id")
             root = session_store.get_root_tree(sid) or {}
             durable_checks.append(
@@ -453,13 +477,14 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
                     for m in root.get("messages") or []
                 )
             )
-            kw["loop"].call_soon_threadsafe(
-                kw["queue"].put_nowait,
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
                 type("E", (), {
                     "type": "complete",
                     "data": {"success": True, "session_id": None, "token_usage": None},
                 })(),
             )
+            return True
 
         def is_running(self, _run_id: str) -> bool:
             return False
