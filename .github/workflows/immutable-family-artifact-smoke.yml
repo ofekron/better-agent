@@ -47,10 +47,11 @@ jobs:
         working-directory: frontend
         run: npm run build
       - name: Install frozen build dependencies
+        working-directory: backend
         run: >-
           python -m pip install
-          -r backend/requirements.txt
-          -r backend/requirements-claude.txt
+          -r requirements.txt
+          -r requirements-claude.txt
           pyinstaller pywebview
       - name: Build PyInstaller onedir
         working-directory: desktop

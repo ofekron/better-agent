@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_execution_common import ExecutionContractError
@@ -16,6 +18,8 @@ from provider_frozen_bundle import (
     attest_materialized_frozen_bundle,
     materialize_frozen_bundle,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fixture(parent: Path) -> tuple[Path, Path, Path]:
@@ -131,6 +135,27 @@ def test_macos_default_bundle_root_preserves_app_layout() -> None:
         assert bundle.sidecar_relative == "Contents/Frameworks"
 
 
+def test_artifact_workflow_installs_backend_relative_requirements() -> None:
+    workflow = yaml.safe_load(
+        (
+            ROOT
+            / ".github"
+            / "workflows"
+            / "immutable-family-artifact-smoke.yml"
+        ).read_text(encoding="utf-8"),
+    )
+    steps = workflow["jobs"]["frozen-onedir-smoke"]["steps"]
+    install = next(
+        step
+        for step in steps
+        if step.get("name") == "Install frozen build dependencies"
+    )
+    assert install["working-directory"] == "backend"
+    assert "-r requirements.txt" in install["run"]
+    assert "-r requirements-claude.txt" in install["run"]
+    assert "-r backend/" not in install["run"]
+
+
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
     mutations = (
         lambda root, sidecar: (sidecar / "injected.py").write_bytes(b"x"),
@@ -218,6 +243,7 @@ def test_materialized_add_change_remove_and_mode_tamper_are_rejected() -> None:
 def main() -> None:
     test_complete_bundle_round_trip_and_materialization()
     test_macos_default_bundle_root_preserves_app_layout()
+    test_artifact_workflow_installs_backend_relative_requirements()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()
     print("frozen onedir artifact tests passed")
