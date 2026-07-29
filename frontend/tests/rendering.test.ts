@@ -1,5 +1,5 @@
-import { afterEach, describe, it, expect } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { act, render, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
@@ -476,6 +476,8 @@ describe("message rendering", () => {
   });
 
   it("a persisted assistant with error=true renders error chrome", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn().mockResolvedValue(undefined);
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u", content: "trigger" }),
@@ -483,15 +485,42 @@ describe("message rendering", () => {
           id: "a",
           content: "API Error: 500",
           error: true,
-          errorText: "API Error: something broke",
+          errorText: "API Error: something broke\nrequest id: req-42",
         }),
       ],
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
 
-    expect(h.$(".message-status.status-error")).not.toBeNull();
-    h.unmount();
+    try {
+      const errorStatus = h.$(".message-status.status-error");
+      expect(errorStatus).not.toBeNull();
+      const disclosure = errorStatus!.querySelector<HTMLButtonElement>(".error-block-toggle");
+      const copyButton = errorStatus!.querySelector<HTMLButtonElement>(".error-copy-btn");
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+      expect(copyButton?.getAttribute("aria-label")).toBe("errorCopy.copy");
+
+      await act(async () => {
+        copyButton!.click();
+      });
+      expect(writeText).toHaveBeenCalledWith(
+        "API Error: something broke\nrequest id: req-42",
+      );
+      expect(copyButton?.getAttribute("aria-label")).toBe("errorCopy.copied");
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+      expect(errorStatus!.querySelector(".error-block-body")).toBeNull();
+    } finally {
+      h.unmount();
+      if (originalClipboard) {
+        Object.defineProperty(navigator, "clipboard", originalClipboard);
+      } else {
+        delete (navigator as unknown as Record<string, unknown>).clipboard;
+      }
+    }
   });
 
   it("thinking text mentioning 'API Error' is NOT mis-rendered as an error block", async () => {

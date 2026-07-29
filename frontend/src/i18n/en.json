@@ -1433,5 +1433,7 @@
   "extensionHealth.error": "Couldn't submit your decision. Please try again.",
   "extensionHealth.disable": "Disable",
   "extensionHealth.keepEnabled": "Keep enabled",
-  "extensionHealth.working": "Working…"
+  "extensionHealth.working": "Working…",
+  "errorCopy.copy": "Copy error details",
+  "errorCopy.copied": "Error details copied"
 }

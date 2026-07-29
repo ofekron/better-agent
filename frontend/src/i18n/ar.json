@@ -1361,5 +1361,7 @@
   "extensionHealth.error": "تعذّر إرسال قرارك. حاول مرة أخرى.",
   "extensionHealth.disable": "تعطيل",
   "extensionHealth.keepEnabled": "إبقاء مفعّل",
-  "extensionHealth.working": "جارٍ المعالجة…"
+  "extensionHealth.working": "جارٍ المعالجة…",
+  "errorCopy.copy": "نسخ تفاصيل الخطأ",
+  "errorCopy.copied": "تم نسخ تفاصيل الخطأ"
 }

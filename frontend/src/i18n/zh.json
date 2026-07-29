@@ -1362,5 +1362,7 @@
   "extensionHealth.error": "无法提交您的决定。请重试。",
   "extensionHealth.disable": "禁用",
   "extensionHealth.keepEnabled": "保持启用",
-  "extensionHealth.working": "处理中…"
+  "extensionHealth.working": "处理中…",
+  "errorCopy.copy": "复制错误详情",
+  "errorCopy.copied": "已复制错误详情"
 }

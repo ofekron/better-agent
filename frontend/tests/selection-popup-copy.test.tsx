@@ -67,7 +67,7 @@ describe("SelectionPopup copy", () => {
     return selection;
   }
 
-  it("copies the captured message selection instead of native copy while the range is still active", async () => {
+  it("leaves native Ctrl/Cmd+C authoritative while the range is active", async () => {
     const { captured, restore } = captureDocumentListeners();
 
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -89,11 +89,10 @@ describe("SelectionPopup copy", () => {
         </>,
       ));
 
-      stubSelectedMessageText("alpha special omega");
+      const selection = stubSelectedMessageText("alpha special omega");
 
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
-        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
       });
       await act(async () => {
         captured.find((listener) => listener.type === "mouseup")!.fn(
@@ -107,17 +106,16 @@ describe("SelectionPopup copy", () => {
         screen.queryByRole("button", { name: /adversarial sync/i }),
       ).toBeNull();
 
-      expect(window.getSelection()?.isCollapsed).toBe(false);
-      await act(async () => {
-        captured.find((listener) => listener.type === "keydown")?.fn(
-          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
-        );
+      const nativeCopyEvent = new KeyboardEvent("keydown", {
+        key: "c",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
       });
-
-      await waitFor(() => {
-        expect(writeText).toHaveBeenCalledWith("alpha special omega");
-      });
-      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(document.dispatchEvent(nativeCopyEvent)).toBe(true);
+      expect(nativeCopyEvent.defaultPrevented).toBe(false);
+      expect(selection.removeAllRanges).not.toHaveBeenCalled();
+      expect(writeText).not.toHaveBeenCalled();
     } finally {
       unmount();
       restore();
@@ -146,7 +144,7 @@ describe("SelectionPopup copy", () => {
         </>,
       ));
 
-      const selection = stubSelectedMessageText("alpha special omega");
+      const selection = stubSelectedMessageText("  alpha special omega\n");
 
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
@@ -171,7 +169,7 @@ describe("SelectionPopup copy", () => {
       });
 
       await waitFor(() => {
-        expect(writeText).toHaveBeenCalledWith("alpha special omega");
+        expect(writeText).toHaveBeenCalledWith("  alpha special omega\n");
       });
     } finally {
       unmount();
@@ -179,7 +177,59 @@ describe("SelectionPopup copy", () => {
     }
   });
 
-  it("keeps Ctrl+C available after right-click", async () => {
+  it("does not clear a newer selection when popup copy resolves", async () => {
+    const { captured, restore } = captureDocumentListeners();
+    let resolveCopy = () => {};
+    const writeText = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveCopy = resolve;
+      }),
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha special omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </>,
+      ));
+      const originalSelection = stubSelectedMessageText("alpha special omega");
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+      await screen.findByRole("button", { name: "Copy" });
+      screen.getByRole("button", { name: "Copy" }).click();
+
+      const newerSelection = {
+        isCollapsed: false,
+        toString: () => "newer selection",
+        removeAllRanges: vi.fn(),
+      } as unknown as Selection;
+      vi.mocked(window.getSelection).mockReturnValue(newerSelection);
+      await act(async () => resolveCopy());
+
+      expect(originalSelection.removeAllRanges).not.toHaveBeenCalled();
+      expect(newerSelection.removeAllRanges).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
+  it("keeps native Ctrl+C available after right-click", async () => {
     const { captured, restore } = captureDocumentListeners();
 
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -206,7 +256,6 @@ describe("SelectionPopup copy", () => {
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
         expect(captured.some((listener) => listener.type === "contextmenu")).toBe(true);
-        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
       });
       await act(async () => {
         captured.find((listener) => listener.type === "mouseup")!.fn(
@@ -219,16 +268,16 @@ describe("SelectionPopup copy", () => {
           new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
         );
       });
-      await act(async () => {
-        captured.find((listener) => listener.type === "keydown")!.fn(
-          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
-        );
+      const nativeCopyEvent = new KeyboardEvent("keydown", {
+        key: "c",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
       });
-
-      expect(selection.removeAllRanges).toHaveBeenCalledTimes(1);
-      await waitFor(() => {
-        expect(writeText).toHaveBeenCalledWith("alpha special omega");
-      });
+      expect(document.dispatchEvent(nativeCopyEvent)).toBe(true);
+      expect(nativeCopyEvent.defaultPrevented).toBe(false);
+      expect(selection.removeAllRanges).not.toHaveBeenCalled();
+      expect(writeText).not.toHaveBeenCalled();
     } finally {
       unmount();
       restore();
@@ -261,7 +310,6 @@ describe("SelectionPopup copy", () => {
 
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
-        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
       });
       await act(async () => {
         captured.find((listener) => listener.type === "mouseup")!.fn(
@@ -272,12 +320,7 @@ describe("SelectionPopup copy", () => {
       await act(async () => {
         screen.getByRole("button", { name: "Comment" }).click();
       });
-      await act(async () => {
-        captured.find((listener) => listener.type === "keydown")!.fn(
-          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
-        );
-      });
-
+      expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
       expect(writeText).not.toHaveBeenCalled();
     } finally {
       unmount();

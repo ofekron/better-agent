@@ -1362,5 +1362,7 @@
   "extensionHealth.error": "आपका निर्णय सबमिट नहीं हो सका। कृपया पुनः प्रयास करें।",
   "extensionHealth.disable": "अक्षम करें",
   "extensionHealth.keepEnabled": "सक्षम रखें",
-  "extensionHealth.working": "प्रसंस्करण…"
+  "extensionHealth.working": "प्रसंस्करण…",
+  "errorCopy.copy": "त्रुटि विवरण कॉपी करें",
+  "errorCopy.copied": "त्रुटि विवरण कॉपी हो गया"
 }

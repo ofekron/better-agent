@@ -1364,5 +1364,7 @@
   "extensionHealth.error": "Не удалось отправить решение. Повторите попытку.",
   "extensionHealth.disable": "Отключить",
   "extensionHealth.keepEnabled": "Оставить включённым",
-  "extensionHealth.working": "Обработка…"
+  "extensionHealth.working": "Обработка…",
+  "errorCopy.copy": "Копировать сведения об ошибке",
+  "errorCopy.copied": "Сведения об ошибке скопированы"
 }

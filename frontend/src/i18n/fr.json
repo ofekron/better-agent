@@ -1362,5 +1362,7 @@
   "extensionHealth.error": "Impossible d'envoyer votre décision. Veuillez réessayer.",
   "extensionHealth.disable": "Désactiver",
   "extensionHealth.keepEnabled": "Garder activé",
-  "extensionHealth.working": "Traitement…"
+  "extensionHealth.working": "Traitement…",
+  "errorCopy.copy": "Copier les détails de l’erreur",
+  "errorCopy.copied": "Détails de l’erreur copiés"
 }

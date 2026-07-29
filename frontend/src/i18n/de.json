@@ -1358,5 +1358,7 @@
   "extensionHealth.error": "Entscheidung konnte nicht gesendet werden. Bitte erneut versuchen.",
   "extensionHealth.disable": "Deaktivieren",
   "extensionHealth.keepEnabled": "Aktiviert lassen",
-  "extensionHealth.working": "Wird verarbeitet…"
+  "extensionHealth.working": "Wird verarbeitet…",
+  "errorCopy.copy": "Fehlerdetails kopieren",
+  "errorCopy.copied": "Fehlerdetails kopiert"
 }

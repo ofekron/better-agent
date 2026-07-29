@@ -1358,5 +1358,7 @@
   "extensionHealth.error": "決定を送信できませんでした。もう一度お試しください。",
   "extensionHealth.disable": "無効化",
   "extensionHealth.keepEnabled": "有効のままにする",
-  "extensionHealth.working": "処理中…"
+  "extensionHealth.working": "処理中…",
+  "errorCopy.copy": "エラー詳細をコピー",
+  "errorCopy.copied": "エラー詳細をコピーしました"
 }

@@ -1405,5 +1405,7 @@
   "extensionHealth.error": "לא הצלחנו לשלוח את ההחלטה. נסה שוב.",
   "extensionHealth.disable": "השבת",
   "extensionHealth.keepEnabled": "השאר מופעל",
-  "extensionHealth.working": "מעבד…"
+  "extensionHealth.working": "מעבד…",
+  "errorCopy.copy": "העתקת פרטי השגיאה",
+  "errorCopy.copied": "פרטי השגיאה הועתקו"
 }

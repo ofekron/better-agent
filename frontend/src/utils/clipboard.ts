@@ -5,13 +5,21 @@
  *  and explicitly focused so that iOS Safari and Android WebView accept
  *  execCommand("copy"). Without this fallback, copy actions invoked from
  *  mobile action sheets do nothing. */
-export async function copyToClipboard(text: string): Promise<void> {
+export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
-    return;
+    return true;
   } catch {
     // Clipboard API unavailable (insecure context) or denied — fall through.
   }
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const selection = window.getSelection();
+  const selectedRanges = selection
+    ? Array.from({ length: selection.rangeCount }, (_, index) =>
+        selection.getRangeAt(index).cloneRange(),
+      )
+    : [];
   const ta = document.createElement("textarea");
   ta.value = text;
   ta.setAttribute("readonly", "");
@@ -30,9 +38,15 @@ export async function copyToClipboard(text: string): Promise<void> {
   ta.focus();
   ta.select();
   try {
-    document.execCommand("copy");
+    return document.execCommand("copy");
   } catch {
-    // best effort
+    return false;
+  } finally {
+    document.body.removeChild(ta);
+    if (selection && selectedRanges.length > 0) {
+      selection.removeAllRanges();
+      selectedRanges.forEach((range) => selection.addRange(range));
+    }
+    activeElement?.focus({ preventScroll: true });
   }
-  document.body.removeChild(ta);
 }

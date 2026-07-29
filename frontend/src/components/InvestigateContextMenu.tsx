@@ -274,7 +274,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
       // Text selection actions — if text is currently selected.
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed && sel.toString().trim()) {
-        const text = sel.toString().trim();
+        const text = sel.toString();
         const anchor = sel.anchorNode;
         const anchorEl =
           anchor instanceof HTMLElement ? anchor : anchor?.parentElement;
@@ -285,9 +285,8 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
           id: "copy",
           label: "Copy",
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => {
-            void copyToClipboard(text);
-            sel.removeAllRanges();
+          onClick: async () => {
+            await copyToClipboard(text);
           },
         });
 

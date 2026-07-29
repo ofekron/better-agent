@@ -38,6 +38,7 @@ import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId, providerKindForId } from "../utils/providerCache";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
+import { copyToClipboard } from "../utils/clipboard";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -3000,7 +3001,16 @@ function MessageStatus({
   errorMeta?: ChatMessage["errorMeta"];
   onRetry?: () => void;
 }) {
+  const { t } = useTranslation();
   const [errorExpanded, setErrorExpanded] = useState(false);
+  const [errorCopyState, setErrorCopyState] = useState<{
+    phase: "idle" | "copying" | "copied";
+    text: string | undefined;
+  }>({ phase: "idle", text: undefined });
+  const copyResetRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+  }, []);
   if (!status) return null;
   const config = {
     sending: { label: "Sending...", className: "status-sending" },
@@ -3015,25 +3025,60 @@ function MessageStatus({
     // expand arrow only \u2014 the card is the primary, readable content.
     const hasCredentialCard = errorMeta?.kind === "provider_credential";
     const firstLine = errorText ? errorText.split("\n", 1)[0] : "";
+    const copyPhase = errorCopyState.text === errorText ? errorCopyState.phase : "idle";
+    const copyError = async () => {
+      if (!errorText || copyPhase === "copying") return;
+      if (copyResetRef.current !== null) {
+        window.clearTimeout(copyResetRef.current);
+        copyResetRef.current = null;
+      }
+      setErrorCopyState({ phase: "copying", text: errorText });
+      if (!(await copyToClipboard(errorText))) {
+        setErrorCopyState({ phase: "idle", text: errorText });
+        return;
+      }
+      setErrorCopyState({ phase: "copied", text: errorText });
+      copyResetRef.current = window.setTimeout(() => {
+        setErrorCopyState({ phase: "idle", text: errorText });
+        copyResetRef.current = null;
+      }, 1600);
+    };
     return (
       <div className="message-status status-error">
-        <div
-          className="error-block-header"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (errorText) setErrorExpanded((v) => !v);
-          }}
-          role={errorText ? "button" : undefined}
-        >
-          <span className="status-dot" />
-          <span className="error-block-label">{config.label}</span>
+        <div className="error-block-header">
+          <button
+            className="error-block-toggle"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (errorText) setErrorExpanded((value) => !value);
+            }}
+            aria-expanded={errorText ? errorExpanded : undefined}
+            disabled={!errorText}
+          >
+            <span className="status-dot" />
+            <span className="error-block-label">{config.label}</span>
+            {errorText && (
+              <span className="collapse-arrow" aria-hidden="true">
+                {errorExpanded ? "\u25BC" : "\u25B6"}
+              </span>
+            )}
+            {errorText && !errorExpanded && !hasCredentialCard && (
+              <span className="status-error-text">{firstLine}</span>
+            )}
+          </button>
           {errorText && (
-            <span className="collapse-arrow">
-              {errorExpanded ? "\u25BC" : "\u25B6"}
-            </span>
-          )}
-          {errorText && !errorExpanded && !hasCredentialCard && (
-            <span className="status-error-text">{firstLine}</span>
+            <button
+              className={`error-copy-btn${copyPhase === "copied" ? " copied" : ""}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                void copyError();
+              }}
+              disabled={copyPhase === "copying"}
+              aria-label={copyPhase === "copied" ? t("errorCopy.copied") : t("errorCopy.copy")}
+              title={copyPhase === "copied" ? t("errorCopy.copied") : t("errorCopy.copy")}
+            >
+              <Icon name={copyPhase === "copied" ? "check" : "clipboard"} size={13} />
+            </button>
           )}
           {onRetry && (
             <button

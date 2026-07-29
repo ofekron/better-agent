@@ -1361,5 +1361,7 @@
   "extensionHealth.error": "결정을 제출할 수 없습니다. 다시 시도해 주세요.",
   "extensionHealth.disable": "비활성화",
   "extensionHealth.keepEnabled": "활성화 유지",
-  "extensionHealth.working": "처리 중…"
+  "extensionHealth.working": "처리 중…",
+  "errorCopy.copy": "오류 세부정보 복사",
+  "errorCopy.copied": "오류 세부정보가 복사됨"
 }

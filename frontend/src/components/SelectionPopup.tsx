@@ -61,9 +61,8 @@ export function SelectionPopup({ onAdd }: Props) {
           id: "copy",
           label: "Copy",
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => {
-            copyToClipboard(text);
-            window.getSelection()?.removeAllRanges();
+          onClick: async () => {
+            await copyToClipboard(text);
           },
         },
         {
@@ -90,8 +89,7 @@ export function SelectionPopup({ onAdd }: Props) {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
 
-      const text = sel.toString().trim();
-      if (!text) return;
+      const text = sel.toString();
 
       // Walk up from the selection anchor to find [data-message-id]
       const anchor = sel.anchorNode;
@@ -188,22 +186,6 @@ export function SelectionPopup({ onAdd }: Props) {
     };
   }, [dismiss, showMobileSheet]);
 
-  // Ctrl/Cmd+C copies the captured message text even when rendered
-  // markdown splits the browser selection across nested nodes.
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!popupTextRef.current) return;
-      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-        if (document.activeElement === inputRef.current) return;
-        e.preventDefault();
-        copyToClipboard(popupTextRef.current);
-        dismiss();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [dismiss]);
-
   // Focus input when entering comment phase
   useEffect(() => {
     if (popup && phase === "comment") {
@@ -218,11 +200,10 @@ export function SelectionPopup({ onAdd }: Props) {
     closePopup();
   }, [popup, comment, closePopup]);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     if (!popup) return;
-    copyToClipboard(popup.text);
-    dismiss();
-  }, [popup, dismiss]);
+    if (await copyToClipboard(popup.text)) closePopup();
+  }, [popup, closePopup]);
 
   const handleComment = useCallback(() => {
     if (!popup) return;
@@ -245,7 +226,7 @@ export function SelectionPopup({ onAdd }: Props) {
     >
       {phase === "actions" ? (
         <div className="selection-popup-actions">
-          <button className="selection-popup-action-btn" onClick={handleCopy}>
+          <button className="selection-popup-action-btn" onClick={() => void handleCopy()}>
             Copy
           </button>
           <button className="selection-popup-action-btn" onClick={handleComment}>

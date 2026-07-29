@@ -4647,8 +4647,24 @@ select:focus-visible,
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+.error-block-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
-  user-select: none;
+  text-align: start;
+}
+
+.error-block-toggle:disabled {
+  cursor: default;
 }
 
 .error-block-header .collapse-arrow {
@@ -4674,6 +4690,53 @@ select:focus-visible,
   word-break: break-word;
   max-height: 320px;
   overflow: auto;
+}
+
+.error-copy-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(231, 76, 60, 0.62);
+  border-radius: 4px;
+  background: transparent;
+  color: #f0a59b;
+  cursor: pointer;
+  font-size: 0.8em;
+  line-height: 1.4;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    transform 180ms ease;
+}
+
+.error-copy-btn:hover:not(:disabled) {
+  background: rgba(231, 76, 60, 0.18);
+}
+
+.error-copy-btn.copied {
+  border-color: #2ecc71;
+  color: #2ecc71;
+  transform: translateY(-1px);
+}
+
+.error-copy-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .error-copy-btn {
+    transition: none;
+  }
+
+  .error-copy-btn.copied {
+    transform: none;
+  }
 }
 
 .status-retry-btn {

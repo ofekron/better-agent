@@ -1358,5 +1358,7 @@
   "extensionHealth.error": "Kon je beslissing niet verzenden. Probeer het opnieuw.",
   "extensionHealth.disable": "Uitschakelen",
   "extensionHealth.keepEnabled": "Ingeschakeld laten",
-  "extensionHealth.working": "Verwerken…"
+  "extensionHealth.working": "Verwerken…",
+  "errorCopy.copy": "Foutdetails kopiëren",
+  "errorCopy.copied": "Foutdetails gekopieerd"
 }

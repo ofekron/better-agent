@@ -40,36 +40,90 @@ describe("copyToClipboard fallback", () => {
     });
   }
 
+  function selectTextAndFocusControl() {
+    const text = document.createTextNode("selected chat text");
+    const container = document.createElement("div");
+    const button = document.createElement("button");
+    container.appendChild(text);
+    document.body.append(container, button);
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    button.focus();
+    return {
+      button,
+      text,
+      cleanup: () => {
+        selection.removeAllRanges();
+        container.remove();
+        button.remove();
+      },
+    };
+  }
+
   it("uses the async Clipboard API when available", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     setClipboard(writeText);
 
-    await copyToClipboard("hello");
+    await expect(copyToClipboard("hello")).resolves.toBe(true);
 
     expect(writeText).toHaveBeenCalledWith("hello");
     expect(execSpy).not.toHaveBeenCalled();
   });
 
   it("falls back to execCommand when the Clipboard API rejects (mobile / insecure context)", async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error("not allowed"));
+    let rejectClipboard = (_error: Error) => {};
+    const writeText = vi.fn().mockImplementation(
+      () => new Promise<void>((_resolve, reject) => {
+        rejectClipboard = reject;
+      }),
+    );
     setClipboard(writeText);
+    const { button, text, cleanup } = selectTextAndFocusControl();
 
-    await copyToClipboard("event-id-123");
+    try {
+      const copy = copyToClipboard("event-id-123");
+      text.data = "newer selected chat text";
+      const newerRange = document.createRange();
+      newerRange.selectNodeContents(text);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(newerRange);
+      rejectClipboard(new Error("not allowed"));
+      await expect(copy).resolves.toBe(true);
 
-    expect(writeText).toHaveBeenCalledWith("event-id-123");
-    // The fallback created a textarea holding the text and invoked copy.
-    const ta = document.querySelector("textarea");
-    // The textarea is removed after copy, so it should be gone now.
-    expect(ta).toBeNull();
-    expect(execSpy).toHaveBeenCalledWith("copy");
+      expect(writeText).toHaveBeenCalledWith("event-id-123");
+      expect(document.querySelector("textarea")).toBeNull();
+      expect(execSpy).toHaveBeenCalledWith("copy");
+      expect(window.getSelection()?.toString()).toBe("newer selected chat text");
+      expect(document.activeElement).toBe(button);
+    } finally {
+      cleanup();
+    }
   });
 
   it("falls back to execCommand when navigator.clipboard is undefined", async () => {
     // Simulate an insecure context where the Clipboard API is absent.
     setClipboard(undefined);
 
-    await copyToClipboard("no-clip");
+    await expect(copyToClipboard("no-clip")).resolves.toBe(true);
 
     expect(execSpy).toHaveBeenCalledWith("copy");
+  });
+
+  it("reports failure when neither clipboard path succeeds", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("not allowed"));
+    setClipboard(writeText);
+    execSpy.mockReturnValue(false);
+    const { button, cleanup } = selectTextAndFocusControl();
+
+    try {
+      await expect(copyToClipboard("blocked")).resolves.toBe(false);
+      expect(window.getSelection()?.toString()).toBe("selected chat text");
+      expect(document.activeElement).toBe(button);
+    } finally {
+      cleanup();
+    }
   });
 });
