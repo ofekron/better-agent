@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 import continuation  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import extension_token_registry  # noqa: E402
 import installation_profile  # noqa: E402
 import session_manager  # noqa: E402
 
@@ -248,6 +249,46 @@ def test_endpoints() -> None:
                 json={"app_session_id": sid, "reasoning_effort": "high"},
             )
             check(resp.status_code == 200, f"selectors still allows reasoning_effort-only ({resp.status_code})")
+
+            capability_token = extension_token_registry.mint(
+                extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID
+            )
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
+                        "reasoning_effort": "none",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 200,
+                "capability transport preserves absent model/provider selectors",
+            )
+            if resp.status_code != 200:
+                raise AssertionError(resp.text)
+            resp = client.post(
+                "/api/internal/capabilities/invoke",
+                headers={"X-Internal-Token": capability_token},
+                json={
+                    "capability": "session-control",
+                    "action": "selectors.set",
+                    "payload": {
+                        "app_session_id": sid,
+                        "model": "model-two",
+                    },
+                },
+            )
+            check(
+                resp.status_code == 409,
+                "capability transport preserves explicit forbidden model switches",
+            )
+            if resp.status_code != 409:
+                raise AssertionError(resp.text)
 
             # Bad internal token is forbidden.
             resp = client.post(

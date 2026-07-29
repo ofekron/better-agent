@@ -806,11 +806,15 @@ def _legacy_main_handler(
     function_name: str,
     *,
     action: str = "",
+    exclude_unset: bool = False,
 ) -> Callable[[BaseModel], Awaitable[Any]]:
     async def handler(payload: BaseModel) -> Any:
         import main
 
-        body = payload.model_dump(by_alias=True)
+        body = payload.model_dump(
+            by_alias=True,
+            exclude_unset=exclude_unset,
+        )
         if action:
             body["action"] = action
         fn = getattr(main, function_name)
@@ -957,7 +961,11 @@ def _register_session_control() -> None:
         "session-control",
         "selectors.set",
         _SessionSelectorsPayload,
-        _legacy_main_handler(extension_id, "internal_session_control_selectors"),
+        _legacy_main_handler(
+            extension_id,
+            "internal_session_control_selectors",
+            exclude_unset=True,
+        ),
     )
     register(
         "session-control",
