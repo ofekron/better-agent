@@ -408,7 +408,10 @@ class CatalogRefreshEngine:
                 ),
             ),
         )
-        result = await discover_models(provider_id)
+        result = await discover_models(
+            provider_id,
+            expected_authority=authority,
+        )
         if not self._is_live(provider):
             return self._projection(
                 provider,
