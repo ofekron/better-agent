@@ -2286,6 +2286,7 @@ class _AppServerProcess:
     ) -> None:
         self._proc = proc
         self.pid = proc.pid
+        self.process_group_id = _process_control().owned_group_id(proc.pid)
         self.stdin = proc.stdin
         self.stderr = proc.stderr
         self._run_dir = run_dir
@@ -3150,26 +3151,33 @@ async def _settle_app_server_process(
     stop_requested: bool,
     log: logging.Logger,
 ) -> None:
+    should_reap_group = rollout_terminal_completion or stop_requested
     if proc.returncode is None:
         if rollout_terminal_completion:
-            try:
-                await proc.close_input()
-            except (BrokenPipeError, ConnectionResetError, RuntimeError):
-                log.debug("Codex app-server input was already closed", exc_info=True)
+            if os.name == "nt":
+                _process_control().signal_owned_group(proc.process_group_id)
+            else:
+                try:
+                    await proc.close_input()
+                except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                    log.debug("Codex app-server input was already closed", exc_info=True)
         elif stop_requested:
-            _process_control().signal_stop(proc.pid)
+            _process_control().signal_owned_group(proc.process_group_id)
         else:
             return
     try:
         await asyncio.wait_for(proc.wait(), timeout=3)
     except asyncio.TimeoutError:
-        if rollout_terminal_completion or stop_requested:
+        if should_reap_group:
             log.warning(
                 "Codex app-server remained alive after terminal/cancel; "
                 "reaping infrastructure"
             )
-            _process_control().force_kill(proc.pid)
+            _process_control().force_kill_owned_group(proc.process_group_id)
             await proc.wait()
+    finally:
+        if should_reap_group:
+            _process_control().force_kill_owned_group(proc.process_group_id)
 
 
 def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:

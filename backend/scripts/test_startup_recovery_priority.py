@@ -17,18 +17,19 @@ import main  # noqa: E402
 import orchestrator  # noqa: E402
 import perf  # noqa: E402
 import provider  # noqa: E402
+import run_recovery  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 import turn_manager  # noqa: E402
 
 
 def test_startup_source_orders_recovery_before_maintenance() -> None:
     source = inspect.getsource(main.on_startup)
-    provider = source.index("await _to_thread_join_on_cancel(load_all_providers)")
     recovery_create = source.index('name="startup-recover-in-flight"')
     recovery_wait = source.index("await recovery_task")
     housekeeping = source.index('"startup_tasks.housekeeping"')
     extensions = source.index('"startup_tasks.extension_reconciliation"')
-    assert provider < recovery_create < recovery_wait < housekeeping < extensions
+    assert recovery_create < recovery_wait < housekeeping < extensions
+    assert "load_all_providers" not in source
     assert "startup_recovery_gate.mark_recovery_failed" in source
 
 
@@ -43,36 +44,52 @@ def test_startup_orchestrator_failure_releases_recovery_gate() -> None:
 
 def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
-    reenqueue = source.index("await _re_enqueue_queued_prompts()")
+    reenqueue_create = source.index(
+        'name="startup-queued-prompt-rehydration"',
+    )
     scan = source.index("pre_provider_orphan_candidates")
     integrate = source.index("await integrate_recovered_runs")
     cold = source.index("_enqueue_recovered_cold_runs(cold)")
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
+    reenqueue_wait = source.index("rehydrated_session_ids = await reenqueue_task")
+    register = source.index("register_session_recovery")
+    candidates = source.index("candidates = await candidate_task")
     start_processors = source.index(
         "await coordinator.start_session_processor_async(sid)",
     )
-    assert reenqueue < scan < integrate
-    assert integrate < opened < start_processors < cold
+    assert reenqueue_create < scan < integrate
+    assert register < opened < candidates < integrate
+    assert integrate < reenqueue_wait < start_processors < cold
 
 
-def test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate() -> None:
+def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
     async def scenario() -> None:
-        scan_release = threading.Event()
-        prompt_visible = asyncio.Event()
+        reenqueue_release = asyncio.Event()
+        candidate_release = threading.Event()
+        recovery_started = threading.Event()
+        live_integrated = asyncio.Event()
         processor_started = asyncio.Event()
         processor_start_count = 0
 
-        def blocked_candidates() -> list:
-            assert prompt_visible.is_set()
-            assert not processor_started.is_set()
-            assert scan_release.wait(timeout=2.0)
+        def candidates() -> list:
+            assert candidate_release.wait(timeout=2.0)
             return []
 
         async def reenqueue() -> set[str]:
-            prompt_visible.set()
+            await reenqueue_release.wait()
             return {"sid"}
 
+        def recover(*args, **kwargs) -> list[dict]:
+            recovery_started.set()
+            return [{"run_id": "run", "app_session_id": "sid", "alive": True}]
+
         async def reconcile(*args, **kwargs) -> None:
+            return None
+
+        async def integrate(*args, **kwargs) -> None:
+            live_integrated.set()
+
+        async def reconcile_lifecycle_projection() -> None:
             return None
 
         async def start_processor(sid: str) -> None:
@@ -86,10 +103,21 @@ def test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate() -> 
         startup_recovery_gate.begin_recovery()
         with (
             patch.object(main, "_re_enqueue_queued_prompts", side_effect=reenqueue),
-            patch.object(main, "pre_provider_orphan_candidates", side_effect=blocked_candidates),
-            patch.object(main, "recover_all_in_flight", return_value=[]),
+            patch.object(main, "pre_provider_orphan_candidates", side_effect=candidates),
+            patch.object(main, "recover_all_in_flight", side_effect=recover),
             patch.object(main, "take_recovery_scan_ownership", return_value=({}, True)),
             patch.object(main, "reconcile_pre_provider_orphans", side_effect=reconcile),
+            patch.object(main, "integrate_recovered_runs", side_effect=integrate),
+            patch.object(
+                main.installation_profile,
+                "integrations_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                main.coordinator.turn_manager,
+                "reconcile_lifecycle_projection",
+                side_effect=reconcile_lifecycle_projection,
+            ),
             patch.object(
                 main.coordinator,
                 "start_session_processor_async",
@@ -97,16 +125,18 @@ def test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate() -> 
             ),
         ):
             recovery = asyncio.create_task(main._recover_in_flight_task())
-            await asyncio.wait_for(prompt_visible.wait(), timeout=1.0)
-            provider_gate = asyncio.create_task(
+            assert await asyncio.to_thread(recovery_started.wait, 1.0)
+            await asyncio.wait_for(
                 startup_recovery_gate.wait_for_recovery_ready(timeout=None),
+                timeout=1.0,
             )
-            await asyncio.sleep(0)
-            assert not provider_gate.done()
-
-            scan_release.set()
+            assert not live_integrated.is_set()
+            candidate_release.set()
+            await asyncio.wait_for(live_integrated.wait(), timeout=1.0)
+            assert not recovery.done()
+            assert not processor_started.is_set()
+            reenqueue_release.set()
             await asyncio.wait_for(recovery, timeout=2.0)
-            await asyncio.wait_for(provider_gate, timeout=1.0)
             assert processor_started.is_set()
             assert processor_start_count == 1
         startup_recovery_gate.reset_for_tests()
@@ -140,6 +170,43 @@ def test_provider_recovery_prioritizes_known_running_scan_buckets() -> None:
     append_other = source.index("scan_inputs.append((owner_id, owner, other))")
     scan = source.index("def _scan_one")
     assert split < append_likely < append_other < scan
+
+
+def test_live_recovery_finishes_before_cold_scan_starts() -> None:
+    source = inspect.getsource(main._recover_in_flight_task)
+    live_scan = source.index("live_only=True")
+    gate_open = source.index("startup_recovery_gate.mark_recovery_done()")
+    cold_scan = source.index("exclude_live=True")
+    assert live_scan < gate_open < cold_scan
+
+
+def test_bulk_terminal_marking_uses_bounded_marker_quantum() -> None:
+    calls: list[tuple[int, float]] = []
+
+    def write_quantum(entries, summary, budget_ms):
+        calls.append((len(entries), budget_ms))
+        return len(entries), len(entries), []
+
+    with patch.object(
+        run_recovery,
+        "_write_terminal_marker_quantum",
+        side_effect=write_quantum,
+    ):
+        marked = asyncio.run(
+            run_recovery.mark_recovered_runs_terminal(
+                [{"run_id": f"run-{index}"} for index in range(17)],
+                "missing session",
+            )
+        )
+
+    assert marked == 17
+    assert calls == [
+        (
+            run_recovery._TERMINAL_MARKER_QUANTUM_MAX,
+            run_recovery._TERMINAL_MARKER_QUANTUM_MS,
+        ),
+        (1, run_recovery._TERMINAL_MARKER_QUANTUM_MS),
+    ]
 
 
 def test_live_recovery_registers_session_gates_and_sorts_priority() -> None:
@@ -235,6 +302,7 @@ def test_provider_recovery_splits_likely_running_run_ids_first() -> None:
 
     assert likely == {live.name}
     assert other == {cold.name, complete.name}
+    assert provider._run_was_likely_running_before_restart(root, "../escape") is False
 
 
 def test_cold_recovery_uses_reschedulable_session_pending_set() -> None:
@@ -355,11 +423,13 @@ def main_test() -> None:
     test_startup_source_orders_recovery_before_maintenance()
     test_startup_orchestrator_failure_releases_recovery_gate()
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
-    test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate()
+    test_slow_queued_prompt_rehydration_does_not_delay_live_recovery()
     test_prompt_waits_only_for_session_recovery_gate()
     test_provider_start_remains_blocked_by_global_recovery_gate()
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_provider_recovery_prioritizes_known_running_scan_buckets()
+    test_live_recovery_finishes_before_cold_scan_starts()
+    test_bulk_terminal_marking_uses_bounded_marker_quantum()
     test_live_recovery_registers_session_gates_and_sorts_priority()
     test_late_priority_is_rechecked_between_live_recovery_batches()
     test_recovery_prioritizes_sessions_with_queued_prompts()

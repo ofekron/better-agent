@@ -68,6 +68,16 @@ class ProcessControl(abc.ABC):
         """Forcibly kill the whole tree under ``pid`` (POSIX: SIGKILL to
         the group; Windows: ``taskkill /T /F``). Best effort."""
 
+    def owned_group_id(self, pid: int) -> int:
+        """Stable identifier for the detached tree rooted at ``pid``."""
+        return pid
+
+    def signal_owned_group(self, group_id: int) -> None:
+        self.signal_stop(group_id)
+
+    def force_kill_owned_group(self, group_id: int) -> None:
+        self.force_kill(group_id)
+
     @abc.abstractmethod
     def group_member_pids(self, leader_pid: int) -> list[int]:
         """All pids in the descendant tree rooted at ``leader_pid`` (walked
@@ -162,10 +172,26 @@ class _PosixProcessControl(ProcessControl):
     def force_kill(self, pid: int) -> None:
         self._killpg(pid, signal.SIGKILL)
 
+    def owned_group_id(self, pid: int) -> int:
+        return os.getpgid(pid)
+
+    def signal_owned_group(self, group_id: int) -> None:
+        self._kill_group_id(group_id, signal.SIGTERM)
+
+    def force_kill_owned_group(self, group_id: int) -> None:
+        self._kill_group_id(group_id, signal.SIGKILL)
+
     @staticmethod
     def _killpg(pid: int, sig: int) -> None:
         try:
             os.killpg(os.getpgid(pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    @staticmethod
+    def _kill_group_id(group_id: int, sig: int) -> None:
+        try:
+            os.killpg(group_id, sig)
         except (ProcessLookupError, PermissionError, OSError):
             pass
 

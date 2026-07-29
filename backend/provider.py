@@ -72,13 +72,19 @@ _RECOVERY_SCAN_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_SCAN_PARALLELISM"
 
 def _run_was_likely_running_before_restart(runs_root: Path, run_id: str) -> bool:
     child = runs_root / run_id
+    try:
+        if (
+            not run_id
+            or Path(run_id).name != run_id
+            or child.resolve(strict=False).parent != runs_root.resolve(strict=False)
+        ):
+            return False
+    except OSError:
+        return False
     if (child / "complete.json").exists():
         return False
     try:
-        from active_run_catalog import read_relative
-        bs = json.loads(
-            read_relative(runs_root, run_id, "backend_state.json").decode("utf-8")
-        )
+        bs = json.loads((child / "backend_state.json").read_text(encoding="utf-8"))
     except Exception:
         return False
     try:
@@ -100,6 +106,23 @@ def _split_recovery_scan_run_ids(
         else:
             other.add(run_id)
     return likely_running, other
+
+
+def _live_runner_run_ids(runs_root: Path) -> set[str]:
+    import psutil
+
+    root = runs_root.resolve(strict=False)
+    run_ids: set[str] = set()
+    for process in psutil.process_iter(["cmdline"]):
+        try:
+            command = process.info.get("cmdline") or []
+            option_index = command.index("--run-dir")
+            run_dir = Path(command[option_index + 1]).resolve(strict=False)
+        except (IndexError, OSError, ValueError, psutil.Error):
+            continue
+        if run_dir.parent == root:
+            run_ids.add(run_dir.name)
+    return run_ids
 
 
 async def path_exists_off_loop(path: Path) -> bool:
@@ -1666,26 +1689,6 @@ def known_providers() -> list[Provider]:
         return list(_PROVIDER_CACHE.values())
 
 
-def load_all_providers() -> list[Provider]:
-    """Instantiate every provider record on disk. Called at startup so
-    `known_providers()` reflects ALL configured providers, not just
-    those touched by request traffic. Required for cross-provider fan-
-    outs like in-flight recovery, /api/processes aggregation, and
-    shutdown's cancel_all."""
-    listed = [
-        p for p in (config_store.list_providers().get("providers", []) or [])
-        if not p.get("suspended")
-    ]
-    if not listed:
-        return []
-    # Parallelize instantiation so multiple slow/timing-out keyring
-    # calls (during first get_provider of an api_key provider) don't
-    # stack sequentially. 10 workers is enough for a typical list.
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=10, thread_name_prefix="load-providers") as executor:
-        return list(executor.map(lambda p: get_provider(p["id"]), listed))
-
-
 # ============================================================================
 # Cross-provider in-flight recovery
 # ============================================================================
@@ -1713,10 +1716,14 @@ def recover_all_in_flight(
     loop: Optional[asyncio.AbstractEventLoop] = None,
     *,
     candidate_targets: Optional[set[tuple[str, str]]] = None,
+    live_only: bool = False,
+    exclude_live: bool = False,
 ) -> list[dict]:
     return _recover_all_in_flight_owned(
         loop,
         candidate_targets=candidate_targets,
+        live_only=live_only,
+        exclude_live=exclude_live,
     )
 
 
@@ -1734,6 +1741,8 @@ def _recover_all_in_flight_owned(
     loop: Optional[asyncio.AbstractEventLoop] = None,
     *,
     candidate_targets: Optional[set[tuple[str, str]]] = None,
+    live_only: bool = False,
+    exclude_live: bool = False,
 ) -> list[dict]:
     """Scan the global runs root and dispatch each in-flight run to
     its owning provider's `recover_in_flight`. Each run dir's
@@ -1757,15 +1766,19 @@ def _recover_all_in_flight_owned(
     runs_root = _runs_root()
     if not runs_root.exists():
         return []
+    live_run_ids = _live_runner_run_ids(runs_root)
     total_started = time.perf_counter()
     phase_started = time.perf_counter()
-    ensure_reconciled_marker_index_backfilled(runs_root)
+    if not live_only:
+        ensure_reconciled_marker_index_backfilled(runs_root)
     perf.record(
         "startup.recovery.marker_backfill",
         (time.perf_counter() - phase_started) * 1000.0,
     )
     phase_started = time.perf_counter()
-    reconciled_index = load_reconciled_marker_index(runs_root)
+    reconciled_index = (
+        {} if live_only else load_reconciled_marker_index(runs_root)
+    )
     perf.record(
         "startup.recovery.marker_index_load",
         (time.perf_counter() - phase_started) * 1000.0,
@@ -1805,7 +1818,15 @@ def _recover_all_in_flight_owned(
                 run_dir.name,
             )
 
-    for child in runs_root.iterdir():
+    if live_only:
+        run_dirs = (runs_root / run_id for run_id in live_run_ids)
+    else:
+        run_dirs = (
+            child
+            for child in runs_root.iterdir()
+            if not (exclude_live and child.name in live_run_ids)
+        )
+    for child in run_dirs:
         if child.is_symlink():
             ownership_safe = False
             continue

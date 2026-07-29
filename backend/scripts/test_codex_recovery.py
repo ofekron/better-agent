@@ -914,6 +914,7 @@ def test_codex_explicit_cancel_still_stops_app_server() -> bool:
 
     class _Proc:
         pid = 54321
+        process_group_id = 54321
         returncode = None
 
         async def close_input(self) -> None:
@@ -924,10 +925,10 @@ def test_codex_explicit_cancel_still_stops_app_server() -> bool:
             return 0
 
     class _Control:
-        def signal_stop(self, _pid: int) -> None:
+        def signal_owned_group(self, _group_id: int) -> None:
             calls.append("signal")
 
-        def force_kill(self, _pid: int) -> None:
+        def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
     async def _run() -> bool:
@@ -942,7 +943,7 @@ def test_codex_explicit_cancel_still_stops_app_server() -> bool:
             )
         finally:
             runner_codex._process_control = original_control  # type: ignore[assignment]
-        return calls == ["signal", "wait"]
+        return calls == ["signal", "wait", "kill"]
 
     return asyncio.run(_run())
 
@@ -978,6 +979,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
 
     class _Proc:
         pid = 65432
+        process_group_id = 65432
         returncode = None
         stdout = _Stdout()
         thread_id = codex_sid
@@ -1001,6 +1003,13 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             calls.append("wait")
             return 0
 
+    class _Control:
+        def signal_owned_group(self, _group_id: int) -> None:
+            calls.append("signal")
+
+        def force_kill_owned_group(self, _group_id: int) -> None:
+            calls.append("kill")
+
     async def _run() -> bool:
         import codex_native
 
@@ -1011,6 +1020,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
         original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
         original_bridge = runner_codex._bridge_extension_mcp_dynamic_tools
         original_wait = runner_codex._wait_rollout_terminal_state
+        original_control = runner_codex._process_control
         try:
             async def _fake_start(*_args, **_kwargs) -> _Proc:
                 return _Proc()
@@ -1030,6 +1040,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
+            runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
             code = await runner_codex._run(run_dir, {
                 "prompt": "continue",
@@ -1048,9 +1059,10 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._bridge_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
             runner_codex._wait_rollout_terminal_state = original_wait  # type: ignore[assignment]
+            runner_codex._process_control = original_control  # type: ignore[assignment]
 
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
-        ok = code == 0 and complete.get("success") is True and calls == ["close", "wait"]
+        ok = code == 0 and complete.get("success") is True and calls == ["close", "wait", "kill"]
         if not ok:
             print(f"  code={code} calls={calls!r} complete={complete!r}")
         return ok
@@ -1072,6 +1084,7 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
 
     class _Proc:
         pid = 76543
+        process_group_id = 76543
         returncode = None
         stdout = _Stdout()
         thread_id = None
@@ -1095,10 +1108,10 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
             return 0
 
     class _Control:
-        def signal_stop(self, _pid: int) -> None:
+        def signal_owned_group(self, _group_id: int) -> None:
             calls.append("signal")
 
-        def force_kill(self, _pid: int) -> None:
+        def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
     async def _run() -> bool:
@@ -1137,7 +1150,7 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
             code == 1
             and complete.get("success") is False
             and complete.get("error") == "cancelled before Codex thread started"
-            and calls == ["signal", "wait"]
+            and calls == ["signal", "wait", "kill"]
         )
         if not ok:
             print(f"  code={code} calls={calls!r} complete={complete!r}")

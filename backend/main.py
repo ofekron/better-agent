@@ -1530,13 +1530,13 @@ from provider import (
     cancel_provider_runs,
     default_provider,
     known_providers,
-    load_all_providers,
     recover_all_in_flight,
     take_recovery_scan_ownership,
 )
 from orchestrator import Coordinator, build_semantic_alter_prompt
 from run_recovery import (
     integrate_recovered_runs,
+    mark_recovered_runs_terminal,
     pre_provider_orphan_candidates,
     reconcile_pre_provider_orphans,
     shutdown_recovery_lease_executor,
@@ -13078,6 +13078,40 @@ async def _re_enqueue_queued_prompts() -> set[str]:
     return rehydrated_session_ids
 
 
+async def _reconcile_missing_session_runs(cold: list[dict]) -> list[dict]:
+    missing_terminal = [
+        descriptor
+        for descriptor in cold
+        if (
+            (sid := _recovered_run_session_id(descriptor))
+            and not session_manager.exists(sid)
+            and (
+                bool(descriptor.get("has_complete_json"))
+                or bool(descriptor.get("cancelled"))
+                or bool(descriptor.get("turn_cancelled"))
+            )
+        )
+    ]
+    if not missing_terminal:
+        return cold
+    missing_ids = {id(descriptor) for descriptor in missing_terminal}
+    marked = await mark_recovered_runs_terminal(
+        missing_terminal,
+        "missing session",
+    )
+    logger.info(
+        "recover_all_in_flight: bulk-reconciled %d/%d terminal run(s) "
+        "for deleted sessions",
+        marked,
+        len(missing_terminal),
+    )
+    return [
+        descriptor
+        for descriptor in cold
+        if id(descriptor) not in missing_ids
+    ]
+
+
 async def _recover_in_flight_task() -> None:
     """Composite body for the `recover_in_flight` startup task: scan
     run dirs on a worker thread (sync FS I/O), then integrate the
@@ -13086,21 +13120,28 @@ async def _recover_in_flight_task() -> None:
     must not block normal prompt start."""
     import startup_recovery_gate
     gate_open = False
+    startup_tasks: list[asyncio.Task] = []
     try:
-        rehydrated_session_ids = await _re_enqueue_queued_prompts()
         loop = asyncio.get_running_loop()
-        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
-        candidate_targets = {
-            (session_id, assistant_id)
-            for _, session_id, assistant_id in candidates
-        }
-        with perf.timed("startup.recovery.classification"):
-            recovered = await _to_thread_join_on_cancel(
+        reenqueue_task = asyncio.create_task(
+            _re_enqueue_queued_prompts(),
+            name="startup-queued-prompt-rehydration",
+        )
+        candidate_task = asyncio.create_task(
+            asyncio.to_thread(pre_provider_orphan_candidates),
+            name="startup-pre-provider-orphan-candidates",
+        )
+        recovery_task = asyncio.create_task(
+            _to_thread_join_on_cancel(
                 recover_all_in_flight,
                 loop,
-                candidate_targets=candidate_targets,
-            )
-        ownership_documents, ownership_safe = take_recovery_scan_ownership()
+                candidate_targets=None,
+                live_only=True,
+            ),
+            name="startup-provider-run-classification",
+        )
+        startup_tasks.extend((reenqueue_task, candidate_task, recovery_task))
+        recovered = await recovery_task
         if recovered and not installation_profile.integrations_enabled():
             import extension_session_ownership
             allowed: list[dict] = []
@@ -13126,6 +13167,20 @@ async def _recover_in_flight_task() -> None:
                         run_ids=[run_id],
                     )
             recovered = allowed
+        live_session_ids = _recovered_run_session_ids(
+            [descriptor for descriptor in recovered if bool(descriptor.get("alive"))]
+        )
+        if live_session_ids:
+            startup_recovery_gate.register_session_recovery(live_session_ids)
+        startup_recovery_gate.mark_recovery_done()
+        gate_open = True
+        candidates = await candidate_task
+        candidate_targets = {
+            (session_id, assistant_id)
+            for _, session_id, assistant_id in candidates
+        }
+        perf.record_count("startup.recovery.candidate_targets", len(candidate_targets))
+        ownership_documents, ownership_safe = take_recovery_scan_ownership()
         await reconcile_pre_provider_orphans(
             coordinator,
             recovered,
@@ -13137,10 +13192,8 @@ async def _recover_in_flight_task() -> None:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]
             cold = [r for r in recovered if not bool(r.get("alive"))]
+            cold = await _reconcile_missing_session_runs(cold)
             if live:
-                startup_recovery_gate.register_session_recovery(
-                    _recovered_run_session_ids(live),
-                )
                 live = _sort_recovered_runs_by_session_priority(live)
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
                 with perf.timed("startup.recovery.integration"):
@@ -13154,14 +13207,30 @@ async def _recover_in_flight_task() -> None:
                                 startup_recovery_gate.mark_session_recovery_done(sid)
         # The gate protects provider-run ownership: classification and every
         # alive run must be registered before rehydrated prompts can start.
-        startup_recovery_gate.mark_recovery_done()
-        gate_open = True
         await coordinator.turn_manager.reconcile_lifecycle_projection()
+        rehydrated_session_ids = await reenqueue_task
         for sid in sorted(rehydrated_session_ids):
             await coordinator.start_session_processor_async(sid)
         if recovered:
             if cold:
                 _enqueue_recovered_cold_runs(cold)
+        background_recovered = await _to_thread_join_on_cancel(
+            recover_all_in_flight,
+            loop,
+            candidate_targets=None,
+            exclude_live=True,
+        )
+        background_cold = [
+            descriptor
+            for descriptor in background_recovered
+            if not bool(descriptor.get("alive"))
+        ]
+        if background_cold:
+            background_cold = await _reconcile_missing_session_runs(
+                background_cold,
+            )
+            if background_cold:
+                _enqueue_recovered_cold_runs(background_cold)
         # Resume a native-session import that a restart interrupted. Spawns
         # its own background thread; the idempotency registry makes resume
         # duplicate-free. Best-effort — must never block startup.
@@ -13181,6 +13250,12 @@ async def _recover_in_flight_task() -> None:
         else:
             logger.exception("recover_all_in_flight: background integration failed")
         raise
+    finally:
+        unfinished = [task for task in startup_tasks if not task.done()]
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.gather(*unfinished, return_exceptions=True)
 
 
 _RECOVERED_COLD_RUN_WORKER_TASK: Optional[asyncio.Task] = None
@@ -14155,34 +14230,6 @@ async def on_startup():
         if not provider_runtime_enabled:
             startup_recovery_gate.mark_recovery_done()
             return
-        # Provider construction is recovery's only prerequisite. Maintenance
-        # must never delay the gate that protects live-run reattachment.
-        startup_task_registry.register(
-            "provider_loading", "startup_tasks.provider_loading",
-        )
-        provider_load_started = time.perf_counter()
-        try:
-            await _to_thread_join_on_cancel(load_all_providers)
-        except asyncio.CancelledError:
-            perf.record_count("startup.provider_loading.cancelled", 1)
-            startup_task_registry.mark_failed("provider_loading", "cancelled")
-            startup_recovery_gate.mark_recovery_failed("provider loading cancelled")
-            raise
-        except Exception as exc:
-            perf.record_count("startup.provider_loading.error", 1)
-            startup_task_registry.mark_failed("provider_loading", str(exc))
-            startup_recovery_gate.mark_recovery_failed("provider loading failed")
-            logger.exception("startup provider loading failed")
-            return
-        else:
-            perf.record_count("startup.provider_loading.success", 1)
-        finally:
-            perf.record(
-                "startup.provider_loading",
-                (time.perf_counter() - provider_load_started) * 1000.0,
-            )
-        startup_task_registry.mark_done("provider_loading")
-
         recovery_task = asyncio.create_task(
             run_composite_task(
                 "recover_in_flight",

@@ -457,6 +457,9 @@ class CodexProvider(Provider):
                 "disabled_builtin_extensions",
             ),
         )
+        start_arguments["disabled_builtin_extensions"] = run_policy[
+            "disabled_builtin_extensions"
+        ]
         bare_config = bool(run_policy["bare_config"])
         request_user_input_enabled = (
             bool(start_arguments.get("user_facing"))

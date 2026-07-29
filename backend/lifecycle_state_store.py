@@ -30,3 +30,14 @@ def save(projection: dict[str, Any]) -> None:
     if projection.get("version") != SCHEMA_VERSION:
         raise RuntimeError("invalid lifecycle state schema")
     write_json(_path(), projection)
+
+
+def merge_sessions(changes: dict[str, dict[str, Any] | None]) -> None:
+    projection = load()
+    sessions = dict(projection["sessions"])
+    for session_id, session in changes.items():
+        if session is None:
+            sessions.pop(session_id, None)
+        else:
+            sessions[session_id] = session
+    save({"version": SCHEMA_VERSION, "sessions": sessions})

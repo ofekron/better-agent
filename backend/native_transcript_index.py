@@ -108,9 +108,12 @@ _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQL_PLAN_PROBE_LIMIT = 10_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
-_FULL_REFRESH_FILE_BATCH = 128
+_FULL_REFRESH_FILE_BATCH = 16
 _FULL_SCAN_DISCOVERY_BATCH = 128
 _FULL_SCAN_ENTRY_BUDGET = 4096
+_APPEND_BOUNDARY_WINDOW_BYTES = 64 * 1024
+_WORKER_BACKGROUND_DUTY_FRACTION = 0.25
+_WORKER_BACKGROUND_NICE = 10
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_OWNER_PID_ARG = "--owner-pid"
@@ -1068,12 +1071,14 @@ def _index_element_rows(
     return rows
 
 
-def _source_prefix_sha256(path: Path, offset: int) -> str:
+def _source_boundary_sha256(path: Path, offset: int) -> str:
     if offset <= 0:
         return ""
+    start = max(0, offset - _APPEND_BOUNDARY_WINDOW_BYTES)
     digest = hashlib.sha256()
-    remaining = offset
+    remaining = offset - start
     with path.open("rb") as handle:
+        handle.seek(start)
         while remaining > 0:
             payload = handle.read(min(1024 * 1024, remaining))
             if not payload:
@@ -1081,6 +1086,43 @@ def _source_prefix_sha256(path: Path, offset: int) -> str:
             digest.update(payload)
             remaining -= len(payload)
     return digest.hexdigest()
+
+
+def _source_append_boundary_hashes(
+    path: Path,
+    old_offset: int,
+    new_offset: int,
+) -> tuple[str, str]:
+    start = max(0, old_offset - _APPEND_BOUNDARY_WINDOW_BYTES)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        payload = handle.read(new_offset - start)
+    if len(payload) != new_offset - start:
+        raise _SourceChanged(str(path))
+    old_end = old_offset - start
+    new_start = max(0, new_offset - _APPEND_BOUNDARY_WINDOW_BYTES) - start
+    return (
+        hashlib.sha256(payload[:old_end]).hexdigest(),
+        hashlib.sha256(payload[new_start:]).hexdigest(),
+    )
+
+
+def _source_append_snapshot_hashes(
+    path: Path,
+    old_offset: int,
+    source_size: int,
+) -> tuple[str, str]:
+    start = max(0, old_offset - _APPEND_BOUNDARY_WINDOW_BYTES)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        payload = handle.read(source_size - start)
+    if len(payload) != source_size - start:
+        raise _SourceChanged(str(path))
+    old_end = old_offset - start
+    return (
+        hashlib.sha256(payload[:old_end]).hexdigest(),
+        hashlib.sha256(payload[old_end:]).hexdigest(),
+    )
 
 
 def _reset_repeat_projection(conn: sqlite3.Connection) -> None:
@@ -1560,7 +1602,7 @@ def _replace_candidate(
             source_offset,
             len(elements),
             sum(1 for element in elements if element.kind == "user_prompt"),
-            _source_prefix_sha256(candidate.transcript, source_offset),
+            _source_boundary_sha256(candidate.transcript, source_offset),
         ),
     )
     state_s = time.monotonic() - state_start
@@ -1650,17 +1692,34 @@ def _append_candidate(
     ):
         return None
     prefix_start = time.monotonic()
-    if _source_prefix_sha256(candidate.transcript, int(source_offset)) != prefix_sha256:
+    before_snapshot = _source_append_snapshot_hashes(
+        candidate.transcript,
+        int(source_offset),
+        size,
+    )
+    if before_snapshot[0] != prefix_sha256:
         return None
     prefix_s = time.monotonic() - prefix_start
     parse_start = time.monotonic()
     elements, new_offset = candidate.parse_elements_from(int(source_offset))
     parse_s = time.monotonic() - parse_start
     parsed_stat = candidate.transcript.stat()
+    after_snapshot = _source_append_snapshot_hashes(
+        candidate.transcript,
+        int(source_offset),
+        size,
+    )
+    verified_prefix_sha256, new_prefix_sha256 = _source_append_boundary_hashes(
+        candidate.transcript,
+        int(source_offset),
+        new_offset,
+    )
     if (
         parsed_stat.st_ino != stat_result.st_ino
         or parsed_stat.st_size != size
         or parsed_stat.st_mtime != mtime
+        or verified_prefix_sha256 != prefix_sha256
+        or after_snapshot != before_snapshot
     ):
         raise _SourceChanged(path)
     if new_offset == int(source_offset):
@@ -1724,7 +1783,7 @@ def _append_candidate(
             new_offset,
             int(element_count) + len(elements),
             int(user_prompt_count) + len(appended_user_prompts),
-            _source_prefix_sha256(candidate.transcript, new_offset),
+            new_prefix_sha256,
             next_turn_source,
             path,
         ),
@@ -3404,6 +3463,7 @@ def _worker_main() -> None:
     # refresh (refresh_once) stamps _last_refresh_at + notifies waiting queries.
     global _refresh_requested
     while not _stop.is_set():
+        refresh_started = time.monotonic()
         try:
             full = None
             if is_covered() and _full_reconcile_due():
@@ -3415,7 +3475,12 @@ def _worker_main() -> None:
             logger.exception("native transcript index refresh failed")
             return  # avoid a hot failure loop; next ensure_started() restarts
         if result.get("partial"):
-            _stop.wait(_WORKER_PARTIAL_BUILD_PAUSE_SECONDS)
+            elapsed = time.monotonic() - refresh_started
+            background_pause = elapsed * (
+                (1.0 - _WORKER_BACKGROUND_DUTY_FRACTION)
+                / _WORKER_BACKGROUND_DUTY_FRACTION
+            )
+            _stop.wait(max(_WORKER_PARTIAL_BUILD_PAUSE_SECONDS, background_pause))
             continue
         if is_covered():
             # Sleep for the poll interval, but wake immediately if a query
@@ -3434,6 +3499,19 @@ def _worker_main() -> None:
                 _refresh_requested = False
         else:
             _stop.wait(_WORKER_PARTIAL_BUILD_PAUSE_SECONDS)
+
+
+def _set_worker_background_priority() -> None:
+    try:
+        if os.name == "nt":
+            import ctypes
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            if not ctypes.windll.kernel32.SetPriorityClass(process, 0x00004000):
+                raise OSError("SetPriorityClass failed")
+            return
+        os.setpriority(os.PRIO_PROCESS, 0, _WORKER_BACKGROUND_NICE)
+    except (AttributeError, OSError):
+        logger.warning("native transcript worker could not lower OS priority", exc_info=True)
 
 
 def _start_owner_watchdog(
@@ -3483,6 +3561,7 @@ def _run_worker_process(owner_identity: ProcessIdentity, roots_json: str) -> int
                 return 0
             time.sleep(0.01)
     _configure_worker_roots(roots_json)
+    _set_worker_background_priority()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

@@ -710,7 +710,10 @@ def test_default_cold_build_batch_is_bounded() -> bool:
     ok = (
         first["partial"] == 1
         and first_files == idx._FULL_REFRESH_FILE_BATCH
-        and queue_after_first == 0
+        and queue_after_first == min(
+            total_files,
+            idx._FULL_SCAN_DISCOVERY_BATCH,
+        ) - idx._FULL_REFRESH_FILE_BATCH
         and progress_blob is not None
         and first_state == {"schema_ok": True, "covered": False, "usable": False}
         and second["partial"] == 1
@@ -718,7 +721,7 @@ def test_default_cold_build_batch_is_bounded() -> bool:
         and fourth["partial"] == 0
         and final_state == {"schema_ok": True, "covered": True, "usable": True}
         and len(rows) == idx._FULL_REFRESH_FILE_BATCH + 5
-        and len(transcript_paths_after_first) <= idx._FULL_REFRESH_FILE_BATCH
+        and len(transcript_paths_after_first) <= idx._FULL_SCAN_DISCOVERY_BATCH
     )
     print(f"{OK if ok else FAIL} default cold build batch is bounded "
           f"(batch={idx._FULL_REFRESH_FILE_BATCH}, first={first}, "
@@ -2099,6 +2102,46 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
     return ok
 
 
+def test_worker_partial_build_obeys_background_duty_budget() -> bool:
+    _setup_roots()
+    waits = []
+    monotonic_values = iter((100.0, 110.0))
+    original_refresh_once = idx.refresh_once
+    original_monotonic = idx.time.monotonic
+    original_wait = idx._stop.wait
+    try:
+        idx.refresh_once = lambda *, full=None: {
+            "walked": 16,
+            "touched": 16,
+            "locked": 0,
+            "full": 1,
+            "partial": 1,
+        }
+        idx.time.monotonic = lambda: next(monotonic_values)
+
+        def capture_wait(timeout=None):
+            waits.append(timeout)
+            idx._stop.set()
+            return True
+
+        idx._stop.wait = capture_wait
+        idx._worker_main()
+    finally:
+        idx.refresh_once = original_refresh_once
+        idx.time.monotonic = original_monotonic
+        idx._stop.wait = original_wait
+        idx._stop.clear()
+
+    expected = 10.0 * (
+        (1.0 - idx._WORKER_BACKGROUND_DUTY_FRACTION)
+        / idx._WORKER_BACKGROUND_DUTY_FRACTION
+    )
+    ok = waits == [expected]
+    print(f"{OK if ok else FAIL} partial build obeys background duty budget "
+          f"(waits={waits}, expected={expected})")
+    return ok
+
+
 def _append_user(path: Path, uid: str, text: str) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({
@@ -2112,7 +2155,7 @@ def _append_user(path: Path, uid: str, text: str) -> None:
 def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/append") / "append.jsonl"
-    _write_claude(path, [f"appendbase {index} " + "x" * 2048 for index in range(100)])
+    _write_claude(path, [f"appendbase {index} " + "x" * 4096 for index in range(1000)])
     idx.refresh_once(full=True)
     conn = idx._readonly_connection()
     original_rowids = {
@@ -2125,8 +2168,46 @@ def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
         "SELECT source_offset FROM native_file_state WHERE path=?",
         (str(path),),
     ).fetchone()[0]
+    bytes_read = 0
+    original_open = idx.Path.open
+
+    class CountingHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._handle.__exit__(exc_type, exc, tb)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def read(self, size=-1):
+            nonlocal bytes_read
+            payload = self._handle.read(size)
+            bytes_read += len(payload)
+            return payload
+
+        def readline(self, size=-1):
+            nonlocal bytes_read
+            payload = self._handle.readline(size)
+            bytes_read += len(payload)
+            return payload
+
+    def counting_open(path_self, *args, **kwargs):
+        handle = original_open(path_self, *args, **kwargs)
+        return CountingHandle(handle) if path_self == path else handle
+
     _append_user(path, "tail", "appendtailneedle")
-    result = idx.refresh_once(full=False)
+    appended_bytes = path.stat().st_size - original_offset
+    idx.Path.open = counting_open
+    try:
+        result = idx.refresh_once(full=False)
+    finally:
+        idx.Path.open = original_open
     current_rowids = {
         row[0] for row in conn.execute(
             "SELECT rowid FROM native_element_meta WHERE path=?",
@@ -2145,11 +2226,17 @@ def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
         and state[0] - original_offset < 512
         and timing["mode"] == "append"
         and timing["rows"] == 1
+        and bytes_read <= (
+            3 * idx._APPEND_BOUNDARY_WINDOW_BYTES
+            + 4 * appended_bytes
+            + 4096
+        )
         and idx.search_rows(["appendtailneedle"], limit=5)
     )
     print(
         f"{OK if ok else FAIL} append work stays proportional "
-        f"(new_rows={len(current_rowids - original_rowids)}, timing={timing})"
+        f"(new_rows={len(current_rowids - original_rowids)}, bytes_read={bytes_read}, "
+        f"append_bytes={appended_bytes}, timing={timing})"
     )
     return bool(ok)
 
@@ -2253,6 +2340,51 @@ def test_append_refresh_defers_unstable_generation() -> bool:
         and after == {"stablebase", "racingone", "racingtwo"}
     )
     print(f"{OK if ok else FAIL} unstable source generation defers atomically")
+    return ok
+
+
+def test_append_refresh_defers_same_stat_delta_rewrite() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/same-stat-racing") / "same-stat-racing.jsonl"
+    _write_claude(path, ["stablebase"])
+    idx.refresh_once(full=True)
+    _append_user(path, "same-stat", "version-one")
+    stable_stat = path.stat()
+    original = nm.NativeCandidate.parse_elements_from
+
+    def parse_and_rewrite(candidate, offset):
+        result = original(candidate, offset)
+        payload = candidate.transcript.read_bytes().replace(b"version-one", b"version-two")
+        candidate.transcript.write_bytes(payload)
+        os.utime(
+            candidate.transcript,
+            ns=(stable_stat.st_atime_ns, stable_stat.st_mtime_ns),
+        )
+        return result
+
+    nm.NativeCandidate.parse_elements_from = parse_and_rewrite
+    try:
+        first = idx.refresh_once(full=False)
+    finally:
+        nm.NativeCandidate.parse_elements_from = original
+    before = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    second = idx.refresh_once(full=False)
+    after = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT text FROM native_element_text"
+        )
+    }
+    ok = (
+        first["touched"] == 0
+        and before == {"stablebase"}
+        and second["touched"] == 1
+        and after == {"stablebase", "version-two"}
+    )
+    print(f"{OK if ok else FAIL} same-stat delta rewrite defers atomically")
     return ok
 
 
@@ -2588,10 +2720,12 @@ def main_run() -> int:
         test_ensure_started_spawns_external_worker_process,
         test_shutdown_force_kills_unresponsive_worker_within_budget,
         test_worker_short_throttles_partial_covered_refresh,
+        test_worker_partial_build_obeys_background_duty_budget,
         test_append_refresh_is_proportional_and_preserves_rows,
         test_append_refresh_holds_partial_line_until_complete,
         test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate,
         test_append_refresh_defers_unstable_generation,
+        test_append_refresh_defers_same_stat_delta_rewrite,
         test_append_refresh_recovers_after_transient_parse_failure,
         test_rebuild_defers_transient_parse_failure_without_erasing_rows,
         test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows,

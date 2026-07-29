@@ -263,8 +263,8 @@ class ConfigIdentity:
             parent_stat = parent.stat()
             if (
                 parent != Path(self.parent_path)
-                or stable_stat_identity(parent_stat)
-                != self.parent_identity
+                or self._parent_routing_identity(parent_stat)
+                != self.parent_routing_identity
             ):
                 return False
             current = ConfigIdentity.capture(root, candidate)
@@ -285,6 +285,22 @@ class ConfigIdentity:
             self.parent_inode,
         )
 
+    @property
+    def parent_routing_identity(self) -> tuple[int, int, int]:
+        return (
+            stat.S_IFMT(self.parent_mode),
+            self.parent_device,
+            self.parent_inode,
+        )
+
+    @staticmethod
+    def _parent_routing_identity(value: os.stat_result) -> tuple[int, int, int]:
+        return (
+            stat.S_IFMT(value.st_mode),
+            value.st_dev,
+            value.st_ino,
+        )
+
     def attest_metadata(self) -> bool:
         root = Path(self.root_path)
         candidate = Path(self.config_path)
@@ -297,8 +313,8 @@ class ConfigIdentity:
             if (
                 not resolved_parent.is_relative_to(root)
                 or resolved_parent != Path(self.parent_path)
-                or stable_stat_identity(resolved_parent.stat())
-                != self.parent_identity
+                or self._parent_routing_identity(resolved_parent.stat())
+                != self.parent_routing_identity
             ):
                 return False
         except OSError:

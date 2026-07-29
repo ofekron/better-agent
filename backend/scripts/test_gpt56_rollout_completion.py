@@ -431,18 +431,19 @@ async def test_parent_terminal_waits_for_recursive_agent_tree() -> None:
         await asyncio.wait_for(waiting, timeout=2)
 
 
-async def test_rollout_completion_never_signals_or_kills() -> None:
+async def test_rollout_completion_closes_parent_and_reaps_owned_group() -> None:
     calls: list[str] = []
 
     class Control:
-        def signal_stop(self, _pid: int) -> None:
+        def signal_owned_group(self, _group_id: int) -> None:
             calls.append("signal")
 
-        def force_kill(self, _pid: int) -> None:
+        def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
     class Proc:
         pid = 1
+        process_group_id = 1
         returncode = None
 
         async def close_input(self) -> None:
@@ -463,7 +464,7 @@ async def test_rollout_completion_never_signals_or_kills() -> None:
         )
     finally:
         runner_codex._process_control = original
-    assert calls == ["close"]
+    assert calls == ["close", "kill"]
 
 
 def test_resumed_session_requires_proven_boundary() -> None:
@@ -529,7 +530,7 @@ async def main() -> None:
     await test_pending_dynamic_tool_wait_honors_cancel()
     await test_pending_tool_wait_reads_live_process_exit()
     await test_parent_terminal_waits_for_recursive_agent_tree()
-    await test_rollout_completion_never_signals_or_kills()
+    await test_rollout_completion_closes_parent_and_reaps_owned_group()
     test_resumed_session_requires_proven_boundary()
     test_transport_truncation_after_tool_progress_is_recoverable_without_replay()
 

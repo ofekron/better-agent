@@ -111,7 +111,8 @@ class LifecycleStateTree:
         self._execution_handles: dict[str, PreparedExecution] = {}
         self._subscriber_name = f"lifecycle_state_tree_{id(self)}"
         self._persist_task: asyncio.Task | None = None
-        self._pending_projection: dict[str, Any] | None = None
+        self._pending_session_projections: dict[str, dict[str, Any] | None] = {}
+        self._persist_error: Exception | None = None
 
     async def bind(self) -> None:
         loop = asyncio.get_running_loop()
@@ -188,14 +189,14 @@ class LifecycleStateTree:
             if prompt_state in {"done", "failed"}:
                 session.prompts.pop(event.msg_id, None)
                 self._retire_session_if_idle(event.sid)
-                self._schedule_persist()
+                self._schedule_persist(event.sid)
                 return
             prompt = session.prompts.setdefault(
                 event.msg_id,
                 PromptLifecycleMachine(event.msg_id),
             )
             prompt.state = prompt_state
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         turn_state = _TURN_STATES.get(event.type)
         if turn_state:
@@ -207,7 +208,7 @@ class LifecycleStateTree:
                 session.turn.admissions.clear()
                 session.turn.steers.clear()
                 self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         steer_state = _STEER_STATES.get(event.type)
         if steer_state and event.msg_id:
@@ -227,44 +228,44 @@ class LifecycleStateTree:
             if steer_state == "failed":
                 reason = event.payload.get("reason")
                 steer.failure_reason = reason if isinstance(reason, str) else None
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.steer_fallback_queued" and event.msg_id:
             session.turn.steers.pop(event.msg_id, None)
             session.prompts[event.msg_id] = PromptLifecycleMachine(event.msg_id)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_turn_missing":
             session.turn.state = "stopped"
             session.turn.admissions.clear()
             session.turn.steers.clear()
             self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_prompt_completed" and event.msg_id:
             session.prompts.pop(event.msg_id, None)
             self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_prompt_missing" and event.msg_id:
             session.prompts.pop(event.msg_id, None)
             self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_admission_missing" and event.run_id:
             session.turn.admissions.pop(event.run_id, None)
             self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_steer_parent_gone" and event.msg_id:
             session.turn.steers.pop(event.msg_id, None)
             self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.admission_cancel_requested":
             for admission in session.turn.admissions.values():
                 admission.cancel()
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         admission_state = _ADMISSION_STATES.get(event.type)
         if admission_state is None or event.run_id is None:
@@ -285,7 +286,7 @@ class LifecycleStateTree:
                 execution=execution,
                 handle_id=handle_id,
             )
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
             return
         admission = session.turn.admissions.get(event.run_id)
         if admission is not None:
@@ -295,7 +296,7 @@ class LifecycleStateTree:
             if admission_state in {"spawned", "cancelled", "failed"}:
                 session.turn.admissions.pop(event.run_id, None)
                 self._retire_session_if_idle(event.sid)
-            self._schedule_persist()
+            self._schedule_persist(event.sid)
 
     async def reconcile(
         self,
@@ -373,55 +374,65 @@ class LifecycleStateTree:
 
     async def flush(self) -> None:
         self._assert_owner()
-        self._pending_projection = self._snapshot()
-        if self._persist_task is None or self._persist_task.done():
+        if self._pending_session_projections and (
+            self._persist_task is None or self._persist_task.done()
+        ):
             self._persist_task = asyncio.create_task(self._persist_loop())
-        await self._persist_task
+        if self._persist_task is not None:
+            await self._persist_task
+        if self._pending_session_projections:
+            error = self._persist_error or RuntimeError("lifecycle state persist incomplete")
+            raise RuntimeError("lifecycle state persist failed") from error
 
-    def _schedule_persist(self) -> None:
-        self._pending_projection = self._snapshot()
+    def _schedule_persist(self, session_id: str) -> None:
+        self._pending_session_projections[session_id] = self._snapshot_session(session_id)
         if self._persist_task is None or self._persist_task.done():
             self._persist_task = asyncio.create_task(self._persist_loop())
 
     async def _persist_loop(self) -> None:
-        while self._pending_projection is not None:
-            projection = self._pending_projection
-            self._pending_projection = None
+        while self._pending_session_projections:
+            changes = self._pending_session_projections
+            self._pending_session_projections = {}
             try:
-                await asyncio.to_thread(lifecycle_state_store.save, projection)
-            except Exception:
+                await asyncio.to_thread(lifecycle_state_store.merge_sessions, changes)
+                self._persist_error = None
+            except Exception as exc:
+                newer_changes_pending = bool(self._pending_session_projections)
+                self._persist_error = exc
+                for session_id, projection in changes.items():
+                    self._pending_session_projections.setdefault(session_id, projection)
                 logger.exception("lifecycle state projection persist failed")
+                if newer_changes_pending:
+                    continue
+                return
 
-    def _snapshot(self) -> dict[str, Any]:
-        sessions: dict[str, Any] = {}
-        for session_id, session in self._sessions.items():
-            sessions[session_id] = {
-                "prompts": {
-                    message_id: {"state": prompt.state}
-                    for message_id, prompt in session.prompts.items()
-                },
-                "turn": {
-                    "state": session.turn.state,
-                    "admissions": {
-                        run_id: {
-                            "turn_run_id": admission.turn_run_id,
-                            "state": admission.state,
-                        }
-                        for run_id, admission in session.turn.admissions.items()
-                    },
-                    "steers": {
-                        message_id: {
-                            "provider_run_id": steer.provider_run_id,
-                            "state": steer.state,
-                            "failure_reason": steer.failure_reason,
-                        }
-                        for message_id, steer in session.turn.steers.items()
-                    },
-                },
-            }
+    def _snapshot_session(self, session_id: str) -> dict[str, Any] | None:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
         return {
-            "version": lifecycle_state_store.SCHEMA_VERSION,
-            "sessions": sessions,
+            "prompts": {
+                message_id: {"state": prompt.state}
+                for message_id, prompt in session.prompts.items()
+            },
+            "turn": {
+                "state": session.turn.state,
+                "admissions": {
+                    run_id: {
+                        "turn_run_id": admission.turn_run_id,
+                        "state": admission.state,
+                    }
+                    for run_id, admission in session.turn.admissions.items()
+                },
+                "steers": {
+                    message_id: {
+                        "provider_run_id": steer.provider_run_id,
+                        "state": steer.state,
+                        "failure_reason": steer.failure_reason,
+                    }
+                    for message_id, steer in session.turn.steers.items()
+                },
+            },
         }
 
     def _restore(self, projection: dict[str, Any]) -> None:

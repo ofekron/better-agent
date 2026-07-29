@@ -45,7 +45,7 @@ import config_store
 
 config_store.apply_provider_config_env_vars()
 
-from provider import default_provider, load_all_providers  # noqa: E402
+from provider import default_provider  # noqa: E402
 from topology import load_topology  # noqa: E402
 import node_identity  # noqa: E402
 import node_runtime_auth  # noqa: E402
@@ -118,10 +118,6 @@ async def _on_startup() -> None:
     logger.info("main_node: starting as node=%s primary=%s",
                 me, topology.primary.address)
 
-    try:
-        load_all_providers()
-    except Exception:
-        logger.exception("main_node: load_all_providers failed")
     try:
         default_provider().prune_old_runs()
     except Exception:

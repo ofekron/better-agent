@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 from pathlib import Path
 
 
@@ -15,6 +16,7 @@ _test_home.isolate("ba-test-lifecycle-state-machines-")
 
 from event_bus import BusEvent, EventBus  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
+import lifecycle_state_store  # noqa: E402
 from lifecycle_state_machines import LifecycleStateTree  # noqa: E402
 
 
@@ -397,6 +399,156 @@ async def test_reconcile_queries_and_repairs_only_state_declared_evidence() -> N
     await tree.close()
 
 
+async def test_persist_snapshots_only_changed_session_without_blocking_loop() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    for index in range(10_000):
+        tree.session(f"bulk-{index}")
+
+    started = threading.Event()
+    release = threading.Event()
+    original_merge = lifecycle_state_store.merge_sessions
+
+    def blocked_merge(changes):
+        assert set(changes) == {"target"}
+        started.set()
+        assert release.wait(timeout=2.0)
+        original_merge(changes)
+
+    lifecycle_state_store.merge_sessions = blocked_merge
+    try:
+        await tree.publish(
+            "user_message_queued",
+            root_id="target",
+            session_id="target",
+            message_id="message",
+            payload={},
+        )
+        assert await asyncio.to_thread(started.wait, 1.0)
+        loop_advanced = asyncio.Event()
+        asyncio.get_running_loop().call_soon(loop_advanced.set)
+        await asyncio.wait_for(loop_advanced.wait(), timeout=0.2)
+        release.set()
+        await tree.flush()
+    finally:
+        release.set()
+        lifecycle_state_store.merge_sessions = original_merge
+    await tree.close()
+
+
+async def test_persist_merges_ordered_sessions_tombstones_and_retries() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    await tree.publish(
+        "user_message_queued",
+        root_id="a",
+        session_id="a",
+        message_id="a-message",
+        payload={},
+    )
+    await tree.publish(
+        "user_message_queued",
+        root_id="b",
+        session_id="b",
+        message_id="b-message",
+        payload={},
+    )
+    await tree.publish(
+        "user_message_sent",
+        root_id="a",
+        session_id="a",
+        message_id="a-message",
+        payload={},
+    )
+    await tree.publish(
+        "user_message_done",
+        root_id="b",
+        session_id="b",
+        message_id="b-message",
+        payload={},
+    )
+    await tree.publish(
+        "user_message_received",
+        root_id="a",
+        session_id="a",
+        message_id="a-message",
+        payload={},
+    )
+    await tree.flush()
+    projection = lifecycle_state_store.load()
+    assert projection["sessions"]["a"]["prompts"]["a-message"]["state"] == "received"
+    assert "b" not in projection["sessions"]
+
+    original_merge = lifecycle_state_store.merge_sessions
+    lifecycle_state_store.merge_sessions = lambda _changes: (
+        (_ for _ in ()).throw(OSError("persist unavailable"))
+    )
+    try:
+        await tree.publish(
+            "user_message_queued",
+            root_id="retry",
+            session_id="retry",
+            message_id="retry-message",
+            payload={},
+        )
+        try:
+            await tree.flush()
+        except RuntimeError as exc:
+            assert isinstance(exc.__cause__, OSError)
+        else:
+            raise AssertionError("failed lifecycle save was reported as successful")
+        assert "retry" in tree._pending_session_projections
+    finally:
+        lifecycle_state_store.merge_sessions = original_merge
+
+    tree._schedule_persist("retry")
+    await tree.flush()
+    restored = lifecycle_state_store.load()
+    assert restored["sessions"]["retry"]["prompts"]["retry-message"]["state"] == "queued"
+
+    first_merge_started = threading.Event()
+    release_first_merge = threading.Event()
+    merge_calls = 0
+
+    def fail_once_while_newer_event_arrives(changes):
+        nonlocal merge_calls
+        merge_calls += 1
+        if merge_calls == 1:
+            first_merge_started.set()
+            assert release_first_merge.wait(timeout=2.0)
+            raise OSError("first persist unavailable")
+        original_merge(changes)
+
+    lifecycle_state_store.merge_sessions = fail_once_while_newer_event_arrives
+    try:
+        await tree.publish(
+            "user_message_queued",
+            root_id="concurrent",
+            session_id="concurrent",
+            message_id="first",
+            payload={},
+        )
+        assert await asyncio.to_thread(first_merge_started.wait, 1.0)
+        await tree.publish(
+            "user_message_queued",
+            root_id="concurrent",
+            session_id="concurrent",
+            message_id="second",
+            payload={},
+        )
+        release_first_merge.set()
+        await tree.flush()
+    finally:
+        release_first_merge.set()
+        lifecycle_state_store.merge_sessions = original_merge
+    concurrent = lifecycle_state_store.load()["sessions"]["concurrent"]["prompts"]
+    assert set(concurrent) == {"first", "second"}
+    assert merge_calls == 2
+    await tree.close()
+
+
 def main() -> None:
     asyncio.run(test_fact_driven_hierarchy_and_pre_spawn_cancel())
     asyncio.run(test_same_facts_converge_to_same_tree())
@@ -406,6 +558,8 @@ def main() -> None:
     asyncio.run(test_steer_machine_stays_under_turn_and_fallback_transfers_owner())
     asyncio.run(test_persisted_projection_reloads_and_reconciles_from_reality())
     asyncio.run(test_reconcile_queries_and_repairs_only_state_declared_evidence())
+    asyncio.run(test_persist_snapshots_only_changed_session_without_blocking_loop())
+    asyncio.run(test_persist_merges_ordered_sessions_tombstones_and_retries())
     print("PASS lifecycle state machines")
 
 

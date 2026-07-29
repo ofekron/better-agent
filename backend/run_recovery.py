@@ -1417,6 +1417,28 @@ async def _mark_reconciled_terminal_async(
     )
 
 
+async def mark_recovered_runs_terminal(
+    recovered: list[dict],
+    reason: str,
+) -> int:
+    entries = [
+        (str(desc.get("run_id") or ""), desc, reason, 0)
+        for desc in recovered
+        if desc.get("run_id")
+    ]
+    completed = 0
+    while entries:
+        processed, marked, retryable = await asyncio.to_thread(
+            _write_terminal_marker_quantum,
+            entries[:_TERMINAL_MARKER_QUANTUM_MAX],
+            None,
+            _TERMINAL_MARKER_QUANTUM_MS,
+        )
+        completed += marked
+        entries = entries[processed:] + retryable
+    return completed
+
+
 def _apply_recovered_stream_event_sync(
     *,
     persist_sid: str,
