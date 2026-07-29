@@ -32,11 +32,17 @@ paths.engage_test_home(tempfile.mkdtemp(prefix="ba-session-events-broadcast-"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 import capability_api  # noqa: E402
+import installation_profile  # noqa: E402
 
 EXT_ID = "ofek.test-broadcaster"
 
 
 def _arm(monkeypatch, grants: list[str]) -> str:
+    monkeypatch.setattr(
+        installation_profile,
+        "allows",
+        lambda capability: capability == installation_profile.INTEGRATIONS,
+    )
     record = {
         "enabled": True,
         "manifest": {"id": EXT_ID, "permissions": {"capabilities": grants}},
