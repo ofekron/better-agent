@@ -1,5 +1,7 @@
+import { PUBLIC_EXTENSION_IDS } from "./extensionIds";
+
 /**
- * Hardcoded global identity for the virtual singleton "Ask" session.
+ * Global identity for the virtual singleton "Ask" session.
  *
  * Mirrors `backend/session_search.py:ASK_SINGLETON_ID`. The two strings
  * MUST match — the routes resolve to the same virtual session record.
@@ -10,4 +12,4 @@
  * picker is rendered once the singleton's last assistant message
  * carries canonical `{ results, reasoning }` search data.
  */
-export const ASK_SINGLETON_ID = "virtual:ofek-dev.ask:ask";
+export const ASK_SINGLETON_ID = `virtual:${PUBLIC_EXTENSION_IDS.ask}:ask`;

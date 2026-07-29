@@ -1,9 +1,11 @@
+import { PUBLIC_EXTENSION_IDS } from "src/extensionIds";
+
 // Per-provider quota projection for the Usage extension's quota-status
 // endpoint. Pure helpers + the wire types; the fetch lives in
 // useQuotaStatus. Mirrors the burn-rate/worst-window logic of the
 // usage-gauge extension module so pickers and gauge agree.
 
-export const QUOTA_STATUS_PATH = "/api/extensions/ofek-dev.usage/backend/quota-status";
+export const QUOTA_STATUS_PATH = `/api/extensions/${PUBLIC_EXTENSION_IDS.usage}/backend/quota-status`;
 
 export const quotaStatusUrl = (apiBase: string): string => `${apiBase}${QUOTA_STATUS_PATH}`;
 

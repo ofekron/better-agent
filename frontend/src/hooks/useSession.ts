@@ -15,6 +15,7 @@ import { startOp, completeOp, failOp } from "../progress/store";
 import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 
 import { API } from "../api";
+import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
 import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
@@ -2894,7 +2895,7 @@ export function useSession(authStatus?: string) {
       error: string | null;
     } | null> => {
       try {
-        const res = await fetch(`${API}/api/extensions/ofek-dev.ask/backend/sessions/search`, {
+        const res = await fetch(`${extBackendBase("ask")}/sessions/search`, {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },

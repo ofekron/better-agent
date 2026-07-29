@@ -14,6 +14,7 @@ import type {
   Permission,
 } from "../types";
 import { trackedFetch } from "../progress/store";
+import { PUBLIC_EXTENSION_IDS } from "../extensionIds";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
@@ -801,8 +802,8 @@ export function NewSessionModal({
         if (cancelled) return;
         const disabledExtensions = profile?.fields?.disabled_builtin_extensions?.resolved || [];
         setFileEditExtensionEnabled(
-          Boolean(profile?.fields?.extension_instances?.["ofek-dev.file-edit"]) &&
-            !disabledExtensions.includes("ofek-dev.file-edit"),
+          Boolean(profile?.fields?.extension_instances?.[PUBLIC_EXTENSION_IDS.fileEdit]) &&
+            !disabledExtensions.includes(PUBLIC_EXTENSION_IDS.fileEdit),
         );
       })
       .catch(() => {

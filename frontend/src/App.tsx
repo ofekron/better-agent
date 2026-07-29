@@ -167,7 +167,7 @@ import { initMobilePushNotifications, teardownMobilePushNotifications } from "./
 import "./styles/globals.css";
 
 import { API, WS_URL } from "./api";
-import { extBackendBase } from "./extensionIds";
+import { extBackendBase, extId } from "./extensionIds";
 import { eventBus } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders, parseProvidersPayload } from "./utils/providerCache";
@@ -176,7 +176,7 @@ import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
 type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
-const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
+const SESSION_BRIDGE_API = `${API}/api/extensions/${extId("sessionBridge")}/backend`;
 const supervisorApi = () => extBackendBase("supervisor");
 const stopSessionOpId = (sessionId: string) => `session:stop:${sessionId}`;
 
@@ -5781,7 +5781,7 @@ function AppMain({
     // doesn't immediately redirect away from the Ask view.
     intentionalAskRef.current = true;
     try {
-      await fetch(`${API}/api/extensions/ofek-dev.ask/backend/ask/ensure`, { method: "POST" });
+      await fetch(`${extBackendBase("ask")}/ask/ensure`, { method: "POST" });
     } catch (e) {
       // Ensure is best-effort: the singleton may already exist (race
       // with another tab) or the WS path will lazy-create on first

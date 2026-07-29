@@ -27,6 +27,25 @@ export const BUILTIN_EXTENSION_KEYS = [
 
 export type BuiltinExtensionKey = (typeof BUILTIN_EXTENSION_KEYS)[number];
 
+/** Public extension ids. These ship in the public repo and never vary, so
+ *  unlike private ids they are compile-time constants — but they live here,
+ *  not scattered across call sites. Mirrors the BUILTIN_*_EXTENSION_ID
+ *  constants in backend/extension_store.py. */
+export const PUBLIC_EXTENSION_IDS = {
+  ask: "ofek-dev.ask",
+  sessionBridge: "ofek-dev.session-bridge",
+  fileEdit: "ofek-dev.file-edit",
+  marketplace: "ofek-dev.marketplace",
+  usage: "ofek-dev.usage",
+} as const;
+
+// The two public ids that are also logical keys. Mirrors the backend's
+// _PUBLIC_FRONTEND_BUILTIN_KEYS, which resolves them to these same constants.
+const _PUBLIC_KEY_IDS: Partial<Record<BuiltinExtensionKey, string>> = {
+  ask: PUBLIC_EXTENSION_IDS.ask,
+  sessionBridge: PUBLIC_EXTENSION_IDS.sessionBridge,
+};
+
 const _ids: Partial<Record<BuiltinExtensionKey, string>> = {};
 
 /** Populate the id map from the backend's /api/extensions/builtin-ids. */
@@ -36,9 +55,12 @@ export function setBuiltinExtensionIds(map: Record<string, string>): void {
   }
 }
 
-/** Resolved extension id for a logical key, or "" if not loaded/installed. */
+/** Resolved extension id for a logical key, or "" if not loaded/installed.
+ *  Public keys fall back to their constant, so a failed or not-yet-finished
+ *  builtin-ids load cannot break UI whose id was never private to begin
+ *  with. */
 export function extId(key: BuiltinExtensionKey): string {
-  return _ids[key] ?? "";
+  return _ids[key] ?? _PUBLIC_KEY_IDS[key] ?? "";
 }
 
 /** `${API}/api/extensions/<id>/backend` for a key — call at runtime, not at

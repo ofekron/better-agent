@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
+import { PUBLIC_EXTENSION_IDS } from "src/extensionIds";
 import { trackPromise } from "src/progress/store";
 import { uuidv4 } from "src/lib/uuid";
 import { loadExtensionModule } from "./extensionModuleLoader";
@@ -83,11 +84,18 @@ type MountedKind = "component" | "mount";
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
 const EXTENSION_ID_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
 const EXTENSION_ID_RE = new RegExp(`^${EXTENSION_ID_SEGMENT}$`);
+// Regex-literal form of the marketplace backend prefix. Built from the id
+// constant with every regex metacharacter escaped, so the allowlist can never
+// widen through an unescaped character in the id.
+const MARKETPLACE_BACKEND = `\\/api\\/extensions\\/${
+  PUBLIC_EXTENSION_IDS.marketplace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}\\/backend`;
+
 const MARKETPLACE_REQUEST_RULES = [
   { method: "GET", path: /^\/api\/extensions$/ },
-  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/(providers|status)$/ },
-  { method: "POST", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/logout$/ },
-  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/catalog(?:\?q=[A-Za-z0-9%._~!'()*-]*)?$/ },
+  { method: "GET", path: new RegExp(`^${MARKETPLACE_BACKEND}\\/auth\\/(providers|status)$`) },
+  { method: "POST", path: new RegExp(`^${MARKETPLACE_BACKEND}\\/auth\\/logout$`) },
+  { method: "GET", path: new RegExp(`^${MARKETPLACE_BACKEND}\\/catalog(?:\\?q=[A-Za-z0-9%._~!'()*-]*)?$`) },
 ] as const;
 
 function isAllowedMarketplaceRequest(path: string, method: string): boolean {
