@@ -3759,9 +3759,12 @@ def test_manifest_accepts_skill_entrypoints_and_requires_skill_md() -> None:
 
 
 def test_extension_enable_disable_installs_runtime_skills() -> None:
+    import installation_profile
+
     work = _private_monorepo_test_work()
     home = Path(tempfile.mkdtemp(prefix="bc-test-extension-skills-home-"))
     original_home = os.environ.get("HOME")
+    original_integrations_enabled = installation_profile.integrations_enabled
     repo = work / "skill-repo"
     package = repo / "extensions" / "skillful"
     package.mkdir(parents=True)
@@ -3798,6 +3801,7 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
     _git(repo, "commit", "-m", "skill extension")
     try:
         os.environ["HOME"] = str(home)
+        installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
         target = home / ".agents" / "skills" / "get-requirements"
         record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
@@ -3806,6 +3810,9 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
         extension_store.set_native_harness_exposed(
             record["manifest"]["id"], "skill", "get-requirements", True
         )
+        if target.exists():
+            raise AssertionError("disabled extension exposed its runtime skill")
+        extension_store.set_enabled(record["manifest"]["id"], True)
         installed = target / "SKILL.md"
         if "Requirements." not in installed.read_text(encoding="utf-8"):
             raise AssertionError("extension skill did not replace the runtime skill copy")
@@ -3816,16 +3823,19 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
         if target.exists():
             raise AssertionError("disabled extension did not remove runtime skill copy")
     finally:
-        if original_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = original_home
         try:
-            extension_store.uninstall("ofek.skill-runtime")
-        except extension_store.ExtensionError:
-            pass
-        shutil.rmtree(home, ignore_errors=True)
-        shutil.rmtree(work, ignore_errors=True)
+            try:
+                extension_store.uninstall("ofek.skill-runtime")
+            except extension_store.ExtensionError:
+                pass
+        finally:
+            installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
+            if original_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = original_home
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def test_optional_permissions_allow_forbid() -> None:
