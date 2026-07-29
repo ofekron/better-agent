@@ -122,20 +122,32 @@ def attest_embedded_claude_sdk(
     package: CriticalPackageIdentity,
     runner: RunnerLaunch,
 ) -> bool:
+    return embedded_claude_sdk_attestation_failure(package, runner) is None
+
+
+def embedded_claude_sdk_attestation_failure(
+    package: CriticalPackageIdentity,
+    runner: RunnerLaunch,
+) -> str | None:
     try:
         runner.validate()
     except (AttributeError, ExecutionContractError):
-        return False
-    return (
-        isinstance(package, CriticalPackageIdentity)
-        and isinstance(runner, RunnerLaunch)
-        and runner.frozen
-        and runner.frozen_bundle is not None
-        and package.package_name == _EMBEDDED_SDK_PACKAGE
-        and package.root == runner.frozen_bundle.root
-        and package.files == (runner.launch.components[0],)
-        and package.files[0].attest_metadata()
-    )
+        return "runner identity is invalid"
+    if not isinstance(package, CriticalPackageIdentity):
+        return "package identity type is invalid"
+    if not isinstance(runner, RunnerLaunch):
+        return "runner identity type is invalid"
+    if not runner.frozen or runner.frozen_bundle is None:
+        return "runner is not frozen"
+    if package.package_name != _EMBEDDED_SDK_PACKAGE:
+        return "package name is invalid"
+    if package.root != runner.frozen_bundle.root:
+        return "package root differs from runner bundle"
+    if package.files != (runner.launch.components[0],):
+        return "package executable differs from runner launch"
+    if not package.files[0].attest_metadata():
+        return "package executable metadata changed"
+    return None
 
 
 def _read_attested(identity: FileIdentity) -> bytes:
@@ -356,6 +368,7 @@ def attest_materialized_claude_sdk_package(
 
 __all__ = [
     "attest_embedded_claude_sdk",
+    "embedded_claude_sdk_attestation_failure",
     "attest_materialized_claude_sdk_package",
     "capture_claude_sdk_package",
     "capture_embedded_claude_sdk",

@@ -14,8 +14,8 @@ from typing import Any
 
 from codex_execution_common import ExecutionContractError
 from provider_claude_execution import (
-    attest_embedded_claude_sdk,
     capture_embedded_claude_sdk,
+    embedded_claude_sdk_attestation_failure,
 )
 from provider_frozen_bundle import attest_materialized_frozen_bundle
 from provider_launch_identity import capture_cli_launch
@@ -216,9 +216,14 @@ def _materialize_snapshot(
     if runner.frozen_bundle is None:
         raise ExecutionContractError("frozen runner authority is unavailable")
     embedded_sdk = capture_embedded_claude_sdk(runner)
-    if not attest_embedded_claude_sdk(embedded_sdk, runner):
+    attestation_failure = embedded_claude_sdk_attestation_failure(
+        embedded_sdk,
+        runner,
+    )
+    if attestation_failure is not None:
         raise ExecutionContractError(
-            "embedded Claude SDK authority mismatch",
+            "embedded Claude SDK authority mismatch: "
+            + attestation_failure,
         )
     captured = time.perf_counter_ns()
     capture_ms = (captured - started) // 1_000_000
