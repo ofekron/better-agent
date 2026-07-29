@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "desktop"))
 
+import node_credential_store
 from node_credential_store import node_provider_credential_store
 from credential_session import ProviderCredentialBroker
 
@@ -31,6 +32,23 @@ def test_node_credentials_survive_restart_and_remain_encrypted(tmp_path) -> None
     assert stat.S_IMODE(authority.stat().st_mode) == 0o700
     assert stat.S_IMODE(seed.stat().st_mode) == 0o600
     assert stat.S_IMODE(keyring.stat().st_mode) == 0o600
+
+
+def test_keyring_file_is_secured_during_store_construction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    secured: list[Path] = []
+    original = node_credential_store.make_private_file
+
+    def secure(path: Path) -> None:
+        secured.append(path)
+        original(path)
+
+    monkeypatch.setattr(node_credential_store, "make_private_file", secure)
+    node_provider_credential_store(tmp_path)
+
+    assert tmp_path / "node-credential-authority" / "credentials-v1.cfg" in secured
 
 
 def test_node_credential_session_subprocess_round_trip(tmp_path) -> None:

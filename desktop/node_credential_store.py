@@ -118,6 +118,8 @@ class _HeadlessProviderKeychain:
     def __init__(self, seed: bytes, file_path: Path) -> None:
         self._file_path = file_path
         self._keyring = Keyring(key=seed.hex(), file_path=file_path)
+        if self._file_path.exists():
+            self._secure_created()
 
     def _validate_existing(self) -> None:
         if self._file_path.exists() or self._file_path.is_symlink():
