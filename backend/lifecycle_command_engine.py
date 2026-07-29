@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import threading
+import uuid
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -14,23 +16,19 @@ from lifecycle_command_model import (
     LifecycleCommand,
     LifecycleEffect,
     LifecycleSnapshot,
-    TurnIdentity,
+    UserTurnIdentity,
     freeze_json,
     materialize_json,
     validate_identifier,
 )
 from lifecycle_command_states import STATES, LifecycleCommandRejected
 import lifecycle_command_store
+from process_identity import ProcessIdentity, capture_process_identity
 
 
 logger = logging.getLogger(__name__)
 _AUTHORITY_LOCK = threading.Lock()
 _BOUND_AUTHORITIES: dict[str, LifecycleCommandEngine] = {}
-
-# D2 is in-process observation infrastructure. Production cutover requires
-# D3 to add cross-process lease ownership before callers route through it.
-PRODUCTION_CUTOVER_READY = False
-
 
 class IdentityRetired(RuntimeError):
     pass
@@ -63,7 +61,7 @@ class ObservationEffectHandler:
 class _PhaseWait:
     future: asyncio.Future[LifecycleSnapshot]
     phases: frozenset[str]
-    identity: TurnIdentity | None
+    identity: UserTurnIdentity | None
     min_revision: int
 
 
@@ -91,6 +89,9 @@ class LifecycleCommandEngine:
             set[asyncio.Future[None]],
         ] = {}
         self._authority_key: str | None = None
+        self._owner_id = str(uuid.uuid4())
+        self._process_identity: ProcessIdentity | None = None
+        self._lease_acquired = False
 
     async def bind(self) -> None:
         loop = asyncio.get_running_loop()
@@ -122,12 +123,29 @@ class LifecycleCommandEngine:
 
     async def _recover(self) -> None:
         await asyncio.to_thread(lifecycle_command_store.initialize)
-        pending = await asyncio.to_thread(
-            lifecycle_command_store.unfinished_transitions
+        process_identity = await asyncio.to_thread(
+            capture_process_identity,
+            os.getpid(),
         )
-        for session_id, request_id in pending:
-            async with self._lock_for(session_id):
-                await self._resume_transition(session_id, request_id)
+        if process_identity is None:
+            raise RuntimeError("cannot prove lifecycle authority process identity")
+        self._process_identity = process_identity
+        await asyncio.to_thread(
+            lifecycle_command_store.acquire_authority,
+            self._owner_id,
+            process_identity,
+        )
+        self._lease_acquired = True
+        try:
+            pending = await asyncio.to_thread(
+                lifecycle_command_store.unfinished_transitions
+            )
+            for session_id, request_id in pending:
+                async with self._lock_for(session_id):
+                    await self._resume_transition(session_id, request_id)
+        except BaseException:
+            await self._release_lease()
+            raise
 
     async def close(self) -> None:
         self._assert_owner()
@@ -135,6 +153,7 @@ class LifecycleCommandEngine:
             if self._bind_task is not None:
                 await asyncio.shield(self._bind_task)
         finally:
+            await self._release_lease()
             for waiters in self._waiters.values():
                 for waiter in waiters:
                     if not waiter.future.done():
@@ -150,6 +169,20 @@ class LifecycleCommandEngine:
             self._loop = None
             self._release_authority()
 
+    async def _release_lease(self) -> None:
+        process_identity = self._process_identity
+        if not self._lease_acquired or process_identity is None:
+            return
+        try:
+            await asyncio.to_thread(
+                lifecycle_command_store.release_authority,
+                self._owner_id,
+                process_identity,
+            )
+        finally:
+            self._lease_acquired = False
+            self._process_identity = None
+
     def snapshot(self, session_id: str) -> LifecycleSnapshot:
         self._assert_ready()
         validate_identifier(session_id, "session_id")
@@ -160,7 +193,7 @@ class LifecycleCommandEngine:
         *,
         request_id: str,
         session_id: str,
-        identity: TurnIdentity,
+        identity: UserTurnIdentity,
     ) -> CommandResult:
         return await self.execute(LifecycleCommand(
             request_id=request_id,
@@ -174,7 +207,7 @@ class LifecycleCommandEngine:
         *,
         request_id: str,
         session_id: str,
-        identity: TurnIdentity,
+        identity: UserTurnIdentity,
     ) -> CommandResult:
         return await self.execute(LifecycleCommand(
             request_id=request_id,
@@ -188,7 +221,7 @@ class LifecycleCommandEngine:
         *,
         request_id: str,
         session_id: str,
-        identity: TurnIdentity,
+        identity: UserTurnIdentity,
     ) -> CommandResult:
         return await self.execute(LifecycleCommand(
             request_id=request_id,
@@ -202,7 +235,7 @@ class LifecycleCommandEngine:
         *,
         request_id: str,
         session_id: str,
-        identity: TurnIdentity,
+        identity: UserTurnIdentity,
         outcome: str,
     ) -> CommandResult:
         return await self.execute(LifecycleCommand(
@@ -213,50 +246,124 @@ class LifecycleCommandEngine:
             outcome=outcome,
         ))
 
+    async def confirm_active_started(
+        self,
+        session_id: str,
+        *,
+        lifecycle_message_id: str,
+    ) -> CommandResult | None:
+        return await self._transition_active(
+            session_id,
+            kind="confirm_started",
+            lifecycle_message_id=lifecycle_message_id,
+        )
+
+    async def request_active_stop(
+        self,
+        session_id: str,
+    ) -> CommandResult | None:
+        return await self._transition_active(session_id, kind="request_stop")
+
+    async def finish_active(
+        self,
+        session_id: str,
+        *,
+        lifecycle_message_id: str,
+        outcome: str,
+    ) -> CommandResult | None:
+        return await self._transition_active(
+            session_id,
+            kind="finish_turn",
+            lifecycle_message_id=lifecycle_message_id,
+            outcome=outcome,
+        )
+
+    async def _transition_active(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        lifecycle_message_id: str | None = None,
+        outcome: str | None = None,
+    ) -> CommandResult | None:
+        await self.bind()
+        async with self._lock_for(session_id):
+            snapshot = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            identity = snapshot.identity
+            if identity is None:
+                return None
+            if (
+                lifecycle_message_id is not None
+                and identity.lifecycle_message_id != lifecycle_message_id
+            ):
+                return None
+            if kind == "confirm_started" and snapshot.phase != "starting":
+                return None
+            if kind == "request_stop" and snapshot.phase not in {"starting", "running"}:
+                return None
+            if kind == "finish_turn" and snapshot.phase == "idle":
+                return None
+            return await self._execute_bound(LifecycleCommand(
+                request_id=f"active:{snapshot.revision}:{kind}",
+                session_id=session_id,
+                kind=kind,
+                identity=identity,
+                outcome=outcome,
+            ))
+
     async def execute(self, command: LifecycleCommand) -> CommandResult:
         await self.bind()
         async with self._lock_for(command.session_id):
-            existing = await asyncio.to_thread(
-                lifecycle_command_store.transition_for,
-                command.session_id,
-                command.request_id,
-            )
-            if existing is not None:
-                if existing["fingerprint"] != command.fingerprint():
-                    raise LifecycleCommandRejected(
-                        "request_id is already bound to another command"
-                    )
-                return await self._resume_transition(
-                    command.session_id,
-                    command.request_id,
+            return await self._execute_bound(command)
+
+    async def _execute_bound(
+        self,
+        command: LifecycleCommand,
+    ) -> CommandResult:
+        existing = await asyncio.to_thread(
+            lifecycle_command_store.transition_for,
+            command.session_id,
+            command.request_id,
+        )
+        if existing is not None:
+            if existing["fingerprint"] != command.fingerprint():
+                raise LifecycleCommandRejected(
+                    "request_id is already bound to another command"
                 )
-            snapshot = await asyncio.to_thread(
-                lifecycle_command_store.session_snapshot,
-                command.session_id,
-            )
-            plan = STATES[snapshot.phase].decide(snapshot, command)
-            try:
-                disposition = await asyncio.to_thread(
-                    lifecycle_command_store.persist_plan,
-                    command,
-                    snapshot,
-                    plan,
-                )
-            except lifecycle_command_store.TransitionConflict as exc:
-                raise LifecycleCommandRejected(str(exc)) from exc
-            if disposition not in {"inserted", "existing"}:
-                raise RuntimeError("unknown lifecycle plan disposition")
             return await self._resume_transition(
                 command.session_id,
                 command.request_id,
             )
+        snapshot = await asyncio.to_thread(
+            lifecycle_command_store.session_snapshot,
+            command.session_id,
+        )
+        plan = STATES[snapshot.phase].decide(snapshot, command)
+        try:
+            disposition = await asyncio.to_thread(
+                lifecycle_command_store.persist_plan,
+                command,
+                snapshot,
+                plan,
+            )
+        except lifecycle_command_store.TransitionConflict as exc:
+            raise LifecycleCommandRejected(str(exc)) from exc
+        if disposition not in {"inserted", "existing"}:
+            raise RuntimeError("unknown lifecycle plan disposition")
+        return await self._resume_transition(
+            command.session_id,
+            command.request_id,
+        )
 
     async def wait_for_phase(
         self,
         session_id: str,
         phases: Collection[str],
         *,
-        identity: TurnIdentity | None = None,
+        identity: UserTurnIdentity | None = None,
         min_revision: int = 0,
     ) -> LifecycleSnapshot:
         await self.bind()
@@ -423,7 +530,7 @@ class LifecycleCommandEngine:
     def _wait_matches(
         snapshot: LifecycleSnapshot,
         phases: Collection[str],
-        identity: TurnIdentity | None,
+        identity: UserTurnIdentity | None,
         min_revision: int,
     ) -> bool:
         if snapshot.phase not in phases or snapshot.revision < min_revision:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sqlite3
@@ -24,12 +25,11 @@ from lifecycle_command_engine import (  # noqa: E402
     IdentityRetired,
     LifecycleAuthorityBound,
     LifecycleCommandEngine,
-    PRODUCTION_CUTOVER_READY,
 )
 from lifecycle_command_model import (  # noqa: E402
     LifecycleCommand,
     LifecycleEffect,
-    TurnIdentity,
+    UserTurnIdentity,
 )
 from lifecycle_command_states import (  # noqa: E402
     STATES,
@@ -39,13 +39,132 @@ from lifecycle_command_states import (  # noqa: E402
 import lifecycle_command_store  # noqa: E402
 
 
-def identity(suffix: str) -> TurnIdentity:
-    return TurnIdentity(
+def identity(suffix: str) -> UserTurnIdentity:
+    return UserTurnIdentity(
         user_turn_id=f"user-{suffix}",
         lifecycle_message_id=f"message-{suffix}",
-        execution_turn_id=f"execution-{suffix}",
-        assistant_message_id=f"assistant-{suffix}",
     )
+
+
+def _create_v1_schema(database: sqlite3.Connection) -> None:
+    database.executescript(
+        """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            identity_json TEXT,
+            revision INTEGER NOT NULL CHECK (revision >= 0)
+        ) STRICT;
+        CREATE TABLE transitions (
+            session_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+            next_snapshot_json TEXT NOT NULL,
+            notification_type TEXT NOT NULL,
+            notification_payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            PRIMARY KEY (session_id, request_id)
+        ) STRICT;
+        CREATE TABLE effects (
+            session_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            effect_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            result_json TEXT,
+            PRIMARY KEY (session_id, request_id, ordinal),
+            UNIQUE (effect_id)
+        ) STRICT;
+        CREATE UNIQUE INDEX one_unfinished_transition_per_session
+            ON transitions(session_id)
+            WHERE status IN ('planned', 'effects_applied', 'committed');
+        CREATE INDEX transitions_by_status
+            ON transitions(status, session_id, request_id);
+        PRAGMA user_version = 1;
+        """
+    )
+
+
+def _insert_v1_projection(
+    database: sqlite3.Connection,
+    *,
+    session_id: str,
+    valid: bool = True,
+) -> dict[str, Any]:
+    old_identity = {
+        "user_turn_id": f"user-{session_id}",
+        "lifecycle_message_id": f"message-{session_id}",
+        "execution_turn_id": f"execution-{session_id}",
+        "assistant_message_id": f"assistant-{session_id}",
+    }
+    if not valid:
+        old_identity.pop("lifecycle_message_id")
+    command = {
+        "request_id": f"request-{session_id}",
+        "session_id": session_id,
+        "kind": "begin_turn",
+        "identity": old_identity,
+        "outcome": None,
+    }
+    snapshot = {
+        "phase": "starting",
+        "identity": old_identity,
+        "revision": 1,
+    }
+    notification = {
+        "request_id": command["request_id"],
+        "command": "begin_turn",
+        "source_phase": "idle",
+        "next_phase": "starting",
+        "identity": old_identity,
+    }
+    effect = dict(notification)
+    def encode(value: Any) -> str:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    database.execute(
+        "INSERT INTO sessions VALUES (?, 'starting', ?, 1)",
+        (session_id, encode(old_identity)),
+    )
+    database.execute(
+        """
+        INSERT INTO transitions VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            command["request_id"],
+            encode(command),
+            encode(command),
+            encode(snapshot),
+            "lifecycle_command_completed",
+            encode(notification),
+            "notification_attempted",
+        ),
+    )
+    database.execute(
+        "INSERT INTO effects VALUES (?, ?, 0, ?, ?, ?, ?)",
+        (
+            session_id,
+            command["request_id"],
+            f"effect-{session_id}",
+            "observe_turn_begin",
+            encode(effect),
+            encode({"observed": "observe_turn_begin"}),
+        ),
+    )
+    return {
+        "identity": old_identity,
+        "command": command,
+        "snapshot": snapshot,
+        "notification": notification,
+        "effect": effect,
+    }
 
 
 class IdempotentRecorder:
@@ -302,7 +421,58 @@ async def test_authority_rejects_another_thread_and_event_loop() -> None:
         await asyncio.to_thread(finished.wait)
         owner_thread.join()
     assert not failures
-    assert PRODUCTION_CUTOVER_READY is False
+
+
+async def test_cross_process_lease_crash_takeover() -> None:
+    child_code = """
+import asyncio
+import sys
+from event_bus import EventBus
+from lifecycle_command_engine import LifecycleCommandEngine
+
+async def main():
+    engine = LifecycleCommandEngine(EventBus())
+    await engine.bind()
+    print("READY", flush=True)
+    await asyncio.to_thread(sys.stdin.read)
+
+asyncio.run(main())
+"""
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        child_code,
+        cwd=str(ROOT),
+        env=os.environ.copy(),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert child.stdout is not None
+        ready = await child.stdout.readline()
+        if ready != b"READY\n":
+            assert child.stderr is not None
+            error = (await child.stderr.read()).decode("utf-8", errors="replace")
+            raise AssertionError(f"lease child failed readiness: {error}")
+        competing = LifecycleCommandEngine(EventBus())
+        try:
+            await competing.bind()
+        except lifecycle_command_store.AuthorityLeaseHeld:
+            pass
+        else:
+            raise AssertionError("live child lifecycle lease was stolen")
+        child.kill()
+        await child.wait()
+        successor = LifecycleCommandEngine(EventBus())
+        await successor.bind()
+        owner = lifecycle_command_store.authority_owner()
+        assert owner is not None and owner["pid"] == os.getpid()
+        await successor.close()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
 
 
 async def test_at_least_once_effect_and_best_effort_notification() -> None:
@@ -461,6 +631,80 @@ async def test_store_initialization_and_atomic_compare_insert() -> None:
         shutil.rmtree(alternate_home)
 
 
+def test_v1_migration_and_atomic_rollback() -> None:
+    migrated = sqlite3.connect(":memory:", isolation_level=None)
+    migrated.row_factory = sqlite3.Row
+    _create_v1_schema(migrated)
+    _insert_v1_projection(migrated, session_id="migration-valid")
+    lifecycle_command_store._migrate(migrated)
+
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM authority_owner"
+    ).fetchone()[0] == 0
+    session_identity = json.loads(migrated.execute(
+        "SELECT identity_json FROM sessions WHERE session_id = ?",
+        ("migration-valid",),
+    ).fetchone()[0])
+    transition = migrated.execute(
+        """
+        SELECT fingerprint, command_json, next_snapshot_json,
+               notification_payload_json
+        FROM transitions WHERE session_id = ?
+        """,
+        ("migration-valid",),
+    ).fetchone()
+    command = json.loads(transition["command_json"])
+    snapshot = json.loads(transition["next_snapshot_json"])
+    notification = json.loads(transition["notification_payload_json"])
+    effect = json.loads(migrated.execute(
+        "SELECT payload_json FROM effects WHERE session_id = ?",
+        ("migration-valid",),
+    ).fetchone()[0])
+    logical_keys = {"user_turn_id", "lifecycle_message_id"}
+    assert set(session_identity) == logical_keys
+    assert set(command["identity"]) == logical_keys
+    assert set(snapshot["identity"]) == logical_keys
+    assert set(notification["identity"]) == logical_keys
+    assert set(effect["identity"]) == logical_keys
+    assert transition["fingerprint"] == LifecycleCommand.from_dict(
+        command,
+    ).fingerprint()
+    migrated.close()
+
+    rolled_back = sqlite3.connect(":memory:", isolation_level=None)
+    rolled_back.row_factory = sqlite3.Row
+    _create_v1_schema(rolled_back)
+    original = _insert_v1_projection(
+        rolled_back,
+        session_id="rollback-valid",
+    )
+    _insert_v1_projection(
+        rolled_back,
+        session_id="rollback-invalid",
+        valid=False,
+    )
+    try:
+        lifecycle_command_store._migrate(rolled_back)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid v1 identity did not fail closed")
+    assert rolled_back.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert rolled_back.execute(
+        """
+        SELECT COUNT(*) FROM sqlite_master
+        WHERE type = 'table' AND name = 'authority_owner'
+        """
+    ).fetchone()[0] == 0
+    persisted = json.loads(rolled_back.execute(
+        "SELECT identity_json FROM sessions WHERE session_id = ?",
+        ("rollback-valid",),
+    ).fetchone()[0])
+    assert persisted == original["identity"]
+    rolled_back.close()
+
+
 def test_handler_validation_and_sqlite_scaling_contract() -> None:
     try:
         LifecycleCommandEngine(
@@ -527,7 +771,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 1
+        assert type(version) is int and version == 2
 
 
 async def main() -> None:
@@ -535,9 +779,11 @@ async def main() -> None:
     await test_concurrent_bind_waits_for_one_recovery()
     await test_single_engine_authority()
     await test_authority_rejects_another_thread_and_event_loop()
+    await test_cross_process_lease_crash_takeover()
     await test_at_least_once_effect_and_best_effort_notification()
     await test_identity_retirement_and_waiter_cleanup()
     await test_store_initialization_and_atomic_compare_insert()
+    test_v1_migration_and_atomic_rollback()
     test_handler_validation_and_sqlite_scaling_contract()
     print("lifecycle command engine integration: ok")
 

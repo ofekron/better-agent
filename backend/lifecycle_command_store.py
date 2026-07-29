@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -16,9 +17,10 @@ from lifecycle_command_model import (
     validate_identifier,
 )
 from paths import ba_home
+from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -40,6 +42,10 @@ class TransitionBusy(TransitionConflict):
 
 
 class SnapshotChanged(TransitionConflict):
+    pass
+
+
+class AuthorityLeaseHeld(RuntimeError):
     pass
 
 
@@ -149,17 +155,114 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 WHERE status IN ('planned', 'effects_applied', 'committed');
             CREATE INDEX transitions_by_status
                 ON transitions(status, session_id, request_id);
+            CREATE TABLE authority_owner (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                owner_id TEXT NOT NULL,
+                pid INTEGER NOT NULL CHECK (pid > 0),
+                create_time REAL NOT NULL
+            ) STRICT;
             """
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 1")
+            connection.execute("PRAGMA user_version = 2")
+        elif version == 1:
+            _migrate_v1_to_v2(connection)
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     if version == 0:
         connection.execute("PRAGMA journal_mode = WAL")
+
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE authority_owner (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            owner_id TEXT NOT NULL,
+            pid INTEGER NOT NULL CHECK (pid > 0),
+            create_time REAL NOT NULL
+        ) STRICT
+        """
+    )
+    session_rows = connection.execute(
+        "SELECT session_id, identity_json FROM sessions WHERE identity_json IS NOT NULL"
+    ).fetchall()
+    for row in session_rows:
+        identity = _logical_identity(_load_object(row["identity_json"], "turn identity"))
+        connection.execute(
+            "UPDATE sessions SET identity_json = ? WHERE session_id = ?",
+            (_dump(identity), row["session_id"]),
+        )
+    transition_rows = connection.execute(
+        """
+        SELECT session_id, request_id, command_json, next_snapshot_json,
+               notification_payload_json
+        FROM transitions
+        """
+    ).fetchall()
+    for row in transition_rows:
+        command = _load_object(row["command_json"], "command")
+        command["identity"] = _logical_identity(command["identity"])
+        next_snapshot = _load_object(row["next_snapshot_json"], "next snapshot")
+        if next_snapshot.get("identity") is not None:
+            next_snapshot["identity"] = _logical_identity(next_snapshot["identity"])
+        notification = _load_object(
+            row["notification_payload_json"],
+            "notification payload",
+        )
+        notification["identity"] = _logical_identity(notification["identity"])
+        fingerprint = LifecycleCommand.from_dict(command).fingerprint()
+        connection.execute(
+            """
+            UPDATE transitions
+            SET command_json = ?, fingerprint = ?, next_snapshot_json = ?,
+                notification_payload_json = ?
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (
+                _dump(command),
+                fingerprint,
+                _dump(next_snapshot),
+                _dump(notification),
+                row["session_id"],
+                row["request_id"],
+            ),
+        )
+    effect_rows = connection.execute(
+        "SELECT session_id, request_id, ordinal, payload_json FROM effects"
+    ).fetchall()
+    for row in effect_rows:
+        payload = _load_object(row["payload_json"], "effect payload")
+        payload["identity"] = _logical_identity(payload["identity"])
+        connection.execute(
+            """
+            UPDATE effects SET payload_json = ?
+            WHERE session_id = ? AND request_id = ? AND ordinal = ?
+            """,
+            (
+                _dump(payload),
+                row["session_id"],
+                row["request_id"],
+                row["ordinal"],
+            ),
+        )
+    connection.execute("PRAGMA user_version = 2")
+
+
+def _logical_identity(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise RuntimeError("invalid persisted turn identity")
+    user_turn_id = value.get("user_turn_id")
+    lifecycle_message_id = value.get("lifecycle_message_id")
+    validate_identifier(user_turn_id, "user_turn_id")
+    validate_identifier(lifecycle_message_id, "lifecycle_message_id")
+    return {
+        "user_turn_id": user_turn_id,
+        "lifecycle_message_id": lifecycle_message_id,
+    }
 
 
 def session_snapshot(session_id: str) -> LifecycleSnapshot:
@@ -174,6 +277,87 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
             (session_id,),
         ).fetchone()
     return _snapshot_from_row(row) if row is not None else LifecycleSnapshot()
+
+
+def acquire_authority(
+    owner_id: str,
+    process_identity: ProcessIdentity,
+) -> None:
+    validate_identifier(owner_id, "owner_id")
+    if type(process_identity.pid) is not int or process_identity.pid <= 0:
+        raise ValueError("authority pid must be a positive integer")
+    if (
+        type(process_identity.create_time) is not float
+        or not math.isfinite(process_identity.create_time)
+    ):
+        raise ValueError("authority create_time must be finite")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        existing = database.execute(
+            "SELECT owner_id, pid, create_time FROM authority_owner WHERE singleton = 1"
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["owner_id"] == owner_id
+                and existing["pid"] == process_identity.pid
+                and existing["create_time"] == process_identity.create_time
+            ):
+                database.commit()
+                return
+            recorded = ProcessIdentity(
+                pid=existing["pid"],
+                create_time=existing["create_time"],
+            )
+            if not process_identity_is_proven_dead(recorded):
+                database.rollback()
+                raise AuthorityLeaseHeld(
+                    "lifecycle authority is owned by a live or unverifiable process"
+                )
+        database.execute(
+            """
+            INSERT INTO authority_owner(singleton, owner_id, pid, create_time)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                pid = excluded.pid,
+                create_time = excluded.create_time
+            """,
+            (
+                owner_id,
+                process_identity.pid,
+                process_identity.create_time,
+            ),
+        )
+        database.commit()
+
+
+def release_authority(
+    owner_id: str,
+    process_identity: ProcessIdentity,
+) -> None:
+    validate_identifier(owner_id, "owner_id")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        database.execute(
+            """
+            DELETE FROM authority_owner
+            WHERE singleton = 1 AND owner_id = ? AND pid = ? AND create_time = ?
+            """,
+            (
+                owner_id,
+                process_identity.pid,
+                process_identity.create_time,
+            ),
+        )
+        database.commit()
+
+
+def authority_owner() -> dict[str, Any] | None:
+    with connection() as database:
+        row = database.execute(
+            "SELECT owner_id, pid, create_time FROM authority_owner WHERE singleton = 1"
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def transition_for(session_id: str, request_id: str) -> dict[str, Any] | None:

@@ -61,11 +61,9 @@ def validate_identifier(value: object, name: str) -> str:
 
 
 @dataclass(frozen=True)
-class TurnIdentity:
+class UserTurnIdentity:
     user_turn_id: str
     lifecycle_message_id: str
-    execution_turn_id: str
-    assistant_message_id: str
 
     def __post_init__(self) -> None:
         for name, value in self.to_dict().items():
@@ -75,18 +73,11 @@ class TurnIdentity:
         return {
             "user_turn_id": self.user_turn_id,
             "lifecycle_message_id": self.lifecycle_message_id,
-            "execution_turn_id": self.execution_turn_id,
-            "assistant_message_id": self.assistant_message_id,
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> TurnIdentity:
-        if set(value) != {
-            "user_turn_id",
-            "lifecycle_message_id",
-            "execution_turn_id",
-            "assistant_message_id",
-        }:
+    def from_dict(cls, value: Mapping[str, Any]) -> UserTurnIdentity:
+        if set(value) != {"user_turn_id", "lifecycle_message_id"}:
             raise ValueError("turn identity has unexpected fields")
         return cls(**dict(value))
 
@@ -94,7 +85,7 @@ class TurnIdentity:
 @dataclass(frozen=True)
 class LifecycleSnapshot:
     phase: str = "idle"
-    identity: TurnIdentity | None = None
+    identity: UserTurnIdentity | None = None
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -119,7 +110,11 @@ class LifecycleSnapshot:
         identity = value["identity"]
         return cls(
             phase=value["phase"],
-            identity=TurnIdentity.from_dict(identity) if identity is not None else None,
+            identity=(
+                UserTurnIdentity.from_dict(identity)
+                if identity is not None
+                else None
+            ),
             revision=value["revision"],
         )
 
@@ -129,7 +124,7 @@ class LifecycleCommand:
     request_id: str
     session_id: str
     kind: str
-    identity: TurnIdentity
+    identity: UserTurnIdentity
     outcome: str | None = None
 
     def __post_init__(self) -> None:
@@ -160,7 +155,7 @@ class LifecycleCommand:
             request_id=value["request_id"],
             session_id=value["session_id"],
             kind=value["kind"],
-            identity=TurnIdentity.from_dict(value["identity"]),
+            identity=UserTurnIdentity.from_dict(value["identity"]),
             outcome=value["outcome"],
         )
 

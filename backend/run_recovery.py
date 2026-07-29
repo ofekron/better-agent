@@ -2015,6 +2015,7 @@ async def _integrate_one_locked(
         if last_asst_initial is not None:
             await _emit_recovered_user_message_terminal(
                 coordinator=coordinator,
+                app_session_id=app_sid,
                 persist_sid=persist_sid,
                 mode=desc.get("mode") or "manager",
                 agent_sid=desc.get("session_id"),
@@ -2217,6 +2218,34 @@ async def _integrate_one_locked(
             # Push the updated counts to any connected Home tab so it
             # doesn't need to wait for a page refresh.
             await coordinator.turn_manager.emit_run_state(app_sid)
+            recovered_assistant = _recovery_target_assistant(
+                sess,
+                recovering_msg_id,
+            )
+            recovered_user = (
+                _last_user_before(sess, recovered_assistant)
+                if recovered_assistant is not None
+                else None
+            )
+            recovered_lifecycle_id = (
+                recovered_user.get("lifecycle_msg_id")
+                if isinstance(recovered_user, dict)
+                else None
+            )
+            lifecycle_commands = getattr(
+                coordinator,
+                "lifecycle_commands",
+                None,
+            )
+            if (
+                lifecycle_commands is not None
+                and isinstance(recovered_lifecycle_id, str)
+                and recovered_lifecycle_id
+            ):
+                await lifecycle_commands.confirm_active_started(
+                    app_sid,
+                    lifecycle_message_id=recovered_lifecycle_id,
+                )
             logger.info(
                 "integrate_recovered_runs: registered run_state for %s (alive, no complete.json)",
                 run_id[:8],
@@ -2280,6 +2309,7 @@ async def _integrate_one_locked(
                 if live_sess is not None and terminal_asst is not None:
                     await _emit_recovered_user_message_terminal(
                         coordinator=coordinator,
+                        app_session_id=app_sid,
                         persist_sid=persist_sid,
                         mode=mode,
                         agent_sid=claude_sid,
@@ -2339,6 +2369,7 @@ def _recovery_target_assistant(
 async def _emit_recovered_user_message_terminal(
     *,
     coordinator,
+    app_session_id: str,
     persist_sid: str,
     mode: str,
     agent_sid: Optional[str],
@@ -2357,19 +2388,34 @@ async def _emit_recovered_user_message_terminal(
     message's lifecycle id, and let the existing event-bus persistence + WS
     fanout handle both disk and live waiters.
     """
-    try:
-        import user_msg_lifecycle
-        from orchs import get_strategy
-    except Exception:
-        logger.debug("recovery lifecycle terminal imports failed", exc_info=True)
-        return
-
     user_msg = _last_user_before(sess, assistant_msg)
     lifecycle_msg_id = (
         user_msg.get("lifecycle_msg_id")
         if isinstance(user_msg, dict) else None
     )
     if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+        return
+    complete = _salvage_complete_payload(run_id)
+    success = bool(complete and complete.get("success")) and not cancelled
+    command_outcome = (
+        "complete"
+        if success
+        else "stopped"
+        if cancelled
+        else "failed"
+    )
+    lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+    if lifecycle_commands is not None:
+        await lifecycle_commands.finish_active(
+            app_session_id,
+            lifecycle_message_id=lifecycle_msg_id,
+            outcome=command_outcome,
+        )
+    try:
+        import user_msg_lifecycle
+        from orchs import get_strategy
+    except Exception:
+        logger.debug("recovery lifecycle terminal imports failed", exc_info=True)
         return
     try:
         if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
@@ -2380,8 +2426,6 @@ async def _emit_recovered_user_message_terminal(
         logger.debug("recovery lifecycle terminal check failed", exc_info=True)
         return
 
-    complete = _salvage_complete_payload(run_id)
-    success = bool(complete and complete.get("success")) and not cancelled
     error = complete.get("error") if isinstance(complete, dict) else None
     try:
         if not success and not cancelled:
@@ -3466,6 +3510,7 @@ async def _finalize_when_done(
         if finalize_ok and last_asst is not None:
             await _emit_recovered_user_message_terminal(
                 coordinator=coordinator,
+                app_session_id=app_sid,
                 persist_sid=persist_sid,
                 mode=desc.get("mode") or "native",
                 agent_sid=desc.get("session_id"),

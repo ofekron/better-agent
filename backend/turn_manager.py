@@ -1521,6 +1521,11 @@ class TurnManager:
     # ======================================================================
     # Cancellation — turn-scoped.
     # ======================================================================
+    async def _request_logical_turn_stop(self, app_session_id: str) -> None:
+        lifecycle_commands = getattr(self._c, "lifecycle_commands", None)
+        if lifecycle_commands is not None:
+            await lifecycle_commands.request_active_stop(app_session_id)
+
     async def cancel_turn(
         self,
         app_session_id: str,
@@ -1569,6 +1574,7 @@ class TurnManager:
                 landed = True
             if landed:
                 self._c._session_cancelled[app_session_id] = True
+                await self._request_logical_turn_stop(app_session_id)
                 logger.info(
                     "Cancelled (no live turn) for session %s", app_session_id,
                 )
@@ -1576,6 +1582,7 @@ class TurnManager:
         self._c._session_cancelled[app_session_id] = True
         if interrupted_by_msg_id:
             self._interrupted_by_msg_id[app_session_id] = interrupted_by_msg_id
+        await self._request_logical_turn_stop(app_session_id)
         event.set()
         for run_id in self.active_run_ids.get(app_session_id, []):
             self._c._cancel_turn_fanout(run_id)
@@ -3080,6 +3087,16 @@ class TurnManager:
                             },
                         })
                         continue
+                    lifecycle_commands = getattr(
+                        self._c,
+                        "lifecycle_commands",
+                        None,
+                    )
+                    if lifecycle_commands is not None:
+                        await lifecycle_commands.confirm_active_started(
+                            app_session_id,
+                            lifecycle_message_id=lifecycle_message_id,
+                        )
                 silence_threshold_seconds = await _to_turn_dispatch_thread(
                     self._load_task_start_silence_seconds,
                 )
