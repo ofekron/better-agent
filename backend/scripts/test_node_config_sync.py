@@ -47,6 +47,7 @@ class _Recorder:
         node_config_sync._call_rpc = self._call_rpc
         node_config_sync._dirty = set()
         node_config_sync._push_task = None
+        node_config_sync._connect_tasks = {}
         node_config_sync._loop = None
 
     def _make_export(self, name: str):
@@ -71,9 +72,16 @@ def _worker(node_id: str, state: str = "connected", role: str = "worker_node") -
 
 
 async def _drain() -> None:
-    task = node_config_sync._push_task
-    if task is not None:
-        await task
+    tasks = [
+        task
+        for task in [
+            node_config_sync._push_task,
+            *node_config_sync._connect_tasks.values(),
+        ]
+        if task is not None
+    ]
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 def test_notify_coalesces_bursts_into_bounded_pushes() -> None:
@@ -120,6 +128,7 @@ def test_connect_listener_pushes_every_surface_to_that_worker_only() -> None:
         rec = _Recorder([_worker("w1"), _worker("w2")])
         rec.install()
         await node_config_sync.on_node_state("w1", "connected")
+        await _drain()
         if sorted(rec.pushes) != [("extensions", "w1"), ("harness", "w1"), ("providers", "w1")]:
             raise AssertionError(f"connect did not push every surface to w1 only: {rec.pushes}")
         before = list(rec.pushes)
@@ -158,6 +167,7 @@ def test_one_broken_exporter_does_not_block_other_surfaces() -> None:
         rec.install()
         rec.failing_exports = {"extensions"}
         await node_config_sync.on_node_state("w1", "connected")
+        await _drain()
         if rec.pushed_nodes("extensions"):
             raise AssertionError("broken surface was pushed anyway")
         if rec.pushed_nodes("providers") != ["w1"] or rec.pushed_nodes("harness") != ["w1"]:
@@ -204,8 +214,46 @@ def test_connect_listener_binds_the_loop_itself() -> None:
         rec.install()
         node_config_sync._loop = None
         await node_config_sync.on_node_state("w1", "connected")
+        await _drain()
         if node_config_sync._loop is None:
             raise AssertionError("connect listener did not self-bind the loop")
+
+    asyncio.run(scenario())
+
+
+def test_connect_listener_does_not_wait_for_projection_rpc() -> None:
+    async def scenario() -> None:
+        rec = _Recorder([_worker("w1")])
+        rec.install()
+        rec.export_gate = asyncio.Event()
+        await asyncio.wait_for(
+            node_config_sync.on_node_state("w1", "connected"),
+            timeout=0.5,
+        )
+        await asyncio.sleep(0)
+        task = node_config_sync._connect_tasks.get("w1")
+        if task is None or task.done():
+            raise AssertionError("connected projection was not running in the background")
+        rec.export_gate.set()
+        await _drain()
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_cancels_connected_projection() -> None:
+    async def scenario() -> None:
+        rec = _Recorder([_worker("w1")])
+        rec.install()
+        rec.export_gate = asyncio.Event()
+        await node_config_sync.on_node_state("w1", "connected")
+        await asyncio.sleep(0)
+        task = node_config_sync._connect_tasks.get("w1")
+        if task is None:
+            raise AssertionError("connected projection task was not tracked")
+        await node_config_sync.on_node_state("w1", "disconnected")
+        await asyncio.gather(task, return_exceptions=True)
+        if not task.cancelled() or node_config_sync._connect_tasks:
+            raise AssertionError("disconnect left a connected projection task running")
 
     asyncio.run(scenario())
 
@@ -237,6 +285,8 @@ if __name__ == "__main__":
     test_notify_from_worker_thread_reaches_the_bound_loop()
     test_bind_loop_off_loop_never_raises()
     test_connect_listener_binds_the_loop_itself()
+    test_connect_listener_does_not_wait_for_projection_rpc()
+    test_disconnect_cancels_connected_projection()
     test_extension_surface_gets_a_longer_rpc_timeout()
     test_unknown_surface_is_rejected()
     print("node_config_sync tests passed")

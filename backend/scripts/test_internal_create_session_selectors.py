@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import json
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home
@@ -17,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # has no owner until its extension is active. Activate before importing main.
 import _test_installation  # noqa: E402
 _test_installation.activate(Path(_TMP_HOME))
+import _test_extension  # noqa: E402
 
 from starlette.testclient import TestClient  # noqa: E402
 
 import config_store  # noqa: E402
-import extension_store  # noqa: E402
 import main  # noqa: E402
 import model_catalog_read_projection  # noqa: E402
 import models as models_mod  # noqa: E402
@@ -37,49 +35,6 @@ def _post(client: TestClient, body: dict):
         json=body,
         headers={"X-Internal-Token": main.coordinator.internal_token},
     )
-
-
-def _install_gate_extension(role: str) -> str:
-    """Install and enable a fixture extension that OWNS `role`.
-
-    The manifest must declare `core_roles` for extension_id_for_role(role) to
-    resolve, and extensions install disabled — only active ones own a role.
-    """
-    extension_id = f"test-fixture-{role}"
-    package = Path(_TMP_HOME) / "private-fixtures" / extension_id
-    if package.exists():
-        shutil.rmtree(package)
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_id,
-        "name": extension_id,
-        "version": "1.0.0",
-        "description": extension_id,
-        "surfaces": ["backend_feature"],
-        "core_roles": [role],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(
-        json.dumps(manifest), encoding="utf-8",
-    )
-    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
-        package_dir=package,
-        source={
-            "type": "better_agent_local",
-            "repo_url": str(package.parent),
-            "extension_path": package.name,
-            "ref": "",
-            "commit_sha": extension_id,
-        },
-        persist=True,
-    )
-    extension_store.set_enabled(extension_id, True)
-    owner = extension_store.extension_id_for_role(role)
-    assert owner == extension_id, f"role {role!r} resolved to {owner!r}"
-    return extension_id
 
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
@@ -120,7 +75,7 @@ def _seed_default_provider(model: str) -> None:
 def main_test() -> int:
     _seed_default_provider("default-provider-model")
     _configure_internal_llm_defaults("default_session")
-    _install_gate_extension('team-orchestration')
+    _test_extension.install_core_role(Path(_TMP_HOME), "team-orchestration")
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     provider = config_store.get_default_provider()
     provider_id = provider["id"]

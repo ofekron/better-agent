@@ -34,6 +34,8 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_installation
+_test_installation.activate(Path(_tmp), provider="codex")
 import topology
 import node_registry_store
 from auth_test_helpers import authenticate_client

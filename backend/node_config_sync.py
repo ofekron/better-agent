@@ -82,7 +82,8 @@ SURFACES: tuple[_Surface, ...] = (
 _SURFACES_BY_NAME = {surface.name: surface for surface in SURFACES}
 
 _dirty: set[str] = set()
-_push_task: asyncio.Task | None = None
+_push_task: asyncio.Task[None] | None = None
+_connect_tasks: dict[str, asyncio.Task[None]] = {}
 _loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -196,11 +197,7 @@ async def _push_until_clean() -> None:
             await _push_surface(_SURFACES_BY_NAME[name], node_ids)
 
 
-async def on_node_state(node_id: str, state: str) -> None:
-    """node_store listener: project every surface onto a worker on connect."""
-    bind_loop()
-    if state != "connected" or node_id == "primary":
-        return
+async def _project_connected_node(node_id: str) -> None:
     try:
         nodes = await asyncio.to_thread(_snapshot_nodes)
     except Exception:
@@ -215,3 +212,58 @@ async def on_node_state(node_id: str, state: str) -> None:
     logger.info("node config sync: projecting all surfaces onto %s", node_id)
     for surface in SURFACES:
         await _push_surface(surface, [node_id])
+
+
+def _forget_connect_task(node_id: str, task: asyncio.Task[None]) -> None:
+    if _connect_tasks.get(node_id) is task:
+        _connect_tasks.pop(node_id, None)
+
+
+def _cancel_connect_projection(node_id: str) -> None:
+    task = _connect_tasks.pop(node_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _schedule_connect_projection(
+    loop: asyncio.AbstractEventLoop,
+    node_id: str,
+) -> None:
+    _cancel_connect_projection(node_id)
+    task = loop.create_task(
+        _project_connected_node(node_id),
+        name=f"node-config-sync-connect-{node_id}",
+    )
+    _connect_tasks[node_id] = task
+    task.add_done_callback(
+        lambda completed, target=node_id: _forget_connect_task(target, completed)
+    )
+
+
+async def on_node_state(node_id: str, state: str) -> None:
+    """node_store listener: project every surface onto a worker on connect."""
+    loop = asyncio.get_running_loop()
+    bind_loop(loop)
+    if state == "disconnected":
+        _cancel_connect_projection(node_id)
+        return
+    if state != "connected" or node_id == "primary":
+        return
+    _schedule_connect_projection(loop, node_id)
+
+
+async def shutdown() -> None:
+    global _push_task, _loop
+    tasks = [
+        task
+        for task in [_push_task, *_connect_tasks.values()]
+        if task is not None and not task.done()
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _push_task = None
+    _connect_tasks.clear()
+    _dirty.clear()
+    _loop = None

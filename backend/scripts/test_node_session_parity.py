@@ -39,6 +39,8 @@ os.environ.pop("BETTER_CLAUDE_TOPOLOGY_PATH", None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_BC_HOME), provider="codex")
 from _extension_test_helpers import install_machine_nodes_extension  # noqa: E402
 
 FAILURES: list[str] = []
@@ -329,7 +331,7 @@ def test_recovery_rpc_validation() -> None:
 # ── P7: offline-node submit gate ──────────────────────────────────────
 
 
-def test_offline_gate() -> None:
+async def test_offline_gate() -> None:
     import main
     import node_store
 
@@ -337,9 +339,9 @@ def test_offline_gate() -> None:
 
     check(
         "gate: primary session passes",
-        main._node_offline_error({"node_id": "primary"}) is None,
+        await main._node_offline_error({"node_id": "primary"}) is None,
     )
-    err = main._node_offline_error({"node_id": "ghost-node"})
+    err = await main._node_offline_error({"node_id": "ghost-node"})
     check(
         "gate: disconnected node session rejected with clear error",
         isinstance(err, str) and "ghost-node" in err and "offline" in err,
@@ -354,7 +356,7 @@ def test_offline_gate() -> None:
     )
     node_store.app_version.current_commit_sha = lambda: "a" * 40
     try:
-        err = main._node_offline_error({"node_id": "node-b"})
+        err = await main._node_offline_error({"node_id": "node-b"})
     finally:
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
         node_store.app_version.current_commit_sha = original_commit
@@ -372,7 +374,7 @@ def run_all() -> int:
     test_prompt_engineer_inherits_node()
     test_remote_run_dir_finalize_and_prepare()
     test_recovery_rpc_validation()
-    test_offline_gate()
+    asyncio.run(test_offline_gate())
     print()
     if FAILURES:
         print(f"\033[91m{len(FAILURES)} failure(s):\033[0m {FAILURES}")

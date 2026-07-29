@@ -14653,6 +14653,11 @@ async def on_shutdown():
         extension_store.extension_id_for_role('machine-nodes')
     ):
         try:
+            import node_config_sync as _node_config_sync
+            await _node_config_sync.shutdown()
+        except Exception:
+            logger.exception("node config sync shutdown failed")
+        try:
             import node_store as _ns
             await _ns.stop_offset_flush_loop()
         except Exception:
