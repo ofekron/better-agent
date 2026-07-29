@@ -8,7 +8,7 @@ from pathlib import Path
 
 import _test_home
 
-_test_home.isolate("ba-test-communicate-stop-turn-")
+_test_home.isolate_installed("ba-test-communicate-stop-turn-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 os.environ["BETTER_CLAUDE_BACKEND_URL"] = "http://backend"
 os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "token"

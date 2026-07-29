@@ -30,7 +30,7 @@ from pathlib import Path
 # importing any backend module so the dev's real session store is
 # never touched.
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-fork-split-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-fork-split-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-extension-iframe-auth-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-extension-iframe-auth-")
 os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

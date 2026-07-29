@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 import _test_home  # noqa: E402
 
-_TMP_HOME = Path(_test_home.isolate("ba-mcp-restart-survival-"))
+_TMP_HOME = Path(_test_home.isolate_installed("ba-mcp-restart-survival-"))
 
 import builtin_mcp_config  # noqa: E402
 import communicate_mcp  # noqa: E402

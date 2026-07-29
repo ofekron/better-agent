@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-alter-ws-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-alter-ws-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

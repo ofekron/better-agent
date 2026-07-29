@@ -8,7 +8,7 @@ from pathlib import Path
 
 import _test_home
 
-_TMP_HOME = _test_home.isolate("bc-test-ws-selectors-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-ws-selectors-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = Path(__file__).resolve().parent

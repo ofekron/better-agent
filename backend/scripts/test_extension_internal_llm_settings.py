@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc-test-extension-internal-llm-settings-")
+_test_home.isolate_installed("bc-test-extension-internal-llm-settings-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

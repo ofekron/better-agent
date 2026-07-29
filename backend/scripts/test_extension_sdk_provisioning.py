@@ -29,7 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-sdkprov-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-sdkprov-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 # Point the required-marketplace lookup at the temp home so the marketplace
 # package is simply absent (no network fetch during extension_store._load).

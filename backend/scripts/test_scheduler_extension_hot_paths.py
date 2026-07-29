@@ -13,7 +13,7 @@ from fastapi import Header, Request
 
 import _test_home
 
-HOME = Path(_test_home.isolate("ba-test-scheduler-hot-"))
+HOME = Path(_test_home.isolate_installed("ba-test-scheduler-hot-"))
 BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
