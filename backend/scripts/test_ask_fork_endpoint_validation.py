@@ -54,6 +54,7 @@ def _install_team_orchestration_extension() -> None:
             "commit_sha": extension_id,
         },
         persist=True,
+        force_enabled=True,
     )
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()

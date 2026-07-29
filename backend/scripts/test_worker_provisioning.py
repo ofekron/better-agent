@@ -69,6 +69,7 @@ def _install_team_orchestration_extension() -> None:
             "commit_sha": extension_id,
         },
         persist=True,
+        force_enabled=True,
     )
     providers = config_store.list_providers()["providers"]
     provider = providers[0]
