@@ -6,8 +6,7 @@ import logging
 from typing import Any
 
 import ask_status_store
-from event_ingester import event_ingester
-from event_journal import event_journal_writer
+from event_journal import event_journal_reader, event_journal_writer
 import inbox_store
 
 
@@ -105,7 +104,7 @@ def _journal_has_receipt(ask_id: str, delivery: dict[str, Any]) -> bool:
     caller_session_id = str(delivery.get("caller_session_id") or "")
     if not root_id or not caller_session_id:
         return False
-    rows, _total, _has_more = event_ingester.read_events(
+    rows, _total, _has_more = event_journal_reader.read_events(
         root_id,
         after_seq=int(delivery.get("journal_after_seq") or 0),
         limit=999_999,
