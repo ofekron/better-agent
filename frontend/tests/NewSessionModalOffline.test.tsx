@@ -1,5 +1,14 @@
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import {
   NewSessionModal,
@@ -17,6 +26,33 @@ vi.mock("../src/hooks/useMachines", () => ({
 vi.mock("../src/hooks/useLocalNodeId", () => ({
   useLocalNodeId: () => "primary",
 }));
+
+vi.mock("../src/utils/fetchRetry", () => ({
+  fetchWithRetry: (input: RequestInfo | URL, init?: RequestInit) =>
+    fetch(input, init),
+}));
+
+const actWarnings: string[] = [];
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+beforeAll(() => {
+  const originalConsoleError = console.error.bind(console);
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+    originalConsoleError(...args);
+    const message = args.map(String).join(" ");
+    if (message.includes("not wrapped in act")) {
+      actWarnings.push(message);
+    }
+  });
+});
+
+afterAll(() => {
+  try {
+    expect(actWarnings).toEqual([]);
+  } finally {
+    consoleErrorSpy.mockRestore();
+  }
+});
 
 const provider: Provider = {
   id: "cached-claude",
@@ -51,6 +87,18 @@ const nativeOnlyProvider: Provider = {
   supports_manager_mode: false,
 };
 
+async function renderSettled(ui: ReactElement) {
+  const view = render(ui);
+  await act(async () => {});
+  return view;
+}
+
+async function clickSettled(element: Element) {
+  await act(async () => {
+    fireEvent.click(element);
+  });
+}
+
 describe("NewSessionModal offline provider cache", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -64,7 +112,7 @@ describe("NewSessionModal offline provider cache", () => {
       resolveCreate = resolve;
     });
     const onCreate = vi.fn(() => createPending);
-    const modal = render(
+    const modal = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -109,7 +157,7 @@ describe("NewSessionModal offline provider cache", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn();
 
-    const modal = render(
+    const modal = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -131,14 +179,16 @@ describe("NewSessionModal offline provider cache", () => {
     await waitFor(() => {
       expect(modal.getByRole("button", { name: "newSession.createAndSend" })).toBeTruthy();
     });
-    fireEvent.click(modal.getByRole("button", { name: "newSession.createAndSend" }));
+    await clickSettled(
+      modal.getByRole("button", { name: "newSession.createAndSend" }),
+    );
 
     expect(onCreate.mock.calls.map((call) => call[2])).toEqual(["send", "send"]);
     expect(JSON.parse(localStorage.getItem("better-agent-new-session-defaults") ?? "{}"))
       .toEqual(expect.objectContaining({ creationAction: "send" }));
 
     modal.unmount();
-    const reopened = render(
+    const reopened = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -151,12 +201,14 @@ describe("NewSessionModal offline provider cache", () => {
     await waitFor(() => {
       expect(reopened.getByRole("button", { name: "newSession.createAndSend" })).toBeTruthy();
     });
-    fireEvent.click(reopened.getByRole("button", { name: "newSession.createAndSend" }));
+    await clickSettled(
+      reopened.getByRole("button", { name: "newSession.createAndSend" }),
+    );
     expect(onCreate.mock.calls.at(-1)?.[2]).toBe("send");
   });
 
-  it("shows the harness profile capability entry point", () => {
-    const { getByText, getByRole } = render(
+  it("shows the harness profile capability entry point", async () => {
+    const { getByText, getByRole } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -182,7 +234,7 @@ describe("NewSessionModal offline provider cache", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
-    const { container } = render(
+    const { container } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -203,7 +255,9 @@ describe("NewSessionModal offline provider cache", () => {
     )?.parentElement as HTMLSelectElement | null;
     expect(modelSelect?.value).toBe("cached-opus");
 
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
+    await clickSettled(
+      container.querySelector(".modal-footer .btn-primary")!,
+    );
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -226,7 +280,7 @@ describe("NewSessionModal offline provider cache", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
-    const { container, queryByText } = render(
+    const { container, queryByText } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -244,7 +298,9 @@ describe("NewSessionModal offline provider cache", () => {
     expect(queryByText("orchestration.nativeDirect")).toBeNull();
     expect(queryByText("orchestration.managerWorkers")).toBeNull();
 
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
+    await clickSettled(
+      container.querySelector(".modal-footer .btn-primary")!,
+    );
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -260,7 +316,7 @@ describe("NewSessionModal offline provider cache", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
-    const { container, getByLabelText } = render(
+    const { container, getByLabelText } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -279,7 +335,9 @@ describe("NewSessionModal offline provider cache", () => {
     expect(container.querySelector(".ns-file-picker-input")).toBeNull();
     expect(container.querySelector(".ns-file-picker-browse")).toBeNull();
 
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
+    await clickSettled(
+      container.querySelector(".modal-footer .btn-primary")!,
+    );
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -307,7 +365,7 @@ describe("NewSessionModal offline provider cache", () => {
       },
     ];
 
-    const { container, getByLabelText } = render(
+    const { container, getByLabelText } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -323,7 +381,9 @@ describe("NewSessionModal offline provider cache", () => {
     });
 
     fireEvent.click(getByLabelText("Demo option"));
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
+    await clickSettled(
+      container.querySelector(".modal-footer .btn-primary")!,
+    );
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -339,7 +399,7 @@ describe("NewSessionModal offline provider cache", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
-    const { container, getByLabelText } = render(
+    const { container, getByLabelText } = await renderSettled(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -370,7 +430,9 @@ describe("NewSessionModal offline provider cache", () => {
     });
 
     fireEvent.click(getByLabelText("Second extension"));
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
+    await clickSettled(
+      container.querySelector(".modal-footer .btn-primary")!,
+    );
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({

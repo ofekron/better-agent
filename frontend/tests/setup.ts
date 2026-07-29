@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
+import i18n from "i18next";
 import React from "react";
+import { initReactI18next } from "react-i18next";
 
 // happy-dom 20 doesn't ship a localStorage by default. Provide a tiny
 // in-memory polyfill so App's `useState(() => localStorage.getItem(...))`
@@ -35,6 +37,16 @@ function installMemoryStorage() {
 }
 
 installMemoryStorage();
+
+await i18n
+  .use(initReactI18next)
+  .init({
+    lng: "en",
+    fallbackLng: false,
+    resources: {},
+    interpolation: { escapeValue: false },
+    react: { useSuspense: false },
+  });
 
 beforeEach(() => {
   installMemoryStorage();
