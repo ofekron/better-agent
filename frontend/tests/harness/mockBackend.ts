@@ -44,6 +44,12 @@ export interface BackendState {
     open_session_tab_ids: string[];
     open_session_tab_joined_at: Record<string, string>;
   };
+  /** GET/PATCH `/api/user-prefs`. Without a route for this, App's
+   * mount-time `progressTrackedFetch("userPrefs:load", ...)` throws
+   * "unhandled", which `fetchWithRetry` treats as a network failure and
+   * retries 3x with real 1s/2s/4s backoff — timers that outlive the test
+   * and fire a stray fetch against whatever mock is installed later. */
+  userPrefs: Record<string, unknown>;
   /** Mocked file content keyed by absolute path. FileEditor polls
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
@@ -187,6 +193,19 @@ function emptyState(): BackendState {
       remembered_session_by_project: {},
       open_session_tab_ids: [],
       open_session_tab_joined_at: {},
+    },
+    // `first_run_wizard_done: true` — a fresh-install `false` would make
+    // every renderApp() test navigate to /settings on mount.
+    userPrefs: {
+      language: "en",
+      shortcut_responses: [],
+      sessions_tabs_sort: "last_opened_at",
+      sessions_tabs_visible: true,
+      user_display_name: null,
+      first_run_wizard_done: true,
+      font_family: "system",
+      font_size: 14,
+      appearance_theme: "default",
     },
     files: {},
   };
@@ -399,8 +418,63 @@ export class MockBackend {
     if (method === "GET" && path === "/api/extensions/builtin-ids") {
       return { ids: {} };
     }
+    // ---- Mount-time endpoints App fires unconditionally ----
+    // Every one of these was previously unhandled, so any renderApp() test
+    // threw "MockBackend: unhandled ..." for it. That throw is treated as a
+    // real operation failure, which frontendLogger's global console.error
+    // patch turns into a `window.setTimeout(send, 0)` POST to
+    // /api/logs/frontend — a real timer with no unmount hook that can fire
+    // during a LATER, unrelated test and pollute ITS fetch mock/call count.
+    if (method === "GET" && path === "/api/startup_tasks") return [];
+    if (method === "GET" && path === "/api/extensions/app-settings") {
+      return { sections: [] };
+    }
+    if (method === "GET" && path === "/api/desktop/status") {
+      return {
+        desktop_shell: false,
+        server_url: ORIGIN,
+        server_url_source: "test",
+        https_available: false,
+        https_unavailable_reason: null,
+        update_url: `${ORIGIN}/api/desktop/updates`,
+        macos: false,
+        windows: false,
+        update_repo: false,
+      };
+    }
+    if (method === "POST" && path === "/api/logs/frontend") return { ok: true };
+    if (method === "GET" && path === "/api/extensions/ui-hooks") return { hooks: {} };
+    if (method === "GET" && path === "/api/extensions") return { extensions: [] };
+    if (method === "GET" && path === "/api/marketplace-bridge") {
+      return {
+        revision: 0,
+        connection_state: "unpaired",
+        revocation_pending: false,
+        paired_devices: [],
+        intents: [],
+      };
+    }
+    if (method === "GET" && path === "/api/session-organization") {
+      return { schema_version: 1, folders: [], tags: [], assignments: {}, models: [] };
+    }
+    if (method === "GET" && path === "/api/git-status") return { is_git: false };
+    const toolApprovalsMatch = path.match(/^\/api\/sessions\/[^/]+\/tool-approvals\/pending$/);
+    if (method === "GET" && toolApprovalsMatch) return { approvals: [] };
+    // `/api/extensions/{extension_id}/backend/{path}` proxy family — the
+    // frontend calls these with an empty extension_id when no matching
+    // extension is configured for the test session, which the real router
+    // 404s (Starlette's path param needs >=1 char). Mirror that instead of
+    // faking success for an extension that was never seeded.
+    if (/^\/api\/extensions\/[^/]*\/backend\//.test(path)) return notFound();
     if (method === "GET" && path === "/api/ui-selection") {
       return this.state.uiSelection;
+    }
+    if (method === "GET" && path === "/api/user-prefs") {
+      return this.state.userPrefs;
+    }
+    if (method === "PATCH" && path === "/api/user-prefs") {
+      this.state.userPrefs = { ...this.state.userPrefs, ...(body as Record<string, unknown>) };
+      return this.state.userPrefs;
     }
     if (method === "GET" && path === "/api/user-input/pending") {
       return {
