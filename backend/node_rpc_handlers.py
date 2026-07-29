@@ -453,11 +453,11 @@ async def handle_resume_stream(node_client, msg: dict) -> None:
 
 
 # ============================================================================
-# Generic RPCs — filesystem ops dispatched by primary's `_file_op` helper.
+# Generic RPCs — filesystem ops dispatched by primary's `node_op` helper.
 #
 # Each handler runs on the node whose `dispatch_rpc` was invoked (either
 # via the inbound WS path in `node_client._handle_rpc_request`, or
-# in-process when primary's `_file_op` short-circuits the local case).
+# in-process when primary's `node_op` short-circuits the local case).
 # Defense-in-depth: every path-receiving handler runs
 # `_assert_within_cwd_roots` before touching the filesystem, so even if
 # the primary forwards a bogus path, the node refuses to step outside
@@ -541,7 +541,7 @@ async def call_local_or_remote(
     topology id; otherwise ship over `node_link.rpc_call` to the
     remote node. Raises plain exceptions (FileNotFoundError,
     ValueError, RuntimeError, etc.) — callers that need HTTP status
-    translation wrap this themselves (see `main._file_op`)."""
+    translation wrap this themselves (see `node_op.node_op`)."""
     if node_id == "primary":
         return await dispatch_rpc(method, params)
     # `topology.local_node_id()` raises when topology.yaml is absent
@@ -579,7 +579,7 @@ def _assert_within_cwd_roots(path_str: str) -> None:
     `cwd_roots` allowlist, every RPC-served filesystem path MUST sit
     under one of those roots. Skipped silently in two cases:
       (1) `topology.yaml` is not configured (single-machine deploy —
-          primary calls `_file_op("primary", ...)` which bypasses the
+          primary calls `node_op("primary", ...)` which bypasses the
           wire entirely; the in-process dispatch_rpc call still passes
           through here but no allowlist exists yet).
       (2) The local node declares empty `cwd_roots` (= wildcard;

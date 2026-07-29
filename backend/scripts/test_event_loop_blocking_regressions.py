@@ -2938,7 +2938,7 @@ def test_search_summary_lookup_uses_maintained_projection() -> None:
 def test_sessions_response_cache_stores_serialized_bytes() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     cache_start = source.index("def _sessions_list_cache_get(")
-    cache_end = source.index("_GIT_STATUS_TTL_SECONDS", cache_start)
+    cache_end = source.index("def _shutdown_kill_runners_flag()", cache_start)
     cache_source = source[cache_start:cache_end]
     assert "tuple[float, bytes, tuple[int, int, int]]" in source
     assert "return _json_response_maybe_gzip(cached[1], accept_encoding)" in cache_source
@@ -2980,7 +2980,7 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = main_source.index("def _sessions_list_cache_version(")
-    helper_end = main_source.index("_GIT_STATUS_TTL_SECONDS", helper_start)
+    helper_end = main_source.index("def _shutdown_kill_runners_flag()", helper_start)
     helper_source = main_source[helper_start:helper_end]
     assert "session_store.search_metadata_version()" in helper_source
     assert "session_search_index.generation()" in helper_source
@@ -3276,7 +3276,7 @@ def test_session_list_reads_user_prefs_once() -> None:
     assert "_session_list_user_prefs_cache" in source
     assert "_SESSION_LIST_USER_PREFS_TTL_SECONDS" in source
     prefs_start = source.index("def _session_list_user_prefs(")
-    prefs_end = source.index("_GIT_STATUS_TTL_SECONDS", prefs_start)
+    prefs_end = source.index("def _shutdown_kill_runners_flag()", prefs_start)
     prefs_source = source[prefs_start:prefs_end]
     assert "time.monotonic()" in prefs_source
     assert "user_prefs.get_all()" in prefs_source
@@ -4089,20 +4089,21 @@ def test_startup_warms_virtual_session_summaries_off_loop() -> None:
 
 def test_startup_warms_recent_git_statuses_off_hot_path() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _warm_recent_git_statuses()")
-    helper_end = source.index("def _shutdown_kill_runners_flag()", helper_start)
-    helper_source = source[helper_start:helper_end]
+    cache_source = (ROOT / "git_status_cache.py").read_text(encoding="utf-8")
+    helper_start = cache_source.index("async def warm_recent(self)")
+    helper_end = cache_source.index("def _start_fetch(", helper_start)
+    helper_source = cache_source[helper_start:helper_end]
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "_GIT_STATUS_STARTUP_WARM_LIMIT = 8" in source
+    assert "startup_warm_limit: int = 8" in cache_source
     assert "await asyncio.to_thread(project_store.list_projects)" in helper_source
     assert 'node_id != "primary"' in helper_source
-    assert "await _cached_git_status(node_id, cwd)" in helper_source
-    assert "warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT" in helper_source
+    assert "await self.get(node_id, cwd)" in helper_source
+    assert "warmed >= self._startup_warm_limit" in helper_source
     assert '"git_status_warm"' in startup_source
     assert '"startup_tasks.git_status_warm"' in startup_source
-    assert "_warm_recent_git_statuses" in startup_source
+    assert "git_status_cache.warm_recent" in startup_source
     assert "in_thread=False" in startup_source
     assert 'name="startup-git-status-warm"' in startup_source
 

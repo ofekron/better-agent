@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-git-status-cache-")
@@ -19,29 +18,35 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 async def _run() -> bool:
-    import main
+    import git_api
+    import git_status_cache as gsc
+    from git_status_cache import GitStatusCache
 
     calls: list[tuple[str, str]] = []
     released = asyncio.Event()
 
-    async def fake_file_op(node_id: str, method: str, params: dict):
+    async def fake_node_op(node_id: str, method: str, params: dict):
         calls.append((method, params.get("cwd", "")))
         if method == "get_git_status":
             await released.wait()
             return {"is_git": True, "branch": f"main-{len(calls)}"}
         return {"ok": True}
 
-    original_file_op = main._file_op
-    original_ttl = main._GIT_STATUS_TTL_SECONDS
-    if original_ttl < 15.0:
-        print(f"{FAIL} git-status cache TTL is below frontend poll interval: {original_ttl!r}")
+    shipped_ttl = gsc.cache.ttl_seconds
+    if shipped_ttl < 15.0:
+        print(f"{FAIL} git-status cache TTL is below frontend poll interval: {shipped_ttl!r}")
         return False
-    main._file_op = fake_file_op
-    main._GIT_STATUS_TTL_SECONDS = 60.0
-    main._clear_git_status_cache()
+
+    cache = GitStatusCache(ttl_seconds=60.0)
+    original_router_cache = git_api.git_status_cache
+    original_cache_node_op = gsc.node_op
+    original_router_node_op = git_api.node_op
+    gsc.node_op = fake_node_op
+    git_api.node_op = fake_node_op
+    git_api.git_status_cache = cache
     try:
-        first = asyncio.create_task(main._cached_git_status("primary", "/repo"))
-        second = asyncio.create_task(main._cached_git_status("primary", "/repo"))
+        first = asyncio.create_task(cache.get("primary", "/repo"))
+        second = asyncio.create_task(cache.get("primary", "/repo"))
         await asyncio.sleep(0)
         released.set()
         first_result, second_result = await asyncio.gather(first, second)
@@ -53,30 +58,36 @@ async def _run() -> bool:
             print(f"{FAIL} coalesced callers received different results: {first_result!r} {second_result!r}")
             return False
 
-        cached = await main._cached_git_status("primary", "/repo")
+        cached = await cache.get("primary", "/repo")
         get_calls = [call for call in calls if call[0] == "get_git_status"]
         if len(get_calls) != 1 or cached != first_result:
             print(f"{FAIL} cached git-status result was not reused: calls={calls!r} cached={cached!r}")
             return False
 
-        await main.post_git_commit({"node_id": "primary", "cwd": "/repo", "message": "x"})
-        await main._cached_git_status("primary", "/repo")
+        await cache.get("primary", "/other")
+        await git_api.post_git_commit({"node_id": "primary", "cwd": "/repo", "message": "x"})
+        await cache.get("primary", "/other")
         get_calls = [call for call in calls if call[0] == "get_git_status"]
         if len(get_calls) != 2:
+            print(f"{FAIL} commit invalidated an unrelated cwd: {calls!r}")
+            return False
+        await cache.get("primary", "/repo")
+        get_calls = [call for call in calls if call[0] == "get_git_status"]
+        if len(get_calls) != 3:
             print(f"{FAIL} commit did not invalidate git-status cache: {calls!r}")
             return False
 
-        main._clear_git_status_cache()
+        stale_cache = GitStatusCache(ttl_seconds=0.0)
+        git_api.git_status_cache = stale_cache
         calls.clear()
         released.clear()
-        main._GIT_STATUS_TTL_SECONDS = 0.0
-        refresh = asyncio.create_task(main._cached_git_status("primary", "/repo"))
+        refresh = asyncio.create_task(stale_cache.get("primary", "/repo"))
         await asyncio.sleep(0)
         released.set()
         warm = await refresh
         released.clear()
         stale = await asyncio.wait_for(
-            main._cached_git_status("primary", "/repo"),
+            stale_cache.get("primary", "/repo"),
             timeout=0.1,
         )
         if stale != warm:
@@ -93,9 +104,9 @@ async def _run() -> bool:
         print(f"{PASS} git-status cache coalesces, reuses, and invalidates")
         return True
     finally:
-        main._file_op = original_file_op
-        main._GIT_STATUS_TTL_SECONDS = original_ttl
-        main._clear_git_status_cache()
+        git_api.git_status_cache = original_router_cache
+        gsc.node_op = original_cache_node_op
+        git_api.node_op = original_router_node_op
 
 
 if __name__ == "__main__":
