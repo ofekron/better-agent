@@ -529,6 +529,8 @@ def make_private_directory(path: Path) -> None:
     ):
         raise PermissionError("private directory must not redirect")
     if os.name == "nt":
+        if windows_path_has_private_acl(path):
+            return
         try:
             _set_windows_private_acl(path, directory=True)
         except (AttributeError, OSError, RuntimeError, ValueError) as exc:
