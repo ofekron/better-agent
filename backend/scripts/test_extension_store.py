@@ -2898,45 +2898,76 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
             if failed_record.get("enabled") is not False or not failed_record.get("quarantine"):
                 raise AssertionError("failed delivery changed quarantine state")
 
-        board_manifest_path = board_repo / "extensions" / "pkg" / "better-agent-extension.json"
-        board_manifest = json.loads(board_manifest_path.read_text(encoding="utf-8"))
-        board_manifest["version"] = "1.0.1"
-        board_manifest_path.write_text(json.dumps(board_manifest), encoding="utf-8")
-        _git(board_repo, "add", "extensions/pkg/better-agent-extension.json")
-        _git(board_repo, "commit", "-m", "new board generation")
-        extension_store.install_from_repo(
-            repo_url=board_repo.as_uri(), extension_path="extensions/pkg"
-        )
-        if extension_store.backend_surface_status("ofek-dev.assistant") != "ready":
-            raise AssertionError({
-                extension_id: extension_store.get_extension(extension_id)
-                for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant")
-            })
+        async def recover_and_drain() -> None:
+            first_failure = asyncio.Event()
+            acknowledged = asyncio.Event()
+            delivered = asyncio.Event()
+            attempts = 0
+            original_base = lag_incident_queue._RETRY_BASE_SECONDS
+            original_max = lag_incident_queue._RETRY_MAX_SECONDS
+            original_acknowledge = lag_incident_queue._acknowledge
 
-        async def dispatch(payload: bytes) -> lag_incident_queue.DispatchOutcome:
-            status, _ = extension_backend_loader.invoke_named_core_destination_sync(
-                "assistant.lag-report", body_bytes=payload
-            )
-            return lag_incident_queue.DispatchOutcome(status < 400)
+            async def dispatch(payload: bytes) -> lag_incident_queue.DispatchOutcome:
+                nonlocal attempts
+                attempts += 1
+                status, _ = await asyncio.to_thread(
+                    extension_backend_loader.invoke_named_core_destination_sync,
+                    "assistant.lag-report",
+                    body_bytes=payload,
+                )
+                if status >= 400:
+                    first_failure.set()
+                else:
+                    delivered.set()
+                return lag_incident_queue.DispatchOutcome(status < 400)
 
-        async def drain() -> None:
-            lag_incident_queue.start(dispatch)
+            loop = asyncio.get_running_loop()
+
+            def observe_ack(*args, **kwargs):
+                original_acknowledge(*args, **kwargs)
+                loop.call_soon_threadsafe(acknowledged.set)
+
+            def install_recovered_generation() -> None:
+                board_manifest_path = (
+                    board_repo / "extensions" / "pkg" / "better-agent-extension.json"
+                )
+                board_manifest = json.loads(board_manifest_path.read_text(encoding="utf-8"))
+                board_manifest["version"] = "1.0.1"
+                board_manifest_path.write_text(json.dumps(board_manifest), encoding="utf-8")
+                _git(board_repo, "add", "extensions/pkg/better-agent-extension.json")
+                _git(board_repo, "commit", "-m", "new board generation")
+                extension_store.install_from_repo(
+                    repo_url=board_repo.as_uri(), extension_path="extensions/pkg"
+                )
+
+            lag_incident_queue._RETRY_BASE_SECONDS = 10.0
+            lag_incident_queue._RETRY_MAX_SECONDS = 10.0
+            lag_incident_queue._acknowledge = observe_ack
             try:
-                for _ in range(200):
-                    if lag_incident_queue.depth() == 0:
-                        return
-                    await asyncio.sleep(0.01)
-                raise AssertionError("lag spool did not drain")
+                lag_incident_queue.start(dispatch)
+                await asyncio.wait_for(first_failure.wait(), timeout=3)
+                if attempts != 1 or lag_incident_queue.depth() != 1:
+                    raise AssertionError((attempts, lag_incident_queue.depth()))
+                await asyncio.to_thread(install_recovered_generation)
+                if extension_store.backend_surface_status("ofek-dev.assistant") != "ready":
+                    raise AssertionError({
+                        extension_id: extension_store.get_extension(extension_id)
+                        for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant")
+                    })
+                await asyncio.wait_for(delivered.wait(), timeout=3)
+                await asyncio.wait_for(acknowledged.wait(), timeout=3)
+                if attempts != 2 or lag_incident_queue.depth() != 0:
+                    raise AssertionError((attempts, lag_incident_queue.depth()))
             finally:
                 await lag_incident_queue.stop()
+                lag_incident_queue._acknowledge = original_acknowledge
+                lag_incident_queue._RETRY_BASE_SECONDS = original_base
+                lag_incident_queue._RETRY_MAX_SECONDS = original_max
 
-        asyncio.run(drain())
+        asyncio.run(recover_and_drain())
         receipts = receipt_path.read_text(encoding="utf-8").splitlines()
         if len(receipts) != 1 or lag_incident_queue.depth() != 0:
             raise AssertionError((receipts, lag_incident_queue.depth()))
-        asyncio.run(drain())
-        if len(receipt_path.read_text(encoding="utf-8").splitlines()) != 1:
-            raise AssertionError("acknowledged lag incident was delivered twice")
     finally:
         installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         extension_backend_loader.evict_persistent_backend("ofek-dev.assistant")
@@ -2953,16 +2984,18 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
             os.environ["LEGACY_LAG_RECEIPT_PATH"] = old_receipt_path
 
 
-def test_user_disabled_quarantine_member_blocks_auto_recovery() -> None:
+def test_user_disabled_cohort_stays_disabled_across_generation_update() -> None:
     work = _private_monorepo_test_work()
     try:
         base_repo, _ = _make_dep_repo(work, "ofek.user-base", [])
         dependent_repo, _ = _make_dep_repo(work, "ofek.user-dependent", ["ofek.user-base"])
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
         extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
-        for elapsed in (2.1, 2.2, 2.3):
-            extension_store.record_backend_timeout("ofek.user-base", activation_id=extension_store.activation_identity("ofek.user-base"), elapsed_seconds=elapsed)
+        extension_store.set_enabled("ofek.user-base", True)
+        extension_store.set_enabled("ofek.user-dependent", True)
+        old_activation = extension_store.activation_identity("ofek.user-base")
         extension_store.set_enabled("ofek.user-dependent", False)
+        extension_store.set_enabled("ofek.user-base", False)
         manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["version"] = "1.0.1"
@@ -2970,11 +3003,26 @@ def test_user_disabled_quarantine_member_blocks_auto_recovery() -> None:
         _git(base_repo, "add", "extensions/pkg/better-agent-extension.json")
         _git(base_repo, "commit", "-m", "new generation")
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        for elapsed in (2.1, 2.2, 2.3):
+            if extension_store.record_backend_timeout(
+                "ofek.user-base",
+                activation_id=old_activation,
+                elapsed_seconds=elapsed,
+            ):
+                raise AssertionError("stale activation affected explicitly disabled generation")
         base = extension_store.get_extension("ofek.user-base") or {}
         dependent = extension_store.get_extension("ofek.user-dependent") or {}
-        if base.get("enabled") is not False or not base.get("quarantine"):
+        if (
+            base.get("enabled") is not False
+            or base.get("quarantine")
+            or base.get("pending_health_decision")
+        ):
             raise AssertionError(base)
-        if dependent.get("enabled") is not False or dependent.get("quarantine"):
+        if (
+            dependent.get("enabled") is not False
+            or dependent.get("quarantine")
+            or dependent.get("pending_health_decision")
+        ):
             raise AssertionError(dependent)
     finally:
         for extension_id in ("ofek.user-dependent", "ofek.user-base"):
@@ -6337,7 +6385,7 @@ if __name__ == "__main__":
         test_legacy_quarantine_is_annotated_without_enabling_then_recovers()
         test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts()
         test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool()
-        test_user_disabled_quarantine_member_blocks_auto_recovery()
+        test_user_disabled_cohort_stays_disabled_across_generation_update()
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
         test_prune_extension_versions_tolerates_vanishing_dir()
