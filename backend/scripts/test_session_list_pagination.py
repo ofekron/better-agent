@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
 import auth  # noqa: E402
+import remote_sessions_cache  # noqa: E402
 import session_search_index  # noqa: E402
 import session_store  # noqa: E402
 
@@ -54,8 +55,7 @@ def _reset_home() -> None:
     session_store._metadata_trigram_index_version = -1
     main._sessions_list_response_cache.clear()
     main._session_summaries_response_cache.clear()
-    main._remote_sessions_cache.clear()
-    main._remote_sessions_cache_version = 0
+    remote_sessions_cache.cache.clear()
     with session_search_index._lock:
         session_search_index._close_writer_connection_locked()
     session_search_index._close_readonly_connection()
@@ -1180,8 +1180,7 @@ def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool
         }
         for index in range(100)
     ]
-    main._remote_sessions_cache["node-a"] = (time.monotonic(), remote)
-    main._remote_sessions_cache_version += 1
+    remote_sessions_cache.cache.put("node-a", remote)
 
     fake_node_store = types.SimpleNamespace(
         connected_worker_node_ids_snapshot=lambda: (1, ("node-a",)),
@@ -1190,7 +1189,7 @@ def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool
     original_enabled = main._machine_nodes_enabled_cached
     original_prefs = main._session_list_user_prefs
     copied_lengths: list[int] = []
-    original_copy = main._copy_remote_sessions
+    original_copy = remote_sessions_cache.copy_sessions
 
     def tracking_copy(sessions, *, limit=None):
         copied = original_copy(sessions, limit=limit)
@@ -1201,11 +1200,11 @@ def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool
     sys.modules["node_store"] = fake_node_store
     main._machine_nodes_enabled_cached = lambda: True
     main._session_list_user_prefs = lambda: (False, "updated_at", False)
-    main._copy_remote_sessions = tracking_copy
+    remote_sessions_cache.copy_sessions = tracking_copy
     try:
         response = client.get("/api/sessions?offset=0&limit=2", headers=HEADERS)
     finally:
-        main._copy_remote_sessions = original_copy
+        remote_sessions_cache.copy_sessions = original_copy
         main._session_list_user_prefs = original_prefs
         main._machine_nodes_enabled_cached = original_enabled
         if original_node_store is None:

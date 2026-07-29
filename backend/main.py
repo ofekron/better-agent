@@ -63,6 +63,7 @@ from event_shape import (
 )
 from git_status_cache import cache as git_status_cache
 from node_op import node_op
+from remote_sessions_cache import cache as remote_sessions_cache
 from paths import ba_home
 from i18n import t
 from prompt_templates import render_prompt
@@ -593,10 +594,6 @@ _sidebar_state_snapshot_cache: tuple[
     tuple[int, int, int],
     tuple[set[str], dict[str, str], dict[str, int], dict[str, int]],
 ] | None = None
-_remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
-_remote_sessions_cache_lock = threading.Lock()
-_remote_sessions_refresh_tasks: set[str] = set()
-_remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
 _local_visible_order_cache: dict[
@@ -608,7 +605,6 @@ _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
 )
 _session_detail_response_cache_latest: dict[tuple[str, int, Optional[int]], tuple] = {}
 _SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0
-_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0
 _SESSION_LIST_USER_PREFS_TTL_SECONDS = 1.0
 _SESSION_DETAIL_RESPONSE_CACHE_MAX = 64
 _SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS = 0.05
@@ -1153,116 +1149,6 @@ def _sessions_list_content_search_ready(
     )
 
 
-def _remote_sessions_cache_version_snapshot() -> int:
-    with _remote_sessions_cache_lock:
-        return _remote_sessions_cache_version
-
-
-def _copy_remote_sessions(sessions: list[dict], *, limit: int | None = None) -> list[dict]:
-    out: list[dict] = []
-    for session in sessions:
-        if isinstance(session, dict):
-            out.append(dict(session))
-            if limit is not None and len(out) >= limit:
-                break
-    return out
-
-
-def _remote_sessions_cache_get(
-    node_id: str,
-    *,
-    limit: int | None = None,
-) -> tuple[list[dict] | None, bool, int]:
-    with _remote_sessions_cache_lock:
-        cached = _remote_sessions_cache.get(node_id)
-    if cached is None:
-        return None, False, 0
-    age = time.monotonic() - cached[0]
-    sessions = cached[1]
-    return (
-        _copy_remote_sessions(sessions, limit=limit),
-        age <= _REMOTE_SESSIONS_CACHE_TTL_SECONDS,
-        len(sessions),
-    )
-
-
-def _remote_sessions_cache_put(node_id: str, sessions: list[dict]) -> None:
-    global _remote_sessions_cache_version
-    clean = _copy_remote_sessions(sessions)
-    with _remote_sessions_cache_lock:
-        existing = _remote_sessions_cache.get(node_id)
-        if existing is not None and existing[1] == clean:
-            _remote_sessions_cache[node_id] = (time.monotonic(), clean)
-            return
-        _remote_sessions_cache[node_id] = (time.monotonic(), clean)
-        _remote_sessions_cache_version += 1
-
-
-async def _fetch_remote_sessions_live(node_id: str) -> list[dict]:
-    import node_link as _nl
-
-    resp = await _nl.rpc_call(
-        node_id,
-        "list_sessions",
-        {},
-        timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS,
-    )
-    sessions = (resp or {}).get("sessions", [])
-    return _copy_remote_sessions(sessions if isinstance(sessions, list) else [])
-
-
-def _schedule_remote_sessions_refresh(node_id: str) -> None:
-    with _remote_sessions_cache_lock:
-        if node_id in _remote_sessions_refresh_tasks:
-            return
-        _remote_sessions_refresh_tasks.add(node_id)
-
-    async def _refresh() -> None:
-        try:
-            sessions = await _fetch_remote_sessions_live(node_id)
-            _remote_sessions_cache_put(node_id, sessions)
-        except Exception:
-            logger.debug("get_sessions: cached remote refresh from %s failed", node_id, exc_info=True)
-        finally:
-            with _remote_sessions_cache_lock:
-                _remote_sessions_refresh_tasks.discard(node_id)
-
-    asyncio.create_task(_refresh())
-
-
-async def _remote_sessions_for_sidebar(node_id: str) -> list[dict]:
-    cached, fresh, _total = _remote_sessions_cache_get(node_id)
-    if cached is not None:
-        if fresh:
-            perf.record("sessions.list.remote_cache.hit", 1.0)
-        else:
-            perf.record("sessions.list.remote_cache.stale", 1.0)
-            _schedule_remote_sessions_refresh(node_id)
-        return cached
-    perf.record("sessions.list.remote_cache.miss", 1.0)
-    sessions = await _fetch_remote_sessions_live(node_id)
-    _remote_sessions_cache_put(node_id, sessions)
-    return sessions
-
-
-def _remote_sessions_for_sidebar_cached(
-    node_id: str,
-    *,
-    limit: int | None = None,
-) -> tuple[list[dict], int] | None:
-    cached, fresh, total = _remote_sessions_cache_get(node_id, limit=limit)
-    if cached is None:
-        perf.record("sessions.list.remote_cache.deferred_miss", 1.0)
-        _schedule_remote_sessions_refresh(node_id)
-        return None
-    if fresh:
-        perf.record("sessions.list.remote_cache.deferred_hit", 1.0)
-    else:
-        perf.record("sessions.list.remote_cache.deferred_stale", 1.0)
-        _schedule_remote_sessions_refresh(node_id)
-    return cached, total
-
-
 def _schedule_virtual_sessions_recent_refresh(limit: int) -> None:
     global _virtual_sessions_recent_refresh_task
     existing = _virtual_sessions_recent_refresh_task
@@ -1615,7 +1501,6 @@ def create_api_app() -> FastAPI:
 
 
 app = create_api_app()
-REMOTE_SESSION_MERGE_TIMEOUT_SECONDS = 0.75
 
 # CORS, auth_gate, SessionMiddleware, and ingest_command_received are
 # registered AFTER `coordinator` is created (we need its internal_token
@@ -7927,7 +7812,7 @@ async def get_sessions(
         tuple(sorted(exclude_statuses_set)),
         connected_version,
         connected,
-        _remote_sessions_cache_version_snapshot() if connected else 0,
+        remote_sessions_cache.version() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
     cached_response = _sessions_list_cache_get(cache_key, accept_encoding)
@@ -8143,7 +8028,7 @@ async def get_sessions(
                     local_total += virtual_total
             with perf.timed("sessions.list.remote.cached_first_page"):
                 for nid in connected:
-                    cached_remote = _remote_sessions_for_sidebar_cached(
+                    cached_remote = remote_sessions_cache.for_sidebar_cached(
                         nid,
                         limit=max(offset + limit, 1),
                     )
@@ -8224,8 +8109,8 @@ async def get_sessions(
                 remote_results = await asyncio.gather(
                     *(
                         asyncio.wait_for(
-                            _remote_sessions_for_sidebar(nid),
-                            timeout=REMOTE_SESSION_MERGE_TIMEOUT_SECONDS + 0.05,
+                            remote_sessions_cache.for_sidebar(nid),
+                            timeout=remote_sessions_cache.fetch_timeout_seconds + 0.05,
                         )
                         for nid in connected
                     ),

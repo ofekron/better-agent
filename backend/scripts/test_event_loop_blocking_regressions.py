@@ -3940,23 +3940,24 @@ def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
 
 def test_sessions_route_uses_cached_remote_node_sessions() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _remote_sessions_for_sidebar(")
-    helper_end = source.index("def _session_list_user_prefs(", helper_start)
-    helper_source = source[helper_start:helper_end]
+    cache_source = (ROOT / "remote_sessions_cache.py").read_text(encoding="utf-8")
+    helper_start = cache_source.index("async def for_sidebar(self")
+    helper_end = cache_source.index("def for_sidebar_cached(", helper_start)
+    helper_source = cache_source[helper_start:helper_end]
     route_start = source.index('@app.get("/api/sessions")')
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
-    assert "_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0" in source
-    assert "def _remote_sessions_cache_get(\n    node_id: str," in source
-    assert "limit: int | None = None" in source
-    assert "def _schedule_remote_sessions_refresh(node_id: str)" in source
-    assert "async def _fetch_remote_sessions_live(node_id: str)" in source
+    assert "ttl_seconds: float = 2.0" in cache_source
+    assert "def get(\n        self,\n        node_id: str," in cache_source
+    assert "limit: int | None = None" in cache_source
+    assert "def schedule_refresh(self, node_id: str)" in cache_source
+    assert "async def fetch_live(self, node_id: str)" in cache_source
     assert "sessions.list.remote_cache.hit" in helper_source
     assert "sessions.list.remote_cache.stale" in helper_source
     assert "sessions.list.remote_cache.miss" in helper_source
-    assert "_remote_sessions_cache_version_snapshot() if connected else 0" in route_source
+    assert "remote_sessions_cache.version() if connected else 0" in route_source
     assert "with perf.timed(\"sessions.list.remote\")" in route_source
-    assert "_remote_sessions_for_sidebar(nid)" in route_source
+    assert "remote_sessions_cache.for_sidebar(nid)" in route_source
     assert "rs[\"node_id\"] = nid" in route_source
 
 
@@ -3965,19 +3966,19 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     route_start = source.index('@app.get("/api/sessions")')
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
-    remote_helper_start = source.index("def _remote_sessions_for_sidebar_cached(")
-    remote_helper_end = source.index("def _schedule_virtual_sessions_recent_refresh(", remote_helper_start)
-    remote_helper_source = source[remote_helper_start:remote_helper_end]
+    remote_cache_source = (ROOT / "remote_sessions_cache.py").read_text(encoding="utf-8")
+    remote_helper_start = remote_cache_source.index("def for_sidebar_cached(")
+    remote_helper_source = remote_cache_source[remote_helper_start:]
     virtual_helper_start = source.index("def _schedule_virtual_sessions_recent_refresh(")
     virtual_helper_end = source.index("def _session_list_user_prefs(", virtual_helper_start)
     virtual_helper_source = source[virtual_helper_start:virtual_helper_end]
     virtual_store_source = (ROOT / "virtual_session_store.py").read_text(encoding="utf-8")
     assert "def list_recent_cached(" in virtual_store_source
     assert "sessions.list.remote_cache.deferred_miss" in remote_helper_source
-    assert "_schedule_remote_sessions_refresh(node_id)" in remote_helper_source
+    assert "self.schedule_refresh(node_id)" in remote_helper_source
     assert "asyncio.to_thread(\n            virtual_session_store.list_recent," in virtual_helper_source
     assert "sessions.list.virtual.cached_first_page" in route_source
-    assert "_remote_sessions_for_sidebar_cached(\n                        nid," in route_source
+    assert "remote_sessions_cache.for_sidebar_cached(\n                        nid," in route_source
     assert "limit=max(offset + limit, 1)" in route_source
     assert "deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions" in route_source
     assert "projected_first_page_sessions" in route_source
