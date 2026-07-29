@@ -206,7 +206,9 @@ def _scan_entries(root: Path) -> tuple[FrozenBundleEntry, ...]:
             )
 
     scan(root)
-    return tuple(entries)
+    return tuple(
+        sorted(entries, key=lambda entry: entry.relative_path),
+    )
 
 
 @dataclass(frozen=True)

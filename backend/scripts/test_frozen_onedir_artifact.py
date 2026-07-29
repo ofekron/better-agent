@@ -30,6 +30,9 @@ def _fixture(parent: Path) -> tuple[Path, Path, Path]:
     package = sidecar / "claude_agent_sdk"
     package.mkdir()
     (package / "__init__.py").write_bytes(b"SDK_AUTHORITY = True\n")
+    metadata = sidecar / "claude_agent_sdk-0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_bytes(b"Name: claude-agent-sdk\n")
     (sidecar / "runner_agy.pyc").write_bytes(b"agy-runner")
     if os.name != "nt":
         os.symlink(
