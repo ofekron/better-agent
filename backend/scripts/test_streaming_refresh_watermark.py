@@ -47,6 +47,7 @@ from session_manager import manager as session_manager  # noqa: E402
 import event_ingester as ei_mod  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
 import main as main_mod  # noqa: E402
+from _test_request import http_request  # noqa: E402
 
 event_ingester = ei_mod.event_ingester
 
@@ -101,7 +102,10 @@ def test_projection_heads_diverge() -> bool:
 
 def test_get_session_watermark_is_render_head() -> bool:
     sid, render_head = _fresh_streaming_session()
-    tree = asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None))
+    tree = asyncio.run(main_mod.get_session(
+            http_request(f"/sessions/{sid}"), sid,
+            msg_limit=50, exchange_count=None,
+        ))
     if hasattr(tree, "body"):
         tree = json.loads(tree.body)
     wm = (tree.get("max_seq_by_sid") or {}).get(sid, 0)
