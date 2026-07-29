@@ -38,6 +38,8 @@ import contextvars
 import json
 import logging
 import os
+import shutil
+import sys
 import time
 import http.client
 import threading
@@ -50,9 +52,8 @@ from typing import Any, Awaitable, Callable, NoReturn, Optional
 
 import chat_store
 import inbox_store
-import extension_store
-import harness_run_projection
 import mcp_stdio_bridge
+import claude_agent_sdk
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -103,11 +104,20 @@ from continuation import normalize_context_overflow_error
 from provider_run_config import write_skill_tree
 from reasoning_effort import claude_sdk_effort
 from runner_guard import apply_ghost_completion_guard
-from runtime_skills import (
-    CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
-    materialize_runtime_skills,
+from provider_claude_execution import (
+    attest_embedded_claude_sdk,
+    attest_materialized_claude_sdk_package,
 )
-from runtime_agents import materialize_runtime_agents
+from provider_family_execution_runtime import (
+    FamilyExecutionRuntime,
+    restore_family_runner_runtime,
+)
+from provider_runtime_plan_source import hydrate_runner_operation_broker
+from codex_execution_identity import file_identity_from_dict
+from provider_pinned_launch import MaterializedSdkLaunch
+
+
+CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime"
 
 
 def _claude_cache_env() -> dict[str, str]:
@@ -124,25 +134,6 @@ def _claude_cache_env() -> dict[str, str]:
     """
     return {"ENABLE_PROMPT_CACHING_1H": "1"}
 
-
-def _resolve_claude_cli() -> Optional[str]:
-    from cli_paths import resolve_cli_binary
-
-    resolved = resolve_cli_binary("claude")
-    if os.name == "nt" and resolved:
-        path = Path(resolved)
-        npm_dir = path.parent
-        packaged_exe = (
-            npm_dir
-            / "node_modules"
-            / "@anthropic-ai"
-            / "claude-code"
-            / "bin"
-            / "claude.exe"
-        )
-        if packaged_exe.is_file():
-            return str(packaged_exe)
-    return resolved
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -374,16 +365,8 @@ async def _mcp_call_tool(
 
 
 async def _bridge_native_extension_mcp_servers(
-    inputs: dict[str, Any],
-    *,
-    user_facing: bool,
-    bare: bool,
+    configs: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    configs = extension_store.native_mcp_server_configs(
-        inputs,
-        user_facing=user_facing,
-        bare=bare,
-    )
     bridged: dict[str, dict[str, Any]] = {}
     tool_lists = await asyncio.gather(*(
         _mcp_list_tools(server_name, config)
@@ -430,30 +413,34 @@ def _resolve_claude_config_dir(raw: str) -> Path:
 
 def _materialize_claude_runtime_plugin(
     run_dir: Path,
-    cwd: str,
     provider_run_config: dict,
     *,
     bare_config: bool,
-    disabled_runtime_skills: Optional[list] = None,
+    skill_dirs: dict[str, Path],
+    agent_files: dict[str, Path],
 ) -> Optional[dict[str, str]]:
     configured_skills = provider_run_config.get("skills") or {}
-    if bare_config and not configured_skills:
+    if bare_config and (skill_dirs or agent_files):
+        raise RuntimeError("bare Claude run has runtime skills or agents")
+    if not configured_skills and not skill_dirs and not agent_files:
         return None
     plugin_dir = run_dir / "claude-runtime-skills-plugin"
     skills_root = plugin_dir / "skills"
-    count = materialize_runtime_skills(
-        skills_root, cwd, bare_config=bare_config,
-        disabled=disabled_runtime_skills,
-    )
+    count = 0
+    for name, source in skill_dirs.items():
+        destination = skills_root / name
+        shutil.copytree(source, destination)
+        count += 1
 
     if configured_skills:
         write_skill_tree(skills_root, configured_skills)
         count += len(configured_skills)
 
-    # Subagents ride in the same run-local plugin: Claude Code discovers an
-    # `agents/` subdir of a plugin and loads each definition natively.
     agents_root = plugin_dir / "agents"
-    count += materialize_runtime_agents(agents_root, "claude", bare_config=bare_config)
+    for name, source in agent_files.items():
+        agents_root.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, agents_root / name)
+        count += 1
 
     if count == 0:
         return None
@@ -3044,8 +3031,190 @@ async def _run_one_turn(
 # ============================================================================
 # Main async runner
 # ============================================================================
-async def _run(run_dir: Path, inputs: dict) -> int:
+def _runtime_capabilities(
+    run_dir: Path,
+    inputs: dict[str, Any],
+    runtime: FamilyExecutionRuntime,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Path],
+    dict[str, Path],
+    str,
+]:
+    hydration = inputs.pop("_runtime_hydration", None)
+    if (
+        type(hydration) is not dict
+        or set(hydration) != {
+            "agent_files",
+            "capability_plan",
+            "claude_cli",
+            "prewarm_status",
+            "sdk_authority",
+            "skill_dirs",
+        }
+        or type(hydration["capability_plan"]) is not dict
+        or hydration["prewarm_status"] != runtime.capabilities.prewarm_status
+        or type(hydration["skill_dirs"]) is not dict
+        or type(hydration["agent_files"]) is not dict
+    ):
+        raise RuntimeError("Claude runtime capability hydration is invalid")
+
+    expected_skills = {
+        name: str(path)
+        for name, path in runtime.capabilities.skill_dirs.items()
+    }
+    expected_agents = {
+        name: str(path)
+        for name, path in runtime.capabilities.agent_files.items()
+    }
+    if (
+        hydration["skill_dirs"] != expected_skills
+        or hydration["agent_files"] != expected_agents
+    ):
+        raise RuntimeError("Claude runtime capability files are invalid")
+
+    cli_raw = hydration["claude_cli"]
+    if (
+        type(cli_raw) is not dict
+        or set(cli_raw) != {"executable_path", "files"}
+        or type(cli_raw["executable_path"]) is not str
+        or type(cli_raw["files"]) is not list
+        or not cli_raw["files"]
+        or any(type(item) is not dict for item in cli_raw["files"])
+    ):
+        raise RuntimeError("Claude CLI hydration is invalid")
+    cli = MaterializedSdkLaunch(
+        executable_path=cli_raw["executable_path"],
+        files=tuple(
+            file_identity_from_dict(item)
+            for item in cli_raw["files"]
+        ),
+    )
+    cli_root = (run_dir / "claude-cli").resolve(strict=True)
+    executable = Path(cli.executable_path).resolve(strict=True)
+    if (
+        not executable.is_relative_to(cli_root)
+        or all(
+            Path(identity.resolved_path) != executable
+            for identity in cli.files
+        )
+        or any(
+            not Path(identity.resolved_path).is_relative_to(cli_root)
+            for identity in cli.files
+        )
+        or not cli.attest()
+    ):
+        raise RuntimeError("Claude CLI execution authority mismatch")
+
+    sdk_authority = hydration["sdk_authority"]
+    if type(sdk_authority) is not dict:
+        raise RuntimeError("Claude Agent SDK authority is invalid")
+    if runtime.launch.runner.frozen:
+        embedded = next(
+            (
+                item
+                for item in runtime.launch.critical_packages
+                if item.package_name
+                == "claude_agent_sdk.embedded_runner"
+            ),
+            None,
+        )
+        if (
+            set(sdk_authority) != {"kind", "runner_sha256"}
+            or sdk_authority.get("kind") != "embedded_runner"
+            or sdk_authority.get("runner_sha256")
+            != runtime.launch.runner.launch.components[0].sha256
+            or not getattr(sys, "frozen", False)
+            or embedded is None
+            or not attest_embedded_claude_sdk(
+                embedded,
+                runtime.launch.runner,
+            )
+        ):
+            raise RuntimeError(
+                "embedded Claude Agent SDK execution authority mismatch",
+            )
+    else:
+        package = next(
+            (
+                item
+                for item in runtime.launch.critical_packages
+                if item.package_name == "claude_agent_sdk"
+            ),
+            None,
+        )
+        expected_sdk_root = (
+            run_dir / "claude-sdk" / "claude_agent_sdk"
+        ).resolve(strict=True)
+        imported_sdk = Path(str(claude_agent_sdk.__file__ or "")).resolve(
+            strict=True,
+        )
+        if (
+            set(sdk_authority) != {"kind", "package_root"}
+            or sdk_authority.get("kind") != "materialized_package"
+            or type(sdk_authority.get("package_root")) is not str
+            or Path(sdk_authority["package_root"]).resolve(strict=True)
+            != expected_sdk_root
+            or package is None
+            or not imported_sdk.is_relative_to(expected_sdk_root)
+            or not attest_materialized_claude_sdk_package(
+                package,
+                expected_sdk_root,
+            )
+        ):
+            raise RuntimeError(
+                "Claude Agent SDK execution authority mismatch",
+            )
+
+    capability_plan = hydrate_runner_operation_broker(
+        hydration["capability_plan"],
+        get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip(),
+    )
+    return (
+        capability_plan,
+        dict(runtime.capabilities.skill_dirs),
+        dict(runtime.capabilities.agent_files),
+        str(executable),
+    )
+
+
+def _claude_mcp_variants(
+    plan: dict[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    servers = plan.get("mcp_servers")
+    if type(servers) is not list:
+        raise RuntimeError("frozen Claude MCP plan is invalid")
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for server in servers:
+        if type(server) is not dict or type(server.get("config")) is not dict:
+            raise RuntimeError("frozen Claude MCP server is invalid")
+        name = server.get("name")
+        if type(name) is not str or not name or name in result:
+            raise RuntimeError("frozen Claude MCP server name is invalid")
+        variants = {
+            key: value
+            for key, value in server["config"].items()
+            if key in {"explicit", "runtime", "native", "launcher"}
+            and type(value) is dict
+        }
+        if not variants or set(variants) != set(server["config"]):
+            raise RuntimeError("frozen Claude MCP delivery is invalid")
+        result[name] = variants
+    return result
+
+
+async def _run(
+    run_dir: Path,
+    inputs: dict,
+    runtime: FamilyExecutionRuntime,
+) -> int:
     log = logging.getLogger("runner")
+    (
+        capability_plan,
+        skill_dirs,
+        agent_files,
+        claude_cli,
+    ) = _runtime_capabilities(run_dir, inputs, runtime)
 
     mode = inputs.get("mode")
     if mode not in ("native", "manager"):
@@ -3140,10 +3309,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         inputs.get("mssg_sender_session_id") or app_session_id
     )
 
-    import installation_profile
-    integrations_enabled = installation_profile.integrations_enabled()
-    team_orchestration_enabled = integrations_enabled and extension_store.is_extension_runtime_ready(
-        extension_store.extension_id_for_role('team-orchestration')
+    installation_capabilities = runtime.capabilities.installation_decisions.get(
+        "capabilities",
+    )
+    if type(installation_capabilities) is not dict:
+        raise RuntimeError("frozen Claude installation decisions are invalid")
+    integrations_enabled = bool(
+        installation_capabilities.get("integrations_enabled"),
+    )
+    team_orchestration_enabled = (
+        integrations_enabled
+        and inputs.get("team_orchestration_enabled") is True
     )
 
     if integrations_enabled and mssg_sender_session_id and backend_url and internal_token:
@@ -3340,28 +3516,32 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # `session_search.search()` (which spawns an ephemeral search worker).
     # So it gets no ask MCP tools here.
 
-    for _extension_mcp_name, _extension_mcp_config in extension_store.runtime_mcp_server_configs(
-        inputs,
-        user_facing=bool(_user_facing_extras and app_session_id),
-        bare=_bare,
-    ).items():
-        mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+    mcp_variants = _claude_mcp_variants(capability_plan)
+    builtin_server_names = set(mcp_servers)
+    for _extension_mcp_name, _variants in mcp_variants.items():
+        for _delivery in ("explicit", "runtime"):
+            _extension_mcp_config = _variants.get(_delivery)
+            if _extension_mcp_config is not None:
+                mcp_servers.setdefault(
+                    _extension_mcp_name,
+                    _extension_mcp_config,
+                )
     if _bare:
+        native_configs = {
+            name: variants["native"]
+            for name, variants in mcp_variants.items()
+            if "native" in variants
+        }
         for _extension_mcp_name, _extension_mcp_config in (
-            await _bridge_native_extension_mcp_servers(
-                inputs,
-                user_facing=bool(_user_facing_extras and app_session_id),
-                bare=_bare,
-            )
+            await _bridge_native_extension_mcp_servers(native_configs)
         ).items():
             mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
     if not _bare:
-        for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
-            inputs,
-            user_facing=bool(_user_facing_extras and app_session_id),
-            bare=_bare,
-        ).items():
-            if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
+        for _extension_mcp_name, _variants in mcp_variants.items():
+            _extension_mcp_config = _variants.get("native")
+            if _extension_mcp_config is None:
+                continue
+            if _extension_mcp_name in builtin_server_names:
                 mcp_servers[_extension_mcp_name] = _extension_mcp_config
                 continue
             mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
@@ -3387,10 +3567,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     provider_run_config = raw_provider_run_config if isinstance(raw_provider_run_config, dict) else {}
     skill_plugin = _materialize_claude_runtime_plugin(
         run_dir,
-        cwd,
         provider_run_config,
         bare_config=_bare,
-        disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
+        skill_dirs=skill_dirs,
+        agent_files=agent_files,
     )
     plugins = [skill_plugin] if skill_plugin else []
 
@@ -3476,7 +3656,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # tool_result (base64 embedded twice per line by the CLI) exceeds
         # that and kills the turn mid-run with SDKJSONDecodeError.
         max_buffer_size=SUBPROCESS_LINE_LIMIT_BYTES,
-        cli_path=_resolve_claude_cli(),
+        cli_path=claude_cli,
         extra_args=extra_args,
         plugins=plugins,
         env=_claude_cache_env(),
@@ -3785,10 +3965,10 @@ def main(run_dir: Path) -> NoReturn:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
 
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        runtime = restore_family_runner_runtime(run_dir)
+        inputs = dict(runtime.inputs)
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
-        inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, t("runner.failed_read_input", e=str(e)))
         _exit_runner(run_dir, 1)
@@ -3800,7 +3980,7 @@ def main(run_dir: Path) -> NoReturn:
     # and `_exit_runner` skips interpreter shutdown's unbounded one.
     loop = asyncio.new_event_loop()
     try:
-        code = loop.run_until_complete(_run(run_dir, inputs))
+        code = loop.run_until_complete(_run(run_dir, inputs, runtime))
     except Exception as e:
         logger.exception("runner top-level failure")
         # `_run` raised before its success-path cleanup, so `runner_alive`
