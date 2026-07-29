@@ -2,6 +2,46 @@ from __future__ import annotations
 
 from typing import Any
 
+import provider_manifest
+
+
+RUNTIME_PROFILE_RUNNER_IDS: tuple[str, ...] = tuple(dict.fromkeys(
+    runner
+    for kind in provider_manifest.runner_kinds()
+    for runner in provider_manifest.runner_choices_for(kind)
+))
+
+
+def runtime_profile_runner_input_property(
+    *,
+    nullable: bool = False,
+    description: str,
+) -> dict[str, Any]:
+    allowed_values: list[Any] = list(RUNTIME_PROFILE_RUNNER_IDS)
+    if nullable:
+        allowed_values.append(None)
+    return {
+        "type": ["string", "null"] if nullable else "string",
+        "enum": allowed_values,
+        "description": description,
+    }
+
+
+def normalize_runtime_profile_runner(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if type(value) is not str:
+        raise ValueError("runner must be a string or null")
+    runner = value.strip()
+    if not runner:
+        return None
+    if runner not in RUNTIME_PROFILE_RUNNER_IDS:
+        allowed = ", ".join(RUNTIME_PROFILE_RUNNER_IDS)
+        raise ValueError(
+            f"runner must be a runtime-profile runner ID; available: {allowed}",
+        )
+    return runner
+
 
 SESSION_ORGANIZATION_INPUT_PROPERTIES: dict[str, Any] = {
     "folder_id": {
