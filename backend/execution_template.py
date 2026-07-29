@@ -589,6 +589,26 @@ def prepare_execution(
     provider_contract: Mapping[str, Any] | None = None,
     **start_arguments: Any,
 ) -> PreparedExecution:
+    from codex_execution_common import timed_contract_step
+
+    with timed_contract_step("provider.execution.prepare"):
+        return _prepare_execution(
+            provider,
+            routing_session_id=routing_session_id,
+            runtime_policy=runtime_policy,
+            provider_contract=provider_contract,
+            **start_arguments,
+        )
+
+
+def _prepare_execution(
+    provider: Mapping[str, Any],
+    *,
+    routing_session_id: str | None = None,
+    runtime_policy: Mapping[str, Any] | None = None,
+    provider_contract: Mapping[str, Any] | None = None,
+    **start_arguments: Any,
+) -> PreparedExecution:
     normalized = _normalize_arguments(start_arguments)
     template = ExecutionTemplate.create(normalized)
     frozen_runtime_policy = dict(runtime_policy or {})

@@ -5,12 +5,17 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from codex_execution_common import ExecutionContractError, binary_open_flags
+from codex_execution_common import (
+    ExecutionContractError,
+    binary_open_flags,
+    record_step_since,
+)
 from codex_execution_identity import FileIdentity
 from paths import make_private_directory
 from provider_frozen_bundle import (
@@ -168,6 +173,7 @@ def open_pinned_launch(
 def open_pinned_runner_launch(
     runner: RunnerLaunch,
 ) -> Iterator[PinnedLaunch]:
+    setup_started = time.perf_counter()
     if not isinstance(runner, RunnerLaunch):
         raise ExecutionContractError("runner launch authority mismatch")
     try:
@@ -193,10 +199,7 @@ def open_pinned_runner_launch(
         if runner.development_runtime is not None:
             bundle_root = materialize_frozen_bundle(
                 runner.development_runtime,
-                frozen_bundle_destination(
-                    runner.development_runtime,
-                    run_dir,
-                ),
+                frozen_bundle_destination(runner.development_runtime),
             )
             executable = (
                 bundle_root
@@ -217,23 +220,32 @@ def open_pinned_runner_launch(
                     )
                     argv[0] = str(executable)
                     argv[runner_index] = str(target)
+                    record_step_since(
+                        "provider.pinned_launch.open_runner",
+                        setup_started,
+                    )
                     yield PinnedLaunch(tuple(argv), ())
             return
         with open_pinned_launch(
             runner.launch,
             materialization_root=run_dir,
         ) as pinned:
+            record_step_since(
+                "provider.pinned_launch.open_runner",
+                setup_started,
+            )
             yield pinned
         return
     if runner.frozen_bundle is None:
         raise ExecutionContractError("frozen runner bundle authority is missing")
     bundle_root = materialize_frozen_bundle(
         runner.frozen_bundle,
-        frozen_bundle_destination(runner.frozen_bundle, run_dir),
+        frozen_bundle_destination(runner.frozen_bundle),
     )
     executable = bundle_root / runner.frozen_bundle.executable_relative
     argv = list(runner.launch.argv)
     argv[0] = str(executable)
+    record_step_since("provider.pinned_launch.open_runner", setup_started)
     yield PinnedLaunch(tuple(argv), ())
 
 

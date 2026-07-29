@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
-from codex_execution_common import ExecutionContractError, required_string
+from codex_execution_common import (
+    ExecutionContractError,
+    required_string,
+    timed_contract_step,
+)
 from codex_execution_identity import (
     FileIdentity,
     file_identity_from_dict,
@@ -41,6 +45,10 @@ class RunnerLaunch:
             self.development_runtime.validate()
 
     def attest(self) -> bool:
+        with timed_contract_step("provider.runner_launch.attest"):
+            return self._attest()
+
+    def _attest(self) -> bool:
         try:
             self.validate()
         except ExecutionContractError:
@@ -354,6 +362,32 @@ def capture_runner_launch(
     frozen_bundle_root: str | Path | None = None,
     frozen_sidecar_root: str | Path | None = None,
 ) -> RunnerLaunch:
+    with timed_contract_step("provider.runner_launch.capture"):
+        return _capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=executable_path,
+            runner_entry=runner_entry,
+            runner_kind=runner_kind,
+            runner_module=runner_module,
+            frozen=frozen,
+            platform=platform,
+            frozen_bundle_root=frozen_bundle_root,
+            frozen_sidecar_root=frozen_sidecar_root,
+        )
+
+
+def _capture_runner_launch(
+    *,
+    run_dir: str | Path,
+    executable_path: str | Path,
+    runner_entry: str | Path,
+    runner_kind: str,
+    runner_module: str,
+    frozen: bool,
+    platform: str | None = None,
+    frozen_bundle_root: str | Path | None = None,
+    frozen_sidecar_root: str | Path | None = None,
+) -> RunnerLaunch:
     run_path = Path(run_dir)
     if not run_path.is_absolute():
         raise ExecutionContractError("run directory must be absolute")
@@ -435,6 +469,14 @@ def capture_runner_launch(
 
 
 def retarget_runner_launch(
+    runner: RunnerLaunch,
+    run_dir: str | Path,
+) -> RunnerLaunch:
+    with timed_contract_step("provider.runner_launch.retarget"):
+        return _retarget_runner_launch(runner, run_dir)
+
+
+def _retarget_runner_launch(
     runner: RunnerLaunch,
     run_dir: str | Path,
 ) -> RunnerLaunch:

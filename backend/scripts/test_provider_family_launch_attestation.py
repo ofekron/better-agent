@@ -12,6 +12,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import _test_home  # noqa: E402
+
+# Isolated state home: pinned runner launches materialize the development
+# runtime into the shared fingerprint-keyed cache under ba_home(), and the
+# tamper test below corrupts that cache entry on purpose.
+_test_home.isolate(prefix="family-launch-attestation-")
 
 from codex_execution_common import ExecutionContractError  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
@@ -25,6 +33,7 @@ from provider_family_launch_attestation import (  # noqa: E402
     materialize_sdk_launch,
     open_pinned_launch,
 )
+from provider_frozen_bundle import frozen_bundle_destination  # noqa: E402
 from provider_pinned_launch import open_pinned_runner_launch  # noqa: E402
 from provider_runner_launch import RunnerLaunch  # noqa: E402
 
@@ -681,9 +690,8 @@ def test_runner_materialization_preserves_python_runtime_closure() -> None:
         assert process.returncode == 0, process.stderr
         assert process.stdout.strip() == "runtime-closure-ok"
         if runner.development_runtime is not None:
-            runtime_root = (
-                run_dir
-                / Path(runner.development_runtime.root.resolved_path).name
+            runtime_root = frozen_bundle_destination(
+                runner.development_runtime,
             )
             materialized = (
                 runtime_root

@@ -17,7 +17,10 @@ from provider_claude_execution import (
     capture_embedded_claude_sdk,
     embedded_claude_sdk_attestation_failure,
 )
-from provider_frozen_bundle import attest_materialized_frozen_bundle
+from provider_frozen_bundle import (
+    attest_materialized_frozen_bundle,
+    remove_materialized_bundle,
+)
 from provider_launch_identity import capture_cli_launch
 from provider_pinned_launch import open_pinned_runner_launch
 from provider_runner_launch import RunnerLaunch, capture_runner_launch
@@ -192,6 +195,9 @@ def _tamper_materialized_sidecar(
         os.fsync(handle.fileno())
     if attest_materialized_frozen_bundle(bundle, materialized_root):
         raise ExecutionContractError("materialized sidecar tamper was accepted")
+    # The materialized root is the shared fingerprint-keyed cache entry;
+    # drop the now-tampered copy so later runs re-materialize a valid one.
+    remove_materialized_bundle(materialized_root)
 
 
 def _materialize_snapshot(

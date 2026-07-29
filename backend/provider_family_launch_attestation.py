@@ -11,8 +11,10 @@ from codex_execution_common import (
     ExecutionContractError,
     SHA256_RE,
     canonical_json,
+    parallel_map,
     required_integer,
     required_string,
+    timed_contract_step,
 )
 from codex_execution_identity import (
     ConfigIdentity,
@@ -72,7 +74,12 @@ class ConfigScopeIdentity:
     def attest(self) -> bool:
         return (
             self.root.attest()
-            and all(identity.attest() for identity in self.files)
+            and all(
+                parallel_map(
+                    lambda identity: identity.attest(),
+                    self.files,
+                ),
+            )
             and (self.resume is None or self.resume.attest())
         )
 
@@ -182,7 +189,7 @@ class CriticalPackageIdentity:
 
     def attest(self) -> bool:
         return self.root.attest() and all(
-            identity.attest() for identity in self.files
+            parallel_map(FileIdentity.attest, self.files),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,13 +299,16 @@ class FamilyLaunchAttestation:
         )
 
     def attest(self) -> bool:
-        return (
-            self.fingerprint == self._computed_fingerprint()
-            and self.runner.attest()
-            and self.downstream.attest()
-            and self.config.attest()
-            and all(package.attest() for package in self.critical_packages)
-        )
+        with timed_contract_step("provider.family_attestation.attest"):
+            return (
+                self.fingerprint == self._computed_fingerprint()
+                and self.runner.attest()
+                and self.downstream.attest()
+                and self.config.attest()
+                and all(
+                    package.attest() for package in self.critical_packages
+                )
+            )
 
     def _assert_attested(self) -> None:
         if not self.attest():

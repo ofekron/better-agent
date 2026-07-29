@@ -1383,6 +1383,20 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
     return normalized
 
 
+def disabled_builtins_fingerprint() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Content fingerprint of just the two fields harness_profile_resolver's
+    default-profile synthesis reads from this store. Narrower than
+    ``config_fingerprint()`` (whole-file mtime/size) on purpose: config.json
+    also holds provider/session state that changes far more often than
+    these two lists, and a cache keyed on the whole-file fingerprint would
+    invalidate — forcing a full resynthesis, including an OS-keychain probe
+    per extension secret — on every unrelated provider-state write."""
+    return (
+        tuple(get_disabled_builtin_tools()),
+        tuple(get_disabled_builtin_extensions()),
+    )
+
+
 # ----------------------------------------------------------------------------
 # Public API: internal-LLM task assignments (global setting)
 # ----------------------------------------------------------------------------

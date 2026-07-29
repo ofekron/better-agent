@@ -329,6 +329,56 @@ def test_secret_setting_write_reports_saved_when_cache_warm_fails() -> None:
         harness_profile_resolver.invalidate_cache()
 
 
+def test_default_profile_cache_key_ignores_unrelated_writes() -> None:
+    """_default_profile_cache_key() must track only what
+    _compute_default_profile_uncached actually reads (config_store's
+    disabled_builtin_tools/extensions, plus the extension store). Before this
+    fix it also fingerprinted the WHOLE config.json (which also holds
+    provider/session state) and harness_profile_store's named-profile store
+    (never read by the default-profile synthesis at all) — so an unrelated
+    write to either would spuriously invalidate _DEFAULT_PROFILE_CACHE and
+    force the next caller (possibly a turn) to pay a full resynthesis,
+    including an OS-keychain probe per extension secret."""
+    harness_profile_resolver.invalidate_cache()
+    harness_profile_resolver.compute_default_profile()
+    key_before = harness_profile_resolver._default_profile_cache_key()
+
+    original_policy = config_store.get_delegate_task_policy()
+    other_policy = "manual" if original_policy != "manual" else "auto"
+    config_store.set_delegate_task_policy(other_policy)
+    try:
+        assert harness_profile_resolver._default_profile_cache_key() == key_before, (
+            "an unrelated config_store write (delegate_task_policy) must not "
+            "change the default-profile cache key"
+        )
+
+        created = harness_profile_store.create_profile({"name": "unrelated-fixture-profile"})
+        try:
+            assert harness_profile_resolver._default_profile_cache_key() == key_before, (
+                "creating a named harness profile must not change the "
+                "default-profile cache key — it isn't read by "
+                "_compute_default_profile_uncached"
+            )
+        finally:
+            harness_profile_store.delete_profile(created["id"])
+
+        # A genuine dependency change must still invalidate — this is the
+        # under-invalidation guard: narrowing the key must not silently drop
+        # a real one.
+        original_disabled = config_store.get_disabled_builtin_tools()
+        config_store.set_disabled_builtin_tools(["ask"])
+        try:
+            assert harness_profile_resolver._default_profile_cache_key() != key_before, (
+                "changing disabled_builtin_tools must still invalidate the "
+                "default-profile cache key"
+            )
+        finally:
+            config_store.set_disabled_builtin_tools(original_disabled)
+    finally:
+        config_store.set_delegate_task_policy(original_policy)
+        harness_profile_resolver.invalidate_cache()
+
+
 def test_default_headless_reflects_extension_setting_write() -> None:
     _install_browser_harness_extension_with_headless_setting()
     assert extension_store.is_extension_runtime_ready(_FIXTURE_BROWSER_HARNESS_EXTENSION_ID)
@@ -559,6 +609,7 @@ def main() -> int:
     test_default_headless_reflects_extension_setting_write()
     test_secret_setting_write_eagerly_warms_default_profile_cache()
     test_secret_setting_write_reports_saved_when_cache_warm_fails()
+    test_default_profile_cache_key_ignores_unrelated_writes()
     test_default_profile_synthesis_is_cached_until_invalidated()
     test_run_snapshot_cache_tracks_selected_package_fingerprint()
     test_resolve_for_session_falls_back_to_default_profile()

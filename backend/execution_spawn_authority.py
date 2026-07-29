@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from codex_execution_common import timed_contract_step
 from execution_template import ExecutionArtifact, ExecutionAuthorityError
 from provider_manifest import artifact_family_kinds
 
@@ -10,7 +11,8 @@ def attest_execution_spawn_authority(
     artifact: ExecutionArtifact,
 ) -> None:
     try:
-        _attest_execution_spawn_authority(artifact)
+        with timed_contract_step("provider.execution.spawn_authority.attest"):
+            _attest_execution_spawn_authority(artifact)
     except ExecutionAuthorityError:
         raise
     except Exception as exc:

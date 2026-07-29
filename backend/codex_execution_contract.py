@@ -15,9 +15,11 @@ from codex_execution_common import (
     SHA256_RE,
     ExecutionContractError,
     canonical_json,
+    parallel_map,
     required_integer,
     required_string,
     required_string_list,
+    timed_contract_step,
 )
 from codex_execution_identity import (
     ConfigIdentity,
@@ -231,11 +233,17 @@ class CodexExecutionContract:
         return contract
 
     def attest(self) -> bool:
-        return (
-            self.launch_chain.attest()
-            and _attest_agent_authority_membership(self.config)
-            and all(identity.attest() for identity in self.config)
-        )
+        with timed_contract_step("provider.codex_contract.attest"):
+            return (
+                self.launch_chain.attest()
+                and _attest_agent_authority_membership(self.config)
+                and all(
+                    parallel_map(
+                        lambda identity: identity.attest(),
+                        self.config,
+                    ),
+                )
+            )
 
     def attest_metadata(self) -> bool:
         return (

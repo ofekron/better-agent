@@ -42,11 +42,20 @@ def invalidate_cache() -> None:
 
 
 def _default_profile_cache_key() -> tuple[Any, ...]:
+    # Deliberately narrower than "every file this module touches": each
+    # entry here must be an actual read inside _compute_default_profile_uncached,
+    # or an unrelated write (a provider-state field, a named harness profile
+    # edit) spuriously invalidates the cache and forces the next caller —
+    # possibly a turn — to pay a full resynthesis, including an OS-keychain
+    # probe per extension secret, for a profile that didn't actually change.
+    # config_store.config_fingerprint()/harness_profile_store.store_fingerprint()
+    # are whole-file mtimes; config.json also holds provider/session state,
+    # and harness_profile_store's named-profile store isn't read by
+    # _compute_default_profile_uncached at all, so it's excluded outright.
     return (
-        config_store.config_fingerprint(),
+        config_store.disabled_builtins_fingerprint(),
         extension_store.store_fingerprint(),
         extension_store.extension_settings_fingerprint(),
-        harness_profile_store.store_fingerprint(),
     )
 
 

@@ -16,6 +16,7 @@ from codex_execution_common import (
     SECRET_NAMES,
     ExecutionContractError,
     binary_open_flags,
+    parallel_map,
     sha256_and_first_line_fd,
     sha256_fd,
     stable_stat_identity,
@@ -33,8 +34,13 @@ class LaunchChain:
     component_argv_indexes: tuple[int, ...]
 
     def attest(self) -> bool:
-        return self.launcher.attest() and all(
-            component.attest() for component in self.components
+        # Identical FileIdentity values assert identical expectations, so
+        # each unique identity is verified once, in parallel.
+        return all(
+            parallel_map(
+                FileIdentity.attest,
+                {self.launcher, *self.components},
+            ),
         )
 
     def attest_metadata(self) -> bool:

@@ -15,6 +15,7 @@ from codex_execution_common import (
     ExecutionContractError,
     SECRET_NAMES,
     binary_open_flags,
+    parallel_map,
     required_integer,
     required_string,
     sha256_and_first_line_fd,
@@ -213,8 +214,13 @@ class AttestedLaunch:
     component_argv_indexes: tuple[int, ...]
 
     def attest(self) -> bool:
-        return self.launcher.attest() and all(
-            component.attest() for component in self.components
+        # Identical FileIdentity values assert identical expectations, so
+        # each unique identity is verified once, in parallel.
+        return all(
+            parallel_map(
+                FileIdentity.attest,
+                {self.launcher, *self.components},
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:

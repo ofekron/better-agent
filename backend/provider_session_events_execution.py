@@ -439,7 +439,12 @@ def prepare_session_events_execution(
     )
     return prepare_family_execution(
         authority,
-        start_arguments=dict(start_arguments),
+        # The execution template's frozen "model" argument must match what
+        # runner_input actually uses: _normalize_model can rewrite it (e.g.
+        # Copilot's retired-model fallbacks collapse to "auto"), and the
+        # template would otherwise freeze the pre-normalization value,
+        # tripping validate_recovery_input's exact-match check at run start.
+        start_arguments={**start_arguments, "model": runner_input["model"]},
         runner_input=runner_input,
         launch=launch,
         capabilities=capabilities,
