@@ -28,8 +28,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 import extension_api  # noqa: E402
 import extension_backend_loader  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
 import project_update_store  # noqa: E402
-from paths import encode_cwd  # noqa: E402
+from paths import ba_home, encode_cwd  # noqa: E402
 
 
 def check(condition: bool, message: str) -> None:
@@ -446,12 +447,17 @@ def _check_projection_response_singleflight() -> None:
 
 
 def main() -> int:
+    original_integrations_enabled = installation_profile.integrations_enabled
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         app = FastAPI()
         app.include_router(extension_api.router)
         _configure_internal_llm_defaults()
         package = _seed_extension()
         module_package = _seed_module_backend_extension()
+        for extension_id in ("ofek.backend", "ofek.compiled-backend"):
+            extension_store.grant_consent(extension_id)
+            extension_store.set_enabled(extension_id, True)
         _seed_core_builtin_without_backend(extension_store.extension_id_for_role('machine-nodes'))
         client = TestClient(app)
         _check_projection_response_singleflight()
@@ -681,6 +687,10 @@ def main() -> int:
         prior_active_checkout = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT")
         os.environ["BETTER_AGENT_ACTIVE_CHECKOUT"] = sentinel
         host_env = extension_backend_loader._host_env()
+        check(
+            host_env.get("BETTER_AGENT_HOME") == str(ba_home()),
+            "_host_env passes canonical extension state ownership",
+        )
         check("BETTER_AGENT_ACTIVE_CHECKOUT" not in host_env, "_host_env hides launcher checkout state")
         extension_backend_loader.evict_persistent_backend("ofek.backend")
         response = client.get("/api/extensions/ofek.backend/backend/sdk-env")
@@ -1003,6 +1013,7 @@ def main() -> int:
 
         check(package.exists(), "fixture package remains until cleanup")
     finally:
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         os.environ.pop("BETTER_CLAUDE_INTERNAL_TOKEN", None)
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     return 0

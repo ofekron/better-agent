@@ -473,9 +473,13 @@ async def _portable_identity_fallback_roundtrip() -> None:
 
 
 async def _structured_retry_after_and_destination_wake() -> None:
+    import extension_store
+
     _reset_spool()
     queue.enqueue(_payload("9" * 16))
     attempts = 0
+    first_attempt = asyncio.Event()
+    acknowledged = asyncio.Event()
     original_base = queue._RETRY_BASE_SECONDS
     original_max = queue._RETRY_MAX_SECONDS
     queue._RETRY_BASE_SECONDS = 10.0
@@ -484,23 +488,23 @@ async def _structured_retry_after_and_destination_wake() -> None:
     async def dispatch(_body: bytes) -> queue.DispatchOutcome:
         nonlocal attempts
         attempts += 1
+        if attempts == 1:
+            first_attempt.set()
+        else:
+            acknowledged.set()
         return queue.DispatchOutcome(attempts > 1, retry_after=10.0)
 
     try:
         queue.start(dispatch)
-        for _ in range(100):
-            if attempts:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(first_attempt.wait(), timeout=1)
         assert attempts == 1 and queue.depth() == 1
-        queue.notify_destination_changed()
-        for _ in range(100):
-            if queue.depth() == 0:
-                break
-            await asyncio.sleep(0.01)
+        extension_store._notify_store_mutated()
+        await asyncio.wait_for(acknowledged.wait(), timeout=1)
+        await queue.stop()
         assert attempts == 2 and queue.depth() == 0
     finally:
-        await queue.stop()
+        if queue._task is not None:
+            await queue.stop()
         queue._RETRY_BASE_SECONDS = original_base
         queue._RETRY_MAX_SECONDS = original_max
 

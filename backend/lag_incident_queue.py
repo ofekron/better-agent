@@ -28,6 +28,7 @@ _RETRY_BASE_SECONDS = 1.0
 _RETRY_MAX_SECONDS = 60.0
 _RETRY_JITTER_RATIO = 0.2
 _FILE_SUFFIX = ".json"
+_DESTINATION_SUBSCRIPTION_NAME = "lag_incident_queue"
 _lock = threading.Lock()
 _depth_lock = threading.Lock()
 _cached_depth = 0
@@ -495,9 +496,10 @@ def _retry_delay(failures: int) -> float:
     return max(0.0, bounded + random.uniform(-jitter, jitter))
 
 
-async def _wait_retry_delay(delay: float) -> None:
+async def _wait_retry_delay(delay: float, destination_generation: int) -> None:
     assert _wake is not None
-    destination_generation = _destination_generation
+    if _destination_generation != destination_generation:
+        return
     deadline = time.monotonic() + delay
     while not _stopping:
         remaining = deadline - time.monotonic()
@@ -520,6 +522,7 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
         _wake.clear()
         if _stopping:
             return
+        destination_generation = _destination_generation
         outcome = await _drain_outcome(dispatch)
         if not outcome.acknowledged:
             failures += 1
@@ -527,7 +530,7 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
             if outcome.retry_after is not None:
                 delay = max(delay, min(_RETRY_MAX_SECONDS, max(0.0, outcome.retry_after)))
             perf.record("lag_incident.retry_backoff", delay * 1000.0)
-            await _wait_retry_delay(delay)
+            await _wait_retry_delay(delay, destination_generation)
             if _stopping:
                 return
             _wake.set()
@@ -545,6 +548,12 @@ def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     _stopping = False
     perf.register_queue("lag_incidents", cached_depth)
     _task = loop.create_task(_run(dispatch), name="lag-incident-dispatcher")
+    import extension_store
+
+    extension_store.subscribe_store_mutations(
+        _DESTINATION_SUBSCRIPTION_NAME,
+        notify_destination_changed,
+    )
     _wake.set()
 
 
@@ -552,6 +561,9 @@ async def stop() -> None:
     global _loop, _wake, _task, _stopping
     task = _task
     _stopping = True
+    import extension_store
+
+    extension_store.unsubscribe_store_mutations(_DESTINATION_SUBSCRIPTION_NAME)
     perf.unregister_queue("lag_incidents")
     if task is None:
         _loop = None
