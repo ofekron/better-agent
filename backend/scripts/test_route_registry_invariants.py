@@ -28,6 +28,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 # must not declare those paths again.
 EXTRACTED_DOMAINS = {
     "git_api": ("/api/git-",),
+    "pending_approvals_api": ("/api/internal/pending-approvals/",),
 }
 
 

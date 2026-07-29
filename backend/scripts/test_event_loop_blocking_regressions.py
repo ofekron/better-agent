@@ -3188,10 +3188,10 @@ def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
     assert "_invalidate_pending_cache()" in create_source
     assert "_invalidate_pending_cache()" in transition_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def internal_list_pending_approvals(")
-    route_end = main_source.index("@app.post(\"/api/internal/tool-approvals/request\")", route_start)
-    route_source = main_source[route_start:route_end]
+    router_source = (ROOT / "pending_approvals_api.py").read_text(encoding="utf-8")
+    route_start = router_source.index("async def internal_list_pending_approvals(")
+    route_end = router_source.index("@router.post(\"/api/internal/pending-approvals/approve\")", route_start)
+    route_source = router_source[route_start:route_end]
     assert "await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)" in route_source
     assert "pending_approvals.list_pending(cwd=cwd)" not in route_source
 

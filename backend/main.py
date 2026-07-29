@@ -1602,58 +1602,25 @@ import auth                                                       # noqa: E402
 import auth_routes                                                # noqa: E402
 from starlette.middleware.sessions import SessionMiddleware       # noqa: E402
 
-app.include_router(auth_routes.router)
+import app_composition  # noqa: E402
+app_composition.wire(
+    app,
+    coordinator=coordinator,
+    session_lite=lambda sid: _session_lite(sid),
+    publish_worker_fanout=lambda sid, **kw: _publish_worker_fanout_required(sid, **kw),
+)
 
-import capability_api  # noqa: E402
-app.include_router(capability_api.router)
-import runtime_operation_api  # noqa: E402
+# Modules main.py uses directly beyond mounting them; the mounting
+# itself lives in app_composition.
 import extension_api  # noqa: E402
-app.include_router(extension_api.router)
-import extension_storage_api  # noqa: E402
-app.include_router(extension_storage_api.router)
+import runtime_operation_api  # noqa: E402
 import marketplace_bridge_api  # noqa: E402
-marketplace_bridge_api.configure(
-    lambda: coordinator.internal_token,
-    lambda revision: coordinator.broadcast_global(
-        "marketplace_bridge_changed",
-        {"revision": revision},
-    ),
-    lambda: extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS),
-)
-app.include_router(marketplace_bridge_api.router)
 import credential_clone_api  # noqa: E402
-credential_clone_api.configure(coordinator.verify_internal_token)
-app.include_router(credential_clone_api.router)
-import testape_api  # noqa: E402
-app.include_router(testape_api.router)
-import git_api  # noqa: E402
-app.include_router(git_api.router)
 import internal_guards  # noqa: E402
-internal_guards.configure(lambda: coordinator.bound_request_principal())
-import assistant_ui_api  # noqa: E402
-app.include_router(assistant_ui_api.router)
-import ask_ui_api  # noqa: E402
-app.include_router(ask_ui_api.router)
-import machine_nodes_api  # noqa: E402
-app.include_router(machine_nodes_api.router)
 import memory_api  # noqa: E402
-app.include_router(memory_api.router)
-import requirements_api  # noqa: E402
-app.include_router(requirements_api.router)
 import prompt_engineer_api  # noqa: E402
-prompt_engineer_api.configure(
-    coordinator.submit_prompt_async,
-    coordinator.cancel_session,
-    lambda sid: _session_lite(sid),
-    lambda sid, **kw: _publish_worker_fanout_required(sid, **kw),
-)
-app.include_router(prompt_engineer_api.router)
-import file_api  # noqa: E402
-app.include_router(file_api.router)
 import file_delivery  # noqa: E402
-import native_index_api  # noqa: E402
 import native_index_manager  # noqa: E402
-app.include_router(native_index_api.router)
 
 
 @app.post("/api/internal/runtime-operations")
@@ -13209,9 +13176,7 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
 
 
 def _require_team_orchestration_internal(x_internal_token: str) -> None:
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
+    internal_guards.require_role_internal('team-orchestration')
 
 
 @app.post("/api/internal/delegate-task-policy/get")
@@ -17807,29 +17772,6 @@ async def internal_delete_password_manager_secret(
     return {"status": "deleted", **deleted}
 
 
-@app.post("/api/internal/pending-approvals/list")
-async def internal_list_pending_approvals(
-    body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_team_orchestration_internal(x_internal_token)
-    cwd = (body or {}).get("cwd")
-    """Pending fresh-worker creation approvals, optionally filtered by
-    cwd. Used by the frontend on WS reconnect to rehydrate inline
-    approval cards.
-
-    Filtered to delegations the backend is ACTIVELY awaiting — disk
-    records with no in-memory waiter Future are orphans (left over
-    from a crash; the runner already gave up or never came back).
-    Surfacing them as cards would invite the user to approve a
-    delegation no one is waiting on, spawning a worker for nothing.
-    """
-    active_dids = set(coordinator.approval_waiters.keys())
-    pending = await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)
-    out = [rec for rec in pending if rec.get("delegation_id") in active_dids]
-    return {"approvals": out}
-
-
 @app.post("/api/internal/tool-approvals/request")
 async def internal_tool_approval_request(
     body: dict = Body(default={}),
@@ -17895,56 +17837,6 @@ async def list_pending_tool_approvals(session_id: str):
     return {
         "approvals": [tool_approval.registry.public_view(r) for r in tool_approval.registry.list_for_session(session_id)]
     }
-
-
-@app.post("/api/internal/pending-approvals/approve")
-async def internal_approve_pending_approval(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_team_orchestration_internal(x_internal_token)
-    """Approve a fresh-worker creation request. Body may include
-    optional `description` and `orchestration_mode` overrides (the
-    user's edits in the inline card)."""
-    body = body or {}
-    delegation_id = str(body.get("delegation_id") or "").strip()
-    if not delegation_id:
-        raise HTTPException(status_code=400, detail="delegation_id is required")
-    description = body.get("description")
-    mode = body.get("orchestration_mode")
-    rec, reason = pending_approvals.approve(
-        delegation_id, description=description, orchestration_mode=mode,
-    )
-    if reason == "missing":
-        raise HTTPException(status_code=404, detail=t("error.approval_not_found"))
-    if reason == "expired":
-        raise HTTPException(status_code=410, detail=t("error.approval_expired"))
-    if reason == "already_resolved":
-        # Idempotent — return the existing record so the second tab sees
-        # the same answer the first tab got.
-        return {"status": rec.get("status"), "record": rec, "idempotent": True}
-    coordinator._resolve_approval(delegation_id, rec)
-    return {"status": "approved", "record": rec}
-
-
-@app.post("/api/internal/pending-approvals/deny")
-async def internal_deny_pending_approval(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_team_orchestration_internal(x_internal_token)
-    delegation_id = str((body or {}).get("delegation_id") or "").strip()
-    if not delegation_id:
-        raise HTTPException(status_code=400, detail="delegation_id is required")
-    rec, reason = pending_approvals.deny(delegation_id)
-    if reason == "missing":
-        raise HTTPException(status_code=404, detail=t("error.approval_not_found"))
-    if reason == "expired":
-        raise HTTPException(status_code=410, detail=t("error.approval_expired"))
-    if reason == "already_resolved":
-        return {"status": rec.get("status"), "record": rec, "idempotent": True}
-    coordinator._resolve_approval(delegation_id, rec)
-    return {"status": "denied", "record": rec}
 
 
 # ============================================================================
