@@ -145,8 +145,6 @@ def embedded_claude_sdk_attestation_failure(
         return "package root differs from runner bundle"
     if package.files != (runner.launch.components[0],):
         return "package executable differs from runner launch"
-    if not package.files[0].attest_metadata():
-        return "package executable metadata changed"
     return None
 
 

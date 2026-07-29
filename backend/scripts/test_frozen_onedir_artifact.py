@@ -13,12 +13,17 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_execution_common import ExecutionContractError
+from provider_claude_execution import (
+    attest_embedded_claude_sdk,
+    capture_embedded_claude_sdk,
+)
 from provider_frozen_artifact_smoke import main as artifact_smoke_main
 from provider_frozen_bundle import (
     FrozenBundleIdentity,
     attest_materialized_frozen_bundle,
     materialize_frozen_bundle,
 )
+from provider_runner_launch import capture_runner_launch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -108,6 +113,29 @@ def test_complete_bundle_round_trip_and_materialization() -> None:
         }
         assert target_paths == source_paths
         assert root.exists()
+
+
+def test_embedded_sdk_binding_is_independent_of_live_bundle_state() -> None:
+    with tempfile.TemporaryDirectory(prefix="frozen-sdk-binding-") as raw:
+        parent = Path(raw)
+        root, executable, sidecar = _fixture(parent)
+        run_dir = parent / "run"
+        run_dir.mkdir()
+        runner = capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=executable,
+            runner_entry=Path(__file__),
+            runner_kind="claude",
+            runner_module="runner",
+            frozen=True,
+            frozen_bundle_root=root,
+            frozen_sidecar_root=sidecar,
+        )
+        package = capture_embedded_claude_sdk(runner)
+        executable.chmod(0o700)
+        executable.write_bytes(b"drifted-frozen-executable")
+        assert not runner.attest()
+        assert attest_embedded_claude_sdk(package, runner)
 
 
 def test_macos_default_bundle_root_preserves_app_layout() -> None:
