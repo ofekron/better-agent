@@ -887,6 +887,9 @@ class Provider(ABC):
             artifact = execution.artifact
             self._assert_execution_provider(artifact)
             owned = True
+            from model_execution_admission import admit_execution_model
+
+            admit_execution_model(artifact)
             hydration = config_store.hydrate_provider_execution(
                 artifact.provider_id,
                 expected_generation=artifact.provider_generation,

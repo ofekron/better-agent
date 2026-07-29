@@ -643,7 +643,12 @@ class CatalogRefreshEngine:
         if self._projections.get(projection.provider_id) == projection:
             return
         self._projections[projection.provider_id] = projection
-        await self._emit(changed_fact(projection))
+        await self._emit(
+            changed_fact(
+                projection,
+                self._snapshots.get(projection.provider_id),
+            ),
+        )
 
     async def _emit(self, fact: CatalogChangedFact) -> None:
         if self._fact_sink is None:

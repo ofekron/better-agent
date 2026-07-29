@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -43,6 +44,10 @@ from provider_execution_authority import ProviderExecutionHydration  # noqa: E40
 from provider_fugu import FuguProvider  # noqa: E402
 import runner_codex  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
+from model_catalog_authority import build_catalog_authority  # noqa: E402
+from model_catalog_cache import build_catalog_snapshot  # noqa: E402
+from model_catalog_refresh_state import CatalogProjection, changed_fact  # noqa: E402
+import model_catalog_read_projection  # noqa: E402
 
 
 def _write_executable(path: Path, data: bytes) -> None:
@@ -105,9 +110,45 @@ def _prepare(provider: CodexProvider, root: Path, *, model: str):
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = os.pathsep.join((str(root / "bin"), old_path))
     try:
-        return provider.prepare_run(**_arguments(root, model=model))
+        prepared = provider.prepare_run(**_arguments(root, model=model))
     finally:
         os.environ["PATH"] = old_path
+    contract = codex_contract_from_artifact(prepared.artifact)
+    authority = build_catalog_authority(
+        provider_id=prepared.artifact.provider_id,
+        provider_generation=prepared.artifact.provider_generation,
+        provider_revision=prepared.artifact.provider_revision,
+        provider_state_authority={
+            "generation": str(uuid.uuid4()),
+            "revision": 1,
+            "digest": "a" * 64,
+        },
+        execution_contract=replace(contract, runtime_args=()),
+        discovery_method="artifact_test",
+        discovery_version=1,
+    )
+    snapshot = build_catalog_snapshot(
+        authority=authority,
+        models=[model],
+        retired=[],
+        last_refreshed_at=1.0,
+        last_fetch_state="ok",
+    )
+    model_catalog_read_projection.apply_fact(changed_fact(
+        CatalogProjection(
+            provider_id=prepared.artifact.provider_id,
+            provider_generation=prepared.artifact.provider_generation,
+            status="current",
+            models=snapshot.models,
+            models_current=True,
+            retired=(),
+            last_refreshed_at=snapshot.last_refreshed_at,
+            reason="",
+            authority_fingerprint=authority.fingerprint,
+        ),
+        snapshot,
+    ))
+    return prepared
 
 
 def test_codex_prepare_binds_runtime_policy_and_contract() -> None:

@@ -591,6 +591,27 @@ def prepare_execution(
 ) -> PreparedExecution:
     normalized = _normalize_arguments(start_arguments)
     template = ExecutionTemplate.create(normalized)
+    frozen_runtime_policy = dict(runtime_policy or {})
+    normalized_provider_contract = (
+        _json_object(_freeze_provider_contract(provider, provider_contract))
+        if provider_contract is not None
+        else None
+    )
+    if normalized_provider_contract is not None:
+        from model_execution_admission import (
+            issue_model_admission,
+            selected_model_from_policy,
+        )
+
+        frozen_runtime_policy.pop("model_admission", None)
+        frozen_runtime_policy["model_admission"] = issue_model_admission(
+            provider=provider,
+            selected_model=selected_model_from_policy(
+                frozen_runtime_policy,
+                normalized["model"],
+            ),
+            provider_contract=normalized_provider_contract,
+        )
     volatile = {
         key: normalized[key]
         for key in _VOLATILE_DEFAULTS
@@ -600,8 +621,8 @@ def prepare_execution(
             provider,
             template,
             routing_session_id=routing_session_id,
-            runtime_policy=runtime_policy,
-            provider_contract=provider_contract,
+            runtime_policy=frozen_runtime_policy,
+            provider_contract=normalized_provider_contract,
         ),
         _canonical_json(volatile),
     )

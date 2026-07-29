@@ -116,6 +116,18 @@ class _Provider(Provider):
         self.runtime_snapshot = dict(self.runtime_record())
         return {}
 
+    def prepare_run(self, **arguments):
+        from provider_execution_contract import provider_family_contract
+
+        return prepare_execution(
+            self.record,
+            provider_contract=provider_family_contract(
+                self.record,
+                payload={"test": "shared-execution-authority"},
+            ),
+            **arguments,
+        )
+
     def _start_run(self, **kwargs) -> None:
         del kwargs
         self.build_env()

@@ -39,6 +39,23 @@ def _record(*, revision: int = 4) -> dict:
     }
 
 
+def _provider_record(*, revision: int = 4) -> dict:
+    return {**_record(revision=revision), "kind": "claude"}
+
+
+def _prepare_test_provider(self, **arguments):
+    from provider_execution_contract import provider_family_contract
+
+    return prepare_execution(
+        self.record,
+        provider_contract=provider_family_contract(
+            self.record,
+            payload={"test": "execution-template"},
+        ),
+        **arguments,
+    )
+
+
 def _arguments() -> dict:
     return {
         "run_id": "f5af980c-b88a-45c7-b1d2-07522350a379",
@@ -300,10 +317,11 @@ def test_provider_start_run_is_shared_final_template() -> None:
 
 def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace() -> None:
     class _Provider(Provider):
-        KIND = "codex"
+        KIND = "claude"
+        prepare_run = _prepare_test_provider
 
         def __init__(self) -> None:
-            super().__init__(_record())
+            super().__init__(_provider_record())
             self._runs = {}
             self.events: list[str] = []
 
@@ -330,7 +348,11 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
             replacement_done = threading.Event()
             replacement = threading.Thread(
                 target=lambda: (
-                    setattr(self, "record", {**_record(), "revision": 5}),
+                    setattr(
+                        self,
+                        "record",
+                        {**_provider_record(), "revision": 5},
+                    ),
                     replacement_done.set(),
                 ),
             )
@@ -390,7 +412,7 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
         ]
 
     provider.events.clear()
-    provider.record = {**_record(), "revision": 5}
+    provider.record = {**_provider_record(), "revision": 5}
     stale_loop = asyncio.new_event_loop()
     try:
         provider.start_run(
@@ -408,10 +430,11 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
 
 def test_provider_starts_are_concurrent() -> None:
     class _Provider(Provider):
-        KIND = "codex"
+        KIND = "claude"
+        prepare_run = _prepare_test_provider
 
         def __init__(self) -> None:
-            super().__init__(_record())
+            super().__init__(_provider_record())
             self._runs = {}
             self.spawn_gate = threading.Event()
             self.spawn_started = threading.Event()
@@ -497,10 +520,11 @@ def test_provider_starts_are_concurrent() -> None:
 
 def test_spawn_commit_linearizes_cancellation() -> None:
     class _Provider(Provider):
-        KIND = "codex"
+        KIND = "claude"
+        prepare_run = _prepare_test_provider
 
         def __init__(self) -> None:
-            super().__init__(_record())
+            super().__init__(_provider_record())
             self._runs = {}
             self.spawn_started = threading.Event()
             self.spawn_gate = threading.Event()

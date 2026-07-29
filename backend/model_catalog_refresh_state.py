@@ -49,16 +49,25 @@ class CatalogProjection:
 class CatalogChangedFact:
     kind: Literal["catalog_changed", "catalog_removed"]
     provider_id: str
+    provider_generation: str
     projection: CatalogProjection | None
+    snapshot: CatalogSnapshot | None
     idempotency_key: str
 
 
-def changed_fact(projection: CatalogProjection) -> CatalogChangedFact:
+def changed_fact(
+    projection: CatalogProjection,
+    snapshot: CatalogSnapshot | None = None,
+) -> CatalogChangedFact:
     payload = projection.to_dict()
+    if snapshot is not None:
+        payload["snapshot_digest"] = snapshot.digest
     return CatalogChangedFact(
         kind="catalog_changed",
         provider_id=projection.provider_id,
+        provider_generation=projection.provider_generation,
         projection=projection,
+        snapshot=snapshot,
         idempotency_key=hashlib.sha256(canonical_json(payload)).hexdigest(),
     )
 
@@ -72,7 +81,9 @@ def removed_fact(provider_id: str, generation: str) -> CatalogChangedFact:
     return CatalogChangedFact(
         kind="catalog_removed",
         provider_id=provider_id,
+        provider_generation=generation,
         projection=None,
+        snapshot=None,
         idempotency_key=hashlib.sha256(canonical_json(payload)).hexdigest(),
     )
 

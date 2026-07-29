@@ -32,6 +32,7 @@ _RUNTIME_POLICY_KEYS = {
     "runtime_agent_manifest",
     "worker_working_mode",
     "working_mode",
+    "model_admission",
 }
 _LEGACY_CODEX_AUTHORITY_KEYS = {
     "codex_binary",
