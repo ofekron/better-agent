@@ -3081,56 +3081,16 @@ async def pick_shortcuts(body: dict = Body(...)):
     return {"shortcuts": shortcuts}
 
 
-def _require_session(session_id: str) -> dict:
-    """Fetch session by id or raise 404 with the standard
-    `session_not_found_retry` detail. Replaces the 2-line guard
-    duplicated across every route that mutates a session by id.
-
-    Returns a `get_lite()` snapshot — caller MUST NOT read
-    `msg.events` / `msg.workers[*].events`
-    from the returned dict (they will be empty lists). Callers that
-    need events should call `session_manager.get(sid)` explicitly."""
-    session = session_manager.get_lite(session_id)
-    if session is None:
-        raise HTTPException(
-            status_code=404, detail=t("error.session_not_found_retry"),
-        )
-    return session
-
-
-async def _session_exists(session_id: str) -> bool:
-    return await asyncio.to_thread(session_manager.exists, session_id)
-
-
-async def _session_lite(session_id: str) -> dict | None:
-    return await asyncio.to_thread(session_manager.get_lite, session_id)
-
-
-def _existing_session_ids(session_ids: Iterable[str]) -> set[str]:
-    return {sid for sid in session_ids if session_manager.exists(sid)}
-
-
-def _session_lite_by_id(session_ids: Iterable[str]) -> dict[str, dict | None]:
-    return {sid: session_manager.get_lite(sid) for sid in session_ids}
-
-
-async def _existing_session_ids_async(session_ids: Iterable[str]) -> set[str]:
-    return await asyncio.to_thread(_existing_session_ids, set(session_ids))
-
-
-async def _session_lite_by_id_async(
-    session_ids: Iterable[str],
-) -> dict[str, dict | None]:
-    return await asyncio.to_thread(_session_lite_by_id, set(session_ids))
-
-
-async def _require_session_async(session_id: str) -> dict:
-    session = await _session_lite(session_id)
-    if session is None:
-        raise HTTPException(
-            status_code=404, detail=t("error.session_not_found_retry"),
-        )
-    return session
+from session_helpers import (
+    require_session as _require_session,
+    session_exists as _session_exists,
+    session_lite as _session_lite,
+    existing_session_ids as _existing_session_ids,
+    session_lite_by_id as _session_lite_by_id,
+    existing_session_ids_async as _existing_session_ids_async,
+    session_lite_by_id_async as _session_lite_by_id_async,
+    require_session_async as _require_session_async,
+)
 
 
 async def _broadcast_projects_changed() -> None:
