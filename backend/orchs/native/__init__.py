@@ -164,10 +164,14 @@ async def handle_turn(
     file_discussion_id: Optional[str] = None,
 ) -> None:
     from orchs import get_strategy
+    # session["orchestration_mode"] is stored as "team"/"native", but this
+    # feeds run_primary(run_mode=...) → ExecutionTurnIdentity.role, which
+    # takes the execution-role vocabulary {"native", "manager", "supervisor"}
+    # — "team" itself is not a valid role.
     run_mode = session.get("orchestration_mode") or "native"
-    if run_mode == "manager":
-        run_mode = "team"
-    if run_mode not in ("team", "native"):
+    if run_mode == "team":
+        run_mode = "manager"
+    if run_mode not in ("manager", "native"):
         run_mode = "native"
     # `cli_prompt` lets a caller send the model a DIFFERENT text than the
     # one persisted/displayed as the user message (e.g. the Ask singleton
