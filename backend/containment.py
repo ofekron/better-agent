@@ -266,6 +266,19 @@ class _LinuxCgroupContainment(Containment):
             raise ContainmentUnavailable(f"unsafe run_id for cgroup: {run_id!r}")
         return os.path.join(self._base, safe)
 
+    def _can_create_run_group(self) -> bool:
+        try:
+            base = os.lstat(self._base)
+        except FileNotFoundError:
+            return os.access(os.path.dirname(self._base), os.W_OK | os.X_OK)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(base.st_mode)
+            and base.st_uid == os.geteuid()
+            and os.access(self._base, os.W_OK | os.X_OK)
+        )
+
     def create(self, run_id: str) -> None:
         d = self._dir(run_id)
         base_fd = None
@@ -668,10 +681,20 @@ def containment() -> Containment:
             _INSTANCE = _WindowsJobContainment()
         elif sys.platform == "linux":
             try:
-                _INSTANCE = _LinuxCgroupContainment()
+                candidate = _LinuxCgroupContainment()
+                if not candidate._can_create_run_group():
+                    raise ContainmentUnavailable(
+                        f"cgroup v2 hierarchy is not delegated at {candidate._base}"
+                    )
+                _INSTANCE = candidate
             except ContainmentUnavailable:
                 try:
-                    _INSTANCE = _LinuxCgroupV1PidsContainment()
+                    candidate = _LinuxCgroupV1PidsContainment()
+                    if not candidate._can_create_run_group():
+                        raise ContainmentUnavailable(
+                            f"cgroup v1 pids hierarchy is not delegated at {candidate._base}"
+                        )
+                    _INSTANCE = candidate
                 except ContainmentUnavailable:
                     if not _is_wsl():
                         raise
