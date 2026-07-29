@@ -1188,7 +1188,7 @@ async def _mcp_json_request(
     method: str,
     params: dict[str, Any],
     *,
-    timeout: float,
+    timeout: float | None,
 ) -> dict[str, Any]:
     command = str(config.get("command") or "").strip()
     if not command:
@@ -1263,12 +1263,40 @@ async def _mcp_json_request(
         await stderr_task
 
 
-async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+async def _mcp_list_tools_with_timeout(
+    config: dict[str, Any],
+    timeout: float | None,
+) -> list[dict[str, Any]]:
     result = await _mcp_json_request(
-        config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S,
+        config, "tools/list", {}, timeout=timeout,
     )
     tools = result.get("tools") or []
     return [tool for tool in tools if isinstance(tool, dict)]
+
+
+async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    return await _mcp_list_tools_with_timeout(config, _MCP_LIST_TIMEOUT_S)
+
+
+async def _mcp_list_required_tools(
+    server_name: str,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return await _mcp_list_tools_with_timeout(config, None)
+
+
+async def _mcp_tools_for_server(
+    server_name: str,
+    config: dict[str, Any],
+    required_servers: set[str],
+) -> list[dict[str, Any]]:
+    if server_name in required_servers:
+        return await _mcp_list_required_tools(server_name, config)
+    return await tool_discovery.discover(
+        server_name,
+        config,
+        _mcp_list_tools,
+    )
 
 
 def _mcp_tool_result_text(result: dict[str, Any]) -> str:
@@ -1335,7 +1363,11 @@ async def _extension_mcp_tools_for_run(
         )
     tool_lists = await asyncio.gather(
         *(
-            tool_discovery.discover(server_name, config, _mcp_list_tools)
+            _mcp_tools_for_server(
+                server_name,
+                config,
+                required_servers,
+            )
             for server_name, config in config_items
         ),
         return_exceptions=True,

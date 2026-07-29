@@ -217,11 +217,76 @@ async def _assert_provider_policies(tmp: Path) -> None:
     assert handlers == {}
 
 
+async def _assert_required_openai_discovery_is_run_owned() -> None:
+    calls = []
+    original = runner_better_agent._mcp_json_request
+
+    async def fake_request(config, method, params, *, timeout):
+        calls.append((config, method, params, timeout))
+        return {"tools": [{"name": "required"}]}
+
+    runner_better_agent._mcp_json_request = fake_request
+    try:
+        required = await runner_better_agent._mcp_list_required_tools(
+            "required",
+            {"command": "unused"},
+        )
+        optional = await runner_better_agent._mcp_list_tools(
+            "optional",
+            {"command": "unused"},
+        )
+    finally:
+        runner_better_agent._mcp_json_request = original
+
+    assert [tool["name"] for tool in required] == ["required"]
+    assert [tool["name"] for tool in optional] == ["required"]
+    assert calls[0][3] is None
+    assert calls[1][3] == runner_better_agent._MCP_LIST_TIMEOUT_S
+
+
+async def _assert_required_openai_discovery_cancels_with_run() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    original = runner_better_agent._mcp_list_required_tools
+
+    async def required_tools(server_name, config):
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    runner_better_agent._mcp_list_required_tools = required_tools
+    try:
+        task = asyncio.create_task(
+            runner_better_agent._extension_mcp_tools_for_run(
+                {"required": {"command": "unused"}},
+                required_servers={"required"},
+                used_names=set(),
+            ),
+        )
+        await started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("required MCP discovery ignored run cancellation")
+        assert cancelled.is_set()
+        assert not runner_better_agent.tool_discovery._inflight
+    finally:
+        runner_better_agent._mcp_list_required_tools = original
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mcp-discovery-test-") as raw:
         tmp = Path(raw)
         asyncio.run(_assert_lifecycle(tmp))
         asyncio.run(_assert_provider_policies(tmp))
+        asyncio.run(_assert_required_openai_discovery_is_run_owned())
+        asyncio.run(_assert_required_openai_discovery_cancels_with_run())
     print("MCP tool discovery tests passed")
     return 0
 
