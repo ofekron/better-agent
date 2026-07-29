@@ -65,6 +65,17 @@ except Exception:
     pass
 
 
+def _stop_diagnostics() -> None:
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:
+        pass
+    try:
+        _fh.close()
+    except Exception:
+        pass
+
+
 def _role(argv: list[str]) -> str:
     """Classify the invocation. `--run-dir` or `--serve` → 'backend'
     (server/runner, both handled by `app_entry`); otherwise → 'shell'."""
@@ -96,5 +107,12 @@ def main() -> int:
     return shell_main(initial_activation=activation)
 
 
+def _run_main() -> int:
+    try:
+        return main()
+    finally:
+        _stop_diagnostics()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run_main())

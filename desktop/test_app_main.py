@@ -49,11 +49,19 @@ def test_diagnostic_argv_redacts_pair_intent() -> bool:
     return "secret-pair-token" not in " ".join(redacted)
 
 
+def test_diagnostic_watchdog_has_an_exit_owner() -> bool:
+    import inspect
+    source = inspect.getsource(app_main._run_main)
+    return "finally:" in source and "_stop_diagnostics()" in source
+
+
 TESTS = [
     ("app_main._role classifies shell vs backend invocations",
      test_role_dispatch),
     ("app_main diagnostics redact marketplace pair intents",
      test_diagnostic_argv_redacts_pair_intent),
+    ("app_main always stops its diagnostic watchdog",
+     test_diagnostic_watchdog_has_an_exit_owner),
 ]
 
 
