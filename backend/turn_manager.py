@@ -2827,6 +2827,13 @@ class TurnManager:
                 root_id = session_manager._root_id_for(app_session_id) or app_session_id
                 with perf.timed("provider.start_run.flush_root_persist"):
                     await _to_turn_dispatch_thread(session_manager.flush_root_persist, root_id)
+                execution_harness_config = resolved_harness_run_config
+                if isinstance(resolved_harness_run_config, dict):
+                    execution_harness_config = {
+                        key: value
+                        for key, value in resolved_harness_run_config.items()
+                        if key != "raw_capability_contexts"
+                    }
                 with perf.timed("provider.start_run.provider_call"):
                     execution = await _to_turn_dispatch_thread(
                         provider.prepare_run,
@@ -2856,7 +2863,7 @@ class TurnManager:
                         disabled_builtin_extensions=disabled_builtin_extensions,
                         provider_run_config=provider_run_config,
                         capability_contexts=run_capability_contexts,
-                        resolved_harness_run_config=resolved_harness_run_config,
+                        resolved_harness_run_config=execution_harness_config,
                         target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
