@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import stat
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,6 +14,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "desktop"))
 
 from node_credential_store import node_provider_credential_store
+from credential_session import ProviderCredentialBroker
 
 
 def test_node_credentials_survive_restart_and_remain_encrypted(tmp_path) -> None:
@@ -27,6 +31,40 @@ def test_node_credentials_survive_restart_and_remain_encrypted(tmp_path) -> None
     assert stat.S_IMODE(authority.stat().st_mode) == 0o700
     assert stat.S_IMODE(seed.stat().st_mode) == 0o600
     assert stat.S_IMODE(keyring.stat().st_mode) == 0o600
+
+
+def test_node_credential_session_subprocess_round_trip(tmp_path) -> None:
+    broker = ProviderCredentialBroker(node_provider_credential_store(tmp_path))
+    session = broker.open_session()
+    session.start()
+    env = {
+        **os.environ,
+        **session.backend_env(),
+        "PYTHONPATH": str(ROOT / "backend"),
+    }
+    code = (
+        "import json, credential_session_client as client; "
+        "stored = client.request('store', 'provider-a', value='secret-a'); "
+        "read = client.request('read', 'provider-a'); "
+        "print(json.dumps({'stored': stored, 'read': read}))"
+    )
+    try:
+        process = subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            **session.backend_popen_kwargs(),
+        )
+        session.revoke_backend_inheritance()
+    finally:
+        session.stop()
+    assert json.loads(process.stdout) == {
+        "stored": {"status": "available"},
+        "read": {"status": "available", "value": "secret-a"},
+    }
 
 
 def test_concurrent_node_credential_store_creation_publishes_one_seed(
