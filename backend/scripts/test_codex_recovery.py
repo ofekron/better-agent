@@ -45,6 +45,7 @@ from session_manager import manager as session_manager  # noqa: E402
 from codex_execution_contract import build_codex_execution_contract  # noqa: E402
 from codex_execution_runtime import codex_provider_contract  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
+from provider_runner_launch import capture_runner_launch  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
@@ -148,18 +149,27 @@ def _seed_codex_run(
             str(config_root / "auth.json"),
         ),
     )
+    runtime_policy = {
+        "context_strategy": None,
+        "disabled_runtime_skills": [],
+        "permission": {},
+        "request_user_input_enabled": False,
+        "run_policy": {},
+        "runtime_agent_manifest": None,
+        "worker_working_mode": None,
+        "working_mode": None,
+        "runner_launch": capture_runner_launch(
+            run_dir=run_dir,
+            executable_path=sys.executable,
+            runner_entry=Path(_BACKEND) / "runner_codex.py",
+            runner_kind="codex",
+            runner_module="runner_codex",
+            frozen=False,
+        ).to_dict(),
+    }
     execution = prepare_execution(
         provider_record,
-        runtime_policy={
-            "context_strategy": None,
-            "disabled_runtime_skills": [],
-            "permission": {},
-            "request_user_input_enabled": False,
-            "run_policy": {},
-            "runtime_agent_manifest": None,
-            "worker_working_mode": None,
-            "working_mode": None,
-        },
+        runtime_policy=runtime_policy,
         provider_contract=codex_provider_contract(contract),
         run_id=run_id,
         prompt="recover",
