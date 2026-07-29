@@ -1,0 +1,444 @@
+{
+  "assistantMsgId": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+  "restAfterLivePush": {
+    "_owner_incarnation": "76eabc65147a4d5eb793f50ffb916a24",
+    "_schema_version": 11,
+    "_unread_migrated": true,
+    "agent_session_id": null,
+    "archived": false,
+    "bare_config": false,
+    "browser_harness_enabled": true,
+    "browser_harness_headless": true,
+    "caller_agent_session_id": null,
+    "capability_contexts": [],
+    "continuation_chain": [],
+    "created_at": "2026-07-29T23:32:23.524261",
+    "current_tasks": [],
+    "current_todos": [],
+    "cwd": "/tmp",
+    "cwd_explicit": true,
+    "disallowed_tools": [],
+    "draft_images": [],
+    "draft_input": "",
+    "draft_input_seq": 0,
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-81080w_b/sessions/e62e4df3-7d9f-4977-b69e-bb70aeb5ab20.json",
+    "fork_closed": false,
+    "fork_point_seq": null,
+    "forked_from_agent_sid": null,
+    "forked_from_supervisor_agent_sid": null,
+    "forks": [],
+    "harness_profile_id": "",
+    "harness_profile_snapshot": null,
+    "id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+    "inline_tags": [],
+    "kind": "user",
+    "last_active_model": null,
+    "last_active_provider_id": null,
+    "last_active_runner": null,
+    "last_active_supervisor_model": null,
+    "last_active_supervisor_provider_id": null,
+    "last_active_supervisor_runner": null,
+    "last_applied_seq": 1,
+    "last_seen_event_uid": null,
+    "max_seq_by_sid": {
+      "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20": 2
+    },
+    "messages": [
+      {
+        "content": "hello from contract test",
+        "events": [],
+        "id": "u1",
+        "role": "user",
+        "seq": 0
+      },
+      {
+        "_content_dirty": false,
+        "_events_seq_floor": 0,
+        "agent_session_id": null,
+        "content": "live pushed assistant reply",
+        "event_ref": {
+          "byte_end": 685,
+          "byte_start": 0,
+          "msg_id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+          "root_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+          "seq_end": 2,
+          "seq_start": 1,
+          "sid": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20"
+        },
+        "events": [],
+        "id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+        "isStreaming": false,
+        "role": "assistant",
+        "seq": 1,
+        "stub": {
+          "event_count": 2,
+          "last_events": [
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "seeded assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-seed-uuid"
+              },
+              "seq": 1,
+              "type": "agent_message"
+            },
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "live pushed assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-live-uuid"
+              },
+              "seq": 2,
+              "type": "agent_message"
+            }
+          ]
+        },
+        "timestamp": "2026-07-29T23:32:24.497397",
+        "workers": []
+      }
+    ],
+    "model": "sonnet",
+    "name": "chat-contract-capture",
+    "next_seq": 2,
+    "node_id": "primary",
+    "notes": [],
+    "open_config_panels": [],
+    "open_file_panels": [],
+    "orchestration_mode": "native",
+    "pagination": {
+      "has_older": false,
+      "oldest_loaded_seq": 0,
+      "total_messages": 2
+    },
+    "parent_line_count_at_fork": null,
+    "parent_session_id": null,
+    "pending_supervisor_verdict": null,
+    "permission": {},
+    "pinned": false,
+    "processed_line_by_sid": {},
+    "provider_id": "claude-id",
+    "queued_prompts": [],
+    "reasoning_effort": "medium",
+    "right_panel_active_tab": null,
+    "right_panel_auto_opened_by": [],
+    "right_panel_mobile_height": null,
+    "right_panel_open": false,
+    "right_panel_todos_dismissed": false,
+    "right_panel_width": null,
+    "runner": "native",
+    "sidebar_minimized": false,
+    "source": "cli",
+    "supervisor_agent_session_id": null,
+    "supervisor_bootstrap_received": false,
+    "supervisor_custom_prompt": "",
+    "supervisor_enabled": false,
+    "token_usage_last": null,
+    "token_usage_total": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "topbar_pinned": false,
+    "topbar_pinned_at": null,
+    "turn_harness_profile_snapshot": null,
+    "updated_at": "2026-07-29T23:32:26.136561",
+    "user_initiated": false,
+    "worker_creation_policy": "ask",
+    "worker_eligible": false
+  },
+  "restInitial": {
+    "_owner_incarnation": "76eabc65147a4d5eb793f50ffb916a24",
+    "_schema_version": 11,
+    "_unread_migrated": true,
+    "agent_session_id": null,
+    "archived": false,
+    "bare_config": false,
+    "browser_harness_enabled": true,
+    "browser_harness_headless": true,
+    "caller_agent_session_id": null,
+    "capability_contexts": [],
+    "continuation_chain": [],
+    "created_at": "2026-07-29T23:32:23.524261",
+    "current_tasks": [],
+    "current_todos": [],
+    "cwd": "/tmp",
+    "cwd_explicit": true,
+    "disallowed_tools": [],
+    "draft_images": [],
+    "draft_input": "",
+    "draft_input_seq": 0,
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-81080w_b/sessions/e62e4df3-7d9f-4977-b69e-bb70aeb5ab20.json",
+    "fork_closed": false,
+    "fork_point_seq": null,
+    "forked_from_agent_sid": null,
+    "forked_from_supervisor_agent_sid": null,
+    "forks": [],
+    "harness_profile_id": "",
+    "harness_profile_snapshot": null,
+    "id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+    "inline_tags": [],
+    "kind": "user",
+    "last_active_model": null,
+    "last_active_provider_id": null,
+    "last_active_runner": null,
+    "last_active_supervisor_model": null,
+    "last_active_supervisor_provider_id": null,
+    "last_active_supervisor_runner": null,
+    "last_seen_event_uid": null,
+    "max_seq_by_sid": {
+      "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20": 1
+    },
+    "messages": [
+      {
+        "content": "hello from contract test",
+        "events": [],
+        "id": "u1",
+        "role": "user",
+        "seq": 0
+      },
+      {
+        "_content_dirty": false,
+        "_events_seq_floor": 0,
+        "agent_session_id": null,
+        "content": "seeded assistant reply",
+        "event_ref": {
+          "byte_end": 339,
+          "byte_start": 0,
+          "msg_id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+          "root_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+          "seq_end": 1,
+          "seq_start": 1,
+          "sid": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20"
+        },
+        "events": [],
+        "id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+        "isStreaming": false,
+        "role": "assistant",
+        "seq": 1,
+        "stub": {
+          "event_count": 1,
+          "last_events": [
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "seeded assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-seed-uuid"
+              },
+              "seq": 1,
+              "type": "agent_message"
+            }
+          ]
+        },
+        "timestamp": "2026-07-29T23:32:24.497397",
+        "workers": []
+      }
+    ],
+    "model": "sonnet",
+    "name": "chat-contract-capture",
+    "next_seq": 2,
+    "node_id": "primary",
+    "notes": [],
+    "open_config_panels": [],
+    "open_file_panels": [],
+    "orchestration_mode": "native",
+    "pagination": {
+      "has_older": false,
+      "oldest_loaded_seq": 0,
+      "total_messages": 2
+    },
+    "parent_line_count_at_fork": null,
+    "parent_session_id": null,
+    "pending_supervisor_verdict": null,
+    "permission": {},
+    "pinned": false,
+    "processed_line_by_sid": {},
+    "provider_id": "claude-id",
+    "queued_prompts": [],
+    "reasoning_effort": "medium",
+    "right_panel_active_tab": null,
+    "right_panel_auto_opened_by": [],
+    "right_panel_mobile_height": null,
+    "right_panel_open": false,
+    "right_panel_todos_dismissed": false,
+    "right_panel_width": null,
+    "runner": "native",
+    "sidebar_minimized": false,
+    "source": "cli",
+    "supervisor_agent_session_id": null,
+    "supervisor_bootstrap_received": false,
+    "supervisor_custom_prompt": "",
+    "supervisor_enabled": false,
+    "token_usage_last": null,
+    "token_usage_total": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "topbar_pinned": false,
+    "topbar_pinned_at": null,
+    "turn_harness_profile_snapshot": null,
+    "updated_at": "2026-07-29T23:32:26.136561",
+    "user_initiated": false,
+    "worker_creation_policy": "ask",
+    "worker_eligible": false
+  },
+  "restMessageEventsFull": {
+    "_content_dirty": false,
+    "_events_seq_floor": 0,
+    "_uid_idx": {
+      "contract-live-uuid": 1,
+      "contract-seed-uuid": 0
+    },
+    "agent_session_id": null,
+    "content": "live pushed assistant reply",
+    "event_ref": {
+      "byte_end": 685,
+      "byte_start": 0,
+      "msg_id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+      "root_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+      "seq_end": 2,
+      "seq_start": 1,
+      "sid": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20"
+    },
+    "events": [
+      {
+        "data": {
+          "message": {
+            "content": [
+              {
+                "text": "seeded assistant reply",
+                "type": "text"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "contract-seed-uuid"
+        },
+        "type": "agent_message"
+      },
+      {
+        "data": {
+          "message": {
+            "content": [
+              {
+                "text": "live pushed assistant reply",
+                "type": "text"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "contract-live-uuid"
+        },
+        "type": "agent_message"
+      }
+    ],
+    "id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+    "isStreaming": false,
+    "role": "assistant",
+    "seq": 1,
+    "timestamp": "2026-07-29T23:32:24.497397",
+    "workers": []
+  },
+  "sessionId": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+  "wsLivePush": {
+    "data": {
+      "app_session_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+      "message": {
+        "content": [
+          {
+            "text": "live pushed assistant reply",
+            "type": "text"
+          }
+        ]
+      },
+      "msg_id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+      "type": "assistant",
+      "uuid": "contract-live-uuid"
+    },
+    "seq": 2,
+    "type": "agent_message"
+  },
+  "wsMessagesReplay": {
+    "data": {
+      "app_session_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+      "messages": [
+        {
+          "content": "hello from contract test",
+          "events": [],
+          "id": "u1",
+          "role": "user",
+          "seq": 0
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 0,
+          "agent_session_id": null,
+          "content": "seeded assistant reply",
+          "event_ref": {
+            "byte_end": 339,
+            "byte_start": 0,
+            "msg_id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+            "root_id": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20",
+            "seq_end": 1,
+            "seq_start": 1,
+            "sid": "e62e4df3-7d9f-4977-b69e-bb70aeb5ab20"
+          },
+          "events": [],
+          "id": "4f7bbe68-9beb-42c6-af76-7b0d46fe28da",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 1,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "seeded assistant reply",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "contract-seed-uuid"
+                },
+                "seq": 1,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-29T23:32:24.497397",
+          "workers": []
+        }
+      ],
+      "next_seq": 2,
+      "since_seq": 0
+    },
+    "type": "messages_replay"
+  }
+}

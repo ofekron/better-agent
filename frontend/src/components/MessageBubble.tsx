@@ -27,6 +27,7 @@ import {
 } from "../utils/artificialSections";
 import { parseInlineTagsBody } from "../utils/inlineTagsPrompt";
 import { getStrategy } from "../strategies";
+import { mergeEventsByUuid } from "../hooks/useSession";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../utils/mergeEvents";
@@ -200,8 +201,17 @@ function isEffectivelyEmpty(text: string): boolean {
 function previewEventsForMessage(message: ChatMessage | undefined, mode?: OrchestrationMode): WSEvent[] {
   if (!message) return [];
   const stubEvents = message.stub?.last_events;
-  if (stubEvents && stubEvents.length > 0) return stubEvents;
-  return getStrategy(mode).getEvents(message);
+  const liveEvents = getStrategy(mode).getEvents(message);
+  if (stubEvents && stubEvents.length > 0) {
+    // A late-arriving live event (routed by msg_id onto an
+    // already-stubbed, finalized message — see
+    // `resolveLiveEventTargetIndex`) appends onto `message.events`
+    // without touching the REST-loaded `stub` snapshot. Without merging
+    // the two, that live append is invisible: this function would keep
+    // returning the stale stub preview forever.
+    return mergeEventsByUuid(stubEvents, liveEvents) ?? stubEvents;
+  }
+  return liveEvents;
 }
 
 function hasStubPreviewEvents(message: ChatMessage | undefined): boolean {
@@ -2362,9 +2372,17 @@ function messageWithHydratedRenderPayload(
   current: ChatMessage,
   hydrated: ChatMessage,
 ): ChatMessage {
+  // `hydrated.events` is a snapshot from the lazy-fetch moment; a late
+  // live event (msg_id-routed onto this already-stubbed message — see
+  // `resolveLiveEventTargetIndex`) can land on `current.events` AFTER
+  // that snapshot was taken. Merge instead of overwriting so the live
+  // append survives past hydration rather than being discarded.
   const next: ChatMessage = {
     ...current,
-    events: hydrated.events ?? current.events,
+    events:
+      mergeEventsByUuid(hydrated.events, current.events) ??
+      hydrated.events ??
+      current.events,
   };
   if (current.workers || hydrated.workers) {
     const hydratedWorkers = new Map(
