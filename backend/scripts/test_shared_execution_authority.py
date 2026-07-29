@@ -216,6 +216,8 @@ def test_atomic_hydration_separates_bound_sensitive_credential() -> None:
 
 
 def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
+    import execution_spawn_authority
+
     created = config_store.add_provider({
         "name": "Race-bound Claude",
         "kind": "claude",
@@ -231,6 +233,10 @@ def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
     )
     assert changed is not None
     loop = asyncio.new_event_loop()
+    original_attest = execution_spawn_authority.attest_execution_spawn_authority
+    execution_spawn_authority.attest_execution_spawn_authority = (
+        lambda _artifact: None
+    )
     try:
         try:
             provider.start_run(
@@ -243,6 +249,7 @@ def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
         else:
             raise AssertionError("stale prepared authority reached provider spawn")
     finally:
+        execution_spawn_authority.attest_execution_spawn_authority = original_attest
         loop.close()
     assert not provider.spawned
     assert provider.released == 1

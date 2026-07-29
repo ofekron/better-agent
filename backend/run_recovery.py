@@ -3173,6 +3173,13 @@ async def _retry_recovered_run(
                 restored_execution,
                 **retry_overrides,
             )
+        elif original_artifact.provider_kind in {"codex", "fugu"}:
+            from codex_execution_runtime import retry_codex_execution
+
+            restored_execution = retry_codex_execution(
+                restored_execution,
+                **retry_overrides,
+            )
         else:
             restored_execution = restored_execution.retry(
                 **retry_overrides,

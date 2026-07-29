@@ -36,7 +36,6 @@ from provider import (
     path_exists_off_loop,
     popen_is_running_off_loop,
     schedule_loop_task,
-    runner_argv,
 )
 import config_store
 from extension_run_policy import (
@@ -316,9 +315,8 @@ class CodexProvider(Provider):
     pushed onto the orchestrator queue."""
 
     KIND: ClassVar[str] = "codex"
-    # `--runner-kind` for the frozen entrypoint dispatch and `runner_argv`.
-    # Subclasses that reuse this runner but need their own frozen dispatch
-    # (Fugu) override this.
+    # Selects the frozen entrypoint dispatch. Subclasses that reuse this
+    # runner under a distinct provider kind (Fugu) override it.
     RUNNER_KIND: ClassVar[str] = "codex"
     # CLI binary the codex runner resolves and spawns in app-server mode.
     CODEX_BINARY: ClassVar[str] = "codex"
@@ -488,6 +486,16 @@ class CodexProvider(Provider):
             "worker_working_mode": worker_record.get("working_mode"),
             "working_mode": session_record.get("working_mode"),
         }
+        from provider_runner_launch import capture_runner_launch
+
+        runtime_policy["runner_launch"] = capture_runner_launch(
+            run_dir=_runs_root() / start_arguments["run_id"],
+            executable_path=sys.executable,
+            runner_entry=_RUNNER_PATH,
+            runner_kind=self.RUNNER_KIND,
+            runner_module="runner_codex",
+            frozen=bool(getattr(sys, "frozen", False)),
+        ).to_dict()
         prepared = prepare_execution(
             authority,
             runtime_policy=runtime_policy,
@@ -725,6 +733,9 @@ class CodexProvider(Provider):
             run_dir / "input.json",
             bind_execution_input(_execution.artifact, input_payload),
         )
+        from execution_spawn_authority import consume_execution_spawn_authority
+
+        consume_execution_spawn_authority(_execution.artifact, run_dir)
 
         from containment import containment
         containment().create(run_id)
@@ -751,16 +762,31 @@ class CodexProvider(Provider):
                 user_facing=bool(user_facing) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
-            popen = subprocess.Popen(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind=self.RUNNER_KIND),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                cwd=cwd,
-                env=env,
-                **_process_control().detach_spawn_kwargs(),
-                **containment().spawn_kwargs(run_id),
+            from codex_execution_runtime import (
+                codex_runner_launch_from_artifact,
             )
+            from provider_pinned_launch import open_pinned_runner_launch
+
+            runner_launch = codex_runner_launch_from_artifact(
+                _execution.artifact,
+            )
+            with open_pinned_runner_launch(runner_launch) as pinned:
+                pass_fds = (
+                    {"pass_fds": pinned.pass_fds}
+                    if os.name != "nt" and pinned.pass_fds
+                    else {}
+                )
+                popen = subprocess.Popen(
+                    list(pinned.argv),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_fp,
+                    stderr=stderr_fp,
+                    cwd=cwd,
+                    env=env,
+                    **pass_fds,
+                    **_process_control().detach_spawn_kwargs(),
+                    **containment().spawn_kwargs(run_id),
+                )
         except Exception:
             stdout_fp.close()
             stderr_fp.close()
@@ -1509,7 +1535,12 @@ class CodexProvider(Provider):
                     (child / "execution.json").read_text(encoding="utf-8"),
                 )
                 artifact = ExecutionArtifact.from_dict(execution_payload)
+                from codex_execution_runtime import (
+                    codex_runner_launch_from_artifact,
+                )
+
                 contract = codex_contract_from_artifact(artifact)
+                codex_runner_launch_from_artifact(artifact)
                 read_codex_runtime_agent_payload(
                     child,
                     codex_runtime_agent_manifest(artifact),

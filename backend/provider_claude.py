@@ -1053,6 +1053,9 @@ class ClaudeProvider(Provider):
             run_dir / "input.json",
             bind_execution_input(_execution.artifact, input_payload),
         )
+        from execution_spawn_authority import consume_execution_spawn_authority
+
+        consume_execution_spawn_authority(_execution.artifact, run_dir)
         mode = input_payload["mode"]
         app_session_id = input_payload["app_session_id"]
         cwd = input_payload["cwd"]

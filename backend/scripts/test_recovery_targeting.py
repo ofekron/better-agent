@@ -1026,6 +1026,12 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
     original_sm = run_recovery.session_manager
     original_wait_for = run_recovery.asyncio.wait_for
     original_create_task = run_recovery.asyncio.create_task
+    import codex_execution_runtime
+
+    original_retry_codex = codex_execution_runtime.retry_codex_execution
+    codex_execution_runtime.retry_codex_execution = (
+        lambda execution, **overrides: execution.retry(**overrides)
+    )
     try:
         run_recovery.asyncio.wait_for = _skip_backoff
         run_recovery.asyncio.create_task = _create_task
@@ -1077,6 +1083,7 @@ def test_recovered_retry_spawn_boundaries_cleanup() -> None:
         check("spawn exception clears cancel event", failing_coordinator.turn_manager.cancel_events == {})
         check("spawn exception clears run state", len(failing_coordinator.turn_manager.removed) == 1)
     finally:
+        codex_execution_runtime.retry_codex_execution = original_retry_codex
         run_recovery.session_manager = original_sm
         run_recovery.asyncio.wait_for = original_wait_for
         run_recovery.asyncio.create_task = original_create_task

@@ -133,6 +133,22 @@ def test_remaining_runners_restore_artifact_and_never_resolve_cli_late() -> None
         assert "resolve_cli_binary(" not in source, kind
 
 
+def test_every_provider_consumes_persisted_authority_before_spawn() -> None:
+    provider_source = (BACKEND / "provider.py").read_text(encoding="utf-8")
+    assert "attest_execution_spawn_authority(artifact)" in provider_source
+    for filename in (
+        "provider_agy.py",
+        "provider_claude.py",
+        "provider_codex.py",
+        "provider_session_events.py",
+    ):
+        source = (BACKEND / filename).read_text(encoding="utf-8")
+        assert "consume_execution_spawn_authority(" in source, filename
+    codex_source = (BACKEND / "provider_codex.py").read_text(encoding="utf-8")
+    assert "open_pinned_runner_launch(" in codex_source
+    assert "runner_argv(" not in codex_source
+
+
 def test_recovery_retries_every_artifact_family() -> None:
     source = (BACKEND / "run_recovery.py").read_text(encoding="utf-8")
     assert source.count("_provider_manifest.artifact_family_kinds()") >= 2
@@ -144,6 +160,7 @@ TESTS = (
     test_remaining_provider_start_methods_are_thin_artifact_consumers,
     test_remaining_provider_env_uses_admitted_runtime_record,
     test_remaining_runners_restore_artifact_and_never_resolve_cli_late,
+    test_every_provider_consumes_persisted_authority_before_spawn,
     test_recovery_retries_every_artifact_family,
 )
 

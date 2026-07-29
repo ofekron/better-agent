@@ -175,6 +175,9 @@ class SessionEventsProvider(Provider):
             run_dir / "input.json",
             bind_execution_input(execution.artifact, inputs),
         )
+        from execution_spawn_authority import consume_execution_spawn_authority
+
+        consume_execution_spawn_authority(execution.artifact, run_dir)
         containment().create(run_id)
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")

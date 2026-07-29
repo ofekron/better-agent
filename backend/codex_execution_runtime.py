@@ -23,7 +23,10 @@ from execution_artifact_io import (
 from execution_template import (
     ExecutionArtifact,
     ExecutionAuthorityError,
+    PreparedExecution,
+    prepare_execution,
 )
+from provider_runner_launch import RunnerLaunch, retarget_runner_launch
 
 
 _RUNTIME_POLICY_KEYS = {
@@ -36,6 +39,7 @@ _RUNTIME_POLICY_KEYS = {
     "worker_working_mode",
     "working_mode",
     "model_admission",
+    "runner_launch",
 }
 _LEGACY_CODEX_AUTHORITY_KEYS = {
     "codex_binary",
@@ -114,6 +118,73 @@ def codex_contract_from_artifact(
             "Codex execution contract conflicts with execution authority",
         )
     return contract
+
+
+def codex_runner_launch_from_artifact(
+    artifact: ExecutionArtifact,
+) -> RunnerLaunch:
+    raw = artifact.runtime_policy.get("runner_launch")
+    if type(raw) is not dict:
+        raise ExecutionAuthorityError(
+            "Codex runner launch authority is unavailable",
+        )
+    try:
+        launch = RunnerLaunch.from_dict(raw)
+    except ExecutionContractError as exc:
+        raise ExecutionAuthorityError(
+            "Codex runner launch authority is invalid",
+        ) from exc
+    expected_run_dir = (
+        Path(launch.launch.argv[2])
+        if launch.frozen
+        else Path(launch.launch.argv[3])
+    )
+    from runs_dir import runs_root
+
+    if (
+        launch.runner_kind != artifact.provider_kind
+        or launch.runner_module != "runner_codex"
+        or expected_run_dir
+        != runs_root() / artifact.template.arguments()["run_id"]
+        or not launch.attest()
+    ):
+        raise ExecutionAuthorityError(
+            "Codex runner launch authority mismatch",
+        )
+    return launch
+
+
+def retry_codex_execution(
+    execution: PreparedExecution,
+    **overrides: Any,
+) -> PreparedExecution:
+    if (
+        not isinstance(execution, PreparedExecution)
+        or execution.artifact.provider_kind not in {"codex", "fugu"}
+    ):
+        raise ExecutionAuthorityError("invalid Codex retry execution")
+    artifact = execution.artifact
+    arguments = execution.start_arguments()
+    arguments.update(overrides)
+    from runs_dir import runs_root
+
+    runtime_policy = artifact.runtime_policy
+    runtime_policy["runner_launch"] = retarget_runner_launch(
+        codex_runner_launch_from_artifact(artifact),
+        runs_root() / arguments["run_id"],
+    ).to_dict()
+    return prepare_execution(
+        {
+            "id": artifact.provider_id,
+            "kind": artifact.provider_kind,
+            "generation": artifact.provider_generation,
+            "revision": artifact.provider_revision,
+        },
+        routing_session_id=artifact.routing_session_id,
+        runtime_policy=runtime_policy,
+        provider_contract=artifact.provider_contract,
+        **arguments,
+    )
 
 
 def _read_attested_file(

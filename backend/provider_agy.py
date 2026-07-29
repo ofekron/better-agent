@@ -375,6 +375,9 @@ class AgyProvider(SessionEventsProvider):
             run_dir / "input.json",
             bind_execution_input(_execution.artifact, input_payload),
         )
+        from execution_spawn_authority import consume_execution_spawn_authority
+
+        consume_execution_spawn_authority(_execution.artifact, run_dir)
 
         containment().create(run_id)
         stdout_fp = (run_dir / "stdout.log").open("ab")

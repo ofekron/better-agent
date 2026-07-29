@@ -887,6 +887,11 @@ class Provider(ABC):
             artifact = execution.artifact
             self._assert_execution_provider(artifact)
             owned = True
+            from execution_spawn_authority import (
+                attest_execution_spawn_authority,
+            )
+
+            attest_execution_spawn_authority(artifact)
             from model_execution_admission import admit_execution_model
 
             admit_execution_model(artifact)

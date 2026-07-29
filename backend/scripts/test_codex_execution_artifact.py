@@ -20,6 +20,7 @@ import _test_home  # noqa: E402
 import codex_execution_runtime as execution_runtime  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import provider_codex as provider_codex_module  # noqa: E402
 
 _TEST_HOME = _test_home.isolate("bc-test-codex-execution-artifact-")
 
@@ -28,13 +29,16 @@ from codex_execution_runtime import (  # noqa: E402
     cleanup_staged_codex_runtime_agent_payload,
     clone_codex_runtime_agent_payload,
     codex_contract_from_artifact,
+    codex_runner_launch_from_artifact,
     codex_runtime_agent_manifest,
     install_staged_codex_runtime_agent_payload,
     read_codex_runtime_agent_payload,
     restore_codex_runner_inputs,
+    retry_codex_execution,
     snapshot_codex_runtime_agents,
     stage_codex_runtime_agent_payload,
 )
+from execution_spawn_authority import attest_execution_spawn_authority  # noqa: E402
 from execution_template import (  # noqa: E402
     ExecutionArtifact,
     ExecutionAuthorityError,
@@ -171,6 +175,12 @@ def test_codex_prepare_binds_runtime_policy_and_contract() -> None:
         assert contract.provider_revision == prepared.artifact.provider_revision
         assert contract.credential_generation == contract.provider_revision
         assert contract.launch_chain.argv_prefix
+        runner_launch = codex_runner_launch_from_artifact(prepared.artifact)
+        assert runner_launch.attest()
+        assert runner_launch.launch.argv[-2:] == (
+            "--run-dir",
+            str(runs_root() / prepared.start_arguments()["run_id"]),
+        )
         assert contract.config
         assert prepared.artifact.runtime_policy["permission"]
         assert prepared.artifact.runtime_policy["run_policy"][
@@ -182,12 +192,91 @@ def test_codex_prepare_binds_runtime_policy_and_contract() -> None:
             ExecutionArtifact.from_dict(json.loads(json.dumps(encoded)))
             == prepared.artifact
         )
-        retry = prepared.retry(run_id=str(uuid.uuid4()))
+        retry_run_id = str(uuid.uuid4())
+        retry = retry_codex_execution(
+            prepared,
+            run_id=retry_run_id,
+            session_id="resume-exact",
+            fork=True,
+        )
         assert retry.artifact.provider_contract == prepared.artifact.provider_contract
-        assert retry.artifact.runtime_policy == prepared.artifact.runtime_policy
+        retry_runner = codex_runner_launch_from_artifact(retry.artifact)
+        assert retry_runner.launch.argv[-2:] == (
+            "--run-dir",
+            str(runs_root() / retry_run_id),
+        )
+        assert retry.start_arguments()["session_id"] == "resume-exact"
+        assert retry.start_arguments()["fork"] is True
+        assert (
+            retry.artifact.runtime_policy["runner_launch"]
+            != prepared.artifact.runtime_policy["runner_launch"]
+        )
 
         config.write_text('model_provider = "changed"\n', encoding="utf-8")
         assert not contract.attest()
+
+
+def test_runner_drift_is_rejected_before_credentials_or_spawn() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        config_dir = root / "config"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text("", encoding="utf-8")
+        _write_executable(root / "bin" / "codex", b"native-codex")
+        runner_copy = root / "runner_codex.py"
+        runner_copy.write_bytes(provider_codex_module._RUNNER_PATH.read_bytes())
+        original_runner = provider_codex_module._RUNNER_PATH
+        original_hydrate = config_store.hydrate_provider_execution
+        original_popen = provider_codex_module.subprocess.Popen
+        provider_codex_module._RUNNER_PATH = runner_copy
+        try:
+            provider = CodexProvider(
+                _record(kind="codex", config_dir=config_dir),
+            )
+            prepared = _prepare(provider, root, model="gpt-5.5")
+            observed = runner_copy.stat()
+            runner_copy.write_bytes(b"x" * observed.st_size)
+            os.utime(
+                runner_copy,
+                ns=(observed.st_atime_ns, observed.st_mtime_ns),
+            )
+            calls = {"hydrate": 0, "spawn": 0}
+
+            def _hydrate(*_args, **_kwargs):
+                calls["hydrate"] += 1
+                raise AssertionError("credentials were hydrated after drift")
+
+            def _popen(*_args, **_kwargs):
+                calls["spawn"] += 1
+                raise AssertionError("subprocess spawned after drift")
+
+            config_store.hydrate_provider_execution = _hydrate
+            provider_codex_module.subprocess.Popen = _popen
+            try:
+                attest_execution_spawn_authority(prepared.artifact)
+            except ExecutionAuthorityError:
+                pass
+            else:
+                raise AssertionError("same-stat runner replacement was accepted")
+            loop = asyncio.new_event_loop()
+            try:
+                try:
+                    provider.start_run(
+                        execution=prepared,
+                        loop=loop,
+                        queue=asyncio.Queue(),
+                    )
+                except ExecutionAuthorityError:
+                    pass
+                else:
+                    raise AssertionError("drifted runner execution was admitted")
+            finally:
+                loop.close()
+            assert calls == {"hydrate": 0, "spawn": 0}
+        finally:
+            provider_codex_module._RUNNER_PATH = original_runner
+            config_store.hydrate_provider_execution = original_hydrate
+            provider_codex_module.subprocess.Popen = original_popen
 
 
 def test_nested_contract_must_match_enclosing_artifact() -> None:
@@ -787,6 +876,7 @@ def test_recovery_reuses_exact_runtime_agent_payload_and_fails_closed() -> None:
 
 TESTS = (
     test_codex_prepare_binds_runtime_policy_and_contract,
+    test_runner_drift_is_rejected_before_credentials_or_spawn,
     test_nested_contract_must_match_enclosing_artifact,
     test_runner_restores_artifact_authority_not_poisoned_input,
     test_fugu_isolation_and_invalid_model_fail_closed,
