@@ -390,6 +390,7 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
         },
         persist=True,
     )
+    extension_store.set_enabled(record["manifest"]["id"], True)
     if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
         raise AssertionError("python_requirements declaration was not preserved")
     # Resolve to the canonical path: the runtime-MCP builder resolves
@@ -398,6 +399,9 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     # compares unresolved vs resolved strings and fails.
     venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
     venv_bin.mkdir(parents=True)
+    extension_store._venv_python(
+        Path(record["source"]["install_path"]).resolve() / ".venv"
+    ).symlink_to(sys.executable)
     _configure_internal_llm_defaults("default_session")
 
     config = extension_store.runtime_mcp_server_configs(
@@ -430,11 +434,14 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
 
 
 def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> None:
-    package = Path(tempfile.mkdtemp(prefix="bc-test-internal-runtime-mcp-")) / "internal-mcp"
+    root = Path(tempfile.mkdtemp(prefix="bc-test-internal-runtime-mcp-"))
+    package = root / "internal-mcp"
+    extension_id = "ofek.internal-runtime-mcp"
+    original_verified = extension_store.dependency_plan.verified_active_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.internal-runtime-mcp",
+        "id": extension_id,
         "name": "Internal Runtime MCP",
         "version": "1.0.0",
         "description": "Internal runtime MCP fixture.",
@@ -466,31 +473,50 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         },
         persist=True,
     )
-    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
-    venv_bin.mkdir(parents=True)
+    try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: Path("/authoritative/backend/python")
+        )
+        extension_store.set_enabled(extension_id, True)
+        venv_bin = extension_store._venv_bin_dir(
+            Path(record["source"]["install_path"]).resolve() / ".venv"
+        )
+        venv_bin.mkdir(parents=True)
 
-    inputs = {
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "token",
-        "app_session_id": "session-1",
-    }
-    configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
-    if "internal-runtime" not in configs:
-        raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
+        inputs = {
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "token",
+            "app_session_id": "session-1",
+        }
+        configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
+        if "internal-runtime" not in configs:
+            raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
 
-    missing_token = dict(inputs)
-    missing_token["internal_token"] = ""
-    configs = extension_store.runtime_mcp_server_configs(missing_token, user_facing=False, bare=False)
-    if "internal-runtime" in configs:
-        raise AssertionError("internal runtime MCP available without internal token")
+        missing_token = dict(inputs)
+        missing_token["internal_token"] = ""
+        configs = extension_store.runtime_mcp_server_configs(
+            missing_token, user_facing=False, bare=False
+        )
+        if "internal-runtime" in configs:
+            raise AssertionError("internal runtime MCP available without internal token")
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
-    package = Path(tempfile.mkdtemp(prefix="bc-test-legacy-internal-runtime-mcp-")) / "internal-mcp"
+    root = Path(tempfile.mkdtemp(prefix="bc-test-legacy-internal-runtime-mcp-"))
+    package = root / "internal-mcp"
+    extension_id = "ofek.legacy-internal-runtime-mcp"
+    original_verified = extension_store.dependency_plan.verified_active_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.legacy-internal-runtime-mcp",
+        "id": extension_id,
         "name": "Legacy Internal Runtime MCP",
         "version": "1.0.0",
         "description": "Legacy internal runtime MCP fixture.",
@@ -522,18 +548,32 @@ def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
         },
         persist=True,
     )
-    stored_item = record["manifest"]["entrypoints"]["mcp"][0]
-    if stored_item.get("user_facing") is not False:
-        raise AssertionError(stored_item)
+    try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: Path("/authoritative/backend/python")
+        )
+        extension_store.set_enabled(extension_id, True)
+        stored_item = record["manifest"]["entrypoints"]["mcp"][0]
+        if stored_item.get("user_facing") is not False:
+            raise AssertionError(stored_item)
 
-    inputs = {
-        "backend_url": "http://127.0.0.1:8000",
-        "internal_token": "token",
-        "app_session_id": "session-1",
-    }
-    configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
-    if "legacy-internal-runtime" not in configs:
-        raise AssertionError("legacy internal runtime MCP unavailable to non-user-facing runner")
+        inputs = {
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "token",
+            "app_session_id": "session-1",
+        }
+        configs = extension_store.runtime_mcp_server_configs(
+            inputs, user_facing=False, bare=False
+        )
+        if "legacy-internal-runtime" not in configs:
+            raise AssertionError("legacy internal runtime MCP unavailable to non-user-facing runner")
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_requirements_role_mcp_repair_keeps_processor_tools_available() -> None:
@@ -590,6 +630,7 @@ def test_requirements_role_mcp_repair_keeps_processor_tools_available() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(extension_id, True)
     stored_item = record["manifest"]["entrypoints"]["mcp"][0]
     if stored_item.get("user_facing") is not True:
         raise AssertionError("fixture must exercise persisted user_facing=true repair")
@@ -739,14 +780,19 @@ def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
 
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
+    import installation_profile
 
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     stale = extension_store._load()
-    package = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-")) / "headroom-like"
+    root = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-"))
+    package = root / "headroom-like"
+    extension_id = "ofek.concurrent-headroom"
+    original_integrations_enabled = installation_profile.integrations_enabled
+    original_extension_python = extension_store._extension_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.concurrent-headroom",
+        "id": extension_id,
         "name": "Concurrent Headroom",
         "version": "0.1.0",
         "description": "Marketplace-style MCP extension fixture.",
@@ -772,44 +818,55 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     (package / "mcp" / "server.py").write_text("print('headroom')\n", encoding="utf-8")
 
-    extension_store._install_from_package_dir(
-        package_dir=package,
-        source={
-            "type": "artifact",
-            "repo_url": "https://example.test/headroom.tar.gz",
-            "extension_path": "",
-            "ref": "",
-            "commit_sha": "concurrent-headroom",
-            "artifact_sha256": "0" * 64,
-            "artifact_url": "https://example.test/headroom.tar.gz",
-        },
-        persist=True,
-    )
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
+    extension_store._extension_python = lambda *_args, **_kwargs: sys.executable  # type: ignore[assignment]
+    try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "artifact",
+                "repo_url": "https://example.test/headroom.tar.gz",
+                "extension_path": "",
+                "ref": "",
+                "commit_sha": "concurrent-headroom",
+                "artifact_sha256": "0" * 64,
+                "artifact_url": "https://example.test/headroom.tar.gz",
+            },
+            persist=True,
+        )
+        if extension_store.get_extension(extension_id) is None:
+            raise AssertionError("fixture extension did not install")
+        extension_store.set_enabled(extension_id, True)
 
-    if extension_store.get_extension("ofek.concurrent-headroom") is None:
-        raise AssertionError("fixture extension did not install")
+        stale["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["updated_at"] = "stale-writer"
+        extension_store._save(stale)
 
-    stale["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["updated_at"] = "stale-writer"
-    extension_store._save(stale)
+        if not extension_store.is_extension_active(extension_id):
+            raise AssertionError("stale registry save dropped an active marketplace extension")
 
-    if extension_store.get_extension("ofek.concurrent-headroom") is None:
-        raise AssertionError("stale registry save dropped an installed marketplace extension")
-
-    config = builtin_mcp_config.with_builtin_mcp_servers(
-        {
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "token",
-            "app_session_id": "session-1",
-            "cwd": "/tmp/project",
-            "model": "model",
-            "bare_config": False,
-            "user_facing": True,
-            "disabled_builtin_extensions": [],
-        },
-        {},
-    )
-    if "headroom" not in config["mcp_servers"]:
-        raise AssertionError("preserved marketplace MCP extension was not exposed")
+        config = builtin_mcp_config.with_builtin_mcp_servers(
+            {
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "token",
+                "app_session_id": "session-1",
+                "cwd": "/tmp/project",
+                "model": "model",
+                "bare_config": False,
+                "user_facing": True,
+                "disabled_builtin_extensions": [],
+            },
+            {},
+        )
+        if "headroom" not in config.get("mcp_servers", {}):
+            raise AssertionError("preserved marketplace MCP extension was not exposed")
+    finally:
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        extension_store._extension_python = original_extension_python  # type: ignore[assignment]
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension() -> None:
@@ -964,13 +1021,17 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
 
 
 def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy() -> None:
+    import installation_profile
     import runtime_skills
 
-    package = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-skill-ext-")) / "synthetic-skill"
+    root = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-skill-ext-"))
+    package = root / "synthetic-skill"
+    extension_id = "ofek.synthetic-skill"
+    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "synthetic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.synthetic-skill",
+        "id": extension_id,
         "name": "Synthetic skill",
         "version": "0.1.0",
         "description": "Fixture exercising extension skill delivery.",
@@ -991,56 +1052,71 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         encoding="utf-8",
     )
 
-    extension_store._install_from_package_dir(
-        package_dir=package,
-        source={
-            "type": "test",
-            "repo_url": "",
-            "extension_path": "synthetic-skill",
-            "ref": "",
-            "commit_sha": "synthetic-skill-test",
-        },
-        persist=True,
-    )
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
+    try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "synthetic-skill",
+                "ref": "",
+                "commit_sha": "synthetic-skill-test",
+            },
+            persist=True,
+        )
+        extension_store.set_native_harness_exposed(
+            extension_id, "skill", "synthetic-skill", True
+        )
 
-    extension_store.set_native_harness_exposed(
-        "ofek.synthetic-skill", "skill", "synthetic-skill", True
-    )
+        native_skill = Path.home() / ".agents" / "skills" / "synthetic-skill"
+        skill_md = native_skill / "SKILL.md"
+        if skill_md.exists():
+            raise AssertionError("disabled extension exposed its native skill")
+        extension_store.set_enabled(extension_id, True)
+        if not skill_md.exists():
+            raise AssertionError("extension skill was not installed into native skill root")
+        skill_md.write_text("---\nname: synthetic-skill\ndescription: User edit\n---\n", encoding="utf-8")
+        extension_store.reconcile_runtime_skills()
+        if "User edit" not in skill_md.read_text(encoding="utf-8"):
+            raise AssertionError("native extension skill reconcile clobbered user edits")
 
-    native_skill = Path.home() / ".agents" / "skills" / "synthetic-skill"
-    skill_md = native_skill / "SKILL.md"
-    if not skill_md.exists():
-        raise AssertionError("extension skill was not installed into native skill root")
-    skill_md.write_text("---\nname: synthetic-skill\ndescription: User edit\n---\n", encoding="utf-8")
-    extension_store.reconcile_runtime_skills()
-    if "User edit" not in skill_md.read_text(encoding="utf-8"):
-        raise AssertionError("native extension skill reconcile clobbered user edits")
+        extension_store.set_native_harness_exposed(
+            extension_id, "skill", "synthetic-skill", False
+        )
+        if native_skill.exists():
+            raise AssertionError("runtime mode left the native skill copy installed")
+        contexts = runtime_skills.runtime_skill_contexts(str(package))
+        content = "\n".join(str(ctx.get("content") or "") for ctx in contexts)
+        if "synthetic-skill" not in content or "From package" not in content:
+            raise AssertionError("runtime mode did not inject the extension skill per turn")
 
-    extension_store.set_native_harness_exposed(
-        "ofek.synthetic-skill", "skill", "synthetic-skill", False
-    )
-    if native_skill.exists():
-        raise AssertionError("runtime mode left the native skill copy installed")
-    contexts = runtime_skills.runtime_skill_contexts(str(package))
-    content = "\n".join(str(ctx.get("content") or "") for ctx in contexts)
-    if "synthetic-skill" not in content or "From package" not in content:
-        raise AssertionError("runtime mode did not inject the extension skill per turn")
-
-    extension_store.set_native_harness_exposed(
-        "ofek.synthetic-skill", "skill", "synthetic-skill", True
-    )
-    if not skill_md.exists():
-        raise AssertionError("native mode did not reinstall the extension skill")
+        extension_store.set_native_harness_exposed(
+            extension_id, "skill", "synthetic-skill", True
+        )
+        if not skill_md.exists():
+            raise AssertionError("native mode did not reinstall the extension skill")
+    finally:
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
+    import installation_profile
     import runtime_skills
 
-    package = Path(tempfile.mkdtemp(prefix="bc-test-atomic-skill-ext-")) / "atomic-skill"
+    root = Path(tempfile.mkdtemp(prefix="bc-test-atomic-skill-ext-"))
+    package = root / "atomic-skill"
+    extension_id = "ofek.atomic-skill"
+    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "atomic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": "ofek.atomic-skill",
+        "id": extension_id,
         "name": "Atomic skill",
         "version": "0.1.0",
         "description": "Fixture exercising crash-safe runtime skill delivery.",
@@ -1060,61 +1136,73 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
         "---\nname: atomic-skill\ndescription: From package\n---\n",
         encoding="utf-8",
     )
-    extension_store._install_from_package_dir(
-        package_dir=package,
-        source={
-            "type": "test",
-            "repo_url": "",
-            "extension_path": "atomic-skill",
-            "ref": "",
-            "commit_sha": "atomic-skill-test",
-        },
-        persist=True,
-    )
-    extension_store.set_native_harness_exposed("ofek.atomic-skill", "skill", "atomic-skill", True)
-
-    target = Path.home() / ".agents" / "skills" / "atomic-skill"
-    skill_md = target / "SKILL.md"
-    if not skill_md.is_file():
-        raise AssertionError("extension skill was not installed into native skill root")
-
-    # An interrupted replace leaves an owned dir without SKILL.md; reconcile
-    # must repair it instead of trusting the owner marker forever.
-    skill_md.unlink()
-    extension_store.reconcile_runtime_skills()
-    if not skill_md.is_file():
-        raise AssertionError("reconcile skipped an owned skill dir that lost its SKILL.md")
-
-    # A replace that dies mid-copy must never leave the target gutted: the old
-    # tree stays in place until the staged copy is complete.
-    source_dir = target  # any valid skill tree works as the copy source
-    real_copytree = shutil.copytree
-
-    def _exploding_copytree(src, dst, **kwargs):  # noqa: ANN001, ANN003
-        real_copytree(src, dst, **kwargs)
-        raise OSError("simulated crash after copy, before swap")
-
-    shutil.copytree = _exploding_copytree
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "atomic-skill",
+                "ref": "",
+                "commit_sha": "atomic-skill-test",
+            },
+            persist=True,
+        )
+        extension_store.set_native_harness_exposed(
+            extension_id, "skill", "atomic-skill", True
+        )
+
+        target = Path.home() / ".agents" / "skills" / "atomic-skill"
+        skill_md = target / "SKILL.md"
+        if skill_md.exists():
+            raise AssertionError("disabled extension exposed its native skill")
+        extension_store.set_enabled(extension_id, True)
+        if not skill_md.is_file():
+            raise AssertionError("extension skill was not installed into native skill root")
+
+        skill_md.unlink()
+        extension_store.reconcile_runtime_skills()
+        if not skill_md.is_file():
+            raise AssertionError("reconcile skipped an owned skill dir that lost its SKILL.md")
+
+        source_dir = target
+        real_copytree = shutil.copytree
+
+        def _exploding_copytree(src, dst, **kwargs):  # noqa: ANN001, ANN003
+            real_copytree(src, dst, **kwargs)
+            raise OSError("simulated crash after copy, before swap")
+
+        shutil.copytree = _exploding_copytree
         try:
-            extension_store._replace_runtime_skill_dir(source_dir, target, "ofek.atomic-skill")
-        except OSError:
-            pass
-    finally:
-        shutil.copytree = real_copytree
-    if not skill_md.is_file():
-        raise AssertionError("failed replace gutted the live skill dir")
+            try:
+                extension_store._replace_runtime_skill_dir(source_dir, target, extension_id)
+            except OSError:
+                pass
+        finally:
+            shutil.copytree = real_copytree
+        if not skill_md.is_file():
+            raise AssertionError("failed replace gutted the live skill dir")
 
-    # Staged dot-dirs are internal and must never be discovered as skills.
-    staged = target.with_name(".atomic-skill.staging-99999")
-    staged.mkdir()
-    (staged / "SKILL.md").write_text("---\nname: staged\ndescription: internal\n---\n", encoding="utf-8")
-    try:
-        names = {s["name"] for s in runtime_skills._discover_skills(str(package))}
+        staged = target.with_name(".atomic-skill.staging-99999")
+        staged.mkdir()
+        (staged / "SKILL.md").write_text(
+            "---\nname: staged\ndescription: internal\n---\n",
+            encoding="utf-8",
+        )
+        try:
+            names = {skill["name"] for skill in runtime_skills._discover_skills(str(package))}
+        finally:
+            shutil.rmtree(staged)
+        if any(name.startswith(".") for name in names):
+            raise AssertionError("dot-prefixed staging dir leaked into skill discovery")
     finally:
-        shutil.rmtree(staged)
-    if any(name.startswith(".") for name in names):
-        raise AssertionError("dot-prefixed staging dir leaked into skill discovery")
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _removed_source_runtime_skill_test() -> None:
@@ -1680,10 +1768,11 @@ def test_installed_extension_exports_team_definition_sources() -> None:
     work = _private_monorepo_test_work()
     try:
         repo, _commit = _make_team_definition_repo(work)
-        extension_store.install_from_repo(
+        record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
             extension_path="extensions/testape",
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
         sources = extension_store.team_definition_sources()
         source = next(item for item in sources if item["source_id"] == "extension:fixture.testape:testape-ui-expert")
         if source["definition"]["manager"]["id"] != "coordinator":
@@ -2010,6 +2099,22 @@ def test_smoke_rejects_entrypoint_module_resolved_outside_package() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_smoke_acknowledges_import_before_interpreter_teardown() -> None:
+    root = Path(tempfile.mkdtemp(prefix="bc-test-smoke-readiness-"))
+    try:
+        (root / "slow_teardown.py").write_text(
+            "import threading\n"
+            "threading.Thread(target=threading.Event().wait).start()\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        extension_store._run_python_module_smoke(root, ["slow_teardown"])
+        if time.monotonic() - started > 5:
+            raise AssertionError("smoke waited for interpreter teardown after import readiness")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_runtime_ready_requires_protocol_smoke_to_pass() -> None:
     package = _write_private_extension_package(
         "ofek.protocol-ready",
@@ -2034,6 +2139,7 @@ def test_runtime_ready_requires_protocol_smoke_to_pass() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(record["manifest"]["id"], True)
     try:
         if record["smoke_test"]["status"] != "passed":
             raise AssertionError(record["smoke_test"])
@@ -2341,13 +2447,22 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(loopback_record["manifest"]["id"], True)
+    extension_store.set_enabled(spawn_record["manifest"]["id"], True)
     try:
         if not extension_store.is_extension_runtime_ready(loopback_record["manifest"]["id"]):
             raise AssertionError("session_state/internal_loopback-only extension required default_session")
         if extension_store.is_extension_runtime_ready(spawn_record["manifest"]["id"]):
             raise AssertionError("spawn_runs extension should require default_session")
     finally:
-        config_store._save_state(old_state)
+        current_state = config_store._load_state()
+        config_store._save_state(
+            {
+                **current_state,
+                "providers": old_state["providers"],
+                "default_provider_id": old_state["default_provider_id"],
+            }
+        )
         extension_store.uninstall(loopback_record["manifest"]["id"])
         extension_store.uninstall(spawn_record["manifest"]["id"])
 
@@ -2438,24 +2553,32 @@ def test_slow_call_requests_user_decision_for_extension_and_dependents() -> None
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
+def test_new_generation_preserves_exact_health_disabled_cohort() -> None:
     work = _private_monorepo_test_work()
     try:
         base_repo, original_sha = _make_dep_repo(work, "ofek.recover-base", [])
         dependent_repo, _ = _make_dep_repo(work, "ofek.recover-dependent", ["ofek.recover-base"])
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
         extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.set_enabled("ofek.recover-base", True)
+        extension_store.set_enabled("ofek.recover-dependent", True)
         activation_id = extension_store.activation_identity("ofek.recover-base")
         for elapsed in (2.1, 2.2, 2.3):
             disabled = extension_store.record_slow_backend_call("ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed, path="work")
         if disabled != ["ofek.recover-base", "ofek.recover-dependent"]:
             raise AssertionError(disabled)
-        quarantined = extension_store.get_extension("ofek.recover-base") or {}
-        quarantine = quarantined.get("quarantine") or {}
-        if quarantine.get("attributed_generation") != original_sha:
-            raise AssertionError(quarantine)
-        if quarantine.get("cohort") != ["ofek.recover-base", "ofek.recover-dependent"]:
-            raise AssertionError(quarantine)
+        decision = (extension_store.get_extension("ofek.recover-base") or {}).get(
+            "pending_health_decision"
+        ) or {}
+        if decision.get("attributed_generation") != original_sha:
+            raise AssertionError(decision)
+        if [item["extension_id"] for item in decision.get("cohort", [])] != disabled:
+            raise AssertionError(decision)
+        extension_store.resolve_health_decision(
+            "ofek.recover-base",
+            decision_id=decision["id"],
+            action="disable",
+        )
 
         manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2464,9 +2587,9 @@ def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
         _git(base_repo, "add", "extensions/pkg/better-agent-extension.json")
         _git(base_repo, "commit", "-m", "new generation")
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
-        recovered_activation = extension_store.activation_identity("ofek.recover-base")
-        if not recovered_activation or recovered_activation == activation_id:
-            raise AssertionError("new-generation recovery did not rotate activation")
+        updated = extension_store.get_extension("ofek.recover-base") or {}
+        if (updated.get("source") or {}).get("commit_sha") == original_sha:
+            raise AssertionError("new generation was not installed")
         for elapsed in (2.4, 2.5, 2.6):
             if extension_store.record_slow_backend_call(
                 "ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed, path="work"
@@ -2477,7 +2600,11 @@ def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
             raise AssertionError("old generation polluted recovered incident history")
         for extension_id in ("ofek.recover-base", "ofek.recover-dependent"):
             record = extension_store.get_extension(extension_id) or {}
-            if record.get("enabled") is not True or record.get("quarantine"):
+            if (
+                record.get("enabled") is not False
+                or record.get("quarantine")
+                or record.get("pending_health_decision")
+            ):
                 raise AssertionError(record)
     finally:
         for extension_id in ("ofek.recover-dependent", "ofek.recover-base"):
@@ -2540,7 +2667,13 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
         if disabled != [extension_id]:
             raise AssertionError(disabled)
         record = extension_store.get_extension(extension_id) or {}
-        if record.get("enabled") is not False or record.get("activation_id") == current_activation:
+        decision = record.get("pending_health_decision") or {}
+        if (
+            record.get("enabled") is not True
+            or record.get("activation_id") != current_activation
+            or decision.get("attributed_extension_id") != extension_id
+            or decision.get("cohort", [{}])[0].get("activation_id") != current_activation
+        ):
             raise AssertionError(record)
         extension_store.set_enabled(extension_id, True)
         timeout_activation = extension_store.activation_identity(extension_id)
@@ -2561,6 +2694,21 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _seed_legacy_quarantine(extension_ids: tuple[str, ...], trigger_id: str) -> None:
+    with extension_store._store_lock():
+        data = extension_store._read_store_unlocked()
+        at = "2026-01-01T00:00:00+00:00"
+        for extension_id in extension_ids:
+            record = data["extensions"][extension_id]
+            record["enabled"] = False
+            record["quarantine"] = {
+                "reason": "repeated_slow_backend_calls",
+                "at": at,
+                "attributed_extension_id": trigger_id,
+            }
+        extension_store._write_store_unlocked(data)
+
+
 def test_legacy_quarantine_is_annotated_without_enabling_then_recovers() -> None:
     work = _private_monorepo_test_work()
     try:
@@ -2572,17 +2720,10 @@ def test_legacy_quarantine_is_annotated_without_enabling_then_recovers() -> None
         extension_store.install_from_repo(
             repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg"
         )
-        for elapsed in (2.1, 2.2, 2.3):
-            extension_store.record_slow_backend_call(
-                "ofek.legacy-base", activation_id=extension_store.activation_identity("ofek.legacy-base"), elapsed_seconds=elapsed, path="work"
-            )
-        with extension_store._store_lock():
-            data = extension_store._read_store_unlocked()
-            for extension_id in ("ofek.legacy-base", "ofek.legacy-dependent"):
-                quarantine = data["extensions"][extension_id]["quarantine"]
-                quarantine.pop("attributed_generation")
-                quarantine.pop("cohort")
-            extension_store._write_store_unlocked(data)
+        _seed_legacy_quarantine(
+            ("ofek.legacy-base", "ofek.legacy-dependent"),
+            "ofek.legacy-base",
+        )
 
         first = extension_store._load()
         second = extension_store._load()
@@ -2686,9 +2827,12 @@ def test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts() -> None:
 
 
 def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
+    import installation_profile
     import lag_incident_queue
 
     work = _private_monorepo_test_work()
+    original_integrations_enabled = installation_profile.integrations_enabled
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     receipt_path = work / "receipts.jsonl"
     old_receipt_path = os.environ.get("LEGACY_LAG_RECEIPT_PATH")
     os.environ["LEGACY_LAG_RECEIPT_PATH"] = str(receipt_path)
@@ -2730,17 +2874,10 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
         extension_store.install_from_repo(
             repo_url=assistant_repo.as_uri(), extension_path="extensions/pkg"
         )
-        for elapsed in (2.1, 2.2, 2.3):
-            extension_store.record_slow_backend_call(
-                "ofek-dev.agent-board", activation_id=extension_store.activation_identity("ofek-dev.agent-board"), elapsed_seconds=elapsed, path="work"
-            )
-        with extension_store._store_lock():
-            data = extension_store._read_store_unlocked()
-            for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant"):
-                quarantine = data["extensions"][extension_id]["quarantine"]
-                quarantine.pop("attributed_generation")
-                quarantine.pop("cohort")
-            extension_store._write_store_unlocked(data)
+        _seed_legacy_quarantine(
+            ("ofek-dev.agent-board", "ofek-dev.assistant"),
+            "ofek-dev.agent-board",
+        )
         spool = Path(_TMP_HOME) / "lag-incidents"
         shutil.rmtree(spool, ignore_errors=True)
         body = json.dumps({
@@ -2801,6 +2938,7 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
         if len(receipt_path.read_text(encoding="utf-8").splitlines()) != 1:
             raise AssertionError("acknowledged lag incident was delivered twice")
     finally:
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         extension_backend_loader.evict_persistent_backend("ofek-dev.assistant")
         for extension_id in ("ofek-dev.assistant", "ofek-dev.agent-board"):
             try:
@@ -4095,6 +4233,7 @@ def test_module_based_mcp_server_config() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(record["manifest"]["id"], True)
     try:
         extension_store.dependency_plan.verified_active_python = (
             lambda _backend_dir: active_python
@@ -4141,6 +4280,7 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
             repo_url=repo.as_uri(),
             extension_path="extensions/scheduler",
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
         _configure_internal_llm_defaults("default_session")
         configs = extension_store.runtime_mcp_server_configs(
             {
@@ -4180,12 +4320,20 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
             raise AssertionError(config)
     finally:
         extension_store.dependency_plan.verified_active_python = original_verified
+        try:
+            extension_store.uninstall("ofek.scheduler")
+        except extension_store.ExtensionError:
+            pass
         shutil.rmtree(work, ignore_errors=True)
 
 
 def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
     package = Path(tempfile.mkdtemp(prefix="bc-test-no-loopback-mcp-")) / "no-loopback"
+    original_verified = extension_store.dependency_plan.verified_active_python
     try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: Path("/authoritative/backend/python")
+        )
         (package / "mcp").mkdir(parents=True)
         manifest = {
         "kind": "better-agent-extension",
@@ -4228,6 +4376,7 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
             },
             persist=True,
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
         configs = extension_store.runtime_mcp_server_configs(
             {
                 "app_session_id": "s1",
@@ -4248,6 +4397,11 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
         if env["BETTER_CLAUDE_EXTENSION_ID"] != record["manifest"]["id"]:
             raise AssertionError(env)
     finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        try:
+            extension_store.uninstall("ofek.no-loopback")
+        except extension_store.ExtensionError:
+            pass
         shutil.rmtree(package.parent, ignore_errors=True)
 
 
@@ -4343,8 +4497,14 @@ def test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record(
         raise AssertionError("private project-structure extension missing from extension list")
     if records[ask_id]["source"]["type"] != "better_agent_local":
         raise AssertionError(records[ask_id]["source"])
+    if extension_store.is_builtin_feature_enabled(ask_id):
+        raise AssertionError("fresh private project-structure extension should default disabled")
+
+    enabled = extension_store.set_enabled(ask_id, True)
+    if enabled["enabled"] is not True:
+        raise AssertionError(enabled)
     if not extension_store.is_builtin_feature_enabled(ask_id):
-        raise AssertionError("private project-structure extension should default active")
+        raise AssertionError("enabled private project-structure extension is not active")
 
     disabled = extension_store.set_enabled(ask_id, False)
     if disabled["enabled"] is not False:
@@ -4534,13 +4694,21 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(project_structure_id, True)
 
     try:
         spec = extension_store.backend_entrypoint_spec(project_structure_id)
         if spec is None:
             raise AssertionError("backend route spec should mount without internal LLM assignment")
     finally:
-        config_store._save_state(old_state)
+        current_state = config_store._load_state()
+        config_store._save_state(
+            {
+                **current_state,
+                "providers": old_state["providers"],
+                "default_provider_id": old_state["default_provider_id"],
+            }
+        )
 
 
 def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
@@ -5290,8 +5458,13 @@ def test_required_marketplace_extension_installs_public_bundled_package() -> Non
             item["name"]
             for item in record["manifest"]["entrypoints"]["mcp"]
         }
-        if "ofek-dev-marketplace" not in mcp_names:
-            raise AssertionError("marketplace extension should expose marketplace MCP")
+        if mcp_names:
+            raise AssertionError("public bundled marketplace should not invent runtime MCPs")
+        entrypoints = record["manifest"]["entrypoints"]
+        if entrypoints.get("backend_module") != "backend.routes":
+            raise AssertionError(entrypoints)
+        if not entrypoints.get("frontend_modules"):
+            raise AssertionError(entrypoints)
     finally:
         os.environ["BETTER_AGENT_HOME"] = old_agent_home
         os.environ["BETTER_CLAUDE_HOME"] = old_home
@@ -5392,10 +5565,11 @@ def test_frontend_extension_exports_frontend_modules() -> None:
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add module extension")
 
-        extension_store.install_from_repo(
+        record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
             extension_path="extensions/module",
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
         entries = extension_store.frontend_entrypoints()
         entry = next(item for item in entries if item["extension_id"] == "ofek.settings-module")
         modules = entry["frontend_modules"]
@@ -5485,10 +5659,11 @@ def test_frontend_entrypoints_use_persisted_smoke_result() -> None:
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add persisted smoke extension")
 
-        extension_store.install_from_repo(
+        record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
             extension_path="extensions/persisted-smoke",
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
 
         def fail_smoke(*_args, **_kwargs):
             raise AssertionError("frontend_entrypoints reran extension smoke")
@@ -5578,10 +5753,11 @@ def test_frontend_extension_exports_iframe_module() -> None:
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add iframe extension")
 
-        extension_store.install_from_repo(
+        record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
             extension_path="extensions/iframe",
         )
+        extension_store.set_enabled(record["manifest"]["id"], True)
         entries = extension_store.frontend_entrypoints()
         entry = next(item for item in entries if item["extension_id"] == "ofek.iframe-panel")
         modules = entry["frontend_modules"]
@@ -6049,6 +6225,11 @@ def test_extension_runtime_prefers_its_dependency_environment() -> None:
 
 
 if __name__ == "__main__":
+    import installation_profile
+
+    original_integrations_enabled = installation_profile.integrations_enabled
+    original_verified_active_python = extension_store.dependency_plan.verified_active_python
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         test_sdk_runtime_requirements_resolves_frozen_layout()
         test_base_extension_environment_lists_sdk_mcp_tools()
@@ -6102,7 +6283,11 @@ if __name__ == "__main__":
         test_install_smoke_test_rejects_bad_python_module_import()
         test_package_install_repairs_incomplete_content_addressed_target()
         test_smoke_rejects_entrypoint_module_resolved_outside_package()
+        test_smoke_acknowledges_import_before_interpreter_teardown()
         test_optional_permissions_allow_forbid()
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: Path("/authoritative/backend/python")
+        )
         test_command_based_mcp_server()
         test_module_based_mcp_server_config()
         test_installed_extension_exports_runtime_mcp_server_config()
@@ -6144,10 +6329,11 @@ if __name__ == "__main__":
         test_reconcile_re_smokes_stale_marketplace_smoke_after_manifest_path_change()
         test_runtime_ready_accepts_persisted_manifest_without_protocol()
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         test_set_enabled_enforces_dependencies()
         test_slow_call_requests_user_decision_for_extension_and_dependents()
         test_incidents_are_fenced_to_same_generation_activation()
-        test_new_generation_recovers_exact_auto_quarantine_cohort()
+        test_new_generation_preserves_exact_health_disabled_cohort()
         test_legacy_quarantine_is_annotated_without_enabling_then_recovers()
         test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts()
         test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool()
@@ -6156,6 +6342,8 @@ if __name__ == "__main__":
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
         test_prune_extension_versions_tolerates_vanishing_dir()
     finally:
+        extension_store.dependency_plan.verified_active_python = original_verified_active_python
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(_TMP_OS_HOME, ignore_errors=True)
         shutil.rmtree(_TRUSTED_TEST_ROOT, ignore_errors=True)
