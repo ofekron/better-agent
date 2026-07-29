@@ -822,7 +822,10 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
         if not isinstance(provider, dict):
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         canonical = _clean_provider_record(provider)
-        if provider != canonical:
+        accepted = dict(canonical)
+        if "nickname" not in provider and canonical["nickname"] == "":
+            accepted.pop("nickname")
+        if provider != accepted:
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         provider_id = provider.get("id")
         if (

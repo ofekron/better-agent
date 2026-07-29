@@ -601,6 +601,16 @@ else:
     assert config_store._config_path().read_bytes() == migrated_v1_bytes
 
     legacy_provider_state = _unversioned_provider_state(canonical)
+    legacy_without_nickname = copy.deepcopy(legacy_provider_state)
+    legacy_without_nickname["providers"][0].pop("nickname")
+    config_store._config_path().write_text(
+        json.dumps(legacy_without_nickname),
+        encoding="utf-8",
+    )
+    _reset_cache()
+    migrated_without_nickname = config_store.list_providers()
+    assert migrated_without_nickname["providers"][0]["nickname"] == ""
+
     unsupported_legacy_states = []
     unexpected_top_level = copy.deepcopy(legacy_provider_state)
     unexpected_top_level["unexpected"] = "shape"
