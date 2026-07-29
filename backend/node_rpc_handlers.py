@@ -33,6 +33,7 @@ from session_manager import manager as session_manager
 import perf
 
 logger = logging.getLogger(__name__)
+_extension_import_limit = asyncio.Semaphore(1)
 
 
 @dataclass
@@ -814,12 +815,16 @@ def _rpc_sync_provider_config(params: dict) -> dict:
     }
 
 
-def _rpc_sync_extension_config(params: dict) -> dict:
+async def _rpc_sync_extension_config(params: dict) -> dict:
     extension_state = params.get("extension_state")
     if not isinstance(extension_state, dict):
         raise ValueError("extension_state must be an object")
     import extension_store
-    return extension_store.import_extension_sync_state(extension_state)
+    async with _extension_import_limit:
+        return await asyncio.to_thread(
+            extension_store.import_extension_sync_state,
+            extension_state,
+        )
 
 
 def _rpc_sync_harness_profile(params: dict) -> dict:

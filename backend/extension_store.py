@@ -968,7 +968,8 @@ def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) 
     actual_sha = hashlib.sha256(archive).hexdigest()
     if expected_sha and expected_sha != actual_sha:
         raise ExtensionError(f"sync artifact sha mismatch for {extension_id}")
-    source = record.setdefault("source", {})
+    current_source = record.get("source")
+    source = copy.deepcopy(current_source) if isinstance(current_source, dict) else {}
     version_key = str(
         artifact.get("commit_sha")
         or source.get("commit_sha")
@@ -979,19 +980,22 @@ def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) 
     target = _install_root() / extension_id / "versions" / version_key
     if target.exists():
         shutil.rmtree(target)
-    _safe_extract_tar_gz(archive, target)
-    manifest_path = target / "better-agent-extension.json"
-    if not manifest_path.is_file():
+    try:
+        _safe_extract_tar_gz(archive, target)
+        manifest_path = target / "better-agent-extension.json"
+        if not manifest_path.is_file():
+            raise ExtensionError(f"sync artifact for {extension_id} missing manifest")
+        manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+        if manifest["id"] != extension_id:
+            raise ExtensionError(f"sync artifact id mismatch for {extension_id}")
+        _validate_declared_files(manifest, target)
+        _install_python_requirements(target, manifest)
+        smoke_test = _run_extension_smoke_test(manifest, target)
+    except Exception:
         shutil.rmtree(target, ignore_errors=True)
-        raise ExtensionError(f"sync artifact for {extension_id} missing manifest")
-    manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
-    if manifest["id"] != extension_id:
-        shutil.rmtree(target, ignore_errors=True)
-        raise ExtensionError(f"sync artifact id mismatch for {extension_id}")
-    _validate_declared_files(manifest, target)
-    _install_python_requirements(target, manifest)
+        raise
     record["manifest"] = manifest
-    record["smoke_test"] = _run_extension_smoke_test(manifest, target)
+    record["smoke_test"] = smoke_test
     source["install_path"] = str(target)
     source.setdefault("commit_sha", version_key)
     source["synced_artifact_sha256"] = actual_sha
@@ -1039,10 +1043,31 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
         source = record.get("source")
         if isinstance(source, dict):
             source.pop("install_path", None)
-    for artifact in payload.get("artifacts") or []:
+    artifacts = payload.get("artifacts") or []
+    if not isinstance(artifacts, list):
+        raise ExtensionError("extension sync artifacts must be a list")
+    imported_artifacts: list[str] = []
+    local_failures: list[dict[str, str]] = []
+    for index, artifact in enumerate(artifacts):
         if not isinstance(artifact, dict):
-            raise ExtensionError("extension sync artifacts must be objects")
-        _install_synced_artifact(artifact, records)
+            local_failures.append({
+                "extension_id": f"artifact[{index}]",
+                "error": "extension sync artifacts must be objects",
+            })
+            continue
+        try:
+            extension_id = _safe_sync_artifact_name(str(artifact.get("extension_id") or ""))
+            _install_synced_artifact(artifact, records)
+        except Exception as exc:
+            raw_extension_id = str(artifact.get("extension_id") or "")
+            try:
+                failure_id = _safe_sync_artifact_name(raw_extension_id)
+            except ExtensionError:
+                failure_id = f"artifact[{index}]"
+            local_failures.append({"extension_id": failure_id, "error": str(exc)})
+            logger.warning("extension sync artifact %r failed: %s", failure_id, exc)
+            continue
+        imported_artifacts.append(extension_id)
     next_store = {
         "schema_version": STORE_SCHEMA_VERSION,
         "extensions": records,
@@ -1069,16 +1094,17 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
         }
         for item in (payload.get("artifact_failures") or [])
         if isinstance(item, dict)
-    ]
+    ] + local_failures
     if failures:
         logger.warning(
             "extension sync arrived without packages for: %s",
             ", ".join(sorted(item["extension_id"] for item in failures)),
         )
     return {
-        "ok": True,
+        "ok": not failures,
         "extension_count": len(records),
-        "artifact_count": len(payload.get("artifacts") or []),
+        "artifact_count": len(imported_artifacts),
+        "imported_artifacts": imported_artifacts,
         "artifact_failures": failures,
         "reconcile": reconcile,
     }
