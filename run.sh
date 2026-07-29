@@ -1020,14 +1020,8 @@ PY
 }
 
 wait_for_backend() {
-  local attempts=0
   local url=""
-  while [ "$attempts" -lt 240 ]; do
-    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-      echo "Backend exited before becoming healthy."
-      BACKEND_PID=""
-      return 1
-    fi
+  while kill -0 "$BACKEND_PID" 2>/dev/null; do
     if curl -fsS "http://127.0.0.1:$BACKEND_PORT/readyz" >/dev/null 2>&1; then
       echo "Backend is ready."
       url="$(app_url)"
@@ -1035,11 +1029,9 @@ wait_for_backend() {
       open_first_run_browser "$url"
       return 0
     fi
-    attempts=$((attempts + 1))
     sleep 0.25
   done
-  echo "Backend did not become ready within 60 seconds."
-  credential_backend_control signal --signal TERM >/dev/null 2>&1 || true
+  echo "Backend exited before becoming healthy."
   BACKEND_PID=""
   return 1
 }
