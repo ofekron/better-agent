@@ -80,10 +80,16 @@ jobs:
               if (Test-Path $Result) {
                   Get-Content $Result
               }
+              $FailureLog = Join-Path $ArtifactRoot "state\faulthandler.log"
+              if (Test-Path $FailureLog) {
+                  Get-Content $FailureLog
+              }
               throw "frozen artifact smoke failed"
           }
           python -c "import json,sys; value=json.load(open(sys.argv[1], encoding='utf-8')); assert set(value['families']) == {'claude', 'agy'}; assert value['windows_wrapper'] == 'rejected'" $Result
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: immutable-family-artifact-${{ matrix.os }}
-          path: ${{ runner.temp }}/better-agent-artifact-smoke/result.json
+          path: ${{ runner.temp }}/better-agent-artifact-smoke/

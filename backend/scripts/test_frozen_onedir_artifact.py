@@ -155,6 +155,18 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     assert "-r requirements.txt" in install["run"]
     assert "-r requirements-claude.txt" in install["run"]
     assert "-r backend/" not in install["run"]
+    windows_smoke = next(
+        step for step in steps if step.get("name") == "Smoke Windows artifact"
+    )
+    assert "state\\faulthandler.log" in windows_smoke["run"]
+    upload = next(
+        step for step in steps
+        if step.get("name") == "Upload artifact smoke diagnostics"
+    )
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"].endswith(
+        "/better-agent-artifact-smoke/",
+    )
 
 
 def test_frozen_bundle_excludes_optional_mcp_cli_surface() -> None:
