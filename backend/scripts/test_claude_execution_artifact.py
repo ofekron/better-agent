@@ -460,12 +460,31 @@ def test_frozen_runner_is_the_explicit_sdk_authority() -> None:
         old_path = os.environ.get("PATH", "")
         old_frozen = getattr(sys, "frozen", None)
         had_frozen = hasattr(sys, "frozen")
+        old_meipass = getattr(sys, "_MEIPASS", None)
+        had_meipass = hasattr(sys, "_MEIPASS")
+        old_executable = sys.executable
         old_broker = os.environ.get("BETTER_CLAUDE_RUNTIME_BROKER")
         os.environ["PATH"] = os.pathsep.join((str(bin_dir), old_path))
         os.environ["BETTER_CLAUDE_RUNTIME_BROKER"] = (
             "unix:/tmp/claude-frozen-artifact-test.sock"
         )
+        if sys.platform == "darwin":
+            bundle_root = (
+                root / "Better Agent.app" / "Contents"
+            )
+            executable = bundle_root / "MacOS" / "Better Agent"
+            sidecar = bundle_root / "Frameworks"
+        else:
+            bundle_root = root / "Better Agent"
+            executable = bundle_root / "Better Agent.exe"
+            sidecar = bundle_root / "_internal"
+        _write_executable(executable, "frozen-executable")
+        embedded_sdk = sidecar / "claude_agent_sdk" / "__init__.py"
+        embedded_sdk.parent.mkdir(parents=True)
+        embedded_sdk.write_text("EMBEDDED = True\n", encoding="utf-8")
         sys.frozen = True
+        sys._MEIPASS = str(sidecar)
+        sys.executable = str(executable)
         try:
             provider, session = _provider(root)
             prepared = provider.prepare_run(
@@ -559,10 +578,15 @@ def test_frozen_runner_is_the_explicit_sdk_authority() -> None:
                 os.environ.pop("BETTER_CLAUDE_RUNTIME_BROKER", None)
             else:
                 os.environ["BETTER_CLAUDE_RUNTIME_BROKER"] = old_broker
+            sys.executable = old_executable
             if had_frozen:
                 sys.frozen = old_frozen
             else:
                 del sys.frozen
+            if had_meipass:
+                sys._MEIPASS = old_meipass
+            else:
+                del sys._MEIPASS
 
 
 def test_runner_has_no_mutable_runtime_authority_reads() -> None:

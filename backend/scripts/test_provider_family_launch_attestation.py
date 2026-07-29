@@ -23,6 +23,7 @@ from provider_family_launch_attestation import (  # noqa: E402
     materialize_sdk_launch,
     open_pinned_launch,
 )
+from provider_runner_launch import RunnerLaunch  # noqa: E402
 
 
 def _write_executable(path: Path, content: bytes) -> None:
@@ -87,7 +88,11 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
         root = Path(raw)
         run_dir = root / "run"
         run_dir.mkdir()
-        python = root / "python.exe"
+        bundle_root = root / "bundle"
+        sidecar = bundle_root / "_internal"
+        sidecar.mkdir(parents=True)
+        (sidecar / "runtime.pyd").write_bytes(b"sidecar")
+        python = bundle_root / "python.exe"
         runner = root / "runner_agy.py"
         claude_runner = root / "runner.py"
         _write_executable(python, b"python")
@@ -120,6 +125,8 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             runner_module="runner_agy",
             frozen=True,
             platform="win32",
+            frozen_bundle_root=bundle_root,
+            frozen_sidecar_root=sidecar,
         )
         frozen_claude = capture_runner_launch(
             run_dir=run_dir,
@@ -129,6 +136,8 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             runner_module="runner",
             frozen=True,
             platform="darwin",
+            frozen_bundle_root=bundle_root,
+            frozen_sidecar_root=sidecar,
         )
 
         assert dev.launch.argv == (
@@ -167,11 +176,16 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             str(run_dir),
         )
         assert frozen_agy.launch.component_argv_indexes == (0,)
+        assert frozen_agy.runner_entry is None
+        assert frozen_agy.frozen_bundle is not None
+        assert RunnerLaunch.from_dict(
+            json.loads(json.dumps(frozen_agy.to_dict())),
+        ) == frozen_agy
         python.write_bytes(b"changed")
         assert not dev.attest()
 
 
-def test_cli_path_swap_and_windows_command_shape_are_bound() -> None:
+def test_cli_path_swap_and_windows_wrappers_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         runtime_a = root / "runtime-a" / "node"
@@ -203,24 +217,36 @@ def test_cli_path_swap_and_windows_command_shape_are_bound() -> None:
         runtime_a.write_bytes(b"runtime-changed")
         assert not launch.attest()
 
-        cmd = root / "windows" / "agy.cmd"
         command_processor = root / "windows" / "cmd.exe"
-        _write_executable(cmd, b"@echo off\r\n")
         _write_executable(command_processor, b"cmd")
+        for suffix in (".cmd", ".bat"):
+            wrapper = root / "windows" / f"agy{suffix}"
+            _write_executable(wrapper, b"@echo off\r\n")
+            try:
+                capture_cli_launch(
+                    logical_command="agy",
+                    launcher_path=wrapper,
+                    command_processor=command_processor,
+                    platform="win32",
+                )
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("Windows command wrapper was accepted")
+
+        native = root / "windows" / "agy.exe"
+        _write_executable(native, b"MZ-native")
         windows = capture_cli_launch(
             logical_command="agy",
-            launcher_path=cmd,
+            launcher_path=native,
             command_processor=command_processor,
             platform="win32",
         )
-        assert windows.argv == (
-            str(command_processor.resolve()),
-            "/d",
-            "/s",
-            "/c",
-            str(cmd.resolve()),
-        )
-        assert windows.component_argv_indexes == (0, 4)
+        assert windows.mode == "native"
+        assert windows.argv == (str(native.resolve()),)
+        assert windows.attest()
+        native.write_bytes(b"MZ-changed")
+        assert not windows.attest()
 
 
 def test_source_package_config_resume_and_symlink_drift_fail_attestation() -> None:
@@ -462,7 +488,7 @@ def test_shebang_launch_pins_script_and_restricts_interpreter() -> None:
 
 TESTS = (
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
-    test_cli_path_swap_and_windows_command_shape_are_bound,
+    test_cli_path_swap_and_windows_wrappers_fail_closed,
     test_source_package_config_resume_and_symlink_drift_fail_attestation,
     test_payload_round_trip_and_tamper_are_strict,
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,

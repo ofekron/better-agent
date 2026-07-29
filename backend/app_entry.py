@@ -55,6 +55,8 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
         return ("extension_mcp", None, None)
     if "--operation-cli" in argv:
         return ("operation_cli", None, None)
+    if "--frozen-artifact-smoke" in argv:
+        return ("frozen_artifact_smoke", None, None)
     if "--serve-node" in argv:
         return ("node_server", None, None)
     if "--run-dir" not in argv:
@@ -94,6 +96,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
         values = sys.argv[1:] if argv is None else argv
         index = values.index("--operation-cli")
         return operation_cli_main(values[index + 1:])
+    if mode == "frozen_artifact_smoke":
+        from provider_frozen_artifact_smoke import main as artifact_smoke_main
+        return artifact_smoke_main(
+            sys.argv[1:] if argv is None else argv,
+        )
     if mode == "runner":
         # Runner module per kind comes from the canonical manifest; "runner"
         # is the default Claude runner. (codex + fugu both resolve to

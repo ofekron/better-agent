@@ -32,6 +32,7 @@ from provider_pinned_launch import (
     PinnedLaunch,
     materialize_sdk_launch,
     open_pinned_launch,
+    open_pinned_runner_launch,
 )
 from provider_runner_launch import RunnerLaunch, capture_runner_launch
 
@@ -303,7 +304,7 @@ class FamilyLaunchAttestation:
     @contextmanager
     def open_runner(self) -> Iterator[PinnedLaunch]:
         self._assert_attested()
-        with open_pinned_launch(self.runner.launch) as pinned:
+        with open_pinned_runner_launch(self.runner) as pinned:
             yield pinned
 
     @contextmanager
@@ -433,4 +434,5 @@ __all__ = [
     "capture_runner_launch",
     "materialize_sdk_launch",
     "open_pinned_launch",
+    "open_pinned_runner_launch",
 ]

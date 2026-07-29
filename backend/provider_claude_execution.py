@@ -14,7 +14,6 @@ from provider_family_launch_attestation import (
     CriticalPackageIdentity,
     capture_critical_package,
 )
-from provider_launch_identity import DirectoryIdentity
 from provider_runner_launch import RunnerLaunch
 
 
@@ -89,13 +88,18 @@ def capture_claude_sdk_package(
 def capture_embedded_claude_sdk(
     runner: RunnerLaunch,
 ) -> CriticalPackageIdentity:
-    if not isinstance(runner, RunnerLaunch) or not runner.frozen:
+    if (
+        not isinstance(runner, RunnerLaunch)
+        or not runner.frozen
+        or runner.frozen_bundle is None
+        or not runner.frozen_bundle.attest()
+    ):
         raise ExecutionContractError("embedded Claude SDK requires frozen runner")
     executable = runner.launch.components[0]
     path = Path(executable.resolved_path)
     package = CriticalPackageIdentity(
         package_name=_EMBEDDED_SDK_PACKAGE,
-        root=DirectoryIdentity.capture(path.parent),
+        root=runner.frozen_bundle.root,
         files=(executable,),
     )
     if (
@@ -116,8 +120,11 @@ def attest_embedded_claude_sdk(
         isinstance(package, CriticalPackageIdentity)
         and isinstance(runner, RunnerLaunch)
         and runner.frozen
+        and runner.frozen_bundle is not None
         and package.package_name == _EMBEDDED_SDK_PACKAGE
+        and package.root == runner.frozen_bundle.root
         and package.files == (runner.launch.components[0],)
+        and runner.frozen_bundle.attest()
         and package.attest()
     )
 

@@ -54,6 +54,7 @@ hiddenimports = [
     # must be listed here explicitly.
     "main", "main_node", "app_entry", "runner",
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
+    "provider_frozen_artifact_smoke", "provider_frozen_bundle",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "deep_link", "activation_server", "macos_url_handler",
     "updater", "update_delta", "pyxdelta", "_version",

@@ -95,6 +95,14 @@ def test_dispatch() -> bool:
     if _dispatch(["--open-file-panel-mcp"]) != ("open_file_panel_mcp", None, None):
         print(f"  --open-file-panel-mcp: got {_dispatch(['--open-file-panel-mcp'])}")
         return False
+    if _dispatch(["--frozen-artifact-smoke"]) != (
+        "frozen_artifact_smoke", None, None,
+    ):
+        print(
+            "  --frozen-artifact-smoke: got "
+            f"{_dispatch(['--frozen-artifact-smoke'])}"
+        )
+        return False
     if _dispatch(["--run-dir", "/runs/x"]) != (
         "runner", "claude", Path("/runs/x"),
     ):

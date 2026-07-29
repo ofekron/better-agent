@@ -5,6 +5,7 @@ One frozen binary, three roles, chosen by argv:
   - `--serve`          → run the FastAPI backend server (via `app_entry`).
   - `--serve-node`     → run the worker-node backend (via `app_entry`).
   - `--operation-cli`  → run the generated operation CLI dispatcher.
+  - `--frozen-artifact-smoke` → verify the built onedir execution artifact.
   - (no args)          → run the desktop shell — what double-clicking the
                          `.app` does.
 
@@ -72,6 +73,7 @@ def _role(argv: list[str]) -> str:
         or "--serve" in argv
         or "--serve-node" in argv
         or "--operation-cli" in argv
+        or "--frozen-artifact-smoke" in argv
     ):
         return "backend"
     return "shell"

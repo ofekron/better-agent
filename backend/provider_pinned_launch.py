@@ -11,12 +11,14 @@ from typing import Iterator
 
 from codex_execution_common import ExecutionContractError
 from codex_execution_identity import FileIdentity
+from provider_frozen_bundle import materialize_frozen_bundle
 from provider_launch_identity import (
     AttestedLaunch,
     _open_file_identities,
     _validate_launch,
     _verify_file_handle,
 )
+from provider_runner_launch import RunnerLaunch
 
 _SYSTEM_INTERPRETER_ROOTS = (
     Path("/bin"),
@@ -130,6 +132,31 @@ def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
                 _copy_descriptor(descriptor, target, source)
                 argv[index] = str(target)
             yield PinnedLaunch(tuple(argv), ())
+
+
+@contextmanager
+def open_pinned_runner_launch(
+    runner: RunnerLaunch,
+) -> Iterator[PinnedLaunch]:
+    if not isinstance(runner, RunnerLaunch) or not runner.attest():
+        raise ExecutionContractError("runner launch authority mismatch")
+    if not runner.frozen:
+        with open_pinned_launch(runner.launch) as pinned:
+            yield pinned
+        return
+    if runner.frozen_bundle is None:
+        raise ExecutionContractError("frozen runner bundle authority is missing")
+    run_dir = Path(runner.launch.argv[2])
+    if not run_dir.is_absolute():
+        raise ExecutionContractError("runner launch directory is invalid")
+    bundle_root = materialize_frozen_bundle(
+        runner.frozen_bundle,
+        run_dir / "frozen-runner",
+    )
+    executable = bundle_root / runner.frozen_bundle.executable_relative
+    argv = list(runner.launch.argv)
+    argv[0] = str(executable)
+    yield PinnedLaunch(tuple(argv), ())
 
 
 @dataclass(frozen=True)
