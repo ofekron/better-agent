@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { API } from "src/api";
-import { eventBus } from "src/lib/eventBus";
+import { useBusEffect } from "src/hooks/useBusEffect";
+
+const CONFIG_TOPICS = ["extension.config.settings", "extension.config"] as const;
 import { trackPromise } from "src/progress/store";
 
 /** Settings an extension contributes to the app Settings page through its
@@ -93,14 +95,7 @@ function useCacheSubscription(): void {
 /** Invalidate on any backend-side extension config change so a value edited
  * in another tab, or an extension enabled/disabled, lands here too. */
 function useInvalidateOnExtensionConfig(): void {
-  useEffect(() => {
-    const reload = () => void refreshExtensionAppSettings().catch(() => {});
-    const unsubs = [
-      eventBus.subscribe("extension.config.settings", reload),
-      eventBus.subscribe("extension.config", reload),
-    ];
-    return () => unsubs.forEach((unsub) => unsub());
-  }, []);
+  useBusEffect(CONFIG_TOPICS, () => void refreshExtensionAppSettings().catch(() => {}));
 }
 
 export function useExtensionAppSettings(): {

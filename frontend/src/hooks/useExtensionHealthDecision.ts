@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "../api";
-import { eventBus } from "../lib/eventBus";
+import { useBusEffect } from "./useBusEffect";
+
+const CATALOG_TOPICS = ["extension.catalog"] as const;
+const CONNECTION_TOPICS = ["ws_connection_changed"] as const;
 
 // Backend contract (GET /api/extensions): an extension record may carry a
 // `pending_health_decision` when the runtime wants the user to decide
@@ -69,28 +72,20 @@ export function useExtensionHealthDecision(): {
   }, []);
 
   useEffect(() => {
-    // Initial mount fetch. setState happens after the network await (not
-    // synchronously in the effect body), so this is the standard data-fetch
-    // lifecycle, not a derived-state cascade.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
     const onfocus = () => void refresh();
     window.addEventListener("focus", onfocus);
-    // Push-driven invalidation: the backend broadcasts `extension.catalog`
-    // whenever the extension snapshot changes (incl. a health decision being
-    // raised/cleared), so refetch immediately on it. Catalog frames are also
-    // broadcast globally and are NOT replayed on WS reconnect, so rehydrate on
-    // `ws_connection_changed` (connected) to close that gap — no polling.
-    const offCatalog = eventBus.subscribe("extension.catalog", () => void refresh());
-    const offConn = eventBus.subscribe("ws_connection_changed", (p) => {
-      if (p && (p as { connected?: boolean }).connected) void refresh();
-    });
-    return () => {
-      window.removeEventListener("focus", onfocus);
-      offCatalog();
-      offConn();
-    };
+    return () => window.removeEventListener("focus", onfocus);
   }, [refresh]);
+
+  // Push-driven invalidation: the backend broadcasts `extension.catalog`
+  // whenever the extension snapshot changes (incl. a health decision being
+  // raised/cleared), so refetch immediately on it — and on mount.
+  useBusEffect(CATALOG_TOPICS, () => void refresh(), { onMount: true });
+  // Catalog frames are broadcast globally and are NOT replayed on WS
+  // reconnect, so rehydrate on reconnect to close that gap — no polling.
+  useBusEffect(CONNECTION_TOPICS, (payload) => {
+    if (payload && (payload as { connected?: boolean }).connected) void refresh();
+  });
 
   const submit = useCallback(
     async (action: HealthDecisionAction): Promise<boolean> => {

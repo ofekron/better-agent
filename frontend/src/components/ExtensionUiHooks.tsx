@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
+import { useBusEffect } from "src/hooks/useBusEffect";
 import Icon, { ICON_NAMES, type IconName } from "./Icon";
 import { ExtensionModuleSlot } from "./ExtensionSlots";
 
@@ -179,15 +180,12 @@ export function useExtensionUiHooks(): UiHooks {
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    return eventBus.subscribe("extension.ui", () => {
-      void refresh();
-    });
-  }, [refresh]);
+  useBusEffect(UI_HOOK_TOPICS, () => void refresh(), { onMount: true });
 
   return hooks;
 }
+
+const UI_HOOK_TOPICS = ["extension.ui"] as const;
 
 const BADGE_POLL_MS = 120_000;
 

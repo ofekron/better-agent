@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { API } from "../api";
-import { eventBus } from "../lib/eventBus";
 import { builtinIdsLoaded, extId, loadBuiltinExtensionIds } from "../extensionIds";
+import { useBusEffect } from "./useBusEffect";
+
+const CATALOG_TOPICS = ["extension.catalog"] as const;
 
 const BUILTIN_FLAG_KEYS = [
   "ask",
@@ -60,13 +62,11 @@ export function useBuiltinExtensionFlags(
     }
   }, [authStatus]);
 
-  useEffect(() => {
-    void refresh();
-    const off = eventBus.subscribe("extension.catalog", () => {
-      void refresh({ reloadBuiltinIds: true });
-    });
-    return off;
-  }, [refresh]);
+  useBusEffect(CATALOG_TOPICS, (payload) => {
+    // `undefined` payload marks the mount call, which must not re-load the
+    // builtin ids: refresh() already does that when the map is empty.
+    void refresh(payload === undefined ? undefined : { reloadBuiltinIds: true });
+  }, { onMount: true });
 
   return flags;
 }
