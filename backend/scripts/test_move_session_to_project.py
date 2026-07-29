@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import _test_home
-_test_home.isolate("ba-test-move-session-")
+_test_home.isolate_installed("ba-test-move-session-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402

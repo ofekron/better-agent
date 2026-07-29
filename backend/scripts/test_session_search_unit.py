@@ -30,7 +30,7 @@ from pathlib import Path
 # Per CLAUDE.md: isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module.
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-session-search-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-session-search-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

@@ -18,7 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-ws-send-ack-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-ws-send-ack-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402

@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-browser-trust-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-browser-trust-")
 os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

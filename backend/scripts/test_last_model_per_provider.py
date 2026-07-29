@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-last-model-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-last-model-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

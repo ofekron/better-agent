@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-rest-journal-barrier-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-rest-journal-barrier-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-virtual-sessions-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-virtual-sessions-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

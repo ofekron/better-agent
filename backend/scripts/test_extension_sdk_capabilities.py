@@ -25,7 +25,7 @@ import tempfile
 import urllib.request
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-sdkcap-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-sdkcap-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = _TMP_HOME
 
