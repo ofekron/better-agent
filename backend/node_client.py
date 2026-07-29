@@ -59,6 +59,7 @@ class NodeClient:
         self._sender_task: Optional[asyncio.Task] = None
         self._receiver_task: Optional[asyncio.Task] = None
         self._rpc_tasks: set[asyncio.Task[None]] = set()
+        self._incident_replay_tasks: set[asyncio.Task[None]] = set()
         self._connection_generation = 0
         self._connected: asyncio.Event = asyncio.Event()
         self._stop: asyncio.Event = asyncio.Event()
@@ -97,12 +98,8 @@ class NodeClient:
             except (asyncio.CancelledError, Exception):
                 pass
             self._sender_task = None
-        tasks = list(self._rpc_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._rpc_tasks.clear()
+        await self._cancel_and_drain_tasks(self._rpc_tasks)
+        await self._cancel_and_drain_tasks(self._incident_replay_tasks)
 
     # ----- Outbound API for node code ------------------------------------
 
@@ -359,16 +356,14 @@ class NodeClient:
                 self._receiver_loop(ws, connection_generation),
                 name="node-receiver",
             )
-            asyncio.create_task(
-                self._replay_extension_incidents(),
-                name="node-extension-incident-replay",
-            )
+            incident_replay = self._start_extension_incident_replay()
             try:
                 await asyncio.wait(
                     [sender, receiver],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
+                await self._cancel_extension_incident_replay(incident_replay)
                 for t in (sender, receiver):
                     if not t.done():
                         t.cancel()
@@ -377,6 +372,34 @@ class NodeClient:
                     self._connection_generation += 1
                 self._connected.clear()
                 self._ws = None
+
+    async def _cancel_and_drain_tasks(
+        self,
+        tasks: set[asyncio.Task[None]],
+    ) -> None:
+        pending = list(tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        tasks.difference_update(pending)
+
+    def _start_extension_incident_replay(self) -> asyncio.Task[None]:
+        task = asyncio.create_task(
+            self._replay_extension_incidents(),
+            name="node-extension-incident-replay",
+        )
+        self._incident_replay_tasks.add(task)
+        task.add_done_callback(self._incident_replay_tasks.discard)
+        return task
+
+    async def _cancel_extension_incident_replay(
+        self,
+        task: asyncio.Task[None],
+    ) -> None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._incident_replay_tasks.discard(task)
 
     async def _sender_loop(self, ws) -> None:
         while True:

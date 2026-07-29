@@ -493,6 +493,20 @@ async def _invoke_rpc_handler(handler, params: dict) -> dict:
     return await asyncio.to_thread(handler, params)
 
 
+async def _invoke_projection_handler(handler, params: dict) -> dict:
+    task = asyncio.create_task(_invoke_rpc_handler(handler, params))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
 async def dispatch_rpc(
     method: str,
     params: dict,
@@ -510,7 +524,7 @@ async def dispatch_rpc(
     async with _projection_apply_lock(method):
         if assert_projection_current is not None:
             assert_projection_current()
-        return await _invoke_rpc_handler(handler, params)
+        return await _invoke_projection_handler(handler, params)
 
 
 async def call_local_or_remote(

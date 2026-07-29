@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -905,6 +906,85 @@ async def test_node_client_tracks_and_rejects_stale_rpc_tasks() -> None:
         node_rpc_handlers.dispatch_rpc = original_dispatch  # type: ignore[assignment]
 
 
+async def test_node_client_stop_drains_projection_handlers() -> None:
+    surfaces = (
+        ("sync_provider_config", "provider_state"),
+        ("sync_extension_config", "extension_state"),
+        ("sync_harness_profile", "harness_state"),
+    )
+    for method, param in surfaces:
+        applied: list[int] = []
+        started = threading.Event()
+        release = threading.Event()
+        original_handler = node_rpc_handlers._HANDLERS[method]
+
+        def blocked_handler(params: dict) -> dict:
+            started.set()
+            release.wait()
+            applied.append(params[param]["version"])
+            return {"ok": True}
+
+        client = node_client.NodeClient()
+        client._connection_generation = 1
+        node_rpc_handlers._HANDLERS[method] = blocked_handler
+        stop_task: asyncio.Task[None] | None = None
+        try:
+            await client._route_inbound(
+                {
+                    "type": "rpc_request",
+                    "request_id": method,
+                    "method": method,
+                    "params": {param: {"version": 1}},
+                },
+                1,
+            )
+            assert await asyncio.to_thread(started.wait, 5), method
+            rpc_task = next(iter(client._rpc_tasks))
+            stop_task = asyncio.create_task(client.stop())
+            while not rpc_task.cancelling():
+                await asyncio.sleep(0)
+            cancellation_delivered = asyncio.Event()
+            asyncio.get_running_loop().call_soon(cancellation_delivered.set)
+            await cancellation_delivered.wait()
+            assert not stop_task.done(), method
+            assert applied == [], (method, applied)
+        finally:
+            release.set()
+            if stop_task is not None:
+                await stop_task
+            node_rpc_handlers._HANDLERS[method] = original_handler
+        assert applied == [1], (method, applied)
+        assert not client._rpc_tasks, method
+
+
+async def test_extension_incident_replay_lifecycle_is_drained() -> None:
+    client = node_client.NodeClient()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def blocked_replay() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+
+    client._replay_extension_incidents = blocked_replay  # type: ignore[method-assign]
+    reconnect_replay = client._start_extension_incident_replay()
+    await started.wait()
+    await client._cancel_extension_incident_replay(reconnect_replay)
+    assert finished.is_set()
+    assert not client._incident_replay_tasks
+
+    started.clear()
+    finished.clear()
+    client._start_extension_incident_replay()
+    await started.wait()
+    await client.stop()
+    assert finished.is_set()
+    assert not client._incident_replay_tasks
+
+
 async def _main() -> None:
     await test_sync_providers_all_nodes_reports_node_failures()
     await test_first_approval_uses_topology_cwd_roots()
@@ -932,6 +1012,8 @@ async def _main() -> None:
     test_harness_surface_is_registered_for_node_sync()
     await test_projection_generation_orders_old_slow_before_new_fast()
     await test_node_client_tracks_and_rejects_stale_rpc_tasks()
+    await test_node_client_stop_drains_projection_handlers()
+    await test_extension_incident_replay_lifecycle_is_drained()
 
 
 if __name__ == "__main__":
