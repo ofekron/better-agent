@@ -79,6 +79,21 @@ def _fresh_provider_sync(payload: dict) -> dict:
     return config_store.import_provider_sync_state(payload)
 
 
+def test_node_projection_replaces_foreign_local_authority() -> None:
+    local = _provider_record("local-provider", "Local Provider")
+    incoming = _provider_record("primary-provider", "Primary Provider")
+    _fresh_provider_sync(_provider_sync_payload(local["id"], [local]))
+    result = node_rpc_handlers._rpc_sync_provider_config({
+        "provider_state": _provider_sync_payload(incoming["id"], [incoming]),
+    })
+
+    assert result["sync_status"] == "applied"
+    state = config_store.list_providers()
+    assert config_store._load_state()["provider_state_projected"] is True
+    assert state["default_provider_id"] == incoming["id"]
+    assert [provider["id"] for provider in state["providers"]] == [incoming["id"]]
+
+
 class _Request:
     def __init__(self, method: str, body: dict | None = None) -> None:
         self.method = method
@@ -1003,6 +1018,7 @@ async def _main() -> None:
     test_import_provider_sync_fails_when_api_key_cannot_be_stored()
     test_import_provider_sync_skips_keyless_api_provider_as_default()
     test_import_provider_sync_clears_default_when_every_provider_needs_missing_key()
+    test_node_projection_replaces_foreign_local_authority()
     await test_node_cwd_is_validated_against_the_node()
     test_package_artifact_prunes_runtime_trees_with_links()
     test_package_artifact_still_rejects_links_in_real_content()

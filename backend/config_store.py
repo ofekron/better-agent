@@ -2042,6 +2042,7 @@ def _provider_sync_credential_changes(
     *,
     current_providers: list[dict] | None,
     incoming_providers: list[dict],
+    authoritative_projection: bool = False,
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
     current_by_id = {
         provider["id"]: provider
@@ -2062,9 +2063,12 @@ def _provider_sync_credential_changes(
             current = current_by_id.get(provider_id)
             incoming = incoming_by_id[provider_id]
             rotation_authorized = bool(
-                current is not None
-                and incoming["generation"] == current["generation"]
-                and incoming["revision"] > current["revision"]
+                authoritative_projection
+                or (
+                    current is not None
+                    and incoming["generation"] == current["generation"]
+                    and incoming["revision"] > current["revision"]
+                )
             )
             if not rotation_authorized:
                 raise ProviderCredentialConflict(provider_id)
@@ -2072,8 +2076,11 @@ def _provider_sync_credential_changes(
     return changes, observed
 
 
-@_serialized_provider_mutation
-def import_provider_sync_state(payload: dict) -> dict:
+def _import_provider_sync_state(
+    payload: dict,
+    *,
+    authoritative_projection: bool,
+) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
     providers, default_provider_id, incoming_authority = (
@@ -2086,7 +2093,14 @@ def import_provider_sync_state(payload: dict) -> dict:
         if state is not None
         else None
     )
-    if current_authority is not None:
+    if (
+        current_authority is not None
+        and (
+            not authoritative_projection
+            or current_authority.get("generation")
+            == incoming_authority.get("generation")
+        )
+    ):
         provider_sync_authority.assert_importable(
             current_authority,
             incoming_authority,
@@ -2103,6 +2117,7 @@ def import_provider_sync_state(payload: dict) -> dict:
         requested_credentials,
         current_providers=state["providers"] if state is not None else None,
         incoming_providers=providers,
+        authoritative_projection=authoritative_projection,
     )
     next_state = dict(state if state is not None else _seed_default_state())
     next_state["providers"] = copy.deepcopy(providers)
@@ -2129,6 +2144,22 @@ def import_provider_sync_state(payload: dict) -> dict:
     else:
         result["sync_status"] = "unchanged"
     return result
+
+
+@_serialized_provider_mutation
+def import_provider_sync_state(payload: dict) -> dict:
+    return _import_provider_sync_state(
+        payload,
+        authoritative_projection=False,
+    )
+
+
+@_serialized_provider_mutation
+def apply_provider_sync_projection(payload: dict) -> dict:
+    return _import_provider_sync_state(
+        payload,
+        authoritative_projection=True,
+    )
 
 
 @_serialized_provider_mutation

@@ -994,7 +994,7 @@ def _rpc_sync_provider_config(params: dict) -> dict:
     if not isinstance(provider_state, dict):
         raise ValueError("provider_state must be an object")
     import config_store
-    synced = config_store.import_provider_sync_state(provider_state)
+    synced = config_store.apply_provider_sync_projection(provider_state)
     return {
         "ok": True,
         "default_provider_id": synced.get("default_provider_id"),
