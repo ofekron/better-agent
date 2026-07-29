@@ -171,6 +171,32 @@ def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
     )
 
 
+def test_node_runtime_plan_uses_config_without_desktop_installation() -> None:
+    inactive = {
+        "status": "setup_required",
+        "mode": None,
+        "provider": None,
+    }
+    config = {
+        "providers": [
+            {"id": "claude-id", "kind": "claude"},
+            {"id": "codex-id", "kind": "codex"},
+        ],
+    }
+    with (
+        patch.dict(os.environ, {"BETTER_AGENT_NODE_ID": "worker"}),
+        patch.object(installation_profile, "load", return_value=inactive),
+        patch.object(dependency_plan, "_read_object", return_value=config),
+    ):
+        plan = dependency_plan.resolve_plan()
+
+    assert plan["provider_kinds"] == ("claude", "codex")
+    assert plan["requirements"] == (
+        "requirements.txt",
+        "requirements-claude.txt",
+    )
+
+
 def test_base_runtime_provisions_extension_mcp_sdk() -> None:
     plan = dependency_plan.resolve_plan(
         {"providers": []},
@@ -1041,6 +1067,7 @@ if __name__ == "__main__":
     test_profile_selection_acknowledgement()
     test_installer_selection_keeps_user_configured_providers()
     test_runtime_plan_uses_pending_selection_then_active_config()
+    test_node_runtime_plan_uses_config_without_desktop_installation()
     test_base_runtime_provisions_extension_mcp_sdk()
     test_unknown_active_provider_requirement_fails_closed()
     test_suspended_provider_requirement_is_included()

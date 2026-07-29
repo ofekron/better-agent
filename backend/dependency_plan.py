@@ -122,6 +122,13 @@ def _mobile_requested(profile: dict[str, Any] | None = None) -> bool:
     ]
 
 
+def _node_runtime() -> bool:
+    return bool(
+        os.environ.get("BETTER_AGENT_NODE_ID")
+        or os.environ.get("BETTER_CLAUDE_NODE_ID")
+    )
+
+
 def _provider_kinds(
     state: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
@@ -133,7 +140,7 @@ def _provider_kinds(
             profile is not None or installation_profile.selection_pending()
         ):
             return (str(selected),)
-        if selected_profile.get("status") != "active":
+        if selected_profile.get("status") != "active" and not _node_runtime():
             return ()
         config = _read_object(bc_home() / "config.json")
     else:
