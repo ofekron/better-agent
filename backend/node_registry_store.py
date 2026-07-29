@@ -49,6 +49,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
 
 from json_store import write_json
+from node_path_authority import validate_cwd_roots
 from paths import ba_home
 from topology import NodeSpec
 
@@ -196,11 +197,12 @@ def add(
     Written atomically (tmp + os.replace) via the canonical store writer:
     these records hold argon2 secret hashes, so a crash mid-write must not
     leave a truncated/half-written authority file."""
+    validated_roots = validate_cwd_roots(cwd_roots)
     record = {
         "schema_version": SCHEMA_VERSION,
         "node_id": node_id,
         "address": address,
-        "cwd_roots": list(cwd_roots or []),
+        "cwd_roots": list(validated_roots),
         "secret_hash": secret_hash,
         "approved_at": datetime.now().isoformat(),
     }

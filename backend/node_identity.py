@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from env_compat import get_env
+from node_path_authority import NodePathError, split_cwd_roots, validate_cwd_roots
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,12 @@ def _env_cwd_roots() -> list[str]:
     raw = get_env("BETTER_CLAUDE_NODE_CWD_ROOTS").strip()
     if not raw:
         return []
-    return [p for p in (s.strip() for s in raw.split(":")) if p.startswith("/")]
+    try:
+        return list(split_cwd_roots(raw, separator=os.pathsep))
+    except NodePathError as exc:
+        raise RuntimeError(
+            "BETTER_AGENT_NODE_CWD_ROOTS contains an invalid path",
+        ) from exc
 
 
 def _load_file() -> dict:
@@ -106,7 +112,9 @@ def load_or_create() -> NodeIdentity:
         or data.get("secret")
         or secrets.token_hex(32)
     )
-    cwd_roots = _env_cwd_roots() or list(data.get("cwd_roots") or [])
+    cwd_roots = _env_cwd_roots() or list(
+        validate_cwd_roots(data.get("cwd_roots") or []),
+    )
     address = (
         get_env("BETTER_CLAUDE_NODE_ADDRESS")
         or data.get("address")

@@ -46,6 +46,7 @@ import app_version
 import node_registry_store
 import node_store
 import shadow_jsonl
+from node_path_authority import NodePathError, validate_cwd_roots
 from node_protocol import PROTOCOL_VERSION
 from stores import pending_node_registrations
 from topology import NodeSpec, load_topology
@@ -344,10 +345,10 @@ async def _await_registration(
     secret_hash = node_registry_store.hash_secret(presented_secret)
     fingerprint = hashlib.sha256(presented_secret.encode("utf-8")).hexdigest()[:12]
     address = reg_meta.get("address") if isinstance(reg_meta.get("address"), str) else ""
-    cwd_roots = [
-        r for r in (reg_meta.get("cwd_roots") or [])
-        if isinstance(r, str) and r.startswith("/")
-    ]
+    try:
+        cwd_roots = list(validate_cwd_roots(reg_meta.get("cwd_roots") or []))
+    except NodePathError:
+        return None
     rec = pending_node_registrations.create(
         node_id=node_id,
         address=address or "",

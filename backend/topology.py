@@ -56,6 +56,7 @@ from typing import Optional
 import yaml
 
 from env_compat import get_env
+from node_path_authority import NodePathError, validate_cwd_roots
 
 SCHEMA_VERSION = 1
 
@@ -117,19 +118,17 @@ def _parse_node(node_id: str, role: str, raw: dict) -> NodeSpec:
         raise TopologyError(
             f"node {node_id!r}: missing or non-string `address`"
         )
-    cwd_roots = raw.get("cwd_roots") or []
-    if not isinstance(cwd_roots, list) or not all(
-        isinstance(r, str) and Path(r).expanduser().is_absolute()
-        for r in cwd_roots
-    ):
+    try:
+        cwd_roots = validate_cwd_roots(raw.get("cwd_roots") or [])
+    except NodePathError:
         raise TopologyError(
             f"node {node_id!r}: `cwd_roots` must be a list of absolute paths"
-        )
+        ) from None
     return NodeSpec(
         id=node_id,
         role=role,
         address=address,
-        cwd_roots=tuple(cwd_roots),
+        cwd_roots=cwd_roots,
     )
 
 

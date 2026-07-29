@@ -515,28 +515,9 @@ async def call_local_or_remote(
     )
 
 
-# INVARIANT: matches any absolute path (POSIX or Windows) excluding NUL
-# and control characters. Loosened from the original ASCII-only filter so
-# that real-world paths with spaces, parens, plus signs, unicode (Mac
-# iCloud Drive, Hebrew folder names) work. Windows support adds two more
-# absolute forms: drive-letter (`C:/…` or `C:\…`) and UNC (`\\server\…`),
-# since a POSIX-only `^/…` rule rejects every Windows path. Path traversal
-# (`..`) is blocked separately by `_assert_within_cwd_roots` and the
-# OS-level resolve() in handlers.
-_SAFE_PATH_RE = re.compile(
-    r"^(?:"
-    r"/[^\x00-\x1f]+"                  # POSIX absolute            (/home/me)
-    r"|[A-Za-z]:[\\/][^\x00-\x1f]*"    # Windows drive-letter      (C:/Users, C:\Users)
-    r"|\\\\[^\x00-\x1f]+"              # Windows UNC               (\\server\share)
-    r")$"
-)
-
-
 def _validate_path(path_str: str) -> None:
-    if not isinstance(path_str, str) or not path_str:
-        raise ValueError("path must be a non-empty string")
-    if not _SAFE_PATH_RE.match(path_str):
-        raise ValueError(f"invalid path: {path_str!r}")
+    from node_path_authority import absolute_node_path
+    absolute_node_path(path_str)
 
 
 def _assert_within_cwd_roots(path_str: str) -> None:

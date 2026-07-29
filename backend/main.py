@@ -9871,18 +9871,18 @@ def _resolve_session_node_id(body: dict) -> str:
         )
     cwd = body.get("cwd") or ""
     if spec.cwd_roots:
-        if not cwd.startswith("/"):
+        from node_path_authority import NodePathError, path_is_within_roots
+        try:
+            allowed = path_is_within_roots(cwd, spec.cwd_roots)
+        except NodePathError:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"cwd {cwd!r} must be an absolute path when targeting "
                     f"node {node_id!r}"
                 ),
-            )
-        if not any(
-            cwd == root or cwd.startswith(root.rstrip("/") + "/")
-            for root in spec.cwd_roots
-        ):
+            ) from None
+        if not allowed:
             raise HTTPException(
                 status_code=400,
                 detail=(
