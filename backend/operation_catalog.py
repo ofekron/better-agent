@@ -20,7 +20,9 @@ from json_store import write_json
 Handler = Callable[[BaseModel], Any | Awaitable[Any]]
 RecoveryHandler = Callable[[BaseModel, str | None, str], Any | Awaitable[Any]]
 _ARTIFACT_DIGEST_CACHE: dict[str, tuple[str, str]] = {}
-_GENERATED_ARTIFACT_PATH_PARTS = frozenset({".venv", ".venvs", "__pycache__", "node_modules"})
+_GENERATED_ARTIFACT_PATH_PARTS = frozenset(
+    {".venv", ".venvs", "__pycache__", "node_modules", ".claude"}
+)
 
 
 class OperationArtifactError(RuntimeError):
