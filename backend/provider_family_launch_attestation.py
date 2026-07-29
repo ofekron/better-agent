@@ -35,10 +35,11 @@ from provider_pinned_launch import (
     open_pinned_runner_launch,
 )
 from provider_runner_launch import RunnerLaunch, capture_runner_launch
+from provider_manifest import artifact_family_kinds
 
 
 ATTESTATION_SCHEMA = 1
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 

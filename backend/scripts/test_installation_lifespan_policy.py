@@ -70,7 +70,7 @@ def _child(mode: str, home: Path) -> None:
     import requirement_prewarm
     import startup_recovery_gate
 
-    provider_loads: list[str] = []
+    recovery_calls: list[str] = []
     integration_calls: list[str] = []
 
     import installation_admission
@@ -95,10 +95,8 @@ def _child(mode: str, home: Path) -> None:
             )
             assert capability == expected, path
 
-    def provider_load() -> None:
-        provider_loads.append("load")
-
     async def recover() -> None:
+        recovery_calls.append("recover")
         startup_recovery_gate.mark_recovery_done()
 
     def integration_call(name: str):
@@ -123,7 +121,6 @@ def _child(mode: str, home: Path) -> None:
 
     async def run() -> None:
         with (
-            patch.object(main, "load_all_providers", side_effect=provider_load),
             patch.object(main, "_recover_in_flight_task", side_effect=recover),
             patch.object(
                 extension_store,
@@ -184,9 +181,9 @@ def _child(mode: str, home: Path) -> None:
     asyncio.run(run())
 
     if mode == "setup-required":
-        assert provider_loads == []
+        assert recovery_calls == []
     else:
-        assert provider_loads == ["load"]
+        assert recovery_calls == ["recover"]
     if mode != installation_profile.DEFAULT:
         assert integration_calls == []
 

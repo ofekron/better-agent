@@ -3124,7 +3124,8 @@ async def _retry_recovered_run(
         )
     if (
         fresh_continuation_reason is None
-        and original_artifact.provider_kind in {"claude", "agy"}
+        and original_artifact.provider_kind
+        in _provider_manifest.artifact_family_kinds()
     ):
         from provider_family_execution_runtime import (
             family_capability_manifest_from_artifact,
@@ -3147,7 +3148,10 @@ async def _retry_recovered_run(
             internal_token=coordinator.internal_token,
             extra_env=None,
         )
-        if original_artifact.provider_kind in {"claude", "agy"}:
+        if (
+            original_artifact.provider_kind
+            in _provider_manifest.artifact_family_kinds()
+        ):
             from provider_family_execution_runtime import (
                 retry_family_execution,
             )

@@ -457,7 +457,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "provisioned_tool_profile": "",
     }
     atomic_write_json(run_dir / "input.json", input_payload)
-    _write_execution_artifact(run_dir, run_id, input_payload, kind="openai")
+    _write_execution_artifact(run_dir, run_id, input_payload, kind="remote")
     fake_sm = _FakeSessionManager({
         "agent_session_id": "provider-sid",
         "messages": [
@@ -471,7 +471,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         popen = _Popen()
 
     class _Provider:
-        KIND = "openai"
+        KIND = "remote"
 
         def __init__(self) -> None:
             self._runs = {}
@@ -567,7 +567,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
     check(
         "provider startup monitoring registered",
-        coordinator.turn_manager.submitted == [("sid", new_run_id, "openai")],
+        coordinator.turn_manager.submitted == [("sid", new_run_id, "remote")],
     )
     check("retry-pending and submitted state emitted", coordinator.turn_manager.emitted == ["sid", "sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")

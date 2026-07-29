@@ -36,28 +36,13 @@ import json
 import logging
 import os
 import re
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Optional
 
-import config_store
-import provider_runtime
-import user_prefs
 from cli_paths import resolve_cli_binary
-from containment import containment
-from extension_run_policy import (
-    disabled_runtime_skills_for_run,
-    resolve_extension_run_policy,
-)
-from proc_control import process_control as _process_control
-from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
-from provider_session_events import SessionEventsProvider, RunState
-from runs_dir import runs_root as _runs_root
+from provider_session_events import SessionEventsProvider
 
 logger = logging.getLogger(__name__)
-
-_RUNNER_PATH = Path(__file__).parent / "runner_qwen.py"
 
 # Cold-start model catalog. First two are the qwen-oauth (subscription)
 # aliases the CLI's ModelRegistry hardcodes (QWEN_OAUTH_MODELS); the rest
@@ -214,7 +199,7 @@ class QwenProvider(SessionEventsProvider):
             "OPENAI_MODEL",
         ):
             env.pop(key, None)
-        rec = self.record
+        rec = self.runtime_record()
         if rec.get("mode") == "api_key":
             api_key = rec.get("api_key")
             base_url = rec.get("base_url")
@@ -232,196 +217,20 @@ class QwenProvider(SessionEventsProvider):
     def _start_run(
         self,
         *,
-        run_id: str,
-        prompt: str,
-        images: Optional[list] = None,
-        files: Optional[list] = None,
-        cwd: str,
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue,
-        model: Optional[str],
-        reasoning_effort: Optional[str],
-        session_id: Optional[str],
-        mode: str,
-        app_session_id: str,
-        source: Optional[str] = None,
-        disallowed_tools: Optional[list[str]] = None,
-        setting_sources: Optional[list[str]] = None,
-        backend_url: Optional[str] = None,
         internal_token: Optional[str] = None,
-        fork: bool = False,
-        supervised: bool = False,
-        supervisor_agent_session_id: Optional[str] = None,
-        worker_agent_session_id: Optional[str] = None,
-        mssg_sender_session_id: Optional[str] = None,
-        is_worker: bool = False,
-        browser_harness_enabled: bool = False,
-        user_facing: bool = False,
-        working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
-        continuation_chain: Optional[list[str]] = None,
-        provider_run_config: Optional[dict] = None,
-        capability_contexts: Optional[list[dict]] = None,
-        target_message_id: Optional[str] = None,
-        resolved_harness_run_config: Optional[dict] = None,
-        turn_run_id: Optional[str] = None,
-        disabled_builtin_extensions: Optional[list[str]] = None,
-        provisioned_tool_profile: str = "",
         _execution,
+        **_unused: Any,
     ) -> None:
-        del disallowed_tools, setting_sources
-        del supervisor_agent_session_id, mssg_sender_session_id
-        del continuation_chain
-        if mode == "manager":
-            mode = "team"
-        if mode not in ("native", "team"):
-            raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
-        if self.defunct:
-            raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
-        self.assert_not_suspended(action="start new runs")
-        if reasoning_effort:
-            raise NotImplementedError("qwen provider does not support reasoning effort.")
-        if mode == "team" and not self.supports_manager_mode:
-            raise NotImplementedError("qwen provider does not support team mode.")
-        if fork and not self.supports_fork:
-            raise NotImplementedError("qwen provider does not support fork.")
-
-        available = _dedupe_preserve_order(self.available_models() + QWEN_MODELS)
-        if model and model not in available:
-            raise ValueError(
-                f"model {model!r} is not available for the Qwen provider. "
-                f"Available: {', '.join(available)}. "
-                f"This session's model was likely set while a different "
-                f"provider was active."
-            )
-
-        run_dir = _runs_root() / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        from session_manager import manager as _sm
-        _sess_rec = _sm.get(app_session_id) or {}
-        _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        from permission import resolve_for_run as _resolve_perm
-        # permission._AXES["qwen"] is the single-axis approval-mode
-        # vocabulary the runner maps onto the CLI (auto_edit → auto-edit).
-        _permission = _resolve_perm(
-            sess_rec=_sess_rec,
-            worker_sess_rec=_worker_sess_rec,
-            is_worker=is_worker,
-            fallback_kind=self.KIND,
-        )
-        run_policy = resolve_extension_run_policy(
-            resolved_harness_run_config=resolved_harness_run_config,
-            session_record=_sess_rec,
-            worker_record=_worker_sess_rec,
-            provider_kind=self.KIND,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            disabled_builtin_extensions=disabled_builtin_extensions,
-        )
-        _bare = bool(run_policy["bare_config"])
-        input_payload = {
-            "prompt": prompt,
-            "images": images or [],
-            "files": files or [],
-            "cwd": cwd,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "permission": _permission,
-            "session_id": session_id,
-            "mode": mode,
-            "source": source or "",
-            "app_session_id": app_session_id,
-            "provider_id": self.id,
-            "provider_mode": self.record.get("mode", "subscription"),
-            "backend_url": backend_url or "",
-            "internal_token": "",
-            "supervised": bool(supervised),
-            "worker_agent_session_id": worker_agent_session_id,
-            "browser_harness_enabled": bool(browser_harness_enabled),
-            "user_facing": bool(user_facing),
-            "bare_config": _bare,
-            "working_mode": _sess_rec.get("working_mode"),
-            "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
-            "context_strategy": user_prefs.get_context_strategy(),
-            "target_message_id": target_message_id,
-            "turn_run_id": turn_run_id,
-            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_runtime_skills": disabled_runtime_skills_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
-        }
-        input_payload.update(run_policy)
-        (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
-
-        containment().create(run_id)
-        stdout_fp = (run_dir / "stdout.log").open("ab")
-        stderr_fp = (run_dir / "stderr.log").open("ab")
-        try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=app_session_id,
-                resolved_harness_run_config=resolved_harness_run_config,
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=backend_url,
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=app_session_id,
-                cwd=cwd,
-                model=model,
-                provider_id=self.id,
-                bare_config=_bare,
-                user_facing=bool(user_facing) and not _bare,
-                disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
-            ))
-            popen = provider_runtime.popen_runner(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="qwen"),
-                run_dir=run_dir,
-                project_cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                cwd=cwd,
-                env=env,
-                **_process_control().detach_spawn_kwargs(),
-                **containment().spawn_kwargs(run_id),
-            )
-        except Exception:
-            stdout_fp.close()
-            stderr_fp.close()
-            containment().teardown(run_id)
-            raise
-        finally:
-            stdout_fp.close()
-            stderr_fp.close()
-        containment().after_spawn(run_id, popen.pid)
-
-        logger.info(
-            "spawned qwen runner pid=%d mode=%s run_id=%s", popen.pid, mode, run_id,
-        )
-
-        rs = RunState(
-            run_id=run_id,
-            run_dir=run_dir,
-            popen=popen,
-            mode=mode,
-            app_session_id=app_session_id,
+        del _unused
+        self.start_session_events_execution(
+            execution=_execution,
+            loop=loop,
             queue=queue,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            persist_to=worker_agent_session_id or app_session_id,
-            target_message_id=target_message_id,
-            turn_run_id=turn_run_id,
-        )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"qwen-bootstrap-{run_id[:8]}",
+            internal_token=internal_token,
+            extra_env=extra_env,
         )
 
     # ------------------------------------------------------------------

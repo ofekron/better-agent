@@ -40,8 +40,8 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 import harness_run_projection
-from cli_paths import resolve_cli_binary
 from runner_errors import classify
+from provider_session_events_runner import restore_session_events_runner
 from runs_dir import atomic_write_json
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
@@ -252,7 +252,7 @@ def _prepend_capability_context(prompt: str, inputs: dict[str, Any]) -> str:
 
 
 async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
-    kimi_bin = resolve_cli_binary("kimi")
+    kimi_bin = inputs.pop("_provider_executable", None)
     if not kimi_bin:
         _fail(run_dir, "kimi CLI not found on PATH")
         return 1
@@ -442,12 +442,11 @@ def main(run_dir: Path) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
-        from runner_operation_host import hydrate_runner_inputs
-        inputs = hydrate_runner_inputs(inputs, run_dir)
+        execution = restore_session_events_runner(run_dir)
+        inputs = execution.inputs
         inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as exc:
-        _fail(run_dir, f"failed to read input.json: {exc}")
+        _fail(run_dir, f"failed to restore execution artifact: {exc}")
         return 1
     try:
         return asyncio.run(_run(run_dir, inputs))

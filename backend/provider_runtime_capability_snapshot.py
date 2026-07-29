@@ -28,9 +28,10 @@ from provider_runtime_capability_model import (
     normalize_prewarm_status,
     semantic_fingerprint,
 )
+from provider_manifest import artifact_family_kinds
 
 
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _SAFE_OWNER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,256}$")
 
 
@@ -226,7 +227,7 @@ def snapshot_family_runtime_capabilities(
 ) -> PreparedRuntimeCapabilities:
     if family not in _FAMILIES:
         raise ExecutionContractError("unsupported runtime capability family")
-    if family == "agy" and agent_sources:
+    if family != "claude" and agent_sources:
         raise ExecutionContractError("AGY has no runtime agent file surface")
     plan = normalize_plan(resolved_plan)
     extensions = json.loads(

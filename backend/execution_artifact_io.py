@@ -20,14 +20,6 @@ _REQUIRED_INPUT_PROJECTION = frozenset({
     "provider_id",
     "session_id",
 })
-_ARTIFACT_REQUIRED_KINDS = frozenset({
-    "agy",
-    "claude",
-    "codex",
-    "fugu",
-})
-
-
 def validate_execution_input_projection(
     artifact: ExecutionArtifact,
     input_payload: Mapping[str, Any],
@@ -68,4 +60,6 @@ def load_execution_artifact(
 
 
 def requires_execution_artifact(provider_kind: str) -> bool:
-    return provider_kind in _ARTIFACT_REQUIRED_KINDS
+    from provider_manifest import execution_artifact_kinds
+
+    return provider_kind in execution_artifact_kinds()

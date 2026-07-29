@@ -200,3 +200,19 @@ def session_events_family_kinds() -> frozenset[str]:
     return frozenset(
         k for k, s in SPECS.items() if s.recovery_family == "session_events"
     )
+
+
+def artifact_family_kinds() -> frozenset[str]:
+    return frozenset(
+        kind
+        for kind, spec in SPECS.items()
+        if not spec.virtual and spec.recovery_family != "codex"
+    )
+
+
+def execution_artifact_kinds() -> frozenset[str]:
+    return frozenset(
+        kind
+        for kind, spec in SPECS.items()
+        if not spec.virtual
+    )

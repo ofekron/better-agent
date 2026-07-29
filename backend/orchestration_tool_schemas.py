@@ -18,7 +18,7 @@ SESSION_ORGANIZATION_INPUT_PROPERTIES: dict[str, Any] = {
 
 HARNESS_PROFILE_INPUT_PROPERTIES: dict[str, Any] = {
     "harness_profile_id": {
-        "type": ["string", "null"],
+        "type": "string",
         "description": (
             "OPTIONAL - harness profile id applied to a newly-created session. "
             "The profile decides which instructions, skills, and MCP servers "
