@@ -711,13 +711,14 @@ class BackendSupervisor:
             "BETTER_CLAUDE_ACTIVE_CHECKOUT": str(checkout),
             "BETTER_CLAUDE_RUN_SH_SUPERVISOR": "1",
         }))
+        command = backend_argv(self.role, checkout)
         self._close_credential_session()
         session = self._credential_broker.open_session()
         session.start()
         child_env = {**backend_child_env(self._env, checkout), **session.backend_env()}
         try:
             proc = subprocess.Popen(
-                backend_argv(self.role, checkout), env=child_env, cwd=checkout / "backend",
+                command, env=child_env, cwd=checkout / "backend",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,  # line-buffered text stream
                 **session.backend_popen_kwargs(),
