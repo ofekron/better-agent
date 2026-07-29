@@ -75,11 +75,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $ArtifactRoot "state") | Out-Null
           $env:BETTER_AGENT_HOME = Join-Path $ArtifactRoot "state"
           $Result = Join-Path $ArtifactRoot "result.json"
+          $Progress = Join-Path $ArtifactRoot "result.progress.jsonl"
           $Smoke = Start-Process `
             -FilePath "desktop\dist\Better Agent\Better Agent.exe" `
             -ArgumentList "--frozen-artifact-smoke", "--output", $Result `
-            -Wait `
             -PassThru
+          $SeenProgress = 0
+          do {
+              $Exited = $Smoke.WaitForExit(1000)
+              if (Test-Path $Progress) {
+                  $ProgressLines = @(Get-Content -LiteralPath $Progress)
+                  for (
+                      $Index = $SeenProgress
+                      $Index -lt $ProgressLines.Count
+                      $Index++
+                  ) {
+                      Write-Host (
+                          "artifact-smoke-progress " +
+                          $ProgressLines[$Index]
+                      )
+                  }
+                  $SeenProgress = $ProgressLines.Count
+              }
+          } while (-not $Exited)
           if ($Smoke.ExitCode -ne 0) {
               if (Test-Path $Result) {
                   Get-Content $Result

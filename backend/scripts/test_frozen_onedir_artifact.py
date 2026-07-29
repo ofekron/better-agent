@@ -171,8 +171,10 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
         step for step in steps if step.get("name") == "Smoke Windows artifact"
     )
     assert "Start-Process" in windows_smoke["run"]
-    assert "-Wait" in windows_smoke["run"]
     assert "-PassThru" in windows_smoke["run"]
+    assert "$Smoke.WaitForExit(1000)" in windows_smoke["run"]
+    assert "result.progress.jsonl" in windows_smoke["run"]
+    assert "artifact-smoke-progress" in windows_smoke["run"]
     assert "$Smoke.ExitCode" in windows_smoke["run"]
     assert "$LASTEXITCODE" not in windows_smoke["run"]
     assert "state\\faulthandler.log" in windows_smoke["run"]
@@ -229,6 +231,18 @@ def test_artifact_smoke_failure_is_structured() -> None:
         assert json.loads(output.read_text(encoding="utf-8")) == {
             "error": "artifact smoke requires frozen runtime",
         }
+        progress = output.with_suffix(".progress.jsonl")
+        assert [
+            json.loads(line)
+            for line in progress.read_text(encoding="utf-8").splitlines()
+        ] == [
+            {"stage": "smoke", "status": "started"},
+            {
+                "error": "artifact smoke requires frozen runtime",
+                "stage": "smoke",
+                "status": "failed",
+            },
+        ]
 
 
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
