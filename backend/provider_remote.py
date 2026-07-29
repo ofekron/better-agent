@@ -414,31 +414,10 @@ class RemoteProviderProxy(Provider):
         timeout: Optional[float] = None,
         no_tools: bool = False,
     ) -> Optional[dict]:
-        self.assert_not_suspended(action="run headless work")
-        # One-shot request/response RPC: the node's own provider runs
-        # `claude -p` and returns the JSON envelope. The CLI is bounded
-        # by its own `timeout`; the WS round-trip gets a generous
-        # ceiling so a long turn isn't cut by rpc_call's 30s default.
-        rpc_timeout = (
-            timeout + 30 if isinstance(timeout, (int, float)) else 1800.0
+        del prompt, session_id, resume_sid, fork, cwd, timeout, no_tools
+        raise NotImplementedError(
+            "remote headless execution requires an admitted request",
         )
-        resp = await node_link.rpc_call(
-            self.node_id, "run_headless",
-            {
-                "prompt": prompt,
-                "session_id": session_id,
-                "resume_sid": resume_sid,
-                "fork": fork,
-                "cwd": cwd,
-                "timeout": timeout,
-                "no_tools": no_tools,
-            },
-            timeout=rpc_timeout,
-            version_ready_required=True,
-        )
-        if not isinstance(resp, dict):
-            return None
-        return resp.get("result")
 
     async def run_admitted_headless(self, admitted: Any) -> dict:
         timeout = admitted.to_dict().get("timeout")

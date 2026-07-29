@@ -1065,24 +1065,28 @@ class Client:
         self,
         prompt: str,
         *,
-        cwd: str = "",
-        session_id: str = "",
-        resume_sid: str = "",
         fork: bool = False,
+        resume: bool = False,
+        no_tools: bool = False,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """One-shot non-interactive provider run (``claude -p`` style) — a raw
-        LLM result, not a managed turn. Fresh run by default; pass ``fork`` or
-        ``resume_sid``/``session_id`` to continue/fork an existing session.
-        Requires ``spawn_runs``. Used by externalized lifecycle extensions
-        that need a raw result without touching the render tree."""
-        payload: dict[str, Any] = {"prompt": prompt, "fork": fork}
-        if cwd or self.cwd:
-            payload["cwd"] = cwd or self.cwd
-        if session_id:
-            payload["session_id"] = session_id
-        if resume_sid:
-            payload["resume_sid"] = resume_sid
+        """Run raw provider work under this client's persisted BA session.
+
+        Provider, model, runtime profile, cwd, routing, and provider-session
+        identity are resolved by core from ``app_session_id``. Requires
+        ``spawn_runs``.
+        """
+        payload: dict[str, Any] = {
+            "app_session_id": self.app_session_id,
+            "prompt": prompt,
+            "fork": fork,
+            "resume": resume,
+            "no_tools": no_tools,
+        }
+        if self.provider_id:
+            payload["expected_provider_id"] = self.provider_id
+        if self.model:
+            payload["expected_model"] = self.model
         if timeout is not None:
             payload["timeout"] = timeout
         return self._post("/api/internal/headless-run", payload, timeout=(timeout or 60.0) + 30.0)

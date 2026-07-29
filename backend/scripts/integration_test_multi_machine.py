@@ -456,20 +456,20 @@ async def test_dispatch_rpc_rejects_path_outside_cwd_roots() -> bool:
 
 
 async def test_run_headless_rewind_rpc_wiring() -> bool:
-    """run_headless/rewind are async request/response RPCs over the same
+    """run_admitted_headless/rewind are async request/response RPCs over the same
     `_HANDLERS` table as the fs handlers. Locks: they're registered, they
     are coroutine functions (so dispatch_rpc awaits them on-loop rather
     than running them off-loop via to_thread), rewind validates its
     params before touching the provider, and the unknown-method path
     still rejects. Does NOT spawn claude — the real two-node round-trip
     is the heavy harness's job."""
-    label = "run_headless/rewind registered as async rpc handlers"
+    label = "run_admitted_headless/rewind registered as async rpc handlers"
     import inspect
     import importlib
     import node_rpc_handlers
     importlib.reload(node_rpc_handlers)
     h = node_rpc_handlers._HANDLERS
-    for method in ("run_headless", "rewind"):
+    for method in ("run_admitted_headless", "rewind"):
         if method not in h:
             _fail(label, f"{method!r} not in _HANDLERS")
             return False

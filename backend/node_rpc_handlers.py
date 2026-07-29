@@ -993,23 +993,8 @@ def _rpc_get_run_status(params: dict) -> dict:
 # translation stays single-path (no second copy of run_headless/rewind
 # logic). They mirror spawn_run's trust model — the primary is trusted
 # after approval, so cwd is not re-gated against cwd_roots, exactly
-# like spawn_run. run_headless spawns a one-shot `claude -p`; rewind
-# reverts a turn's file edits.
-async def _rpc_run_headless(params: dict) -> dict:
-    provider = default_provider()
-    timeout = params.get("timeout")
-    result = await provider.run_headless(
-        prompt=params.get("prompt") or "",
-        session_id=params.get("session_id"),
-        resume_sid=params.get("resume_sid"),
-        fork=bool(params.get("fork")),
-        cwd=params.get("cwd"),
-        timeout=timeout if isinstance(timeout, (int, float)) else None,
-        no_tools=bool(params.get("no_tools")),
-    )
-    return {"result": result}
-
-
+# like spawn_run. Admitted headless work carries its frozen authority;
+# rewind reverts a turn's file edits.
 async def _rpc_run_admitted_headless(params: dict) -> dict:
     if type(params) is not dict or set(params) != {"admitted"}:
         raise ValueError("invalid admitted headless RPC envelope")
@@ -1101,7 +1086,6 @@ _HANDLERS = {
     "pe_temp_write": _rpc_pe_temp_write,
     "pe_temp_read": _rpc_pe_temp_read,
     "pe_temp_cleanup": _rpc_pe_temp_cleanup,
-    "run_headless": _rpc_run_headless,
     "run_admitted_headless": _rpc_run_admitted_headless,
     "rewind": _rpc_rewind,
 }

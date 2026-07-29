@@ -448,11 +448,17 @@ async def test_run_headless_requires_version_ready() -> None:
 
     async def rpc_call(_node_id, _method, _params, **kwargs):
         seen.update(kwargs)
-        return {}
+        return {"result": {"result": "ok"}}
 
     node_link.rpc_call = rpc_call  # type: ignore[assignment]
     try:
-        await provider_remote.RemoteProviderProxy("node-a").run_headless(prompt="x")
+        class Admitted:
+            def to_dict(self):
+                return {"timeout": 10}
+
+        await provider_remote.RemoteProviderProxy(
+            "node-a",
+        ).run_admitted_headless(Admitted())
     finally:
         node_link.rpc_call = original_rpc_call  # type: ignore[assignment]
 

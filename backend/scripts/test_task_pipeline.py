@@ -374,7 +374,7 @@ class _StubJudge:
         self._exc = exc
         self.calls = []
 
-    async def run_headless(self, *, prompt, cwd=None, timeout=None, no_tools=False):
+    async def run(self, _session_id, *, prompt, **_kwargs):
         self.calls.append(prompt)
         if self._exc:
             raise self._exc
@@ -407,9 +407,10 @@ async def test_assessor():
 
     print("T15 llm_judge: pass verdict parsed from model reply")
     judge = _StubJudge({"result": '{"pass": true, "reason": "all criteria met"}', "is_error": False})
-    orig_judge = task_assessor._resolve_judge_provider
+    import headless_admission
+    orig_judge = headless_admission.run_session_headless
     orig_text = task_assessor._extract_run_text
-    task_assessor._resolve_judge_provider = lambda cfg: judge
+    headless_admission.run_session_headless = judge.run
     task_assessor._extract_run_text = lambda sid: "the agent did the thing"
     try:
         v, r, k = await task_assessor.assess(
@@ -420,7 +421,7 @@ async def test_assessor():
 
         print("T16 llm_judge: fail verdict")
         judge2 = _StubJudge({"result": '{"pass": false, "reason": "missing X"}', "is_error": False})
-        task_assessor._resolve_judge_provider = lambda cfg: judge2
+        headless_admission.run_session_headless = judge2.run
         v, r, _ = await task_assessor.assess(
             {"cwd": "/tmp", "goal": "g", "scripts": {"pre": [], "post": []},
              "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
@@ -428,7 +429,7 @@ async def test_assessor():
 
         print("T17 llm_judge: unparseable reply → error (fail closed)")
         judge3 = _StubJudge({"result": "I think it mostly worked", "is_error": False})
-        task_assessor._resolve_judge_provider = lambda cfg: judge3
+        headless_admission.run_session_headless = judge3.run
         v, r, _ = await task_assessor.assess(
             {"cwd": "/tmp", "goal": "g", "scripts": {"pre": [], "post": []},
              "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
@@ -441,7 +442,7 @@ async def test_assessor():
              "assessment": {"kind": "llm_judge", "config": {"criteria": "c"}}}, "s")
         check(v == "error" and "no assistant output" in r, "llm_judge with empty output → error")
     finally:
-        task_assessor._resolve_judge_provider = orig_judge
+        headless_admission.run_session_headless = orig_judge
         task_assessor._extract_run_text = orig_text
 
 

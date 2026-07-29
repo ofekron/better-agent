@@ -585,6 +585,13 @@ def models_for_provider(provider_id: str) -> list[str]:
     return available_models(provider_id)
 
 
+def models_for_record(provider: dict) -> list[str]:
+    """Active models from a secret-free authoritative provider snapshot."""
+    if type(provider) is not dict or not provider.get("id"):
+        return []
+    return _models_for(dict(provider))
+
+
 def available_models_including_retired(provider_id: Optional[str] = None) -> list[str]:
     """Active + recently-retired (within RETIRED_STICKY_DAYS). Use for
     `default_model` validation so a session pinned to a just-retired

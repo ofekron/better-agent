@@ -2095,6 +2095,13 @@ class ClaudeProvider(Provider):
             "--permission-mode", "bypassPermissions",
             "--input-format", "text",
         ]
+        record = self.runtime_record()
+        model = str(record.get("default_model") or "").strip()
+        effort = str(record.get("default_reasoning_effort") or "").strip()
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
         if no_tools:
             cmd += ["--tools="]
         if session_id is not None:

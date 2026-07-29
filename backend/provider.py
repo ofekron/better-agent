@@ -608,6 +608,7 @@ class Provider(ABC):
         # twice in one method.
         self._record: dict = dict(record)
         self._execution_record = threading.local()
+        self._headless_authority_lock = asyncio.Lock()
         self.defunct: bool = False
         self.suspended: bool = config_store.provider_suspended(self.id)
         self._parked_runs: dict[str, ParkedRun] = {}
@@ -1466,10 +1467,84 @@ class Provider(ABC):
     ) -> Optional[dict]: ...
 
     async def run_admitted_headless(self, admitted: Any) -> dict:
-        del admitted
-        raise NotImplementedError(
-            f"{self.KIND} does not support admitted headless execution",
+        async with self._headless_authority_lock:
+            return await self._run_admitted_headless_legacy(admitted)
+
+    async def _run_admitted_headless_legacy(self, admitted: Any) -> dict:
+        from headless_request_contract import AdmittedHeadlessRequest
+        import runtime_profile
+
+        admitted = AdmittedHeadlessRequest.from_dict(admitted.to_dict())
+        payload = admitted.to_dict()
+        authority = payload["provider"]
+        record = self.record
+        expected = (
+            authority["id"],
+            authority["kind"],
+            authority["generation"],
+            authority["revision"],
         )
+        actual = (
+            record.get("id"),
+            record.get("kind"),
+            record.get("generation"),
+            record.get("revision"),
+        )
+        if actual != expected:
+            raise ValueError("headless provider authority changed")
+        if payload["runtime_profile"] != runtime_profile.resolve_runner(
+            record,
+            record.get("runner"),
+        ):
+            raise ValueError("headless runtime profile changed")
+        if payload["fork"] and not self.supports_fork:
+            raise ValueError("headless provider does not support fork")
+        if payload["no_tools"] and not self.supports_headless_no_tools:
+            raise ValueError("headless provider does not support no-tools")
+        import models as models_mod
+        models = models_mod.models_for_record(record)
+        if payload["model"] not in models:
+            raise ValueError("headless model is stale or unsupported")
+        effort = payload["reasoning_effort"]
+        if self.supports_reasoning_effort:
+            if effort not in self.reasoning_effort_options:
+                raise ValueError("headless reasoning effort is unsupported")
+        elif effort:
+            raise ValueError("headless provider does not support reasoning effort")
+        if (
+            self.KIND not in {"claude", "openai"}
+            and payload["model"] != str(record.get("default_model") or "")
+        ):
+            raise ValueError("headless provider cannot override its configured model")
+        hydration = config_store.hydrate_provider_execution(
+            authority["id"],
+            expected_generation=authority["generation"],
+            expected_revision=authority["revision"],
+        )
+        if hydration is None:
+            raise RuntimeError("headless provider authority is unavailable")
+        runtime_record = dict(hydration.runtime_record())
+        runtime_record["default_model"] = payload["model"]
+        runtime_record["default_reasoning_effort"] = effort
+        installed = getattr(self._execution_record, "value", None)
+        self._execution_record.value = runtime_record
+        try:
+            result = await self.run_headless(
+                prompt=payload["prompt"],
+                resume_sid=payload["resume_sid"],
+                fork=payload["fork"],
+                cwd=payload["cwd"],
+                timeout=payload["timeout"],
+                no_tools=payload["no_tools"],
+            )
+        finally:
+            if installed is None:
+                del self._execution_record.value
+            else:
+                self._execution_record.value = installed
+        if type(result) is not dict:
+            raise RuntimeError("headless provider returned no result")
+        return result
 
     # ------------------------------------------------------------------
     # File-system rewind — undo the file edits a turn produced.

@@ -14797,34 +14797,32 @@ async def internal_headless_generate(
     """
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    session_id = str(body.get("session_id") or "").strip()
-    prompt = str(body.get("prompt") or "").strip()
+    if set(body) != {"session_id", "prompt"}:
+        raise HTTPException(status_code=400, detail="invalid headless generation request")
+    if type(body.get("session_id")) is not str or type(body.get("prompt")) is not str:
+        raise HTTPException(status_code=400, detail="invalid headless generation request")
+    session_id = body["session_id"].strip()
+    prompt = body["prompt"].strip()
     if not session_id or not prompt:
         raise HTTPException(status_code=400, detail="session_id and prompt are required")
     if len(prompt) > _HEADLESS_GENERATE_MAX_PROMPT:
         raise HTTPException(status_code=413, detail="prompt too long")
-    session = await _session_lite(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    agent_sid = str(session.get("agent_session_id") or "").strip()
-    if not agent_sid:
-        # Fail closed: no provider sid to fork from yet (session never ran).
-        raise HTTPException(status_code=409, detail="session has no provider session yet")
-    provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)
-    # Fail closed: only providers that can fork (no real-session mutation)
-    # AND guarantee a tool-less run may serve a fill.
-    if not provider.supports_fork or not provider.supports_headless_no_tools:
-        raise HTTPException(
-            status_code=422, detail="session provider cannot run a tool-less fork",
+    from headless_admission import run_session_headless
+    try:
+        result = await run_session_headless(
+            session_id,
+            prompt=prompt,
+            fork=True,
+            resume=False,
+            no_tools=True,
+            timeout=_HEADLESS_GENERATE_TIMEOUT,
+            permission_scope="internal_generation",
         )
-    result = await provider.run_headless(
-        prompt=prompt,
-        resume_sid=agent_sid,
-        fork=True,
-        no_tools=True,
-        cwd=str(session.get("cwd") or "") or None,
-        timeout=_HEADLESS_GENERATE_TIMEOUT,
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("headless generation failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="generation failed") from exc
     if not result or result.get("is_error"):
         raise HTTPException(status_code=502, detail="generation failed")
     return {"text": str(result.get("result") or "")}
@@ -15892,27 +15890,61 @@ async def internal_headless_run(
     as ask-fork / provisioned sessions). Used by externalized lifecycle
     extensions that need a raw result without a session turn."""
     extension_id = _require_extension_permission(x_internal_token, "spawn_runs")
-    if not isinstance(body, dict):
+    if type(body) is not dict:
         raise HTTPException(status_code=400, detail="body must be an object")
-    prompt = str(body.get("prompt") or "")
-    if not prompt:
+    allowed = {
+        "app_session_id",
+        "prompt",
+        "fork",
+        "resume",
+        "no_tools",
+        "timeout",
+        "expected_provider_id",
+        "expected_model",
+    }
+    if set(body) - allowed:
+        raise HTTPException(status_code=400, detail="invalid headless-run fields")
+    app_session_id = body.get("app_session_id")
+    prompt = body.get("prompt")
+    if type(app_session_id) is not str or not app_session_id.strip():
+        raise HTTPException(status_code=400, detail="app_session_id is required")
+    if type(prompt) is not str or not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
-    cwd = str(body.get("cwd") or "").strip() or None
+    for key in ("fork", "resume", "no_tools"):
+        if key in body and type(body[key]) is not bool:
+            raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+    if body.get("fork") is True and body.get("resume") is True:
+        raise HTTPException(status_code=400, detail="fork and resume are mutually exclusive")
+    for key in ("expected_provider_id", "expected_model"):
+        if key in body and type(body[key]) is not str:
+            raise HTTPException(status_code=400, detail=f"{key} must be a string")
+    timeout = body.get("timeout")
+    if timeout is not None and type(timeout) not in (int, float):
+        raise HTTPException(status_code=400, detail="timeout must be a number")
+    from headless_admission import run_session_headless
     try:
-        result = await provider.default_provider().run_headless(
+        result = await run_session_headless(
+            app_session_id.strip(),
             prompt=prompt,
-            session_id=(str(body.get("session_id") or "").strip() or None),
-            resume_sid=(str(body.get("resume_sid") or "").strip() or None),
-            fork=bool(body.get("fork")),
-            cwd=cwd,
-            timeout=float(body.get("timeout")) if body.get("timeout") is not None else None,
+            fork=body.get("fork") is True,
+            resume=body.get("resume") is True,
+            no_tools=body.get("no_tools") is True,
+            timeout=float(timeout) if timeout is not None else None,
+            permission_scope="spawn_runs",
+            expected_provider_id=str(body.get("expected_provider_id") or ""),
+            expected_model=str(body.get("expected_model") or ""),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("headless-run failed")
-        raise HTTPException(status_code=500, detail=f"headless run failed: {exc}") from exc
-    if result is None:
-        raise HTTPException(status_code=500, detail="headless run returned no result")
-    logger.info("headless-run by extension %s (fork=%s)", extension_id, bool(body.get("fork")))
+        raise HTTPException(status_code=502, detail="headless run failed") from exc
+    logger.info(
+        "headless-run by extension %s session=%s fork=%s",
+        extension_id,
+        app_session_id,
+        body.get("fork") is True,
+    )
     return result
 
 

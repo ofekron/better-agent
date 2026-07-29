@@ -63,26 +63,6 @@ def _extract_run_text(session_id: str) -> str:
     return _last_assistant_text(sess)
 
 
-def _resolve_judge_provider(cfg: dict):
-    """Provider instance for the judge: the task's configured provider_id if
-    set, else the default provider. run_headless has no per-call model
-    override, so the provider's default_model is used."""
-    import provider as provider_mod
-    pid = (cfg or {}).get("provider_id")
-    if pid:
-        try:
-            prov = provider_mod.get_provider(pid)
-            if getattr(prov, "suspended", False):
-                raise RuntimeError("provider is suspended")
-            return prov
-        except Exception:
-            logger.info("task_assessor: provider %s unavailable, using default", pid)
-    prov = provider_mod.default_provider()
-    if getattr(prov, "suspended", False):
-        raise RuntimeError("default provider is suspended")
-    return prov
-
-
 def _parse_judge_json(text: str) -> tuple[bool, str] | None:
     """Pull a {pass, reason} object out of the model's reply. Tolerates
     surrounding prose / fences. Returns None if no usable verdict."""
@@ -125,12 +105,17 @@ async def _llm_judge(task: dict, session_id: str) -> tuple[str, str]:
         '{"pass": true|false, "reason": "one short sentence"}'
     )
     try:
-        provider = _resolve_judge_provider(cfg)
-        result = await provider.run_headless(
+        from headless_admission import run_session_headless
+        result = await run_session_headless(
+            session_id,
             prompt=prompt,
-            cwd=task.get("cwd") or None,
-            timeout=_JUDGE_TIMEOUT,
+            fork=False,
+            resume=False,
             no_tools=True,
+            timeout=_JUDGE_TIMEOUT,
+            permission_scope="task_assessment",
+            expected_provider_id=str(cfg.get("provider_id") or ""),
+            expected_model=str(cfg.get("model") or ""),
         )
     except Exception as exc:
         return "error", f"llm_judge call failed: {exc}"
