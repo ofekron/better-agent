@@ -41,7 +41,7 @@ def mark_working_mode(
     def _do(s: dict) -> None:
         s["working_mode"] = mode
         s["working_mode_meta"] = meta
-    return session_manager._run(
+    session = session_manager._run(
         sid,
         _do,
         {"kind": "working_mode_marked", "mode": mode},
@@ -50,6 +50,13 @@ def mark_working_mode(
             "working_mode_meta": s.get("working_mode_meta"),
         },
     )
+    if session is None:
+        return None
+    root_id = session_manager.root_id_for(sid)
+    if root_id is None:
+        raise RuntimeError("working-mode session lost its root identity")
+    session_manager.flush_root_persist(root_id)
+    return session
 
 
 # ── Lookup ─────────────────────────────────────────────────────────

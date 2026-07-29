@@ -1050,11 +1050,13 @@ async def _rpc_run_admitted_headless(params: dict) -> dict:
 
 
 async def _rpc_rewind(params: dict) -> dict:
-    provider = default_provider()
     agent_sid = params.get("agent_sid") or ""
     message_uuid = params.get("message_uuid") or ""
     if not agent_sid or not message_uuid:
         raise ValueError("rewind requires agent_sid and message_uuid")
+    from provider import default_provider
+
+    provider = default_provider()
     await provider.rewind(agent_sid, message_uuid)
     return {"ok": True}
 
