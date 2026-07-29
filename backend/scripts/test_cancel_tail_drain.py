@@ -169,6 +169,7 @@ def main() -> int:
                 session_id_field="agent_session_id",
                 mode="native",
                 turn_run_id="turn-drain",
+                lifecycle_message_id="lifecycle-drain",
             )
         finally:
             await tm.lifecycle.close()

@@ -93,6 +93,11 @@ _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RUNTIME_READY_PROJECTION: dict[str, bool] = {}
 _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
 _RUNTIME_READY_PROJECTION_LOCK = threading.Lock()
+_RUNTIME_AGENT_ENTRIES_CACHE: tuple[
+    StoreFingerprint,
+    tuple[dict[str, str], ...],
+] | None = None
+_RUNTIME_AGENT_ENTRIES_LOCK = threading.Lock()
 StoreFingerprint = tuple[str, str]
 _ENABLED_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
@@ -103,6 +108,7 @@ _GET_EXTENSION_CACHE_LOCK = threading.Lock()
 _BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[Any, ...], bool]] = {}
 _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_CACHE: tuple[float, StoreFingerprint] | None = None
+_STORE_FINGERPRINT_FILE_STATE: tuple[str, int, int, int, int] | None = None
 _STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_TTL_SECONDS = 0.5
 _STORE_MUTATION_LOCAL = threading.local()
@@ -309,39 +315,69 @@ def activation_identity(extension_id: str) -> str:
     return activation_id if isinstance(activation_id, str) and re.fullmatch(r"[0-9a-f]{32}", activation_id) else ""
 
 
+def _fingerprint_store_file(
+    path: Path,
+) -> tuple[StoreFingerprint, tuple[str, int, int, int, int]]:
+    path_key = str(path)
+    try:
+        with path.open("rb") as handle:
+            content = handle.read()
+            stat = os.fstat(handle.fileno())
+    except FileNotFoundError:
+        return (path_key, ""), (path_key, 0, 0, 0, 0)
+    return (
+        (path_key, hashlib.sha256(content).hexdigest()),
+        (path_key, stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size),
+    )
+
+
 def store_fingerprint() -> StoreFingerprint:
-    global _STORE_FINGERPRINT_CACHE
+    global _STORE_FINGERPRINT_CACHE, _STORE_FINGERPRINT_FILE_STATE
     now = time.monotonic()
+    path = _store_path()
+    current_path = str(path)
     with _STORE_FINGERPRINT_CACHE_LOCK:
         cached = _STORE_FINGERPRINT_CACHE
-        current_path = str(_store_path())
         if (
             cached is not None
             and now - cached[0] <= _STORE_FINGERPRINT_TTL_SECONDS
             and cached[1][0] == current_path
         ):
             return cached[1]
-    path = _store_path()
     try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        stat = path.stat()
+        file_state = (
+            current_path,
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
     except FileNotFoundError:
-        digest = ""
-    fingerprint = (str(path), digest)
+        file_state = (current_path, 0, 0, 0, 0)
+    with _STORE_FINGERPRINT_CACHE_LOCK:
+        cached = _STORE_FINGERPRINT_CACHE
+        if (
+            cached is not None
+            and cached[1][0] == current_path
+            and _STORE_FINGERPRINT_FILE_STATE == file_state
+        ):
+            _STORE_FINGERPRINT_CACHE = (now, cached[1])
+            return cached[1]
+    fingerprint, file_state = _fingerprint_store_file(path)
     with _STORE_FINGERPRINT_CACHE_LOCK:
         _STORE_FINGERPRINT_CACHE = (now, fingerprint)
+        _STORE_FINGERPRINT_FILE_STATE = file_state
     return fingerprint
 
 
 def _refresh_store_fingerprint_cache(path: Path | None = None) -> StoreFingerprint:
-    global _STORE_FINGERPRINT_CACHE
+    global _STORE_FINGERPRINT_CACHE, _STORE_FINGERPRINT_FILE_STATE
     path = path or _store_path()
-    try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except FileNotFoundError:
-        digest = ""
-    fingerprint = (str(path), digest)
+    fingerprint, file_state = _fingerprint_store_file(path)
     with _STORE_FINGERPRINT_CACHE_LOCK:
         _STORE_FINGERPRINT_CACHE = (time.monotonic(), fingerprint)
+        _STORE_FINGERPRINT_FILE_STATE = file_state
     return fingerprint
 
 
@@ -374,6 +410,7 @@ def _projection_cache_items(name: str) -> list[tuple[tuple[Any, ...], Any]]:
 
 def _clear_projection_cache() -> None:
     global _RECONCILED_STORE_FINGERPRINT, _CORE_ROLE_OWNERS_CACHE
+    global _RUNTIME_AGENT_ENTRIES_CACHE
     _PROJECTION_CACHE.clear()
     with _RUNTIME_READY_PROJECTION_LOCK:
         _RUNTIME_READY_PROJECTION.clear()
@@ -387,6 +424,8 @@ def _clear_projection_cache() -> None:
         _GET_EXTENSION_CACHE.clear()
     with _CORE_ROLE_OWNERS_LOCK:
         _CORE_ROLE_OWNERS_CACHE = None
+    with _RUNTIME_AGENT_ENTRIES_LOCK:
+        _RUNTIME_AGENT_ENTRIES_CACHE = None
 
 
 def _install_root() -> Path:
@@ -5948,23 +5987,42 @@ def runtime_agent_entries() -> list[dict[str, str]]:
     """Subagent definitions from active extensions, resolved to absolute
     per-provider source files. Each entry: {"name": ..., "<provider>": <abspath>}
     for every provider whose source file exists."""
-    agents: list[dict[str, str]] = []
-    data = _load()
-    for record in _active_records_from_data(data):
-        manifest = record["manifest"]
-        install_root = runtime_package_root_for_record(record)
-        if install_root is None or not install_root.exists():
+    global _RUNTIME_AGENT_ENTRIES_CACHE
+    while True:
+        fingerprint = store_fingerprint()
+        with _RUNTIME_AGENT_ENTRIES_LOCK:
+            cached = _RUNTIME_AGENT_ENTRIES_CACHE
+            if cached is not None and cached[0] == fingerprint:
+                return [dict(entry) for entry in cached[1]]
+        data = read_json(_store_path(), _blank_store())
+        if (
+            data.get("schema_version") != STORE_SCHEMA_VERSION
+            or not isinstance(data.get("extensions"), dict)
+            or not isinstance(data.get("deleted_extensions"), dict)
+        ):
+            raise ExtensionError("extension store snapshot is invalid")
+        agents: list[dict[str, str]] = []
+        for record in _active_records_from_data(data):
+            manifest = record["manifest"]
+            install_root = runtime_package_root_for_record(record)
+            if install_root is None or not install_root.exists():
+                continue
+            for item in manifest.get("entrypoints", {}).get("agents") or []:
+                resolved: dict[str, str] = {"name": item["name"]}
+                for provider_id, rel_path in (item.get("providers") or {}).items():
+                    source = (install_root / rel_path).resolve()
+                    if not source.is_relative_to(install_root) or not source.is_file():
+                        continue
+                    resolved[provider_id] = str(source)
+                if len(resolved) > 1:
+                    agents.append(resolved)
+        final_fingerprint = _refresh_store_fingerprint_cache()
+        if final_fingerprint != fingerprint:
             continue
-        for item in manifest.get("entrypoints", {}).get("agents") or []:
-            resolved: dict[str, str] = {"name": item["name"]}
-            for provider_id, rel_path in (item.get("providers") or {}).items():
-                source = (install_root / rel_path).resolve()
-                if not source.is_relative_to(install_root) or not source.is_file():
-                    continue
-                resolved[provider_id] = str(source)
-            if len(resolved) > 1:  # has at least one provider besides "name"
-                agents.append(resolved)
-    return agents
+        frozen = tuple(dict(entry) for entry in agents)
+        with _RUNTIME_AGENT_ENTRIES_LOCK:
+            _RUNTIME_AGENT_ENTRIES_CACHE = (final_fingerprint, frozen)
+        return [dict(entry) for entry in frozen]
 
 
 def _active_records_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:

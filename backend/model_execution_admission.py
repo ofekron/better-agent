@@ -129,8 +129,6 @@ def _descriptor(artifact: Any) -> dict[str, Any]:
 
 
 def _admit_catalog_model(artifact: Any, descriptor: Mapping[str, Any]) -> None:
-    from dataclasses import replace
-
     import model_catalog_read_projection
     from codex_execution import CodexExecutionContract
 
@@ -168,7 +166,10 @@ def _admit_catalog_model(artifact: Any, descriptor: Mapping[str, Any]) -> None:
     contract = CodexExecutionContract.from_dict(
         provider_contract["contract"],
     )
-    if replace(contract, runtime_args=()) != authority.execution_contract:
+    if (
+        contract.catalog_fingerprint
+        != authority.execution_contract.catalog_fingerprint
+    ):
         raise ModelAdmissionError("model catalog execution contract mismatch")
     selected = descriptor["selected_model"]
     if type(selected) is not str or not selected:

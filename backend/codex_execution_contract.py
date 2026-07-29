@@ -21,6 +21,7 @@ from codex_execution_common import (
 )
 from codex_execution_identity import (
     ConfigIdentity,
+    FileIdentity,
     config_identity_from_dict,
     file_identity_from_dict,
 )
@@ -64,8 +65,38 @@ class CodexExecutionContract:
 
     @property
     def catalog_fingerprint(self) -> str:
-        payload = self.to_dict(include_fingerprint=False)
-        payload.pop("runtime_args", None)
+        payload = {
+            "schema": self.schema,
+            "provider_id": self.provider_id,
+            "provider_kind": self.provider_kind,
+            "provider_generation": self.provider_generation,
+            "provider_revision": self.provider_revision,
+            "mode": self.mode,
+            "base_url": self.base_url,
+            "profile": self.profile,
+            "credential_generation": self.credential_generation,
+            "catalog_args": self.catalog_args,
+            "environment_selectors": self.environment_selectors,
+            "config": tuple(
+                _catalog_config_identity(identity)
+                for identity in self.config
+            ),
+            "launch_chain": {
+                "logical_command": self.launch_chain.logical_command,
+                "mode": self.launch_chain.mode,
+                "launcher": _catalog_file_identity(
+                    self.launch_chain.launcher,
+                ),
+                "argv_prefix": self.launch_chain.argv_prefix,
+                "components": tuple(
+                    _catalog_file_identity(identity)
+                    for identity in self.launch_chain.components
+                ),
+                "component_argv_indexes": (
+                    self.launch_chain.component_argv_indexes
+                ),
+            },
+        }
         return hashlib.sha256(canonical_json(payload)).hexdigest()
 
     @classmethod
@@ -212,6 +243,28 @@ class CodexExecutionContract:
             and _attest_agent_authority_membership(self.config)
             and all(identity.attest_metadata() for identity in self.config)
         )
+
+
+def _catalog_file_identity(identity: FileIdentity) -> dict[str, Any]:
+    return {
+        "requested_path": identity.requested_path,
+        "resolved_path": identity.resolved_path,
+        "sha256": identity.sha256,
+        "size": identity.size,
+        "symlink_chain": identity.symlink_chain,
+    }
+
+
+def _catalog_config_identity(identity: ConfigIdentity) -> dict[str, Any]:
+    return {
+        "root_path": identity.root_path,
+        "config_path": identity.config_path,
+        "config_file": (
+            _catalog_file_identity(identity.config_file)
+            if identity.config_file is not None
+            else None
+        ),
+    }
 
 
 def codex_authority_paths(config_root: Path) -> tuple[str, ...]:

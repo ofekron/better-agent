@@ -1569,6 +1569,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 session_id_field="agent_session_id",
                 mode="native",
                 turn_run_id=str(uuid.uuid4()),
+                lifecycle_message_id="lifecycle-codex-recovery",
             )
         finally:
             turn_manager_mod.runtime_skill_projection = original_runtime

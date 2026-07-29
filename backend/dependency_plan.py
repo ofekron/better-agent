@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -281,6 +282,7 @@ def verified_active_python(backend_dir: Path) -> Path:
     return _python_in(verified_active_env(backend_dir))
 
 
+@functools.lru_cache(maxsize=None)
 def _module_available(module: str) -> bool:
     import importlib.util
 
