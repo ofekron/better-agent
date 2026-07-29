@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import threading
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -23,9 +24,19 @@ import lifecycle_command_store
 
 
 logger = logging.getLogger(__name__)
+_AUTHORITY_LOCK = threading.Lock()
+_BOUND_AUTHORITIES: dict[str, LifecycleCommandEngine] = {}
+
+# D2 is in-process observation infrastructure. Production cutover requires
+# D3 to add cross-process lease ownership before callers route through it.
+PRODUCTION_CUTOVER_READY = False
 
 
 class IdentityRetired(RuntimeError):
+    pass
+
+
+class LifecycleAuthorityBound(RuntimeError):
     pass
 
 
@@ -75,16 +86,39 @@ class LifecycleCommandEngine:
         self._bind_task: asyncio.Task[None] | None = None
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._waiters: dict[str, set[_PhaseWait]] = {}
+        self._registration_watchers: dict[
+            str,
+            set[asyncio.Future[None]],
+        ] = {}
+        self._authority_key: str | None = None
 
     async def bind(self) -> None:
         loop = asyncio.get_running_loop()
         if self._loop is None:
+            authority_key = str(lifecycle_command_store.store_path())
+            with _AUTHORITY_LOCK:
+                existing = _BOUND_AUTHORITIES.get(authority_key)
+                if existing is not None and existing is not self:
+                    raise LifecycleAuthorityBound(
+                        "a lifecycle command authority is already bound "
+                        "to this store and event loop"
+                    )
+                _BOUND_AUTHORITIES[authority_key] = self
+            self._authority_key = authority_key
             self._loop = loop
         elif self._loop is not loop:
             raise RuntimeError("lifecycle command engine cannot move between event loops")
         if self._bind_task is None:
             self._bind_task = loop.create_task(self._recover())
-        await asyncio.shield(self._bind_task)
+            self._bind_task.add_done_callback(self._bind_finished)
+        task = self._bind_task
+        await asyncio.shield(task)
+
+    def _bind_finished(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled() or task.exception() is not None:
+            self._release_authority()
+            self._bind_task = None
+            self._loop = None
 
     async def _recover(self) -> None:
         await asyncio.to_thread(lifecycle_command_store.initialize)
@@ -106,9 +140,15 @@ class LifecycleCommandEngine:
                     if not waiter.future.done():
                         waiter.future.cancel()
             self._waiters.clear()
+            for watchers in self._registration_watchers.values():
+                for watcher in watchers:
+                    if not watcher.done():
+                        watcher.cancel()
+            self._registration_watchers.clear()
             self._session_locks.clear()
             self._bind_task = None
             self._loop = None
+            self._release_authority()
 
     def snapshot(self, session_id: str) -> LifecycleSnapshot:
         self._assert_ready()
@@ -226,21 +266,30 @@ class LifecycleCommandEngine:
             raise ValueError("wait phases must be known lifecycle phases")
         if type(min_revision) is not int or min_revision < 0:
             raise ValueError("min_revision must be a non-negative integer")
-        snapshot = await asyncio.to_thread(
-            lifecycle_command_store.session_snapshot,
-            session_id,
-        )
-        if self._wait_matches(snapshot, expected, identity, min_revision):
-            return snapshot
-        if identity is not None and snapshot.identity != identity:
-            raise IdentityRetired("requested turn identity is no longer active")
         waiter = _PhaseWait(
             asyncio.get_running_loop().create_future(),
             expected,
             identity,
             min_revision,
         )
-        self._waiters.setdefault(session_id, set()).add(waiter)
+        async with self._lock_for(session_id):
+            snapshot = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            if self._wait_matches(snapshot, expected, identity, min_revision):
+                return snapshot
+            if identity is not None and snapshot.identity != identity:
+                raise IdentityRetired(
+                    "requested turn identity is no longer active"
+                )
+            self._waiters.setdefault(session_id, set()).add(waiter)
+            current = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            self._settle_waiter(waiter, current)
+            self._announce_waiter_registration(session_id)
         try:
             return await waiter.future
         finally:
@@ -249,6 +298,23 @@ class LifecycleCommandEngine:
                 session_waiters.discard(waiter)
                 if not session_waiters:
                     self._waiters.pop(session_id, None)
+
+    async def wait_until_waiter_registered(self, session_id: str) -> None:
+        await self.bind()
+        validate_identifier(session_id, "session_id")
+        if self.waiter_count(session_id):
+            return
+        watcher = asyncio.get_running_loop().create_future()
+        watchers = self._registration_watchers.setdefault(session_id, set())
+        watchers.add(watcher)
+        if self.waiter_count(session_id):
+            watcher.set_result(None)
+        try:
+            await watcher
+        finally:
+            watchers.discard(watcher)
+            if not watchers:
+                self._registration_watchers.pop(session_id, None)
 
     def waiter_count(self, session_id: str) -> int:
         self._assert_ready()
@@ -328,22 +394,30 @@ class LifecycleCommandEngine:
         for waiter in tuple(self._waiters.get(session_id, ())):
             if waiter.future.done():
                 continue
-            if self._wait_matches(
-                snapshot,
-                waiter.phases,
-                waiter.identity,
-                waiter.min_revision,
-            ):
-                waiter.future.set_result(snapshot)
-                continue
-            if (
-                waiter.identity is not None
-                and snapshot.revision >= waiter.min_revision
-                and snapshot.identity != waiter.identity
-            ):
-                waiter.future.set_exception(IdentityRetired(
-                    "requested turn identity was retired"
-                ))
+            self._settle_waiter(waiter, snapshot)
+
+    def _settle_waiter(
+        self,
+        waiter: _PhaseWait,
+        snapshot: LifecycleSnapshot,
+    ) -> None:
+        if self._wait_matches(
+            snapshot,
+            waiter.phases,
+            waiter.identity,
+            waiter.min_revision,
+        ):
+            waiter.future.set_result(snapshot)
+            return
+        if waiter.identity is not None and snapshot.identity != waiter.identity:
+            waiter.future.set_exception(IdentityRetired(
+                "requested turn identity was retired"
+            ))
+
+    def _announce_waiter_registration(self, session_id: str) -> None:
+        for watcher in self._registration_watchers.get(session_id, ()):
+            if not watcher.done():
+                watcher.set_result(None)
 
     @staticmethod
     def _wait_matches(
@@ -369,3 +443,12 @@ class LifecycleCommandEngine:
             raise RuntimeError("lifecycle command engine recovery is incomplete")
         if self._bind_task.exception() is not None:
             raise RuntimeError("lifecycle command engine recovery failed")
+
+    def _release_authority(self) -> None:
+        authority_key = self._authority_key
+        if authority_key is None:
+            return
+        with _AUTHORITY_LOCK:
+            if _BOUND_AUTHORITIES.get(authority_key) is self:
+                _BOUND_AUTHORITIES.pop(authority_key)
+        self._authority_key = None

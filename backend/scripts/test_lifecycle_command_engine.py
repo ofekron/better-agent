@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import sqlite3
 import sys
+import tempfile
+import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,10 +22,20 @@ TEST_HOME = Path(_test_home.isolate("ba-test-lifecycle-command-engine-"))
 from event_bus import BusEvent, EventBus  # noqa: E402
 from lifecycle_command_engine import (  # noqa: E402
     IdentityRetired,
+    LifecycleAuthorityBound,
     LifecycleCommandEngine,
+    PRODUCTION_CUTOVER_READY,
 )
-from lifecycle_command_model import LifecycleEffect, TurnIdentity  # noqa: E402
-from lifecycle_command_states import LifecycleCommandRejected  # noqa: E402
+from lifecycle_command_model import (  # noqa: E402
+    LifecycleCommand,
+    LifecycleEffect,
+    TurnIdentity,
+)
+from lifecycle_command_states import (  # noqa: E402
+    STATES,
+    LifecycleCommandRejected,
+    effect_id_for,
+)
 import lifecycle_command_store  # noqa: E402
 
 
@@ -65,6 +80,14 @@ class UnsafeCallable:
         return {"unsafe": effect.kind}
 
 
+class FailingEffectHandler:
+    async def execute_idempotently(
+        self,
+        effect: LifecycleEffect,
+    ) -> Mapping[str, Any]:
+        raise RuntimeError(f"cannot recover {effect.effect_id}")
+
+
 class LosingNotificationBus(EventBus):
     def __init__(self) -> None:
         super().__init__()
@@ -73,17 +96,6 @@ class LosingNotificationBus(EventBus):
     async def publish(self, event: BusEvent, *, is_replay: bool = False) -> None:
         self.attempts += 1
         raise RuntimeError("notification transport unavailable")
-
-
-async def wait_until_registered(
-    engine: LifecycleCommandEngine,
-    session_id: str,
-) -> None:
-    for _ in range(20):
-        if engine.waiter_count(session_id) == 1:
-            return
-        await asyncio.get_running_loop().run_in_executor(None, lambda: None)
-    raise AssertionError("waiter did not register")
 
 
 async def test_state_contract_idempotency_and_reload() -> None:
@@ -193,6 +205,17 @@ async def test_concurrent_bind_waits_for_one_recovery() -> None:
         raise AssertionError("effect crash was not surfaced")
     await crashed.close()
 
+    failed_recovery = LifecycleCommandEngine(
+        EventBus(),
+        effect_handler=FailingEffectHandler(),
+    )
+    try:
+        await failed_recovery.bind()
+    except RuntimeError as exc:
+        assert "cannot recover" in str(exc)
+    else:
+        raise AssertionError("recovery failure was not surfaced")
+
     recovery_handler = IdempotentRecorder()
     recovery_handler.block = True
     recovering = LifecycleCommandEngine(
@@ -201,10 +224,14 @@ async def test_concurrent_bind_waits_for_one_recovery() -> None:
     )
     first_bind = asyncio.create_task(recovering.bind())
     await recovery_handler.entered.wait()
-    second_bind = asyncio.create_task(recovering.bind())
-    await asyncio.get_running_loop().run_in_executor(None, lambda: None)
-    assert not first_bind.done()
-    assert not second_bind.done()
+    second_entered = asyncio.Event()
+
+    async def bind_second_caller() -> None:
+        second_entered.set()
+        await recovering.bind()
+
+    second_bind = asyncio.create_task(bind_second_caller())
+    await second_entered.wait()
     assert recovering._bind_task is not None
     recovery_task = recovering._bind_task
     recovery_handler.release.set()
@@ -215,52 +242,67 @@ async def test_concurrent_bind_waits_for_one_recovery() -> None:
     await recovering.close()
 
 
-async def test_two_engines_admit_only_one_turn_atomically() -> None:
-    handler = IdempotentRecorder()
-    handler.block = True
-    first_engine = LifecycleCommandEngine(EventBus(), effect_handler=handler)
-    second_engine = LifecycleCommandEngine(EventBus(), effect_handler=handler)
-    await asyncio.gather(first_engine.bind(), second_engine.bind())
-    first = asyncio.create_task(first_engine.begin_turn(
-        request_id="atomic-first",
-        session_id="atomic-session",
-        identity=identity("atomic-first"),
-    ))
-    await handler.entered.wait()
+async def test_single_engine_authority() -> None:
+    first_engine = LifecycleCommandEngine(EventBus())
+    second_engine = LifecycleCommandEngine(EventBus())
+    await first_engine.bind()
     try:
-        await second_engine.begin_turn(
-            request_id="atomic-second",
-            session_id="atomic-session",
-            identity=identity("atomic-second"),
-        )
-    except LifecycleCommandRejected:
+        await second_engine.bind()
+    except LifecycleAuthorityBound:
         pass
     else:
-        raise AssertionError("two engines admitted competing turns")
-    handler.release.set()
-    assert (await first).snapshot.identity == identity("atomic-first")
-    assert lifecycle_command_store.session_snapshot(
-        "atomic-session"
-    ).identity == identity("atomic-first")
+        raise AssertionError("second live lifecycle authority was accepted")
+    await first_engine.close()
+    await second_engine.bind()
+    await second_engine.close()
 
-    handler.block = False
-    existing_effect_ids = set(handler.consequences)
-    shared_request_results = await asyncio.gather(
-        first_engine.begin_turn(
-            request_id="shared-request",
-            session_id="shared-session-a",
-            identity=identity("shared-a"),
-        ),
-        second_engine.begin_turn(
-            request_id="shared-request",
-            session_id="shared-session-b",
-            identity=identity("shared-b"),
-        ),
+
+async def test_authority_rejects_another_thread_and_event_loop() -> None:
+    bound = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def hold_authority() -> None:
+        async def run() -> None:
+            engine = LifecycleCommandEngine(EventBus())
+            await engine.bind()
+            bound.set()
+            await asyncio.to_thread(release.wait)
+            await engine.close()
+
+        try:
+            asyncio.run(run())
+        except BaseException as exc:
+            failures.append(exc)
+            bound.set()
+        finally:
+            finished.set()
+
+    owner_thread = threading.Thread(
+        target=hold_authority,
+        name="lifecycle-authority-owner",
     )
-    assert all(result.snapshot.phase == "starting" for result in shared_request_results)
-    shared_effect_ids = set(handler.consequences) - existing_effect_ids
-    assert len(shared_effect_ids) == 2
-    await asyncio.gather(first_engine.close(), second_engine.close())
+    owner_thread.start()
+    await asyncio.to_thread(bound.wait)
+    if failures:
+        release.set()
+        await asyncio.to_thread(finished.wait)
+        owner_thread.join()
+        raise AssertionError("authority owner thread failed") from failures[0]
+    competing = LifecycleCommandEngine(EventBus())
+    try:
+        await competing.bind()
+    except LifecycleAuthorityBound:
+        pass
+    else:
+        raise AssertionError("cross-loop lifecycle authority was accepted")
+    finally:
+        release.set()
+        await asyncio.to_thread(finished.wait)
+        owner_thread.join()
+    assert not failures
+    assert PRODUCTION_CUTOVER_READY is False
 
 
 async def test_at_least_once_effect_and_best_effort_notification() -> None:
@@ -322,8 +364,8 @@ async def test_identity_retirement_and_waiter_cleanup() -> None:
         "wait-session",
         {"running"},
         identity=turn,
+        min_revision=999,
     ))
-    await wait_until_registered(engine, "wait-session")
     await engine.finish_turn(
         request_id="wait-finish",
         session_id="wait-session",
@@ -342,7 +384,7 @@ async def test_identity_retirement_and_waiter_cleanup() -> None:
         "wait-session",
         {"running"},
     ))
-    await wait_until_registered(engine, "wait-session")
+    await engine.wait_until_waiter_registered("wait-session")
     cancelled.cancel()
     try:
         await cancelled
@@ -350,6 +392,73 @@ async def test_identity_retirement_and_waiter_cleanup() -> None:
         pass
     assert engine.waiter_count("wait-session") == 0
     await engine.close()
+
+
+async def test_store_initialization_and_atomic_compare_insert() -> None:
+    session_id = "store-cas-session"
+    snapshot = lifecycle_command_store.session_snapshot(session_id)
+    commands = (
+        LifecycleCommand(
+            request_id="store-cas-a",
+            session_id=session_id,
+            kind="begin_turn",
+            identity=identity("store-cas-a"),
+        ),
+        LifecycleCommand(
+            request_id="store-cas-b",
+            session_id=session_id,
+            kind="begin_turn",
+            identity=identity("store-cas-b"),
+        ),
+    )
+    outcomes = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                lifecycle_command_store.persist_plan,
+                command,
+                snapshot,
+                STATES["idle"].decide(snapshot, command),
+            )
+            for command in commands
+        ),
+        return_exceptions=True,
+    )
+    assert sum(outcome == "inserted" for outcome in outcomes) == 1
+    assert sum(
+        isinstance(outcome, lifecycle_command_store.TransitionConflict)
+        for outcome in outcomes
+    ) == 1
+
+    alternate_home = Path(tempfile.mkdtemp(prefix="ba-lifecycle-init-"))
+    original_home = os.environ["BETTER_AGENT_HOME"]
+    original_migrate = lifecycle_command_store._migrate
+    migrate_calls = 0
+
+    def counted_migrate(connection: sqlite3.Connection) -> None:
+        nonlocal migrate_calls
+        migrate_calls += 1
+        original_migrate(connection)
+
+    try:
+        os.environ["BETTER_AGENT_HOME"] = str(alternate_home)
+        lifecycle_command_store._migrate = counted_migrate
+        await asyncio.gather(
+            *(asyncio.to_thread(lifecycle_command_store.initialize) for _ in range(4))
+        )
+        assert migrate_calls == 1
+        lifecycle_command_store._migrate = lambda connection: (_ for _ in ()).throw(
+            AssertionError("ordinary read attempted schema migration")
+        )
+        assert lifecycle_command_store.session_snapshot("unused").phase == "idle"
+        assert lifecycle_command_store.open_connection_count() == 0
+        database = alternate_home / "lifecycle-command-state.sqlite3"
+        moved = alternate_home / "moved.sqlite3"
+        os.replace(database, moved)
+        os.replace(moved, database)
+    finally:
+        lifecycle_command_store._migrate = original_migrate
+        os.environ["BETTER_AGENT_HOME"] = original_home
+        shutil.rmtree(alternate_home)
 
 
 def test_handler_validation_and_sqlite_scaling_contract() -> None:
@@ -375,10 +484,37 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
     else:
         raise AssertionError("effect payload remained mutable")
 
+    for non_finite in (float("nan"), float("inf"), float("-inf")):
+        try:
+            LifecycleEffect(
+                "non-finite:0",
+                "observe_turn_begin",
+                {"value": non_finite},
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("non-finite JSON number was accepted")
+
+    command = LifecycleCommand(
+        request_id="effect-identity",
+        session_id="effect-identity-session",
+        kind="begin_turn",
+        identity=identity("effect-identity"),
+    )
+    assert effect_id_for(command, 0) != effect_id_for(command, 1)
+    other_session = LifecycleCommand(
+        request_id=command.request_id,
+        session_id="effect-identity-other-session",
+        kind=command.kind,
+        identity=identity("effect-identity-other"),
+    )
+    assert effect_id_for(command, 0) != effect_id_for(other_session, 0)
+
     counts = lifecycle_command_store.table_counts()
     assert counts["transitions"] >= 10
     database = TEST_HOME / "lifecycle-command-state.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         plan = connection.execute(
             """
             EXPLAIN QUERY PLAN
@@ -397,9 +533,11 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
 async def main() -> None:
     await test_state_contract_idempotency_and_reload()
     await test_concurrent_bind_waits_for_one_recovery()
-    await test_two_engines_admit_only_one_turn_atomically()
+    await test_single_engine_authority()
+    await test_authority_rejects_another_thread_and_event_loop()
     await test_at_least_once_effect_and_best_effort_notification()
     await test_identity_retirement_and_waiter_cleanup()
+    await test_store_initialization_and_atomic_compare_insert()
     test_handler_validation_and_sqlite_scaling_contract()
     print("lifecycle command engine integration: ok")
 

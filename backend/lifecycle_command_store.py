@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from lifecycle_command_model import (
     LifecycleCommand,
@@ -23,6 +25,10 @@ _STATUSES = {
     "committed",
     "notification_attempted",
 }
+_INIT_LOCK = threading.Lock()
+_INITIALIZED_PATHS: set[Path] = set()
+_OPEN_CONNECTIONS = 0
+_OPEN_CONNECTIONS_LOCK = threading.Lock()
 
 
 class TransitionConflict(RuntimeError):
@@ -41,19 +47,52 @@ def _path() -> Path:
     return ba_home() / "lifecycle-command-state.sqlite3"
 
 
-def _connect() -> sqlite3.Connection:
-    path = _path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=2.0, isolation_level=None)
+def store_path() -> Path:
+    return _path().resolve()
+
+
+def initialize() -> None:
+    path = store_path()
+    with _INIT_LOCK:
+        if path in _INITIALIZED_PATHS:
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        connection = sqlite3.connect(path, timeout=2.0, isolation_level=None)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA synchronous = FULL")
+            _migrate(connection)
+        finally:
+            connection.close()
+        _INITIALIZED_PATHS.add(path)
+
+
+@contextmanager
+def connection() -> Iterator[sqlite3.Connection]:
+    path = store_path()
+    with _INIT_LOCK:
+        initialized = path in _INITIALIZED_PATHS
+    if not initialized:
+        raise RuntimeError("lifecycle command store is not initialized")
+    database = sqlite3.connect(
+        f"file:{path}?mode=rw",
+        timeout=2.0,
+        isolation_level=None,
+        uri=True,
+    )
+    global _OPEN_CONNECTIONS
     try:
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA synchronous = FULL")
-        _migrate(connection)
-    except Exception:
-        connection.close()
-        raise
-    return connection
+        with _OPEN_CONNECTIONS_LOCK:
+            _OPEN_CONNECTIONS += 1
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA foreign_keys = ON")
+        database.execute("PRAGMA synchronous = FULL")
+        yield database
+    finally:
+        database.close()
+        with _OPEN_CONNECTIONS_LOCK:
+            _OPEN_CONNECTIONS -= 1
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
@@ -123,15 +162,10 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA journal_mode = WAL")
 
 
-def initialize() -> None:
-    with _connect():
-        return
-
-
 def session_snapshot(session_id: str) -> LifecycleSnapshot:
     validate_identifier(session_id, "session_id")
-    with _connect() as connection:
-        row = connection.execute(
+    with connection() as database:
+        row = database.execute(
             """
             SELECT session_id, phase, identity_json, revision
             FROM sessions
@@ -145,8 +179,8 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
 def transition_for(session_id: str, request_id: str) -> dict[str, Any] | None:
     validate_identifier(session_id, "session_id")
     validate_identifier(request_id, "request_id")
-    with _connect() as connection:
-        row = connection.execute(
+    with connection() as database:
+        row = database.execute(
             """
             SELECT *
             FROM transitions
@@ -156,7 +190,7 @@ def transition_for(session_id: str, request_id: str) -> dict[str, Any] | None:
         ).fetchone()
         if row is None:
             return None
-        effects = connection.execute(
+        effects = database.execute(
             """
             SELECT effect_id, kind, payload_json, result_json
             FROM effects
@@ -176,8 +210,8 @@ def required_transition(session_id: str, request_id: str) -> dict[str, Any]:
 
 
 def unfinished_transitions() -> tuple[tuple[str, str], ...]:
-    with _connect() as connection:
-        rows = connection.execute(
+    with connection() as database:
+        rows = database.execute(
             """
             SELECT session_id, request_id
             FROM transitions
@@ -205,9 +239,9 @@ def persist_plan(
         )
         for ordinal, effect in enumerate(plan.effects)
     )
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        existing = connection.execute(
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        existing = database.execute(
             """
             SELECT fingerprint
             FROM transitions
@@ -216,13 +250,13 @@ def persist_plan(
             (command.session_id, command.request_id),
         ).fetchone()
         if existing is not None:
-            connection.commit()
+            database.commit()
             if existing["fingerprint"] != command.fingerprint():
                 raise TransitionConflict(
                     "request_id is already bound to another command"
                 )
             return "existing"
-        connection.execute(
+        database.execute(
             """
             INSERT INTO sessions(session_id, phase, identity_json, revision)
             VALUES (?, 'idle', NULL, 0)
@@ -230,7 +264,7 @@ def persist_plan(
             """,
             (command.session_id,),
         )
-        current = connection.execute(
+        current = database.execute(
             """
             SELECT session_id, phase, identity_json, revision
             FROM sessions
@@ -239,10 +273,10 @@ def persist_plan(
             (command.session_id,),
         ).fetchone()
         if _snapshot_from_row(current) != snapshot:
-            connection.rollback()
+            database.rollback()
             raise SnapshotChanged("lifecycle snapshot changed before intent")
         try:
-            connection.execute(
+            database.execute(
                 """
                 INSERT INTO transitions(
                     session_id,
@@ -267,7 +301,7 @@ def persist_plan(
                     notification_payload_json,
                 ),
             )
-            connection.executemany(
+            database.executemany(
                 """
                 INSERT INTO effects(
                     session_id,
@@ -291,11 +325,11 @@ def persist_plan(
                 ),
             )
         except sqlite3.IntegrityError as exc:
-            connection.rollback()
+            database.rollback()
             raise TransitionBusy(
                 "another lifecycle transition is unfinished"
             ) from exc
-        connection.commit()
+        database.commit()
         return "inserted"
 
 
@@ -308,9 +342,9 @@ def record_effect_result(
     if type(ordinal) is not int or ordinal < 0:
         raise ValueError("effect ordinal must be a non-negative integer")
     result_json = _dump(result)
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute(
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
             """
             SELECT result_json
             FROM effects
@@ -319,12 +353,12 @@ def record_effect_result(
             (session_id, request_id, ordinal),
         ).fetchone()
         if row is None:
-            connection.rollback()
+            database.rollback()
             raise RuntimeError("lifecycle effect disappeared")
         if row["result_json"] is not None:
-            connection.commit()
+            database.commit()
             return _load_object(row["result_json"], "effect result")
-        connection.execute(
+        database.execute(
             """
             UPDATE effects
             SET result_json = ?
@@ -332,7 +366,7 @@ def record_effect_result(
             """,
             (result_json, session_id, request_id, ordinal),
         )
-        remaining = connection.execute(
+        remaining = database.execute(
             """
             SELECT 1
             FROM effects
@@ -342,7 +376,7 @@ def record_effect_result(
             (session_id, request_id),
         ).fetchone()
         if remaining is None:
-            connection.execute(
+            database.execute(
                 """
                 UPDATE transitions
                 SET status = 'effects_applied'
@@ -350,14 +384,14 @@ def record_effect_result(
                 """,
                 (session_id, request_id),
             )
-        connection.commit()
+        database.commit()
     return result
 
 
 def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute(
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
             """
             SELECT source_revision, next_snapshot_json, status
             FROM transitions
@@ -366,18 +400,18 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
             (session_id, request_id),
         ).fetchone()
         if row is None:
-            connection.rollback()
+            database.rollback()
             raise RuntimeError("lifecycle transition disappeared")
         next_snapshot = LifecycleSnapshot.from_dict(
             _load_object(row["next_snapshot_json"], "next snapshot")
         )
         if row["status"] in {"committed", "notification_attempted"}:
-            connection.commit()
+            database.commit()
             return next_snapshot
         if row["status"] != "effects_applied":
-            connection.rollback()
+            database.rollback()
             raise RuntimeError("cannot commit lifecycle transition before effects")
-        cursor = connection.execute(
+        cursor = database.execute(
             """
             UPDATE sessions
             SET phase = ?, identity_json = ?, revision = ?
@@ -392,9 +426,9 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
             ),
         )
         if cursor.rowcount != 1:
-            connection.rollback()
+            database.rollback()
             raise SnapshotChanged("lifecycle revision changed before commit")
-        connection.execute(
+        database.execute(
             """
             UPDATE transitions
             SET status = 'committed'
@@ -402,14 +436,14 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
             """,
             (session_id, request_id),
         )
-        connection.commit()
+        database.commit()
     return next_snapshot
 
 
 def mark_notification_attempted(session_id: str, request_id: str) -> bool:
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        cursor = connection.execute(
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        cursor = database.execute(
             """
             UPDATE transitions
             SET status = 'notification_attempted'
@@ -417,18 +451,23 @@ def mark_notification_attempted(session_id: str, request_id: str) -> bool:
             """,
             (session_id, request_id),
         )
-        connection.commit()
+        database.commit()
     return cursor.rowcount == 1
 
 
 def table_counts() -> dict[str, int]:
-    with _connect() as connection:
+    with connection() as database:
         return {
-            table: connection.execute(
+            table: database.execute(
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()[0]
             for table in ("sessions", "transitions", "effects")
         }
+
+
+def open_connection_count() -> int:
+    with _OPEN_CONNECTIONS_LOCK:
+        return _OPEN_CONNECTIONS
 
 
 def _snapshot_from_row(row: sqlite3.Row) -> LifecycleSnapshot:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -25,6 +26,8 @@ MAX_IDENTIFIER_LENGTH = 256
 
 def freeze_json(value: Any) -> Any:
     if value is None or type(value) in {str, int, float, bool}:
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
         return value
     if isinstance(value, dict):
         if any(type(key) is not str for key in value):
@@ -178,7 +181,7 @@ class LifecycleEffect:
         if not isinstance(self.payload, Mapping):
             raise ValueError("lifecycle effect payload must be a mapping")
         frozen = freeze_json(dict(self.payload))
-        json.dumps(materialize_json(frozen))
+        json.dumps(materialize_json(frozen), allow_nan=False)
         object.__setattr__(self, "payload", frozen)
 
     def to_dict(self) -> dict[str, Any]:
@@ -208,7 +211,7 @@ class TransitionPlan:
     def __post_init__(self) -> None:
         validate_identifier(self.fact_type, "fact_type")
         frozen = freeze_json(dict(self.fact_payload))
-        json.dumps(materialize_json(frozen))
+        json.dumps(materialize_json(frozen), allow_nan=False)
         object.__setattr__(self, "fact_payload", frozen)
 
 

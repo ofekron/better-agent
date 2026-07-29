@@ -66,7 +66,7 @@ class LifecycleState(ABC):
         if outcome is not None:
             payload["outcome"] = outcome
         effect = LifecycleEffect(
-            effect_id=self._effect_id(command),
+            effect_id=effect_id_for(command, 0),
             kind=effect_kind,
             payload=payload,
         )
@@ -76,14 +76,6 @@ class LifecycleState(ABC):
             fact_type="lifecycle_command_completed",
             fact_payload=payload,
         )
-
-    @staticmethod
-    def _effect_id(command: LifecycleCommand) -> str:
-        material = (
-            f"{command.session_id}\0{command.request_id}\0{command.kind}"
-        ).encode("utf-8")
-        return f"lifecycle:{hashlib.sha256(material).hexdigest()}"
-
 
 class IdleState(LifecycleState):
     phase = "idle"
@@ -192,3 +184,13 @@ STATES: dict[str, LifecycleState] = {
     state.phase: state
     for state in (IdleState(), StartingState(), RunningState(), StoppingState())
 }
+
+
+def effect_id_for(command: LifecycleCommand, ordinal: int) -> str:
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("effect ordinal must be a non-negative integer")
+    material = (
+        f"{command.session_id}\0{command.request_id}\0"
+        f"{command.kind}\0{ordinal}"
+    ).encode("utf-8")
+    return f"lifecycle:{hashlib.sha256(material).hexdigest()}"
