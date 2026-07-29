@@ -151,6 +151,54 @@ def test_loopback_post_bounds_refresh_and_redacts_tokens(monkeypatch):
     assert disk_token not in detail
 
 
+def test_loopback_post_refreshes_multiple_generations_and_redacts_history(
+    monkeypatch,
+):
+    tokens = ("A" * 43, "B" * 43, "C" * 43)
+    token_file = bc_home() / "internal_token"
+    token_file.write_text(tokens[1], encoding="utf-8")
+    token_file.chmod(0o600)
+    runner_operation_host._install_internal_token_authority(tokens[0])
+    seen_tokens = []
+
+    def fake_urlopen(req, *args, **kwargs):
+        token = req.headers.get("X-internal-token")
+        seen_tokens.append(token)
+        if token == tokens[1]:
+            token_file.write_text(tokens[2], encoding="utf-8")
+            token_file.chmod(0o600)
+        raise urllib.error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(
+                f'{{"detail":"rejected {" ".join(tokens)}"}}'.encode(),
+            ),
+        )
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            runner._post_loopback_sync(
+                {},
+                backend_url="http://127.0.0.1:9999",
+                internal_token=tokens[0],
+                url_path="/api/internal/ask-fork",
+                timeout=24 * 60 * 60,
+                non_json_t_key="runner.delegate_non_json",
+                log_prefix="delegate POST",
+                backoff_cap=60.0,
+            )
+    finally:
+        runner_operation_host.stop_active_host()
+
+    detail = str(exc.value)
+    assert seen_tokens == list(tokens)
+    assert detail.count("[redacted]") == len(tokens)
+    assert not any(token in detail for token in tokens)
+
+
 def test_loopback_post_surfaces_http_error_detail(monkeypatch):
     def fake_urlopen(req, *args, **kwargs):
         raise urllib.error.HTTPError(

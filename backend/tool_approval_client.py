@@ -76,7 +76,7 @@ def request_tool_approval(
     """Return True only if the user approved. False on denial, timeout, or any
     error (fail-closed). Detached runners can outlive backend restarts/token
     rotations, so transient transport failures retry within the approval HTTP
-    deadline and 403 retries once with the current disk token."""
+    deadline and each newly observed 403 refreshes from the current disk token."""
     if not backend_url or not internal_token or not app_session_id:
         return False
     body = json.dumps(

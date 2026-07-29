@@ -1658,7 +1658,11 @@ def _post_loopback_sync(
         try:
             return _request_once(token_lease.token)
         except urllib.error.HTTPError as e:
-            if e.code == 403 and token_lease.refresh_after_forbidden():
+            if (
+                e.code == 403
+                and time.monotonic() < deadline
+                and token_lease.refresh_after_forbidden()
+            ):
                 continue
             raise_loopback_http_error(
                 e,

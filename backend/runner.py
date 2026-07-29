@@ -1288,7 +1288,7 @@ def _post_loopback_sync(
     """Shared retry loop for the runner's loopback POSTs into the
     backend (delegate, open-file-panel). Retries on transient connection
     loss with exponential backoff and refreshes the runner's canonical
-    token once after a forbidden response. If `recover` returns a dict
+    token after each newly forbidden generation. If `recover` returns a dict
     after a connection loss, that durable result is returned instead of
     retrying. `log_prefix` is interpolated into the retry warning.
     `non_json_t_key` is the i18n key for the "response body did not parse"
@@ -1337,7 +1337,11 @@ def _post_loopback_sync(
             return _request_once(token_lease.token)
         except urllib.error.HTTPError as e:
             _mark_runner_activity()
-            if e.code == 403 and token_lease.refresh_after_forbidden():
+            if (
+                e.code == 403
+                and time.monotonic() < deadline
+                and token_lease.refresh_after_forbidden()
+            ):
                 continue
             raise_loopback_http_error(
                 e,
