@@ -170,16 +170,24 @@ def make_private_file(path: Path) -> None:
     path.chmod(0o600)
 
 
-def windows_path_has_private_acl(path: Path) -> bool:
+def windows_path_has_private_acl(
+    path: Path,
+    *,
+    require_protected: bool = True,
+) -> bool:
     if os.name != "nt":
         return False
     script = r"""
 $ErrorActionPreference = "Stop"
 $acl = Get-Acl -LiteralPath $args[0]
+$requireProtected = $args[1] -eq "true"
 $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($current, "S-1-5-18", "S-1-5-32-544")
 $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner) {
+if (
+    ($requireProtected -and -not $acl.AreAccessRulesProtected) -or
+    $allowed -notcontains $owner
+) {
     exit 2
 }
 foreach ($rule in $acl.GetAccessRules(
@@ -206,6 +214,7 @@ Write-Output "private"
                 "-Command",
                 script,
                 str(path),
+                str(require_protected).lower(),
             ],
             check=False,
             capture_output=True,

@@ -182,6 +182,23 @@ def test_frozen_bundle_excludes_optional_mcp_cli_surface() -> None:
     assert "filter_submodules=_without_optional_mcp_cli" in spec
 
 
+def test_windows_materialization_uses_acl_authority() -> None:
+    bundle_source = (
+        ROOT / "backend" / "provider_frozen_bundle.py"
+    ).read_text(encoding="utf-8")
+    sdk_source = (
+        ROOT / "backend" / "provider_claude_execution.py"
+    ).read_text(encoding="utf-8")
+    smoke_source = (
+        ROOT / "backend" / "provider_frozen_artifact_smoke.py"
+    ).read_text(encoding="utf-8")
+    for source in (bundle_source, sdk_source):
+        assert 'if os.name == "nt"' in source
+        assert "windows_path_has_private_acl(" in source
+        assert "require_protected=False" in source
+    assert "dir=ba_home()" in smoke_source
+
+
 def test_artifact_smoke_failure_is_structured() -> None:
     with tempfile.TemporaryDirectory(prefix="artifact-failure-") as raw:
         output = Path(raw) / "result.json"
@@ -283,6 +300,7 @@ def main() -> None:
     test_macos_default_bundle_root_preserves_app_layout()
     test_artifact_workflow_installs_backend_relative_requirements()
     test_frozen_bundle_excludes_optional_mcp_cli_surface()
+    test_windows_materialization_uses_acl_authority()
     test_artifact_smoke_failure_is_structured()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()

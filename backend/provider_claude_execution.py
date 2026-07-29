@@ -10,6 +10,7 @@ from pathlib import Path
 
 from codex_execution_common import ExecutionContractError, sha256_fd
 from codex_execution_identity import FileIdentity
+from paths import windows_path_has_private_acl
 from provider_family_launch_attestation import (
     CriticalPackageIdentity,
     capture_critical_package,
@@ -225,14 +226,21 @@ def materialize_claude_sdk_package(
         raise ExecutionContractError(
             "Claude Agent SDK destination is unavailable",
         ) from exc
+    unsafe_permissions = (
+        not windows_path_has_private_acl(
+            container,
+            require_protected=False,
+        )
+        if os.name == "nt"
+        else (
+            bool(stat.S_IMODE(observed_container.st_mode) & 0o022)
+            or observed_container.st_uid != os.getuid()
+        )
+    )
     if (
         not stat.S_ISDIR(observed_container.st_mode)
         or stat.S_ISLNK(observed_container.st_mode)
-        or stat.S_IMODE(observed_container.st_mode) & 0o022
-        or (
-            hasattr(os, "getuid")
-            and observed_container.st_uid != os.getuid()
-        )
+        or unsafe_permissions
     ):
         raise ExecutionContractError(
             "Claude Agent SDK destination is unsafe",

@@ -20,6 +20,7 @@ from provider_frozen_bundle import attest_materialized_frozen_bundle
 from provider_launch_identity import capture_cli_launch
 from provider_pinned_launch import open_pinned_runner_launch
 from provider_runner_launch import capture_runner_launch
+from paths import ba_home
 
 
 _RUNNERS = {
@@ -251,6 +252,7 @@ def _smoke(output: Path) -> int:
         raise ExecutionContractError("artifact smoke requires frozen runtime")
     with tempfile.TemporaryDirectory(
         prefix="better-agent-artifact-smoke-",
+        dir=ba_home(),
     ) as raw:
         root = Path(raw)
         results = {

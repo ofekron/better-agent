@@ -24,6 +24,7 @@ from codex_execution_identity import (
     file_identity_to_dict,
 )
 from provider_launch_identity import DirectoryIdentity, _require_object
+from paths import windows_path_has_private_acl
 
 
 _ENTRY_KINDS = frozenset({"directory", "file", "symlink"})
@@ -580,14 +581,21 @@ def _safe_materialization_parent(destination: Path) -> Path:
         raise ExecutionContractError(
             "frozen bundle destination is unavailable",
         ) from exc
+    unsafe_permissions = (
+        not windows_path_has_private_acl(
+            parent,
+            require_protected=False,
+        )
+        if os.name == "nt"
+        else (
+            bool(stat.S_IMODE(observed.st_mode) & 0o022)
+            or observed.st_uid != os.getuid()
+        )
+    )
     if (
         not stat.S_ISDIR(observed.st_mode)
         or stat.S_ISLNK(observed.st_mode)
-        or stat.S_IMODE(observed.st_mode) & 0o022
-        or (
-            hasattr(os, "getuid")
-            and observed.st_uid != os.getuid()
-        )
+        or unsafe_permissions
     ):
         raise ExecutionContractError(
             "frozen bundle destination is unsafe",
