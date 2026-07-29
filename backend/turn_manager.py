@@ -3,8 +3,9 @@
 Owns the per-session turn lifecycle (start, drive, retry, cancel,
 recovery resume, finalize) and is the SOLE emitter of
 `lifecycle.turn_*` facts on the backend event bus across every
-terminal path: success-complete, cancel-stopped, error, recovery-
-finalize, and worker-inner.
+live terminal path: success-complete, cancel-stopped, and error-stopped.
+Recovery terminalization belongs to lifecycle reconciliation. Worker
+executions emit distinct worker-scoped lifecycle facts.
 
 Coordinator (in `orchestrator.py`) delegates its core turn methods
 (`run_turn`, `_drive_cli_run`, `cancel_turn`) through `self._ensure_tm()`
@@ -15,10 +16,8 @@ Shared helpers (`_TRANSIENT_*`, `_is_rate_limit_attempt`,
 live in `backend/turn_helpers.py` — a neutral module both
 `orchestrator.py` and `turn_manager.py` import from.
 
-Worker-inner integration: `orchs/manager/_delegation.py`'s terminal
-path calls `coordinator.turn_manager._publish_terminal_lifecycle(
-"complete"|"stopped", reason="worker_inner")` directly — no separate
-public hook on TurnManager.
+Worker-inner integration uses `_publish_worker_terminal_lifecycle`, so a
+worker terminal cannot target the parent user-turn state machine.
 
 Convergence-invariant contract: TurnManager owns turn LIFECYCLE
 (framing, bus emits, retry/reuse, queue-drain). It does NOT own
@@ -343,14 +342,29 @@ class TurnManager:
         self,
         *,
         app_session_id: str,
+        user_turn_id: str,
+        execution_turn_id: str,
+        lifecycle_message_id: str,
+        assistant_message_id: str,
         manager_session_id: Optional[str] = None,
     ) -> None:
+        self._validate_lifecycle_identity(
+            user_turn_id=user_turn_id,
+            execution_turn_id=execution_turn_id,
+            lifecycle_message_id=lifecycle_message_id,
+            assistant_message_id=assistant_message_id,
+        )
         try:
             root_id = (
                 session_manager._root_id_for(app_session_id)
                 or app_session_id
             )
-            payload: dict = {}
+            payload = {
+                "user_turn_id": user_turn_id,
+                "execution_turn_id": execution_turn_id,
+                "lifecycle_message_id": lifecycle_message_id,
+                "assistant_message_id": assistant_message_id,
+            }
             if manager_session_id is not None:
                 payload["manager_session_id"] = manager_session_id
             await bus.publish(BusEvent(
@@ -371,6 +385,10 @@ class TurnManager:
         kind: Literal["complete", "stopped"],
         *,
         app_session_id: str,
+        user_turn_id: str,
+        execution_turn_id: str,
+        lifecycle_message_id: str,
+        assistant_message_id: str,
         trace_id: Optional[str] = None,
         reason: Optional[str] = None,
         provider_kind: Optional[str] = None,
@@ -378,24 +396,32 @@ class TurnManager:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
 
-        EVERY terminal path routes through here — success-complete,
-        cancel-stopped, error, recovery-finalize, worker-inner. Today
-        the error/recovery/worker paths in `Coordinator` emit only the
-        direct WS framing and skip the bus; this helper closes that
-        gap (the (ii) behavior change). Any `lifecycle.turn_*`
-        subscriber observes every terminal.
+        Every live user execution terminal routes through here:
+        success-complete, cancel-stopped, and error-stopped. Startup recovery
+        terminates projected turns only through `LifecycleStateTree.reconcile`.
 
         `reason` is an optional payload tag — "success" / "cancelled"
-        / "error" / "recovery_finalize" / "worker_inner" — so
+        / "error" — so
         subscribers can distinguish causes without resorting to two
         event types per cause.
         """
+        self._validate_lifecycle_identity(
+            user_turn_id=user_turn_id,
+            execution_turn_id=execution_turn_id,
+            lifecycle_message_id=lifecycle_message_id,
+            assistant_message_id=assistant_message_id,
+        )
         try:
             root_id = (
                 session_manager._root_id_for(app_session_id)
                 or app_session_id
             )
-            payload: dict = {}
+            payload = {
+                "user_turn_id": user_turn_id,
+                "execution_turn_id": execution_turn_id,
+                "lifecycle_message_id": lifecycle_message_id,
+                "assistant_message_id": assistant_message_id,
+            }
             if trace_id is not None:
                 payload["trace_id"] = trace_id
             if reason is not None:
@@ -420,6 +446,59 @@ class TurnManager:
                 "lifecycle bus publish failed kind=%s sid=%s",
                 kind, app_session_id,
             )
+
+    async def _publish_worker_terminal_lifecycle(
+        self,
+        kind: Literal["complete", "stopped"],
+        *,
+        app_session_id: str,
+        delegation_id: str,
+        execution_turn_id: str,
+        assistant_message_id: str,
+        provider_run_id: str,
+        provider_kind: str,
+    ) -> None:
+        try:
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await bus.publish(BusEvent(
+                type=f"lifecycle.worker_turn_{kind}",
+                root_id=root_id,
+                sid=app_session_id,
+                run_id=provider_run_id,
+                payload={
+                    "delegation_id": delegation_id,
+                    "execution_turn_id": execution_turn_id,
+                    "assistant_message_id": assistant_message_id,
+                    "provider_kind": provider_kind,
+                },
+                persist=False,
+            ))
+        except Exception:
+            logger.exception(
+                "worker lifecycle bus publish failed kind=%s sid=%s",
+                kind,
+                app_session_id,
+            )
+
+    @staticmethod
+    def _validate_lifecycle_identity(
+        *,
+        user_turn_id: str,
+        execution_turn_id: str,
+        lifecycle_message_id: str,
+        assistant_message_id: str,
+    ) -> None:
+        for name, value in (
+            ("user_turn_id", user_turn_id),
+            ("execution_turn_id", execution_turn_id),
+            ("lifecycle_message_id", lifecycle_message_id),
+            ("assistant_message_id", assistant_message_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"lifecycle fact requires {name}")
 
     # ======================================================================
     # The `user_message_*` lifecycle (requested / queued / sent /
@@ -1464,12 +1543,15 @@ class TurnManager:
         supervisor verdict.
         """
         root_id = session_manager._root_id_for(app_session_id) or app_session_id
-        await self.lifecycle.publish(
-            "lifecycle.admission_cancel_requested",
-            root_id=root_id,
-            session_id=app_session_id,
-            payload={},
-        )
+        await self.lifecycle.bind()
+        lifecycle_identity = self.lifecycle.active_turn_identity(app_session_id)
+        if lifecycle_identity is not None:
+            await self.lifecycle.publish(
+                "lifecycle.admission_cancel_requested",
+                root_id=root_id,
+                session_id=app_session_id,
+                payload=lifecycle_identity,
+            )
         event = self.cancel_events.get(app_session_id)
         if not event:
             landed = False
@@ -1675,6 +1757,12 @@ class TurnManager:
             # ran.
             self._pending_cancel.pop(app_session_id, None)
             raise
+        owning_lifecycle_message_id = lifecycle_msg_id or user_msg.get("id")
+        if (
+            not isinstance(owning_lifecycle_message_id, str)
+            or not owning_lifecycle_message_id
+        ):
+            raise RuntimeError("turn requires an owning lifecycle message identity")
 
         cancel_event = asyncio.Event()
         self.cancel_events[app_session_id] = cancel_event
@@ -1781,6 +1869,7 @@ class TurnManager:
 
         primary_result: dict = {}
         frozen_provider_kind: Optional[str] = None
+        turn_lifecycle_started = False
 
         if (
             user_initiated
@@ -1845,8 +1934,13 @@ class TurnManager:
             }})
             await self._publish_turn_start_lifecycle(
                 app_session_id=app_session_id,
+                user_turn_id=owning_lifecycle_message_id,
+                execution_turn_id=turn_run_id,
+                lifecycle_message_id=owning_lifecycle_message_id,
+                assistant_message_id=new_msg["id"],
                 manager_session_id=session.get(session_id_field),
             )
+            turn_lifecycle_started = True
 
             # The session is resuming work, so the prior turn (even if it
             # errored) is no longer the "last" turn. Retire the error dot
@@ -1895,6 +1989,7 @@ class TurnManager:
                 primary_session_id=session.get("id"),
                 user_initiated=user_initiated,
                 turn_run_id=turn_run_id,
+                lifecycle_message_id=owning_lifecycle_message_id,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
@@ -2079,6 +2174,10 @@ class TurnManager:
                 await self._publish_terminal_lifecycle(
                     "complete",
                     app_session_id=app_session_id,
+                    user_turn_id=owning_lifecycle_message_id,
+                    execution_turn_id=turn_run_id,
+                    lifecycle_message_id=owning_lifecycle_message_id,
+                    assistant_message_id=assistant_msg_holder[0]["id"],
                     trace_id=trace.trace_id,
                     reason="success",
                     provider_kind=(
@@ -2089,6 +2188,10 @@ class TurnManager:
                 await self._publish_terminal_lifecycle(
                     "stopped",
                     app_session_id=app_session_id,
+                    user_turn_id=owning_lifecycle_message_id,
+                    execution_turn_id=turn_run_id,
+                    lifecycle_message_id=owning_lifecycle_message_id,
+                    assistant_message_id=assistant_msg_holder[0]["id"],
                     trace_id=trace.trace_id,
                     reason="error",
                     provider_kind=(
@@ -2140,6 +2243,10 @@ class TurnManager:
             await self._publish_terminal_lifecycle(
                 "stopped",
                 app_session_id=app_session_id,
+                user_turn_id=owning_lifecycle_message_id,
+                execution_turn_id=turn_run_id,
+                lifecycle_message_id=owning_lifecycle_message_id,
+                assistant_message_id=assistant_msg_holder[0]["id"],
                 trace_id=trace.trace_id,
                 reason="cancelled",
                 provider_kind=(
@@ -2240,15 +2347,20 @@ class TurnManager:
             # lifecycle subscribers blind to error
             # terminals. Treat as "stopped" since the turn did not
             # complete successfully.
-            await self._publish_terminal_lifecycle(
-                "stopped",
-                app_session_id=app_session_id,
-                trace_id=trace.trace_id,
-                reason="error",
-                provider_kind=(
-                    primary_result.get("provider_kind") or frozen_provider_kind
-                ),
-            )
+            if turn_lifecycle_started:
+                await self._publish_terminal_lifecycle(
+                    "stopped",
+                    app_session_id=app_session_id,
+                    user_turn_id=owning_lifecycle_message_id,
+                    execution_turn_id=turn_run_id,
+                    lifecycle_message_id=owning_lifecycle_message_id,
+                    assistant_message_id=assistant_msg_holder[0]["id"],
+                    trace_id=trace.trace_id,
+                    reason="error",
+                    provider_kind=(
+                        primary_result.get("provider_kind") or frozen_provider_kind
+                    ),
+                )
 
         finally:
             self.cancel_events.pop(app_session_id, None)
@@ -2363,6 +2475,7 @@ class TurnManager:
         primary_session_id: Optional[str] = None,
         user_initiated: bool = False,
         turn_run_id: str,
+        lifecycle_message_id: str,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
@@ -2870,13 +2983,19 @@ class TurnManager:
                         turn_run_id=turn_run_id,
                     )
                     execution_handle = self.lifecycle.register_execution_handle(execution)
+                    admission_identity = {
+                        "user_turn_id": lifecycle_message_id,
+                        "execution_turn_id": turn_run_id,
+                        "lifecycle_message_id": lifecycle_message_id,
+                        "assistant_message_id": target_message_id,
+                    }
                     await self.lifecycle.publish(
                         "lifecycle.admission_registered",
                         root_id=root_id,
                         session_id=app_session_id,
                         run_id=run_id,
                         payload={
-                            "turn_run_id": turn_run_id,
+                            **admission_identity,
                             "execution_handle": execution_handle,
                         },
                     )
@@ -2886,14 +3005,14 @@ class TurnManager:
                             "lifecycle.admission_cancel_requested",
                             root_id=root_id,
                             session_id=app_session_id,
-                            payload={},
+                            payload=admission_identity,
                         )
                     await self.lifecycle.publish(
                         "lifecycle.admission_starting",
                         root_id=root_id,
                         session_id=app_session_id,
                         run_id=run_id,
-                        payload={},
+                        payload=admission_identity,
                     )
                     try:
                         admitted = await _to_turn_dispatch_thread(
@@ -2909,7 +3028,7 @@ class TurnManager:
                                 root_id=root_id,
                                 session_id=app_session_id,
                                 run_id=run_id,
-                                payload={},
+                                payload=admission_identity,
                             )
                             admitted = await _to_turn_dispatch_thread(
                                 execution.wait_for_admission,
@@ -2920,7 +3039,7 @@ class TurnManager:
                                     root_id=root_id,
                                     session_id=app_session_id,
                                     run_id=run_id,
-                                    payload={},
+                                    payload=admission_identity,
                                 )
                                 admitted = await _to_turn_dispatch_thread(
                                     execution.wait_for_spawn_completion,
@@ -2931,7 +3050,7 @@ class TurnManager:
                                 root_id=root_id,
                                 session_id=app_session_id,
                                 run_id=run_id,
-                                payload={},
+                                payload=admission_identity,
                             )
                     except BaseException:
                         await self.lifecycle.publish(
@@ -2939,7 +3058,7 @@ class TurnManager:
                             root_id=root_id,
                             session_id=app_session_id,
                             run_id=run_id,
-                            payload={},
+                            payload=admission_identity,
                         )
                         raise
                     await self.lifecycle.publish(
@@ -2951,7 +3070,7 @@ class TurnManager:
                         root_id=root_id,
                         session_id=app_session_id,
                         run_id=run_id,
-                        payload={},
+                        payload=admission_identity,
                     )
                     if not admitted:
                         attempt_events.append({
@@ -3526,7 +3645,6 @@ class TurnManager:
             }
 
     # ======================================================================
-    # Worker-inner (`Coordinator.run_delegation` terminal) routing calls
-    # `self._c.turn_manager._publish_terminal_lifecycle("complete", ...,
-    # reason="worker_inner")` directly — no separate API surface needed.
+    # Worker-inner execution publishes a distinct worker-scoped lifecycle
+    # terminal so it cannot mutate the parent user-turn projection.
     # ======================================================================

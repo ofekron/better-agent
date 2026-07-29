@@ -16,6 +16,7 @@ _test_home.isolate("ba-test-lifecycle-state-machines-")
 
 from event_bus import BusEvent, EventBus  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
+from json_store import read_json, write_json  # noqa: E402
 import lifecycle_state_store  # noqa: E402
 from lifecycle_state_machines import LifecycleStateTree  # noqa: E402
 
@@ -38,6 +39,319 @@ def _execution():
         mode="native",
         app_session_id="session",
     )
+
+
+def _turn_identity(execution_turn_id: str, assistant_message_id: str) -> dict:
+    return {
+        "user_turn_id": "user-turn",
+        "lifecycle_message_id": "user-turn",
+        "execution_turn_id": execution_turn_id,
+        "assistant_message_id": assistant_message_id,
+    }
+
+
+async def _start_turn(
+    tree: LifecycleStateTree,
+    session_id: str,
+    *,
+    execution_turn_id: str = "turn-run",
+    assistant_message_id: str = "assistant-message",
+) -> dict:
+    identity = _turn_identity(execution_turn_id, assistant_message_id)
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id=session_id,
+        session_id=session_id,
+        payload=identity,
+    )
+    return identity
+
+
+def test_schema_v1_migrates_contiguously_to_v2() -> None:
+    write_json(lifecycle_state_store._path(), {
+        "version": 1,
+        "sessions": {
+            "legacy": {
+                "prompts": {"prompt": {"state": "queued"}},
+                "turn": {
+                    "state": "running",
+                    "admissions": {
+                        "live-run": {
+                            "turn_run_id": "live-execution",
+                            "state": "deferred",
+                        },
+                        "missing-run": {
+                            "turn_run_id": "missing-execution",
+                            "state": "deferred",
+                        },
+                    },
+                    "steers": {},
+                },
+            },
+        },
+    })
+    migrated = lifecycle_state_store.load()
+    assert migrated["version"] == 2
+    turn = migrated["sessions"]["legacy"]["turn"]
+    assert turn["state"] == "legacy_reconciling"
+    assert turn["execution_turn_id"] is None
+    assert turn["executions"] == {}
+    admission = turn["admissions"]["live-run"]
+    assert admission["execution_turn_id"] == "live-execution"
+    assert "turn_run_id" not in admission
+    assert read_json(lifecycle_state_store._path(), {}) == migrated
+    assert lifecycle_state_store.load() == migrated
+
+
+async def test_migrated_running_state_binds_and_reconciles_without_matching_live_turn() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    assert tree.session("legacy").turn.state == "legacy_reconciling"
+    await tree.reconcile(
+        "legacy",
+        live_run_ids={"live-run"},
+        queued_message_ids={"prompt"},
+        completed_message_ids=set(),
+    )
+    turn = tree.session("legacy").turn
+    assert turn.state == "legacy_reconciling"
+    assert set(turn.admissions) == {"live-run"}
+    await tree.reconcile(
+        "legacy",
+        live_run_ids=set(),
+        queued_message_ids=set(),
+        completed_message_ids={"prompt"},
+    )
+    assert tree.session("legacy").turn.state == "idle"
+    await tree.close()
+
+
+def test_schema_rejects_future_and_malformed_v2() -> None:
+    for projection in (
+        {"version": 3, "sessions": {}},
+        {
+            "version": 2,
+            "sessions": {
+                "bad": {
+                    "prompts": {},
+                    "turn": {
+                        "state": "running",
+                        "user_turn_id": None,
+                        "lifecycle_message_id": None,
+                        "execution_turn_id": None,
+                        "assistant_message_id": None,
+                        "executions": [],
+                        "admissions": {},
+                        "steers": {},
+                    },
+                },
+            },
+        },
+    ):
+        write_json(lifecycle_state_store._path(), projection)
+        try:
+            lifecycle_state_store.load()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("invalid lifecycle schema was accepted")
+    lifecycle_state_store.save({"version": 2, "sessions": {}})
+
+
+async def test_sequential_executions_share_user_turn_and_ignore_stale_terminal() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    await tree.publish(
+        "user_message_queued",
+        root_id="sequential",
+        session_id="sequential",
+        message_id="user-turn",
+        payload={},
+    )
+    first = _turn_identity("execution-1", "assistant-1")
+    second = _turn_identity("execution-2", "assistant-2")
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id="sequential",
+        session_id="sequential",
+        payload=first,
+    )
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="sequential",
+        session_id="sequential",
+        payload=first,
+    )
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id="sequential",
+        session_id="sequential",
+        payload=second,
+    )
+    await tree.publish(
+        "lifecycle.turn_stopped",
+        root_id="sequential",
+        session_id="sequential",
+        payload=first,
+    )
+
+    turn = tree.session("sequential").turn
+    assert turn.state == "running"
+    assert turn.user_turn_id == "user-turn"
+    assert turn.lifecycle_message_id == "user-turn"
+    assert turn.execution_turn_id == "execution-2"
+    assert turn.assistant_message_id == "assistant-2"
+    assert turn.executions["execution-1"].state == "complete"
+    assert turn.executions["execution-2"].state == "running"
+
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="sequential",
+        session_id="sequential",
+        payload=second,
+    )
+    assert turn.executions["execution-2"].state == "complete"
+    await tree.close()
+
+
+async def test_queued_successor_starts_with_clean_logical_turn_scope() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    for message_id in ("user-turn-a", "user-turn-b"):
+        await tree.publish(
+            "user_message_queued",
+            root_id="queued-successor",
+            session_id="queued-successor",
+            message_id=message_id,
+            payload={},
+        )
+    first = {
+        "user_turn_id": "user-turn-a",
+        "lifecycle_message_id": "user-turn-a",
+        "execution_turn_id": "execution-a",
+        "assistant_message_id": "assistant-a",
+    }
+    second = {
+        "user_turn_id": "user-turn-b",
+        "lifecycle_message_id": "user-turn-b",
+        "execution_turn_id": "execution-b",
+        "assistant_message_id": "assistant-b",
+    }
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id="queued-successor",
+        session_id="queued-successor",
+        payload=first,
+    )
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="queued-successor",
+        session_id="queued-successor",
+        payload=first,
+    )
+    await tree.publish(
+        "user_message_done",
+        root_id="queued-successor",
+        session_id="queued-successor",
+        message_id="user-turn-a",
+        payload={},
+    )
+    await tree.publish(
+        "lifecycle.turn_start",
+        root_id="queued-successor",
+        session_id="queued-successor",
+        payload=second,
+    )
+    await tree.publish(
+        "lifecycle.turn_stopped",
+        root_id="queued-successor",
+        session_id="queued-successor",
+        payload=first,
+    )
+
+    session = tree.session("queued-successor")
+    assert set(session.prompts) == {"user-turn-b"}
+    assert session.turn.state == "running"
+    assert session.turn.user_turn_id == "user-turn-b"
+    assert session.turn.execution_turn_id == "execution-b"
+    assert set(session.turn.executions) == {"execution-b"}
+    assert session.turn.admissions == {}
+    assert session.turn.steers == {}
+    await tree.close()
+
+
+async def test_missing_identity_and_worker_terminal_cannot_mutate_active_turn() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    identity = await _start_turn(tree, "identity-guard")
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="identity-guard",
+        session_id="identity-guard",
+        payload={},
+    )
+    await tree.publish(
+        "lifecycle.worker_turn_complete",
+        root_id="identity-guard",
+        session_id="identity-guard",
+        run_id="worker-provider-run",
+        payload={
+            "delegation_id": "delegation",
+            "execution_turn_id": "worker-turn",
+            "assistant_message_id": "assistant-message",
+        },
+    )
+    turn = tree.session("identity-guard").turn
+    assert turn.state == "running"
+    assert turn.execution_turn_id == identity["execution_turn_id"]
+    await tree.close()
+
+
+async def test_admission_rejects_stale_parent_and_ignores_stale_transition() -> None:
+    event_bus = EventBus()
+    tree = LifecycleStateTree(event_bus)
+    await tree.bind()
+    current = await _start_turn(tree, "admission-identity")
+    stale = _turn_identity("stale-execution", "stale-assistant")
+
+    rejected_execution = _execution()
+    rejected_handle = tree.register_execution_handle(rejected_execution)
+    await tree.publish(
+        "lifecycle.admission_registered",
+        root_id="admission-identity",
+        session_id="admission-identity",
+        run_id="stale-registration",
+        payload={**stale, "execution_handle": rejected_handle},
+    )
+    assert rejected_handle not in tree._execution_handles
+    assert "stale-registration" not in tree.session(
+        "admission-identity"
+    ).turn.admissions
+
+    execution = _execution()
+    handle = tree.register_execution_handle(execution)
+    await tree.publish(
+        "lifecycle.admission_registered",
+        root_id="admission-identity",
+        session_id="admission-identity",
+        run_id="provider-run",
+        payload={**current, "execution_handle": handle},
+    )
+    await tree.publish(
+        "lifecycle.admission_failed",
+        root_id="admission-identity",
+        session_id="admission-identity",
+        run_id="provider-run",
+        payload=stale,
+    )
+    admission = tree.session("admission-identity").turn.admissions["provider-run"]
+    assert admission.state == "registered"
+    assert handle in tree._execution_handles
+    await tree.close()
 
 
 async def test_fact_driven_hierarchy_and_pre_spawn_cancel() -> None:
@@ -65,25 +379,19 @@ async def test_fact_driven_hierarchy_and_pre_spawn_cancel() -> None:
         payload={},
         persist=False,
     ))
-    await event_bus.publish(BusEvent(
-        type="lifecycle.turn_start",
-        root_id="session",
-        sid="session",
-        payload={},
-        persist=False,
-    ))
+    identity = await _start_turn(tree, "session")
     await tree.publish(
         "lifecycle.admission_registered",
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={"turn_run_id": "turn-run", "execution_handle": handle_id},
+        payload={**identity, "execution_handle": handle_id},
     )
     await tree.publish(
         "lifecycle.admission_cancel_requested",
         root_id="session",
         session_id="session",
-        payload={},
+        payload=identity,
     )
 
     session = tree.session("session")
@@ -91,6 +399,27 @@ async def test_fact_driven_hierarchy_and_pre_spawn_cancel() -> None:
     assert session.turn.state == "running"
     assert session.turn.admissions["provider-run"].state == "cancelled"
     assert execution.wait_for_admission() is False
+    await tree.publish(
+        "lifecycle.admission_cancelled",
+        root_id="session",
+        session_id="session",
+        run_id="provider-run",
+        payload=identity,
+    )
+    await tree.publish(
+        "lifecycle.turn_stopped",
+        root_id="session",
+        session_id="session",
+        payload=identity,
+    )
+    await tree.publish(
+        "user_message_done",
+        root_id="session",
+        session_id="session",
+        message_id="message",
+        payload={},
+    )
+    await tree.close()
 
 
 async def test_same_facts_converge_to_same_tree() -> None:
@@ -112,12 +441,13 @@ async def test_same_facts_converge_to_same_tree() -> None:
                 payload={},
                 persist=False,
             ))
+        identity = _turn_identity("execution", "assistant")
         for event_type in ("lifecycle.turn_start", "lifecycle.turn_complete"):
             await event_bus.publish(BusEvent(
                 type=event_type,
                 root_id="session",
                 sid="session",
-                payload={},
+                payload=identity,
                 persist=False,
             ))
         session = tree.session("session")
@@ -135,7 +465,8 @@ async def test_bus_facts_are_serializable_and_tree_rebinds_after_close() -> None
     await tree.bind()
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
-    payload = {"turn_run_id": "turn-run", "execution_handle": handle_id}
+    identity = await _start_turn(tree, "session")
+    payload = {**identity, "execution_handle": handle_id}
     json.dumps(payload)
     await tree.publish(
         "lifecycle.admission_registered",
@@ -149,9 +480,15 @@ async def test_bus_facts_are_serializable_and_tree_rebinds_after_close() -> None
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={},
+        payload=identity,
     )
     assert handle_id not in tree._execution_handles
+    await tree.publish(
+        "lifecycle.turn_stopped",
+        root_id="session",
+        session_id="session",
+        payload=identity,
+    )
     await tree.close()
     await tree.bind()
     await tree.close()
@@ -163,19 +500,20 @@ async def test_deferred_commit_to_spawn_cancel_uses_real_facts() -> None:
     await tree.bind()
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
+    identity = await _start_turn(tree, "session")
     await tree.publish(
         "lifecycle.admission_registered",
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={"turn_run_id": "turn-run", "execution_handle": handle_id},
+        payload={**identity, "execution_handle": handle_id},
     )
     await tree.publish(
         "lifecycle.admission_deferred",
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={},
+        payload=identity,
     )
     assert execution._try_commit_spawn()
     await tree.publish(
@@ -183,13 +521,13 @@ async def test_deferred_commit_to_spawn_cancel_uses_real_facts() -> None:
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={},
+        payload=identity,
     )
     await tree.publish(
         "lifecycle.admission_cancel_requested",
         root_id="session",
         session_id="session",
-        payload={},
+        payload=identity,
     )
     assert execution.cancel_after_admission_requested
     assert handle_id in tree._execution_handles
@@ -199,9 +537,16 @@ async def test_deferred_commit_to_spawn_cancel_uses_real_facts() -> None:
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={},
+        payload=identity,
     )
     assert handle_id not in tree._execution_handles
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="session",
+        session_id="session",
+        payload=identity,
+    )
+    await tree.close()
 
 
 async def test_parent_terminal_and_close_cancel_pending_children() -> None:
@@ -210,18 +555,19 @@ async def test_parent_terminal_and_close_cancel_pending_children() -> None:
     await tree.bind()
     first = _execution()
     first_handle = tree.register_execution_handle(first)
+    first_identity = await _start_turn(tree, "session")
     await tree.publish(
         "lifecycle.admission_registered",
         root_id="session",
         session_id="session",
         run_id="provider-run",
-        payload={"turn_run_id": "turn-run", "execution_handle": first_handle},
+        payload={**first_identity, "execution_handle": first_handle},
     )
     await event_bus.publish(BusEvent(
         type="lifecycle.turn_stopped",
         root_id="session",
         sid="session",
-        payload={},
+        payload=first_identity,
         persist=False,
     ))
     assert first.wait_for_admission() is False
@@ -229,12 +575,18 @@ async def test_parent_terminal_and_close_cancel_pending_children() -> None:
 
     second = _execution()
     second_handle = tree.register_execution_handle(second)
+    second_identity = await _start_turn(
+        tree,
+        "session-2",
+        execution_turn_id="turn-run-2",
+        assistant_message_id="assistant-2",
+    )
     await tree.publish(
         "lifecycle.admission_registered",
         root_id="session-2",
         session_id="session-2",
         run_id="provider-run-2",
-        payload={"turn_run_id": "turn-run-2", "execution_handle": second_handle},
+        payload={**second_identity, "execution_handle": second_handle},
     )
     await tree.close()
     assert second.wait_for_admission() is False
@@ -244,12 +596,7 @@ async def test_steer_machine_stays_under_turn_and_fallback_transfers_owner() -> 
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
     await tree.bind()
-    await tree.publish(
-        "lifecycle.turn_start",
-        root_id="session",
-        session_id="session",
-        payload={},
-    )
+    identity = await _start_turn(tree, "session")
     for event_type in (
         "lifecycle.steer_requested",
         "lifecycle.steer_accepted",
@@ -274,7 +621,7 @@ async def test_steer_machine_stays_under_turn_and_fallback_transfers_owner() -> 
         session_id="session",
         run_id="provider-run",
         message_id="steer-2",
-        payload={},
+        payload=identity,
     )
     await tree.publish(
         "lifecycle.steer_failed",
@@ -299,7 +646,7 @@ async def test_steer_machine_stays_under_turn_and_fallback_transfers_owner() -> 
         "lifecycle.turn_complete",
         root_id="session",
         session_id="session",
-        payload={},
+        payload=identity,
     )
     assert session.turn.steers == {}
 
@@ -308,12 +655,7 @@ async def test_persisted_projection_reloads_and_reconciles_from_reality() -> Non
     first_bus = EventBus()
     first = LifecycleStateTree(first_bus)
     await first.bind()
-    await first.publish(
-        "lifecycle.turn_start",
-        root_id="restart-session",
-        session_id="restart-session",
-        payload={},
-    )
+    await _start_turn(first, "restart-session")
     await first.publish(
         "lifecycle.steer_requested",
         root_id="restart-session",
@@ -371,13 +713,14 @@ async def test_reconcile_queries_and_repairs_only_state_declared_evidence() -> N
     )
     execution = _execution()
     handle_id = tree.register_execution_handle(execution)
+    identity = await _start_turn(tree, "admission-only")
     await tree.publish(
         "lifecycle.admission_registered",
         root_id="admission-only",
         session_id="admission-only",
         run_id="missing-run",
         payload={
-            "turn_run_id": "turn-run",
+            **identity,
             "execution_handle": handle_id,
         },
     )
@@ -560,6 +903,21 @@ async def test_persist_merges_ordered_sessions_tombstones_and_retries() -> None:
 
 
 def main() -> None:
+    test_schema_v1_migrates_contiguously_to_v2()
+    asyncio.run(
+        test_migrated_running_state_binds_and_reconciles_without_matching_live_turn()
+    )
+    test_schema_rejects_future_and_malformed_v2()
+    asyncio.run(
+        test_sequential_executions_share_user_turn_and_ignore_stale_terminal()
+    )
+    asyncio.run(test_queued_successor_starts_with_clean_logical_turn_scope())
+    asyncio.run(
+        test_missing_identity_and_worker_terminal_cannot_mutate_active_turn()
+    )
+    asyncio.run(
+        test_admission_rejects_stale_parent_and_ignores_stale_transition()
+    )
     asyncio.run(test_fact_driven_hierarchy_and_pre_spawn_cancel())
     asyncio.run(test_same_facts_converge_to_same_tree())
     asyncio.run(test_bus_facts_are_serializable_and_tree_rebinds_after_close())

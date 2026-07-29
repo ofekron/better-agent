@@ -422,7 +422,7 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         async def emit_run_state(self, app_session_id):
             self.emits.append(app_session_id)
 
-        async def _publish_terminal_lifecycle(self, *args, **kwargs):
+        async def _publish_worker_terminal_lifecycle(self, *args, **kwargs):
             pass
 
     class Coordinator:
@@ -542,7 +542,7 @@ def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(
         async def emit_run_state(self, app_session_id):
             self.emits.append(app_session_id)
 
-        async def _publish_terminal_lifecycle(self, *_args, **_kwargs):
+        async def _publish_worker_terminal_lifecycle(self, *_args, **_kwargs):
             pass
 
     class Coordinator:
@@ -715,7 +715,7 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
         async def emit_run_state(self, app_session_id):
             self.emits.append(app_session_id)
 
-        async def _publish_terminal_lifecycle(self, *_args, **_kwargs):
+        async def _publish_worker_terminal_lifecycle(self, *_args, **_kwargs):
             pass
 
     class Coordinator:

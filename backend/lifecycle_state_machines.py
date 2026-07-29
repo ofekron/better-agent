@@ -63,7 +63,10 @@ class PromptLifecycleMachine:
 @dataclass
 class AdmissionLifecycleMachine:
     provider_run_id: str
-    turn_run_id: str
+    execution_turn_id: str
+    user_turn_id: str | None
+    lifecycle_message_id: str | None
+    assistant_message_id: str | None
     execution: PreparedExecution | None
     handle_id: str | None
     state: str = "registered"
@@ -96,8 +99,20 @@ class SteerLifecycleMachine:
 
 
 @dataclass
+class ExecutionTurnLifecycleMachine:
+    execution_turn_id: str
+    assistant_message_id: str | None
+    state: str = "running"
+
+
+@dataclass
 class TurnLifecycleMachine:
     state: str = "idle"
+    user_turn_id: str | None = None
+    lifecycle_message_id: str | None = None
+    execution_turn_id: str | None = None
+    assistant_message_id: str | None = None
+    executions: dict[str, ExecutionTurnLifecycleMachine] = field(default_factory=dict)
     admissions: dict[str, AdmissionLifecycleMachine] = field(default_factory=dict)
     steers: dict[str, SteerLifecycleMachine] = field(default_factory=dict)
 
@@ -195,8 +210,15 @@ class LifecycleStateTree:
             session.prompts
             or session.turn.admissions
             or session.turn.steers
-            or session.turn.state == "running"
+            or session.turn.state in {"running", "legacy_reconciling"}
         )
+
+    def active_turn_identity(self, session_id: str) -> dict[str, str] | None:
+        self._assert_owner()
+        session = self._sessions.get(session_id)
+        if session is None or session.turn.state != "running":
+            return None
+        return self._identity_from_turn(session.turn)
 
     async def _apply(self, event: BusEvent) -> None:
         self._assert_owner()
@@ -217,7 +239,25 @@ class LifecycleStateTree:
             return
         turn_state = _TURN_STATES.get(event.type)
         if turn_state:
+            identity = self._required_identity(event.payload)
+            if turn_state == "running":
+                self._start_execution_turn(session.turn, identity)
+                self._schedule_persist(event.sid)
+                return
+            if not self._terminal_matches(session.turn, identity):
+                logger.warning(
+                    "ignoring stale lifecycle terminal sid=%s current=%s incoming=%s",
+                    event.sid,
+                    session.turn.execution_turn_id,
+                    identity["execution_turn_id"],
+                )
+                return
             session.turn.state = turn_state
+            execution_turn_id = session.turn.execution_turn_id
+            if execution_turn_id:
+                execution = session.turn.executions.get(execution_turn_id)
+                if execution is not None:
+                    execution.state = turn_state
             if turn_state in {"complete", "stopped"}:
                 for admission in session.turn.admissions.values():
                     admission.cancel()
@@ -256,7 +296,20 @@ class LifecycleStateTree:
             self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_turn_missing":
+            if session.turn.state == "legacy_reconciling":
+                if any(event.payload.values()):
+                    return
+            elif not self._terminal_matches(
+                session.turn,
+                self._required_identity(event.payload),
+            ):
+                return
             session.turn.state = "stopped"
+            execution_turn_id = session.turn.execution_turn_id
+            if execution_turn_id:
+                execution = session.turn.executions.get(execution_turn_id)
+                if execution is not None:
+                    execution.state = "stopped"
             session.turn.admissions.clear()
             session.turn.steers.clear()
             self._retire_session_if_idle(event.sid)
@@ -273,7 +326,15 @@ class LifecycleStateTree:
             self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_admission_missing" and event.run_id:
-            session.turn.admissions.pop(event.run_id, None)
+            admission = session.turn.admissions.get(event.run_id)
+            if admission is None:
+                return
+            if session.turn.state == "legacy_reconciling":
+                if event.payload != {"legacy_reconciling": True}:
+                    return
+            elif not self._admission_identity_matches(admission, event.payload):
+                return
+            session.turn.admissions.pop(event.run_id)
             self._retire_session_if_idle(event.sid)
             self._schedule_persist(event.sid)
             return
@@ -283,7 +344,10 @@ class LifecycleStateTree:
             self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.admission_cancel_requested":
+            identity = self._required_identity(event.payload)
             for admission in session.turn.admissions.values():
+                if not self._admission_identity_matches(admission, identity):
+                    continue
                 admission.cancel()
             self._schedule_persist(event.sid)
             return
@@ -292,17 +356,24 @@ class LifecycleStateTree:
             return
         if admission_state == "registered":
             handle_id = event.payload.get("execution_handle")
-            turn_run_id = event.payload.get("turn_run_id")
             if not isinstance(handle_id, str):
                 raise TypeError("admission registration requires execution handle")
             execution = self._execution_handles.get(handle_id)
             if execution is None:
                 raise KeyError("admission execution handle is unavailable")
-            if not isinstance(turn_run_id, str) or not turn_run_id:
-                raise ValueError("admission registration requires turn_run_id")
+            identity = self._required_identity(event.payload)
+            if (
+                session.turn.state != "running"
+                or not self._terminal_matches(session.turn, identity)
+            ):
+                self._execution_handles.pop(handle_id, None)
+                raise ValueError("admission registration parent mismatch")
             session.turn.admissions[event.run_id] = AdmissionLifecycleMachine(
                 provider_run_id=event.run_id,
-                turn_run_id=turn_run_id,
+                execution_turn_id=identity["execution_turn_id"],
+                user_turn_id=identity["user_turn_id"],
+                lifecycle_message_id=identity["lifecycle_message_id"],
+                assistant_message_id=identity["assistant_message_id"],
                 execution=execution,
                 handle_id=handle_id,
             )
@@ -310,6 +381,8 @@ class LifecycleStateTree:
             return
         admission = session.turn.admissions.get(event.run_id)
         if admission is not None:
+            if not self._admission_identity_matches(admission, event.payload):
+                return
             admission.state = admission_state
             if admission_state in {"spawned", "cancelled", "failed"}:
                 self._execution_handles.pop(admission.handle_id, None)
@@ -332,7 +405,10 @@ class LifecycleStateTree:
             return
         root_id = session_id
         facts: list[tuple[str, str | None, str | None]] = []
-        turn_missing = session.turn.state == "running" and not live_run_ids
+        turn_missing = (
+            session.turn.state in {"running", "legacy_reconciling"}
+            and not live_run_ids
+        )
         if turn_missing:
             facts.append(("lifecycle.reconcile_turn_missing", None, None))
         for message_id in session.prompts:
@@ -360,13 +436,23 @@ class LifecycleStateTree:
                     steer.provider_run_id,
                 ))
         for event_type, message_id, run_id in facts:
+            payload: dict[str, Any] = {}
+            if event_type == "lifecycle.reconcile_turn_missing":
+                if session.turn.state != "legacy_reconciling":
+                    payload = self._identity_from_turn(session.turn)
+            elif event_type == "lifecycle.reconcile_admission_missing" and run_id:
+                if session.turn.state == "legacy_reconciling":
+                    payload = {"legacy_reconciling": True}
+                else:
+                    admission = session.turn.admissions[run_id]
+                    payload = self._identity_from_admission(admission)
             await self.publish(
                 event_type,
                 root_id=root_id,
                 session_id=session_id,
                 run_id=run_id,
                 message_id=message_id,
-                payload={},
+                payload=payload,
             )
 
     def reconciliation_requirements(self) -> dict[str, dict[str, Any]]:
@@ -384,11 +470,18 @@ class LifecycleStateTree:
                 for steer in session.turn.steers.values()
                 if steer.provider_run_id
             )
-            if not prompt_message_ids and session.turn.state != "running" and not run_ids:
+            if (
+                not prompt_message_ids
+                and session.turn.state not in {"running", "legacy_reconciling"}
+                and not run_ids
+            ):
                 continue
             requirements[session_id] = {
                 "prompt_message_ids": prompt_message_ids,
-                "needs_live_runs": session.turn.state == "running" or bool(run_ids),
+                "needs_live_runs": (
+                    session.turn.state in {"running", "legacy_reconciling"}
+                    or bool(run_ids)
+                ),
             }
         return requirements
 
@@ -437,9 +530,23 @@ class LifecycleStateTree:
             },
             "turn": {
                 "state": session.turn.state,
+                "user_turn_id": session.turn.user_turn_id,
+                "lifecycle_message_id": session.turn.lifecycle_message_id,
+                "execution_turn_id": session.turn.execution_turn_id,
+                "assistant_message_id": session.turn.assistant_message_id,
+                "executions": {
+                    execution_turn_id: {
+                        "state": execution.state,
+                        "assistant_message_id": execution.assistant_message_id,
+                    }
+                    for execution_turn_id, execution in session.turn.executions.items()
+                },
                 "admissions": {
                     run_id: {
-                        "turn_run_id": admission.turn_run_id,
+                        "execution_turn_id": admission.execution_turn_id,
+                        "user_turn_id": admission.user_turn_id,
+                        "lifecycle_message_id": admission.lifecycle_message_id,
+                        "assistant_message_id": admission.assistant_message_id,
                         "state": admission.state,
                     }
                     for run_id, admission in session.turn.admissions.items()
@@ -469,15 +576,58 @@ class LifecycleStateTree:
                     )
             raw_turn = raw_session.get("turn") or {}
             session.turn.state = str(raw_turn.get("state") or "idle")
+            session.turn.user_turn_id = self._optional_identity(
+                raw_turn,
+                "user_turn_id",
+            )
+            session.turn.lifecycle_message_id = self._optional_identity(
+                raw_turn,
+                "lifecycle_message_id",
+            )
+            session.turn.execution_turn_id = self._optional_identity(
+                raw_turn,
+                "execution_turn_id",
+            )
+            session.turn.assistant_message_id = self._optional_identity(
+                raw_turn,
+                "assistant_message_id",
+            )
+            for execution_turn_id, raw_execution in (
+                raw_turn.get("executions") or {}
+            ).items():
+                if not isinstance(execution_turn_id, str) or not isinstance(
+                    raw_execution,
+                    dict,
+                ):
+                    continue
+                session.turn.executions[execution_turn_id] = (
+                    ExecutionTurnLifecycleMachine(
+                        execution_turn_id,
+                        self._optional_identity(
+                            raw_execution,
+                            "assistant_message_id",
+                        ),
+                        str(raw_execution.get("state") or "running"),
+                    )
+                )
             for run_id, raw_admission in (raw_turn.get("admissions") or {}).items():
                 if not isinstance(run_id, str) or not isinstance(raw_admission, dict):
                     continue
-                turn_run_id = raw_admission.get("turn_run_id")
-                if not isinstance(turn_run_id, str):
+                execution_turn_id = raw_admission.get("execution_turn_id")
+                if not isinstance(execution_turn_id, str):
                     continue
                 session.turn.admissions[run_id] = AdmissionLifecycleMachine(
                     run_id,
-                    turn_run_id,
+                    execution_turn_id,
+                    self._optional_identity(raw_admission, "user_turn_id"),
+                    self._optional_identity(
+                        raw_admission,
+                        "lifecycle_message_id",
+                    ),
+                    self._optional_identity(
+                        raw_admission,
+                        "assistant_message_id",
+                    ),
                     None,
                     None,
                     str(raw_admission.get("state") or "registered"),
@@ -494,13 +644,123 @@ class LifecycleStateTree:
                 )
             self._sessions[session_id] = session
 
+    @staticmethod
+    def _optional_identity(payload: dict[str, Any], key: str) -> str | None:
+        value = payload.get(key)
+        return value if isinstance(value, str) and value else None
+
+    @staticmethod
+    def _required_identity(payload: dict[str, Any]) -> dict[str, str]:
+        identity: dict[str, str] = {}
+        for key in (
+            "user_turn_id",
+            "lifecycle_message_id",
+            "execution_turn_id",
+            "assistant_message_id",
+        ):
+            value = payload.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"lifecycle fact requires {key}")
+            identity[key] = value
+        return identity
+
+    @staticmethod
+    def _identity_from_turn(turn: TurnLifecycleMachine) -> dict[str, str]:
+        return LifecycleStateTree._required_identity({
+            "user_turn_id": turn.user_turn_id,
+            "lifecycle_message_id": turn.lifecycle_message_id,
+            "execution_turn_id": turn.execution_turn_id,
+            "assistant_message_id": turn.assistant_message_id,
+        })
+
+    @staticmethod
+    def _identity_from_admission(
+        admission: AdmissionLifecycleMachine,
+    ) -> dict[str, str]:
+        return LifecycleStateTree._required_identity({
+            "user_turn_id": admission.user_turn_id,
+            "lifecycle_message_id": admission.lifecycle_message_id,
+            "execution_turn_id": admission.execution_turn_id,
+            "assistant_message_id": admission.assistant_message_id,
+        })
+
+    @staticmethod
+    def _admission_identity_matches(
+        admission: AdmissionLifecycleMachine,
+        payload: dict[str, Any],
+    ) -> bool:
+        try:
+            return (
+                LifecycleStateTree._identity_from_admission(admission)
+                == LifecycleStateTree._required_identity(payload)
+            )
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _start_execution_turn(
+        turn: TurnLifecycleMachine,
+        identity: dict[str, str],
+    ) -> None:
+        incoming_execution_id = identity["execution_turn_id"]
+        if (
+            turn.state == "running"
+            and turn.execution_turn_id
+            and incoming_execution_id != turn.execution_turn_id
+        ):
+            raise ValueError("cannot replace a running execution turn")
+        incoming_user_turn_id = identity["user_turn_id"]
+        if (
+            turn.user_turn_id
+            and turn.user_turn_id != incoming_user_turn_id
+        ):
+            if turn.state == "running":
+                raise ValueError("cannot replace an active logical user turn")
+            if turn.state == "legacy_reconciling":
+                raise ValueError("legacy logical turn requires reconciliation")
+            if turn.admissions:
+                raise ValueError("terminal logical turn retained admissions")
+            turn.user_turn_id = None
+            turn.lifecycle_message_id = None
+            turn.execution_turn_id = None
+            turn.assistant_message_id = None
+            turn.executions.clear()
+            turn.steers.clear()
+        turn.state = "running"
+        turn.user_turn_id = incoming_user_turn_id
+        turn.lifecycle_message_id = identity["lifecycle_message_id"]
+        turn.execution_turn_id = incoming_execution_id
+        turn.assistant_message_id = identity["assistant_message_id"]
+        if incoming_execution_id:
+            turn.executions[incoming_execution_id] = ExecutionTurnLifecycleMachine(
+                incoming_execution_id,
+                identity["assistant_message_id"],
+            )
+
+    @staticmethod
+    def _terminal_matches(
+        turn: TurnLifecycleMachine,
+        identity: dict[str, str],
+    ) -> bool:
+        for field_name in (
+            "user_turn_id",
+            "lifecycle_message_id",
+            "execution_turn_id",
+            "assistant_message_id",
+        ):
+            current = getattr(turn, field_name)
+            incoming = identity[field_name]
+            if current and incoming != current:
+                return False
+        return True
+
     def _retire_session_if_idle(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
         if session is None:
             return
         if session.prompts or session.turn.admissions or session.turn.steers:
             return
-        if session.turn.state in {"running"}:
+        if session.turn.state in {"running", "legacy_reconciling"}:
             return
         self._sessions.pop(session_id, None)
 

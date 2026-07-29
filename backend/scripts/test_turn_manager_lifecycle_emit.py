@@ -1,11 +1,10 @@
-"""Lock test: TurnManager is the sole, exactly-once emitter of
-`lifecycle.turn_*` BusEvents across every terminal path.
+"""Lock test: TurnManager is the sole, exactly-once emitter of live
+`lifecycle.turn_*` BusEvents.
 
-The (ii) behavior change: every terminal — success, cancel, error,
-recovery-finalize — fires exactly one `lifecycle.turn_complete` or
-`lifecycle.turn_stopped` on the bus. Worker-inner is deliberately
-NOT wired in this isolated commit; it lands at cutover by calling
-`_publish_terminal_lifecycle` directly from `_delegation.py`.
+Every live terminal — success, cancel, error — fires exactly one
+`lifecycle.turn_complete` or `lifecycle.turn_stopped` on the bus.
+Recovery projection terminalization belongs to LifecycleStateTree reconciliation;
+worker execution uses distinct worker-scoped facts.
 
 Coverage strategy:
 - A runtime spy wraps `bus.publish` and inspects the caller frame.
@@ -15,7 +14,7 @@ Coverage strategy:
 - A textual "exactly one bus.publish in module" check supplements
   it by failing fast at edit time.
 - A static-source guard counts `_publish_terminal_lifecycle(`
-  invocations to lock the 5 expected terminal call sites — if a
+  invocations to lock the 4 expected live terminal call sites — if a
   future edit silently drops one, this test fails.
 - Subscribers used for capture are removed in `finally` blocks so
   the bus subscriber list doesn't accumulate across tests in the
@@ -34,6 +33,14 @@ _test_home.isolate("bc_test_tm_emit_")
 
 from event_bus import BusEvent, bus  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
+
+
+_IDENTITY = {
+    "user_turn_id": "user-turn",
+    "execution_turn_id": "execution-turn",
+    "lifecycle_message_id": "lifecycle-message",
+    "assistant_message_id": "assistant-message",
+}
 
 
 class _StubCoordinator:
@@ -64,7 +71,7 @@ def _unsubscribe(handler) -> None:
 # ---------------------------------------------------------------------------
 def test_textual_check_no_other_bus_publish_in_module() -> None:
     """Per-file bus.publish funnels after the UPM split:
-      turn_manager.py: 2 (start + terminal funnels)
+      turn_manager.py: 3 (start + user terminal + worker terminal funnels)
       user_prompt_manager.py: 1 (user lifecycle funnel)
     Each file's count locks down exactly-one-funnel-per-responsibility.
     """
@@ -76,16 +83,20 @@ def test_textual_check_no_other_bus_publish_in_module() -> None:
     assert "_publish_terminal_lifecycle" in tm_src
     # Count actual call sites (`bus.publish(`), not docstring mentions.
     n_tm = tm_src.count("bus.publish(")
-    assert n_tm == 2, (
-        f"expected exactly 2 `bus.publish` calls in turn_manager.py "
+    assert n_tm == 3, (
+        f"expected exactly 3 `bus.publish` calls in turn_manager.py "
         f"(inside lifecycle funnels), got {n_tm} — "
         f"an unexpected emit site exists"
     )
     # Defeat alias-based evasion of the runtime spy.
     assert "= bus.publish" not in tm_src
     assert "from event_bus import publish" not in tm_src
-    # Guard against re-introducing the dead public hook.
-    assert "publish_worker_inner_terminal" not in tm_src
+    assert "_publish_worker_terminal_lifecycle" in tm_src
+    delegation_src = (
+        backend / "orchs" / "manager" / "_delegation.py"
+    ).read_text()
+    assert "_publish_worker_terminal_lifecycle(" in delegation_src
+    assert "_publish_terminal_lifecycle(" not in delegation_src
 
     # UserPromptManager.
     assert "_publish_user_lifecycle" in upm_src
@@ -113,9 +124,8 @@ def test_textual_check_no_other_bus_publish_in_module() -> None:
 def test_run_turn_source_calls_helper_at_every_terminal() -> None:
     """Lock the per-function distribution of `_publish_terminal_lifecycle(`
     call sites — not just the global count. Cardinality alone is
-    bypassable: an edit that adds a 6th call inside `run_turn` while
-    removing the recovery emit would pass a count check but break
-    the (ii) contract on the recovery path.
+    bypassable: moving or replacing one live terminal call could preserve
+    a global count while breaking the per-path contract.
 
     Expected:
       run_turn: success-complete, failed-result-stopped,
@@ -147,7 +157,7 @@ def test_run_turn_source_calls_helper_at_every_terminal() -> None:
     }, (
         f"per-function `_publish_terminal_lifecycle(` distribution "
         f"diverged from the (ii) contract: {per_func} "
-        f"(expected run_turn=3). "
+        f"(expected run_turn=4). "
         f"A terminal emit was added, dropped, or relocated to the "
         f"wrong method."
     )
@@ -221,10 +231,16 @@ def test_runtime_spy_bus_publish_only_through_helper() -> None:
     try:
         tm = TurnManager(_StubCoordinator())
         asyncio.run(tm._publish_terminal_lifecycle(
-            "complete", app_session_id="sid-spy-1", reason="success",
+            "complete",
+            app_session_id="sid-spy-1",
+            reason="success",
+            **_IDENTITY,
         ))
         asyncio.run(tm._publish_terminal_lifecycle(
-            "stopped", app_session_id="sid-spy-2", reason="error",
+            "stopped",
+            app_session_id="sid-spy-2",
+            reason="error",
+            **_IDENTITY,
         ))
     finally:
         bus.publish = real_publish  # type: ignore[assignment]
@@ -244,6 +260,10 @@ def test_publish_terminal_emits_exactly_once_complete() -> None:
         asyncio.run(tm._publish_terminal_lifecycle(
             "complete",
             app_session_id="sid-success",
+            user_turn_id="user-turn",
+            execution_turn_id="execution-turn",
+            lifecycle_message_id="lifecycle-message",
+            assistant_message_id="assistant-message",
             trace_id="trace-1",
             reason="success",
             provider_kind="codex",
@@ -254,8 +274,39 @@ def test_publish_terminal_emits_exactly_once_complete() -> None:
         assert events[0].payload.get("reason") == "success"
         assert events[0].payload.get("trace_id") == "trace-1"
         assert events[0].payload.get("provider_kind") == "codex"
+        assert events[0].payload.get("user_turn_id") == "user-turn"
+        assert events[0].payload.get("execution_turn_id") == "execution-turn"
+        assert (
+            events[0].payload.get("lifecycle_message_id")
+            == "lifecycle-message"
+        )
+        assert (
+            events[0].payload.get("assistant_message_id")
+            == "assistant-message"
+        )
     finally:
         _unsubscribe(h)
+
+
+def test_turn_lifecycle_helpers_require_complete_identity() -> None:
+    tm = TurnManager(_StubCoordinator())
+    for invoke in (
+        lambda: tm._publish_turn_start_lifecycle(
+            app_session_id="missing",
+            **{**_IDENTITY, "assistant_message_id": ""},
+        ),
+        lambda: tm._publish_terminal_lifecycle(
+            "complete",
+            app_session_id="missing",
+            **{**_IDENTITY, "execution_turn_id": ""},
+        ),
+    ):
+        try:
+            asyncio.run(invoke())
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incomplete lifecycle identity was accepted")
 
 
 def test_publish_turn_start_emits_lifecycle_start() -> None:
@@ -264,30 +315,69 @@ def test_publish_turn_start_emits_lifecycle_start() -> None:
         tm = TurnManager(_StubCoordinator())
         asyncio.run(tm._publish_turn_start_lifecycle(
             app_session_id="sid-start",
+            user_turn_id="user-turn",
+            execution_turn_id="execution-turn",
+            lifecycle_message_id="lifecycle-message",
+            assistant_message_id="assistant-message",
             manager_session_id="agent-1",
         ))
         events = [e for e in captured if e.sid == "sid-start"]
         assert len(events) == 1, f"expected 1 emit, got {len(events)}"
         assert events[0].type == "lifecycle.turn_start"
         assert events[0].payload.get("manager_session_id") == "agent-1"
+        assert events[0].payload.get("user_turn_id") == "user-turn"
+        assert events[0].payload.get("execution_turn_id") == "execution-turn"
+        assert (
+            events[0].payload.get("lifecycle_message_id")
+            == "lifecycle-message"
+        )
+        assert (
+            events[0].payload.get("assistant_message_id")
+            == "assistant-message"
+        )
         assert events[0].persist is False
     finally:
         _unsubscribe(h)
+
+
+def test_worker_terminal_is_distinct_from_parent_turn_terminal() -> None:
+    captured: list[BusEvent] = []
+
+    async def capture(event: BusEvent) -> None:
+        captured.append(event)
+
+    bus.subscribe("lifecycle.worker_turn_*", capture, name="worker-terminal")
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_worker_terminal_lifecycle(
+            "complete",
+            app_session_id="sid-worker",
+            delegation_id="delegation",
+            execution_turn_id="worker-execution",
+            assistant_message_id="parent-assistant",
+            provider_run_id="provider-run",
+            provider_kind="claude",
+        ))
+        assert len(captured) == 1
+        event = captured[0]
+        assert event.type == "lifecycle.worker_turn_complete"
+        assert event.run_id == "provider-run"
+        assert event.payload["execution_turn_id"] == "worker-execution"
+    finally:
+        _unsubscribe(capture)
 
 
 def test_publish_terminal_emits_exactly_once_each_stopped_cause() -> None:
     captured, h = _subscribe_capture("tm-test-stopped")
     try:
         tm = TurnManager(_StubCoordinator())
-        causes = [
-            ("sid-cancel", "cancelled"),
-            ("sid-error", "error"),
-            ("sid-recovery", "recovery_finalize"),
-            ("sid-recovery-failed", "recovery_failed"),
-        ]
+        causes = [("sid-cancel", "cancelled"), ("sid-error", "error")]
         for sid, reason in causes:
             asyncio.run(tm._publish_terminal_lifecycle(
-                "stopped", app_session_id=sid, reason=reason,
+                "stopped",
+                app_session_id=sid,
+                reason=reason,
+                **_IDENTITY,
             ))
         by_sid: dict[str, list[BusEvent]] = {}
         for e in captured:
@@ -435,7 +525,10 @@ def test_publish_terminal_swallows_subscriber_exception() -> None:
     try:
         tm = TurnManager(_StubCoordinator())
         asyncio.run(tm._publish_terminal_lifecycle(
-            "complete", app_session_id="sid-bad-sub", reason="success",
+            "complete",
+            app_session_id="sid-bad-sub",
+            reason="success",
+            **_IDENTITY,
         ))
     finally:
         _unsubscribe(_bad_handler)
@@ -447,6 +540,9 @@ if __name__ == "__main__":
     test_run_turn_records_provider_result_before_user_done()
     test_runtime_spy_bus_publish_only_through_helper()
     test_publish_terminal_emits_exactly_once_complete()
+    test_turn_lifecycle_helpers_require_complete_identity()
+    test_publish_turn_start_emits_lifecycle_start()
+    test_worker_terminal_is_distinct_from_parent_turn_terminal()
     test_publish_terminal_emits_exactly_once_each_stopped_cause()
     test_user_lifecycle_routes_through_user_prompt_manager()
     test_reported_error_makes_the_done_payload_fail()

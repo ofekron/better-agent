@@ -1631,17 +1631,15 @@ async def run_delegation_locked(
         **result_payload,
     }})
 
-    # (ii) worker-inner terminal — single bus emit through
-    # `TurnManager._publish_terminal_lifecycle` so every
-    # `lifecycle.turn_*` subscriber sees the worker turn end.
-    # Pre-cutover this fact was invisible on the bus; only the parent
-    # manager turn's terminal fired. Worker turns are independent units
-    # of work — under the per-session lock this collapses safely
-    # (no fan-out explosion).
-    await coordinator.turn_manager._publish_terminal_lifecycle(
+    # Worker execution is independent from the parent user turn. Publish a
+    # worker-scoped terminal so it cannot close the parent's lifecycle slot.
+    await coordinator.turn_manager._publish_worker_terminal_lifecycle(
         "complete" if success else "stopped",
         app_session_id=app_session_id,
-        reason="worker_inner",
+        delegation_id=delegation_id,
+        execution_turn_id=worker_run_id,
+        assistant_message_id=target_message_id or worker_run_id,
+        provider_run_id=run_id,
         provider_kind=provider.KIND,
     )
 
