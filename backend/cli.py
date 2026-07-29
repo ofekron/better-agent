@@ -23,7 +23,7 @@ Usage:
   python cli.py --provider Z.AI --model glm-5.1
   python cli.py --json                        # jsonl pass-through, no colors
   python cli.py --no-color
-  python cli.py --port 8000                   # where to look for an existing backend
+  python cli.py --port 18765                  # where to look for an existing backend (default: run.sh's port)
 """
 
 import argparse
@@ -55,6 +55,13 @@ from session_manager import manager as session_manager
 # REST calls and `?token=` on the /ws/chat upgrade. Empty for backends that
 # don't require auth (e.g. a cookie-authed dev session).
 _AUTH_TOKEN: Optional[str] = None
+
+# Same env vars and fallback order run.sh uses to pick the backend port, so
+# the CLI's default matches whatever port a normally-launched backend is
+# actually listening on.
+DEFAULT_BACKEND_PORT = int(
+    os.environ.get("BETTER_AGENT_BACKEND_PORT") or os.environ.get("BETTER_CLAUDE_BACKEND_PORT") or 18765
+)
 
 
 def _auth_headers(extra: Optional[dict] = None) -> dict:
@@ -821,7 +828,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--model", help="model id (default: provider/session default)")
     p.add_argument("--json", action="store_true", help="emit raw jsonl events instead of pretty output")
     p.add_argument("--no-color", action="store_true", help="disable ANSI colors")
-    p.add_argument("--port", type=int, default=8000, help="port of the running backend to connect to (default 8000)")
+    p.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_BACKEND_PORT,
+        help=f"port of the running backend to connect to (default {DEFAULT_BACKEND_PORT})",
+    )
     p.add_argument(
         "--token",
         help="bearer token to authenticate to an auth-gated backend (default: $BETTER_CLAUDE_CLI_TOKEN)",
