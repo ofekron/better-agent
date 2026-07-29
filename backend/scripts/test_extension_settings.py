@@ -19,6 +19,13 @@ import extension_store  # noqa: E402
 import builtin_mcp_config  # noqa: E402
 import better_agent_sdk as sdk  # noqa: E402
 import config_store  # noqa: E402
+import installation_profile  # noqa: E402
+
+# Bare test homes have no installation.json, so _record_active() would gate
+# every installed-extension assertion here on integrations being off. Same
+# monkeypatch test_native_mcp_grant_wiring.py and
+# test_cross_provider_harness_parity.py already use.
+installation_profile.integrations_enabled = lambda: True
 
 
 class _FakeKeychain:
@@ -58,6 +65,10 @@ _FAKE_RECORD = {
     },
     "source": {"type": "git"},
 }
+
+# Derived, not spelled out: the account format is production's to choose (it
+# uses ":" because password_manager rejects "/" in an account).
+_TOKEN_ACCOUNT = extension_store._setting_secret_account("ofek.demo", "token")
 
 
 def _with_fake_extension(keychain: _FakeKeychain):
@@ -220,7 +231,7 @@ def test_secret_routed_to_keychain_and_redacted() -> None:
         assert result["secret_present"]["token"] is False
         # SET routes to the keychain, never to the JSON store
         extension_store.set_extension_setting("ofek.demo", "token", "supersecret")
-        assert keychain.entries[(extension_store._SETTING_SECRET_SERVICE, "ofek.demo/token")] == "supersecret"
+        assert keychain.entries[(extension_store._SETTING_SECRET_SERVICE, _TOKEN_ACCOUNT)] == "supersecret"
         # GET still never returns the value, only the presence flag
         result = extension_store.get_extension_settings("ofek.demo")
         assert result["values"]["token"] is None
@@ -237,9 +248,9 @@ def test_secret_clear_and_unknown_key_rejected() -> None:
     restore = _with_fake_extension(keychain)
     try:
         extension_store.set_extension_setting("ofek.demo", "token", "abc")
-        assert keychain.has_service_password(extension_store._SETTING_SECRET_SERVICE, "ofek.demo/token")
+        assert keychain.has_service_password(extension_store._SETTING_SECRET_SERVICE, _TOKEN_ACCOUNT)
         extension_store.set_extension_setting("ofek.demo", "token", "")  # empty clears
-        assert not keychain.has_service_password(extension_store._SETTING_SECRET_SERVICE, "ofek.demo/token")
+        assert not keychain.has_service_password(extension_store._SETTING_SECRET_SERVICE, _TOKEN_ACCOUNT)
         try:
             extension_store.set_extension_setting("ofek.demo", "bogus", 1)
             raise AssertionError("expected rejection for unknown key")
@@ -374,7 +385,7 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
         encoding="utf-8",
     )
     package = Path(_TMP_HOME) / "private-fixtures" / "scheduler"
-    (package / "mcp").mkdir(parents=True, exist_ok=True)
+    package.mkdir(parents=True, exist_ok=True)
     manifest = {
         "kind": extension_store.MANIFEST_KIND,
         "id": "ofek.scheduler",
@@ -385,8 +396,14 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
         "entrypoints": {
             "mcp": [
                 {
+                    # A command entrypoint keeps this test on the toggle it
+                    # actually covers: a `python` entrypoint would resolve
+                    # through dependency_plan.assert_active_plan, whose hash
+                    # folds in the BETTER_AGENT_HOME-installed requirements
+                    # while its marker lives in the shared repo venv -- so an
+                    # isolated test home always reads as stale.
                     "name": "scheduler",
-                    "python": "mcp/server.py",
+                    "command": "scheduler-stub",
                     "user_facing": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
@@ -397,7 +414,6 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
         "marketplace": {},
     }
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (package / "mcp" / "server.py").write_text("print('scheduler')\n", encoding="utf-8")
     extension_store._install_from_package_dir(  # type: ignore[attr-defined]
         package_dir=package,
         source={
@@ -407,6 +423,11 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
             "ref": "",
             "commit_sha": "scheduler-private",
         },
+        # Installing no longer starts an extension: fresh installs land
+        # disabled and the user turns them on. This fixture arrives enabled so
+        # the assertions below stay about the per-MCP-server toggle rather
+        # than the install-enable policy.
+        default_enabled=True,
         persist=True,
     )
     inputs = {
