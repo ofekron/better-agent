@@ -54,7 +54,6 @@ from backend_instance_lock import (
 from env_compat import dual_env, get_env
 from event_bus import BusEvent, bus as event_bus
 import browser_trust
-import hook_store
 from event_shape import (
     has_assistant_text,
     project_content_snapshot,
@@ -63,7 +62,6 @@ from event_shape import (
 from git_status_cache import cache as git_status_cache
 import hot_path_executor
 from hot_path_executor import hot_path, session_detail_path, session_list_path
-from node_op import node_op
 from remote_sessions_cache import cache as remote_sessions_cache
 from paths import ba_home
 from i18n import t
@@ -97,7 +95,6 @@ from requirements_query_runner import (
 )
 import memory_store
 import user_input_store
-import device_token_store
 import task_output_preview_urls
 import mobile_bundle_ticket
 import installation_capabilities
@@ -1322,7 +1319,6 @@ import session_search
 import session_bridge
 import coordination
 import project_update_store
-import project_structure_edit_session
 import virtual_session_prompt_handlers
 import extension_store
 import harness_field_writer
@@ -1631,6 +1627,8 @@ app_composition.wire(
     coordinator=coordinator,
     session_lite=lambda sid: _session_lite(sid),
     publish_worker_fanout=lambda sid, **kw: _publish_worker_fanout_required(sid, **kw),
+    invalidate_session_list_cache=_invalidate_session_list_user_prefs_cache,
+    notify_projects_changed=lambda: _broadcast_projects_changed(),
 )
 
 # Modules main.py uses directly beyond mounting them; the mounting
@@ -2008,209 +2006,6 @@ if (
 # ============================================================================
 
 
-# ---- User preferences ----
-
-@app.get("/api/user-prefs")
-async def get_user_prefs(request: Request):
-    login_username = (request.session.get("user") or {}).get("username")
-    return await asyncio.to_thread(user_prefs.get_all, login_username)
-
-
-@app.patch("/api/user-prefs")
-async def patch_user_prefs(request: Request, body: dict = Body(...)):
-    login_username = (request.session.get("user") or {}).get("username")
-
-    def _patch_user_prefs_sync() -> dict:
-        if "auto_restart_on_idle" in body:
-            raise ValueError("auto_restart_on_idle is no longer supported")
-        if "user_display_name" in body:
-            user_prefs.set_user_display_name(body["user_display_name"])
-        if "send_mode" in body:
-            user_prefs.set_send_mode(body["send_mode"])
-        if "language" in body:
-            user_prefs.set_language(body["language"])
-        if "shortcut_responses" in body:
-            user_prefs.set_shortcut_responses(body["shortcut_responses"])
-        if "cross_session_delegate_auto" in body:
-            val = body["cross_session_delegate_auto"]
-            if not isinstance(val, bool):
-                raise ValueError("cross_session_delegate_auto must be a boolean")
-            user_prefs.set_cross_session_delegate_auto(val)
-        if "context_strategy" in body:
-            user_prefs.set_context_strategy(body["context_strategy"])
-        if "session_auto_delete_days" in body:
-            val = body["session_auto_delete_days"]
-            if val is not None and (
-                isinstance(val, bool) or not isinstance(val, int) or val < 1
-            ):
-                raise ValueError("session_auto_delete_days must be null or a positive integer")
-            user_prefs.set_session_auto_delete_days(val)
-        if "font_family" in body:
-            val = body["font_family"]
-            if val not in ("system", "serif", "mono", "inter"):
-                raise ValueError("font_family must be system, serif, mono, or inter")
-            user_prefs.set_font_family(val)
-        if "font_size" in body:
-            val = body["font_size"]
-            if (
-                isinstance(val, bool)
-                or not isinstance(val, int)
-                or val < user_prefs.MIN_FONT_SIZE
-                or val > user_prefs.MAX_FONT_SIZE
-            ):
-                raise ValueError(
-                    f"font_size must be an integer between "
-                    f"{user_prefs.MIN_FONT_SIZE} and {user_prefs.MAX_FONT_SIZE}"
-                )
-            user_prefs.set_font_size(val)
-        if "appearance_theme" in body:
-            val = body["appearance_theme"]
-            if val not in user_prefs.APPEARANCE_THEME_VALUES:
-                raise ValueError("appearance_theme must be default, nord, or dracula")
-            user_prefs.set_appearance_theme(val)
-        if "first_run_wizard_done" in body:
-            val = body["first_run_wizard_done"]
-            if not isinstance(val, bool):
-                raise ValueError("first_run_wizard_done must be a boolean")
-            user_prefs.set_first_run_wizard_done(val)
-        if "network_bind_address" in body:
-            val = body["network_bind_address"]
-            if val not in ("127.0.0.1", "0.0.0.0"):
-                raise ValueError("network_bind_address must be 127.0.0.1 or 0.0.0.0")
-            user_prefs.set_network_bind_address(val)
-        if "folder_view_enabled" in body:
-            val = body["folder_view_enabled"]
-            if not isinstance(val, bool):
-                raise ValueError("folder_view_enabled must be a boolean")
-            user_prefs.set_folder_view_enabled(val)
-        if "session_sort" in body:
-            val = body["session_sort"]
-            if not isinstance(val, str):
-                raise ValueError("session_sort must be a string")
-            user_prefs.set_session_sort(val)
-        if "session_status_sort" in body:
-            val = body["session_status_sort"]
-            if not isinstance(val, bool):
-                raise ValueError("session_status_sort must be a boolean")
-            user_prefs.set_session_status_sort(val)
-        if "sessions_tabs_sort" in body:
-            val = body["sessions_tabs_sort"]
-            if not isinstance(val, str):
-                raise ValueError("sessions_tabs_sort must be a string")
-            user_prefs.set_session_tabs_sort(val)
-        if "sessions_tabs_visible" in body:
-            val = body["sessions_tabs_visible"]
-            if not isinstance(val, bool):
-                raise ValueError("sessions_tabs_visible must be a boolean")
-            user_prefs.set_session_tabs_visible(val)
-        if "voice_close_on_background" in body:
-            val = body["voice_close_on_background"]
-            if not isinstance(val, bool):
-                raise ValueError("voice_close_on_background must be a boolean")
-            user_prefs.set_voice_close_on_background(val)
-        if "task_start_silence_seconds" in body:
-            user_prefs.set_task_start_silence_seconds(
-                body["task_start_silence_seconds"]
-            )
-        if "sync_wait_depth_cap" in body:
-            user_prefs.set_sync_wait_depth_cap(body["sync_wait_depth_cap"])
-        if "session_creation_depth_cap" in body:
-            user_prefs.set_session_creation_depth_cap(
-                body["session_creation_depth_cap"]
-            )
-        if "session_max_live_descendants" in body:
-            user_prefs.set_session_max_live_descendants(
-                body["session_max_live_descendants"]
-            )
-        return user_prefs.get_all(login_username)
-
-    try:
-        prefs = await asyncio.to_thread(_patch_user_prefs_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _invalidate_session_list_user_prefs_cache()
-    await coordinator.broadcast_global("user_prefs_changed", prefs)
-    return prefs
-
-
-# ---- UI selection (per-machine navigation restore) ----
-
-@app.get("/api/ui-selection")
-async def get_ui_selection():
-    return await hot_path.run("ui_selection.get_all", ui_selection.get_all)
-
-
-@app.patch("/api/ui-selection")
-async def patch_ui_selection(body: dict = Body(...)):
-    def _patch_sync() -> dict:
-        if "selected_project" in body:
-            sel = body["selected_project"]
-            if sel is None:
-                ui_selection.set_selected_project("")
-            elif isinstance(sel, dict):
-                path = sel.get("path")
-                if not isinstance(path, str):
-                    raise ValueError("selected_project.path must be a string")
-                node_id = sel.get("node_id", ui_selection.DEFAULT_NODE_ID)
-                if not isinstance(node_id, str):
-                    raise ValueError("selected_project.node_id must be a string")
-                ui_selection.set_selected_project(path, node_id)
-            else:
-                raise ValueError("selected_project must be an object or null")
-        if "remembered_session" in body:
-            rem = body["remembered_session"]
-            if not isinstance(rem, dict):
-                raise ValueError("remembered_session must be an object")
-            path = rem.get("path")
-            session_id = rem.get("session_id")
-            node_id = rem.get("node_id", ui_selection.DEFAULT_NODE_ID)
-            if not isinstance(path, str) or not path:
-                raise ValueError("remembered_session.path must be a non-empty string")
-            if not isinstance(session_id, str) or not session_id:
-                raise ValueError("remembered_session.session_id must be a non-empty string")
-            if not isinstance(node_id, str):
-                raise ValueError("remembered_session.node_id must be a string")
-            ui_selection.set_remembered_session(path, node_id, session_id)
-        if "open_session_tab_ids" in body:
-            open_ids = body["open_session_tab_ids"]
-            if not isinstance(open_ids, list):
-                raise ValueError("open_session_tab_ids must be a list")
-            if any(not isinstance(sid, str) or not sid for sid in open_ids):
-                raise ValueError("open_session_tab_ids entries must be non-empty strings")
-            ui_selection.set_open_session_tab_ids(open_ids)
-        if "open_session_tab_joined_at" in body:
-            joined_at = body["open_session_tab_joined_at"]
-            if not isinstance(joined_at, dict):
-                raise ValueError("open_session_tab_joined_at must be an object")
-            if any(
-                not isinstance(sid, str)
-                or not sid
-                or not isinstance(value, str)
-                or not value
-                for sid, value in joined_at.items()
-            ):
-                raise ValueError("open_session_tab_joined_at entries must be non-empty strings")
-            ui_selection.set_open_session_tab_joined_at(joined_at)
-        return ui_selection.get_all()
-
-    try:
-        snapshot = await hot_path.run("ui_selection.patch", _patch_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await coordinator.broadcast_global("ui_selection_changed", snapshot)
-    return snapshot
-
-
-# ---- Shortcut responses ----
-
-
-@app.post("/api/shortcuts/pick")
-async def pick_shortcuts(body: dict = Body(...)):
-    assistant_text = body.get("assistant_text", "")
-    shortcuts = await shortcut_picker.pick_shortcuts(assistant_text)
-    return {"shortcuts": shortcuts}
-
-
 from session_helpers import (
     require_session as _require_session,
     session_exists as _session_exists,
@@ -2221,6 +2016,7 @@ from session_helpers import (
     session_lite_by_id_async as _session_lite_by_id_async,
     require_session_async as _require_session_async,
 )
+from projects_api import invalidate_project_aggregates as _invalidate_project_aggregates
 
 
 async def _broadcast_projects_changed() -> None:
@@ -2683,151 +2479,10 @@ def _local_sessions_for_sidebar() -> list[dict]:
     return _decorate_local_sidebar_sessions(_local_session_summaries_for_sidebar())
 
 
-_project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
-_project_aggregates_gen = 0
 _session_org_facets_cache: dict[
     tuple[str | None, int, tuple[int, int] | None],
     dict[str, Any],
 ] = {}
-
-
-def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
-    """Compute per-project (cwd, node_id) → counts for status badges.
-
-    Cached: recompute only when the generation counter bumps (set by
-    session mutation events via `_invalidate_project_aggregates`).
-    Reads from the background-tick running-state cache — no PID
-    probing on the event loop."""
-    global _project_aggregates_cache, _project_aggregates_gen
-    if _project_aggregates_gen > 0 and _project_aggregates_cache:
-        return _project_aggregates_cache
-    import working_mode as _wm
-    running_sids, _ = coordinator.turn_manager.cached_state_snapshot()
-    unread_by_sid = session_manager.unread_counts_snapshot()
-    agg: dict[tuple[str, str], dict[str, int]] = {}
-    for s in session_manager.list():
-        if _wm.should_hide_from_sidebar(s):
-            continue
-        sid = s.get("id")
-        cwd = s.get("cwd") or ""
-        if not sid or not cwd:
-            continue
-        key = (cwd, s.get("node_id") or "primary")
-        slot = agg.setdefault(
-            key, {"running_count": 0, "unread_session_count": 0}
-        )
-        if sid in running_sids:
-            slot["running_count"] += 1
-        if unread_by_sid.get(sid, 0) > 0:
-            slot["unread_session_count"] += 1
-    _project_aggregates_cache = agg
-    _project_aggregates_gen += 1
-    return agg
-
-
-def _invalidate_project_aggregates() -> None:
-    """Bump the generation counter so the next _project_aggregates call
-    recomputes. Called from session mutation broadcast paths."""
-    global _project_aggregates_gen
-    _project_aggregates_gen = 0
-
-
-@app.get("/api/projects")
-async def get_projects():
-    aggs = await asyncio.to_thread(_project_aggregates)
-    out: list[dict] = []
-    for p in await asyncio.to_thread(project_store.list_projects):
-        key = (p.get("path") or "", p.get("node_id") or "primary")
-        slot = aggs.get(key, {"running_count": 0, "unread_session_count": 0})
-        out.append({
-            **p,
-            "running_count": slot["running_count"],
-            "unread_session_count": slot["unread_session_count"],
-        })
-    return {"projects": out}
-
-
-@app.post("/api/projects")
-async def create_project(body: dict):
-    record = await asyncio.to_thread(
-        project_store.add_project,
-        path=body.get("path", ""),
-        name=body.get("name") or None,
-        node_id=body.get("node_id") or "primary",
-    )
-    if not record:
-        raise HTTPException(status_code=400, detail=t("error.invalid_path"))
-    await _broadcast_projects_changed()
-    return record
-
-
-@app.delete("/api/projects")
-async def delete_project(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    deleted = await asyncio.to_thread(
-        project_store.remove_project,
-        path,
-        node_id=node_id,
-    )
-    if deleted:
-        await _broadcast_projects_changed()
-    return {"deleted": deleted}
-
-
-@app.post("/api/projects/touch")
-async def touch_project(body: dict):
-    await asyncio.to_thread(
-        project_store.touch_project,
-        body.get("path", ""),
-        node_id=body.get("node_id") or "primary",
-    )
-    await _broadcast_projects_changed()
-    return {"status": "ok"}
-
-
-# ── Project mappings ───────────────────────────────────────────
-
-
-async def _broadcast_mappings_changed() -> None:
-    await coordinator.broadcast_global("project_mappings_changed", {})
-
-
-@app.get("/api/project-mappings")
-async def get_project_mappings():
-    return {"groups": await asyncio.to_thread(project_mapping_store.list_mappings)}
-
-
-@app.post("/api/project-mappings/rebuild")
-async def rebuild_project_mappings():
-    projects = await asyncio.to_thread(project_store.list_projects)
-    groups = await asyncio.to_thread(project_mapping_store.rebuild_and_save, projects)
-    await _broadcast_mappings_changed()
-    return {"groups": groups}
-
-
-@app.patch("/api/project-mappings/{group_id}")
-async def update_project_mapping(group_id: str, body: dict):
-    result = await asyncio.to_thread(
-        project_mapping_store.update_group,
-        group_id,
-        label=body.get("label"),
-        members=body.get("members"),
-    )
-    if not result:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return result
-
-
-@app.delete("/api/project-mappings/{group_id}")
-async def delete_project_mapping(group_id: str):
-    deleted = await asyncio.to_thread(project_mapping_store.remove_group, group_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return {"deleted": True}
 
 
 # ── Project structure updates ──────────────────────────────────
@@ -2853,23 +2508,6 @@ def _require_project_structure_internal(request: Request, x_internal_token: str)
         principal[0] != "extension"
         or principal[1] != extension_store.extension_id_for_role('project-structure')
     ):
-        raise HTTPException(status_code=403, detail="project-structure extension is required")
-
-
-async def _require_project_structure_internal_async(request: Request, x_internal_token: str) -> None:
-    principal = await coordinator.request_principal_async(request, x_internal_token)
-    if principal is None:
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    try:
-        role_owner = await extension_api.core_role_owner_async('project-structure')
-    except AdmissionOverloaded as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="extension routing is busy; retry shortly",
-            headers={"Retry-After": "1"},
-        ) from exc
-    _require_builtin_runtime_extension(role_owner)
-    if principal != ("extension", role_owner):
         raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
@@ -4246,155 +3884,6 @@ async def internal_auto_tagging(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     raise HTTPException(status_code=400, detail="unknown auto-tagging action")
-
-
-@app.post("/api/internal/project-structure-edit/status")
-async def internal_project_structure_edit_status(
-    request: Request,
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    await _require_project_structure_internal_async(request, x_internal_token)
-    cwd = (body or {}).get("cwd") or os.getcwd()
-    return await asyncio.to_thread(project_structure_edit_session.get_edit_status, cwd)
-
-
-@app.post("/api/internal/project-structure-edit/ensure")
-async def internal_project_structure_edit_ensure(
-    request: Request,
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    await _require_project_structure_internal_async(request, x_internal_token)
-    cwd = (body or {}).get("cwd") or os.getcwd()
-    prompt_result = await project_structure_edit_session.submit_review_prompt(cwd)
-    return {
-        "session_id": project_structure_edit_session.EDIT_SINGLETON_ID,
-        **prompt_result,
-    }
-
-
-@app.get("/api/project-config")
-async def get_project_config(
-    cwd: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    result = await node_op(node_id, "scan_project_configs", {"cwd": cwd})
-    # rpc handler returns the raw scan dict; legacy endpoint shape
-    # wraps it as {"files": ...}. Preserve that envelope.
-    return {"files": result}
-
-
-@app.get("/api/hooks")
-async def get_hooks():
-    try:
-        return {"hooks": await asyncio.to_thread(hook_store.list_hooks)}
-    except hook_store.HookConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.put("/api/hooks")
-async def put_hooks(body: dict):
-    hooks = body.get("hooks")
-    if not isinstance(hooks, list):
-        raise HTTPException(status_code=400, detail="hooks must be a list")
-    try:
-        return {"hooks": await asyncio.to_thread(hook_store.replace_hooks, hooks)}
-    except hook_store.HookConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.post("/api/hooks")
-async def post_hook(body: dict):
-    try:
-        return {"hook": await asyncio.to_thread(hook_store.upsert_hook, body)}
-    except hook_store.HookConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.delete("/api/hooks/{hook_id}")
-async def delete_hook(hook_id: str):
-    try:
-        deleted = await asyncio.to_thread(hook_store.delete_hook, hook_id)
-    except hook_store.HookConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if not deleted:
-        raise HTTPException(status_code=404, detail="hook not found")
-    return {"ok": True}
-
-
-_PUSH_TOKEN_MAX_LEN = 4096
-_PUSH_DEVICE_ID_MAX_LEN = 256
-_PUSH_SESSION_ID_MAX_LEN = 256
-_PUSH_PLATFORMS = ("android", "ios")
-
-
-@app.post("/api/push-tokens")
-async def register_push_token(body: dict):
-    device_id_raw = body.get("device_id")
-    token_raw = body.get("token")
-    platform_raw = body.get("platform")
-    session_id_raw = body.get("session_id")
-    device_id = device_id_raw.strip() if isinstance(device_id_raw, str) else ""
-    token = token_raw.strip() if isinstance(token_raw, str) else ""
-    platform = platform_raw.strip() if isinstance(platform_raw, str) else ""
-    session_id = session_id_raw.strip() if isinstance(session_id_raw, str) else ""
-    if not device_id or len(device_id) > _PUSH_DEVICE_ID_MAX_LEN:
-        raise HTTPException(status_code=400, detail="device_id is required")
-    if not token or len(token) > _PUSH_TOKEN_MAX_LEN:
-        raise HTTPException(status_code=400, detail="token is required")
-    if platform not in _PUSH_PLATFORMS:
-        raise HTTPException(status_code=400, detail="platform must be android or ios")
-    if not session_id or len(session_id) > _PUSH_SESSION_ID_MAX_LEN:
-        raise HTTPException(status_code=400, detail="session_id is required")
-    preferences = body.get("notification_preferences")
-    try:
-        record = await asyncio.to_thread(
-            device_token_store.register_token,
-            device_id,
-            token,
-            platform,
-            session_id,
-            preferences,
-        )
-    except device_token_store.NotificationPreferencesError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"device": record}
-
-
-@app.delete("/api/push-tokens/{device_id}")
-async def unregister_push_token(device_id: str):
-    if not device_id or len(device_id) > _PUSH_DEVICE_ID_MAX_LEN:
-        raise HTTPException(status_code=400, detail="invalid device_id")
-    deleted = await asyncio.to_thread(device_token_store.unregister_token, device_id)
-    return {"deleted": deleted}
-
-
-@app.get("/api/push-tokens/{device_id}/notification-preferences")
-async def get_push_notification_preferences(device_id: str):
-    if not device_id or len(device_id) > _PUSH_DEVICE_ID_MAX_LEN:
-        raise HTTPException(status_code=400, detail="invalid device_id")
-    preferences = await asyncio.to_thread(
-        device_token_store.get_notification_preferences,
-        device_id,
-    )
-    return {"notification_preferences": preferences}
-
-
-@app.patch("/api/push-tokens/{device_id}/notification-preferences")
-async def patch_push_notification_preferences(device_id: str, body: dict):
-    if not device_id or len(device_id) > _PUSH_DEVICE_ID_MAX_LEN:
-        raise HTTPException(status_code=400, detail="invalid device_id")
-    preferences = body.get("notification_preferences")
-    try:
-        updated = await asyncio.to_thread(
-            device_token_store.update_notification_preferences,
-            device_id,
-            preferences,
-        )
-    except device_token_store.NotificationPreferencesError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"notification_preferences": updated}
 
 
 def _parse_session_timestamp(value: object) -> datetime | None:

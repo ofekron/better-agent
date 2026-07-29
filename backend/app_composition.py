@@ -17,6 +17,8 @@ def wire(
     coordinator: Any,
     session_lite: Callable[[str], Awaitable[Optional[dict]]],
     publish_worker_fanout: Callable[..., Awaitable[Any]],
+    invalidate_session_list_cache: Callable[[], None],
+    notify_projects_changed: Callable[[], Awaitable[None]],
 ) -> None:
     """Configure and mount every router on `app`.
 
@@ -101,6 +103,22 @@ def wire(
         coordinator._resolve_approval,
     )
     app.include_router(pending_approvals_api.router)
+
+    import user_prefs_api
+    user_prefs_api.configure(coordinator.broadcast_global, invalidate_session_list_cache)
+    app.include_router(user_prefs_api.router)
+
+    import projects_api
+    projects_api.configure(
+        notify_projects_changed,
+        coordinator.broadcast_global,
+        coordinator.turn_manager.cached_state_snapshot,
+    )
+    app.include_router(projects_api.router)
+
+    import hooks_push_api
+    hooks_push_api.configure(coordinator.request_principal_async)
+    app.include_router(hooks_push_api.router)
 
     import file_api
     app.include_router(file_api.router)

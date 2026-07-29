@@ -1,5 +1,5 @@
 """Locks the per-project aggregate enrichment computed by
-`main._project_aggregates`:
+`projects_api._project_aggregates`:
 
 1. Two user-kind sessions running in the same cwd → running_count=2.
 2. After one completes, running_count=1.
@@ -42,6 +42,7 @@ from session_manager import manager as session_manager  # noqa: E402
 # Import after the env tempdir is set — main.py wires the coordinator
 # singleton at import time.
 import main as backend_main  # noqa: E402
+import projects_api  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -82,9 +83,9 @@ def test_running_count_aggregation() -> None:
     coord.run_state_add(s1, run_id="r1", kind="native", target_message_id=None)
     coord.run_state_add(s2, run_id="r2", kind="native", target_message_id=None)
     coord.turn_manager._refresh_cache()
-    backend_main._invalidate_project_aggregates()
+    projects_api.invalidate_project_aggregates()
 
-    aggs = backend_main._project_aggregates()
+    aggs = projects_api._project_aggregates()
     key = (CWD, "primary")
     assert key in aggs, f"project {CWD} missing from aggs: {aggs}"
     rc = aggs[key]["running_count"]
@@ -92,8 +93,8 @@ def test_running_count_aggregation() -> None:
 
     coord.run_state_remove(s1, "r1")
     coord.turn_manager._refresh_cache()
-    backend_main._invalidate_project_aggregates()
-    aggs = backend_main._project_aggregates()
+    projects_api.invalidate_project_aggregates()
+    aggs = projects_api._project_aggregates()
     rc = aggs[key]["running_count"]
     assert rc == 1, f"after one completes expected 1, got {rc}"
     coord.run_state_remove(s2, "r2")
@@ -117,9 +118,9 @@ def test_unread_session_count_aggregation() -> None:
                 ctx=ctx, source_is_provider_stream=False,
             )
         session_manager.warm_unread(sid)
-    backend_main._invalidate_project_aggregates()
+    projects_api.invalidate_project_aggregates()
 
-    aggs = backend_main._project_aggregates()
+    aggs = projects_api._project_aggregates()
     key = (CWD, "primary")
     total = aggs[key]["unread_session_count"]
     assert total == 2, f"expected unread_session_count=2, got {total}"
@@ -147,9 +148,9 @@ def test_worker_fork_excluded_from_aggregates() -> None:
     coord.active_run_ids[fork["id"]] = ["rw"]
     coord.run_state_add(fork["id"], run_id="rw", kind="worker", target_message_id=None)
     coord.turn_manager._refresh_cache()
-    backend_main._invalidate_project_aggregates()
+    projects_api.invalidate_project_aggregates()
 
-    aggs = backend_main._project_aggregates()
+    aggs = projects_api._project_aggregates()
     key = (CWD, "primary")
     # Only the root session counts. It's NOT running (we didn't
     # run_state_add on the root sid), so running_count is 0.
@@ -211,7 +212,7 @@ def test_session_list_enrichment() -> None:
     coord.active_run_ids[sid] = ["rr"]
     coord.run_state_add(sid, run_id="rr", kind="native", target_message_id=None)
     coord.turn_manager._refresh_cache()
-    backend_main._invalidate_project_aggregates()
+    projects_api.invalidate_project_aggregates()
     # Force one event so unread > 0.
     strategy = get_strategy("native")
     scaffold = strategy.build_assistant_scaffold()
