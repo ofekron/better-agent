@@ -42,10 +42,6 @@ const provider: Provider = {
   capability_overrides: {},
 };
 
-const capabilityPickerClient = {
-  listCapabilityPickerSources: vi.fn(async () => ({ sources: [] })),
-};
-
 function renderModal(open: boolean, onClose: () => void, onCreate: () => void = vi.fn()) {
   return render(
     <NewSessionModal
@@ -54,7 +50,6 @@ function renderModal(open: boolean, onClose: () => void, onCreate: () => void = 
       onCreate={onCreate}
       defaultCwd="/tmp/project"
       projects={[]}
-      capabilityPickerClient={capabilityPickerClient}
     />,
   );
 }
@@ -141,7 +136,7 @@ describe("NewSessionModal prompt draft", () => {
     view.unmount();
   });
 
-  it("keeps Enter as a newline instead of creating the session", async () => {
+  it("uses Enter to create with the selected action", async () => {
     const onCreate = vi.fn();
     const view = renderModal(true, () => {}, onCreate);
     const textarea = await promptTextarea(view);
@@ -149,8 +144,14 @@ describe("NewSessionModal prompt draft", () => {
 
     const notPrevented = fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
-    expect(notPrevented).toBe(true);
-    expect(onCreate).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(false);
+    await waitFor(() => {
+      expect(onCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ initialPrompt: "first line" }),
+        undefined,
+        "send-and-open",
+      );
+    });
     view.unmount();
   });
 

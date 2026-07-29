@@ -65,10 +65,6 @@ const provider: Provider = {
   capability_overrides: {},
 };
 
-const capabilityPickerClient = {
-  listCapabilityPickerSources: vi.fn(async () => ({ sources: [] })),
-};
-
 function speak(transcript: string) {
   act(() => {
     handlers?.onResult({ transcript, alternatives: [transcript] });
@@ -113,7 +109,6 @@ describe("new session modal voice mode", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -140,8 +135,8 @@ describe("new session modal voice mode", () => {
     speak("add tests that's all send");
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
 
-    // The cumulative send buffer must not duplicate the already-appended text.
-    expect(textarea.value).toBe("hello world add tests");
+    // Successful creation clears the draft after handing off its complete buffer.
+    await waitFor(() => expect(textarea.value).toBe(""));
     expect(onCreate.mock.calls[0][0].initialPrompt).toBe("hello world add tests");
   });
 
@@ -158,7 +153,6 @@ describe("new session modal voice mode", () => {
         onCreate={vi.fn()}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 

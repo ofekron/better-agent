@@ -51,10 +51,6 @@ const nativeOnlyProvider: Provider = {
   supports_manager_mode: false,
 };
 
-const capabilityPickerClient = {
-  listCapabilityPickerSources: vi.fn(async () => ({ sources: [] })),
-};
-
 describe("NewSessionModal offline provider cache", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -75,7 +71,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -121,7 +116,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -151,7 +145,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -162,7 +155,7 @@ describe("NewSessionModal offline provider cache", () => {
     expect(onCreate.mock.calls.at(-1)?.[2]).toBe("send");
   });
 
-  it("shows the session capability picker entry point", () => {
+  it("shows the harness profile capability entry point", () => {
     const { getByText, getByRole } = render(
       <NewSessionModal
         open
@@ -170,12 +163,11 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={vi.fn()}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
-    expect(getByText("Capabilities")).toBeTruthy();
-    expect(getByRole("button", { name: /Add capability/ })).toBeTruthy();
+    expect(getByText("Harness profile")).toBeTruthy();
+    expect(getByRole("combobox", { name: "Harness profile" })).toBeTruthy();
   });
 
   it("creates with cached provider and model when provider fetches fail", async () => {
@@ -197,7 +189,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -242,7 +233,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -277,7 +267,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
       />,
     );
 
@@ -313,17 +302,7 @@ describe("NewSessionModal offline provider cache", () => {
         label: "Demo option",
         defaultValue: false,
         applyToSessionConfig: (value) => ({
-          capabilityContexts: value
-            ? [
-                {
-                  source_id: "extension:ofek-dev.demo",
-                  capability_id: "demo",
-                  name: "Demo",
-                  category: "extension",
-                  outputs: [],
-                },
-              ]
-            : [],
+          harnessProfileId: value ? "demo-profile" : "",
         }),
       },
     ];
@@ -335,7 +314,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
         extensionOptions={options}
       />,
     );
@@ -349,11 +327,7 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        capabilityContexts: [
-          expect.objectContaining({
-            source_id: "extension:ofek-dev.demo",
-          }),
-        ],
+        harnessProfileId: "demo-profile",
       }),
       undefined,
       "send-and-open",
@@ -372,7 +346,6 @@ describe("NewSessionModal offline provider cache", () => {
         onCreate={onCreate}
         defaultCwd="/tmp/project"
         projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
         extensionOptions={[
           {
             id: "enabled",
