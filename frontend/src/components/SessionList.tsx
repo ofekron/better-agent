@@ -2562,21 +2562,29 @@ function SessionListImpl({
     [roots],
   );
   const visiblePinned = pinnedCollapsed ? EMPTY_SESSIONS : pinnedSessions;
+  // The unpinned/unfiled sessions form their own collapsible "New sessions"
+  // group, mirroring the Pinned group above.
+  const [newSessionsCollapsed, setNewSessionsCollapsed] = useLocalStorage<boolean>(
+    "better-agent-new-sessions-group-collapsed",
+    false,
+  );
   const { folderRoots, unfiledSessions } = useMemo(
     () => buildFolderRenderTree(folders, unpinnedRoots),
     [folders, unpinnedRoots],
   );
+  const visibleUnfiled = newSessionsCollapsed ? EMPTY_SESSIONS : unfiledSessions;
+  const visibleUnpinnedFlat = newSessionsCollapsed ? EMPTY_SESSIONS : unpinnedRoots;
   const sortedRoots = useMemo(
     () => [
       ...visiblePinned,
       ...flattenFolderSessions(folderRoots, collapsedFolderIds),
-      ...unfiledSessions,
+      ...visibleUnfiled,
     ],
-    [visiblePinned, folderRoots, collapsedFolderIds, unfiledSessions],
+    [visiblePinned, folderRoots, collapsedFolderIds, visibleUnfiled],
   );
   const flatRoots = useMemo(
-    () => [...visiblePinned, ...unpinnedRoots],
-    [visiblePinned, unpinnedRoots],
+    () => [...visiblePinned, ...visibleUnpinnedFlat],
+    [visiblePinned, visibleUnpinnedFlat],
   );
   // Folders render unless explicitly disabled. `undefined` (pref not yet
   // loaded) defaults to showing folders, matching the backend pref default.
@@ -3543,29 +3551,53 @@ function SessionListImpl({
             onStartBulkSelect={startBulkSelect}
           />
         ))}
-        {showFolders && unfiledSessions.length > 0 && folderRoots.length > 0 && (
+        {(showFolders ? unfiledSessions.length > 0 : unpinnedRoots.length > 0) && (
           <div
-            className={`session-folder-heading session-unfiled-heading ${unfiledDragOver ? "drag-over" : ""}`}
-            onDragOver={(e) => {
-              if (!isSessionDrag(e)) return;
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-              if (!unfiledDragOver) setUnfiledDragOver(true);
-            }}
-            onDragLeave={() => setUnfiledDragOver(false)}
-            onDrop={(e) => {
-              if (!isSessionDrag(e)) return;
-              e.preventDefault();
-              setUnfiledDragOver(false);
-              const id = e.dataTransfer.getData(SESSION_DRAG_MIME);
-              if (id) moveToFolder(id, null);
-            }}
+            className="session-folder-section session-new-section"
+            data-testid="session-new-section"
           >
-            <span>{t("session.unfiled")}</span>
+            <button
+              type="button"
+              className={`session-folder-heading ${showFolders && unfiledDragOver ? "drag-over" : ""}`}
+              onClick={() => setNewSessionsCollapsed((v) => !v)}
+              aria-expanded={!newSessionsCollapsed}
+              onDragOver={
+                showFolders
+                  ? (e) => {
+                      if (!isSessionDrag(e)) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      if (!unfiledDragOver) setUnfiledDragOver(true);
+                    }
+                  : undefined
+              }
+              onDragLeave={showFolders ? () => setUnfiledDragOver(false) : undefined}
+              onDrop={
+                showFolders
+                  ? (e) => {
+                      if (!isSessionDrag(e)) return;
+                      e.preventDefault();
+                      setUnfiledDragOver(false);
+                      const id = e.dataTransfer.getData(SESSION_DRAG_MIME);
+                      if (id) moveToFolder(id, null);
+                    }
+                  : undefined
+              }
+            >
+              <Icon
+                name={newSessionsCollapsed ? "chevron-right" : "chevron-down"}
+                size={12}
+                className="session-folder-chevron"
+              />
+              <span>{t("session.newSessionsGroup")}</span>
+              <span className="session-group-count">
+                {showFolders ? unfiledSessions.length : unpinnedRoots.length}
+              </span>
+            </button>
+            {(showFolders ? visibleUnfiled : visibleUnpinnedFlat).map((s) =>
+              renderNode(s, 0, showFolders),
+            )}
           </div>
-        )}
-        {(showFolders ? unfiledSessions : unpinnedRoots).map((s) =>
-          renderNode(s, 0, showFolders),
         )}
         {searching && sessions.length === 0 && (
           <div className="session-list-loading">

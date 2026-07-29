@@ -617,6 +617,7 @@
   "session.folder": "Folder",
   "session.unfiled": "Unfiled",
   "session.pinnedGroup": "Pinned",
+  "session.newSessionsGroup": "New sessions",
   "session.tags": "Tags",
   "session.selectSession": "Select session",
   "session.selectedCount": "{{count}} selected",
