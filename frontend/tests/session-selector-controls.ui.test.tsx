@@ -29,8 +29,8 @@ function provider(overrides: Partial<Provider> = {}): Provider {
     config_dir: "",
     custom_models: [],
     default_model: "sonnet",
-    runner: "claude",
-    runner_options: ["claude"],
+    runner: "native",
+    runner_options: ["native"],
     suspended: false,
     reasoning_effort_options: ["low", "medium", "high"],
     default_reasoning_effort: "medium",
@@ -115,7 +115,11 @@ describe("SessionSelectorControls picker interactions", () => {
 
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledTimes(1);
-      expect(onChange).toHaveBeenCalledWith({ model: "opus" });
+      expect(onChange).toHaveBeenCalledWith({
+        model: "opus",
+        reasoning_effort: "medium",
+        runner: "native",
+      });
     });
   });
 
