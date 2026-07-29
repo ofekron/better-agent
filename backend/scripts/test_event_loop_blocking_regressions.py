@@ -339,13 +339,13 @@ def test_ui_selection_routes_use_hot_path_executor() -> None:
     get_start = source.index("async def get_ui_selection(")
     get_end = source.index("@app.patch(\"/api/ui-selection\")", get_start)
     get_source = source[get_start:get_end]
-    assert 'await _run_hot_path("ui_selection.get_all", ui_selection.get_all)' in get_source
+    assert 'await hot_path.run("ui_selection.get_all", ui_selection.get_all)' in get_source
     assert "asyncio.to_thread(" not in get_source
 
     patch_start = source.index("async def patch_ui_selection(")
     patch_end = source.index("# ---- Shortcut responses ----", patch_start)
     patch_source = source[patch_start:patch_end]
-    assert 'await _run_hot_path("ui_selection.patch", _patch_sync)' in patch_source
+    assert 'await hot_path.run("ui_selection.patch", _patch_sync)' in patch_source
     assert "asyncio.to_thread(" not in patch_source
 
 
@@ -365,7 +365,7 @@ def test_session_opened_avoids_full_session_copy() -> None:
     route_end = main_source.index("@app.", route_start)
     route_source = main_source[route_start:route_end]
     assert "return_session=False" in route_source
-    assert 'await _run_hot_path(\n        "session.opened.set_last_opened_at"' in route_source
+    assert 'await hot_path.run(\n        "session.opened.set_last_opened_at"' in route_source
     assert "asyncio.to_thread(" not in route_source
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     method_start = manager_source.index("def set_last_opened_at(")
@@ -690,10 +690,14 @@ def test_native_demand_publish_does_not_leak_coroutine_without_loop() -> None:
     publish_start = source.index("    def _publish_native_demand(")
     publish_end = source.index("    def _unsubscribe_from_wire_tailer(", publish_start)
     publish_source = source[publish_start:publish_end]
-    assert "loop = asyncio.get_running_loop()" in publish_source
-    assert "except RuntimeError:\n            return" in publish_source
-    assert "asyncio.create_task(\n                bus.publish(" not in publish_source
-    assert "loop.create_task(\n            bus.publish(" in publish_source
+    assert "loop_affinity.schedule_on_main(\n            bus.publish(" in publish_source
+    assert "asyncio.get_running_loop()" not in publish_source
+    assert "asyncio.create_task(" not in publish_source
+    affinity = (ROOT / "loop_affinity.py").read_text(encoding="utf-8")
+    schedule_start = affinity.index("def schedule_on(")
+    schedule_source = affinity[schedule_start:]
+    assert "if loop is None or loop.is_closed():\n        coro.close()\n        return False" in schedule_source
+    assert "except RuntimeError:\n        # Loop stopped between the check and the submit.\n        coro.close()\n        return False" in schedule_source
 
 
 def test_wire_tailer_unsubscribe_uses_cached_subscriber_root() -> None:
@@ -3298,8 +3302,8 @@ def test_session_detail_has_split_perf_timers() -> None:
     helper_start = source.index("def _session_detail_snapshot_sync(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "await _run_session_detail_hot_path(\n        \"sessions.detail.worker\"" in route_source
-    assert "await _run_hot_path(\n        \"sessions.detail.worker\"" not in route_source
+    assert "await session_detail_path.run(\n        \"sessions.detail.worker\"" in route_source
+    assert "await hot_path.run(\n        \"sessions.detail.worker\"" not in route_source
     assert "session_manager.get_root_tree_stubbed" not in route_source
     assert 'perf.record("sessions.detail.worker"' not in route_source
     miss_cache_start = route_source.index(
@@ -3332,35 +3336,32 @@ def test_session_detail_has_split_perf_timers() -> None:
 
 def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _run_hot_path(")
-    helper_end = source.index("def _streaming_assistant_message_id(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_HOT_PATH_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "max_workers=8" in source
-    assert "thread_name_prefix=\"hot-path\"" in source
-    assert "run_in_executor(\n            _HOT_PATH_EXECUTOR" in helper_source
-    assert "_SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"session-detail\"" in source
-    assert "async def _run_session_detail_hot_path(" in helper_source
-    assert "run_in_executor(\n            _SESSION_DETAIL_EXECUTOR" in helper_source
-    assert "_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"session-list\"" in source
-    assert "async def _run_session_list_hot_path(" in helper_source
-    assert "run_in_executor(\n            _SESSION_LIST_EXECUTOR" in helper_source
-    assert 'perf.record(f"{name}.queue_wait"' in helper_source
-    assert "perf.record(name," in helper_source
+    executor_source = (ROOT / "hot_path_executor.py").read_text(encoding="utf-8")
+    helper_start = executor_source.index("async def run(self")
+    helper_end = executor_source.index("def shutdown(self)", helper_start)
+    helper_source = executor_source[helper_start:helper_end]
+    # One pooled implementation, three separately-owned pools: a
+    # saturated pool may only delay its own callers.
+    assert "self._executor = ThreadPoolExecutor(" in executor_source
+    assert "thread_name_prefix=name," in executor_source
+    assert 'hot_path = HotPathExecutor("hot-path", 8)' in executor_source
+    assert 'session_detail_path = HotPathExecutor("session-detail", 4)' in executor_source
+    assert 'session_list_path = HotPathExecutor("session-list", 4)' in executor_source
+    assert "run_in_executor(\n                self._executor" in helper_source
+    assert 'perf.record(f"{metric}.queue_wait"' in helper_source
+    assert "perf.record(metric," in helper_source
 
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
-    assert "await _run_session_list_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
+    assert "await session_list_path.run(\n            \"sessions.list.local_page_thread\"" in route_source
     assert "await asyncio.to_thread(_build_local_sessions_page_for_list" not in route_source
-    assert "await _run_session_list_hot_path(\n            \"sessions.list.search_local_page.worker\"" in route_source
-    assert "await _run_session_list_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
+    assert "await session_list_path.run(\n            \"sessions.list.search_local_page.worker\"" in route_source
+    assert "await session_list_path.run(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
     assert "\"sessions.list.page_decorate.worker\"" in route_source
     assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
     assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
-    assert "await _run_hot_path(\n            \"sessions.list." not in route_source
+    assert "await hot_path.run(\n            \"sessions.list." not in route_source
 
 
 def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
@@ -3685,7 +3686,7 @@ def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
     shutdown_start = source.index("async def on_shutdown()")
     shutdown_end = source.index("# Internal Endpoints", shutdown_start)
     shutdown_source = source[shutdown_start:shutdown_end]
-    assert "_SESSION_DETAIL_EXECUTOR.shutdown(" in shutdown_source
+    assert "hot_path_executor.shutdown_all()" in shutdown_source
     assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" not in shutdown_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
@@ -4433,7 +4434,7 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
 
 
 def test_internal_communication_worker_lookup_is_off_loop() -> None:
-    # Isolated onto `_HOT_PATH_EXECUTOR` (not the bare `asyncio.to_thread`
+    # Isolated onto `hot_path_executor.hot_path` (not the bare `asyncio.to_thread`
     # default pool) — see test_team_message_dispatch_uses_dedicated_executor
     # for why: mssg/ask were timing out client-side while the target session
     # still received and processed the message, because these lookups queued
@@ -4442,14 +4443,14 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
     resolver_start = source.index("async def _resolve_communication_target(")
     resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
     resolver_source = source[resolver_start:resolver_end]
-    assert 'await _run_hot_path(\n            "communication.resolve_target.find_worker",\n            _find_worker_by_agent_session_id' in resolver_source
-    assert 'await _run_hot_path(\n        "communication.resolve_target.pick_pool_worker",\n        _pick_pool_worker_for_sender' in resolver_source
+    assert 'await hot_path.run(\n            "communication.resolve_target.find_worker",\n            _find_worker_by_agent_session_id' in resolver_source
+    assert 'await hot_path.run(\n        "communication.resolve_target.pick_pool_worker",\n        _pick_pool_worker_for_sender' in resolver_source
     assert "asyncio.to_thread(" not in resolver_source
 
     async_start = source.index("async def _ask_continue_and_expect_inbox_back_async(")
     async_end = source.index("async def _ask_wait_and_grab_last_assistant_mssg_in_turn(", async_start)
     async_source = source[async_start:async_end]
-    assert 'await _run_hot_path(\n            "communication.ask_async.pick_pool_worker",\n            _pick_pool_worker_for_sender' in async_source
+    assert 'await hot_path.run(\n            "communication.ask_async.pick_pool_worker",\n            _pick_pool_worker_for_sender' in async_source
     assert "await _resolve_communication_target(body)" in async_source
     assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
     assert "asyncio.to_thread(" not in async_source
@@ -4460,8 +4461,8 @@ def test_communication_run_selector_validation_is_off_default_pool() -> None:
     start = source.index("async def _validate_optional_run_selector(")
     end = source.index("def _validate_provider_default_reasoning_effort(", start)
     validator_source = source[start:end]
-    assert 'await _run_hot_path(\n            "communication.validate_run_selector.get_provider",\n            config_store.get_provider' in validator_source
-    assert 'await _run_hot_path(\n        "communication.validate_run_selector.validate_provider_model",\n        _validate_provider_model' in validator_source
+    assert 'await hot_path.run(\n            "communication.validate_run_selector.get_provider",\n            config_store.get_provider' in validator_source
+    assert 'await hot_path.run(\n        "communication.validate_run_selector.validate_provider_model",\n        _validate_provider_model' in validator_source
     assert "asyncio.to_thread(" not in validator_source
 
 
