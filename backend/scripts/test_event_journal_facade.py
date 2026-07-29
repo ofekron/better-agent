@@ -395,11 +395,15 @@ async def _run() -> bool:
         str(msg1_after_provider_stream),
     ) and ok
 
+    # Mirrors `build_assistant_scaffold`: a message being provider-streamed
+    # is always `isStreaming`. Replay hydrates journal events only for
+    # streaming messages; completed ones are stubbed for lazy fetch.
     live_msg = {
         "id": "msg-live",
         "role": "assistant",
         "content": "",
         "events": [],
+        "isStreaming": True,
     }
     session_manager.append_assistant_msg(sid, live_msg)
     live_event = {
@@ -453,7 +457,10 @@ async def _run() -> bool:
         [(e.get("data") or {}).get("uuid")
          for e in replay_live_msg.get("events") or []]
         == ["live-provider"]
-        and replay_live_msg.get("content") == "live provider text",
+        # Content is owned by the fold, not by replay: before the live
+        # apply both the render tree and replay carry "". The fold below
+        # is what publishes "live provider text" to both.
+        and replay_live_msg.get("content") == "",
         "message replay recovers provider_stream row before live apply",
         str(replay_live_msg),
     ) and ok
