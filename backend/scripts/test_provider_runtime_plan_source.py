@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -11,7 +12,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from provider_runtime_capability_model import reject_secrets  # noqa: E402
+from provider_runtime_capability_model import (  # noqa: E402
+    normalize_harness_plan,
+    reject_secrets,
+    serialize_runtime_plan,
+)
 from provider_runtime_plan_source import (  # noqa: E402
     hydrate_frozen_provider_runtime_plan,
     hydrate_runner_operation_broker,
@@ -20,6 +25,96 @@ from provider_runtime_plan_source import (  # noqa: E402
     structural_provider_runtime_plan,
 )
 from codex_execution_common import ExecutionContractError  # noqa: E402
+
+
+def _assert_contract_rejected(callable_) -> None:
+    try:
+        callable_()
+    except ExecutionContractError:
+        return
+    raise AssertionError("invalid runtime plan was accepted")
+
+
+def test_harness_secret_refs_are_narrow_and_authoritative() -> None:
+    refs = {
+        "example.extension": [
+            "extension-setting:example.extension:access_token",
+            "extension-setting:example.extension:api_key",
+        ],
+    }
+    base_harness = {
+        "profile_id": "prepared-profile",
+        "secret_refs": refs,
+        "launcher_projection": {
+            "secret_refs": refs,
+        },
+    }
+    assert normalize_harness_plan(base_harness)["secret_refs"] == refs
+    invalid_harnesses = []
+
+    duplicate = copy.deepcopy(base_harness)
+    duplicate["secret_refs"]["example.extension"].append(
+        "extension-setting:example.extension:access_token",
+    )
+    duplicate["launcher_projection"]["secret_refs"] = copy.deepcopy(
+        duplicate["secret_refs"],
+    )
+    invalid_harnesses.append(duplicate)
+
+    wrong_owner = copy.deepcopy(base_harness)
+    wrong_owner["secret_refs"]["example.extension"][0] = (
+        "extension-setting:other.extension:access_token"
+    )
+    wrong_owner["launcher_projection"]["secret_refs"] = copy.deepcopy(
+        wrong_owner["secret_refs"],
+    )
+    invalid_harnesses.append(wrong_owner)
+
+    malformed_key = copy.deepcopy(base_harness)
+    malformed_key["secret_refs"]["example.extension"][0] = (
+        "extension-setting:example.extension:AccessToken"
+    )
+    malformed_key["launcher_projection"]["secret_refs"] = copy.deepcopy(
+        malformed_key["secret_refs"],
+    )
+    invalid_harnesses.append(malformed_key)
+
+    divergent = copy.deepcopy(base_harness)
+    divergent["launcher_projection"]["secret_refs"] = {}
+    invalid_harnesses.append(divergent)
+
+    for malformed_refs in (None, ""):
+        malformed_top = copy.deepcopy(base_harness)
+        malformed_top["secret_refs"] = malformed_refs
+        invalid_harnesses.append(malformed_top)
+        malformed_launcher = copy.deepcopy(base_harness)
+        malformed_launcher["launcher_projection"]["secret_refs"] = (
+            malformed_refs
+        )
+        invalid_harnesses.append(malformed_launcher)
+
+    for key, value in (
+        ("authorization_ref", "opaque-value"),
+        ("api_key_refs", ["opaque-value"]),
+        ("token_ref", "opaque-value"),
+    ):
+        fake_ref = copy.deepcopy(base_harness)
+        fake_ref[key] = value
+        invalid_harnesses.append(fake_ref)
+        fake_launcher_ref = copy.deepcopy(base_harness)
+        fake_launcher_ref["launcher_projection"][key] = value
+        invalid_harnesses.append(fake_launcher_ref)
+
+    nested_fake_ref = copy.deepcopy(base_harness)
+    nested_fake_ref["nested"] = {"token_ref": "opaque-value"}
+    invalid_harnesses.append(nested_fake_ref)
+
+    for invalid_harness in invalid_harnesses:
+        _assert_contract_rejected(
+            lambda value=invalid_harness: normalize_harness_plan(value),
+        )
+
+
 def _record(package: Path) -> dict:
     return {
         "enabled": True,
@@ -124,7 +219,19 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             },
             "resolved_harness_run_config": {
                 "profile_id": "prepared-profile",
+                "secret_refs": {
+                    "example.extension": [
+                        "extension-setting:example.extension:access_token",
+                        "extension-setting:example.extension:api_key",
+                    ],
+                },
                 "launcher_projection": {
+                    "secret_refs": {
+                        "example.extension": [
+                            "extension-setting:example.extension:access_token",
+                            "extension-setting:example.extension:api_key",
+                        ],
+                    },
                     "extension_setting_overlays": {
                         "example.extension": {
                             "label": {"value": "prepared"},
@@ -208,6 +315,27 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
             for runtime_patch in patches:
                 stack.enter_context(runtime_patch)
             prepared = structural_provider_runtime_plan(inputs, "claude")
+            expected_refs = inputs["resolved_harness_run_config"][
+                "secret_refs"
+            ]
+            assert prepared["resolved_plan"]["harness"]["secret_refs"] == (
+                expected_refs
+            )
+            assert prepared["resolved_plan"]["harness"][
+                "launcher_projection"
+            ]["secret_refs"] == expected_refs
+
+            fake_ref_inputs = copy.deepcopy(inputs)
+            fake_ref_inputs["resolved_harness_run_config"][
+                "authorization_ref"
+            ] = "opaque-value"
+            _assert_contract_rejected(
+                lambda: structural_provider_runtime_plan(
+                    fake_ref_inputs,
+                    "claude",
+                ),
+            )
+
             hydrated = hydrate_frozen_provider_runtime_plan(
                 prepared["resolved_plan"],
             )
@@ -267,7 +395,15 @@ def test_structural_plan_freezes_drift_and_references_secrets() -> None:
 
         encoded = json.dumps(prepared, sort_keys=True)
         assert "never-persist" not in encoded
-        reject_secrets(prepared, label="structural runtime plan")
+        serialize_runtime_plan(prepared["resolved_plan"])
+        reject_secrets(
+            prepared["extension_state"],
+            label="extension runtime state",
+        )
+        reject_secrets(
+            prepared["installation_decisions"],
+            label="installation decisions",
+        )
         assert prepared["resolved_plan"]["harness"]["profile_id"] == "prepared-profile"
         assert prepared["resolved_plan"]["tools"] == [
             "explicit_tool",
@@ -384,6 +520,7 @@ def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> N
 
 
 if __name__ == "__main__":
+    test_harness_secret_refs_are_narrow_and_authoritative()
     test_selected_sources_are_exact_and_respect_gates()
     test_structural_plan_freezes_drift_and_references_secrets()
     test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration()

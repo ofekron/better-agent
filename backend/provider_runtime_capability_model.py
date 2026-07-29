@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError, canonical_json
+from harness_secret_refs import (
+    HarnessSecretRefError,
+    normalize_harness_secret_refs,
+)
 from provider_manifest import artifact_family_kinds
 
 
@@ -36,8 +40,7 @@ _SECRET_VALUE_RE = re.compile(
 )
 
 
-def frozen_json(value: Any, *, label: str) -> str:
-    reject_secrets(value, label=label)
+def _json_encode(value: Any, *, label: str) -> str:
     try:
         return json.dumps(
             value,
@@ -49,7 +52,18 @@ def frozen_json(value: Any, *, label: str) -> str:
         raise ExecutionContractError(f"{label} must be JSON-compatible") from exc
 
 
-def reject_secrets(value: Any, *, label: str, depth: int = 0) -> None:
+def frozen_json(value: Any, *, label: str) -> str:
+    reject_secrets(value, label=label)
+    return _json_encode(value, label=label)
+
+
+def reject_secrets(
+    value: Any,
+    *,
+    label: str,
+    depth: int = 0,
+    allow_reference_keys: bool = True,
+) -> None:
     if depth > 32:
         raise ExecutionContractError(f"{label} is nested too deeply")
     if type(value) is str:
@@ -69,7 +83,12 @@ def reject_secrets(value: Any, *, label: str, depth: int = 0) -> None:
         ):
             raise ExecutionContractError(f"{label} must be secret-free")
         for item in value:
-            reject_secrets(item, label=label, depth=depth + 1)
+            reject_secrets(
+                item,
+                label=label,
+                depth=depth + 1,
+                allow_reference_keys=allow_reference_keys,
+            )
         return
     if type(value) is not dict:
         raise ExecutionContractError(f"{label} must be JSON-compatible")
@@ -79,11 +98,19 @@ def reject_secrets(value: Any, *, label: str, depth: int = 0) -> None:
         normalized = key.lower().replace("-", "_")
         if (
             _SECRET_KEY_RE.search(normalized)
-            and not normalized.endswith(("_ref", "_refs"))
+            and (
+                not allow_reference_keys
+                or not normalized.endswith(("_ref", "_refs"))
+            )
             and item not in (None, "", [], {})
         ):
             raise ExecutionContractError(f"{label} must be secret-free")
-        reject_secrets(item, label=label, depth=depth + 1)
+        reject_secrets(
+            item,
+            label=label,
+            depth=depth + 1,
+            allow_reference_keys=allow_reference_keys,
+        )
 
 
 def _string_list(value: Any, *, label: str) -> list[str]:
@@ -103,6 +130,53 @@ def _string_list(value: Any, *, label: str) -> list[str]:
     return list(value)
 
 
+def normalize_harness_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ExecutionContractError("invalid harness plan")
+    harness = json.loads(
+        _json_encode(raw, label="harness plan"),
+    )
+    launcher = harness.get("launcher_projection")
+    top_present = "secret_refs" in harness
+    launcher_present = (
+        type(launcher) is dict
+        and "secret_refs" in launcher
+    )
+    if top_present != launcher_present:
+        raise ExecutionContractError("harness secret_refs authority mismatch")
+    refs: dict[str, list[str]] | None = None
+    if top_present:
+        try:
+            refs = normalize_harness_secret_refs(harness["secret_refs"])
+            launcher_refs = normalize_harness_secret_refs(
+                launcher["secret_refs"],
+            )
+        except HarnessSecretRefError as exc:
+            raise ExecutionContractError(str(exc)) from exc
+        if refs != launcher_refs:
+            raise ExecutionContractError(
+                "harness secret_refs authority mismatch",
+            )
+        harness.pop("secret_refs")
+        launcher = dict(launcher)
+        launcher.pop("secret_refs")
+        harness["launcher_projection"] = launcher
+    reject_secrets(
+        harness,
+        label="harness plan",
+        allow_reference_keys=False,
+    )
+    normalized = json.loads(
+        _json_encode(harness, label="harness plan"),
+    )
+    if refs is not None:
+        normalized["secret_refs"] = refs
+        normalized_launcher = dict(normalized["launcher_projection"])
+        normalized_launcher["secret_refs"] = refs
+        normalized["launcher_projection"] = normalized_launcher
+    return normalized
+
+
 def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
     if type(raw) is not dict or set(raw) != {
         "harness",
@@ -112,7 +186,7 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ExecutionContractError("invalid frozen capability plan")
     if type(raw["harness"]) is not dict or type(raw["mcp_servers"]) is not list:
         raise ExecutionContractError("invalid frozen capability plan")
-    harness = json.loads(frozen_json(raw["harness"], label="harness plan"))
+    harness = normalize_harness_plan(raw["harness"])
     tools = _string_list(raw["tools"], label="tool plan")
     servers: list[dict[str, Any]] = []
     names: set[str] = set()
@@ -169,6 +243,13 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
         "tools": tools,
         "mcp_servers": servers,
     }
+
+
+def serialize_runtime_plan(plan: Mapping[str, Any]) -> str:
+    return _json_encode(
+        normalize_plan(plan),
+        label="runtime capability plan",
+    )
 
 
 def normalize_prewarm_status(
@@ -379,7 +460,7 @@ class PreparedRuntimeCapabilities:
         return cls(
             frozen_json(manifest, label="runtime capability manifest"),
             bytes(payload),
-            frozen_json(plan, label="runtime capability plan"),
+            serialize_runtime_plan(plan),
             frozen_json(prewarm_status, label="MCP prewarm status"),
         )
 

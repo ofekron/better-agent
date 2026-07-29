@@ -197,6 +197,23 @@ def file_identity_from_dict(raw: Mapping[str, Any]) -> FileIdentity:
     )
 
 
+def config_file_target_is_admissible(
+    root_path: str | Path,
+    config_path: str | Path,
+    identity: FileIdentity,
+) -> bool:
+    root = Path(root_path)
+    candidate = Path(config_path)
+    if Path(identity.requested_path) != candidate:
+        return False
+    if Path(identity.resolved_path).is_relative_to(root):
+        return True
+    return bool(
+        identity.symlink_chain
+        and Path(identity.symlink_chain[0][0]) == candidate
+    )
+
+
 @dataclass(frozen=True)
 class ConfigIdentity:
     root_path: str
@@ -238,13 +255,13 @@ class ConfigIdentity:
         ):
             raise ExecutionContractError("config path escapes its root")
         if candidate.exists() or candidate.is_symlink():
-            try:
-                resolved = candidate.resolve(strict=True)
-            except OSError as exc:
-                raise ExecutionContractError("config path is unavailable") from exc
-            if not resolved.is_relative_to(canonical_root):
-                raise ExecutionContractError("config path escapes its root")
             identity = FileIdentity.capture(candidate)
+            if not config_file_target_is_admissible(
+                canonical_root,
+                lexical,
+                identity,
+            ):
+                raise ExecutionContractError("config path escapes its root")
         else:
             identity = None
         try:
@@ -374,7 +391,7 @@ def config_identity_from_dict(raw: Mapping[str, Any]) -> ConfigIdentity:
     config_file_raw = raw.get("config_file")
     if config_file_raw is not None and type(config_file_raw) is not dict:
         raise ExecutionContractError("invalid config identity")
-    return ConfigIdentity(
+    identity = ConfigIdentity(
         root_path=root_path,
         parent_path=parent_path,
         config_path=config_path,
@@ -385,3 +402,13 @@ def config_identity_from_dict(raw: Mapping[str, Any]) -> ConfigIdentity:
         ),
         **integers,
     )
+    if (
+        identity.config_file is not None
+        and not config_file_target_is_admissible(
+            identity.root_path,
+            identity.config_path,
+            identity.config_file,
+        )
+    ):
+        raise ExecutionContractError("invalid config identity")
+    return identity

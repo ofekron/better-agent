@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from codex_execution_common import ExecutionContractError  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
+    ConfigScopeIdentity,
     FamilyLaunchAttestation,
     build_provider_family_launch_contract,
     capture_cli_launch,
@@ -81,6 +83,119 @@ def _capture(root: Path) -> FamilyLaunchAttestation:
             ),
         ),
     )
+
+
+def _assert_contract_rejected(callable_) -> None:
+    try:
+        callable_()
+    except ExecutionContractError:
+        return
+    raise AssertionError("invalid execution contract was accepted")
+
+
+def test_external_config_symlink_is_exactly_attested() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        config_root = root / "config"
+        external_root = root / "shared"
+        config_root.mkdir()
+        external_root.mkdir()
+        first = external_root / "first.json"
+        second = external_root / "second.json"
+        first.write_text('{"theme":"dark"}', encoding="utf-8")
+        second.write_text('{"theme":"dark"}', encoding="utf-8")
+        settings = config_root / "settings.json"
+        settings.symlink_to(first)
+
+        captured = capture_config_scope(
+            root_path=config_root,
+            config_paths=(settings,),
+        )
+        decoded = ConfigScopeIdentity.from_dict(
+            json.loads(json.dumps(captured.to_dict())),
+        )
+
+        assert decoded == captured
+        assert decoded.attest()
+        assert decoded.files[0].attest_metadata()
+
+        forged = captured.to_dict()
+        forged["files"][0]["config_file"]["symlink_chain"] = []
+        _assert_contract_rejected(
+            lambda: ConfigScopeIdentity.from_dict(forged),
+        )
+
+        settings.unlink()
+        settings.symlink_to(second)
+        assert not captured.attest()
+
+        settings.unlink()
+        settings.symlink_to(first)
+        captured = capture_config_scope(
+            root_path=config_root,
+            config_paths=(settings,),
+        )
+        first.write_text('{"theme":"light"}', encoding="utf-8")
+        assert not captured.attest()
+
+        first.write_text('{"theme":"dark"}', encoding="utf-8")
+        captured = capture_config_scope(
+            root_path=config_root,
+            config_paths=(settings,),
+        )
+        first.unlink()
+        assert not captured.attest()
+
+        first.write_text('{"theme":"dark"}', encoding="utf-8")
+        captured = capture_config_scope(
+            root_path=config_root,
+            config_paths=(settings,),
+        )
+        settings.unlink()
+        settings.write_text('{"theme":"dark"}', encoding="utf-8")
+        assert not captured.attest()
+
+        nested_parent = config_root / "nested"
+        nested_parent.mkdir()
+        nested_settings = nested_parent / "settings.json"
+        nested_settings.write_text('{"theme":"dark"}', encoding="utf-8")
+        nested_captured = capture_config_scope(
+            root_path=config_root,
+            config_paths=(nested_settings,),
+        )
+        replacement_parent = external_root / "nested"
+        replacement_parent.mkdir()
+        (replacement_parent / "settings.json").write_text(
+            '{"theme":"dark"}',
+            encoding="utf-8",
+        )
+        shutil.rmtree(nested_parent)
+        nested_parent.symlink_to(replacement_parent, target_is_directory=True)
+        assert not nested_captured.files[0].attest()
+
+        parent_link = config_root / "linked"
+        parent_link.symlink_to(external_root, target_is_directory=True)
+        _assert_contract_rejected(
+            lambda: capture_config_scope(
+                root_path=config_root,
+                config_paths=(parent_link / "second.json",),
+            ),
+        )
+        _assert_contract_rejected(
+            lambda: capture_config_scope(
+                root_path=config_root,
+                config_paths=(second,),
+            ),
+        )
+
+        directory_link = config_root / "directory.json"
+        directory_link.symlink_to(external_root, target_is_directory=True)
+        _assert_contract_rejected(
+            lambda: capture_config_scope(
+                root_path=config_root,
+                config_paths=(directory_link,),
+            ),
+        )
 
 
 def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
@@ -487,6 +602,7 @@ def test_shebang_launch_pins_script_and_restricts_interpreter() -> None:
 
 
 TESTS = (
+    test_external_config_symlink_is_exactly_attested,
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
     test_cli_path_swap_and_windows_wrappers_fail_closed,
     test_source_package_config_resume_and_symlink_drift_fail_attestation,

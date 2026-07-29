@@ -8,6 +8,10 @@ import threading
 from datetime import datetime
 from typing import Any
 
+from harness_secret_refs import (
+    HarnessSecretRefError,
+    normalize_harness_secret_refs,
+)
 from json_store import read_json, write_json
 from paths import ba_home
 
@@ -129,17 +133,10 @@ def _string_map(value: object, field: str) -> dict[str, Any]:
 
 
 def _normalize_secret_refs(value: object) -> dict[str, list[str]]:
-    """secret_refs is dict[extension_id, list[str]] — opaque token
-    references, never arbitrary data."""
-    if value in (None, ""):
-        return {}
-    if not isinstance(value, dict):
-        raise HarnessProfileError("secret_refs must be an object")
-    out: dict[str, list[str]] = {}
-    for extension_id, refs in value.items():
-        clean_id = _clean_id(extension_id)
-        out[clean_id] = _string_list(refs, f"secret_refs.{clean_id}")
-    return out
+    try:
+        return normalize_harness_secret_refs(value)
+    except HarnessSecretRefError as exc:
+        raise HarnessProfileError(str(exc)) from exc
 
 
 def _normalize_delta(value: object, field: str) -> dict[str, list[str]] | None:
@@ -274,7 +271,9 @@ def _normalized_payload(profile_id: str, payload: dict[str, Any], *, existing: d
         "native_harness_overrides": _string_map(payload.get("native_harness_overrides"), "native_harness_overrides"),
         "provider_run_config_overlay": _string_map(payload.get("provider_run_config_overlay"), "provider_run_config_overlay"),
         "capability_contexts": copy.deepcopy(payload.get("capability_contexts") or []),
-        "secret_refs": _normalize_secret_refs(payload.get("secret_refs")),
+        "secret_refs": _normalize_secret_refs(
+            payload.get("secret_refs", {}),
+        ),
         "base_profile_id": _clean_id(payload.get("base_profile_id"), required=False) or None,
         "base_profile_revision": _clean_text(payload.get("base_profile_revision"), "base_profile_revision", 64) or None,
         "default_provider_id": _clean_text(payload.get("default_provider_id"), "default_provider_id", MAX_SELECTOR_CHARS) or None,

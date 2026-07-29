@@ -17,6 +17,7 @@ from codex_execution_common import (
 from codex_execution_identity import (
     ConfigIdentity,
     FileIdentity,
+    config_file_target_is_admissible,
     config_identity_from_dict,
     file_identity_from_dict,
     file_identity_to_dict,
@@ -112,9 +113,10 @@ class ConfigScopeIdentity:
             any(Path(item.root_path) != root for item in value.files)
             or any(
                 item.config_file is not None
-                and (
-                    item.config_file.requested_path != item.config_path
-                    or not Path(item.config_file.resolved_path).is_relative_to(root)
+                and not config_file_target_is_admissible(
+                    root,
+                    item.config_path,
+                    item.config_file,
                 )
                 for item in value.files
             )
