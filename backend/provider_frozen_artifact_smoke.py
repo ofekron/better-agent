@@ -207,8 +207,15 @@ def _run_family_probe(
         env=environment,
     )
     if completed.returncode != 0:
+        detail = ""
+        try:
+            failure = json.loads(probe_output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            failure = None
+        if type(failure) is dict and type(failure.get("error")) is str:
+            detail = f": {failure['error']}"
         raise ExecutionContractError(
-            f"{family} materialized artifact probe failed",
+            f"{family} materialized artifact probe failed{detail}",
         )
     try:
         result = json.loads(probe_output.read_text(encoding="utf-8"))
@@ -262,8 +269,7 @@ def _smoke(output: Path) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
+def _execute(args: argparse.Namespace) -> int:
     if not args.frozen_artifact_smoke:
         raise ExecutionContractError("artifact smoke mode is required")
     if args.artifact_probe:
@@ -275,6 +281,15 @@ def main(argv: list[str] | None = None) -> int:
             "artifact smoke family is probe-only",
         )
     return _smoke(args.output)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        return _execute(args)
+    except ExecutionContractError as exc:
+        _write_result(args.output, {"error": str(exc)})
+        return 1
 
 
 __all__ = ["main"]

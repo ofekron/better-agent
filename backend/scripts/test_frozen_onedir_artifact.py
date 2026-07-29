@@ -13,6 +13,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_execution_common import ExecutionContractError
+from provider_frozen_artifact_smoke import main as artifact_smoke_main
 from provider_frozen_bundle import (
     FrozenBundleIdentity,
     attest_materialized_frozen_bundle,
@@ -164,6 +165,18 @@ def test_frozen_bundle_excludes_optional_mcp_cli_surface() -> None:
     assert "filter_submodules=_without_optional_mcp_cli" in spec
 
 
+def test_artifact_smoke_failure_is_structured() -> None:
+    with tempfile.TemporaryDirectory(prefix="artifact-failure-") as raw:
+        output = Path(raw) / "result.json"
+        result = artifact_smoke_main(
+            ["--frozen-artifact-smoke", "--output", str(output)],
+        )
+        assert result == 1
+        assert json.loads(output.read_text(encoding="utf-8")) == {
+            "error": "artifact smoke requires frozen runtime",
+        }
+
+
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
     mutations = (
         lambda root, sidecar: (sidecar / "injected.py").write_bytes(b"x"),
@@ -253,6 +266,7 @@ def main() -> None:
     test_macos_default_bundle_root_preserves_app_layout()
     test_artifact_workflow_installs_backend_relative_requirements()
     test_frozen_bundle_excludes_optional_mcp_cli_surface()
+    test_artifact_smoke_failure_is_structured()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()
     print("frozen onedir artifact tests passed")

@@ -77,6 +77,9 @@ jobs:
           $Result = Join-Path $ArtifactRoot "result.json"
           & "desktop\dist\Better Agent\Better Agent.exe" --frozen-artifact-smoke --output $Result
           if ($LASTEXITCODE -ne 0) {
+              if (Test-Path $Result) {
+                  Get-Content $Result
+              }
               throw "frozen artifact smoke failed"
           }
           python -c "import json,sys; value=json.load(open(sys.argv[1], encoding='utf-8')); assert set(value['families']) == {'claude', 'agy'}; assert value['windows_wrapper'] == 'rejected'" $Result
