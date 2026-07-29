@@ -423,6 +423,7 @@ class Coordinator:
         from turn_manager import TurnManager
         from user_prompt_manager import UserPromptManager
         from draft_store import DraftStore
+        from lifecycle_command_engine import LifecycleCommandEngine
         # Turn-lifecycle authority. Owns: cancel_events, active_run_ids,
         # current_assistant_msgs, current_turn_workers,
         # _turn_save_callbacks, in_flight_lifecycle_msg_id,
@@ -432,6 +433,7 @@ class Coordinator:
         # accessors). Reaches back here only for non-turn collaborators
         # (session/message helpers, providers, internal_token).
         self.turn_manager = TurnManager(self)
+        self.lifecycle_commands = LifecycleCommandEngine(bus)
         # User-prompt-lifecycle authority. Owns `in_flight_lifecycle_msg_id`,
         # the `_publish_user_lifecycle` funnel, `emit_user_msg_done/_failed`,
         # and `notify_user_msg_persisted`. `_interrupted_by_msg_id` stays
@@ -3673,7 +3675,21 @@ class Coordinator:
             # via get_in_flight_lifecycle_msg_id. Cleared in the finally
             # below regardless of how the turn ends.
             lifecycle_msg_id = params.pop("lifecycle_msg_id", None)
+            logical_turn_identity = None
+            logical_turn_claimed = False
+            logical_turn_outcome = "complete"
+            delivery_attempt = int(params.get("_delivery_attempt") or 0)
+            logical_request_prefix = None
             if lifecycle_msg_id:
+                from lifecycle_command_model import UserTurnIdentity
+
+                logical_turn_identity = UserTurnIdentity(
+                    user_turn_id=lifecycle_msg_id,
+                    lifecycle_message_id=lifecycle_msg_id,
+                )
+                logical_request_prefix = (
+                    f"user-turn:{lifecycle_msg_id}:{delivery_attempt}"
+                )
                 self.user_prompt_manager.set_in_flight_lifecycle_msg_id(
                     app_session_id, lifecycle_msg_id,
                 )
@@ -3690,6 +3706,13 @@ class Coordinator:
             params["ws_callback"] = dispatch_ws
             is_review = params.pop("_review", False)
             try:
+                if logical_turn_identity and logical_request_prefix:
+                    await self.lifecycle_commands.begin_turn(
+                        request_id=f"{logical_request_prefix}:begin",
+                        session_id=app_session_id,
+                        identity=logical_turn_identity,
+                    )
+                    logical_turn_claimed = True
                 import startup_recovery_gate
                 if (
                     self._startup_recovery_can_overlap_session(app_session_id)
@@ -3706,6 +3729,7 @@ class Coordinator:
                 # session — two CLI subprocesses on one session interleave.
                 await self.turn_manager.wait_for_clear_runs(app_session_id)
                 if item_id and await cleanup_cancelled_queue_item():
+                    logical_turn_outcome = "stopped"
                     continue
                 if is_review:
                     from orchs.supervisor import request_review
@@ -3755,6 +3779,7 @@ class Coordinator:
                             )
                     await self.handle_prompt(**_prompt_processor_handle_params(params))
             except asyncio.CancelledError:
+                logical_turn_outcome = "stopped"
                 # Backend shutdown propagating into us; bail.
                 if lifecycle_msg_id:
                     self.user_prompt_manager.clear_in_flight_lifecycle_msg_id(
@@ -3762,6 +3787,7 @@ class Coordinator:
                     )
                 break
             except ModelAdmissionError as e:
+                logical_turn_outcome = "failed"
                 logger.exception(
                     "prompt processor: permanent model admission failure: %s",
                     e,
@@ -3772,6 +3798,7 @@ class Coordinator:
                     pass
                 await consume_queue_item()
             except Exception as e:
+                logical_turn_outcome = "failed"
                 logger.exception("prompt processor: handle_prompt failed: %s", e)
                 try:
                     await dispatch_ws({"type": "error", "data": {"error": str(e)}})
@@ -3833,6 +3860,21 @@ class Coordinator:
                     self._in_flight_prompts[app_session_id] = remaining
                 else:
                     self._in_flight_prompts.pop(app_session_id, None)
+                if (
+                    logical_turn_claimed
+                    and logical_turn_identity
+                    and logical_request_prefix
+                ):
+                    if self._session_cancelled.get(app_session_id):
+                        logical_turn_outcome = "stopped"
+                    await asyncio.shield(
+                        self.lifecycle_commands.finish_turn(
+                            request_id=f"{logical_request_prefix}:finish",
+                            session_id=app_session_id,
+                            identity=logical_turn_identity,
+                            outcome=logical_turn_outcome,
+                        )
+                    )
         # If the queue is empty, drop ourselves so a future submit can
         # spawn a fresh task. (Don't pop the queue itself — it may have
         # been swapped by a re-spawn race.)
@@ -4079,11 +4121,12 @@ class Coordinator:
         if not root_id:
             return
         token = _cb_token(ws_callback) if ws_callback is not None else None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(
+        # WS disconnect reaches here from a worker thread via
+        # `unregister_all_ws` -> asyncio.to_thread, where there is no
+        # running loop. Binding to the caller's loop dropped the fact
+        # entirely on that path, so native_files_manager never learned a
+        # subscriber detached and kept its tailers open.
+        session_manager.schedule_on_bound_loop(
             bus.publish(
                 BusEvent(
                     type="native_files.demand",
@@ -4097,7 +4140,6 @@ class Coordinator:
                     persist=False,
                 )
             ),
-            name=f"native-demand-{app_session_id[:8]}",
         )
 
     def _unsubscribe_from_wire_tailer(
@@ -4150,14 +4192,12 @@ class Coordinator:
             # Runs on the main loop normally, but also from a worker thread
             # via unregister_all_ws — WS disconnect drives it through
             # asyncio.to_thread (main.py), where there is no running loop.
-            # asyncio.create_task needs one; on the no-loop path close the
-            # reap coroutine instead of leaking it ("never awaited").
-            # tailer.stop() above already signaled graceful stop.
-            coro = self._await_tailer_stop(root_id, task)
-            try:
-                asyncio.get_running_loop().create_task(coro)
-            except RuntimeError:
-                coro.close()
+            # Scheduling on the bound loop reaps the tailer task on that
+            # path too; previously it was dropped and the task was left
+            # for the loop to collect on its own.
+            session_manager.schedule_on_bound_loop(
+                self._await_tailer_stop(root_id, task),
+            )
 
     async def _await_tailer_stop(self, root_id: str, task: asyncio.Task) -> None:
         try:
