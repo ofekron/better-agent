@@ -20,6 +20,8 @@ import node_link  # noqa: E402
 import node_store  # noqa: E402
 from daemonhost.jsonio import write_json  # noqa: E402
 from daemonhost.paths import switch_request_path  # noqa: E402
+from restart_request import consume_restart_request  # noqa: E402
+from paths import ba_home  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -65,6 +67,7 @@ async def _run() -> None:
         assert sent == ["node-a"], f"expected only connected worker restart, got {sent!r}"
         assert result["restarted_nodes"] == ["node-a"], result
         assert killed, "primary restart signal was not scheduled"
+        assert consume_restart_request(ba_home() / "restart_requested") == "restart-test"
         status = await main.admin_restart_status("restart-test")
         assert status["accepted"] is True, status
         assert status["status"] == "pending", status

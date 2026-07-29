@@ -962,7 +962,7 @@ open_first_run_browser() {
 start_backend() {
   local bind_host
   local pid_file="$CREDENTIAL_BACKEND_CONTROL_DIR/backend.pid"
-  if ! PYTHONPATH="$DIR" "$PY" -m desktop.restart_request "$FLAG" --clear; then
+  if ! PYTHONPATH="$DIR:$DIR/backend" "$PY" -m restart_request "$FLAG" --clear; then
     echo "Could not clear stale restart intent before backend generation." >&2
     return 1
   fi
@@ -1239,7 +1239,7 @@ else
     fi
 
     if [ -f "$FLAG" ]; then
-      if ! PENDING_REFRESH_ID="$(PYTHONPATH="$DIR" "$PY" -m desktop.restart_request \
+      if ! PENDING_REFRESH_ID="$(PYTHONPATH="$DIR:$DIR/backend" "$PY" -m restart_request \
         "$FLAG" --not-before "$BACKEND_GENERATION_STARTED_AT")"; then
         echo "Restart request was invalid; stopping launcher." >&2
         break

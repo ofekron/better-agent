@@ -108,6 +108,7 @@ hiddenimports += [
     "switch_control_daemon.line_switch_runtime.paths",
     "switch_control_daemon.line_switch_runtime.pointer",
     "switch_control_daemon.line_switch_runtime.requests",
+    "switch_control_daemon.line_switch_runtime.restart_request",
     "switch_control_daemon.line_switch_runtime.service",
     "switch_control_daemon.line_switch_runtime.transaction",
 ]

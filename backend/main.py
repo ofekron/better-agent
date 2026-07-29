@@ -94,6 +94,11 @@ import task_output_preview_urls
 import mobile_bundle_ticket
 import installation_capabilities
 import installation_profile
+from restart_request import (
+    new_restart_request_id,
+    valid_restart_request_id,
+    write_restart_request,
+)
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
     SerializedWebSocketFrame,
@@ -11210,10 +11215,7 @@ async def build_info():
 
 
 def _valid_refresh_request_id(request_id: str) -> bool:
-    return (
-        1 <= len(request_id) <= 100
-        and all(char.isalnum() or char in "-_" for char in request_id)
-    )
+    return valid_restart_request_id(request_id)
 
 
 def _refresh_acceptance_path() -> Path:
@@ -11369,7 +11371,7 @@ async def admin_restart(body: dict | None = None):
     raw_request_id = (body or {}).get("request_id")
     request_id = str(raw_request_id) if raw_request_id is not None else ""
     if not _valid_refresh_request_id(request_id):
-        request_id = str(uuid.uuid4())
+        request_id = new_restart_request_id()
 
     mode = str((body or {}).get("mode") or "now")
     if mode not in {"now", "idle"}:
@@ -11413,7 +11415,7 @@ async def internal_switch_restart(
     raw_request_id = (body or {}).get("request_id")
     request_id = str(raw_request_id) if raw_request_id is not None else ""
     if not _valid_refresh_request_id(request_id):
-        request_id = str(uuid.uuid4())
+        request_id = new_restart_request_id()
     restarted_nodes = await _restart_connected_worker_nodes()
     await _trigger_supervisor_restart(request_id)
     return {"status": "rebuilding", "request_id": request_id, "restarted_nodes": restarted_nodes}
@@ -11441,7 +11443,7 @@ async def _trigger_supervisor_restart(request_id: str) -> None:
     )
 
     flag = ba_home() / "restart_requested"
-    await asyncio.to_thread(flag.write_text, request_id, encoding="utf-8")
+    await asyncio.to_thread(write_restart_request, flag, request_id)
     pid = os.getpid()
 
     async def _restart():

@@ -8,8 +8,9 @@ from typing import Any
 
 from . import pointer
 from .control import request as set_switch_intent, state
-from .jsonio import read_json, write_json, write_text
+from .jsonio import read_json, write_json
 from .paths import refresh_result_path, restart_request_path, switch_request_path
+from .restart_request import remove_restart_request, write_restart_request
 from .transaction import mutation_lock
 
 _NONTERMINAL = {"preparing", "pending", "accepted"}
@@ -318,7 +319,7 @@ def _validate_record(
 
 
 def _restart(request_id: str) -> None:
-    write_text(restart_request_path(), request_id)
+    write_restart_request(restart_request_path(), request_id)
 
 
 def _mark_failed(data: dict[str, Any], error: str, restart: bool = False) -> dict[str, Any]:
@@ -417,11 +418,9 @@ def request_status(request_id: str) -> dict[str, Any]:
 
 
 def _remove_own_restart(request_id: str) -> None:
-    path = restart_request_path()
     try:
-        if path.read_text(encoding="utf-8") == request_id:
-            path.unlink()
-    except OSError:
+        remove_restart_request(restart_request_path(), request_id)
+    except (OSError, ValueError):
         return
 
 

@@ -68,7 +68,7 @@ def test_never_ready_generations_open_circuit_and_cleanup(tmp_path) -> None:
 
 
 def test_invalid_restart_intent_fails_closed_and_cleans_up(tmp_path) -> None:
-    supervisor = FakeSupervisor(tmp_path, request_content="invalid")
+    supervisor = FakeSupervisor(tmp_path, request_content="contains/slash")
 
     with pytest.raises(OSError):
         windows_source_launcher.run(

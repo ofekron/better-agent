@@ -12,6 +12,12 @@ RUN_WINDOWS = ROOT / "run_windows.bat"
 APP_ENTRY = ROOT / "backend" / "app_entry.py"
 MAIN = ROOT / "backend" / "main.py"
 BROWSER_SUPERVISOR = ROOT / "desktop" / "browser_backend_supervisor.py"
+RESTART_REQUEST = (
+    ROOT / "switch_control_daemon" / "line_switch_runtime" / "restart_request.py"
+)
+SWITCH_REQUESTS = (
+    ROOT / "switch_control_daemon" / "line_switch_runtime" / "requests.py"
+)
 SERVER_CONFIG = ROOT / "backend" / "server_config.py"
 WINDOWS_SOURCE_LAUNCHER = ROOT / "desktop" / "windows_source_launcher.py"
 LOCAL_CODESIGN = ROOT / "desktop" / "local_codesign.sh"
@@ -31,6 +37,8 @@ def main() -> int:
     app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
     main_text = MAIN.read_text(encoding="utf-8")
     browser_supervisor_text = BROWSER_SUPERVISOR.read_text(encoding="utf-8")
+    restart_request_text = RESTART_REQUEST.read_text(encoding="utf-8")
+    switch_requests_text = SWITCH_REQUESTS.read_text(encoding="utf-8")
     server_config_text = SERVER_CONFIG.read_text(encoding="utf-8")
     windows_source_launcher_text = WINDOWS_SOURCE_LAUNCHER.read_text(encoding="utf-8")
     local_codesign_text = LOCAL_CODESIGN.read_text(encoding="utf-8")
@@ -170,10 +178,27 @@ def main() -> int:
     )
     check(
         "restart intent uses hardened shared consumer",
-        "-m desktop.restart_request" in text
+        "-m restart_request" in text
         and '"$FLAG" --clear' in text
         and '--not-before "$BACKEND_GENERATION_STARTED_AT"' in text
         and 'PENDING_REFRESH_ID="$(cat "$FLAG")"' not in text,
+        failures,
+    )
+    check(
+        "backend and launcher share atomic restart-intent authority",
+        "valid_restart_request_id(request_id)" in main_text
+        and "await asyncio.to_thread(write_restart_request, flag, request_id)"
+        in main_text
+        and "def write_restart_request(" in restart_request_text
+        and "os.replace(temporary, path)" in restart_request_text,
+        failures,
+    )
+    check(
+        "line switch daemon uses canonical restart-intent authority",
+        "write_restart_request(restart_request_path(), request_id)"
+        in switch_requests_text
+        and "write_text(restart_request_path(), request_id)"
+        not in switch_requests_text,
         failures,
     )
     check(
