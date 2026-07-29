@@ -156,6 +156,14 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     assert "-r backend/" not in install["run"]
 
 
+def test_frozen_bundle_excludes_optional_mcp_cli_surface() -> None:
+    spec = (ROOT / "desktop" / "BetterAgent.spec").read_text(
+        encoding="utf-8",
+    )
+    assert 'not _module_name.startswith("mcp.cli.")' in spec
+    assert "filter_submodules=_without_optional_mcp_cli" in spec
+
+
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
     mutations = (
         lambda root, sidecar: (sidecar / "injected.py").write_bytes(b"x"),
@@ -244,6 +252,7 @@ def main() -> None:
     test_complete_bundle_round_trip_and_materialization()
     test_macos_default_bundle_root_preserves_app_layout()
     test_artifact_workflow_installs_backend_relative_requirements()
+    test_frozen_bundle_excludes_optional_mcp_cli_surface()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()
     print("frozen onedir artifact tests passed")

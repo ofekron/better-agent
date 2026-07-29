@@ -76,9 +76,19 @@ def _without_python_sources(_datas):
     ]
 
 
+def _without_optional_mcp_cli(_module_name):
+    return (
+        _module_name != "mcp.cli"
+        and not _module_name.startswith("mcp.cli.")
+    )
+
+
 for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "watchfiles", "fastapi",
              "starlette", "webview", "tufup", "mcp"):
-    _d, _b, _h = collect_all(_pkg)
+    _d, _b, _h = collect_all(
+        _pkg,
+        filter_submodules=_without_optional_mcp_cli,
+    )
     datas += _without_python_sources(_d)
     binaries += _b
     hiddenimports += _h
