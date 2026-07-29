@@ -3142,8 +3142,8 @@ def test_get_extension_setting_values_never_touches_os_keychain() -> None:
     def _timed_out(*_args, **_kwargs):
         raise RuntimeError("OS credential read timed out")
 
-    original_has_service_password = password_manager.has_service_password
-    password_manager.has_service_password = _timed_out  # type: ignore[assignment]
+    original_has_service_password = getattr(password_manager, "has_service_password")
+    setattr(password_manager, "has_service_password", _timed_out)
     try:
         values = extension_store.get_extension_setting_values(extension_id)
         if values["values"]["label"] != "unset" or values["values"]["api_key"] is not None:
@@ -3160,7 +3160,7 @@ def test_get_extension_setting_values_never_touches_os_keychain() -> None:
                 "accessor no longer does)"
             )
     finally:
-        password_manager.has_service_password = original_has_service_password  # type: ignore[assignment]
+        setattr(password_manager, "has_service_password", original_has_service_password)
         extension_store.uninstall(extension_id)
 
 
