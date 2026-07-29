@@ -216,6 +216,7 @@ def test_windows_materialization_uses_acl_authority() -> None:
     assert "dir=ba_home()" in smoke_source
     assert smoke_source.count("open_pinned_runner_launch(") == 1
     assert '"timings_ms": timings' in smoke_source
+    assert "os.fsync(output)" not in bundle_source
 
 
 def test_artifact_smoke_failure_is_structured() -> None:

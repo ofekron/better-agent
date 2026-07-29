@@ -608,7 +608,6 @@ def _copy_attested_file(
                         if written <= 0:
                             raise OSError("short frozen bundle write")
                         view = view[written:]
-                os.fsync(output)
             finally:
                 os.close(output)
             after = os.fstat(source)
