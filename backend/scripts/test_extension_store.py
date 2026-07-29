@@ -5812,19 +5812,159 @@ def test_sdk_runtime_requirements_resolves_frozen_layout() -> None:
         shutil.rmtree(frozen_root, ignore_errors=True)
 
 
+def _mcp_tool_names(
+    python: Path,
+    argv: list[str],
+    *,
+    package_root: Path | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> set[str]:
+    if (package_root is None) == (runtime_env is None):
+        raise AssertionError("provide exactly one MCP runtime environment")
+    env = {**os.environ, **(runtime_env or {})}
+    if package_root is not None:
+        sdk_root = Path(extension_store.__file__).resolve().parent.parent / "sdk"
+        env["PYTHONPATH"] = os.pathsep.join((str(package_root), str(sdk_root)))
+    requests = "\n".join(
+        (
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"},
+                },
+            }),
+            json.dumps({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }),
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            }),
+            "",
+        )
+    )
+    result = subprocess.run(
+        [str(python), *argv],
+        input=requests,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    responses = [
+        json.loads(line)
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("{")
+    ]
+    tools_response = next(
+        (response for response in responses if response.get("id") == 2),
+        None,
+    )
+    if tools_response is None:
+        raise AssertionError(
+            f"tools/list response missing\nstdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+    return {
+        tool["name"] for tool in tools_response["result"]["tools"]
+    }
+
+
+def _write_mcp_server(
+    path: Path,
+    *,
+    server_name: str,
+    tool_name: str,
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "from mcp.server.fastmcp import FastMCP\n"
+        f"server = FastMCP({server_name!r})\n"
+        "@server.tool()\n"
+        f"def {tool_name}() -> str:\n"
+        "    return 'pong'\n"
+        "server.run()\n",
+        encoding="utf-8",
+    )
+
+
+def test_base_extension_environment_lists_sdk_mcp_tools() -> None:
+    target = Path(tempfile.mkdtemp(prefix="bc-test-extension-base-mcp-"))
+    original_verified = extension_store.dependency_plan.verified_active_python
+    try:
+        _write_mcp_server(
+            target / "scheduler_fixture" / "server.py",
+            server_name="scheduler",
+            tool_name="schedule_list",
+        )
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: Path(sys.executable)
+        )
+        item = {
+            "name": "scheduler",
+            "module": "scheduler_fixture.server",
+            "python": "",
+            "command": "",
+            "args": [],
+            "env": {},
+            "default_enabled": True,
+            "user_facing": True,
+            "bare_allowed": False,
+            "requires_backend_auth": False,
+            "ambient_native": False,
+            "predicate": {},
+            "replaces_builtin": "",
+        }
+        record = {
+            "enabled": True,
+            "source": {"install_path": str(target)},
+            "manifest": {
+                "id": "fixture.scheduler",
+                "permissions": [],
+                "entrypoints": {
+                    "python_requirements": [],
+                    "mcp": [item],
+                },
+            },
+        }
+        config = extension_store._runtime_mcp_server_config_for_item(
+            record,
+            item,
+            {"user_facing": True},
+        )
+        if config is None:
+            raise AssertionError("scheduler MCP runtime config was omitted")
+        tool_names = _mcp_tool_names(
+            Path(config["command"]),
+            config["args"],
+            runtime_env=config["env"],
+        )
+        if tool_names != {"schedule_list"}:
+            raise AssertionError(tool_names)
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        shutil.rmtree(target, ignore_errors=True)
+
+
 def test_private_extension_environment_lists_sdk_mcp_tools() -> None:
     target = Path(tempfile.mkdtemp(prefix="bc-test-extension-private-mcp-"))
     original_verified = extension_store.dependency_plan.verified_active_python
     script = target / "mcp" / "server.py"
-    script.parent.mkdir(parents=True)
-    script.write_text(
-        "from mcp.server.fastmcp import FastMCP\n"
-        "server = FastMCP('private-extension')\n"
-        "@server.tool()\n"
-        "def private_ping() -> str:\n"
-        "    return 'pong'\n"
-        "server.run()\n",
-        encoding="utf-8",
+    _write_mcp_server(
+        script,
+        server_name="private-extension",
+        tool_name="private_ping",
     )
     try:
         extension_store.dependency_plan.verified_active_python = (
@@ -5838,84 +5978,16 @@ def test_private_extension_environment_lists_sdk_mcp_tools() -> None:
             target,
             has_dependency_environment=True,
         )
-        sdk_root = Path(extension_store.__file__).resolve().parent.parent / "sdk"
-        env = {
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(target), str(sdk_root))),
-        }
-        requests = "\n".join(
-            (
-                json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "0"},
-                    },
-                }),
-                json.dumps({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized",
-                    "params": {},
-                }),
-                json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/list",
-                    "params": {},
-                }),
-                "",
-            )
-        )
-        result = subprocess.run(
+        tool_names = _mcp_tool_names(
+            private_python,
             [
-                str(private_python),
                 "-m",
                 "better_agent_sdk.script_entrypoint",
                 str(target),
                 str(script),
             ],
-            input=requests,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
-            check=False,
+            package_root=target,
         )
-        if result.returncode != 0:
-            probe = subprocess.run(
-                [
-                    str(private_python),
-                    "-c",
-                    (
-                        "import importlib.metadata, importlib.util, mcp; "
-                        "print(importlib.metadata.version('mcp')); "
-                        "print(mcp, tuple(mcp.__path__)); "
-                        "print(importlib.util.find_spec('mcp.server.fastmcp'))"
-                    ),
-                ],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
-            raise AssertionError(
-                f"{result.stderr}\nprobe stdout: {probe.stdout}\n"
-                f"probe stderr: {probe.stderr}"
-            )
-        responses = [
-            json.loads(line)
-            for line in result.stdout.splitlines()
-            if line.strip().startswith("{")
-        ]
-        tools_response = next(
-            response for response in responses if response.get("id") == 2
-        )
-        tool_names = {
-            tool["name"] for tool in tools_response["result"]["tools"]
-        }
         if tool_names != {"private_ping"}:
             raise AssertionError(tool_names)
     finally:
@@ -5969,6 +6041,7 @@ def test_extension_runtime_prefers_its_dependency_environment() -> None:
 if __name__ == "__main__":
     try:
         test_sdk_runtime_requirements_resolves_frozen_layout()
+        test_base_extension_environment_lists_sdk_mcp_tools()
         test_private_extension_environment_lists_sdk_mcp_tools()
         test_extension_runtime_prefers_its_dependency_environment()
         test_extension_dependencies_use_active_backend_python()
