@@ -416,9 +416,10 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
         raise AssertionError("runtime MCP server was not exposed")
     args = server.get("args") or []
     if (
-        len(args) != 3
+        len(args) != 4
         or args[:2] != ["-m", "better_agent_sdk.script_entrypoint"]
-        or not str(args[2]).endswith("mcp/server.py")
+        or Path(args[2]).resolve() != Path(record["source"]["install_path"]).resolve()
+        or not str(args[3]).endswith("mcp/server.py")
     ):
         raise AssertionError(f"unexpected MCP args: {args!r}")
     env = server.get("env") or {}
@@ -4149,7 +4150,9 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
             raise AssertionError(config)
         if config["args"][:2] != ["-m", "better_agent_sdk.script_entrypoint"]:
             raise AssertionError(config)
-        if Path(config["args"][2]).resolve() != (Path(record["source"]["install_path"]) / "mcp" / "server.py").resolve():
+        if Path(config["args"][2]).resolve() != Path(record["source"]["install_path"]).resolve():
+            raise AssertionError(config)
+        if Path(config["args"][3]).resolve() != (Path(record["source"]["install_path"]) / "mcp" / "server.py").resolve():
             raise AssertionError(config)
         if config["env"]["BETTER_CLAUDE_EXTENSION_ID"] != "ofek.scheduler":
             raise AssertionError(config)

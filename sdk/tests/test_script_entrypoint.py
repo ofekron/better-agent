@@ -7,8 +7,10 @@ import sys
 
 
 def test_script_entrypoint_does_not_shadow_mcp_sdk(tmp_path: Path) -> None:
-    script = tmp_path / "mcp" / "server.py"
-    script.parent.mkdir()
+    package_root = tmp_path / "extension"
+    script = package_root / "mcp" / "server.py"
+    script.parent.mkdir(parents=True)
+    (script.parent / "__init__.py").write_text("", encoding="utf-8")
     script.write_text(
         "from mcp.server.fastmcp import FastMCP\n"
         "print(FastMCP.__name__)\n",
@@ -18,7 +20,11 @@ def test_script_entrypoint_does_not_shadow_mcp_sdk(tmp_path: Path) -> None:
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(
-            filter(None, (str(sdk_root), os.environ.get("PYTHONPATH", "")))
+            filter(None, (
+                str(package_root),
+                str(sdk_root),
+                os.environ.get("PYTHONPATH", ""),
+            ))
         ),
     }
 
@@ -27,6 +33,7 @@ def test_script_entrypoint_does_not_shadow_mcp_sdk(tmp_path: Path) -> None:
             sys.executable,
             "-m",
             "better_agent_sdk.script_entrypoint",
+            str(package_root),
             str(script),
         ],
         capture_output=True,
