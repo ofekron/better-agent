@@ -202,6 +202,10 @@ def _development_runtime(
     elif current.is_relative_to(base_root) and stdlib_root.is_relative_to(
         base_root,
     ):
+        if current.is_relative_to(Path("/bin")) or current.is_relative_to(
+            Path("/usr/bin"),
+        ):
+            return None
         runtime_root = base_root
     else:
         return None

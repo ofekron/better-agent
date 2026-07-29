@@ -131,7 +131,54 @@ def test_self_contained_python_runtime_is_materialized_and_attested() -> None:
             raise AssertionError("tampered runtime was accepted")
 
 
+def test_system_interpreter_is_not_bundled_from_external_venv() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        prefix_root = Path(raw) / "venv"
+        prefix_root.mkdir()
+        current = Path("/usr/bin/python3")
+        if not current.is_file():
+            return
+        with (
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "executable",
+                str(current),
+            ),
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "prefix",
+                str(prefix_root),
+            ),
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "base_prefix",
+                "/usr",
+            ),
+            mock.patch.object(
+                provider_runner_launch.sysconfig,
+                "get_path",
+                return_value="/usr/lib",
+            ),
+            mock.patch.object(
+                provider_runner_launch.FrozenBundleIdentity,
+                "capture",
+                side_effect=AssertionError("system installation was scanned"),
+            ),
+        ):
+            runner = capture_runner_launch(
+                run_dir=Path(raw),
+                executable_path=current,
+                runner_entry=Path(__file__),
+                runner_kind="openai",
+                runner_module="test_provider_runner_runtime_classification",
+                frozen=False,
+            )
+
+    assert runner.development_runtime is None
+
+
 if __name__ == "__main__":
     test_base_python_installation_is_not_a_runtime_bundle()
     test_self_contained_python_runtime_is_materialized_and_attested()
+    test_system_interpreter_is_not_bundled_from_external_venv()
     print("PASS provider runner runtime classification")
