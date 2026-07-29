@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from provider_codex import CodexProvider  # noqa: E402
 import runner_codex  # noqa: E402
 import codex_normalize  # noqa: E402
+import installation_profile  # noqa: E402
 
 
 def check(cond: bool, msg: str, failures: list[str]) -> None:
@@ -93,21 +95,30 @@ def test_delegate_task_dynamic_tool_contract(failures: list[str]) -> None:
 
 
 def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
-    tools, handlers = runner_codex._build_dynamic_tool_set(
-        mode="native",
-        app_session_id="sender-1",
-        backend_url="http://backend",
-        internal_token="tok",
-        mssg_sender_session_id="sender-1",
-        cwd="/tmp",
-        model="model-1",
-        user_facing=False,
-        request_user_input_enabled=False,
-        file_editing_mode=False,
-        team_orchestration_enabled=True,
-        disabled_builtin_tools=set(),
-        existing_tool_names=set(),
-    )
+    def build_tool_set() -> tuple[list[dict], dict]:
+        return runner_codex._build_dynamic_tool_set(
+            mode="native",
+            app_session_id="sender-1",
+            backend_url="http://backend",
+            internal_token="tok",
+            mssg_sender_session_id="sender-1",
+            cwd="/tmp",
+            model="model-1",
+            user_facing=False,
+            request_user_input_enabled=False,
+            file_editing_mode=False,
+            team_orchestration_enabled=True,
+            disabled_builtin_tools=set(),
+            existing_tool_names=set(),
+        )
+
+    with patch.object(installation_profile, "integrations_enabled", return_value=False):
+        disabled_tools, disabled_handlers = build_tool_set()
+    check(disabled_tools == [], "disabled integrations register no dynamic tools", failures)
+    check(disabled_handlers == {}, "disabled integrations register no handlers", failures)
+
+    with patch.object(installation_profile, "integrations_enabled", return_value=True):
+        tools, handlers = build_tool_set()
     names = {tool.get("name") for tool in tools}
     check("mssg" in names, "native loopback registers mssg dynamic tool", failures)
     check("mssg" in handlers, "native loopback registers mssg handler", failures)
