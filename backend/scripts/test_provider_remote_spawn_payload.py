@@ -17,6 +17,7 @@ _PROVIDER_TREE = ast.parse(_PROVIDER_SOURCE)
 
 from execution_template import prepare_execution
 from node_rpc_handlers import _local_node_backend_url, _prepare_node_execution
+from provider_remote import RemoteProviderProxy
 
 
 def _start_run_node() -> ast.FunctionDef:
@@ -131,6 +132,31 @@ def test_node_prepares_platform_local_execution_contract() -> None:
 
     assert execution.artifact.runtime_policy == {"prepared_on": "node"}
     assert execution.artifact.template.arguments() == authority.template.arguments()
+
+
+def test_primary_proxy_defers_spawn_attestation_to_node() -> None:
+    provider_record = {
+        "id": "zai-provider",
+        "kind": "z.ai",
+        "generation": str(uuid.uuid4()),
+        "revision": 1,
+    }
+    arguments = {
+        "run_id": "remote-authority",
+        "prompt": "route only",
+        "cwd": "C:\\Users\\Lenovo\\better-agent",
+        "model": "glm-5.2",
+        "reasoning_effort": "medium",
+        "session_id": None,
+        "mode": "native",
+        "app_session_id": "remote-session",
+    }
+    execution = prepare_execution(provider_record, **arguments)
+    proxy = object.__new__(RemoteProviderProxy)
+    proxy.execution_authority_record = lambda _arguments: provider_record
+
+    with proxy._execution_authority_context(execution, arguments) as authority:
+        assert authority == provider_record
 
 
 def test_remote_spawn_forwards_effective_harness_policy() -> None:

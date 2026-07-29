@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+from contextlib import contextmanager
 import logging
 import os
 import threading
@@ -269,6 +270,16 @@ class RemoteProviderProxy(Provider):
             routing_session_id=routing_session_id,
             **canonical_arguments,
         )
+
+    @contextmanager
+    def _execution_authority_context(
+        self,
+        execution,
+        start_arguments: dict[str, Any],
+    ):
+        authority = self.execution_authority_record(start_arguments)
+        execution.artifact.require_authority(authority)
+        yield authority
 
     def _assert_execution_provider(self, artifact) -> None:
         del artifact
