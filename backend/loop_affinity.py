@@ -70,6 +70,35 @@ def schedule_on(loop: Optional[asyncio.AbstractEventLoop], coro) -> bool:
         return False
 
 
+async def call_on_main(factory):
+    """Await a coroutine ON the main loop, from whatever loop is calling.
+
+    The fire-and-forget `schedule_on_*` helpers are wrong when the caller
+    needs the result, or needs the work to have finished before it
+    continues. This is the awaiting counterpart: work that must run on
+    the main loop — anything touching a loop-bound engine, lock, or
+    queue — but whose caller lives elsewhere.
+
+    Takes a factory so the coroutine is created on the loop that runs
+    it. Falls through to running inline when there is no main loop bound
+    or the caller is already on it.
+    """
+    loop = _main_loop
+    if loop is None or loop.is_closed():
+        return await factory()
+    try:
+        if asyncio.get_running_loop() is loop:
+            return await factory()
+    except RuntimeError:
+        pass
+    future = asyncio.run_coroutine_threadsafe(_invoke(factory), loop)
+    return await asyncio.wrap_future(future)
+
+
+async def _invoke(factory):
+    return await factory()
+
+
 def reset_for_tests() -> None:
     global _main_loop
     _main_loop = None

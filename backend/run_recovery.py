@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Optional
 from weakref import WeakKeyDictionary
 
+import loop_affinity
 import perf
 import recovery_manager
 import recovery_schedule
@@ -2441,7 +2442,21 @@ def _recovery_target_assistant(
     return _last_assistant(sess)
 
 
-async def _emit_recovered_user_message_terminal(
+async def _emit_recovered_user_message_terminal(*args, **kwargs):
+    """Run the terminal lifecycle emit on the main loop.
+
+    Replay-only buckets integrate on the recovery thread, but this emit
+    reaches `lifecycle_commands` and `coordinator.user_prompt_manager`,
+    both of which assert they are called on the loop they were bound to.
+    The expensive work (replay, reconcile) stays off-main; only this
+    hops back.
+    """
+    return await loop_affinity.call_on_main(
+        lambda: _emit_recovered_user_message_terminal_on_main(*args, **kwargs),
+    )
+
+
+async def _emit_recovered_user_message_terminal_on_main(
     *,
     coordinator,
     app_session_id: str,
@@ -3161,7 +3176,7 @@ async def _project_admitted_retry(
         )
         return
     if elected.phase in {"starting", "running"}:
-        await lifecycle_commands.confirm_execution_started(
+        await lifecycle_commands.admit_execution_attempt(
             app_session_id,
             execution_identity=execution_identity,
             provider_run_id=provider_run_id,
@@ -3424,7 +3439,7 @@ async def _retry_recovered_run(
             or execution.provider_run_id != old_run_id
         ):
             raise RuntimeError("recovered retry execution identity is ambiguous")
-        await lifecycle_commands.bind_execution_run(
+        await lifecycle_commands.elect_execution_attempt(
             app_sid,
             execution_identity=execution.identity,
             provider_run_id=new_run_id,
