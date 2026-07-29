@@ -71,6 +71,7 @@ import time as _time
 import virtual_session_prompt_handlers
 from ws_serialization import dumps_ws_json
 from global_events import GLOBAL_EVENT_TYPES, validate_global_event
+from model_execution_admission import ModelAdmissionError
 
 logger = logging.getLogger(__name__)
 
@@ -3760,6 +3761,16 @@ class Coordinator:
                         app_session_id,
                     )
                 break
+            except ModelAdmissionError as e:
+                logger.exception(
+                    "prompt processor: permanent model admission failure: %s",
+                    e,
+                )
+                try:
+                    await dispatch_ws({"type": "error", "data": {"error": str(e)}})
+                except Exception:
+                    pass
+                await consume_queue_item()
             except Exception as e:
                 logger.exception("prompt processor: handle_prompt failed: %s", e)
                 try:

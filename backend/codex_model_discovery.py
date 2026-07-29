@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
@@ -15,6 +14,7 @@ from codex_execution import (
     ExecutionContractError,
     build_codex_execution_contract,
 )
+from codex_execution_runtime import codex_authority_paths
 from codex_model_discovery_format import (
     CatalogOutputError,
     parse_models,
@@ -204,26 +204,15 @@ def _effective_codex_home(provider: Mapping[str, object]) -> Path:
         ) from exc
 
 
-def _check_deadline(deadline: float | None) -> None:
-    if deadline is not None and time.monotonic() >= deadline:
-        raise _PreparationFailure("error", "timeout")
-
-
 def _build_context(
     provider_id: str,
-    *,
-    deadline: float | None = None,
 ) -> _DiscoveryContext:
-    _check_deadline(deadline)
     snapshot = _provider_snapshot(provider_id)
-    _check_deadline(deadline)
     catalog_args, method = _catalog_semantics(snapshot.provider)
     executable = resolve_cli_binary("codex")
-    _check_deadline(deadline)
     if not executable:
         raise _PreparationFailure("unavailable", "executable_unavailable")
     codex_home = _effective_codex_home(snapshot.provider)
-    _check_deadline(deadline)
     provider_for_contract = {
         **snapshot.provider,
         "config_dir": str(codex_home),
@@ -234,10 +223,7 @@ def _build_context(
             launcher_path=executable,
             catalog_args=catalog_args,
             environment_selectors={"CODEX_HOME": str(codex_home)},
-            config_paths=(
-                str(codex_home / "config.toml"),
-                str(codex_home / "auth.json"),
-            ),
+            config_paths=codex_authority_paths(codex_home),
             search_path=os.environ.get("PATH"),
         )
         authority = build_catalog_authority(
@@ -251,7 +237,6 @@ def _build_context(
         )
     except (CatalogAuthorityError, ExecutionContractError, ValueError) as exc:
         raise _PreparationFailure("unavailable", "source_unavailable") from exc
-    _check_deadline(deadline)
     profile_args = ("-p", contract.profile) if contract.profile else ()
     argv = (
         *contract.launch_chain.argv_prefix,
@@ -269,28 +254,72 @@ def _build_context(
     )
 
 
+def _context_from_authority(
+    provider_id: str,
+    authority: CatalogAuthority,
+) -> _DiscoveryContext:
+    snapshot = _provider_snapshot(provider_id)
+    catalog_args, method = _catalog_semantics(snapshot.provider)
+    contract = authority.execution_contract
+    expected_identity = (
+        authority.provider_generation,
+        authority.provider_revision,
+        authority.provider_state_generation,
+        authority.provider_state_revision,
+        authority.provider_state_digest,
+    )
+    selectors = dict(contract.environment_selectors)
+    codex_home = _effective_codex_home(snapshot.provider)
+    if (
+        authority.provider_id != provider_id
+        or authority.discovery_method != method
+        or authority.discovery_version != DISCOVERY_VERSION
+        or snapshot.identity != expected_identity
+        or contract.provider_id != provider_id
+        or contract.catalog_args != catalog_args
+        or selectors != {"CODEX_HOME": str(codex_home)}
+    ):
+        raise _PreparationFailure("error", "authority_changed")
+    profile_args = ("-p", contract.profile) if contract.profile else ()
+    return _DiscoveryContext(
+        snapshot=snapshot,
+        contract=contract,
+        authority=authority,
+        environment=child_environment(codex_home),
+        argv=(
+            *contract.launch_chain.argv_prefix,
+            *profile_args,
+            *contract.catalog_args,
+            "debug",
+            "models",
+        ),
+    )
+
+
 def _refresh_context(
     original: _DiscoveryContext,
     *,
-    deadline: float | None = None,
+    require_content: bool,
 ) -> _DiscoveryContext | None:
-    _check_deadline(deadline)
-    if not original.contract.attest():
+    if not original.contract.attest_metadata():
         return None
-    _check_deadline(deadline)
-    try:
-        current = _build_context(
-            original.snapshot.provider["id"],
-            deadline=deadline,
+    if not require_content:
+        try:
+            snapshot = _provider_snapshot(original.snapshot.provider["id"])
+        except _PreparationFailure:
+            return None
+        return (
+            original
+            if snapshot.identity == original.snapshot.identity
+            else None
         )
-    except _PreparationFailure as exc:
-        if exc.reason == "timeout":
-            raise
+    try:
+        current = _build_context(original.snapshot.provider["id"])
+    except _PreparationFailure:
         return None
     if (
         current.snapshot.identity == original.snapshot.identity
-        and current.contract.catalog_fingerprint
-        == original.contract.catalog_fingerprint
+        and current.contract.fingerprint == original.contract.fingerprint
     ):
         return current
     return None
@@ -298,18 +327,10 @@ def _refresh_context(
 
 def _parent_stabilization_context(
     original: _DiscoveryContext,
-    *,
-    deadline: float | None = None,
 ) -> _DiscoveryContext | None:
-    _check_deadline(deadline)
     try:
-        current = _build_context(
-            original.snapshot.provider["id"],
-            deadline=deadline,
-        )
-    except _PreparationFailure as exc:
-        if exc.reason == "timeout":
-            raise
+        current = _build_context(original.snapshot.provider["id"])
+    except _PreparationFailure:
         return None
     if (
         current.snapshot.identity != original.snapshot.identity
@@ -335,7 +356,6 @@ def _parent_stabilization_context(
         config=tuple(normalized_config),
     ) != original.contract:
         return None
-    _check_deadline(deadline)
     return current
 
 
@@ -343,38 +363,46 @@ def _discover_sync(
     provider_id: str,
     timeout_seconds: float,
     cancellation: CommandCancellation,
+    expected_authority: CatalogAuthority | None,
 ) -> DiscoveryResult:
-    deadline = time.monotonic() + timeout_seconds
     if cancellation.cancelled:
         return DiscoveryResult(status="error", reason="cancelled")
     try:
-        context = _build_context(provider_id, deadline=deadline)
+        context = (
+            _context_from_authority(
+                provider_id,
+                expected_authority,
+            )
+            if expected_authority is not None
+            else _build_context(provider_id)
+        )
     except _PreparationFailure as exc:
         return DiscoveryResult(status=exc.status, reason=exc.reason)
-    if not context.contract.attest():
-        return DiscoveryResult(status="error", reason="authority_changed")
     if cancellation.cancelled:
         return DiscoveryResult(status="error", reason="cancelled")
     try:
-        context = _refresh_context(context, deadline=deadline)
+        context = _refresh_context(
+            context,
+            require_content=False,
+        )
     except _PreparationFailure as exc:
         return DiscoveryResult(status=exc.status, reason=exc.reason)
     if context is None:
         return DiscoveryResult(status="error", reason="authority_changed")
     for attempt in range(2):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return DiscoveryResult(status="error", reason="timeout")
         command = run_catalog_command(
             context.argv,
             context.environment,
-            remaining,
+            timeout_seconds,
             cancellation,
         )
         if command.reason:
             return DiscoveryResult(status="error", reason=command.reason)
         try:
-            refreshed = _refresh_context(context, deadline=deadline)
+            refreshed = _refresh_context(
+                context,
+                require_content=True,
+            )
         except _PreparationFailure as exc:
             return DiscoveryResult(status=exc.status, reason=exc.reason)
         if refreshed is not None:
@@ -392,7 +420,6 @@ def _discover_sync(
         try:
             context = _parent_stabilization_context(
                 context,
-                deadline=deadline,
             )
         except _PreparationFailure as exc:
             return DiscoveryResult(status=exc.status, reason=exc.reason)
@@ -421,6 +448,7 @@ async def discover_models(
     provider_id: str,
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    expected_authority: CatalogAuthority | None = None,
 ) -> DiscoveryResult:
     if (
         type(provider_id) is not str
@@ -429,6 +457,10 @@ async def discover_models(
         or not math.isfinite(timeout_seconds)
         or timeout_seconds <= 0
         or timeout_seconds > MAX_TIMEOUT_SECONDS
+        or (
+            expected_authority is not None
+            and type(expected_authority) is not CatalogAuthority
+        )
     ):
         raise CatalogDiscoveryError("invalid discovery request")
     cancellation = CommandCancellation()
@@ -438,6 +470,7 @@ async def discover_models(
             provider_id,
             float(timeout_seconds),
             cancellation,
+            expected_authority,
         ),
     )
     try:
@@ -455,12 +488,13 @@ async def discover_models(
 
 def _inspect_source_sync(
     provider_id: str,
-    timeout_seconds: float,
 ) -> SourceInspection:
-    deadline = time.monotonic() + timeout_seconds
     try:
-        context = _build_context(provider_id, deadline=deadline)
-        refreshed = _refresh_context(context, deadline=deadline)
+        context = _build_context(provider_id)
+        refreshed = _refresh_context(
+            context,
+            require_content=False,
+        )
     except _PreparationFailure as exc:
         return SourceInspection(status=exc.status, reason=exc.reason)
     if refreshed is None:
@@ -474,23 +508,13 @@ def _inspect_source_sync(
 
 async def inspect_catalog_source(
     provider_id: str,
-    *,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> SourceInspection:
-    if (
-        type(provider_id) is not str
-        or not provider_id
-        or type(timeout_seconds) not in {int, float}
-        or not math.isfinite(timeout_seconds)
-        or timeout_seconds <= 0
-        or timeout_seconds > MAX_TIMEOUT_SECONDS
-    ):
+    if type(provider_id) is not str or not provider_id:
         raise CatalogDiscoveryError("invalid source inspection request")
     worker = asyncio.create_task(
         asyncio.to_thread(
             _inspect_source_sync,
             provider_id,
-            float(timeout_seconds),
         ),
     )
     try:

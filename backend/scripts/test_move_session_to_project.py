@@ -182,6 +182,7 @@ def _drive_first_turn(sid: str, prompt: str) -> _CaptureProvider:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-move-wrap",
+            lifecycle_message_id="lifecycle-move-wrap",
         )
 
     result = asyncio.run(_go())

@@ -150,11 +150,10 @@ def test_prompt_waits_only_for_session_recovery_gate() -> None:
     assert "wait_for_recovery_ready()" not in source
 
 
-def test_provider_start_remains_blocked_by_global_recovery_gate() -> None:
+def test_provider_start_does_not_repeat_orchestrator_recovery_gate() -> None:
     source = inspect.getsource(turn_manager.TurnManager._drive_cli_run)
-    gate = source.index("await startup_recovery_gate.wait_for_recovery_ready()")
-    provider_start = source.index("provider.start_run", gate)
-    assert gate < provider_start
+    assert "wait_for_recovery_ready()" not in source
+    assert "wait_for_session_recovery_ready(" not in source
 
 
 def test_provider_recovery_does_not_wrap_scan_in_catalog_lock() -> None:
@@ -425,7 +424,7 @@ def main_test() -> None:
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
     test_slow_queued_prompt_rehydration_does_not_delay_live_recovery()
     test_prompt_waits_only_for_session_recovery_gate()
-    test_provider_start_remains_blocked_by_global_recovery_gate()
+    test_provider_start_does_not_repeat_orchestrator_recovery_gate()
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_provider_recovery_prioritizes_known_running_scan_buckets()
     test_live_recovery_finishes_before_cold_scan_starts()

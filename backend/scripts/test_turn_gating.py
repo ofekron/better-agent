@@ -349,6 +349,7 @@ def test_drive_cli_run_pre_spawn_guard() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-5",
+            lifecycle_message_id="lifecycle-5",
         )
 
     result = asyncio.run(_go())
@@ -399,6 +400,7 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
             mode="native",
             user_initiated=False,
             turn_run_id="turn-loopback",
+            lifecycle_message_id="lifecycle-loopback",
         )
 
     result = asyncio.run(_go())
@@ -479,6 +481,7 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
         session_id_field="agent_session_id",
         mode="native",
         turn_run_id=turn_run_id,
+        lifecycle_message_id="lifecycle-flush-target",
     ))
     submitted_state = tm._run_state[sid][0]
     check("result success", result.get("success") is True)
@@ -533,6 +536,7 @@ def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-rl-cancel",
+            lifecycle_message_id="lifecycle-rl-cancel",
         ))
         await asyncio.sleep(0.2)
         no_terminal = not any(e.get("type") == "complete" for e in ws_events)
@@ -588,6 +592,7 @@ def test_rate_limit_retry_spawns_once_then_emits_terminal() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-rl-success",
+            lifecycle_message_id="lifecycle-rl-success",
         )
 
     result = asyncio.run(_go())
@@ -646,6 +651,7 @@ def test_rate_limit_wait_can_continue_immediately() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-rl-continue",
+            lifecycle_message_id="lifecycle-rl-continue",
         ))
         await asyncio.sleep(0.2)
         landed = tm.request_immediate_continuation(
@@ -694,6 +700,7 @@ def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-forced-overflow",
+            lifecycle_message_id="lifecycle-forced-overflow",
         )
 
     result = asyncio.run(_go())
@@ -774,6 +781,7 @@ def test_capability_change_retries_as_fresh_continuation() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-capability-drift",
+            lifecycle_message_id="lifecycle-capability-drift",
         )
 
     result = asyncio.run(_go())
@@ -853,6 +861,7 @@ def test_context_continuation_start_runs_off_loop() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-continuation-off-loop",
+            lifecycle_message_id="lifecycle-continuation-off-loop",
         )
 
     try:
@@ -925,6 +934,7 @@ def test_codex_context_fill_preempts_native_compaction() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-codex-preempt",
+            lifecycle_message_id="lifecycle-codex-preempt",
         )
 
     result = asyncio.run(_go())
@@ -980,6 +990,7 @@ def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-codex-usage-1",
+            lifecycle_message_id="lifecycle-codex-usage-1",
         )
 
     async def _second() -> dict:
@@ -994,6 +1005,7 @@ def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-codex-usage-2",
+            lifecycle_message_id="lifecycle-codex-usage-2",
         )
 
     first = asyncio.run(_first())
@@ -1070,6 +1082,7 @@ def test_lazy_selector_change_continuation() -> None:
             session_id_field="agent_session_id",
             mode="native",
             turn_run_id="turn-lazy-selector",
+            lifecycle_message_id="lifecycle-lazy-selector",
         )
 
     result = asyncio.run(_go())

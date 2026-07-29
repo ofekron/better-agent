@@ -4407,7 +4407,8 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     fingerprint_end = source.index("def _refresh_store_fingerprint_cache(", fingerprint_start)
     fingerprint_source = source[fingerprint_start:fingerprint_end]
     assert "_STORE_FINGERPRINT_CACHE_LOCK" in fingerprint_source
-    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in fingerprint_source
+    assert "_fingerprint_store_file(path)" in fingerprint_source
+    assert "_STORE_FINGERPRINT_FILE_STATE == file_state" in fingerprint_source
     assert "return cached[1]" in fingerprint_source
     write_start = source.index("def _write_store_unlocked(")
     write_end = source.index("def _merge_store_for_save(", write_start)

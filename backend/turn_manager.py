@@ -2933,9 +2933,6 @@ class TurnManager:
                 })
             else:
                 spawn_started = _time.monotonic()
-                import startup_recovery_gate
-                with perf.timed("provider.start_run.recovery_gate"):
-                    await startup_recovery_gate.wait_for_recovery_ready()
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
                 ).get("id")
