@@ -92,6 +92,7 @@ import {
 
 import { API, createSessionSchedule } from "../api";
 import { extBackendBase } from "../extensionIds";
+import { hasPendingPromptAck } from "../utils/pendingMessages";
 
 const teamOrchestrationApi = () => extBackendBase("team");
 
@@ -854,6 +855,8 @@ export function Chat({
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
   const { is_running: sessionRunning } = useSessionMeta(session?.id);
+  const showPendingPromptAsRunning =
+    !sessionRunning && hasPendingPromptAck(pendingMessages);
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
@@ -1651,7 +1654,11 @@ export function Chat({
                       precedingModelSwitchEvents={g.precedingModelSwitchEvents}
                       trailingModelSwitchEvents={g.trailingModelSwitchEvents}
                       runs={g.turnRuns}
-                      sessionRunning={g.isLatest ? sessionRunning : false}
+                      sessionRunning={
+                        g.isLatest
+                          ? sessionRunning || showPendingPromptAsRunning
+                          : false
+                      }
                       fallbackRunMeta={
                         g.isLatest && session
                           ? {

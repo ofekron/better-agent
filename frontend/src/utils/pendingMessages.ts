@@ -5,6 +5,10 @@ export interface PendingAckState {
   skipNextAppendBySession: Set<string>;
 }
 
+export function hasPendingPromptAck(messages: ChatMessage[]): boolean {
+  return messages.some((message) => !message.file_discussion_id);
+}
+
 export function upsertPendingUnlessAcked(
   prev: ChatMessage[],
   sessionId: string,
