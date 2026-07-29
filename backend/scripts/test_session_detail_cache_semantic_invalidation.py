@@ -17,6 +17,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import main as main_mod  # noqa: E402
+from _test_request import http_request  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -114,13 +115,16 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
     main_mod._session_detail_response_cache.clear()
     main_mod._session_detail_response_cache_latest.clear()
 
-    asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None))
+    asyncio.run(main_mod.get_session(
+            http_request(f"/sessions/{sid}"), sid,
+            msg_limit=50, exchange_count=None,
+        ))
     simple_key = (sid, 50, None)
     key = main_mod._session_detail_response_cache_latest.get(simple_key)
     if not isinstance(key, tuple) or len(key) != 4:
         print(f"  route stored unexpected cache key: {key!r}")
         return False
-    if not main_mod._session_detail_cache_has(key):
+    if main_mod._session_detail_cache_get(key) is None:
         print("  route did not populate detail response cache")
         return False
 
@@ -138,7 +142,10 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
         print("  route-populated key became stale after non-render event")
         return False
 
-    asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None))
+    asyncio.run(main_mod.get_session(
+            http_request(f"/sessions/{sid}"), sid,
+            msg_limit=50, exchange_count=None,
+        ))
     if main_mod._session_detail_response_cache_latest.get(simple_key) != key:
         print("  second route read replaced reusable cache key")
         return False
@@ -151,7 +158,10 @@ def test_last_opened_invalidates_cached_detail_response() -> bool:
     main_mod._session_detail_response_cache_latest.clear()
 
     before = _response_json(
-        asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None)),
+        asyncio.run(main_mod.get_session(
+            http_request(f"/sessions/{sid}"), sid,
+            msg_limit=50, exchange_count=None,
+        )),
     )
     if before.get("last_opened_at") is not None:
         print(f"  fresh session unexpectedly opened: {before.get('last_opened_at')!r}")
@@ -172,7 +182,10 @@ def test_last_opened_invalidates_cached_detail_response() -> bool:
         return False
 
     after = _response_json(
-        asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None)),
+        asyncio.run(main_mod.get_session(
+            http_request(f"/sessions/{sid}"), sid,
+            msg_limit=50, exchange_count=None,
+        )),
     )
     if after.get("last_opened_at") != opened_at:
         print(f"  detail response returned stale last_opened_at: {after.get('last_opened_at')!r}")

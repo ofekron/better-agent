@@ -134,7 +134,7 @@ def _read_status_unlocked(ask_id: str) -> dict[str, Any] | None:
 
 
 def _new_delivery(sender_session_id: str) -> dict[str, Any]:
-    from event_ingester import event_ingester
+    from event_journal import event_journal_reader
     from session_manager import manager as session_manager
 
     root_id = session_manager._root_id_for(sender_session_id) or sender_session_id
@@ -142,7 +142,7 @@ def _new_delivery(sender_session_id: str) -> dict[str, Any]:
         "state": "waiting",
         "caller_session_id": sender_session_id,
         "caller_root_id": root_id,
-        "journal_after_seq": event_ingester.cursor(root_id),
+        "journal_after_seq": event_journal_reader.cursor(root_id),
         "caller_terminal": False,
     }
 

@@ -15,25 +15,17 @@ import _test_home
 
 _TMP_HOME = _test_home.isolate("ba-test-credential-pending-fast-")
 
-from starlette.requests import Request  # noqa: E402
+from _test_request import http_request  # noqa: E402
 
 import extension_api  # noqa: E402
 from credential_broker import consent_store  # noqa: E402
 
 
-def _request(app_session_id: str) -> Request:
-    return Request({
-        "type": "http",
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": "/credentials/pending",
-        "raw_path": b"/credentials/pending",
-        "query_string": f"app_session_id={app_session_id}".encode(),
-        "headers": [],
-        "client": ("test", 0),
-        "server": ("test", 80),
-    })
+def _request(app_session_id: str):
+    return http_request(
+        "/credentials/pending",
+        query=f"app_session_id={app_session_id}",
+    )
 
 
 def _create_pending(app_session_id: str, label: str) -> None:

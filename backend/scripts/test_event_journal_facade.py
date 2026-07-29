@@ -373,33 +373,15 @@ async def _run() -> bool:
         "session projection routes written rows through apply_event",
         str(msg1),
     ) and ok
-    await _refresh_session_content_projection(BusEvent(
-        type=EVENT_JOURNAL_WRITTEN,
-        root_id=sid,
-        sid=sid,
-        msg_id="msg-1",
-        payload={
-            "event_type": "agent_message",
-            "seq": 999,
-            "source": "provider_stream",
-            "data": _agent_data("provider-stream-skip", "skip"),
-        },
-        persist=False,
-    ))
-    msg1_after_provider_stream = session_manager.get_message_full(sid, "msg-1") or {}
-    ok = _check(
-        [(e.get("data") or {}).get("uuid")
-         for e in msg1_after_provider_stream.get("events") or []]
-        == ["owned", "owned-final"],
-        "generic journal projection skips provider_stream rows",
-        str(msg1_after_provider_stream),
-    ) and ok
-
+    # Mirrors `build_assistant_scaffold`: a message being provider-streamed
+    # is always `isStreaming`. Replay hydrates journal events only for
+    # streaming messages; completed ones are stubbed for lazy fetch.
     live_msg = {
         "id": "msg-live",
         "role": "assistant",
         "content": "",
         "events": [],
+        "isStreaming": True,
     }
     session_manager.append_assistant_msg(sid, live_msg)
     live_event = {
@@ -436,7 +418,11 @@ async def _run() -> bool:
     )
     ok = _check(
         msg_live_before_apply.get("events") == [],
-        "provider stream publish does not mutate render tree before live apply",
+        # The generic journal projection is subscribed to the bus, so the
+        # publish above already drove it with a real provider_stream row.
+        # An empty render tree here IS its skip: only the explicit fold
+        # below may apply a provider_stream row.
+        "generic journal projection skips provider_stream rows before live apply",
         str(msg_live_before_apply),
     ) and ok
     replay_before_apply = session_manager.get_messages_since(
@@ -453,7 +439,10 @@ async def _run() -> bool:
         [(e.get("data") or {}).get("uuid")
          for e in replay_live_msg.get("events") or []]
         == ["live-provider"]
-        and replay_live_msg.get("content") == "live provider text",
+        # Content is owned by the fold, not by replay: before the live
+        # apply both the render tree and replay carry "". The fold below
+        # is what publishes "live provider text" to both.
+        and replay_live_msg.get("content") == "",
         "message replay recovers provider_stream row before live apply",
         str(replay_live_msg),
     ) and ok

@@ -892,7 +892,7 @@ def _started_turns_for_candidates(
     candidates: list[tuple[str, str, str]],
 ) -> dict[tuple[str, str], str]:
     """Map exact candidate targets to their durable turn ids."""
-    import event_ingester
+    from event_journal import event_journal_reader
 
     wanted_by_root: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for root_id, session_id, assistant_id in candidates:
@@ -904,7 +904,7 @@ def _started_turns_for_candidates(
     for root_id, wanted in wanted_by_root.items():
         after_seq = 0
         while True:
-            rows, _, has_more = event_ingester.event_ingester.read_events(
+            rows, _, has_more = event_journal_reader.read_events(
                 root_id,
                 after_seq=after_seq,
                 limit=10_000,
