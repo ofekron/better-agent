@@ -24,10 +24,13 @@ Usage:
   python cli.py --json                        # jsonl pass-through, no colors
   python cli.py --no-color
   python cli.py --port 18765                  # where to look for an existing backend (default: run.sh's port)
+  python cli.py login                          # authenticate once, store a token in the OS keychain
+  python cli.py logout                         # forget the stored token for --port
 """
 
 import argparse
 import asyncio
+import getpass
 import json
 import logging
 import os
@@ -47,6 +50,8 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config_store
+import keychain_names
+import oskeychain
 from session_manager import manager as session_manager
 
 
@@ -69,6 +74,39 @@ def _auth_headers(extra: Optional[dict] = None) -> dict:
     if _AUTH_TOKEN:
         headers["Authorization"] = f"Bearer {_AUTH_TOKEN}"
     return headers
+
+
+# ── CLI-issued token storage ─────────────────────────────────────
+# `bagent login` stores its bearer token in the OS keychain (same
+# read/write primitives auth_secrets.py uses for the app's own
+# username/password_hash/session_secret), scoped by the target port
+# rather than by BETTER_AGENT_HOME: a token is only valid against the
+# specific backend instance that signed it, and the caller's shell
+# has no reliable way to know which `bas` line's home corresponds to
+# an arbitrary --port. Keying by port matches what the CLI actually
+# connects to.
+
+
+def _cli_token_account(port: int) -> str:
+    return f"cli_token:{port}"
+
+
+def _load_stored_token(port: int) -> Optional[str]:
+    try:
+        value = oskeychain.get(keychain_names.PRIMARY_SERVICE, _cli_token_account(port))
+    except RuntimeError:
+        return None
+    # `security find-generic-password -w` appends a trailing newline that
+    # isn't part of the stored value — same quirk auth_secrets.py strips.
+    return value.strip() if value else value
+
+
+def _store_token(port: int, token: str) -> None:
+    oskeychain.store(keychain_names.PRIMARY_SERVICE, _cli_token_account(port), token)
+
+
+def _delete_stored_token(port: int) -> None:
+    oskeychain.delete(keychain_names.PRIMARY_SERVICE, _cli_token_account(port))
 
 
 def _ws_chat_url(port: int) -> str:
@@ -354,8 +392,11 @@ def resolve_provider(selector: Optional[str]) -> Optional[dict]:
 
 # ── Backend auto-detection ───────────────────────────────────────
 
-def _probe_backend(port: int, retries: int = 3, timeout: float = 2.0) -> bool:
-    """Return True if a Better Agent backend is reachable on localhost:<port>."""
+def _probe_backend(port: int, retries: int = 3, timeout: float = 2.0) -> Optional[bool]:
+    """True if a backend on localhost:<port> answered and the current
+    token (if any) authenticated. False if a backend answered but
+    rejected the token (401) — not transient, so no retry. None if
+    nothing answered after retries (no backend running there)."""
     for attempt in range(retries):
         try:
             for path in ("/api/config", "/api/sessions"):
@@ -365,13 +406,15 @@ def _probe_backend(port: int, retries: int = 3, timeout: float = 2.0) -> bool:
                         if resp.status == 200:
                             return True
                 except urllib.error.HTTPError as exc:
+                    if exc.code == 401:
+                        return False
                     if exc.code != 404:
                         raise
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
             if attempt < retries - 1:
                 import time
                 time.sleep(0.5)
-    return False
+    return None
 
 
 def _fetch_backend_session(port: int, session_id: str) -> Optional[dict]:
@@ -820,6 +863,19 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="CLI driver for the Better Agent orchestration layer.",
     )
+    p.add_argument(
+        "command",
+        nargs="?",
+        choices=["login", "logout"],
+        default=None,
+        help=(
+            "login: authenticate once and store a bearer token in the OS "
+            "keychain, scoped to --port, so later calls need no --token. "
+            "logout: forget the stored token for --port. Omit for the "
+            "normal REPL/one-shot chat behavior."
+        ),
+    )
+    p.add_argument("--username", help="username for `login` (prompted if omitted)")
     p.add_argument("-p", "--prompt", help="one-shot prompt (use '-' to read from stdin)")
     p.add_argument("--session", help="resume a specific session id")
     p.add_argument("--mode", choices=["team", "native"], help="orchestration mode")
@@ -880,18 +936,30 @@ def _parse_args() -> argparse.Namespace:
 
 async def _async_main(args: argparse.Namespace) -> int:
     global _AUTH_TOKEN
-    _AUTH_TOKEN = getattr(args, "token", None) or os.environ.get("BETTER_CLAUDE_CLI_TOKEN")
+    _AUTH_TOKEN = (
+        getattr(args, "token", None)
+        or os.environ.get("BETTER_CLAUDE_CLI_TOKEN")
+        or _load_stored_token(args.port)
+    )
     if args.json or args.no_color or not sys.stdout.isatty():
         _disable_colors()
     renderer: Renderer = JsonRenderer() if args.json else PrettyRenderer()
 
     cwd = os.path.abspath(args.cwd)
-    if not _probe_backend(args.port):
+    reachable = _probe_backend(args.port)
+    if reachable is None:
         print(
             f"{RED}error: no Better Agent backend reachable on 127.0.0.1:{args.port}{RESET}",
             file=sys.stderr,
         )
         print("Start Better Agent first or pass --port for the running backend.", file=sys.stderr)
+        return 2
+    if reachable is False:
+        print(
+            f"{RED}error: backend on 127.0.0.1:{args.port} rejected authentication{RESET}",
+            file=sys.stderr,
+        )
+        print(f"Run `bagent login --port {args.port}`, or pass --token.", file=sys.stderr)
         return 2
 
     selected_provider = resolve_provider(args.provider)
@@ -975,8 +1043,80 @@ async def _async_main(args: argparse.Namespace) -> int:
         await backend.close()
 
 
+def _do_login(port: int, username: Optional[str]) -> int:
+    """Authenticate once against the backend on `port` and store the
+    returned bearer token in the OS keychain. Password is read via
+    getpass (never echoed, never an argv flag, so it can't leak into
+    shell history or `ps`)."""
+    if not username:
+        try:
+            username = input("Username: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return 130
+    if not username:
+        print(f"{RED}error: username required{RESET}", file=sys.stderr)
+        return 2
+    try:
+        password = getpass.getpass("Password: ")
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return 130
+    if not password:
+        print(f"{RED}error: password required{RESET}", file=sys.stderr)
+        return 2
+
+    body = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/auth/login",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            print(f"{RED}error: invalid credentials{RESET}", file=sys.stderr)
+        elif exc.code == 429:
+            print(f"{RED}error: too many attempts, try again later{RESET}", file=sys.stderr)
+        else:
+            print(f"{RED}error: login failed ({exc.code}){RESET}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"{RED}error: could not reach backend on 127.0.0.1:{port}: {exc}{RESET}", file=sys.stderr)
+        return 2
+
+    token = payload.get("token")
+    if not token:
+        print(f"{RED}error: login succeeded but no token was returned{RESET}", file=sys.stderr)
+        return 1
+    try:
+        _store_token(port, token)
+    except RuntimeError as exc:
+        print(f"{RED}error: could not save token to the OS keychain: {exc}{RESET}", file=sys.stderr)
+        return 1
+    print(f"{GREEN}logged in as {username} — token stored for 127.0.0.1:{port}{RESET}")
+    return 0
+
+
+def _do_logout(port: int) -> int:
+    try:
+        _delete_stored_token(port)
+    except RuntimeError as exc:
+        print(f"{RED}error: could not remove token from the OS keychain: {exc}{RESET}", file=sys.stderr)
+        return 1
+    print(f"{GREEN}removed stored token for 127.0.0.1:{port}{RESET}")
+    return 0
+
+
 def main() -> int:
     args = _parse_args()
+    if args.command == "login":
+        return _do_login(args.port, args.username)
+    if args.command == "logout":
+        return _do_logout(args.port)
     try:
         return asyncio.run(_async_main(args))
     except KeyboardInterrupt:
