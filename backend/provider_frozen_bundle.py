@@ -359,7 +359,7 @@ def _bundle_paths(
             and executable_parent.name == "MacOS"
             and executable_parent.parent.name == "Contents"
         ):
-            root = executable_parent.parent
+            root = executable_parent.parent.parent
         else:
             root = executable_parent
     else:
@@ -649,9 +649,27 @@ def materialize_frozen_bundle(
     return target.resolve(strict=True)
 
 
+def frozen_bundle_destination(
+    bundle: FrozenBundleIdentity,
+    parent: str | Path,
+) -> Path:
+    if not isinstance(bundle, FrozenBundleIdentity):
+        raise ExecutionContractError("invalid frozen bundle authority")
+    root_name = Path(bundle.root.resolved_path).name
+    destination_parent = Path(parent)
+    if (
+        not root_name
+        or root_name in {".", ".."}
+        or not destination_parent.is_absolute()
+    ):
+        raise ExecutionContractError("invalid frozen bundle destination")
+    return destination_parent / root_name
+
+
 __all__ = [
     "FrozenBundleEntry",
     "FrozenBundleIdentity",
     "attest_materialized_frozen_bundle",
+    "frozen_bundle_destination",
     "materialize_frozen_bundle",
 ]

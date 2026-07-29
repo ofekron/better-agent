@@ -93,6 +93,44 @@ def test_complete_bundle_round_trip_and_materialization() -> None:
         assert root.exists()
 
 
+def test_macos_default_bundle_root_preserves_app_layout() -> None:
+    if sys.platform != "darwin":
+        return
+    with tempfile.TemporaryDirectory(prefix="mac-frozen-bundle-") as raw:
+        app = Path(raw) / "Better Agent.app"
+        executable = app / "Contents" / "MacOS" / "Better Agent"
+        sidecar = app / "Contents" / "Frameworks"
+        executable.parent.mkdir(parents=True)
+        sidecar.mkdir(parents=True)
+        executable.write_bytes(b"frozen-executable")
+        executable.chmod(0o500)
+        (sidecar / "runner.pyc").write_bytes(b"runner")
+        old_frozen = getattr(sys, "frozen", None)
+        old_meipass = getattr(sys, "_MEIPASS", None)
+        had_frozen = hasattr(sys, "frozen")
+        had_meipass = hasattr(sys, "_MEIPASS")
+        sys.frozen = True
+        sys._MEIPASS = str(sidecar)
+        try:
+            bundle = FrozenBundleIdentity.capture(
+                executable_path=executable,
+            )
+        finally:
+            if had_frozen:
+                sys.frozen = old_frozen
+            else:
+                del sys.frozen
+            if had_meipass:
+                sys._MEIPASS = old_meipass
+            else:
+                del sys._MEIPASS
+        assert Path(bundle.root.resolved_path) == app.resolve()
+        assert bundle.executable_relative == (
+            "Contents/MacOS/Better Agent"
+        )
+        assert bundle.sidecar_relative == "Contents/Frameworks"
+
+
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
     mutations = (
         lambda root, sidecar: (sidecar / "injected.py").write_bytes(b"x"),
@@ -179,6 +217,7 @@ def test_materialized_add_change_remove_and_mode_tamper_are_rejected() -> None:
 
 def main() -> None:
     test_complete_bundle_round_trip_and_materialization()
+    test_macos_default_bundle_root_preserves_app_layout()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()
     print("frozen onedir artifact tests passed")

@@ -184,9 +184,12 @@ def _run_family_probe(
             )
     with open_pinned_runner_launch(runner) as pinned:
         materialized_executable = Path(pinned.argv[0])
-    materialized_root = (
-        run_dir / "frozen-runner"
-    ).resolve(strict=True)
+    executable_depth = len(
+        Path(runner.frozen_bundle.executable_relative).parts,
+    )
+    materialized_root = materialized_executable.parents[
+        executable_depth - 1
+    ]
     probe_output = root / f"{family}-probe.json"
     environment = dict(os.environ)
     environment["BETTER_AGENT_HOME"] = str(root / "state")

@@ -11,7 +11,10 @@ from typing import Iterator
 
 from codex_execution_common import ExecutionContractError
 from codex_execution_identity import FileIdentity
-from provider_frozen_bundle import materialize_frozen_bundle
+from provider_frozen_bundle import (
+    frozen_bundle_destination,
+    materialize_frozen_bundle,
+)
 from provider_launch_identity import (
     AttestedLaunch,
     _open_file_identities,
@@ -151,7 +154,7 @@ def open_pinned_runner_launch(
         raise ExecutionContractError("runner launch directory is invalid")
     bundle_root = materialize_frozen_bundle(
         runner.frozen_bundle,
-        run_dir / "frozen-runner",
+        frozen_bundle_destination(runner.frozen_bundle, run_dir),
     )
     executable = bundle_root / runner.frozen_bundle.executable_relative
     argv = list(runner.launch.argv)
