@@ -22,7 +22,7 @@ browser-harness, project-structure, etc.) are owned by their extensions, which
 ship their own SDKs. One extension reaches another through
 ``Client.call_extension``; core routes the call without baking in feature logic.
 """
-from better_agent_sdk.client import BetterAgentError, Client
+from better_agent_sdk.client import BetterAgentError, BetterAgentHTTPError, Client
 from better_agent_sdk.manifest import (
     Badge,
     ExtensionProtocol,
@@ -46,6 +46,7 @@ __all__ = [
     "Client",
     "IntegrationClient",
     "BetterAgentError",
+    "BetterAgentHTTPError",
     "Badge",
     "ExtensionProtocol",
     "FrontendModule",

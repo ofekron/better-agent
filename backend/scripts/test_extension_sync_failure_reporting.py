@@ -66,7 +66,13 @@ def _seed_store(install_paths: dict[str, str]) -> None:
         extension_store._write_store_unlocked(store)
 
 
-def _sync_artifact(root: Path, extension_id: str) -> dict[str, str]:
+def _sync_artifact(
+    root: Path,
+    extension_id: str,
+    *,
+    permissions: dict | None = None,
+    core_roles: list[str] | None = None,
+) -> dict[str, str]:
     package = root / extension_id
     package.mkdir()
     manifest = {
@@ -77,9 +83,11 @@ def _sync_artifact(root: Path, extension_id: str) -> dict[str, str]:
         "description": extension_id,
         "surfaces": [],
         "entrypoints": {},
-        "permissions": {},
+        "permissions": permissions or {},
         "marketplace": {},
     }
+    if core_roles is not None:
+        manifest["core_roles"] = core_roles
     (package / "better-agent-extension.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -205,6 +213,59 @@ def test_import_isolates_bad_artifact_and_reports_partial_state() -> None:
         raise AssertionError("failed package was marked installed")
 
 
+def test_import_refuses_legacy_authority_over_scoped_generation() -> None:
+    work = Path(tempfile.mkdtemp(prefix="bc-test-sync-authority-"))
+    try:
+        current_package = _write_package(work, "current")
+        extension_id = "scoped.ext"
+        _seed_store({extension_id: str(current_package)})
+        with extension_store._store_lock():
+            current = extension_store._read_store_unlocked()
+            current_record = current["extensions"][extension_id]
+            current_record["manifest"] = {
+                "id": extension_id,
+                "permissions": {"capabilities": ["ask.ensure"]},
+                "core_roles": ["requirements"],
+            }
+            extension_store._write_store_unlocked(current)
+
+        legacy = _sync_artifact(
+            work,
+            extension_id,
+            permissions={"internal_loopback": True},
+            core_roles=[],
+        )
+        rejected_target = (
+            extension_store._install_root()
+            / extension_id
+            / "versions"
+            / legacy["commit_sha"]
+        )
+        result = extension_store.import_extension_sync_state(
+            _sync_payload([extension_id], [legacy])
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    if result["ok"]:
+        raise AssertionError(f"legacy authority replacement reported success: {result}")
+    failures = result["artifact_failures"]
+    if len(failures) != 1 or failures[0]["extension_id"] != extension_id:
+        raise AssertionError(f"legacy authority failure was not isolated: {failures}")
+    error = failures[0]["error"]
+    if error != "sync artifact cannot replace scoped authority with internal_loopback":
+        raise AssertionError(f"authority failure was not stable and sanitized: {error}")
+    record = extension_store._load()["extensions"][extension_id]
+    if record["manifest"]["permissions"] != {"capabilities": ["ask.ensure"]}:
+        raise AssertionError("failed sync replaced the last-known-good capability grants")
+    if record["manifest"]["core_roles"] != ["requirements"]:
+        raise AssertionError("failed sync replaced the last-known-good core roles")
+    if record["source"]["install_path"] != str(current_package):
+        raise AssertionError("failed sync discarded the last-known-good package")
+    if rejected_target.exists():
+        raise AssertionError("failed sync mutated the authoritative package tree")
+
+
 def test_rpc_import_is_bounded_without_blocking_event_loop() -> None:
     entered = threading.Event()
     loop_progressed = threading.Event()
@@ -277,6 +338,7 @@ def main() -> None:
         test_export_reports_the_package_it_could_not_ship,
         test_import_result_carries_the_missing_packages,
         test_import_isolates_bad_artifact_and_reports_partial_state,
+        test_import_refuses_legacy_authority_over_scoped_generation,
         test_rpc_import_is_bounded_without_blocking_event_loop,
     ]
     failures = 0
