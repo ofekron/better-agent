@@ -250,6 +250,86 @@ def test_better_agent_runner_preserves_zai_reasoning_in_history():
     assert assistant["reasoning_content"] == "think step"
 
 
+def test_openai_team_execution_freezes_manager_runner_semantics():
+    execution_mod = _mod("provider_session_events_execution")
+    execution_template = _mod("execution_template")
+    runner = _mod("runner_better_agent")
+    mode_projection = execution_mod._mode_projection(
+        execution_mod.strategy_for("openai"),
+        "team",
+    )
+    assert mode_projection == {
+        "canonical_mode": "team",
+        "mode": "manager",
+    }
+    inputs = {
+        **mode_projection,
+        "app_session_id": "team-session",
+        "backend_url": "http://127.0.0.1:8000",
+        "bare_config": True,
+        "disabled_builtin_tools": [],
+        "disallowed_tools": [],
+        "integrations_enabled": True,
+        "internal_token": "runtime-only-token",
+        "team_orchestration_enabled": True,
+        "user_facing": False,
+    }
+    loopback_enabled = runner._loopback_tools_enabled(
+        interactive=True,
+        integrations_enabled=True,
+        bare_config=True,
+        mode=inputs["mode"],
+        team_orchestration_enabled=True,
+    )
+    assert loopback_enabled is True
+    schemas = runner._tool_schemas_for_run(
+        inputs=inputs,
+        capabilities_enabled=False,
+        loopback_enabled=loopback_enabled,
+        team_manager_enabled=inputs["mode"] == "manager",
+        team_orchestration_enabled=True,
+        user_facing=False,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    assert "create_worker" in {
+        schema["function"]["name"]
+        for schema in schemas
+    }
+    handlers = runner._build_loopback_tool_handlers(
+        inputs,
+        cwd="/workspace",
+        model="model",
+        lock_registry=runner.LockRegistry(),
+    )
+    assert "create_worker" in handlers
+    prepared = execution_template.prepare_execution(
+        {
+            "id": "openai-team",
+            "kind": "openai",
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "revision": 1,
+        },
+        run_id="openai-team-run",
+        prompt="coordinate",
+        cwd="/workspace",
+        model="model",
+        reasoning_effort=None,
+        session_id=None,
+        mode="team",
+        app_session_id="team-session",
+        runtime_policy={
+            "runner_input": {
+                **inputs,
+                "internal_token": "",
+            },
+        },
+    )
+    frozen = prepared.artifact.runtime_policy["runner_input"]
+    assert frozen["canonical_mode"] == "team"
+    assert frozen["mode"] == "manager"
+
+
 def test_event_emitter_buffers_tool_call_until_arguments_render():
     runner = _mod("runner_better_agent")
     with tempfile.TemporaryDirectory() as d:

@@ -21,6 +21,7 @@ _COMMON_INPUT_FIELDS = frozenset({
     "app_session_id",
     "backend_url",
     "browser_harness_enabled",
+    "canonical_mode",
     "cwd",
     "files",
     "images",

@@ -228,7 +228,7 @@ class SessionEventsProvider(Provider):
             run_id=run_id,
             run_dir=run_dir,
             popen=popen,
-            mode=inputs["mode"],
+            mode=inputs["canonical_mode"],
             app_session_id=inputs["app_session_id"],
             queue=queue,
             started_at=datetime.now(timezone.utc).isoformat(),

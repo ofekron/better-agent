@@ -84,6 +84,20 @@ def _normalize_mode(provider: Any, arguments: Mapping[str, Any]) -> str:
     return mode
 
 
+def _mode_projection(
+    strategy: SessionEventsExecutionStrategy,
+    canonical_mode: str,
+) -> dict[str, str]:
+    return {
+        "canonical_mode": canonical_mode,
+        "mode": (
+            "manager"
+            if strategy.kind == "openai" and canonical_mode == "team"
+            else canonical_mode
+        ),
+    }
+
+
 def _normalize_reasoning(
     provider: Any,
     arguments: Mapping[str, Any],
@@ -177,7 +191,7 @@ def _runner_input(
     arguments: Mapping[str, Any],
     authority: Mapping[str, Any],
 ) -> dict[str, Any]:
-    mode = _normalize_mode(provider, arguments)
+    canonical_mode = _normalize_mode(provider, arguments)
     model = _normalize_model(provider, arguments)
     reasoning_effort = _normalize_reasoning(provider, arguments)
     session, worker = _session_records(arguments)
@@ -211,6 +225,7 @@ def _runner_input(
     values = {
         **arguments,
         **policy,
+        **_mode_projection(strategy, canonical_mode),
         "app_session_id": str(arguments["app_session_id"]),
         "backend_url": (
             str(arguments.get("backend_url") or "").strip()
@@ -225,7 +240,6 @@ def _runner_input(
         "images": list(arguments.get("images") or []),
         "internal_token": "",
         "integrations_enabled": integrations_enabled,
-        "mode": mode,
         "model": model,
         "permission": permission,
         "provider_id": provider.id,
