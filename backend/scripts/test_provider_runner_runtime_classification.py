@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -53,7 +53,12 @@ def test_self_contained_python_runtime_is_materialized_and_attested() -> None:
         runtime_root = root / "runtime"
         executable = runtime_root / "bin" / "python"
         executable.parent.mkdir(parents=True)
-        shutil.copy2(Path(sys.executable).resolve(strict=True), executable)
+        executable.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(str(Path(sys.executable).resolve(strict=True)))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
         stdlib_root = runtime_root / "lib" / "python"
         stdlib_root.mkdir(parents=True)
         runner_entry = root / "runner_probe.py"
