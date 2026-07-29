@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from codex_execution_common import (
     SHA256_RE,
     ExecutionContractError,
+    binary_open_flags,
     required_integer,
     required_string,
     sha256_fd,
@@ -37,7 +38,9 @@ class FileIdentity:
         try:
             chain_before = symlink_chain(requested)
             resolved_before = requested.resolve(strict=True)
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags = binary_open_flags(
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
             flags |= getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(resolved_before, flags)
             try:

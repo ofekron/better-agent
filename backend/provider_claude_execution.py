@@ -8,7 +8,11 @@ import stat
 import tempfile
 from pathlib import Path
 
-from codex_execution_common import ExecutionContractError, sha256_fd
+from codex_execution_common import (
+    ExecutionContractError,
+    binary_open_flags,
+    sha256_fd,
+)
 from codex_execution_identity import FileIdentity
 from paths import make_private_directory, windows_path_has_private_acl
 from provider_family_launch_attestation import (
@@ -149,7 +153,9 @@ def embedded_claude_sdk_attestation_failure(
 
 
 def _read_attested(identity: FileIdentity) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(identity.resolved_path, flags)
@@ -198,11 +204,13 @@ def _write_private(path: Path, contents: bytes) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     descriptor = os.open(
         path,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        binary_open_flags(
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        ),
         0o400,
     )
     try:

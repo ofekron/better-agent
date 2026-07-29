@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from codex_execution_common import (
     SHA256_RE,
     ExecutionContractError,
+    binary_open_flags,
     canonical_json,
     required_integer,
     required_string,
@@ -556,7 +557,9 @@ def _copy_attested_file(
     identity = entry.file
     if identity is None:
         raise ExecutionContractError("invalid frozen bundle file")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         source = os.open(identity.resolved_path, flags)
@@ -575,11 +578,13 @@ def _copy_attested_file(
                 )
             output = os.open(
                 destination,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                binary_open_flags(
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                ),
                 entry.mode,
             )
             try:

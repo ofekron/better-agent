@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from codex_execution_common import ExecutionContractError
+from codex_execution_common import ExecutionContractError, binary_open_flags
 from codex_execution_identity import FileIdentity
 from paths import make_private_directory
 from provider_frozen_bundle import (
@@ -52,7 +52,7 @@ def _copy_descriptor(
     identity: FileIdentity,
 ) -> None:
     mode = 0o500
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     created = False
     try:
@@ -259,7 +259,7 @@ def materialize_sdk_launch(
         if arguments:
             shebang += " " + " ".join(arguments)
         payload = shebang.encode("utf-8") + b"\n" + body
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         created = False
         try:

@@ -29,6 +29,7 @@ from provider_frozen_bundle import (
 from provider_runner_launch import capture_runner_launch
 
 ROOT = Path(__file__).resolve().parents[2]
+_FROZEN_EXECUTABLE = b"MZ\r\n\x1a\nfrozen\r\nexecutable\n"
 
 
 def _fixture(parent: Path) -> tuple[Path, Path, Path]:
@@ -38,7 +39,7 @@ def _fixture(parent: Path) -> tuple[Path, Path, Path]:
     executable = root / (
         "Better Agent.exe" if sys.platform == "win32" else "Better Agent"
     )
-    executable.write_bytes(b"frozen-executable")
+    executable.write_bytes(_FROZEN_EXECUTABLE)
     executable.chmod(0o500)
     package = sidecar / "claude_agent_sdk"
     package.mkdir()
@@ -93,7 +94,7 @@ def test_complete_bundle_round_trip_and_materialization() -> None:
         assert attest_materialized_frozen_bundle(restored, destination)
         assert (
             destination / restored.executable_relative
-        ).read_bytes() == b"frozen-executable"
+        ).read_bytes() == _FROZEN_EXECUTABLE
         assert materialize_frozen_bundle(restored, destination) == materialized
         source_entry = next(
             entry for entry in restored.entries

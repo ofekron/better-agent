@@ -34,6 +34,10 @@ class ExecutionContractError(RuntimeError):
     pass
 
 
+def binary_open_flags(flags: int) -> int:
+    return flags | getattr(os, "O_BINARY", 0)
+
+
 def sha256_fd(fd: int) -> str:
     digest = hashlib.sha256()
     os.lseek(fd, 0, os.SEEK_SET)

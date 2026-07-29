@@ -9,7 +9,12 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping
 
-from codex_execution_common import ExecutionContractError, canonical_json, sha256_fd
+from codex_execution_common import (
+    ExecutionContractError,
+    binary_open_flags,
+    canonical_json,
+    sha256_fd,
+)
 from codex_execution_identity import FileIdentity, file_identity_to_dict
 from provider_family_launch_attestation import CriticalPackageIdentity
 from provider_runtime_capability_model import (
@@ -36,7 +41,9 @@ _SAFE_OWNER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,256}$")
 
 
 def _read_identity(identity: FileIdentity) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(identity.resolved_path, flags)

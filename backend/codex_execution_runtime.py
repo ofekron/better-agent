@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codex_execution_contract import CodexExecutionContract
-from codex_execution_common import ExecutionContractError, sha256_fd
+from codex_execution_common import (
+    ExecutionContractError,
+    binary_open_flags,
+    sha256_fd,
+)
 from codex_execution_identity import FileIdentity
 from execution_template import (
     ExecutionArtifact,
@@ -113,7 +117,9 @@ def _read_attested_file(
     *,
     max_bytes: int | None = None,
 ) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(expected.resolved_path, flags)
@@ -282,7 +288,7 @@ def _staged_runtime_agent_dir(run_id: str) -> Path:
 def _write_private_payload(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=False)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = -1
@@ -382,7 +388,9 @@ def _read_codex_runtime_agent_payload(
         raise ExecutionAuthorityError(
             "invalid Codex runtime agent payload",
         )
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)

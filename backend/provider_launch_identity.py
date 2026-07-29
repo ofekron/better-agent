@@ -14,6 +14,7 @@ from typing import Any, Iterator, Mapping
 from codex_execution_common import (
     ExecutionContractError,
     SECRET_NAMES,
+    binary_open_flags,
     required_integer,
     required_string,
     sha256_and_first_line_fd,
@@ -183,7 +184,9 @@ def _open_file_identities(
     handles: list[int] = []
     try:
         for identity in identities:
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags = binary_open_flags(
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
             flags |= getattr(os, "O_NOFOLLOW", 0)
             try:
                 descriptor = os.open(identity.resolved_path, flags)
@@ -321,7 +324,9 @@ def _validate_launch(launch: AttestedLaunch) -> None:
 
 
 def _read_attested_shebang(identity: FileIdentity) -> tuple[str, ...]:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(identity.resolved_path, flags)

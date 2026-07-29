@@ -15,6 +15,7 @@ from typing import Iterator
 from codex_execution_common import (
     SECRET_NAMES,
     ExecutionContractError,
+    binary_open_flags,
     sha256_and_first_line_fd,
     sha256_fd,
     stable_stat_identity,
@@ -46,7 +47,9 @@ class LaunchChain:
         handles: list[int] = []
         try:
             for component in self.components:
-                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                flags = binary_open_flags(
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                )
                 flags |= getattr(os, "O_NOFOLLOW", 0)
                 fd = os.open(component.resolved_path, flags)
                 handles.append(fd)
@@ -324,7 +327,9 @@ def _read_shebang_tokens(
     expected: FileIdentity | None = None,
 ) -> tuple[str, ...]:
     try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags = binary_open_flags(
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+        )
         flags |= getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(target, flags)
         try:
