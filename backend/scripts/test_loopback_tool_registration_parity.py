@@ -112,7 +112,20 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
     runner._runtime_capabilities = fake_runtime_capabilities  # type: ignore[assignment]
     try:
-        with tempfile.TemporaryDirectory(prefix="claude-loopback-run-") as raw:
+        with tempfile.TemporaryDirectory(prefix="claude-loopback-no-team-run-") as raw:
+            code_without_team = asyncio.run(
+                runner._run(
+                    Path(raw),
+                    _claude_inputs(bare=False, team=False),
+                    _runtime_stub(),
+                ),
+            )
+            without_team = {
+                name: list(tools)
+                for name, tools in captured_servers.items()
+            }
+        captured_servers.clear()
+        with tempfile.TemporaryDirectory(prefix="claude-loopback-team-run-") as raw:
             code = asyncio.run(
                 runner._run(
                     Path(raw),
@@ -126,6 +139,8 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
         runner._runtime_capabilities = original_runtime_capabilities  # type: ignore[assignment]
 
+    assert code_without_team == 0
+    assert "ensure_named_worker" not in without_team["communicate"]
     assert code == 0
     assert "mssg" in captured_servers["communicate"]
     assert "ask" in captured_servers["communicate"]
@@ -308,6 +323,21 @@ def test_requirements_wait_true_uses_long_bridged_mcp_timeout() -> None:
 
 
 def test_codex_native_non_user_registers_loopback_tools() -> None:
+    without_team_tools, without_team_handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="sender-1",
+        backend_url="http://127.0.0.1:8000",
+        internal_token="tok",
+        mssg_sender_session_id="sender-1",
+        cwd="/tmp",
+        model="gpt",
+        user_facing=False,
+        request_user_input_enabled=False,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
     tools, handlers = runner_codex._build_dynamic_tool_set(
         mode="native",
         app_session_id="sender-1",
@@ -323,6 +353,9 @@ def test_codex_native_non_user_registers_loopback_tools() -> None:
         disabled_builtin_tools=set(),
         existing_tool_names=set(),
     )
+    without_team_names = {tool["name"] for tool in without_team_tools}
+    assert "ensure_named_worker" not in without_team_names
+    assert "ensure_named_worker" not in without_team_handlers
     names = {tool["name"] for tool in tools}
     expected = {
         "mssg",

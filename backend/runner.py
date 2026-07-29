@@ -3523,7 +3523,10 @@ async def _run(
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))
-        if "ensure_named_worker" not in disabled_builtin_tools:
+        if (
+            team_orchestration_enabled
+            and "ensure_named_worker" not in disabled_builtin_tools
+        ):
             communicate_tools.append(_build_ensure_named_worker_tool(
                 cwd=cwd,
                 backend_url=backend_url,

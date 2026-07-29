@@ -2146,7 +2146,10 @@ def _build_dynamic_tool_set(
                 ),
                 existing_tool_names=existing_tool_names,
             )
-        if "ensure_named_worker" not in disabled_builtin_tools:
+        if (
+            team_orchestration_enabled
+            and "ensure_named_worker" not in disabled_builtin_tools
+        ):
             _add_dynamic_tool(
                 dynamic_tools,
                 tool_handlers,

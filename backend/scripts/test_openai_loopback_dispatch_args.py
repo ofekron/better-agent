@@ -27,7 +27,6 @@ _test_home.isolate("bc-test-openai-loopback-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import runner_better_agent
-import extension_store
 
 
 def _make_emitter() -> runner_better_agent.EventEmitter:
@@ -271,7 +270,6 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
 def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
     captured: list[tuple[str, dict]] = []
     original_post = runner_better_agent._post_loopback_sync
-    original_ready = extension_store.is_extension_runtime_ready
 
     def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload))
@@ -288,13 +286,13 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
         }
 
     runner_better_agent._post_loopback_sync = fake_post  # type: ignore[assignment]
-    extension_store.is_extension_runtime_ready = lambda _extension_id: True  # type: ignore[assignment]
     try:
         handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://backend",
                 "internal_token": "tok",
                 "app_session_id": "sender-1",
+                "team_orchestration_enabled": True,
             },
             cwd="/repo",
             model="model-x",
@@ -331,7 +329,6 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
         )
     finally:
         runner_better_agent._post_loopback_sync = original_post  # type: ignore[assignment]
-        extension_store.is_extension_runtime_ready = original_ready  # type: ignore[assignment]
 
     parsed = json.loads(result)
     assert parsed["agent_session_id"] == "worker-1"
@@ -346,30 +343,48 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
     assert spec["tags"] == ["testape"]
 
 
-def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
+def test_ensure_named_worker_schema_and_handler_require_artifact_readiness() -> None:
     base = {
         "backend_url": "http://backend",
         "internal_token": "tok",
         "app_session_id": "sender-1",
     }
 
-    without_team = runner_better_agent._tool_schemas_for_run(
-        inputs=base,
-        capabilities_enabled=False,
-        loopback_enabled=True,
-        team_manager_enabled=False,
-        team_orchestration_enabled=False,
-        user_facing=False,
-        file_editing_mode=False,
-        coordination_enabled=False,
-    )
-    assert all(
-        schema.get("function", {}).get("name") != "ensure_named_worker"
-        for schema in without_team
-    )
+    for readiness in (None, False, "true"):
+        inputs = dict(base)
+        if readiness is not None:
+            inputs["team_orchestration_enabled"] = readiness
+        handlers = runner_better_agent._build_loopback_tool_handlers(
+            inputs,
+            cwd="/repo",
+            model="model-x",
+            lock_registry=runner_better_agent.LockRegistry(),
+        )
+        schemas = runner_better_agent._tool_schemas_for_run(
+            inputs=inputs,
+            capabilities_enabled=False,
+            loopback_enabled=True,
+            team_manager_enabled=False,
+            team_orchestration_enabled=readiness is True,
+            user_facing=False,
+            file_editing_mode=False,
+            coordination_enabled=False,
+        )
+        assert "ensure_named_worker" not in handlers
+        assert all(
+            schema.get("function", {}).get("name") != "ensure_named_worker"
+            for schema in schemas
+        )
 
+    enabled_inputs = {**base, "team_orchestration_enabled": True}
+    handlers = runner_better_agent._build_loopback_tool_handlers(
+        enabled_inputs,
+        cwd="/repo",
+        model="model-x",
+        lock_registry=runner_better_agent.LockRegistry(),
+    )
     with_team = runner_better_agent._tool_schemas_for_run(
-        inputs=base,
+        inputs=enabled_inputs,
         capabilities_enabled=False,
         loopback_enabled=True,
         team_manager_enabled=False,
@@ -378,11 +393,38 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         file_editing_mode=False,
         coordination_enabled=False,
     )
+    assert "ensure_named_worker" in handlers
     tool = next(
         schema for schema in with_team
         if schema.get("function", {}).get("name") == "ensure_named_worker"
     )
     assert tool["function"]["parameters"]["required"] == ["name", "orchestration_mode"]
+
+    disabled_inputs = {
+        **enabled_inputs,
+        "disabled_builtin_tools": ["ensure_named_worker"],
+    }
+    disabled_handlers = runner_better_agent._build_loopback_tool_handlers(
+        disabled_inputs,
+        cwd="/repo",
+        model="model-x",
+        lock_registry=runner_better_agent.LockRegistry(),
+    )
+    disabled_schemas = runner_better_agent._tool_schemas_for_run(
+        inputs=disabled_inputs,
+        capabilities_enabled=False,
+        loopback_enabled=True,
+        team_manager_enabled=False,
+        team_orchestration_enabled=True,
+        user_facing=False,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    assert "ensure_named_worker" not in disabled_handlers
+    assert all(
+        schema.get("function", {}).get("name") != "ensure_named_worker"
+        for schema in disabled_schemas
+    )
 
 
 def test_bare_manager_loopback_requires_authenticated_team_orchestration() -> None:
