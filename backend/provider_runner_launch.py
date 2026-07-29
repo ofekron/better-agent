@@ -184,8 +184,16 @@ def _development_runtime(
         return None
     if Path(executable.resolved_path) != current:
         return None
-    runtime_root = Path(sys.base_prefix).resolve(strict=True)
+    runtime_root = Path(sys.prefix).resolve(strict=True)
+    base_runtime_root = Path(sys.base_prefix).resolve(strict=True)
+    if runtime_root == base_runtime_root:
+        return None
     stdlib_root = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
+    if (
+        not current.is_relative_to(runtime_root)
+        or not stdlib_root.is_relative_to(runtime_root)
+    ):
+        return None
     site_packages = stdlib_root / "site-packages"
     excluded = (
         (
