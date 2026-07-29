@@ -465,6 +465,22 @@ async def _drain_outcome(
             logger.exception("lag-incident-queue: dispatch raised")
         finally:
             perf.record("lag_incident.dispatch", (time.perf_counter() - started) * 1000.0)
+        if not outcome.acknowledged and not outcome.retryable:
+            # Destination permanently rejected this entry (e.g. malformed payload).
+            # Retrying it forever would silently pin lag_incident.enqueue_age and
+            # spam identical warnings for days; give up on this entry only and
+            # keep draining the rest of the spool.
+            logger.error(
+                "lag-incident-queue: dropping non-retryable entry name=%s", path.name,
+            )
+            perf.record_count("lag_incident.dropped_unretryable")
+            try:
+                await asyncio.to_thread(_acknowledge, path, identity)
+            except (OSError, ValueError):
+                logger.exception(
+                    "lag-incident-queue: cannot drop non-retryable entry name=%s", path.name,
+                )
+            continue
         if not outcome.acknowledged:
             perf.record_count("lag_incident.retry")
             perf.record_count("lag_incident.circuit_open")

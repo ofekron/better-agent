@@ -546,6 +546,35 @@ async def _cached_depth_is_io_free_and_registered_for_perf_gauge() -> None:
     _reset_spool()
 
 
+async def _non_retryable_dispatch_is_dropped_not_retried_forever() -> None:
+    """Regression: a permanently-rejected entry (retryable=False) must be
+    dropped after its first failed attempt instead of being retried forever
+    with unbounded lag_incident.enqueue_age growth and endless warnings —
+    see backend/lag_incident_queue.py _drain_outcome.
+    """
+    _reset_spool()
+    assert queue.enqueue(_payload("9" * 16))
+    attempts = 0
+
+    async def dispatch(_body: bytes) -> queue.DispatchOutcome:
+        nonlocal attempts
+        attempts += 1
+        return queue.DispatchOutcome(False, retryable=False)
+
+    try:
+        queue.start(dispatch)
+        for _ in range(50):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert queue.depth() == 0, "non-retryable entry must be dropped, not stuck forever"
+        await asyncio.sleep(0.05)
+        assert attempts == 1, f"non-retryable entry was retried {attempts} times instead of dropped"
+    finally:
+        await queue.stop()
+        _reset_spool()
+
+
 def main_test() -> None:
     asyncio.run(_cached_depth_is_io_free_and_registered_for_perf_gauge())
     asyncio.run(_blocked_loop_eventual_exactly_once())
@@ -565,6 +594,7 @@ def main_test() -> None:
     test_non_finite_numbers_are_rejected()
     asyncio.run(_portable_identity_fallback_roundtrip())
     asyncio.run(_structured_retry_after_and_destination_wake())
+    asyncio.run(_non_retryable_dispatch_is_dropped_not_retried_forever())
     print("PASS: durable lag incident queue")
 
 
