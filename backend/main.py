@@ -65,7 +65,13 @@ from paths import ba_home
 from i18n import t
 from prompt_templates import render_prompt
 from reasoning_effort import normalize_reasoning_effort
-from user_msg_lifecycle import emit_queued, new_lifecycle_msg_id, queued_payload
+from user_msg_lifecycle import (
+    emit_failed,
+    emit_queued,
+    emit_requested,
+    new_lifecycle_msg_id,
+    queued_payload,
+)
 import session_store
 import session_organization_store
 import functools
@@ -20842,6 +20848,17 @@ async def websocket_chat(websocket: WebSocket):
                                 },
                             })
                         continue
+                await emit_requested(
+                    app_session_id=app_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    content=prompt,
+                    kind=lifecycle_kind,
+                    queue_position=queue_position,
+                    client_id=msg.get("client_id"),
+                    interrupts_msg_id=interrupts_msg_id,
+                    images_count=len(images),
+                    orchestration_mode=orchestration_mode,
+                )
                 params = {
                     "prompt": prompt,
                     "app_session_id": app_session_id,
@@ -20883,8 +20900,14 @@ async def websocket_chat(websocket: WebSocket):
                             app_session_id,
                             interrupted_by_msg_id=lifecycle_msg_id,
                         )
-                    except Exception:
+                    except Exception as exc:
                         _release_claim_on_failure()
+                        await emit_failed(
+                            app_session_id=app_session_id,
+                            lifecycle_msg_id=lifecycle_msg_id,
+                            reason="interrupt_failed",
+                            error=str(exc),
+                        )
                         raise
                 elif alter_rewind_latest:
                     params["_alter_rewind_latest"] = True
@@ -20893,8 +20916,14 @@ async def websocket_chat(websocket: WebSocket):
                             app_session_id,
                             interrupted_by_msg_id=lifecycle_msg_id,
                         )
-                    except Exception:
+                    except Exception as exc:
                         _release_claim_on_failure()
+                        await emit_failed(
+                            app_session_id=app_session_id,
+                            lifecycle_msg_id=lifecycle_msg_id,
+                            reason="alter_interrupt_failed",
+                            error=str(exc),
+                        )
                         raise
 
                 # Hand off to the coordinator-owned per-session
@@ -20930,16 +20959,32 @@ async def websocket_chat(websocket: WebSocket):
                         queued_prompt,
                         params,
                     )
-                except Exception:
+                except Exception as exc:
                     _release_claim_on_failure()
+                    await emit_failed(
+                        app_session_id=app_session_id,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        reason="durable_admission_failed",
+                        error=str(exc),
+                    )
                     raise
                 if not admission.get("session"):
                     _release_claim_on_failure()
+                    await emit_failed(
+                        app_session_id=app_session_id,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        reason="session_not_found",
+                    )
                     await _send_message_error(t("error.session_not_found_retry"))
                     continue
                 existing_user_message = admission.get("existing_user_message")
                 if existing_user_message:
                     _release_claim_on_failure()
+                    await emit_failed(
+                        app_session_id=app_session_id,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        reason="duplicate_user_message",
+                    )
                     await ws_callback({
                         "type": "user_message_persisted",
                         "data": {
@@ -20951,6 +20996,11 @@ async def websocket_chat(websocket: WebSocket):
                 existing_queued_prompt = admission.get("existing_queued_prompt")
                 if existing_queued_prompt:
                     _release_claim_on_failure()
+                    await emit_failed(
+                        app_session_id=app_session_id,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        reason="duplicate_queued_prompt",
+                    )
                     existing_lifecycle_msg_id = existing_queued_prompt.get("lifecycle_msg_id")
                     existing_kind = existing_queued_prompt.get("kind") or "queued_behind"
                     if existing_lifecycle_msg_id:

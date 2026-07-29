@@ -1,8 +1,9 @@
 """User message lifecycle events on the bus.
 
-Five states per user prompt:
+Six states per user prompt:
 
-  queued    — POST/WS accepted; we know `kind` (send / queued_behind / interrupt)
+  requested — WS accepted the prompt; durable admission is in progress
+  queued    — durable admission completed
   sent      — provider.start_run returned; runner is alive
   received  — tailer saw the matching `type=user` line in the agent's jsonl
   done      — natural completion per orchestration mode
@@ -31,6 +32,7 @@ from session_manager import manager as session_manager
 logger = logging.getLogger(__name__)
 
 
+_USER_MSG_REQUESTED = "user_message_requested"
 _USER_MSG_QUEUED = "user_message_queued"
 _USER_MSG_SENT = "user_message_sent"
 _USER_MSG_RECEIVED = "user_message_received"
@@ -231,6 +233,34 @@ async def emit_queued(
         _USER_MSG_QUEUED, app_session_id, lifecycle_msg_id, payload,
     ):
         logger.error("lifecycle queued: no root for app_session=%s", app_session_id)
+
+
+async def emit_requested(
+    *,
+    app_session_id: str,
+    lifecycle_msg_id: str,
+    content: str,
+    kind: str,
+    queue_position: int,
+    client_id: Optional[str] = None,
+    interrupts_msg_id: Optional[str] = None,
+    images_count: int = 0,
+    orchestration_mode: Optional[str] = None,
+) -> None:
+    payload = queued_payload(
+        lifecycle_msg_id=lifecycle_msg_id,
+        content=content,
+        kind=kind,
+        queue_position=queue_position,
+        client_id=client_id,
+        interrupts_msg_id=interrupts_msg_id,
+        images_count=images_count,
+        orchestration_mode=orchestration_mode,
+    )
+    if not await _publish_lifecycle(
+        _USER_MSG_REQUESTED, app_session_id, lifecycle_msg_id, payload,
+    ):
+        logger.error("lifecycle requested: no root for app_session=%s", app_session_id)
 
 
 async def emit_sent(

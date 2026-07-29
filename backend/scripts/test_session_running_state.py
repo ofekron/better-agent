@@ -24,6 +24,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -40,6 +41,8 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-running-")
 
 from orchestrator import Coordinator  # noqa: E402
+from event_bus import BusEvent, bus  # noqa: E402
+import event_bus_subscribers  # noqa: E402
 from run_recovery import _normalize_recovered_started_at  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -95,6 +98,51 @@ def test_run_start_fires_running_true() -> None:
     assert session_manager.is_running(sid) is True
     coord.run_state_remove(sid, "r1")
     print(f"{PASS} run_start_fires_running_true")
+
+
+def test_accepted_prompt_fact_fires_active_before_run_registration() -> None:
+    async def run() -> None:
+        sid = _mk_session()
+        fires = _capture()
+        coord = _bound_coord()
+        await coord.turn_manager.lifecycle.bind()
+        event_bus_subscribers.bind_session_lifecycle_projection()
+        try:
+            await bus.publish(BusEvent(
+                type="user_message_requested",
+                root_id=sid,
+                sid=sid,
+                msg_id="accepted-prompt",
+                payload={},
+                persist=False,
+            ))
+            assert coord.get_run_state(sid) == []
+            active = [
+                event for event in fires
+                if event.get("kind") == "monitoring_changed"
+            ]
+            assert active and active[-1]["value"] == "active", active
+
+            await bus.publish(BusEvent(
+                type="user_message_failed",
+                root_id=sid,
+                sid=sid,
+                msg_id="accepted-prompt",
+                payload={},
+                persist=False,
+            ))
+            assert active[-1]["value"] == "active"
+            terminal = [
+                event for event in fires
+                if event.get("kind") == "monitoring_changed"
+            ]
+            assert terminal[-1]["value"] == "stopped", terminal
+        finally:
+            bus.unsubscribe("session_lifecycle_projection")
+            await coord.turn_manager.lifecycle.close()
+
+    asyncio.run(run())
+    print(f"{PASS} accepted_prompt_fact_fires_active_before_run_registration")
 
 
 def test_run_start_is_utc_and_recovery_preserves_original_start() -> None:
@@ -298,6 +346,7 @@ def test_audit_running_discrepancy_records_state_layers() -> None:
 def main() -> int:
     try:
         test_run_start_fires_running_true()
+        test_accepted_prompt_fact_fires_active_before_run_registration()
         test_run_start_is_utc_and_recovery_preserves_original_start()
         test_legacy_recovery_start_uses_server_local_timezone()
         test_multiple_runs_single_fire()

@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
+_SESSION_LIFECYCLE_PROJECTION_PRIORITY = 6  # after lifecycle tree priority 5
 _SESSION_PROJECTION_SHARDS = 8
 _SESSION_PROJECTION_MAX_PENDING = 256
 _SESSION_PROJECTION_DRAIN_CHUNK = 128
@@ -728,6 +729,27 @@ def bind_session_content_projection() -> None:
     logger.info("event_bus: registered session content projection")
 
 
+async def _refresh_session_lifecycle_projection(event: BusEvent) -> None:
+    session_manager.recompute_state(event.sid)
+
+
+def bind_session_lifecycle_projection() -> None:
+    bus.unsubscribe("session_lifecycle_projection")
+    bus.subscribe(
+        "user_message_*",
+        _refresh_session_lifecycle_projection,
+        priority=_SESSION_LIFECYCLE_PROJECTION_PRIORITY,
+        name="session_lifecycle_projection",
+    )
+    bus.subscribe(
+        "lifecycle.*",
+        _refresh_session_lifecycle_projection,
+        priority=_SESSION_LIFECYCLE_PROJECTION_PRIORITY,
+        name="session_lifecycle_projection",
+    )
+    logger.info("event_bus: registered session lifecycle projection")
+
+
 def bind_requirement_tags_projection() -> None:
     bus.unsubscribe("requirement_tags_refresh")
     bus.unsubscribe("requirement_tags_projection")
@@ -752,6 +774,7 @@ def register_default_subscribers() -> None:
     are pruned first."""
     bind_event_journal_writer()
     bind_session_content_projection()
+    bind_session_lifecycle_projection()
     bind_requirement_tags_projection()
     bind_ask_delivery()
     bind_extension_job_delivery()

@@ -317,9 +317,11 @@ class CatalogRefreshEngine:
             and read.snapshot.authority.provider_generation == generation
         ):
             self._snapshots[provider_id] = read.snapshot
+        snapshot_is_fresh = False
         if read.status == "matching" and read.snapshot is not None:
             due_at = read.snapshot.last_refreshed_at + self._max_age_seconds
-            if not force and due_at > time.time():
+            snapshot_is_fresh = due_at > time.time()
+            if not force and snapshot_is_fresh:
                 self._failures.pop(provider_id, None)
                 self._next_due[provider_id] = due_at
                 await self._project(
@@ -332,18 +334,19 @@ class CatalogRefreshEngine:
                     ),
                 )
                 return
-        await self._project(
-            self._projection(
-                provider,
-                status=(
-                    "stale"
-                    if provider_id in self._snapshots
-                    else "pending"
+        if not snapshot_is_fresh:
+            await self._project(
+                self._projection(
+                    provider,
+                    status=(
+                        "stale"
+                        if provider_id in self._snapshots
+                        else "pending"
+                    ),
+                    reason=read.status,
+                    authority=authority,
                 ),
-                reason=read.status,
-                authority=authority,
-            ),
-        )
+            )
         await self._refresh_singleflight(provider, authority)
 
     async def _inspection_failure(

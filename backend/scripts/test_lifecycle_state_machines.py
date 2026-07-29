@@ -48,6 +48,16 @@ async def test_fact_driven_hierarchy_and_pre_spawn_cancel() -> None:
     handle_id = tree.register_execution_handle(execution)
 
     await event_bus.publish(BusEvent(
+        type="user_message_requested",
+        root_id="session",
+        sid="session",
+        msg_id="message",
+        payload={},
+        persist=False,
+    ))
+    assert tree.has_active_session("session")
+    assert tree.session("session").prompts["message"].state == "requested"
+    await event_bus.publish(BusEvent(
         type="user_message_queued",
         root_id="session",
         sid="session",

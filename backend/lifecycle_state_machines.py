@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 _PROMPT_STATES = {
+    "user_message_requested": "requested",
     "user_message_queued": "queued",
     "user_message_sent": "sent",
     "user_message_received": "received",
@@ -56,7 +57,7 @@ _STEER_TRANSITIONS = {
 @dataclass
 class PromptLifecycleMachine:
     message_id: str
-    state: str = "queued"
+    state: str = "requested"
 
 
 @dataclass
@@ -186,6 +187,17 @@ class LifecycleStateTree:
             SessionLifecycleMachine(session_id),
         )
 
+    def has_active_session(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        return bool(
+            session.prompts
+            or session.turn.admissions
+            or session.turn.steers
+            or session.turn.state == "running"
+        )
+
     async def _apply(self, event: BusEvent) -> None:
         self._assert_owner()
         session = self.session(event.sid)
@@ -237,7 +249,10 @@ class LifecycleStateTree:
             return
         if event.type == "lifecycle.steer_fallback_queued" and event.msg_id:
             session.turn.steers.pop(event.msg_id, None)
-            session.prompts[event.msg_id] = PromptLifecycleMachine(event.msg_id)
+            session.prompts[event.msg_id] = PromptLifecycleMachine(
+                event.msg_id,
+                "queued",
+            )
             self._schedule_persist(event.sid)
             return
         if event.type == "lifecycle.reconcile_turn_missing":

@@ -422,7 +422,7 @@ class TurnManager:
             )
 
     # ======================================================================
-    # The `user_message_*` lifecycle (5-state machine: queued / sent /
+    # The `user_message_*` lifecycle (requested / queued / sent /
     # received / done / failed) is owned by `UserPromptManager`. See
     # backend/user_prompt_manager.py for the funnel and helpers.
     # TurnManager keeps `_interrupted_by_msg_id` (turn-side handoff,
@@ -833,10 +833,12 @@ class TurnManager:
         return False
 
     def monitoring_state(self, sid: str) -> str:
-        if not self.is_running(sid):
-            return "stopped"
+        if self.lifecycle.has_active_session(sid):
+            return "active"
         if self.has_active_turn(sid) or self.has_active_runs(sid):
             return "active"
+        if not self.is_running(sid):
+            return "stopped"
         if self._has_pending_approval(sid):
             return "blocked_on_user"
         if self._has_background_work(sid):

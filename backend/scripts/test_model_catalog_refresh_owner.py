@@ -103,6 +103,8 @@ async def _scenario(root: Path) -> None:
         await owner.start()
         await owner.wait_ready()
         startup_invocations = _invocations(invocation_log)
+        while not facts.empty():
+            facts.get_nowait()
 
         first, second = await asyncio.gather(
             owner.refresh(provider_id),
@@ -120,6 +122,13 @@ async def _scenario(root: Path) -> None:
             reason="",
             authority_fingerprint=first.authority_fingerprint,
         )
+        manual_statuses = [
+            fact.projection.status
+            for fact in list(facts._queue)
+            if fact.provider_id == provider_id
+            and fact.projection is not None
+        ]
+        assert manual_statuses == ["refreshing", "current"], manual_statuses
         assert _invocations(invocation_log) == startup_invocations + 1
         after_manual = _invocations(invocation_log)
         await owner.shutdown()

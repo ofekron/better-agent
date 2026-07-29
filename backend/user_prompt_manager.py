@@ -1,6 +1,6 @@
 """UserPromptManager — authority for the user-prompt lifecycle.
 
-Owns the 5-state state machine of a single in-flight user prompt:
+Owns the 6-state state machine of a single in-flight user prompt:
 
   queued    main.py WS handler accepts the prompt
   sent      TurnManager._drive_cli_run spawns the runner
