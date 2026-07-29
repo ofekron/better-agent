@@ -316,22 +316,24 @@ class OrchestrationStrategy(ABC):
             agent_sid = sess.get(self.session_id_field)
         except Exception:
             pass
-        # Schedule the bus publish on the running event loop without
-        # awaiting it from this sync apply_event path.
-        import asyncio
-        try:
-            asyncio.get_running_loop().create_task(
-                emit_received(
-                    app_session_id=app_session_id,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    agent_user_uuid=agent_user_uuid,
-                    agent_sid=agent_sid,
-                ),
-                name=f"lifecycle-received-{lifecycle_msg_id[:8]}",
-            )
-        except RuntimeError:
-            # No running loop (replay/sync context); skip.
-            pass
+        # Schedule the bus publish on the bound loop without awaiting it
+        # from this sync apply_event path. Routed through
+        # `schedule_on_bound_loop` rather than `get_running_loop()
+        # .create_task` because apply_event runs on whichever thread is
+        # driving ingestion — a `to_thread` worker or crash recovery.
+        # Binding to the caller's loop would either lose the emit (no
+        # running loop) or strand it on a loop the bus subscribers do
+        # not live on.
+        if not session_manager.schedule_on_bound_loop(
+            emit_received(
+                app_session_id=app_session_id,
+                lifecycle_msg_id=lifecycle_msg_id,
+                agent_user_uuid=agent_user_uuid,
+                agent_sid=agent_sid,
+            ),
+        ):
+            # Un-emit so a later attempt for this lifecycle can retry.
+            seen.discard(lifecycle_msg_id)
 
     def record_turn_start(self, lifecycle_msg_id: str) -> None:
         """Stamp the wall-clock start for this user message. Idempotent

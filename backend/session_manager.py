@@ -609,6 +609,7 @@ class SessionManager:
         ] = collections.OrderedDict()
         self._todo_projection_cache_max = 64
         self._queued_prompt_counts_by_sid: dict[str, int] = {}
+        self._queued_prompt_counts_guard = threading.Lock()
         # Transient per-process marker for assistant messages currently
         # being reconciled by run_recovery. Lives in memory only — a
         # crash mid-recovery has no on-disk residue, and the next boot
@@ -748,21 +749,8 @@ class SessionManager:
                 payload=dict(change),
                 persist=False,
             )
-            try:
-                # `run_coroutine_threadsafe` is the thread-safe primitive
-                # — `_fire` can be called from worker threads (e.g.
-                # `to_thread`-wrapped cleanup subscribers from A15 that
-                # call `session_manager.delete`). `loop.create_task`
-                # would corrupt the loop's task list from those threads.
-                # We discard the returned Future; subscribers run
-                # fire-and-forget after the lock releases.
-                asyncio.run_coroutine_threadsafe(
-                    bus.publish(ev), self._loop,
-                )
-            except RuntimeError:
-                # Loop torn down mid-fire (shutdown race). Listener
-                # fan-out below still runs.
-                pass
+            # Fire-and-forget; subscribers run after the lock releases.
+            self.schedule_on_bound_loop(bus.publish(ev))
         # Legacy listener fan-out — kept for the deprecation window.
         for fn in list(self._listeners):
             try:
@@ -773,6 +761,37 @@ class SessionManager:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the event loop. Call once at backend startup."""
         self._loop = loop
+
+    def schedule_on_bound_loop(self, coro) -> bool:
+        """Run `coro` on the bound loop from any thread. False if it
+        could not be scheduled (no loop bound yet, or torn down).
+
+        This is the one sanctioned way for synchronous, possibly
+        off-main-thread code to reach the event loop. `loop.create_task`
+        is NOT thread-safe and corrupts the loop's task list when called
+        from another thread; `run_coroutine_threadsafe` is the primitive
+        that is. Callers here include `_fire` (reachable from
+        `to_thread`-wrapped subscribers) and the strategy lifecycle emit
+        in `orchs/base.py`, which runs inside `apply_event` on whichever
+        thread is replaying.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            coro.close()
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                loop.create_task(coro)
+                return True
+        except RuntimeError:
+            pass
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+            return True
+        except RuntimeError:
+            # Loop torn down between the check and the submit.
+            coro.close()
+            return False
 
     def bind_pin_predicate(
         self, fn: Callable[[str, set], bool],
@@ -1219,7 +1238,8 @@ class SessionManager:
         self._tree_stub_cache.clear()
         self._tree_stub_attached_cache.clear()
         self._todo_projection_cache.clear()
-        self._queued_prompt_counts_by_sid.clear()
+        with self._queued_prompt_counts_guard:
+            self._queued_prompt_counts_by_sid.clear()
         self._recovering_msg_ids.clear()
         self._last_broadcast_running.clear()
         self._last_broadcast_monitoring.clear()
@@ -3664,26 +3684,41 @@ class SessionManager:
         for node in session_store.iter_all_sessions():
             yield copy.deepcopy(node)
 
+    # The queued-prompt count cache is read and written from several
+    # threads: the main loop serves it to REST/WS, recovery reaches it
+    # through `to_thread`, and the writers below run after their
+    # per-root lock has already been released, so the per-root lock does
+    # NOT cover them. Iterating it unguarded while another thread adds
+    # or removes a session raises "dictionary changed size during
+    # iteration", so every access takes this dedicated lock.
     def has_any_queued_prompts(self) -> bool:
-        return any(count > 0 for count in self._queued_prompt_counts_by_sid.values())
+        with self._queued_prompt_counts_guard:
+            return any(
+                count > 0
+                for count in self._queued_prompt_counts_by_sid.values()
+            )
 
     def queued_prompt_count(self, sid: str) -> int:
         """Queued-prompt count from the queue projection — cheap read that
         avoids hydrating the session root just to learn the queue is empty."""
-        return self._queued_prompt_counts_by_sid.get(sid, 0)
+        with self._queued_prompt_counts_guard:
+            return self._queued_prompt_counts_by_sid.get(sid, 0)
 
     def rebuild_queued_prompt_counts(self) -> None:
         import session_queue_projection
 
-        self._queued_prompt_counts_by_sid = session_queue_projection.queued_counts(
+        counts = session_queue_projection.queued_counts(
             storage_identity=self._root_repository.storage_identity(),
         )
+        with self._queued_prompt_counts_guard:
+            self._queued_prompt_counts_by_sid = counts
 
     def _set_queued_prompt_count(self, sid: str, queued_count: int) -> None:
-        if queued_count:
-            self._queued_prompt_counts_by_sid[sid] = queued_count
-            return
-        self._queued_prompt_counts_by_sid.pop(sid, None)
+        with self._queued_prompt_counts_guard:
+            if queued_count:
+                self._queued_prompt_counts_by_sid[sid] = queued_count
+                return
+            self._queued_prompt_counts_by_sid.pop(sid, None)
 
     @staticmethod
     def _project_queue_record(session: dict) -> Optional[dict]:

@@ -2479,7 +2479,13 @@ class EventIngester:
             with lock:
                 self._close_handle_locked(root_id)
                 self._seq.pop(root_id, None)
-                self._locks.pop(root_id, None)
+                # The lock itself is deliberately NOT popped. Every other
+                # entry point does `_locks.setdefault(root_id, Lock())`,
+                # so dropping it here would hand a concurrent ingest a
+                # brand-new lock and let it enter the critical section
+                # while this teardown is still running. Handle eviction
+                # (`_evict_handles`) already keeps locks for the same
+                # reason; the registry is bounded by root count.
                 self._seen_uuids.pop(root_id, None)
                 self._seen_event_owners.pop(root_id, None)
                 self._seen_uids_only.pop(root_id, None)
