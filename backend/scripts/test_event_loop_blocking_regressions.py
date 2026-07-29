@@ -2201,20 +2201,30 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
         main_source.index("async def on_startup()") :
         main_source.index("async def on_shutdown()")
     ]
+    pipeline_source = main_source[
+        main_source.index("async def _shutdown_session_persistence_pipeline()") :
+        main_source.index("async def on_shutdown()")
+    ]
     shutdown_source = main_source[main_source.index("async def on_shutdown()") :]
     assert startup_source.index(
         "await asyncio.to_thread(session_store.start_root_change_owner)"
     ) < startup_source.index("session_manager.start_persistence()")
-    assert shutdown_source.index(
+    assert pipeline_source.index(
         "await asyncio.to_thread(session_manager.shutdown_persistence)"
-    ) < shutdown_source.index(
+    ) < pipeline_source.index(
         "await asyncio.to_thread(session_store.shutdown_root_change_owner)"
-    ) < shutdown_source.index(
-        "await asyncio.to_thread(drain_queue_projection_submissions)"
-    ) < shutdown_source.index(
-        "session_queue_projection.flush_pending_writes(timeout=5.0)"
+    ) < pipeline_source.index(
+        "await asyncio.to_thread(session_store.shutdown_durability_writer)"
+    ) < pipeline_source.index(
+        "session_queue_projection.shutdown,"
     )
-    assert "mark_current_if_generation(\n                    certification_generation" in shutdown_source
+    assert "certify=True" in pipeline_source
+    assert "try:" not in pipeline_source
+    assert "await _shutdown_session_persistence_pipeline()" in shutdown_source
+    assert (
+        'raise RuntimeError("session persistence pipeline shutdown failed")'
+        in shutdown_source
+    )
     try:
         manager_module.session_store.write_session_full = (
             lambda root, **_kwargs: writes.append(root["id"])

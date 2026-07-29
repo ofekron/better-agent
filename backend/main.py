@@ -14503,6 +14503,20 @@ async def on_startup():
         )
 
 
+async def _shutdown_session_persistence_pipeline() -> None:
+    import session_queue_projection
+
+    storage_identity = session_manager._root_repository.storage_identity()
+    await asyncio.to_thread(session_manager.shutdown_persistence)
+    await asyncio.to_thread(session_store.shutdown_root_change_owner)
+    await asyncio.to_thread(session_store.shutdown_durability_writer)
+    await asyncio.to_thread(
+        session_queue_projection.shutdown,
+        storage_identity=storage_identity,
+        certify=True,
+    )
+
+
 async def on_shutdown():
     """Cancel every in-flight runner on intentional shutdown (Ctrl+C).
     During uvicorn hot-reload (SIGTERM), leave runners alive — they're
@@ -14605,30 +14619,12 @@ async def on_shutdown():
         coordinator.draft_store.drain_pending_drafts()
     except Exception:
         logger.exception("drain_pending_drafts failed")
-    # Close the per-root persistence producer before its WAL-backed
-    # durability consumer. Draft draining above may enqueue writes, so
-    # the producer owns the final drain and scheduler join.
+    persistence_shutdown_error: Exception | None = None
     try:
-        await asyncio.to_thread(session_manager.shutdown_persistence)
-        await asyncio.to_thread(session_store.shutdown_root_change_owner)
-        await asyncio.to_thread(session_store.shutdown_durability_writer)
-    except Exception:
-        logger.exception("session persistence durability shutdown failed")
-    # Drain queue-recovery projection writes after session persists. On a
-    # clean shutdown this keeps the projection usable as the fast startup
-    # source of truth; on a crash, the startup manifest fingerprint still
-    # detects changed session files and falls back to a full rebuild.
-    try:
-        import session_queue_projection
-        storage_identity = session_manager._root_repository.storage_identity()
-        await asyncio.to_thread(
-            session_queue_projection.shutdown,
-            storage_identity=storage_identity,
-            timeout=5.0,
-            certify=True,
-        )
-    except Exception:
-        logger.exception("queue projection flush_pending_writes failed")
+        await _shutdown_session_persistence_pipeline()
+    except Exception as exc:
+        persistence_shutdown_error = exc
+        logger.exception("session persistence pipeline shutdown failed")
     try:
         from event_journal import event_journal_writer
         await asyncio.to_thread(event_journal_writer.close)
@@ -14674,6 +14670,10 @@ async def on_shutdown():
     # queued loggers. Flush + join their listener threads only now, so
     # nothing logged during shutdown is silently dropped.
     await asyncio.to_thread(stop_queued_logging)
+    if persistence_shutdown_error is not None:
+        raise RuntimeError("session persistence pipeline shutdown failed") from (
+            persistence_shutdown_error
+        )
 
 
 # ============================================================================

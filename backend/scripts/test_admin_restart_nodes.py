@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
 import main  # noqa: E402
 import node_link  # noqa: E402
 import node_store  # noqa: E402
+import session_store  # noqa: E402
 from daemonhost.jsonio import write_json  # noqa: E402
 from daemonhost.paths import switch_request_path  # noqa: E402
 from restart_request import consume_restart_request  # noqa: E402
@@ -99,10 +100,7 @@ async def _run() -> None:
         node_store.snapshot = old_snapshot
         node_link.send_restart = old_send_restart
         main.os.kill = old_kill
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
-
-
-async def _run_idle_wait_test() -> None:
+async def _run_idle_wait_test() -> str:
     session = session_manager.create(
         name="idle-wait",
         model="m",
@@ -134,14 +132,35 @@ async def _run_idle_wait_test() -> None:
         if not waiter.done():
             waiter.cancel()
         session_manager.remove_queued_prompt(sid, "accepted-queued-1")
+    session_manager.rename(sid, "idle-wait-drained")
+    return sid
 
 
 def main_test() -> int:
+    sid = ""
+    errors: list[Exception] = []
     try:
         asyncio.run(_run())
-        asyncio.run(_run_idle_wait_test())
+        sid = asyncio.run(_run_idle_wait_test())
     except Exception as exc:
-        print(f"{FAIL}: admin refresh restarts connected worker nodes: {exc}")
+        errors.append(exc)
+    try:
+        asyncio.run(main._shutdown_session_persistence_pipeline())
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        if not sid:
+            raise AssertionError("idle-wait session was not created")
+        persisted = session_store.get_session(sid)
+        assert persisted is not None
+        assert persisted["name"] == "idle-wait-drained"
+    except Exception as exc:
+        errors.append(exc)
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    if errors:
+        details = "; ".join(str(error) for error in errors)
+        print(f"{FAIL}: admin refresh restarts connected worker nodes: {details}")
         return 1
     print(f"{PASS}: admin refresh restarts connected worker nodes")
     print(f"{PASS}: idle refresh waits for accepted queued requests")
