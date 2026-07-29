@@ -8,7 +8,7 @@ export interface PreSendAdvisory {
   source?: string;
 }
 
-const FETCH_TIMEOUT_MS = 2500;
+const FETCH_TIMEOUT_MS = 200;
 
 // Per (provider, model) frontend-only snooze of the pre-send advisory dialog.
 // Mirrors the ba_bypass_perm_ack pattern: a transient UI ack, not backend state.
