@@ -2196,6 +2196,38 @@ async def _integrate_one_locked(
             RedigestBackup(recovery_root_id, lease=root_lease).capture,
         )
 
+    recovered_lifecycle_id: Optional[str] = None
+    lifecycle_commands = None
+    if alive and not has_complete:
+        recovered_assistant = _recovery_target_assistant(
+            sess,
+            recovering_msg_id,
+        )
+        recovered_user = (
+            _last_user_before(sess, recovered_assistant)
+            if recovered_assistant is not None
+            else None
+        )
+        recovered_lifecycle_id = (
+            recovered_user.get("lifecycle_msg_id")
+            if isinstance(recovered_user, dict)
+            else None
+        )
+        lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+        if (
+            lifecycle_commands is not None
+            and isinstance(recovered_lifecycle_id, str)
+            and recovered_lifecycle_id
+        ):
+            _validate_recovered_live_execution(
+                lifecycle_commands,
+                app_session_id=app_sid,
+                lifecycle_message_id=recovered_lifecycle_id,
+                execution_turn_id=str(desc.get("turn_run_id") or ""),
+                assistant_message_id=recovering_msg_id or "",
+                provider_run_id=run_id,
+            )
+
     try:
         # The batch+replay block can take seconds for sessions with
         # large claude jsonls — running it on the event loop would
@@ -2352,48 +2384,15 @@ async def _integrate_one_locked(
             # Push the updated counts to any connected Home tab so it
             # doesn't need to wait for a page refresh.
             await coordinator.turn_manager.emit_run_state(app_sid)
-            recovered_assistant = _recovery_target_assistant(
-                sess,
-                recovering_msg_id,
-            )
-            recovered_user = (
-                _last_user_before(sess, recovered_assistant)
-                if recovered_assistant is not None
-                else None
-            )
-            recovered_lifecycle_id = (
-                recovered_user.get("lifecycle_msg_id")
-                if isinstance(recovered_user, dict)
-                else None
-            )
-            lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
-            if (
-                lifecycle_commands is not None
-                and isinstance(recovered_lifecycle_id, str)
-                and recovered_lifecycle_id
-            ):
-                snapshot = lifecycle_commands.snapshot(app_sid)
-                execution = snapshot.execution
-                if snapshot.identity is not None:
-                    if (
-                        snapshot.identity.lifecycle_message_id
-                        != recovered_lifecycle_id
-                        or execution is None
-                        or execution.phase not in {"detached", "detached_stopping"}
-                        or execution.identity.assistant_message_id
-                        != (recovering_msg_id or "")
-                        or execution.identity.execution_turn_id
-                        != str(desc.get("turn_run_id") or "")
-                        or execution.provider_run_id != run_id
-                    ):
-                        raise RuntimeError(
-                            "recovered live execution identity is ambiguous"
-                        )
-                    await lifecycle_commands.adopt_execution(
-                        app_sid,
-                        execution_identity=execution.identity,
-                        provider_run_id=run_id,
-                    )
+            if lifecycle_commands is not None and recovered_lifecycle_id:
+                await _adopt_recovered_live_execution(
+                    lifecycle_commands,
+                    app_session_id=app_sid,
+                    lifecycle_message_id=recovered_lifecycle_id,
+                    execution_turn_id=str(desc.get("turn_run_id") or ""),
+                    assistant_message_id=recovering_msg_id or "",
+                    provider_run_id=run_id,
+                )
             logger.info(
                 "integrate_recovered_runs: registered run_state for %s (alive, no complete.json)",
                 run_id[:8],
@@ -3629,6 +3628,60 @@ def _recovery_target_snapshot(
     last_asst = _recovery_target_assistant(sess, recovering_msg_id)
     msg_id = last_asst.get("id") if isinstance(last_asst, dict) else None
     return sess, last_asst, msg_id
+
+
+def _validate_recovered_live_execution(
+    lifecycle_commands,
+    *,
+    app_session_id: str,
+    lifecycle_message_id: str,
+    execution_turn_id: str,
+    assistant_message_id: str,
+    provider_run_id: str,
+) -> None:
+    snapshot = lifecycle_commands.snapshot(app_session_id)
+    execution = snapshot.execution
+    if snapshot.identity is None:
+        return
+    if (
+        snapshot.identity.lifecycle_message_id != lifecycle_message_id
+        or execution is None
+        or execution.identity.assistant_message_id != assistant_message_id
+        or execution.identity.execution_turn_id != execution_turn_id
+        or execution.provider_run_id != provider_run_id
+    ):
+        raise RuntimeError("recovered live execution identity is ambiguous")
+    if execution.phase in {"running", "stopping"}:
+        return
+    if execution.phase not in {"detached", "detached_stopping"}:
+        raise RuntimeError("recovered live execution identity is ambiguous")
+
+
+async def _adopt_recovered_live_execution(
+    lifecycle_commands,
+    *,
+    app_session_id: str,
+    lifecycle_message_id: str,
+    execution_turn_id: str,
+    assistant_message_id: str,
+    provider_run_id: str,
+) -> None:
+    _validate_recovered_live_execution(
+        lifecycle_commands,
+        app_session_id=app_session_id,
+        lifecycle_message_id=lifecycle_message_id,
+        execution_turn_id=execution_turn_id,
+        assistant_message_id=assistant_message_id,
+        provider_run_id=provider_run_id,
+    )
+    execution = lifecycle_commands.snapshot(app_session_id).execution
+    if execution is None or execution.phase in {"running", "stopping"}:
+        return
+    await lifecycle_commands.adopt_execution(
+        app_session_id,
+        execution_identity=execution.identity,
+        provider_run_id=provider_run_id,
+    )
 
 
 async def _finalize_when_done(

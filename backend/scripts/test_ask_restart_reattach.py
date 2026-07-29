@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ask_status_store
 import paths
 import user_msg_lifecycle
-from orchestrator import Coordinator
+from orchestrator import Coordinator, _await_cancellation_safe
 
 
 def teardown_module():
@@ -64,6 +64,38 @@ def test_ask_status_store_roundtrip():
     assert status["result"] == {"success": True, "ask_id": "ask_1"}
     ask_status_store.delete_status("ask_1")
     assert ask_status_store.read_status("ask_1") is None
+
+
+def test_cancellation_safe_dispatch_joins_before_propagating_cancel():
+    async def _go() -> tuple[bool, bool]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        completed = False
+
+        async def dispatch() -> None:
+            nonlocal completed
+            started.set()
+            await release.wait()
+            completed = True
+
+        caller = asyncio.create_task(_await_cancellation_safe(dispatch()))
+        await started.wait()
+        caller.cancel()
+        await asyncio.sleep(0)
+        still_waiting = not caller.done()
+        caller.cancel()
+        await asyncio.sleep(0)
+        still_waiting = still_waiting and not caller.done()
+        release.set()
+        try:
+            await caller
+        except asyncio.CancelledError:
+            pass
+        return still_waiting, completed
+
+    still_waiting, completed = asyncio.run(_go())
+    assert still_waiting
+    assert completed
 
 
 def test_claim_route_backfills_unclaimed_legacy_shaped_record():

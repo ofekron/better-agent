@@ -77,6 +77,21 @@ from model_execution_admission import ModelAdmissionError
 logger = logging.getLogger(__name__)
 
 
+async def _await_cancellation_safe(operation: Awaitable[None]) -> None:
+    task = asyncio.ensure_future(operation)
+    cancellation_requested = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancellation_requested = True
+    await task
+    if cancellation_requested:
+        raise asyncio.CancelledError
+
+
 class _AskCallGate:
     __slots__ = ("lock", "users")
 
@@ -2882,7 +2897,7 @@ class Coordinator:
         result: dict
         try:
             if not reattach:
-                await _dispatch_prompt()
+                await _await_cancellation_safe(_dispatch_prompt())
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
             # normally writes a durable user_message_done/failed terminal; older
@@ -2930,7 +2945,7 @@ class Coordinator:
                                     "dispatch never durably landed; redispatching",
                                     ask_id or lifecycle_msg_id,
                                 )
-                                await _dispatch_prompt()
+                                await _await_cancellation_safe(_dispatch_prompt())
                     finally:
                         self._ask_reattach_locks.pop(lifecycle_msg_id, None)
                     result = await asyncio.wait_for(done, timeout=timeout_s)
@@ -3929,6 +3944,8 @@ class Coordinator:
     def _startup_recovery_can_overlap_session(self, app_session_id: str) -> bool:
         import startup_recovery_gate
 
+        if startup_recovery_gate.is_session_pending(app_session_id):
+            return True
         if not startup_recovery_gate.is_pending():
             return False
         session = session_manager.get(app_session_id)

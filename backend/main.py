@@ -10048,14 +10048,12 @@ async def _recover_in_flight_task() -> None:
         # Resume a native-session import that a restart interrupted.
         await native_index_manager.manager.resume_interrupted_import()
     except asyncio.CancelledError:
-        if not gate_open:
-            startup_recovery_gate.mark_recovery_failed("recovery cancelled")
+        startup_recovery_gate.mark_recovery_failed("recovery cancelled")
         perf.record_count("startup.recovery.cancelled", 1)
         raise
     except Exception as e:
-        if not gate_open:
-            startup_recovery_gate.mark_recovery_failed(str(e))
-        else:
+        startup_recovery_gate.mark_recovery_failed(str(e))
+        if gate_open:
             logger.exception("recover_all_in_flight: background integration failed")
         raise
     finally:
