@@ -367,6 +367,7 @@ def test_runner_fails_closed_on_empty_prompt() -> bool:
         rc = asyncio.run(runner_cursor._run(run_dir, {
             "prompt": "", "cwd": str(run_dir), "mode": "native",
             "app_session_id": "app-1",
+            "_provider_executable": sys.executable,
         }))
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
         return rc == 1 and complete["success"] is False and "prompt" in complete["error"]

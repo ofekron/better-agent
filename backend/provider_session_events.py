@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import subprocess
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -239,7 +238,7 @@ class SessionEventsProvider(Provider):
             ),
             target_message_id=inputs.get("target_message_id"),
             turn_run_id=inputs.get("turn_run_id"),
-            runner=str(self.runtime_record().get("runner") or ""),
+            runner=str(inputs.get("runner") or ""),
         )
         self._runs[run_id] = state
         self._write_backend_state(state)

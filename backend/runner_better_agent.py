@@ -2200,13 +2200,9 @@ def _build_loopback_tool_handlers(
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
-    try:
-        import extension_store
-        team_orchestration_ready = extension_store.is_extension_runtime_ready(
-            extension_store.extension_id_for_role('team-orchestration')
-        )
-    except Exception:
-        team_orchestration_ready = False
+    team_orchestration_ready = (
+        inputs.get("team_orchestration_enabled") is True
+    )
     if (inputs.get("mode") or "native") == "manager" and team_orchestration_ready:
         handlers["create_worker"] = create_worker
     if team_orchestration_ready and "ensure_named_worker" not in disabled:
@@ -2228,12 +2224,7 @@ def _build_loopback_tool_handlers(
         handlers["request_user_approval"] = request_user_approval
         if inputs.get("working_mode") == "file_editing":
             handlers["start_file_discussion"] = start_file_discussion
-    try:
-        coordination_ready = extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_COORDINATION_EXTENSION_ID
-        )
-    except Exception:
-        coordination_ready = False
+    coordination_ready = inputs.get("coordination_enabled") is True
     if coordination_ready:
         handlers["lock_ops"] = lock_ops
     return handlers

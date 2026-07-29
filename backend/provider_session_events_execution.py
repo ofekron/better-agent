@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,12 +27,16 @@ from provider_family_runtime_capabilities import (
 from provider_manifest import (
     artifact_family_kinds,
     runner_module_for,
-    session_events_family_kinds,
 )
 from provider_runtime_plan_source import (
     selected_runtime_agent_sources,
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
+)
+from provider_session_events_execution_strategy import (
+    SessionEventsExecutionStrategy,
+    external_execution_kinds,
+    strategy_for,
 )
 import user_prefs
 
@@ -51,165 +54,6 @@ RUN_CONFIG_SESSION_FIELDS = (
     "provider_id",
     "working_mode",
 )
-
-
-@dataclass(frozen=True)
-class SessionEventsExecutionStrategy:
-    kind: str
-    cli_command: str | None
-    config_default: str
-    config_files: tuple[str, ...]
-    input_fields: frozenset[str]
-    permission: bool = False
-    resume_kind: str = ""
-
-
-_COMMON_INPUT_FIELDS = frozenset({
-    "app_session_id",
-    "backend_url",
-    "browser_harness_enabled",
-    "cwd",
-    "files",
-    "images",
-    "internal_token",
-    "mode",
-    "model",
-    "prompt",
-    "provider_id",
-    "provider_kind",
-    "session_id",
-    "source",
-    "target_message_id",
-    "turn_run_id",
-    "user_facing",
-    "worker_agent_session_id",
-})
-_POLICY_FIELDS = frozenset({
-    "active_capability_ids",
-    "bare_config",
-    "capability_contexts",
-    "coordination_enabled",
-    "disabled_builtin_extensions",
-    "disabled_builtin_tools",
-    "disabled_runtime_skills",
-    "extra_mcp_servers",
-    "integrations_enabled",
-    "provider_run_config",
-    "required_mcp_server_names",
-    "resolved_harness_run_config",
-    "team_orchestration_enabled",
-})
-_PROJECTION_FIELDS = frozenset({
-    "context_strategy",
-    "provisioned_tool_profile",
-    "worker_working_mode",
-    "working_mode",
-})
-
-
-def _fields(*extra: str) -> frozenset[str]:
-    return frozenset({
-        *_COMMON_INPUT_FIELDS,
-        *_POLICY_FIELDS,
-        *_PROJECTION_FIELDS,
-        *extra,
-    })
-
-
-_STRATEGIES = {
-    "amp": SessionEventsExecutionStrategy(
-        "amp",
-        "amp",
-        ".config/amp",
-        ("settings.json",),
-        _fields("fork"),
-        permission=True,
-    ),
-    "copilot": SessionEventsExecutionStrategy(
-        "copilot",
-        "copilot",
-        ".copilot",
-        (),
-        _fields("config_dir"),
-        resume_kind="copilot",
-    ),
-    "cursor": SessionEventsExecutionStrategy(
-        "cursor",
-        "cursor-agent",
-        ".cursor",
-        ("cli-config.json", "mcp.json"),
-        _fields(),
-        permission=True,
-    ),
-    "kimi": SessionEventsExecutionStrategy(
-        "kimi",
-        "kimi",
-        ".kimi",
-        ("config.toml", "kimi.json", "mcp.json"),
-        _fields(),
-    ),
-    "openai": SessionEventsExecutionStrategy(
-        "openai",
-        None,
-        "",
-        (),
-        _fields(
-            "continuation_chain",
-            "disallowed_tools",
-            "fork",
-            "mssg_sender_session_id",
-            "reasoning_effort",
-            "setting_sources",
-            "supervised",
-            "supervisor_agent_session_id",
-        ),
-        permission=True,
-        resume_kind="openai",
-    ),
-    "opencode": SessionEventsExecutionStrategy(
-        "opencode",
-        "opencode",
-        ".",
-        (
-            ".config/opencode/opencode.jsonc",
-            ".local/share/opencode/opencode.db",
-        ),
-        _fields(
-            "fork",
-            "mssg_sender_session_id",
-            "reasoning_effort",
-        ),
-        permission=True,
-    ),
-    "pi": SessionEventsExecutionStrategy(
-        "pi",
-        "pi",
-        ".",
-        (".pi/agent/auth.json", ".pi/agent/models.json"),
-        _fields("fork", "reasoning_effort", "supervised"),
-        permission=True,
-        resume_kind="pi",
-    ),
-    "qwen": SessionEventsExecutionStrategy(
-        "qwen",
-        "qwen",
-        ".qwen",
-        ("settings.json", "oauth_creds.json", "output-language.md"),
-        _fields("provider_mode", "reasoning_effort", "supervised"),
-        permission=True,
-    ),
-}
-
-
-def external_execution_kinds() -> frozenset[str]:
-    return session_events_family_kinds() - {"agy"}
-
-
-def strategy_for(kind: str) -> SessionEventsExecutionStrategy:
-    strategy = _STRATEGIES.get(kind)
-    if strategy is None or kind not in external_execution_kinds():
-        raise ExecutionContractError("unsupported session-events execution kind")
-    return strategy
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -331,6 +175,7 @@ def _runner_input(
     provider: Any,
     strategy: SessionEventsExecutionStrategy,
     arguments: Mapping[str, Any],
+    authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     mode = _normalize_mode(provider, arguments)
     model = _normalize_model(provider, arguments)
@@ -385,8 +230,9 @@ def _runner_input(
         "permission": permission,
         "provider_id": provider.id,
         "provider_kind": provider.KIND,
-        "provider_mode": str(provider.record.get("mode") or "subscription"),
+        "provider_mode": str(authority.get("mode") or "subscription"),
         "reasoning_effort": reasoning_effort,
+        "runner": str(authority.get("runner") or ""),
         "source": str(arguments.get("source") or ""),
         "team_orchestration_enabled": (
             integrations_enabled
@@ -416,7 +262,7 @@ def _runner_input(
     )
     if strategy.kind == "copilot":
         values["config_dir"] = str(
-            provider.record.get("config_dir") or "",
+            authority.get("config_dir") or "",
         )
     payload = {
         key: values.get(key)
@@ -428,7 +274,7 @@ def _runner_input(
 
 
 def _config_root(
-    provider: Any,
+    authority: Mapping[str, Any],
     strategy: SessionEventsExecutionStrategy,
 ) -> Path:
     if strategy.kind == "openai":
@@ -437,7 +283,7 @@ def _config_root(
         root = user_home()
     else:
         configured = (
-            provider.record.get("config_dir")
+            authority.get("config_dir")
             if strategy.kind == "copilot"
             else None
         )
@@ -476,12 +322,12 @@ def _resume_path(
 
 
 def _launch_attestation(
-    provider: Any,
+    authority: Mapping[str, Any],
     strategy: SessionEventsExecutionStrategy,
     runner_input: Mapping[str, Any],
     run_dir: Path,
 ) -> FamilyLaunchAttestation:
-    root = _config_root(provider, strategy)
+    root = _config_root(authority, strategy)
     resume = _resume_path(strategy, root, runner_input)
     config_paths = tuple(root / value for value in strategy.config_files)
     if resume is not None and not resume.resolve(strict=True).is_relative_to(root):
@@ -543,11 +389,17 @@ def prepare_session_events_execution(
     run_id = str(start_arguments.get("run_id") or "")
     if not run_id:
         raise ExecutionContractError("session-events run id is unavailable")
-    runner_input = _runner_input(provider, strategy, start_arguments)
+    authority = provider.execution_authority_record(dict(start_arguments))
+    runner_input = _runner_input(
+        provider,
+        strategy,
+        start_arguments,
+        authority,
+    )
     from runs_dir import runs_root
 
     launch = _launch_attestation(
-        provider,
+        authority,
         strategy,
         runner_input,
         runs_root() / run_id,
@@ -572,7 +424,7 @@ def prepare_session_events_execution(
         installation_decisions=projection["installation_decisions"],
     )
     return prepare_family_execution(
-        provider.execution_authority_record(dict(start_arguments)),
+        authority,
         start_arguments=dict(start_arguments),
         runner_input=runner_input,
         launch=launch,

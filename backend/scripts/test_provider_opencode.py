@@ -348,17 +348,11 @@ def test_runner_usage_accumulation() -> bool:
 
 
 def test_capability_context_labels_team_message() -> bool:
-    prompt = runner_opencode._prepend_capability_context("<mssg>done</mssg>", {
-        "source": "mssg",
-        "capability_contexts": [{
-            "name": "Runtime",
-            "category": "system",
-            "content": "Use runtime context.",
-        }],
-    })
+    from capability_contexts import prompt_heading_for_source
+
     return (
-        "## Message\n\n<mssg>" in prompt
-        and "## User prompt\n\n<mssg>" not in prompt
+        prompt_heading_for_source("mssg") == "Message"
+        and prompt_heading_for_source("team_ask") == "Ask"
     )
 
 

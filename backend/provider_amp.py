@@ -26,28 +26,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import ClassVar, Optional
 
-import config_store
-from extension_run_policy import (
-    disabled_runtime_skills_for_run,
-    resolve_extension_run_policy,
-)
-import user_prefs
 from cli_paths import resolve_cli_binary
-from containment import containment
-from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
-import provider_runtime
-from provider_session_events import SessionEventsProvider, RunState
-from proc_control import process_control as _process_control
-from runs_dir import runs_root as _runs_root
+from provider_session_events import SessionEventsProvider
 
 logger = logging.getLogger(__name__)
-
-_RUNNER_PATH = Path(__file__).parent / "runner_amp.py"
 
 # Amp auto-selects the underlying LLM; the only selectable knobs are the
 # agent mode (`-m smart|rush|free` — controls model + system prompt +

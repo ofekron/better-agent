@@ -82,17 +82,13 @@ def test_capability_matrix() -> bool:
 
 
 def test_build_env_clears_claude_and_routes_credentials() -> bool:
-    real_status = provider_amp.config_store.provider_credential_status
-    provider_amp.config_store.provider_credential_status = lambda _provider_id: "available"
     inst = provider_amp.AmpProvider({
         "id": "a1", "kind": "amp", "mode": "api_key",
         "api_key": "test-amp-key", "base_url": "https://amp.example.com",
         "_credential_authoritative": True,
+        "_credential_status": "available",
     })
-    try:
-        env = inst.build_env()
-    finally:
-        provider_amp.config_store.provider_credential_status = real_status
+    env = inst.build_env()
     cleared = not any(k in env for k in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
@@ -305,17 +301,11 @@ def test_auth_failure_detection() -> bool:
 
 
 def test_capability_context_labels_team_message() -> bool:
-    prompt = runner_amp._prepend_capability_context("<mssg>done</mssg>", {
-        "source": "mssg",
-        "capability_contexts": [{
-            "name": "Runtime",
-            "category": "system",
-            "content": "Use runtime context.",
-        }],
-    })
+    from capability_contexts import prompt_heading_for_source
+
     return (
-        "## Message\n\n<mssg>" in prompt
-        and "## User prompt\n\n<mssg>" not in prompt
+        prompt_heading_for_source("mssg") == "Message"
+        and prompt_heading_for_source("team_ask") == "Ask"
     )
 
 

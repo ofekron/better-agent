@@ -133,11 +133,18 @@ def test_remaining_runners_restore_artifact_and_never_resolve_cli_late() -> None
         assert "resolve_cli_binary(" not in source, kind
 
 
+def test_recovery_retries_every_artifact_family() -> None:
+    source = (BACKEND / "run_recovery.py").read_text(encoding="utf-8")
+    assert source.count("_provider_manifest.artifact_family_kinds()") >= 2
+    assert 'original_artifact.provider_kind in {"claude", "agy"}' not in source
+
+
 TESTS = (
     test_manifest_covers_every_production_start_with_an_artifact,
     test_remaining_provider_start_methods_are_thin_artifact_consumers,
     test_remaining_provider_env_uses_admitted_runtime_record,
     test_remaining_runners_restore_artifact_and_never_resolve_cli_late,
+    test_recovery_retries_every_artifact_family,
 )
 
 

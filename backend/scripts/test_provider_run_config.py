@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path
 
 import _test_home
+import _test_installation
 _TMP_HOME = _test_home.isolate("bc-test-provider-run-config-")
 os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
@@ -32,7 +33,16 @@ import extension_registry  # noqa: E402
 import extension_store  # noqa: E402
 import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
+import dependency_plan  # noqa: E402
+import installation_profile  # noqa: E402
+from codex_execution_contract import build_codex_execution_contract  # noqa: E402
 from paths import ba_home  # noqa: E402
+from provider_runtime_plan_source import structural_provider_runtime_plan  # noqa: E402
+from provider_session_events_runner import effective_mcp_servers  # noqa: E402
+
+_test_installation.activate(Path(_TMP_HOME))
+installation_profile.capture_active_capabilities()
+dependency_plan.verified_active_python = lambda _backend: Path(sys.executable)
 
 FAILURES: list[str] = []
 
@@ -41,6 +51,17 @@ def check(cond: bool, msg: str) -> None:
     print(f"  {'✓' if cond else '✗'} {msg}")
     if not cond:
         FAILURES.append(msg)
+
+
+def _check_sdk_script_server(server: dict, script: Path, message: str) -> None:
+    args = server.get("args") or []
+    check(
+        Path(server.get("command") or "").resolve() == Path(sys.executable).resolve()
+        and args[:2] == ["-m", "better_agent_sdk.script_entrypoint"]
+        and len(args) >= 4
+        and Path(args[3]).resolve() == script.resolve(),
+        message,
+    )
 
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
@@ -727,12 +748,29 @@ def t_codex_materializes_mcp_and_skills() -> None:
         (home / ".zshenv").write_text('. "$HOME/.cargo/env"\n', encoding="utf-8")
         (home / ".bashrc").write_text(". ~/.profile\n", encoding="utf-8")
         (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text("", encoding="utf-8")
+        codex_launcher = home / "codex"
+        codex_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        codex_launcher.chmod(0o700)
+        contract = build_codex_execution_contract(
+            {
+                "id": "codex-fixture",
+                "kind": "codex",
+                "generation": "fixture-generation",
+                "revision": 1,
+                "mode": "subscription",
+                "config_dir": str(home / ".codex"),
+            },
+            launcher_path=str(codex_launcher),
+            environment_selectors={"CODEX_HOME": str(home / ".codex")},
+        )
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
         env = runner_codex._materialize_codex_run_home(
             run_dir,
             {
                 "skills": {"reviewer": {"description": "Review code", "instructions": "Review carefully.\n"}},
             },
+            execution_contract=contract,
             cwd=str(home),
         )
         overrides = runner_codex._codex_config_overrides(run_dir, {
@@ -742,6 +780,7 @@ def t_codex_materializes_mcp_and_skills() -> None:
         bare_env = runner_codex._materialize_codex_run_home(
             bare_run_dir,
             {},
+            execution_contract=contract,
             cwd=str(home),
             bare_config=True,
         )
@@ -758,7 +797,13 @@ def t_codex_materializes_mcp_and_skills() -> None:
     overlay_home = Path(env["HOME"])
     skill_root = overlay_home / ".agents" / "skills"
     check(overlay_home == run_dir / "codex-home", "Codex HOME points at run-local overlay")
-    check(Path(env["CODEX_HOME"]).is_symlink(), "Codex config home is linked into overlay")
+    codex_home = Path(env["CODEX_HOME"])
+    check(
+        codex_home.is_dir()
+        and not codex_home.is_symlink()
+        and (codex_home / "config.toml").read_text(encoding="utf-8") == "",
+        "Codex config home is an isolated attested overlay",
+    )
     check(not (overlay_home / ".zshenv").exists(), "Codex run home skips zsh startup files")
     check(not (overlay_home / ".bashrc").exists(), "Codex run home skips bash startup files")
     skill = skill_root / "reviewer" / "SKILL.md"
@@ -775,8 +820,21 @@ def t_codex_materializes_mcp_and_skills() -> None:
 
 
 def t_codex_runner_inputs_self_identify_provider_kind() -> None:
-    inputs = runner_codex._codex_runner_inputs({"provider_kind": "stale", "cwd": "/tmp/project"})
-    check(inputs["provider_kind"] == "codex", "Codex runner self-identifies provider kind")
+    try:
+        runner_codex._codex_runner_inputs({
+            "provider_kind": "stale",
+            "cwd": "/tmp/project",
+        })
+    except ValueError:
+        stale_rejected = True
+    else:
+        stale_rejected = False
+    check(stale_rejected, "Codex runner rejects stale provider identity")
+    inputs = runner_codex._codex_runner_inputs({
+        "provider_kind": "codex",
+        "cwd": "/tmp/project",
+    })
+    check(inputs["provider_kind"] == "codex", "Codex runner preserves attested provider kind")
     check(inputs["cwd"] == "/tmp/project", "Codex runner preserves original inputs")
 
 
@@ -809,11 +867,12 @@ def t_claude_materializes_runtime_skills_plugin() -> None:
         skill.parent.mkdir(parents=True)
         skill.write_text("---\nname: get-requirements\ndescription: Req.\n---\n# Req\n", encoding="utf-8")
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-        plugin = runner._materialize_claude_skill_plugin(
+        plugin = runner._materialize_claude_runtime_plugin(
             run_dir,
-            str(home),
             {"skills": {"reviewer": "Review carefully.\n"}},
             bare_config=False,
+            skill_dirs={"get-requirements": skill.parent},
+            agent_files={},
         )
     finally:
         if old_home is None:
@@ -826,7 +885,7 @@ def t_claude_materializes_runtime_skills_plugin() -> None:
     check((plugin_path / ".claude-plugin" / "plugin.json").is_file(), "Claude runtime skills plugin has manifest")
     manifest = json.loads((plugin_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     check(
-        manifest["name"] == "better-agent-runtime-skills",
+        manifest["name"] == runner.CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
         "Claude runtime skills plugin uses Better Agent name",
     )
     check(
@@ -1251,7 +1310,11 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
     }, {})
     server = config["mcp_servers"].get("project-updates")
     check(server is not None, "installed extension replacement is exposed under reserved MCP name")
-    check(Path(server["args"][0]).resolve() == script.resolve(), "replacement MCP points at private package script")
+    _check_sdk_script_server(
+        server,
+        script,
+        "replacement MCP uses the SDK script entrypoint",
+    )
 
 
 def t_installed_extension_mcp_servers_are_injected() -> None:
@@ -1321,7 +1384,11 @@ def t_installed_extension_mcp_servers_are_injected() -> None:
     }, {})
     runtime = config["mcp_servers"].get("ofek-runtime")
     check(runtime is not None, "installed extension MCP server is injected")
-    check(Path(runtime["args"][0]).resolve() == script.resolve(), "installed extension MCP points at package script")
+    _check_sdk_script_server(
+        runtime,
+        script,
+        "installed extension MCP uses the SDK script entrypoint",
+    )
     check(runtime["env"]["BETTER_CLAUDE_EXTENSION_ID"] == "ofek.runtime", "installed extension MCP carries extension id")
     check(runtime["env"]["OF_RUNTIME"] == "1", "installed extension MCP carries manifest env")
 
@@ -1495,8 +1562,11 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
         "model": "m",
         "provider_id": "prov-ba",
     }
-    configs = runner_better_agent._extension_mcp_server_configs_for_run(
-        inputs, user_facing=True, bare=False,
+    configs = effective_mcp_servers(
+        structural_provider_runtime_plan(
+            inputs,
+            "openai",
+        )["resolved_plan"],
     )
     check(
         "better-agent-requirements" in configs,
@@ -1505,8 +1575,11 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     headless = dict(inputs)
     headless["user_facing"] = False
     check(
-        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
-            headless, user_facing=False, bare=False,
+        "better-agent-requirements" in effective_mcp_servers(
+            structural_provider_runtime_plan(
+                headless,
+                "openai",
+            )["resolved_plan"],
         ),
         "Better Agent runner keeps requirements MCP for authenticated headless sessions",
     )
@@ -1514,14 +1587,20 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
     check(
-        "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
-            missing_token, user_facing=True, bare=False,
+        "better-agent-requirements" not in effective_mcp_servers(
+            structural_provider_runtime_plan(
+                missing_token,
+                "openai",
+            )["resolved_plan"],
         ),
         "Better Agent runner omits requirements MCP without backend auth",
     )
     check(
-        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
-            inputs, user_facing=True, bare=True,
+        "better-agent-requirements" in effective_mcp_servers(
+            structural_provider_runtime_plan(
+                {**inputs, "bare_config": True},
+                "openai",
+            )["resolved_plan"],
         ),
         "Better Agent runner keeps requirements MCP for bare runs",
     )
@@ -1549,7 +1628,11 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
         check(env["BETTER_CLAUDE_EXTENSION_ID"] == _FIXTURE_REQUIREMENTS_EXTENSION_ID, "runtime requirements MCP env selects requirements extension")
         check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
         check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
-        check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
+        _check_sdk_script_server(
+            req,
+            Path(_TMP_HOME) / "requirements-extension" / "mcp" / "server.py",
+            "runtime requirements MCP uses the SDK script entrypoint",
+        )
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
     check(
@@ -1757,7 +1840,11 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     check(server is not None, "bare TestApe MCP is injected")
     if not server:
         return
-    check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
+    _check_sdk_script_server(
+        server,
+        Path(_TMP_HOME) / "testape-extension" / "mcp" / "server.py",
+        "bare TestApe MCP uses the SDK script entrypoint",
+    )
     check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == _FIXTURE_TESTAPE_EXTENSION_ID, "bare TestApe runtime env carries extension id")
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
     raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
@@ -1783,7 +1870,11 @@ def t_explicit_testape_mcp_opt_in_works_headlessly() -> None:
     check(server is not None, "explicit TestApe MCP opt-in is injected headlessly")
     if not server:
         return
-    check(Path(server["args"][0]).name == "server.py", "explicit TestApe opt-in uses runtime server")
+    _check_sdk_script_server(
+        server,
+        Path(_TMP_HOME) / "testape-extension" / "mcp" / "server.py",
+        "explicit TestApe opt-in uses the SDK script entrypoint",
+    )
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-headless-sid", "explicit TestApe opt-in carries session id")
 
 
@@ -1898,6 +1989,13 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     agy_src = (Path(_BACKEND) / "provider_agy.py").read_text(encoding="utf-8")
+    claude_src = (Path(_BACKEND) / "provider_claude.py").read_text(encoding="utf-8")
+    session_events_src = (
+        Path(_BACKEND) / "provider_session_events_execution.py"
+    ).read_text(encoding="utf-8")
+    session_events_strategy_src = (
+        Path(_BACKEND) / "provider_session_events_execution_strategy.py"
+    ).read_text(encoding="utf-8")
     family_runtime_src = (
         Path(_BACKEND) / "provider_family_execution_runtime.py"
     ).read_text(encoding="utf-8")
@@ -1934,13 +2032,12 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "AGY provider persists context_strategy into runner input",
     )
     check(
-        '"disabled_builtin_extensions": (' in codex_src
-        and "disabled_builtin_extensions_for_run(" in codex_src,
-        "Codex provider persists disabled built-in extensions into runner input",
+        "input_payload.update(run_policy)" in codex_src,
+        "Codex applies the frozen extension run policy to runner input",
     )
     check(
-        '"worker_working_mode": (_worker_sess_rec or {}).get("working_mode")' in codex_src,
-        "Codex provider persists worker working mode into runner input",
+        '"worker_working_mode": runtime_policy["worker_working_mode"]' in codex_src,
+        "Codex consumes frozen worker working mode",
     )
     check(
         '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in codex_src,
@@ -1958,15 +2055,13 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         '"provider_kind": self.KIND' in agy_src,
         "AGY runner input self-identifies its provider kind",
     )
-    claude_src = (Path(_BACKEND) / "provider_claude.py").read_text(encoding="utf-8")
     check(
-        '"provider_run_config": provider_run_config or {}' in claude_src,
-        "Claude provider persists provider_run_config into runner input",
+        "input_payload.update(run_policy)" in claude_src,
+        "Claude applies the frozen extension run policy to runner input",
     )
     check(
-        '"disabled_builtin_extensions": (' in claude_src
-        and "disabled_builtin_extensions_for_run(" in claude_src,
-        "Claude provider persists disabled built-in extensions into runner input",
+        "resolve_extension_run_policy(" in claude_src,
+        "Claude resolves extension policy through the shared authority",
     )
     check(
         '"worker_working_mode": (_worker_sess_rec or {}).get("working_mode")' in claude_src,
@@ -1979,53 +2074,42 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     remote_src = (Path(_BACKEND) / "provider_remote.py").read_text(encoding="utf-8")
     node_handler_src = (Path(_BACKEND) / "node_rpc_handlers.py").read_text(encoding="utf-8")
     node_protocol_src = (Path(_BACKEND) / "node_protocol.py").read_text(encoding="utf-8")
+    execution_template_src = (
+        Path(_BACKEND) / "execution_template.py"
+    ).read_text(encoding="utf-8")
     check(
-        '"disabled_builtin_extensions": (' in remote_src,
-        "Remote provider ships disabled built-in extensions in spawn_run payload",
+        '"disabled_builtin_extensions": None' in execution_template_src
+        and "**node_execution.artifact.template.arguments()" in remote_src,
+        "Remote execution artifact ships disabled built-in extensions",
     )
     check(
-        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in remote_src,
-        "Remote provider ships provisioned tool profile in spawn_run payload",
+        '"provisioned_tool_profile": ""' in execution_template_src
+        and "**node_execution.artifact.template.arguments()" in remote_src,
+        "Remote execution artifact ships provisioned tool profile",
     )
     check(
-        "disabled_builtin_extensions=msg.get(\"disabled_builtin_extensions\")" in node_handler_src,
-        "Worker node forwards disabled built-in extensions into local provider",
+        "restore_prepared_execution(" in node_handler_src
+        and "start_prepared_run," in node_handler_src,
+        "Worker node restores and forwards the authoritative execution artifact",
     )
     check(
-        "_node_provisioned_tool_profile(" in node_handler_src,
-        "Worker node validates provisioned tool profile before forwarding",
+        'artifact.template.arguments()' in node_handler_src,
+        "Worker node validates selectors through the artifact template",
     )
     check(
         "disabled_builtin_extensions: Optional[list[str]]" in node_protocol_src,
         "Node protocol types disabled built-in extensions",
     )
-    for filename in (
-        "provider_agy.py",
-        "provider_amp.py",
-        "provider_claude.py",
-        "provider_codex.py",
-        "provider_copilot.py",
-        "provider_cursor.py",
-        "provider_kimi.py",
-        "provider_openai.py",
-        "provider_opencode.py",
-        "provider_pi.py",
-        "provider_qwen.py",
-        "provider_remote.py",
-    ):
-        source = (Path(_BACKEND) / filename).read_text(encoding="utf-8")
+    for kind in ("amp", "copilot", "cursor", "kimi", "openai", "opencode", "pi", "qwen"):
         check(
-            "resolve_extension_run_policy(" in source,
-            f"{filename} resolves the unified extension run policy",
-        )
-        update_call = (
-            "payload.update(run_policy)"
-            if filename in {"provider_agy.py", "provider_remote.py"}
-            else "input_payload.update(run_policy)"
+            f'"{kind}": SessionEventsExecutionStrategy('
+            in session_events_strategy_src,
+            f"{kind} uses the centralized session-events execution strategy",
         )
         check(
-            update_call in source,
-            f"{filename} applies the effective extension run policy to its payload",
+            "resolve_extension_run_policy(" in session_events_src
+            and "**policy," in session_events_src,
+            f"{kind} freezes the effective extension run policy",
         )
     check(
         "provisioned_tool_profile: str" in node_protocol_src,

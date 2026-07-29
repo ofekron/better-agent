@@ -26,27 +26,12 @@ import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import ClassVar, Optional
 
-import config_store
-import user_prefs
 from cli_paths import resolve_cli_binary
-from containment import containment
-from extension_run_policy import (
-    disabled_runtime_skills_for_run,
-    resolve_extension_run_policy,
-)
-from proc_control import process_control as _process_control
-from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
-from provider_session_events import SessionEventsProvider, RunState
-from runs_dir import runs_root as _runs_root
-import provider_runtime
+from provider_session_events import SessionEventsProvider
 
 logger = logging.getLogger(__name__)
-
-_RUNNER_PATH = Path(__file__).parent / "runner_cursor.py"
 
 # Install command per Cursor's CLI docs (cursor.com/docs/cli/installation):
 #   curl https://cursor.com/install -fsS | bash

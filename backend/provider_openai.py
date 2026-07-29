@@ -20,63 +20,20 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 import httpx
-import config_store
-from extension_run_policy import (
-    disabled_runtime_skills_for_run,
-    resolve_extension_run_policy,
-)
-
-from provider import (
-    Provider,
-    RecoveredPopen,
-    StreamEvent,
-    await_line_tailer_drained,
-    build_better_agent_run_env,
-    path_exists_off_loop,
-    popen_is_running_off_loop,
-    schedule_loop_task,
-    runner_argv,
-)
 from provider_session_events import SessionEventsProvider
-import provider_runtime
-from ingestion_versions import OPENAI_INGESTION_VERSION, marker_matches_current
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
     DEFAULT_REASONING_EFFORT,
-    normalize_reasoning_effort,
-)
-from proc_control import process_control as _process_control
-from runs_dir import (
-    atomic_write_json as _atomic_write_json,
-    iter_run_dirs,
-    pid_alive as _pid_alive,
-    prune_old_completed_runs,
-    reap_run_dir as _reap_run_dir,
-    runs_root as _runs_root,
 )
 
 logger = logging.getLogger(__name__)
 
 
-_RUNNER_PATH = Path(__file__).parent / "runner_better_agent.py"
 _HEADLESS_TIMEOUT_S = 60.0
-_TAIL_POLL_INTERVAL = 0.05
-_RUNNER_EVENT_TYPES = {"agent_message", "worker_start", "worker_event", "worker_complete"}
-
-
-def runner_event_to_stream_event(event: dict) -> StreamEvent:
-    event_type = event.get("type")
-    event_data = event.get("data")
-    if event_type in _RUNNER_EVENT_TYPES and isinstance(event_data, dict):
-        return StreamEvent(event_type, event_data)
-    return StreamEvent("agent_message", event)
 
 
 async def _openai_headless_completion(
@@ -112,12 +69,6 @@ async def _openai_headless_completion(
     else:
         text = str(content or "")
     return text, body.get("usage") or {}
-
-
-# ============================================================================
-# RunState — per-run bookkeeping (mirrors SessionEventsProvider.RunState exactly)
-# ============================================================================
-@dataclass
 
 
 # ============================================================================
@@ -200,30 +151,6 @@ class OpenAIProvider(SessionEventsProvider):
             extra_env=extra_env,
         )
 
-    # ------------------------------------------------------------------
-    # _bootstrap_run — wait for state.json, then tail session_events.jsonl
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # _watch_complete
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # _emit_complete_from_file
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # _emit_early_failure
-    # ------------------------------------------------------------------
-
-    # _backend_state_path / _read_backend_state inherited from
-    # AbstractStreamingProvider. is_running / cancel_all / active_runs /
-    # runs_for_session / _cleanup_run / cancel_run all inherited.
-
-
-
-
-
     def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
         """Append a steering message for a live OpenAI turn.
 
@@ -253,14 +180,6 @@ class OpenAIProvider(SessionEventsProvider):
         except OSError:
             logger.exception("openai steer_run failed for %s", run_id)
             return False
-
-    # ------------------------------------------------------------------
-    # recover_in_flight
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # prune_old_runs
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # run_headless — direct one-shot Chat Completions call.
