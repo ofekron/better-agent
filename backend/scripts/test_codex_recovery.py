@@ -814,6 +814,7 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
 
     class _Proc:
         pid = 43210
+        process_group_id = 87654
         returncode = None
         stdout = _Stdout()
         thread_id = codex_sid
@@ -837,10 +838,12 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
             return 0
 
     class _Control:
-        def signal_stop(self, _pid: int) -> None:
+        def signal_owned_group(self, group_id: int) -> None:
+            assert group_id == _Proc.process_group_id
             calls.append("signal")
 
-        def force_kill(self, _pid: int) -> None:
+        def force_kill_owned_group(self, group_id: int) -> None:
+            assert group_id == _Proc.process_group_id
             calls.append("kill")
 
     async def _run() -> bool:

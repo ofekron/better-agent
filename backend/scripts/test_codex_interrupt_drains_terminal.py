@@ -62,6 +62,7 @@ class _FakeStdout:
 class _FakeCodexProcess:
     def __init__(self, run_dir: Path, rows: list[dict] | None = None) -> None:
         self.pid = 12345
+        self.process_group_id = 54321
         self.returncode = None
         self.thread_id = "thread-1"
         self.turn_id: str | None = None
@@ -69,6 +70,7 @@ class _FakeCodexProcess:
         self.stdout = _FakeStdout(self, run_dir, rows)
         self._stderr_task = asyncio.create_task(asyncio.sleep(0))
         self.requests: list[tuple[str, dict]] = []
+        self.process_group_actions: list[tuple[str, int]] = []
         self._pending_tool_calls: set = set()
 
     async def request(self, method: str, params: dict) -> dict:
@@ -78,6 +80,16 @@ class _FakeCodexProcess:
     async def wait(self) -> int:
         self.returncode = 0
         return 0
+
+    async def close_input(self) -> None:
+        return None
+
+
+def _assert_terminal_completion_cleanup(fake: _FakeCodexProcess) -> None:
+    assert fake.process_group_actions == [
+        ("signal", fake.process_group_id),
+        ("kill", fake.process_group_id),
+    ]
 
 
 async def _run_with_fake_process(
@@ -94,9 +106,24 @@ async def _run_with_fake_process(
             return fake
 
         original_start = runner_codex._start_app_server
-        original_signal_stop = runner_codex._process_control().signal_stop
+
+        def record_group_action(action: str, group_id: int) -> None:
+            assert group_id == fake.process_group_id
+            fake.process_group_actions.append((action, group_id))
+
+        class _FakeProcessControl:
+            def signal_stop(self, _pid: int) -> None:
+                return None
+
+            def signal_owned_group(self, group_id: int) -> None:
+                record_group_action("signal", group_id)
+
+            def force_kill_owned_group(self, group_id: int) -> None:
+                record_group_action("kill", group_id)
+
+        original_process_control = runner_codex._process_control
         runner_codex._start_app_server = start_app_server  # type: ignore[assignment]
-        runner_codex._process_control().signal_stop = lambda _pid: None  # type: ignore[method-assign]
+        runner_codex._process_control = lambda: _FakeProcessControl()  # type: ignore[assignment]
         cleanup = None
         try:
             if configure:
@@ -115,7 +142,7 @@ async def _run_with_fake_process(
             if callable(cleanup):
                 cleanup()
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
-            runner_codex._process_control().signal_stop = original_signal_stop  # type: ignore[method-assign]
+            runner_codex._process_control = original_process_control  # type: ignore[assignment]
 
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
         return code, complete, fake
@@ -126,6 +153,10 @@ async def _test_interrupt_drains_terminal_event() -> None:
     assert code == 1
     assert ("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"}) in fake.requests
     assert complete["error"] == "interrupted by user"
+    assert fake.process_group_actions == [
+        ("signal", fake.process_group_id),
+        ("kill", fake.process_group_id),
+    ]
 
 
 async def _test_fork_thread_started_boundary_controls_terminal_scan() -> None:
@@ -183,7 +214,7 @@ async def _test_fork_thread_started_boundary_controls_terminal_scan() -> None:
 
         return cleanup
 
-    code, complete, _fake = await _run_with_fake_process(
+    code, complete, fake = await _run_with_fake_process(
         rows=rows,
         inputs={"session_id": "parent-thread", "fork": True},
         configure=configure,
@@ -193,6 +224,7 @@ async def _test_fork_thread_started_boundary_controls_terminal_scan() -> None:
     assert complete["success"] is True
     assert captured_offsets == [boundary]
     assert initial_terminal_seen == [None]
+    _assert_terminal_completion_cleanup(fake)
 
 
 async def _test_resume_keeps_existing_rollout_boundary() -> None:
@@ -241,7 +273,7 @@ async def _test_resume_keeps_existing_rollout_boundary() -> None:
 
         return cleanup
 
-    code, complete, _fake = await _run_with_fake_process(
+    code, complete, fake = await _run_with_fake_process(
         rows=rows,
         inputs={"session_id": "parent-thread"},
         configure=configure,
@@ -250,6 +282,7 @@ async def _test_resume_keeps_existing_rollout_boundary() -> None:
     assert code == 0
     assert complete["success"] is True
     assert captured_offsets == expected_offsets
+    _assert_terminal_completion_cleanup(fake)
 
 
 def main() -> None:
