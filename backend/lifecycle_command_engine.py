@@ -16,6 +16,7 @@ from lifecycle_command_model import (
     LifecycleCommand,
     LifecycleEffect,
     LifecycleSnapshot,
+    ExecutionTurnIdentity,
     UserTurnIdentity,
     freeze_json,
     materialize_json,
@@ -194,12 +195,14 @@ class LifecycleCommandEngine:
         request_id: str,
         session_id: str,
         identity: UserTurnIdentity,
+        execution_policy: str = "single",
     ) -> CommandResult:
         return await self.execute(LifecycleCommand(
             request_id=request_id,
             session_id=session_id,
             kind="begin_turn",
             identity=identity,
+            execution_policy=execution_policy,
         ))
 
     async def confirm_started(
@@ -277,6 +280,165 @@ class LifecycleCommandEngine:
             lifecycle_message_id=lifecycle_message_id,
             outcome=outcome,
         )
+
+    async def start_execution(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "start_execution",
+            execution_identity,
+        )
+
+    async def bind_execution_run(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "bind_execution_run",
+            execution_identity,
+            provider_run_id=provider_run_id,
+        )
+
+    async def restore_execution_run(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        expected_failed_run_id: str,
+        replacement_provider_run_id: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "restore_execution_run",
+            execution_identity,
+            provider_run_id=expected_failed_run_id,
+            replacement_provider_run_id=replacement_provider_run_id,
+        )
+
+    async def confirm_execution_started(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "confirm_execution_started",
+            execution_identity,
+            provider_run_id=provider_run_id,
+        )
+
+    async def detach_execution(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "detach_execution",
+            execution_identity,
+        )
+
+    async def adopt_execution(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "adopt_execution",
+            execution_identity,
+            provider_run_id=provider_run_id,
+        )
+
+    async def finish_execution(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+        outcome: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "finish_execution",
+            execution_identity,
+            provider_run_id=provider_run_id,
+            outcome=outcome,
+        )
+
+    async def finish_execution_and_turn(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        provider_run_id: str,
+        outcome: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "finish_execution_and_turn",
+            execution_identity,
+            provider_run_id=provider_run_id,
+            outcome=outcome,
+        )
+
+    async def abort_execution(
+        self,
+        session_id: str,
+        *,
+        execution_identity: ExecutionTurnIdentity,
+        outcome: str,
+    ) -> CommandResult:
+        return await self._transition_execution(
+            session_id,
+            "abort_execution",
+            execution_identity,
+            outcome=outcome,
+        )
+
+    async def _transition_execution(
+        self,
+        session_id: str,
+        kind: str,
+        execution_identity: ExecutionTurnIdentity,
+        *,
+        provider_run_id: str | None = None,
+        replacement_provider_run_id: str | None = None,
+        outcome: str | None = None,
+    ) -> CommandResult:
+        await self.bind()
+        async with self._lock_for(session_id):
+            snapshot = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            if snapshot.identity is None:
+                raise LifecycleCommandRejected(
+                    "execution requires an active user turn"
+                )
+            return await self._execute_bound(LifecycleCommand(
+                request_id=f"execution:{snapshot.revision}:{kind}",
+                session_id=session_id,
+                kind=kind,
+                identity=snapshot.identity,
+                execution_identity=execution_identity,
+                provider_run_id=provider_run_id,
+                replacement_provider_run_id=replacement_provider_run_id,
+                outcome=outcome,
+            ))
 
     async def _transition_active(
         self,

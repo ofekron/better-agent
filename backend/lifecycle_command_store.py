@@ -20,7 +20,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -115,7 +115,10 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 session_id TEXT PRIMARY KEY,
                 phase TEXT NOT NULL,
                 identity_json TEXT,
-                revision INTEGER NOT NULL CHECK (revision >= 0)
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                execution_json TEXT,
+                execution_policy TEXT,
+                completed_execution_count INTEGER NOT NULL DEFAULT 0
             ) STRICT;
             CREATE TABLE transitions (
                 session_id TEXT NOT NULL,
@@ -165,9 +168,12 @@ def _migrate(connection: sqlite3.Connection) -> None:
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute("PRAGMA user_version = 3")
         elif version == 1:
             _migrate_v1_to_v2(connection)
+            version = 2
+        if version == 2:
+            _migrate_v2_to_v3(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -206,9 +212,23 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     for row in transition_rows:
         command = _load_object(row["command_json"], "command")
         command["identity"] = _logical_identity(command["identity"])
+        command.update({
+            "execution_identity": None,
+            "provider_run_id": None,
+            "execution_policy": (
+                "single" if command.get("kind") == "begin_turn" else None
+            ),
+        })
         next_snapshot = _load_object(row["next_snapshot_json"], "next snapshot")
         if next_snapshot.get("identity") is not None:
             next_snapshot["identity"] = _logical_identity(next_snapshot["identity"])
+        next_snapshot.update({
+            "execution": None,
+            "execution_policy": (
+                "single" if next_snapshot.get("phase") != "idle" else None
+            ),
+            "completed_execution_count": 0,
+        })
         notification = _load_object(
             row["notification_payload_json"],
             "notification payload",
@@ -252,6 +272,51 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 2")
 
 
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE sessions ADD COLUMN execution_json TEXT")
+    connection.execute("ALTER TABLE sessions ADD COLUMN execution_policy TEXT")
+    connection.execute(
+        "ALTER TABLE sessions ADD COLUMN completed_execution_count INTEGER NOT NULL DEFAULT 0"
+    )
+    rows = connection.execute(
+        """
+        SELECT session_id, request_id, command_json, next_snapshot_json
+        FROM transitions
+        """
+    ).fetchall()
+    for row in rows:
+        command = _load_object(row["command_json"], "command")
+        command.setdefault("execution_identity", None)
+        command.setdefault("provider_run_id", None)
+        command.setdefault(
+            "execution_policy",
+            "single" if command.get("kind") == "begin_turn" else None,
+        )
+        snapshot = _load_object(row["next_snapshot_json"], "next snapshot")
+        snapshot.setdefault("execution", None)
+        snapshot.setdefault(
+            "execution_policy",
+            "single" if snapshot.get("phase") != "idle" else None,
+        )
+        snapshot.setdefault("completed_execution_count", 0)
+        fingerprint = LifecycleCommand.from_dict(command).fingerprint()
+        connection.execute(
+            """
+            UPDATE transitions
+            SET command_json = ?, fingerprint = ?, next_snapshot_json = ?
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (
+                _dump(command),
+                fingerprint,
+                _dump(snapshot),
+                row["session_id"],
+                row["request_id"],
+            ),
+        )
+    connection.execute("PRAGMA user_version = 3")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -270,7 +335,8 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
     with connection() as database:
         row = database.execute(
             """
-            SELECT session_id, phase, identity_json, revision
+            SELECT session_id, phase, identity_json, revision,
+                   execution_json, execution_policy, completed_execution_count
             FROM sessions
             WHERE session_id = ?
             """,
@@ -442,15 +508,19 @@ def persist_plan(
             return "existing"
         database.execute(
             """
-            INSERT INTO sessions(session_id, phase, identity_json, revision)
-            VALUES (?, 'idle', NULL, 0)
+            INSERT INTO sessions(
+                session_id, phase, identity_json, revision,
+                execution_json, execution_policy, completed_execution_count
+            )
+            VALUES (?, 'idle', NULL, 0, NULL, NULL, 0)
             ON CONFLICT(session_id) DO NOTHING
             """,
             (command.session_id,),
         )
         current = database.execute(
             """
-            SELECT session_id, phase, identity_json, revision
+            SELECT session_id, phase, identity_json, revision,
+                   execution_json, execution_policy, completed_execution_count
             FROM sessions
             WHERE session_id = ?
             """,
@@ -598,13 +668,21 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
         cursor = database.execute(
             """
             UPDATE sessions
-            SET phase = ?, identity_json = ?, revision = ?
+            SET phase = ?, identity_json = ?, revision = ?,
+                execution_json = ?, execution_policy = ?,
+                completed_execution_count = ?
             WHERE session_id = ? AND revision = ?
             """,
             (
                 next_snapshot.phase,
                 _identity_json(next_snapshot),
                 next_snapshot.revision,
+                (
+                    _dump(next_snapshot.execution.to_dict())
+                    if next_snapshot.execution else None
+                ),
+                next_snapshot.execution_policy,
+                next_snapshot.completed_execution_count,
                 session_id,
                 row["source_revision"],
             ),
@@ -664,6 +742,12 @@ def _snapshot_from_row(row: sqlite3.Row) -> LifecycleSnapshot:
         "phase": row["phase"],
         "identity": identity,
         "revision": row["revision"],
+        "execution": (
+            _load_object(row["execution_json"], "execution")
+            if row["execution_json"] is not None else None
+        ),
+        "execution_policy": row["execution_policy"],
+        "completed_execution_count": row["completed_execution_count"],
     })
 
 

@@ -1819,6 +1819,36 @@ class TurnManager:
         # (assistant append raising strict KeyError). All consumers are
         # None/.get-tolerant.
         assistant_msg_holder: list[Optional[dict]] = [None]
+        execution_identity = None
+
+        async def finish_execution(outcome: str) -> None:
+            current = self._c.lifecycle_commands.snapshot(
+                app_session_id,
+            ).execution
+            if (
+                execution_identity is not None
+                and current is not None
+                and current.identity == execution_identity
+            ):
+                if current.provider_run_id is None:
+                    await self._c.lifecycle_commands.abort_execution(
+                        app_session_id,
+                        execution_identity=execution_identity,
+                        outcome=outcome,
+                    )
+                    return
+                snapshot = self._c.lifecycle_commands.snapshot(app_session_id)
+                terminal = (
+                    self._c.lifecycle_commands.finish_execution_and_turn
+                    if snapshot.execution_policy == "single"
+                    else self._c.lifecycle_commands.finish_execution
+                )
+                await terminal(
+                    app_session_id,
+                    execution_identity=execution_identity,
+                    provider_run_id=current.provider_run_id,
+                    outcome=outcome,
+                )
 
         original_ws_callback = ws_callback
 
@@ -1906,6 +1936,23 @@ class TurnManager:
             assistant_msg_holder[0] = new_msg
             self.current_assistant_msgs[app_session_id] = new_msg
             self._run_state_set_target(app_session_id, turn_run_id, new_msg["id"])
+            from lifecycle_command_model import ExecutionTurnIdentity
+            execution_identity = ExecutionTurnIdentity(
+                execution_turn_id=turn_run_id,
+                assistant_message_id=new_msg["id"],
+                role=(
+                    "supervisor"
+                    if (
+                        source == "supervisor"
+                        or session_id_field == "supervisor_agent_session_id"
+                    )
+                    else mode
+                ),
+            )
+            await self._c.lifecycle_commands.start_execution(
+                app_session_id,
+                execution_identity=execution_identity,
+            )
             try:
                 from event_journal import publish_event
                 root_id = session_manager._root_id_for(persist_to) or persist_to
@@ -1997,6 +2044,7 @@ class TurnManager:
                 user_initiated=user_initiated,
                 turn_run_id=turn_run_id,
                 lifecycle_message_id=owning_lifecycle_message_id,
+                execution_identity=execution_identity,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
@@ -2178,6 +2226,7 @@ class TurnManager:
             }})
 
             if primary_result.get("success"):
+                await finish_execution("complete")
                 await self._publish_terminal_lifecycle(
                     "complete",
                     app_session_id=app_session_id,
@@ -2192,6 +2241,7 @@ class TurnManager:
                     ),
                 )
             else:
+                await finish_execution("failed")
                 await self._publish_terminal_lifecycle(
                     "stopped",
                     app_session_id=app_session_id,
@@ -2210,6 +2260,7 @@ class TurnManager:
             logger.info("Turn cancelled for session %s", app_session_id)
             trace.finalize()
             await _to_turn_dispatch_thread(trace.save)
+            await finish_execution("stopped")
 
             await self._await_worker_panel_fold(persist_to)
             finalized_msg = assistant_msg_holder[0]
@@ -2295,14 +2346,47 @@ class TurnManager:
                 await _to_turn_dispatch_thread(trace.save)
             except Exception:
                 logger.exception("Failed to save trace on task cancel")
-            try:
-                await ws_callback({"type": "turn_detached", "data": {
-                    "app_session_id": persist_to,
-                    "msg_id": assistant_msg_holder[0]["id"] if assistant_msg_holder[0] else None,
-                    "trace_id": trace.trace_id,
-                }})
-            except Exception:
-                logger.exception("Failed to emit turn_detached WS event")
+            current_execution = self._c.lifecycle_commands.snapshot(
+                app_session_id,
+            ).execution
+            if (
+                execution_identity is not None
+                and current_execution is not None
+                and current_execution.identity == execution_identity
+            ):
+                provider_completed = "success" in primary_result
+                elected_run_id = current_execution.provider_run_id
+                provider_live = (
+                    elected_run_id is not None
+                    and elected_run_id in (self.active_run_ids.get(app_session_id) or ())
+                    and self.is_running(app_session_id)
+                )
+                if (
+                    not provider_completed
+                    and current_execution.phase in {"running", "stopping"}
+                    and provider_live
+                ):
+                    await self._c.lifecycle_commands.detach_execution(
+                        app_session_id,
+                        execution_identity=execution_identity,
+                    )
+                    try:
+                        await ws_callback({"type": "turn_detached", "data": {
+                            "app_session_id": persist_to,
+                            "msg_id": assistant_msg_holder[0]["id"] if assistant_msg_holder[0] else None,
+                            "trace_id": trace.trace_id,
+                        }})
+                    except Exception:
+                        logger.exception("Failed to emit turn_detached WS event")
+                else:
+                    outcome = (
+                        "complete"
+                        if primary_result.get("success")
+                        else "failed"
+                        if provider_completed
+                        else "stopped"
+                    )
+                    await finish_execution(outcome)
             # NOTE: detached is NOT a terminal in the lifecycle sense —
             # the runner is still alive and a fresh backend will pick
             # it up via run_recovery. No lifecycle.turn_* emit.
@@ -2355,6 +2439,7 @@ class TurnManager:
             # terminals. Treat as "stopped" since the turn did not
             # complete successfully.
             if turn_lifecycle_started:
+                await finish_execution("failed")
                 await self._publish_terminal_lifecycle(
                     "stopped",
                     app_session_id=app_session_id,
@@ -2483,6 +2568,7 @@ class TurnManager:
         user_initiated: bool = False,
         turn_run_id: str,
         lifecycle_message_id: str,
+        execution_identity=None,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
@@ -2939,6 +3025,12 @@ class TurnManager:
                     },
                 })
             else:
+                if execution_identity is not None:
+                    await self._c.lifecycle_commands.bind_execution_run(
+                        app_session_id,
+                        execution_identity=execution_identity,
+                        provider_run_id=run_id,
+                    )
                 spawn_started = _time.monotonic()
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
@@ -3087,15 +3179,11 @@ class TurnManager:
                             },
                         })
                         continue
-                    lifecycle_commands = getattr(
-                        self._c,
-                        "lifecycle_commands",
-                        None,
-                    )
-                    if lifecycle_commands is not None:
-                        await lifecycle_commands.confirm_active_started(
+                    if execution_identity is not None:
+                        await self._c.lifecycle_commands.confirm_execution_started(
                             app_session_id,
-                            lifecycle_message_id=lifecycle_message_id,
+                            execution_identity=execution_identity,
+                            provider_run_id=run_id,
                         )
                 silence_threshold_seconds = await _to_turn_dispatch_thread(
                     self._load_task_start_silence_seconds,

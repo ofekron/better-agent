@@ -17,9 +17,13 @@ import _test_installation  # noqa: E402
 _test_installation.activate(Path(_TMP_HOME))
 
 import lifecycle_command_store  # noqa: E402
-from lifecycle_command_model import UserTurnIdentity  # noqa: E402
+from lifecycle_command_model import (  # noqa: E402
+    ExecutionTurnIdentity,
+    UserTurnIdentity,
+)
 from orchestrator import Coordinator  # noqa: E402
 import run_recovery  # noqa: E402
+from lifecycle_command_states import LifecycleCommandRejected  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import user_msg_lifecycle  # noqa: E402
 
@@ -288,6 +292,29 @@ async def prove_recovery_uses_execution_owner(
         session_id=app_session_id,
         identity=identity,
     )
+    execution_identity = ExecutionTurnIdentity(
+        "recovery-execution",
+        "recovery-assistant",
+        "native",
+    )
+    await coordinator.lifecycle_commands.start_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+    )
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="recovery-owner-run",
+    )
+    await coordinator.lifecycle_commands.confirm_execution_started(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="recovery-owner-run",
+    )
+    await coordinator.lifecycle_commands.detach_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+    )
     original_terminal = (
         user_msg_lifecycle.terminal_event_for_lifecycle_async
     )
@@ -304,6 +331,7 @@ async def prove_recovery_uses_execution_owner(
             mode="native",
             agent_sid=None,
             run_id="recovery-owner-run",
+            execution_turn_id="recovery-execution",
             cancelled=True,
             sess={
                 "messages": [
@@ -335,6 +363,267 @@ async def prove_recovery_uses_execution_owner(
     )
 
 
+async def prove_recovery_terminal_failure_blocks_marker(
+    coordinator: Coordinator,
+) -> None:
+    app_session_id = create_session("recovery-terminal-failure")
+    lifecycle_id = "turn-recovery-terminal-failure"
+    identity = UserTurnIdentity(lifecycle_id, lifecycle_id)
+    execution_identity = ExecutionTurnIdentity(
+        "recovery-failure-execution",
+        "recovery-failure-assistant",
+        "native",
+    )
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="recovery-terminal-failure:begin",
+        session_id=app_session_id,
+        identity=identity,
+    )
+    await coordinator.lifecycle_commands.start_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+    )
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="recovery-failure-run",
+    )
+    original_terminal = user_msg_lifecycle.terminal_event_for_lifecycle_async
+    marker_called = False
+
+    async def failed_terminal_check(*_args, **_kwargs) -> None:
+        raise OSError("injected terminal persistence failure")
+
+    async def recovery_flow() -> None:
+        nonlocal marker_called
+        await run_recovery._emit_recovered_user_message_terminal(
+            coordinator=coordinator,
+            app_session_id=app_session_id,
+            persist_sid=app_session_id,
+            mode="native",
+            agent_sid=None,
+            run_id="recovery-failure-run",
+            execution_turn_id="recovery-failure-execution",
+            cancelled=True,
+            sess={"messages": [
+                {
+                    "id": "recovery-failure-user",
+                    "role": "user",
+                    "lifecycle_msg_id": lifecycle_id,
+                },
+                {
+                    "id": "recovery-failure-assistant",
+                    "role": "assistant",
+                },
+            ]},
+            assistant_msg={
+                "id": "recovery-failure-assistant",
+                "role": "assistant",
+            },
+        )
+        marker_called = True
+
+    user_msg_lifecycle.terminal_event_for_lifecycle_async = failed_terminal_check
+    try:
+        try:
+            await recovery_flow()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("terminal persistence failure was swallowed")
+    finally:
+        user_msg_lifecycle.terminal_event_for_lifecycle_async = original_terminal
+    check("recovery terminal persistence failure propagates", not marker_called)
+    check("reconciliation marker path is unreachable after failure", not marker_called)
+
+
+async def prove_retry_election_compensation(
+    coordinator: Coordinator,
+) -> None:
+    app_session_id = create_session("retry-election-compensation")
+    lifecycle_id = "turn-retry-election-compensation"
+    identity = UserTurnIdentity(lifecycle_id, lifecycle_id)
+    execution_identity = ExecutionTurnIdentity(
+        "retry-election-execution",
+        "retry-election-assistant",
+        "native",
+    )
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="retry-election:begin",
+        session_id=app_session_id,
+        identity=identity,
+        execution_policy="sequential",
+    )
+    await coordinator.lifecycle_commands.start_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+    )
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-old",
+    )
+    await coordinator.lifecycle_commands.confirm_execution_started(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-old",
+    )
+    await coordinator.lifecycle_commands.detach_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+    )
+
+    for failed_run_id, failure in (
+        ("retry-start-exception", RuntimeError("injected start exception")),
+        ("retry-admission-false", False),
+    ):
+        await coordinator.lifecycle_commands.bind_execution_run(
+            app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id=failed_run_id,
+        )
+        if failure is False:
+            admitted = False
+            assert not admitted
+        else:
+            try:
+                raise failure
+            except RuntimeError:
+                pass
+        restored = await run_recovery._restore_retry_election(
+            coordinator.lifecycle_commands,
+            app_session_id=app_session_id,
+            execution_identity=execution_identity,
+            failed_run_id=failed_run_id,
+            authoritative_run_id="retry-old",
+        )
+        assert restored
+        assert not await run_recovery._restore_retry_election(
+            coordinator.lifecycle_commands,
+            app_session_id=app_session_id,
+            execution_identity=execution_identity,
+            failed_run_id=failed_run_id,
+            authoritative_run_id="retry-old",
+        )
+        check(
+            f"{failed_run_id} restores authoritative election",
+            coordinator.lifecycle_commands.snapshot(
+                app_session_id,
+            ).execution.provider_run_id == "retry-old",
+        )
+
+    class FailedProjection:
+        def __init__(self, error: BaseException) -> None:
+            self.error = error
+
+        def snapshot(self, session_id: str):
+            return coordinator.lifecycle_commands.snapshot(session_id)
+
+        async def adopt_execution(self, *_args, **_kwargs) -> None:
+            raise self.error
+
+    for admitted_run_id, error in (
+        ("retry-confirm-failure", RuntimeError("injected confirm failure")),
+        ("retry-confirm-cancel", asyncio.CancelledError()),
+    ):
+        await coordinator.lifecycle_commands.bind_execution_run(
+            app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id=admitted_run_id,
+        )
+        registered_live = [admitted_run_id]
+        try:
+            await run_recovery._project_admitted_retry(
+                FailedProjection(error),
+                app_session_id=app_session_id,
+                execution_identity=execution_identity,
+                provider_run_id=admitted_run_id,
+            )
+        except type(error):
+            pass
+        else:
+            raise AssertionError("admitted projection failure was swallowed")
+        check(
+            f"{admitted_run_id} remains elected and registered",
+            coordinator.lifecycle_commands.snapshot(
+                app_session_id,
+            ).execution.provider_run_id == admitted_run_id
+            and registered_live == [admitted_run_id],
+        )
+        await run_recovery._project_admitted_retry(
+            coordinator.lifecycle_commands,
+            app_session_id=app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id=admitted_run_id,
+        )
+        await coordinator.lifecycle_commands.detach_execution(
+            app_session_id,
+            execution_identity=execution_identity,
+        )
+
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-failed-interleaving",
+    )
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-C",
+    )
+    assert not await run_recovery._restore_retry_election(
+        coordinator.lifecycle_commands,
+        app_session_id=app_session_id,
+        execution_identity=execution_identity,
+        failed_run_id="retry-failed-interleaving",
+        authoritative_run_id="retry-old",
+    )
+    check(
+        "compensation cannot overwrite a newer C election",
+        coordinator.lifecycle_commands.snapshot(
+            app_session_id,
+        ).execution.provider_run_id == "retry-C",
+    )
+
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-success",
+    )
+    await coordinator.lifecycle_commands.adopt_execution(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-success",
+    )
+    stale_revision = coordinator.lifecycle_commands.snapshot(
+        app_session_id,
+    ).revision
+    try:
+        await coordinator.lifecycle_commands.finish_execution(
+            app_session_id,
+            execution_identity=execution_identity,
+            provider_run_id="retry-old",
+            outcome="failed",
+        )
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("stale old retry terminal was accepted")
+    assert coordinator.lifecycle_commands.snapshot(
+        app_session_id,
+    ).revision == stale_revision
+    await coordinator.lifecycle_commands.finish_execution_and_turn(
+        app_session_id,
+        execution_identity=execution_identity,
+        provider_run_id="retry-success",
+        outcome="complete",
+    )
+    check(
+        "successful retry rejects stale old terminal and completes new election",
+        coordinator.lifecycle_commands.snapshot(app_session_id).phase == "idle",
+    )
+
+
 async def run() -> None:
     coordinator = Coordinator()
     await coordinator.lifecycle_commands.bind()
@@ -344,6 +633,8 @@ async def run() -> None:
         await prove_cancel_before_execution(coordinator)
         await prove_retry_reclaims_identity(coordinator)
         await prove_recovery_uses_execution_owner(coordinator)
+        await prove_recovery_terminal_failure_blocks_marker(coordinator)
+        await prove_retry_election_compensation(coordinator)
     finally:
         await coordinator.quiesce_prompt_processors()
         await coordinator.lifecycle_commands.close()

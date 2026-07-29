@@ -27,8 +27,11 @@ from lifecycle_command_engine import (  # noqa: E402
     LifecycleCommandEngine,
 )
 from lifecycle_command_model import (  # noqa: E402
+    ExecutionTurnIdentity,
+    ExecutionTurnSnapshot,
     LifecycleCommand,
     LifecycleEffect,
+    LifecycleSnapshot,
     UserTurnIdentity,
 )
 from lifecycle_command_states import (  # noqa: E402
@@ -44,6 +47,130 @@ def identity(suffix: str) -> UserTurnIdentity:
         user_turn_id=f"user-{suffix}",
         lifecycle_message_id=f"message-{suffix}",
     )
+
+
+def test_corrupt_serialized_snapshot_fails_closed() -> None:
+    corrupt = {
+        "phase": "running",
+        "identity": identity("corrupt").to_dict(),
+        "revision": 1,
+        "execution": {
+            "phase": "running",
+            "identity": ExecutionTurnIdentity(
+                "execution-corrupt",
+                "assistant-corrupt",
+                "native",
+            ).to_dict(),
+            "provider_run_id": None,
+        },
+        "execution_policy": "single",
+        "completed_execution_count": 0,
+    }
+    try:
+        LifecycleSnapshot.from_dict(corrupt)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("corrupt serialized execution was accepted")
+
+
+def test_reachable_snapshot_matrix() -> None:
+    user_identity = identity("matrix")
+    execution_identity = ExecutionTurnIdentity(
+        "execution-matrix",
+        "assistant-matrix",
+        "native",
+    )
+    child_phases = (
+        None, "starting", "running", "stopping", "detached",
+        "detached_stopping", "complete", "stopped", "failed", "aborted",
+    )
+
+    def reachable(
+        parent: str,
+        child: str | None,
+        has_provider: bool,
+        policy: str,
+        completed: int,
+    ) -> bool:
+        if child is None:
+            return completed == 0
+        if child in {"starting", "aborted"}:
+            provider_valid = not has_provider if child == "aborted" else True
+        else:
+            provider_valid = has_provider
+        parent_valid = {
+            "starting": child in {"starting", "complete", "stopped", "failed", "aborted"},
+            "running": child in {
+                "starting", "running", "detached",
+                "complete", "stopped", "failed", "aborted",
+            },
+            "stopping": child in {
+                "starting", "stopping", "detached_stopping",
+                "complete", "stopped", "failed", "aborted",
+            },
+        }[parent]
+        terminal = child in {"complete", "stopped", "failed", "aborted"}
+        count_valid = (
+            completed > 0
+            if terminal
+            else completed == 0 or policy == "sequential"
+        )
+        policy_valid = policy == "sequential" or completed <= 1
+        return provider_valid and parent_valid and count_valid and policy_valid
+
+    for parent in ("starting", "running", "stopping"):
+        for child in child_phases:
+            for has_provider in (False, True):
+                for policy in ("single", "sequential"):
+                    for completed in (0, 1, 2):
+                        execution = (
+                            ExecutionTurnSnapshot(
+                                child,
+                                execution_identity,
+                                "provider-matrix" if has_provider else None,
+                            )
+                            if child is not None
+                            else None
+                        )
+                        expected = reachable(
+                            parent, child, has_provider, policy, completed,
+                        )
+                        try:
+                            LifecycleSnapshot(
+                                phase=parent,
+                                identity=user_identity,
+                                revision=1,
+                                execution=execution,
+                                execution_policy=policy,
+                                completed_execution_count=completed,
+                            )
+                        except ValueError:
+                            accepted = False
+                        else:
+                            accepted = True
+                        assert accepted == expected, (
+                            parent, child, has_provider, policy, completed,
+                        )
+
+    for child_phase in ("running", "stopping", "detached"):
+        try:
+            LifecycleSnapshot(
+                phase="starting",
+                identity=user_identity,
+                execution=ExecutionTurnSnapshot(
+                    child_phase,
+                    execution_identity,
+                    "provider-hostile",
+                ),
+                execution_policy="sequential",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"starting parent accepted {child_phase} child"
+            )
 
 
 def _create_v1_schema(database: sqlite3.Connection) -> None:
@@ -573,12 +700,14 @@ async def test_store_initialization_and_atomic_compare_insert() -> None:
             session_id=session_id,
             kind="begin_turn",
             identity=identity("store-cas-a"),
+            execution_policy="single",
         ),
         LifecycleCommand(
             request_id="store-cas-b",
             session_id=session_id,
             kind="begin_turn",
             identity=identity("store-cas-b"),
+            execution_policy="single",
         ),
     )
     outcomes = await asyncio.gather(
@@ -631,6 +760,191 @@ async def test_store_initialization_and_atomic_compare_insert() -> None:
         shutil.rmtree(alternate_home)
 
 
+async def test_execution_subturn_state_matrix() -> None:
+    engine = LifecycleCommandEngine(EventBus())
+    sequential_turn = identity("execution-sequential")
+    await engine.begin_turn(
+        request_id="execution-sequential:begin",
+        session_id="execution-sequential",
+        identity=sequential_turn,
+        execution_policy="sequential",
+    )
+    first = ExecutionTurnIdentity("execution-1", "assistant-1", "native")
+    second = ExecutionTurnIdentity("execution-2", "assistant-2", "supervisor")
+    await engine.start_execution(
+        "execution-sequential",
+        execution_identity=first,
+    )
+    overlap_revision = engine.snapshot("execution-sequential").revision
+    try:
+        await engine.start_execution(
+            "execution-sequential",
+            execution_identity=second,
+        )
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("overlapping execution was accepted")
+    assert engine.snapshot("execution-sequential").revision == overlap_revision
+
+    await engine.bind_execution_run(
+        "execution-sequential",
+        execution_identity=first,
+        provider_run_id="provider-1",
+    )
+    await engine.bind_execution_run(
+        "execution-sequential",
+        execution_identity=first,
+        provider_run_id="provider-1b",
+    )
+    stale_attempt_revision = engine.snapshot("execution-sequential").revision
+    try:
+        await engine.finish_execution(
+            "execution-sequential",
+            execution_identity=first,
+            provider_run_id="provider-1",
+            outcome="failed",
+        )
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("stale provider attempt terminal was accepted")
+    assert engine.snapshot("execution-sequential").revision == stale_attempt_revision
+    await engine.confirm_execution_started(
+        "execution-sequential",
+        execution_identity=first,
+        provider_run_id="provider-1b",
+    )
+    await engine.detach_execution(
+        "execution-sequential",
+        execution_identity=first,
+    )
+    detached_revision = engine.snapshot("execution-sequential").revision
+    try:
+        await engine.adopt_execution(
+            "execution-sequential",
+            execution_identity=first,
+            provider_run_id="stale-provider",
+        )
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("stale provider attempt adopted execution")
+    assert engine.snapshot("execution-sequential").revision == detached_revision
+    await engine.adopt_execution(
+        "execution-sequential",
+        execution_identity=first,
+        provider_run_id="provider-1b",
+    )
+    await engine.finish_execution(
+        "execution-sequential",
+        execution_identity=first,
+        provider_run_id="provider-1b",
+        outcome="complete",
+    )
+    await engine.start_execution(
+        "execution-sequential",
+        execution_identity=second,
+    )
+    stale_revision = engine.snapshot("execution-sequential").revision
+    try:
+        await engine.finish_execution(
+            "execution-sequential",
+            execution_identity=first,
+            provider_run_id="provider-1b",
+            outcome="failed",
+        )
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("stale terminal finished newer execution")
+    assert engine.snapshot("execution-sequential").revision == stale_revision
+    await engine.bind_execution_run(
+        "execution-sequential",
+        execution_identity=second,
+        provider_run_id="provider-2",
+    )
+    await engine.finish_execution_and_turn(
+        "execution-sequential",
+        execution_identity=second,
+        provider_run_id="provider-2",
+        outcome="complete",
+    )
+    assert engine.snapshot("execution-sequential").phase == "idle"
+
+    single_turn = identity("execution-single")
+    await engine.begin_turn(
+        request_id="execution-single:begin",
+        session_id="execution-single",
+        identity=single_turn,
+        execution_policy="single",
+    )
+    await engine.start_execution("execution-single", execution_identity=first)
+    await engine.bind_execution_run(
+        "execution-single",
+        execution_identity=first,
+        provider_run_id="provider-single",
+    )
+    await engine.finish_execution_and_turn(
+        "execution-single",
+        execution_identity=first,
+        provider_run_id="provider-single",
+        outcome="complete",
+    )
+    assert engine.snapshot("execution-single").phase == "idle"
+    try:
+        await engine.start_execution("execution-single", execution_identity=second)
+    except (LifecycleCommandRejected, RuntimeError):
+        pass
+    else:
+        raise AssertionError("single policy accepted a second execution")
+
+    stopping_turn = identity("execution-stopping")
+    await engine.begin_turn(
+        request_id="execution-stopping:begin",
+        session_id="execution-stopping",
+        identity=stopping_turn,
+        execution_policy="sequential",
+    )
+    await engine.start_execution("execution-stopping", execution_identity=first)
+    await engine.bind_execution_run(
+        "execution-stopping",
+        execution_identity=first,
+        provider_run_id="provider-stop",
+    )
+    await engine.confirm_execution_started(
+        "execution-stopping",
+        execution_identity=first,
+        provider_run_id="provider-stop",
+    )
+    await engine.request_active_stop("execution-stopping")
+    await engine.detach_execution("execution-stopping", execution_identity=first)
+    try:
+        await engine.start_execution("execution-stopping", execution_identity=second)
+    except LifecycleCommandRejected:
+        pass
+    else:
+        raise AssertionError("stopping turn accepted another execution")
+    await engine.adopt_execution(
+        "execution-stopping",
+        execution_identity=first,
+        provider_run_id="provider-stop",
+    )
+    await engine.finish_execution(
+        "execution-stopping",
+        execution_identity=first,
+        provider_run_id="provider-stop",
+        outcome="stopped",
+    )
+    await engine.finish_turn(
+        request_id="execution-stopping:finish",
+        session_id="execution-stopping",
+        identity=stopping_turn,
+        outcome="stopped",
+    )
+    await engine.close()
+
+
 def test_v1_migration_and_atomic_rollback() -> None:
     migrated = sqlite3.connect(":memory:", isolation_level=None)
     migrated.row_factory = sqlite3.Row
@@ -638,7 +952,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
     assert migrated.execute(
         "SELECT COUNT(*) FROM authority_owner"
     ).fetchone()[0] == 0
@@ -745,6 +1059,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         session_id="effect-identity-session",
         kind="begin_turn",
         identity=identity("effect-identity"),
+        execution_policy="single",
     )
     assert effect_id_for(command, 0) != effect_id_for(command, 1)
     other_session = LifecycleCommand(
@@ -752,6 +1067,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         session_id="effect-identity-other-session",
         kind=command.kind,
         identity=identity("effect-identity-other"),
+        execution_policy="single",
     )
     assert effect_id_for(command, 0) != effect_id_for(other_session, 0)
 
@@ -771,10 +1087,12 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 2
+        assert type(version) is int and version == 3
 
 
 async def main() -> None:
+    test_corrupt_serialized_snapshot_fails_closed()
+    test_reachable_snapshot_matrix()
     await test_state_contract_idempotency_and_reload()
     await test_concurrent_bind_waits_for_one_recovery()
     await test_single_engine_authority()
@@ -783,6 +1101,7 @@ async def main() -> None:
     await test_at_least_once_effect_and_best_effort_notification()
     await test_identity_retirement_and_waiter_cleanup()
     await test_store_initialization_and_atomic_compare_insert()
+    await test_execution_subturn_state_matrix()
     test_v1_migration_and_atomic_rollback()
     test_handler_validation_and_sqlite_scaling_contract()
     print("lifecycle command engine integration: ok")

@@ -3882,16 +3882,35 @@ class Coordinator:
                     )
                     if (
                         lifecycle_snapshot.identity == logical_turn_identity
-                        and lifecycle_snapshot.execution is None
-                    ):
-                        await asyncio.shield(
-                            self.lifecycle_commands.finish_turn(
-                            request_id=f"{logical_request_prefix}:finish",
-                            session_id=app_session_id,
-                            identity=logical_turn_identity,
-                            outcome=logical_turn_outcome,
-                            )
+                        and (
+                            lifecycle_snapshot.execution is None
+                            or lifecycle_snapshot.execution.phase
+                            in {"complete", "stopped", "failed", "aborted"}
                         )
+                    ):
+                        execution = lifecycle_snapshot.execution
+                        if (
+                            lifecycle_snapshot.execution_policy == "sequential"
+                            and execution is not None
+                            and execution.provider_run_id is not None
+                        ):
+                            await asyncio.shield(
+                                self.lifecycle_commands.finish_execution_and_turn(
+                                    app_session_id,
+                                    execution_identity=execution.identity,
+                                    provider_run_id=execution.provider_run_id,
+                                    outcome=logical_turn_outcome,
+                                )
+                            )
+                        else:
+                            await asyncio.shield(
+                                self.lifecycle_commands.finish_turn(
+                                    request_id=f"{logical_request_prefix}:finish",
+                                    session_id=app_session_id,
+                                    identity=logical_turn_identity,
+                                    outcome=logical_turn_outcome,
+                                )
+                            )
         # If the queue is empty, drop ourselves so a future submit can
         # spawn a fresh task. (Don't pop the queue itself — it may have
         # been swapped by a re-spawn race.)
