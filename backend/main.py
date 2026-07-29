@@ -5989,14 +5989,14 @@ def _auto_tagging_selector_module():
     package (tagging_selector) so the worker spec registers in-process."""
     import extension_package_loader
     extension_package_loader.ensure_package_importable(
-        "ofek-dev.auto-tagging", "tagging_selector"
+        extension_store.BUILTIN_AUTO_TAGGING_EXTENSION_ID, "tagging_selector"
     )
     import importlib
     return importlib.import_module("tagging_selector")
 
 
 _TAG_SOURCE_OWNERS = {
-    session_organization_store.TAG_SOURCE_AUTO_TAGGING: "ofek-dev.auto-tagging",
+    session_organization_store.TAG_SOURCE_AUTO_TAGGING: extension_store.BUILTIN_AUTO_TAGGING_EXTENSION_ID,
     session_organization_store.TAG_SOURCE_REQUIREMENT_ANALYSIS: extension_store.extension_id_for_role('requirements'),
 }
 
@@ -6013,9 +6013,9 @@ async def internal_auto_tagging(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if _internal_authority_extension_id() != "ofek-dev.auto-tagging":
+    if _internal_authority_extension_id() != extension_store.BUILTIN_AUTO_TAGGING_EXTENSION_ID:
         raise HTTPException(status_code=403, detail="auto-tagging extension is required")
-    not_ready = extension_store.runtime_not_ready_message("ofek-dev.auto-tagging")
+    not_ready = extension_store.runtime_not_ready_message(extension_store.BUILTIN_AUTO_TAGGING_EXTENSION_ID)
     if not_ready:
         raise HTTPException(status_code=403, detail=not_ready)
     if not isinstance(body, dict):

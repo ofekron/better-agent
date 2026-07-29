@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+import extension_store
 import perf
 import project_store
 import config_store
@@ -58,7 +59,7 @@ from session_manager import manager as session_manager
 logger = logging.getLogger(__name__)
 
 
-ASK_EXTENSION_ID = "ofek-dev.ask"
+ASK_EXTENSION_ID = extension_store.BUILTIN_ASK_EXTENSION_ID
 
 # Stable virtual identity for the Ask UI container. Frontend shares the same
 # constant in `askSession.ts`.

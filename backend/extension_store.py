@@ -157,6 +157,7 @@ BUILTIN_FILE_EDIT_EXTENSION_ID = "ofek-dev.file-edit"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
+BUILTIN_AUTO_TAGGING_EXTENSION_ID = "ofek-dev.auto-tagging"
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     BUILTIN_COORDINATION_EXTENSION_ID: frozenset({"better-agent-coordination"}),
 }
@@ -7182,14 +7183,15 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
             for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
             if is_frontend_module_enabled(manifest["id"], item["slot"], item["id"])
         ]
-        v = _frontend_asset_version(record)
-        bust = f"?v={v}"
+        version = _frontend_asset_version(record)
         entries.append(
             {
                 "extension_id": manifest["id"],
                 "name": manifest["name"],
                 "entrypoint": frontend_path,
-                "entrypoint_url": f"/api/extensions/{manifest['id']}/frontend/{frontend_path}{bust}",
+                "entrypoint_url": _frontend_asset_url(
+                    manifest["id"], frontend_path, version
+                ),
                 "payments": (manifest.get("permissions") or {}).get("payments") is True,
                 "marketplace_auth": (manifest.get("permissions") or {}).get("marketplace_auth") is True,
                 "frontend_modules": [
@@ -7199,7 +7201,9 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                         "label": item["label"],
                         "kind": item["kind"],
                         "module": item["module"],
-                        "module_url": f"/api/extensions/{manifest['id']}/frontend/{item['module']}{bust}",
+                        "module_url": _frontend_asset_url(
+                            manifest["id"], item["module"], version
+                        ),
                     }
                     for item in frontend_modules
                 ],
@@ -7228,6 +7232,11 @@ def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
 
 def _frontend_asset_version(record: dict[str, Any]) -> str:
     return _record_generation(record)
+
+
+def _frontend_asset_url(extension_id: str, asset_path: str, version: str) -> str:
+    """The one place a frontend asset URL is built, cache-bust included."""
+    return f"/api/extensions/{extension_id}/frontend/{asset_path}?v={version}"
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -7984,15 +7993,13 @@ def extension_frontend_modules(extension_id: str) -> list[dict[str, Any]]:
     frontend_path = str(entrypoints.get("frontend") or "")
     runtime_root = runtime_package_root_for_record(record)
     loadable = bool(frontend_path and runtime_root is not None and _record_active(record) and _record_runtime_ready(record))
-    bust = ""
-    if loadable:
-        bust = f"?v={_frontend_asset_version(record)}"
+    version = _frontend_asset_version(record)
     result: list[dict[str, Any]] = []
     for item in frontend_modules:
         module_path = str(item.get("module") or "")
         enabled = is_frontend_module_enabled(extension_id, item["slot"], item["id"])
         module_url = (
-            f"/api/extensions/{manifest['id']}/frontend/{module_path}{bust}"
+            _frontend_asset_url(manifest["id"], module_path, version)
             if loadable and enabled and module_path
             else ""
         )

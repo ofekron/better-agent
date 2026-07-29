@@ -262,6 +262,14 @@ def _extension_error(exc: extension_store.ExtensionError) -> HTTPException:
 
 
 async def _broadcast_extension_changed(*topics: str, extension_id: str = "") -> None:
+    """Reconcile daemons and tell clients an extension mutated.
+
+    `topics` are the invalidation pings this mutation needs; pass none
+    when the UI frame is the only consequence. The frontend-modules
+    frame is never a topic here — extension_ui_manager owns it, and
+    passing it would duplicate the manager's payload-carrying frame with
+    an empty one.
+    """
     from orchestrator import get_active_coordinator
 
     try:
@@ -273,9 +281,7 @@ async def _broadcast_extension_changed(*topics: str, extension_id: str = "") -> 
 
     coordinator = get_active_coordinator()
     if coordinator is not None:
-        for topic in dict.fromkeys(topics or EXTENSION_CATALOG_TOPICS):
-            if topic == extension_ui_manager.UI_MODULES_CHANGED:
-                continue
+        for topic in dict.fromkeys(topics):
             await coordinator.broadcast_global(topic, {})
 
     # The UI catalog frame is owned by extension_ui_manager: any mutation
@@ -1290,9 +1296,7 @@ async def set_extension_frontend_module_enabled(
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extension_changed(
-        "extension.ui.frontend_modules", extension_id=extension_id
-    )
+    await _broadcast_extension_changed(extension_id=extension_id)
     return {"slot": slot, "id": module_id, "enabled": enabled}
 
 
