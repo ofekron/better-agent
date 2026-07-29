@@ -10,16 +10,22 @@ internal-loopback principal", not a specific extension identity, so this
 grants no more than what coordination's own ambient `lock_ops` server already
 holds.
 
-Only `capabilities` is wired here. `open-config-panel` and the `ui` server's
-`open_config_panel`/`request_user_approval`/`request_user_input` tools are
-NOT ambient-eligible: their "inline" contract attaches a UI widget to the
+`capabilities` and `ui` are wired here. `ui`'s ambient tool set is narrowed
+to `open_file_panel(mode="panel")` only (a real per-session state mutation,
+takes an explicit `session_id`) -- `mode="inline"`, `request_user_approval`,
+`request_user_input`, and `start_file_discussion` all attach to the
 in-flight assistant message of a live Better Agent turn, which does not
-exist for a standalone/ambient caller -- serving them here would either
-silently no-op or misattach UI onto an unrelated session's conversation.
-`ui`'s `open_file_panel(mode="panel")` is a real per-session state mutation
-and could be made ambient-eligible in a future, narrower launcher; it is not
-wired here because the module also carries `request_user_approval`/
-`request_user_input`, which share the same in-flight-turn problem.
+exist for a standalone/ambient caller, so they are not advertised here at
+all (`open_file_panel_mcp.main` narrows its own tool list when
+`BETTER_CLAUDE_AMBIENT_LAUNCH=1`) rather than offered and left to always
+fail closed.
+
+`open-config-panel` is NOT wired: its one tool has no non-inline mode --
+every ambient call would fail closed with the same "app session id is
+required" error every time, with no scoping split available the way `ui`
+has one. A server whose only tool can never do real work in this context
+is better left unregistered than discoverable-but-permanently-inert; if a
+non-inline mode is ever added for it, wire it here the same way as `ui`.
 
 Run with:
     core_ambient_mcp_launcher.py capabilities
@@ -32,7 +38,10 @@ import sys
 from env_compat import dual_env_many, get_env
 
 
-_AMBIENT_ELIGIBLE_SERVERS = {"capabilities": "capabilities_mcp.py"}
+_AMBIENT_ELIGIBLE_SERVERS = {
+    "capabilities": "capabilities_mcp.py",
+    "ui": "open_file_panel_mcp.py",
+}
 
 _DEFAULT_BACKEND_PORT = 18765
 

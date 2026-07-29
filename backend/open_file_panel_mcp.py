@@ -73,14 +73,27 @@ def open_file_panel_response(
     end_line: int | None = None,
     selected_start: int | None = None,
     selected_end: int | None = None,
+    session_id: str = "",
 ) -> dict[str, Any]:
     mode = (mode or "").strip()
     path = (path or "").strip()
     if mode not in ("panel", "inline") or not path:
         return {"success": False, "error": "`mode` (panel|inline) and `path` are required"}
     try:
+        # "panel" is a plain per-session state mutation -- a session_id
+        # argument can target it explicitly, needed for an ambient launch
+        # (no BETTER_CLAUDE_APP_SESSION_ID of its own). "inline" attaches
+        # to THIS turn's in-flight assistant message; there is no such
+        # message for any session but the caller's own bound one, so it
+        # always uses the env session and correctly fails closed (via
+        # `_env_required` below) when launched ambiently.
+        target_session_id = (
+            ((session_id or "").strip() or _env_required("BETTER_CLAUDE_APP_SESSION_ID"))
+            if mode == "panel"
+            else _env_required("BETTER_CLAUDE_APP_SESSION_ID")
+        )
         return _post_open_file_panel({
-            "app_session_id": _env_required("BETTER_CLAUDE_APP_SESSION_ID"),
+            "app_session_id": target_session_id,
             "mode": mode,
             "path": path,
             "start_line": start_line,
@@ -162,7 +175,16 @@ _INSTRUCTIONS = (
 )
 
 
-def _specs() -> tuple[OperationSpec, ...]:
+def _specs(*, ambient: bool = False) -> tuple[OperationSpec, ...]:
+    if ambient:
+        # request_user_input/request_user_approval/start_file_discussion and
+        # open_file_panel(mode="inline") all attach to THIS turn's in-flight
+        # assistant message -- there is no such message for an ambient
+        # (session-less) caller, so they are not offered here at all rather
+        # than advertised and then always failing closed.
+        return (
+            OperationSpec("open_file_panel", open_file_panel_response, operation="runtime_ui_open_file_panel"),
+        )
     specs = [
         OperationSpec("open_file_panel", open_file_panel_response, operation="runtime_ui_open_file_panel"),
         OperationSpec("request_user_input", request_user_input_response, operation="runtime_ui_request_user_input"),
@@ -182,7 +204,12 @@ def build_server():
 
 
 def main() -> int:
-    return run_mcp_or_cli("ui", _specs(), instructions=_INSTRUCTIONS)
+    # An ambient (session-less) launch has no per-run operation broker to
+    # route through -- open_file_panel_response already authenticates
+    # itself directly over the internal loopback, so dispatch locally
+    # instead of through the broker that will never exist for this process.
+    ambient = os.environ.get("BETTER_CLAUDE_AMBIENT_LAUNCH") == "1"
+    return run_mcp_or_cli("ui", _specs(ambient=ambient), instructions=_INSTRUCTIONS, local=ambient)
 
 
 if __name__ == "__main__":
