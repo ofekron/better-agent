@@ -48,7 +48,7 @@ async def mcp_json_request(
     method: str,
     params: dict[str, Any],
     *,
-    timeout: float,
+    timeout: float | None,
 ) -> dict[str, Any]:
     command, args = _mcp_command_args(config)
     proc = await asyncio.create_subprocess_exec(

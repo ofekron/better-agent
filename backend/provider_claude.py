@@ -60,6 +60,7 @@ from provider import (
     schedule_loop_task,
     runner_argv,
 )
+from provider_watch_helpers import emit_early_failure, wait_for_complete_or_process_death
 import config_store
 from process_identity import process_identity_to_dict
 from extension_run_policy import (
@@ -1480,22 +1481,14 @@ class ClaudeProvider(Provider):
         complete_path = rs.run_dir / "complete.json"
         cleanup = True
         try:
-            while True:
-                if await path_exists_off_loop(complete_path):
-                    break
-                # No heartbeat-based stuck detection — a live process is
-                # assumed to be doing useful work (long tool calls, model
-                # thinking, network waits). The user can stop via the UI.
-                if not await popen_is_running_off_loop(rs.popen):
-                    loop = asyncio.get_event_loop()
-                    grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while (
-                        not await path_exists_off_loop(complete_path)
-                        and loop.time() < grace_end
-                    ):
-                        await asyncio.sleep(_TAIL_POLL_INTERVAL)
-                    break
-                await asyncio.sleep(_TAIL_POLL_INTERVAL)
+            # No heartbeat-based stuck detection — a live process is
+            # assumed to be doing useful work (long tool calls, model
+            # thinking, network waits). The user can stop via the UI.
+            await wait_for_complete_or_process_death(
+                complete_path=complete_path,
+                popen=rs.popen,
+                poll_interval=_TAIL_POLL_INTERVAL,
+            )
 
             # Drain the tailer to the current end of the jsonl before
             # firing `complete` — deterministic, not a fixed sleep, so a
@@ -1671,19 +1664,15 @@ class ClaudeProvider(Provider):
     # _emit_early_failure — synthesize error + complete on startup failure
     # ------------------------------------------------------------------
     async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
-        logger.warning("start_run bootstrap failure for %s: %s", rs.run_id, msg)
-        rs.turn_finalized = True
-        try:
-            rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
-            rs.queue.put_nowait(StreamEvent("complete", {
-                "success": False,
-                "error": msg,
-                "session_id": None,
-                "token_usage": None,
-            }))
-        except Exception:
-            logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        await emit_early_failure(
+            logger=logger,
+            log_prefix="start_run",
+            run_id=rs.run_id,
+            msg=msg,
+            queue=rs.queue,
+            cleanup=lambda: self._cleanup_run(rs.run_id),
+            before_enqueue=lambda: setattr(rs, "turn_finalized", True),
+        )
 
     # ------------------------------------------------------------------
     # _on_tailer_progress — called from FileTailer after each line dispatched

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
+import mcp_stdio_bridge
 from mcp_tool_discovery import tool_discovery
 
 from communication_modes import (
@@ -85,7 +86,6 @@ from provider_session_events_runner import (
     effective_mcp_servers,
     restore_session_events_runner,
 )
-from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_better_agent")
@@ -1174,15 +1174,6 @@ def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) 
     return candidate
 
 
-def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONIOENCODING": "utf-8",
-    }
-    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
-    return env
-
-
 async def _mcp_json_request(
     config: dict[str, Any],
     method: str,
@@ -1190,77 +1181,9 @@ async def _mcp_json_request(
     *,
     timeout: float | None,
 ) -> dict[str, Any]:
-    command = str(config.get("command") or "").strip()
-    if not command:
-        raise RuntimeError("MCP server config missing command")
-    args = [str(arg) for arg in config.get("args") or []]
-    proc = await asyncio.create_subprocess_exec(
-        command,
-        *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_mcp_subprocess_env(config),
-        limit=SUBPROCESS_LINE_LIMIT_BYTES,
+    return await mcp_stdio_bridge.mcp_json_request(
+        config, method, params, timeout=timeout,
     )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    stderr_tail = bytearray()
-
-    async def _drain_stderr() -> None:
-        while chunk := await proc.stderr.read(4096):
-            stderr_tail.extend(chunk)
-            if len(stderr_tail) > 16 * 1024:
-                del stderr_tail[:-16 * 1024]
-
-    stderr_task = asyncio.create_task(_drain_stderr())
-
-    async def _send(payload: dict[str, Any]) -> None:
-        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        await proc.stdin.drain()
-
-    async def _read_response() -> dict[str, Any]:
-        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-        if not line:
-            try:
-                await asyncio.wait_for(asyncio.shield(stderr_task), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-            detail = stderr_tail.decode("utf-8", "replace").strip()
-            raise RuntimeError(
-                "MCP server closed stdout"
-                + (f": {detail}" if detail else "")
-            )
-        response = json.loads(line.decode("utf-8", "replace"))
-        if response.get("error"):
-            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
-        return response.get("result") or {}
-
-    try:
-        await _send({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "better-agent-runner", "version": "1"},
-            },
-        })
-        await _read_response()
-        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
-        return await _read_response()
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-        await stderr_task
 
 
 async def _mcp_list_tools_with_timeout(

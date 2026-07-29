@@ -63,6 +63,19 @@ _COMMON_RULES: tuple[_Rule, ...] = (
 
 # Provider-specific rules (ordered, checked before the common rules).
 _PROVIDER_RULES: dict[str, tuple[_Rule, ...]] = {
+    "agy": (
+        _rule(
+            CATEGORY_AUTH,
+            r"(?=.*Authentication required\. Please visit the URL to log in:)"
+            r"(?=.*Error: authentication timed out\.)",
+            "Antigravity authentication timed out. Log in with the agy CLI and retry.",
+        ),
+        _rule(
+            CATEGORY_AUTH,
+            r"Authentication required\. Please visit the URL to log in:",
+            "Antigravity authentication is required. Log in with the agy CLI and retry.",
+        ),
+    ),
     "pi": (
         _rule(
             CATEGORY_AUTH,

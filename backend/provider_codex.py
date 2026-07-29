@@ -37,6 +37,7 @@ from provider import (
     popen_is_running_off_loop,
     schedule_loop_task,
 )
+from provider_watch_helpers import emit_early_failure, wait_for_complete_or_process_death
 import config_store
 from process_identity import process_identity_to_dict
 from extension_run_policy import (
@@ -993,19 +994,11 @@ class CodexProvider(Provider):
     async def _watch_complete(self, rs: RunState) -> None:
         complete_path = rs.run_dir / "complete.json"
         try:
-            while True:
-                if await path_exists_off_loop(complete_path):
-                    break
-                if not await popen_is_running_off_loop(rs.popen):
-                    loop = asyncio.get_event_loop()
-                    grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while (
-                        not await path_exists_off_loop(complete_path)
-                        and loop.time() < grace_end
-                    ):
-                        await asyncio.sleep(_TAIL_POLL_INTERVAL)
-                    break
-                await asyncio.sleep(_TAIL_POLL_INTERVAL)
+            await wait_for_complete_or_process_death(
+                complete_path=complete_path,
+                popen=rs.popen,
+                poll_interval=_TAIL_POLL_INTERVAL,
+            )
 
             # Deterministic drain: the Codex rollout is appended by the CLI
             # before complete.json is written, so wait until the tailer's
@@ -1352,16 +1345,14 @@ class CodexProvider(Provider):
     # _emit_early_failure
     # ------------------------------------------------------------------
     async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
-        logger.warning("codex bootstrap failure for %s: %s", rs.run_id, msg)
-        try:
-            rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
-            rs.queue.put_nowait(StreamEvent("complete", {
-                "success": False, "error": msg,
-                "session_id": None, "token_usage": None,
-            }))
-        except Exception:
-            logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        await emit_early_failure(
+            logger=logger,
+            log_prefix="codex",
+            run_id=rs.run_id,
+            msg=msg,
+            queue=rs.queue,
+            cleanup=lambda: self._cleanup_run(rs.run_id),
+        )
 
     def _write_backend_state(self, rs: RunState) -> None:
         data = {

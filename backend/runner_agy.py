@@ -24,6 +24,7 @@ from provider_family_execution_runtime import (
 )
 from provider_runtime_plan_source import hydrate_runner_operation_broker
 from runs_dir import atomic_write_json
+import runner_errors
 
 logger = logging.getLogger(__name__)
 _CONVERSATION_RE = re.compile(
@@ -1214,12 +1215,10 @@ def _fail(run_dir: Path, error: str) -> None:
 
 
 def _auth_failure_from_output(stdout: str, stderr: str) -> Optional[str]:
-    combined = f"{stdout}\n{stderr}"
-    if "Authentication required. Please visit the URL to log in:" not in combined:
-        return None
-    if "Error: authentication timed out." in combined:
-        return "Antigravity authentication timed out. Log in with the agy CLI and retry."
-    return "Antigravity authentication is required. Log in with the agy CLI and retry."
+    hit = runner_errors.classify("agy", stdout, stderr)
+    if hit and hit.category == runner_errors.CATEGORY_AUTH:
+        return hit.message
+    return None
 
 
 def _effective_mcp_servers(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:

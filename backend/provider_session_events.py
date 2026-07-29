@@ -32,6 +32,7 @@ from provider import (
     schedule_loop_task,
 )
 from containment import containment
+from provider_watch_helpers import emit_early_failure, wait_for_complete_or_process_death
 from provider_family_execution_runtime import (
     cleanup_failed_family_execution,
     install_family_execution_payload,
@@ -362,29 +363,20 @@ class SessionEventsProvider(Provider):
     async def _watch_complete(self, rs: RunState) -> None:
         complete_path = rs.run_dir / "complete.json"
         try:
-            while True:
-                if await path_exists_off_loop(complete_path):
-                    break
-                # INVARIANT: process death MUST end this loop. If the
-                # runner is SIGKILLed (OOM, manual kill, OS) it never
-                # writes complete.json — the old "complete.json AND
-                # process dead" condition would spin forever, leaving
-                # the turn stuck in flight forever. Breaking on
-                # process-dead alone lets `_emit_complete_from_file`'s
-                # built-in fallback (`error="runner exited without
-                # writing complete.json"`) synthesize the error
-                # complete event. A short grace window lets a normal
-                # exit's complete.json land before we synthesize.
-                if not await popen_is_running_off_loop(rs.popen):
-                    loop = asyncio.get_event_loop()
-                    grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while (
-                        not await path_exists_off_loop(complete_path)
-                        and loop.time() < grace_end
-                    ):
-                        await asyncio.sleep(_TAIL_POLL_INTERVAL)
-                    break
-                await asyncio.sleep(_TAIL_POLL_INTERVAL)
+            # INVARIANT: process death MUST end this wait. If the runner is
+            # SIGKILLed (OOM, manual kill, OS) it never writes complete.json
+            # — the old "complete.json AND process dead" condition would
+            # spin forever, leaving the turn stuck in flight forever.
+            # Returning on process-dead alone lets `_emit_complete_from_file`'s
+            # built-in fallback (`error="runner exited without writing
+            # complete.json"`) synthesize the error complete event. A short
+            # grace window lets a normal exit's complete.json land before we
+            # synthesize.
+            await wait_for_complete_or_process_death(
+                complete_path=complete_path,
+                popen=rs.popen,
+                poll_interval=_TAIL_POLL_INTERVAL,
+            )
 
             # Deterministic drain: the runner appends every event line
             # BEFORE writing complete.json, so wait until the tailer's
@@ -439,16 +431,14 @@ class SessionEventsProvider(Provider):
     # _emit_early_failure
     # ------------------------------------------------------------------
     async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
-        logger.warning("session-events bootstrap failure for %s: %s", rs.run_id, msg)
-        try:
-            rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
-            rs.queue.put_nowait(StreamEvent("complete", {
-                "success": False, "error": msg,
-                "session_id": None, "token_usage": None,
-            }))
-        except Exception:
-            logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        await emit_early_failure(
+            logger=logger,
+            log_prefix="session-events",
+            run_id=rs.run_id,
+            msg=msg,
+            queue=rs.queue,
+            cleanup=lambda: self._cleanup_run(rs.run_id),
+        )
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /

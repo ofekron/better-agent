@@ -21,6 +21,7 @@ import extension_jobs
 import provisioning
 import extension_package_loader
 import extension_store
+import transcript_text_collapse
 
 logger = logging.getLogger(__name__)
 
@@ -2653,12 +2654,8 @@ def _native_bundle_row_ref(row: dict[str, Any]) -> str:
     return f"{path}:{element_index}"
 
 
-def _normalize_native_bundle_text(text: str) -> str:
-    return " ".join(text.split())
-
-
-def _native_hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+_normalize_native_bundle_text = transcript_text_collapse.normalize_repeated_text
+_native_hash_text = transcript_text_collapse.hash_text
 
 
 def _native_bundle_hash(row: dict[str, Any], field: str, text: str) -> str:
@@ -2679,34 +2676,8 @@ def _native_bundle_hash(row: dict[str, Any], field: str, text: str) -> str:
     return ""
 
 
-def _raw_index_after_normalized_prefix(text: str, prefix_len: int) -> int:
-    normalized_len = 0
-    emitted_any = False
-    in_whitespace = False
-    for index, char in enumerate(text):
-        if char.isspace():
-            if emitted_any and not in_whitespace:
-                if normalized_len >= prefix_len:
-                    return index
-                normalized_len += 1
-                in_whitespace = True
-            continue
-        emitted_any = True
-        in_whitespace = False
-        if normalized_len >= prefix_len:
-            return index
-        normalized_len += 1
-        if normalized_len >= prefix_len:
-            return index + 1
-    return len(text)
-
-
-def _common_prefix_len(left: str, right: str) -> int:
-    limit = min(len(left), len(right))
-    for index in range(limit):
-        if left[index] != right[index]:
-            return index
-    return limit
+_raw_index_after_normalized_prefix = transcript_text_collapse.raw_index_after_normalized_prefix
+_common_prefix_len = transcript_text_collapse.common_prefix_len
 
 
 def _collapse_native_bundle_row_text(
