@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -2960,8 +2961,11 @@ def test_user_disabled_quarantine_member_blocks_auto_recovery() -> None:
         dependent_repo, _ = _make_dep_repo(work, "ofek.user-dependent", ["ofek.user-base"])
         extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
         extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
-        for elapsed in (2.1, 2.2, 2.3):
-            extension_store.record_backend_timeout("ofek.user-base", activation_id=extension_store.activation_identity("ofek.user-base"), elapsed_seconds=elapsed)
+        _seed_legacy_quarantine(
+            ("ofek.user-base", "ofek.user-dependent"),
+            "ofek.user-base",
+        )
+        extension_store._load()
         extension_store.set_enabled("ofek.user-dependent", False)
         manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -6011,57 +6015,81 @@ def _mcp_tool_names(
     if package_root is not None:
         sdk_root = Path(extension_store.__file__).resolve().parent.parent / "sdk"
         env["PYTHONPATH"] = os.pathsep.join((str(package_root), str(sdk_root)))
-    requests = "\n".join(
-        (
-            json.dumps({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0"},
-                },
-            }),
-            json.dumps({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }),
-            json.dumps({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/list",
-                "params": {},
-            }),
-            "",
-        )
-    )
-    result = subprocess.run(
+    process = subprocess.Popen(
         [str(python), *argv],
-        input=requests,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
-        timeout=30,
-        check=False,
     )
-    if result.returncode != 0:
-        raise AssertionError(result.stderr)
-    responses = [
-        json.loads(line)
-        for line in result.stdout.splitlines()
-        if line.strip().startswith("{")
-    ]
-    tools_response = next(
-        (response for response in responses if response.get("id") == 2),
-        None,
-    )
-    if tools_response is None:
-        raise AssertionError(
-            f"tools/list response missing\nstdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
-        )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    responses: queue.Queue[dict] = queue.Queue()
+
+    def read_responses() -> None:
+        for line in process.stdout:
+            if line.strip().startswith("{"):
+                responses.put(json.loads(line))
+
+    reader = threading.Thread(target=read_responses, daemon=True)
+    reader.start()
+
+    def request(payload: dict, response_id: int | None = None) -> dict | None:
+        process.stdin.write(json.dumps(payload) + "\n")
+        process.stdin.flush()
+        if response_id is None:
+            return None
+        while True:
+            try:
+                response = responses.get(timeout=30)
+            except queue.Empty as exc:
+                raise AssertionError(
+                    f"MCP response {response_id} timed out"
+                ) from exc
+            if response.get("id") == response_id:
+                return response
+
+    try:
+        request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        }, 1)
+        request({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        })
+        tools_response = request({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {},
+        }, 2)
+        assert tools_response is not None
+    finally:
+        process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        reader.join(timeout=5)
+        if reader.is_alive():
+            raise AssertionError("MCP response reader did not stop")
+    if process.returncode != 0:
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        raise AssertionError(stderr)
     return {
         tool["name"] for tool in tools_response["result"]["tools"]
     }

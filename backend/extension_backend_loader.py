@@ -132,6 +132,7 @@ def _allows_backend_exit_retry(spec: dict[str, Any], path: str) -> bool:
 def _host_env() -> dict[str, str]:
     env = {
         "PYTHONIOENCODING": "utf-8",
+        **dual_env_many({"BETTER_CLAUDE_HOME": ba_home()}),
     }
     path = os.environ.get("PATH")
     if path:
