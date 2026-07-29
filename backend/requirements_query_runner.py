@@ -142,6 +142,7 @@ async def run_requirements_query(
     *,
     executor: ThreadPoolExecutor,
     requires_projection: bool = False,
+    cancellation_kwarg: str = "",
     **kwargs: Any,
 ) -> Any:
     if requires_projection:
@@ -152,6 +153,9 @@ async def run_requirements_query(
         perf.record(f"{name}.readiness_wait", (time.perf_counter() - readiness_started) * 1000)
     queued_at = time.perf_counter()
     ctx = contextvars.copy_context()
+    cancel_event = threading.Event() if cancellation_kwarg else None
+    if cancel_event is not None:
+        kwargs[cancellation_kwarg] = cancel_event
 
     def _call() -> Any:
         perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
@@ -160,8 +164,29 @@ async def run_requirements_query(
     start = time.perf_counter()
     try:
         return await asyncio.get_running_loop().run_in_executor(executor, _call)
+    except asyncio.CancelledError:
+        if cancel_event is not None:
+            cancel_event.set()
+        raise
     finally:
         perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def run_supervised_requirements_search(
+    name: str,
+    action: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    from requirements_search_supervisor import run_supervised_search
+
+    return await run_requirements_query(
+        name,
+        run_supervised_search,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        cancellation_kwarg="_cancel_event",
+        action=action,
+        **kwargs,
+    )
 
 
 async def run_requirements_processor_query(

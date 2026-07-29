@@ -29,6 +29,7 @@ def test_every_processor_route_is_supervised() -> None:
         "internal_search_requirements": "unit_rg",
         "internal_requirements_unit_fts": "unit_fts",
         "internal_requirements_unit_vector": "unit_vector",
+        "internal_requirements_thread_fts": "thread_fts",
         "internal_requirements_thread_vector": "thread_vector_search",
         "internal_requirements_index_sql": "index_sql",
     }
@@ -36,8 +37,8 @@ def test_every_processor_route_is_supervised() -> None:
         start = source.index(f"async def {function_name}(")
         end = source.find("\n@app.", start + 1)
         body = source[start:end if end != -1 else len(source)]
-        assert "run_supervised_search" in body
-        assert f'action="{action}"' in body
+        assert "run_supervised_requirements_search" in body
+        assert f'"{action}"' in body
         limits = SEARCH_LIMITS[action]
         assert limits.memory_mb > 0
         assert limits.cpu_seconds > 0

@@ -33,6 +33,7 @@ class SupervisedOutput:
 SEARCH_LIMITS = {
     "unit_rg": SearchLimits(memory_mb=512, cpu_seconds=20, wall_seconds=30),
     "unit_fts": SearchLimits(memory_mb=768, cpu_seconds=25, wall_seconds=40),
+    "thread_fts": SearchLimits(memory_mb=768, cpu_seconds=25, wall_seconds=40),
     "unit_vector": SearchLimits(memory_mb=3072, cpu_seconds=75, wall_seconds=90),
     "thread_vector_search": SearchLimits(memory_mb=1024, cpu_seconds=30, wall_seconds=45),
     "thread_vector_build": SearchLimits(memory_mb=3072, cpu_seconds=180, wall_seconds=240),

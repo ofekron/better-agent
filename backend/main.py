@@ -83,6 +83,7 @@ from requirements_query_runner import (
     REQUIREMENTS_SEARCH_EXECUTOR,
     run_requirements_processor_query,
     run_requirements_query,
+    run_supervised_requirements_search,
 )
 import memory_store
 import user_input_store
@@ -5867,12 +5868,9 @@ async def internal_requirements_unit_fts(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    from requirements_search_supervisor import run_supervised_search
-    return await run_requirements_query(
+    return await run_supervised_requirements_search(
         "requirements.unit_fts",
-        run_supervised_search,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        action="unit_fts",
+        "unit_fts",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5900,12 +5898,9 @@ async def internal_requirements_unit_vector(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    from requirements_search_supervisor import run_supervised_search
-    return await run_requirements_query(
+    return await run_supervised_requirements_search(
         "requirements.unit_vector",
-        run_supervised_search,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        action="unit_vector",
+        "unit_vector",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5933,11 +5928,9 @@ async def internal_requirements_thread_fts(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    import requirement_context
-    return await run_requirements_query(
+    return await run_supervised_requirements_search(
         "requirements.thread_fts",
-        requirement_context.search_requirement_threads_fts,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        "thread_fts",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5965,12 +5958,9 @@ async def internal_requirements_thread_vector(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    from requirements_search_supervisor import run_supervised_search
-    response = await run_requirements_query(
+    response = await run_supervised_requirements_search(
         "requirements.thread_vector",
-        run_supervised_search,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        action="thread_vector_search",
+        "thread_vector_search",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5999,12 +5989,9 @@ async def internal_requirements_index_sql(
     if not isinstance(sql, str) or not sql.strip():
         raise HTTPException(status_code=400, detail="sql must be a non-empty string")
 
-    from requirements_search_supervisor import run_supervised_search
-    response = await run_requirements_query(
+    response = await run_supervised_requirements_search(
         "requirements.index_sql",
-        run_supervised_search,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        action="index_sql",
+        "index_sql",
         sql=sql,
     )
     from fastapi.responses import JSONResponse
@@ -6292,12 +6279,9 @@ async def internal_search_requirements(
     ):
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
-    from requirements_search_supervisor import run_supervised_search
-    return await run_requirements_query(
+    return await run_supervised_requirements_search(
         "requirements.search",
-        run_supervised_search,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        action="unit_rg",
+        "unit_rg",
         rg_args=rg_args,
         query=query,
         cwd=cwd,

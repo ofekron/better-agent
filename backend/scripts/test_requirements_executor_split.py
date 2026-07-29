@@ -595,6 +595,44 @@ def test_shared_bounded_pool_self_deadlocks_under_saturation() -> None:
     print("PASS shared bounded pool self-deadlocks under saturation (split is required)")
 
 
+def test_cancelled_search_stops_its_executor_worker() -> None:
+    from requirements_query_runner import run_requirements_query
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cancel-test")
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def cancellable(*, _cancel_event: threading.Event) -> None:
+        started.set()
+        _cancel_event.wait()
+        stopped.set()
+
+    async def _main() -> None:
+        task = asyncio.create_task(
+            run_requirements_query(
+                "requirements.cancel",
+                cancellable,
+                executor=executor,
+                cancellation_kwarg="_cancel_event",
+            ),
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled query did not propagate cancellation")
+        assert await asyncio.to_thread(stopped.wait, 2)
+
+    try:
+        asyncio.run(_main())
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    print("PASS cancelled search stops its executor worker")
+
+
 def _run() -> int:
     failures: list[str] = []
     for name, fn in sorted(globals().items()):

@@ -7,6 +7,7 @@ from typing import Any, Callable
 WORKER_ACTION_NAMES = (
     "unit_rg",
     "unit_fts",
+    "thread_fts",
     "unit_vector",
     "thread_vector_search",
     "thread_vector_build",
@@ -25,6 +26,7 @@ def main() -> int:
     actions: dict[str, Callable[..., dict[str, Any]]] = {
         "unit_rg": requirement_context.search_requirements,
         "unit_fts": requirement_context.search_requirement_units_fts,
+        "thread_fts": requirement_context.search_requirement_threads_fts,
         "unit_vector": requirement_context.search_requirement_units_vector,
         "thread_vector_search": requirement_context.search_requirement_threads_vector,
         "thread_vector_build": requirement_context.build_requirement_threads_vector_projection,

@@ -511,9 +511,9 @@ def test_requirements_internal_routes_use_dedicated_executor() -> None:
     assert "_run_requirements_query" not in source
     assert "run_requirements_processor_query(\n            \"requirements.processed.processor\"," in source
     assert "run_requirements_query(\n        \"requirements.processed.finalize\"," in source
-    assert "except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)" in source
+    assert "processed = recovered or requirement_context.processor_failure_result(exc)" in source
     assert "executor=REQUIREMENTS_PROCESSOR_EXECUTOR" in source
-    assert "run_requirements_query(\n        \"requirements.search\"," in source
+    assert "run_supervised_requirements_search(\n        \"requirements.search\"," in source
     assert "executor=REQUIREMENTS_SEARCH_EXECUTOR" in source
     assert "asyncio.to_thread(\n        requirement_context.get_processed_requirements," not in source
     assert "asyncio.to_thread(\n        requirement_context.search_requirements," not in source
