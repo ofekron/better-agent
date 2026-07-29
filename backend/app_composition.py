@@ -29,6 +29,10 @@ def wire(
 
     app.include_router(auth_routes.router)
 
+    import providers_api
+    providers_api.configure(coordinator.broadcast_global)
+    app.include_router(providers_api.router)
+
     import capability_api
     app.include_router(capability_api.router)
 
