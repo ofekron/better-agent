@@ -123,6 +123,35 @@ def t_closed_result_schema_fails_closed() -> None:
     check(True, "malformed, empty, unknown, and prose-bearing output fails closed")
 
 
+def t_markdown_fenced_model_output_is_parsed() -> None:
+    value = projection(profile_id="fenced-output")
+    ref = value["entries"][0]["ref"]
+    clean_fenced = "```json\n{\"status\": \"clean\", \"findings\": []}\n```"
+    parsed = audit.AUDIT_SPEC.parse_result(clean_fenced, {"projection": value})
+    check(parsed == {"status": "clean", "findings": []}, "fenced clean result parses")
+    findings_fenced = (
+        "```json\n"
+        "{\"status\": \"findings\", \"findings\": "
+        f"[{{\"code\": \"identifier_clarity\", \"refs\": [\"{ref}\"]}}]}}\n"
+        "```"
+    )
+    parsed = audit.AUDIT_SPEC.parse_result(findings_fenced, {"projection": value})
+    check(
+        parsed == {"status": "findings", "findings": [{"code": "identifier_clarity", "refs": [ref]}]},
+        "fenced findings result parses",
+    )
+    bare_fence_lang = "```\n{\"status\": \"clean\", \"findings\": []}\n```"
+    parsed = audit.AUDIT_SPEC.parse_result(bare_fence_lang, {"projection": value})
+    check(parsed == {"status": "clean", "findings": []}, "fenced result without language tag parses")
+    for text in ("", "   ", "Not logged in · Please run /login", "```json\n\n```"):
+        try:
+            audit.AUDIT_SPEC.parse_result(text, {"projection": value})
+        except ValueError:
+            continue
+        raise AssertionError(f"empty/non-JSON output must still fail closed: {text!r}")
+    check(True, "empty and non-JSON output still fails closed after fence stripping")
+
+
 def t_fixed_renderer_cannot_emit_model_prose() -> None:
     value = projection()
     result = finding_result(value)
@@ -320,6 +349,7 @@ def main() -> None:
         t_projection_is_exact_and_fingerprint_isolated()
         t_unsafe_identifiers_are_lossless_and_collision_resistant()
         t_closed_result_schema_fails_closed()
+        t_markdown_fenced_model_output_is_parsed()
         t_fixed_renderer_cannot_emit_model_prose()
         t_per_fingerprint_cache_isolated_and_versioned()
         t_refresh_backoff_and_success_reset()

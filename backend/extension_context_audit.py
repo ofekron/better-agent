@@ -37,6 +37,7 @@ _CACHE_PROJECTION: dict[str, dict[str, Any]] = {}
 _SAFE_DISPLAY_RE = re.compile(r"[A-Za-z0-9_.:-]{1,160}")
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _REF_RE = re.compile(r"(skill|mcp|instruction|capability):[0-9a-f]{64}")
+_CODE_FENCE_RE = re.compile(r"\A```[A-Za-z0-9_-]*\s*\n(.*?)\n?```\s*\Z", re.DOTALL)
 _FINDING_RULES = {
     "potential_overlap": {
         "kinds": frozenset({"skill", "mcp", "instruction", "capability"}),
@@ -488,8 +489,15 @@ def _evict_cache_entries(directory: Path, *, keep: Path) -> set[str]:
 
 def _parse_json_object(text: str) -> dict[str, Any]:
     try:
-        value = json.loads(text.strip())
-    except (AttributeError, json.JSONDecodeError):
+        stripped = text.strip()
+    except AttributeError:
+        raise ValueError("audit result must be one JSON object")
+    fence_match = _CODE_FENCE_RE.match(stripped)
+    if fence_match:
+        stripped = fence_match.group(1).strip()
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
         raise ValueError("audit result must be one JSON object")
     if not isinstance(value, dict):
         raise ValueError("audit result must be one JSON object")
