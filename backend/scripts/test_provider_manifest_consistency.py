@@ -68,6 +68,22 @@ def test_recovery_families():
     assert pm.runner_module_for("fugu") == "runner_codex"
 
 
+def test_execution_artifact_coverage():
+    from execution_artifact_io import requires_execution_artifact
+
+    local = {
+        kind
+        for kind, spec in pm.SPECS.items()
+        if not spec.virtual
+    }
+    assert pm.artifact_family_kinds() == local - {"codex", "fugu"}
+    assert {
+        kind
+        for kind in local
+        if requires_execution_artifact(kind)
+    } == local
+
+
 def test_installable_matches_installers():
     import provider_setup
     assert pm.installable_kinds() == sorted(provider_setup.INSTALLERS)
@@ -169,6 +185,7 @@ if __name__ == "__main__":
     test_resolve_class_matches_manifest()
     test_runner_modules_importable()
     test_recovery_families()
+    test_execution_artifact_coverage()
     test_installable_matches_installers()
     test_uses_claude_env_matches()
     test_codex_only_gates()

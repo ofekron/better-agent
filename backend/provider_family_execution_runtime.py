@@ -26,6 +26,7 @@ from provider_family_runtime_capabilities import (
     runtime_capability_manifest_from_payload,
     stage_family_runtime_capabilities,
 )
+from provider_manifest import artifact_family_kinds
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,7 @@ def retry_family_execution(
     if not isinstance(execution, PreparedExecution):
         raise ExecutionContractError("invalid family retry execution")
     artifact = execution.artifact
-    if artifact.provider_kind not in {"claude", "agy"}:
+    if artifact.provider_kind not in artifact_family_kinds():
         raise ExecutionContractError("invalid family retry provider")
     runtime_policy = artifact.runtime_policy
     runner_input = runtime_policy.get("runner_input")

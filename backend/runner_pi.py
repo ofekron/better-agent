@@ -35,9 +35,9 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 import harness_run_projection
-from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
 from runner_errors import resume_session_mismatch, stderr_error
+from provider_session_events_runner import restore_session_events_runner
 from runs_dir import atomic_write_json, runs_root as _runs_root
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
@@ -360,7 +360,7 @@ def _fail(run_dir: Path, error: str) -> None:
 async def _run(run_dir: Path, inputs: dict) -> int:
     log = logging.getLogger("runner_pi")
 
-    pi_bin = resolve_cli_binary("pi")
+    pi_bin = inputs.pop("_provider_executable", None)
     if not pi_bin:
         _fail(run_dir, "pi CLI not found on PATH")
         return 1
@@ -709,12 +709,11 @@ def main(run_dir: Path) -> int:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
 
     try:
-        inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
-        from runner_operation_host import hydrate_runner_inputs
-        inputs = hydrate_runner_inputs(inputs, run_dir)
+        execution = restore_session_events_runner(run_dir)
+        inputs = execution.inputs
         inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as exc:
-        _fail(run_dir, f"failed to read input.json: {exc}")
+        _fail(run_dir, f"failed to restore execution artifact: {exc}")
         return 1
 
     try:

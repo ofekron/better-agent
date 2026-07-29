@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError, canonical_json
+from provider_manifest import artifact_family_kinds
 
 
 CAPABILITY_PAYLOAD_SCHEMA = 1
@@ -20,7 +21,7 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_FILE_BYTES = 32 * 1024 * 1024
 MAX_SKILLS = 128
 MAX_AGENTS = 128
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _TRANSPORTS = frozenset({"http", "sdk", "sse", "stdio"})
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,256}$")
 _SECRET_KEY_RE = re.compile(

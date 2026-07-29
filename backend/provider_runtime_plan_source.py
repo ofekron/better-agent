@@ -12,9 +12,10 @@ from provider_runtime_plan_hydration import (
     apply_runtime_hydration,
     capture_runtime_hydration,
 )
+from provider_manifest import artifact_family_kinds
 
 
-_FAMILIES = frozenset({"claude", "agy"})
+_FAMILIES = artifact_family_kinds()
 _RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|auth|authorization|credential|password|secret|token)($|_)",
@@ -378,7 +379,7 @@ def _structural_provider_runtime_plan(
     import installation_profile
 
     explicit = _explicit_mcp_configs(frozen_inputs)
-    if provider_kind == "agy":
+    if provider_kind != "claude":
         from builtin_mcp_config import with_builtin_mcp_servers
 
         runtime = extension_store.runtime_mcp_server_configs(

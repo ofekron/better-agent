@@ -166,187 +166,20 @@ class CursorProvider(SessionEventsProvider):
     def _start_run(
         self,
         *,
-        run_id: str,
-        prompt: str,
-        images: Optional[list] = None,
-        files: Optional[list] = None,
-        cwd: str,
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue,
-        model: Optional[str],
-        reasoning_effort: Optional[str],
-        session_id: Optional[str],
-        mode: str,
-        app_session_id: str,
-        source: Optional[str] = None,
-        disallowed_tools: Optional[list[str]] = None,
-        setting_sources: Optional[list[str]] = None,
-        backend_url: Optional[str] = None,
         internal_token: Optional[str] = None,
-        fork: bool = False,
-        supervised: bool = False,
-        supervisor_agent_session_id: Optional[str] = None,
-        worker_agent_session_id: Optional[str] = None,
-        mssg_sender_session_id: Optional[str] = None,
-        is_worker: bool = False,
-        browser_harness_enabled: bool = False,
-        user_facing: bool = False,
-        working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
-        continuation_chain: Optional[list[str]] = None,
-        provider_run_config: Optional[dict] = None,
-        capability_contexts: Optional[list[dict]] = None,
-        target_message_id: Optional[str] = None,
-        resolved_harness_run_config: Optional[dict] = None,
-        turn_run_id: Optional[str] = None,
-        disabled_builtin_extensions: Optional[list[str]] = None,
-        provisioned_tool_profile: str = "",
         _execution,
+        **_unused: Any,
     ) -> None:
-        del disallowed_tools, setting_sources
-        del supervised, supervisor_agent_session_id, mssg_sender_session_id
-        del continuation_chain
-        if mode == "manager":
-            mode = "team"
-        if mode not in ("native", "team"):
-            raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
-        if self.defunct:
-            raise RuntimeError(f"provider {self.id} is defunct; cannot start new runs")
-        self.assert_not_suspended(action="start new runs")
-        if reasoning_effort:
-            raise NotImplementedError("cursor provider does not support reasoning effort.")
-        if mode == "team":
-            raise NotImplementedError("cursor provider does not support team mode.")
-        if fork:
-            raise NotImplementedError("cursor provider does not support fork.")
-
-        model = str(model or "").strip()
-        available = _dedupe_preserve_order(self.available_models() + CURSOR_MODELS)
-        if model and model not in available:
-            raise ValueError(
-                f"model {model!r} is not available for the Cursor provider. "
-                f"Available: {', '.join(available)}."
-            )
-
-        run_dir = _runs_root() / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        from session_manager import manager as _sm
-        session_record = _sm.get(app_session_id) or {}
-        worker_record = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        from permission import resolve_for_run as _resolve_perm
-        permission = _resolve_perm(
-            sess_rec=session_record,
-            worker_sess_rec=worker_record,
-            is_worker=is_worker,
-            fallback_kind="cursor",
-        )
-        run_policy = resolve_extension_run_policy(
-            resolved_harness_run_config=resolved_harness_run_config,
-            session_record=session_record,
-            worker_record=worker_record,
-            provider_kind=self.KIND,
-            provider_run_config=provider_run_config,
-            capability_contexts=capability_contexts,
-            disabled_builtin_extensions=disabled_builtin_extensions,
-        )
-        _bare = bool(run_policy["bare_config"])
-        input_payload = {
-            "prompt": prompt,
-            "images": images or [],
-            "files": files or [],
-            "cwd": cwd,
-            "model": model,
-            "permission": permission,
-            "session_id": session_id,
-            "mode": mode,
-            "source": source or "",
-            "app_session_id": app_session_id,
-            "backend_url": backend_url or "",
-            "internal_token": "",
-            "provider_id": self.id,
-            "browser_harness_enabled": bool(browser_harness_enabled),
-            "user_facing": bool(user_facing),
-            "worker_agent_session_id": worker_agent_session_id,
-            "bare_config": _bare,
-            "working_mode": session_record.get("working_mode"),
-            "worker_working_mode": (worker_record or {}).get("working_mode"),
-            "context_strategy": user_prefs.get_context_strategy(),
-            "target_message_id": target_message_id,
-            "turn_run_id": turn_run_id,
-            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_runtime_skills": disabled_runtime_skills_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
-        }
-        input_payload.update(run_policy)
-        (run_dir / "input.json").write_text(
-            json.dumps(input_payload), encoding="utf-8"
-        )
-
-        containment().create(run_id)
-        stdout_fp = (run_dir / "stdout.log").open("ab")
-        stderr_fp = (run_dir / "stderr.log").open("ab")
-        try:
-            env = self.finalize_run_env(
-                self.build_env(),
-                run_id=run_id,
-                app_session_id=app_session_id,
-                resolved_harness_run_config=resolved_harness_run_config,
-            )
-            if extra_env:
-                env.update(extra_env)
-            env.update(build_better_agent_run_env(
-                backend_url=backend_url,
-                internal_token=internal_token,
-                run_id=run_id,
-                app_session_id=app_session_id,
-                cwd=cwd,
-                model=model,
-                provider_id=self.id,
-                bare_config=_bare,
-                user_facing=bool(user_facing) and not _bare,
-                disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
-            ))
-            popen = provider_runtime.popen_runner(
-                runner_argv(run_dir, dev_script=_RUNNER_PATH, kind="cursor"),
-                run_dir=run_dir,
-                project_cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fp,
-                stderr=stderr_fp,
-                cwd=cwd,
-                env=env,
-                **_process_control().detach_spawn_kwargs(),
-                **containment().spawn_kwargs(run_id),
-            )
-        except Exception:
-            stdout_fp.close()
-            stderr_fp.close()
-            containment().teardown(run_id)
-            raise
-        finally:
-            stdout_fp.close()
-            stderr_fp.close()
-        containment().after_spawn(run_id, popen.pid)
-
-        rs = RunState(
-            run_id=run_id,
-            run_dir=run_dir,
-            popen=popen,
-            mode=mode,
-            app_session_id=app_session_id,
+        del _unused
+        self.start_session_events_execution(
+            execution=_execution,
+            loop=loop,
             queue=queue,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            persist_to=worker_agent_session_id or app_session_id,
-            target_message_id=target_message_id,
-            turn_run_id=turn_run_id,
-        )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"cursor-bootstrap-{run_id[:8]}",
+            internal_token=internal_token,
+            extra_env=extra_env,
         )
 
     async def run_headless(
