@@ -13,10 +13,9 @@ def _internal_token() -> str:
     env_token = get_env("BETTER_CLAUDE_INTERNAL_TOKEN")
     if env_token:
         return env_token
-    try:
-        return (ba_home() / "internal_token").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    from internal_token_file import read_private_token
+
+    return read_private_token(ba_home() / "internal_token") or ""
 
 
 def _runtime_inputs() -> dict:

@@ -137,28 +137,88 @@ def _windows_current_user_sid() -> str:
     return _WINDOWS_CURRENT_USER_SID
 
 
-def _make_private(path: Path) -> None:
+def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
+    sid = _windows_current_user_sid()
+    inheritance = "(OI)(CI)" if directory else ""
+    subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"*{sid}:{inheritance}F",
+            "/grant:r",
+            f"*S-1-5-32-544:{inheritance}F",
+            "/grant:r",
+            f"*S-1-5-18:{inheritance}F",
+            "/remove:g",
+            "*S-1-1-0",
+            "*S-1-5-32-545",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def make_private_file(path: Path) -> None:
     if os.name == "nt":
-        sid = _windows_current_user_sid()
-        subprocess.run(
+        _set_windows_private_acl(path, directory=False)
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private file ACL verification failed")
+        return
+    path.chmod(0o600)
+
+
+def windows_path_has_private_acl(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    script = r"""
+$ErrorActionPreference = "Stop"
+$acl = Get-Acl -LiteralPath $args[0]
+$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$allowed = @($current, "S-1-5-18", "S-1-5-32-544")
+$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+if (-not $acl.AreAccessRulesProtected -or $allowed -notcontains $owner) {
+    exit 2
+}
+foreach ($rule in $acl.GetAccessRules(
+    $true,
+    $true,
+    [System.Security.Principal.SecurityIdentifier]
+)) {
+    if (
+        $rule.AccessControlType -eq
+            [System.Security.AccessControl.AccessControlType]::Allow -and
+        $allowed -notcontains $rule.IdentityReference.Value
+    ) {
+        exit 3
+    }
+}
+Write-Output "private"
+"""
+    try:
+        result = subprocess.run(
             [
-                "icacls",
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
                 str(path),
-                "/inheritance:r",
-                "/grant:r",
-                f"*{sid}:(OI)(CI)F",
-                "/grant:r",
-                "*S-1-5-32-544:(OI)(CI)F",
-                "/grant:r",
-                "*S-1-5-18:(OI)(CI)F",
-                "/remove:g",
-                "*S-1-1-0",
-                "*S-1-5-32-545",
             ],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "private"
+
+
+def _make_private(path: Path) -> None:
+    if os.name == "nt":
+        _set_windows_private_acl(path, directory=True)
         return
     path.chmod(_PRIVATE_DIR_MODE)
 

@@ -125,3 +125,26 @@ def write_json_durable(path: Path, data, mode: int = 0o700) -> None:
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def write_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            from paths import make_private_file
+
+            make_private_file(tmp)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_atomic(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise

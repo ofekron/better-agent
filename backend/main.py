@@ -14477,9 +14477,9 @@ async def on_startup():
 
     # Phase-1 stage 5b: periodic internal_token rotation. Every 60 min
     # the coordinator mints a new token + retains the old one for a
-    # 5min grace window. Runner mtime-cached `_load_internal_token`
-    # picks up the new value within one stat() interval after rotation;
-    # in-flight calls retry with the new token automatically.
+    # 5min grace window. A surviving runner's run-local token authority
+    # validates and loads the new value after an authentication rejection;
+    # in-flight calls retry with the new token once.
     # Operators who want disabling can set
     # `BA_DISABLE_INTERNAL_TOKEN_ROTATION=1`.
     # Guard: on_startup can fire twice (uvicorn hot-reload, Starlette

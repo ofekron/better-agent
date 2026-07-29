@@ -63,17 +63,21 @@ def test_request_tool_approval_retries_transient_backend_restart(monkeypatch):
 
 
 def test_request_tool_approval_retries_disk_token_after_forbidden(monkeypatch):
+    import runner_operation_host
+
+    spawn_token = "A" * 43
+    disk_token = "B" * 43
     token_file = Path(os.environ["BETTER_AGENT_HOME"]) / "internal_token"
-    token_file.write_text("disk-token", encoding="utf-8")
-    client._token_cache["token"] = None
-    client._token_cache["mtime"] = 0.0
+    token_file.write_text(disk_token, encoding="utf-8")
+    token_file.chmod(0o600)
+    runner_operation_host._install_internal_token_authority(spawn_token)
 
     seen_tokens = []
 
     def fake_urlopen(req, *args, **kwargs):
         token = req.headers.get("X-internal-token")
         seen_tokens.append(token)
-        if token == "spawn-token":
+        if token == spawn_token:
             raise urllib.error.HTTPError(
                 req.full_url,
                 403,
@@ -85,8 +89,13 @@ def test_request_tool_approval_retries_disk_token_after_forbidden(monkeypatch):
 
     monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
 
-    assert client.request_tool_approval(**_approval_kwargs()) is True
-    assert seen_tokens == ["spawn-token", "disk-token"]
+    kwargs = _approval_kwargs()
+    kwargs["internal_token"] = spawn_token
+    try:
+        assert client.request_tool_approval(**kwargs) is True
+    finally:
+        runner_operation_host.stop_active_host()
+    assert seen_tokens == [spawn_token, disk_token]
 
 
 def test_request_tool_approval_retries_http_5xx(monkeypatch):

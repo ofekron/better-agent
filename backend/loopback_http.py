@@ -40,8 +40,16 @@ def loopback_http_error_message(e: urllib.error.HTTPError) -> str:
     return str(e)
 
 
-def raise_loopback_http_error(e: urllib.error.HTTPError) -> None:
-    raise RuntimeError(f"HTTP {e.code}: {loopback_http_error_message(e)}") from e
+def raise_loopback_http_error(
+    e: urllib.error.HTTPError,
+    *,
+    redact_values: tuple[str, ...] = (),
+) -> None:
+    message = loopback_http_error_message(e)
+    for value in redact_values:
+        if value:
+            message = message.replace(value, "[redacted]")
+    raise RuntimeError(f"HTTP {e.code}: {message}") from e
 
 
 def loopback_urlopen(

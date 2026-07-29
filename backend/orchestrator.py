@@ -262,29 +262,30 @@ def _internal_token_path() -> Path:
     return ba_home() / "internal_token"
 
 
+def _persist_internal_token(token: str) -> None:
+    from internal_token_file import write_private_token
+
+    write_private_token(_internal_token_path(), token)
+
+
 def _load_or_create_internal_token() -> str:
     """Read the persisted internal token, or mint+persist a new one.
 
     The token authenticates `runner.py` → the `/api/internal/*` loopback
     endpoints (ask-fork, delegate, mssg, ask, create-worker, create-session).
     Persisting across restarts keeps detached runners that survived a backend
-    reload able to authenticate. Permissions 0600 so other local users can't
-    read the secret.
+    reload able to authenticate. POSIX mode 0600 or a protected Windows ACL
+    keeps other local users from reading the secret.
     """
-    try:
-        token = _internal_token_path().read_text(encoding="utf-8").strip()
-        if token:
-            return token
-    except FileNotFoundError:
-        pass
-    except OSError:
-        logger.exception("Failed to read internal_token file; minting a new one")
+    from internal_token_file import read_private_token
+
+    token = read_private_token(_internal_token_path())
+    if token:
+        return token
 
     token = secrets.token_urlsafe(32)
     try:
-        _internal_token_path().parent.mkdir(parents=True, exist_ok=True)
-        _internal_token_path().write_text(token, encoding="utf-8")
-        os.chmod(_internal_token_path(), 0o600)
+        _persist_internal_token(token)
     except OSError:
         logger.exception("Failed to persist internal_token; using in-memory only")
     return token
@@ -932,12 +933,11 @@ class Coordinator:
         # On-disk fallback: a runner may have read a freshly-rotated
         # token from the file before this coordinator's in-memory
         # state caught up (e.g. across async tasks on the same loop).
-        try:
-            disk = _internal_token_path().read_text(encoding="utf-8").strip()
-            if disk and _hmac.compare_digest(token, disk):
-                return True
-        except OSError:
-            pass
+        from internal_token_file import read_private_token
+
+        disk = read_private_token(_internal_token_path())
+        if disk and _hmac.compare_digest(token, disk):
+            return True
         if self._prev_token and _hmac.compare_digest(token, self._prev_token):
             import time as _time
             if _time.monotonic() < self._prev_token_grace_expires_at:
@@ -984,11 +984,10 @@ class Coordinator:
 
         def _resolve_disk_aware() -> Optional[tuple[str, Optional[str]]]:
             import extension_token_registry
+            from internal_token_file import read_private_token
+
             extension_id = extension_token_registry.resolve_fresh(token)
-            try:
-                disk = _internal_token_path().read_text(encoding="utf-8").strip()
-            except OSError:
-                disk = ""
+            disk = read_private_token(_internal_token_path()) or ""
             extension_match = bool(extension_id)
             core_match = bool(disk and _hmac.compare_digest(token, disk))
             if extension_match and core_match:
@@ -1093,8 +1092,8 @@ class Coordinator:
     def rotate_internal_token(self, grace_seconds: float = 7200.0) -> None:
         """Mint a new internal_token; keep the old one valid for
         `grace_seconds`. Persists the new token to
-        `ba_home()/internal_token` so runners' mtime-cached
-        `_load_internal_token` discovers it.
+        `ba_home()/internal_token` so surviving runners can refresh their
+        run-local token authority after an authentication rejection.
 
         Default grace (7200s = 2h) exceeds the 1h rotation interval,
         so a token stays valid for at least one full rotation cycle
@@ -1106,10 +1105,7 @@ class Coordinator:
         old = self.internal_token
         new = _secrets.token_urlsafe(32)
         try:
-            path = _internal_token_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new, encoding="utf-8")
-            os.chmod(path, 0o600)
+            _persist_internal_token(new)
         except OSError:
             logger.exception(
                 "rotate_internal_token: failed to persist new token; "

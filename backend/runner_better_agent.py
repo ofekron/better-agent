@@ -77,6 +77,7 @@ from user_interaction_tool_contracts import (
 )
 from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
+from runner_operation_host import internal_token_lease
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 
@@ -1624,6 +1625,8 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout_s
     backoff = 1.0
+    token_lease = internal_token_lease(internal_token)
+
     def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             backend_url.rstrip("/") + url_path,
@@ -1640,13 +1643,27 @@ def _post_loopback_sync(
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
-            raise RuntimeError(f"loopback returned non-JSON: {e}; raw={raw[:200]!r}")
+            preview = raw[:200]
+            for value in token_lease.redact_values():
+                if value:
+                    preview = preview.replace(
+                        value.encode("utf-8"),
+                        b"[redacted]",
+                    )
+            raise RuntimeError(
+                f"loopback returned non-JSON: {e}; raw={preview!r}"
+            )
 
     while True:
         try:
-            return _request_once(internal_token)
+            return _request_once(token_lease.token)
         except urllib.error.HTTPError as e:
-            raise_loopback_http_error(e)
+            if e.code == 403 and token_lease.refresh_after_forbidden():
+                continue
+            raise_loopback_http_error(
+                e,
+                redact_values=token_lease.redact_values(),
+            )
         except (
             urllib.error.URLError,
             http.client.RemoteDisconnected,
@@ -2921,16 +2938,15 @@ def _capabilities_endpoint_post(
     return a JSON-string result. Core owns the active-capability write; this is
     the authorized trigger. Errors are returned as text, never raised, so a
     failed call doesn't abort the turn."""
-    url = backend_url.rstrip("/") + f"/api/internal/sessions/{app_session_id}/capabilities"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Internal-Token": internal_token,
-    }
     try:
-        resp = httpx.post(url, json=payload, headers=headers, timeout=30.0)
-        if resp.status_code >= 400:
-            return f"Error: HTTP {resp.status_code}: {resp.text[:500]}"
-        return resp.text or "{}"
+        result = _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path=f"/api/internal/sessions/{app_session_id}/capabilities",
+            timeout_s=30.0,
+        )
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     except Exception as e:  # noqa: BLE001 — surface to the model
         return f"Error: {type(e).__name__}: {e}"
 

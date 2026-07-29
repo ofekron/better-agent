@@ -21,6 +21,7 @@ if str(BACKEND) not in sys.path:
 import extension_api
 import extension_store
 import extension_token_registry
+import internal_token_file
 import main
 import orchestrator
 from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
@@ -359,8 +360,10 @@ def test_internal_endpoints_have_no_legacy_sync_auth_calls() -> None:
 
 
 async def test_token_auth_freshness_and_loop_responsiveness() -> None:
+    current_token = "C" * 43
+    rotated_token = "D" * 43
     coordinator = object.__new__(orchestrator.Coordinator)
-    coordinator.internal_token = "core-current"
+    coordinator.internal_token = current_token
     coordinator._prev_token = None
     coordinator._prev_token_grace_expires_at = 0.0
 
@@ -370,23 +373,23 @@ async def test_token_auth_freshness_and_loop_responsiveness() -> None:
     assert await coordinator.resolve_principal_async(extension_token) is None
 
     token_path = orchestrator._internal_token_path()
-    token_path.write_text("core-current", encoding="utf-8")
-    assert await coordinator.resolve_principal_async("core-current") == ("core", None)
+    internal_token_file.write_private_token(token_path, current_token)
+    assert await coordinator.resolve_principal_async(current_token) == ("core", None)
     token_stat = token_path.stat()
-    token_path.write_text("core-rotated", encoding="utf-8")
+    internal_token_file.write_private_token(token_path, rotated_token)
     assert token_path.stat().st_size == token_stat.st_size
     os.utime(token_path, ns=(token_stat.st_atime_ns, token_stat.st_mtime_ns))
-    assert await coordinator.resolve_principal_async("core-current") is None
-    assert await coordinator.resolve_principal_async("core-rotated") == ("core", None)
+    assert await coordinator.resolve_principal_async(current_token) is None
+    assert await coordinator.resolve_principal_async(rotated_token) == ("core", None)
 
-    original_read_text = Path.read_text
+    original_read_private_token = internal_token_file.read_private_token
 
-    def delayed_read_text(self, *args, **kwargs):
-        if self in {token_path, extension_token_registry._path()}:
+    def delayed_read_private_token(path):
+        if path == token_path:
             time.sleep(0.05)
-        return original_read_text(self, *args, **kwargs)
+        return original_read_private_token(path)
 
-    Path.read_text = delayed_read_text
+    internal_token_file.read_private_token = delayed_read_private_token
     try:
         task = asyncio.create_task(coordinator.resolve_principal_async("invalid"))
         ticks = 0
@@ -396,10 +399,10 @@ async def test_token_auth_freshness_and_loop_responsiveness() -> None:
         assert ticks > 10
         assert await task is None
     finally:
-        Path.read_text = original_read_text
+        internal_token_file.read_private_token = original_read_private_token
 
     coordinator.rotate_internal_token(grace_seconds=60)
-    assert await coordinator.resolve_principal_async("core-current") == ("core", None)
+    assert await coordinator.resolve_principal_async(current_token) == ("core", None)
     assert await coordinator.resolve_principal_async(coordinator.internal_token) == ("core", None)
 
     authority = orchestrator.PrincipalAuthority("extension", "ext.bound")

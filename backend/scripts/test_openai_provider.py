@@ -460,16 +460,20 @@ def test_bash_tool_scrubs_provider_and_internal_secrets():
     assert env.get("SAFE_VISIBLE_FOR_TEST") == "ok"
 
 
-def test_openai_loopback_retries_disk_token_after_forbidden():
+def test_openai_loopback_retries_disk_token_after_forbidden(monkeypatch):
     runner = _mod("runner_better_agent")
+    authority_owner = _mod("runner_operation_host")
+    spawn_token = "A" * 43
+    rotated_token = "B" * 43
+    authority_owner._install_internal_token_authority(spawn_token)
     token_file = Path(os.environ["BETTER_AGENT_HOME"]) / "internal_token"
-    token_file.write_text("disk-token", encoding="utf-8")
-    runner._token_cache["token"] = None
-    runner._token_cache["mtime"] = 0.0
-
+    token_file.unlink(missing_ok=True)
+    token_file.write_text(spawn_token, encoding="utf-8")
+    token_file.chmod(0o600)
     seen_tokens = []
+    accepted_token = spawn_token
 
-    class FakeResponse:
+    class Response:
         def __enter__(self):
             return self
 
@@ -477,36 +481,58 @@ def test_openai_loopback_retries_disk_token_after_forbidden():
             return False
 
         def read(self):
-            return json.dumps({"success": True}).encode("utf-8")
+            return b'{"success":true}'
 
     def fake_urlopen(req, *args, **kwargs):
         token = req.headers.get("X-internal-token")
         seen_tokens.append(token)
-        if token == "spawn-token":
+        if token != accepted_token:
             raise urllib.error.HTTPError(
                 req.full_url,
                 403,
                 "Forbidden",
                 hdrs=None,
-                fp=None,
+                fp=io.BytesIO(b'{"detail":"invalid internal token"}'),
             )
-        return FakeResponse()
+        return Response()
 
-    original_urlopen = runner.urllib.request.urlopen
+    monkeypatch.setattr(runner.urllib.request, "urlopen", fake_urlopen)
     try:
-        runner.urllib.request.urlopen = fake_urlopen
+        assert runner._post_loopback_sync(
+            {},
+            backend_url="http://127.0.0.1:9999",
+            internal_token=spawn_token,
+            url_path="/api/internal/ask",
+            timeout_s=30.0,
+        ) == {"success": True}
+        token_file.unlink()
+        token_file.write_text(rotated_token, encoding="utf-8")
+        token_file.chmod(0o600)
+        accepted_token = rotated_token
         recovered = runner._post_loopback_sync(
             {},
             backend_url="http://127.0.0.1:9999",
-            internal_token="spawn-token",
+            internal_token=spawn_token,
             url_path="/api/internal/ask",
             timeout_s=30.0,
         )
+        assert runner._post_loopback_sync(
+            {},
+            backend_url="http://127.0.0.1:9999",
+            internal_token=spawn_token,
+            url_path="/api/internal/ask",
+            timeout_s=30.0,
+        ) == {"success": True}
     finally:
-        runner.urllib.request.urlopen = original_urlopen
+        authority_owner.stop_active_host()
 
     assert recovered == {"success": True}
-    assert seen_tokens == ["spawn-token", "disk-token"]
+    assert seen_tokens == [
+        spawn_token,
+        spawn_token,
+        rotated_token,
+        rotated_token,
+    ]
 
 
 def test_openai_loopback_recovers_completed_ask_result():
