@@ -624,6 +624,12 @@ def materialize_frozen_bundle(
             if entry.kind == "symlink":
                 assert entry.target is not None
                 os.symlink(entry.target, path)
+                if hasattr(os, "lchmod"):
+                    os.lchmod(path, entry.mode)
+                elif stat.S_IMODE(path.lstat().st_mode) != entry.mode:
+                    raise ExecutionContractError(
+                        "frozen bundle symlink mode cannot be preserved",
+                    )
                 continue
             _copy_attested_file(entry, path)
         directories = (

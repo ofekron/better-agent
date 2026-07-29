@@ -68,7 +68,14 @@ def test_complete_bundle_round_trip_and_materialization() -> None:
         run_dir = parent / "run"
         run_dir.mkdir(mode=0o700)
         destination = run_dir / "frozen-runner"
-        materialized = materialize_frozen_bundle(restored, destination)
+        previous_umask = os.umask(0o077)
+        try:
+            materialized = materialize_frozen_bundle(
+                restored,
+                destination,
+            )
+        finally:
+            os.umask(previous_umask)
         assert materialized == destination.resolve()
         assert attest_materialized_frozen_bundle(restored, destination)
         assert (
