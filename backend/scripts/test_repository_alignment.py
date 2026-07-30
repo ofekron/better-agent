@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import types
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -57,6 +59,57 @@ def main() -> None:
         public_sha = _git(public_source, "rev-parse", "HEAD")
         _git(public_source, "push", "origin", "HEAD:refs/heads/dev")
         private_sha = _commit(private_source, "private.txt", "private")
+        private_proxy = root / "private-proxy"
+        subprocess.run(
+            ["git", "clone", str(private_source), str(private_proxy)],
+            check=True,
+            capture_output=True,
+        )
+        assert alignment.repository_snapshot(
+            alignment.PRIVATE_ROLE,
+            private_proxy,
+        )["remote_url"] == str(private_remote)
+        _git(
+            private_proxy,
+            "remote",
+            "set-url",
+            "origin",
+            os.path.relpath(private_source, private_proxy),
+        )
+        assert alignment.repository_snapshot(
+            alignment.PRIVATE_ROLE,
+            private_proxy,
+        )["remote_url"] == str(private_remote)
+        _git(
+            private_proxy,
+            "remote",
+            "set-url",
+            "origin",
+            f"file://{quote(str(private_source))}",
+        )
+        assert alignment.repository_snapshot(
+            alignment.PRIVATE_ROLE,
+            private_proxy,
+        )["remote_url"] == str(private_remote)
+        assert alignment._file_uri_path_text(
+            "file:///C:/Users/Lenovo/repo.git",
+            windows=True,
+        ).replace("\\", "/") == "C:/Users/Lenovo/repo.git"
+        assert alignment._file_uri_path_text(
+            "file://server/share/repo.git",
+            windows=True,
+        ).replace("\\", "/") == "//server/share/repo.git"
+
+        cycle_a = root / "cycle-a"
+        cycle_b = root / "cycle-b"
+        subprocess.run(["git", "init", str(cycle_a)], check=True, capture_output=True)
+        subprocess.run(["git", "init", str(cycle_b)], check=True, capture_output=True)
+        _git(cycle_a, "remote", "add", "origin", str(cycle_b))
+        _git(cycle_b, "remote", "add", "origin", str(cycle_a))
+        assert alignment._canonical_remote(cycle_a) in {
+            str(cycle_a),
+            str(cycle_b),
+        }
 
         node_root = root / "node"
         subprocess.run(

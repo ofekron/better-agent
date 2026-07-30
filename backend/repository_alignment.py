@@ -7,6 +7,8 @@ import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from paths import ba_home
 from json_store import read_json, write_json
@@ -115,6 +117,42 @@ def _remote(path: Path) -> str:
     return _output(path, "remote", "get-url", name)
 
 
+def _file_uri_path_text(remote: str, windows: bool = os.name == "nt") -> str:
+    parsed = urlparse(remote)
+    path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        path = f"//{parsed.netloc}{path}"
+    elif windows and re.match(r"^/[a-z]:/", path, re.I):
+        path = path[1:]
+    return url2pathname(path)
+
+
+def _local_remote_path(repository: Path, remote: str) -> Path | None:
+    parsed = urlparse(remote)
+    if parsed.scheme == "file":
+        return Path(_file_uri_path_text(remote)).resolve()
+    if parsed.scheme or _SCP_REMOTE.match(remote):
+        return None
+    candidate = Path(remote).expanduser()
+    if not candidate.is_absolute():
+        candidate = repository / candidate
+    return candidate.resolve()
+
+
+def _canonical_remote(path: Path, seen: set[Path] | None = None) -> str:
+    repository = path.resolve()
+    visited = set() if seen is None else seen
+    if repository in visited:
+        return _remote(repository)
+    visited.add(repository)
+    remote = _remote(repository)
+    local = _local_remote_path(repository, remote)
+    if local is None or not local.exists():
+        return remote
+    upstream = _canonical_remote(local, visited)
+    return upstream or remote
+
+
 def _dirty(path: Path) -> bool:
     result = _git(path, "status", "--porcelain", "--untracked-files=normal")
     return result.returncode != 0 or bool(result.stdout.strip())
@@ -145,7 +183,7 @@ def repository_snapshot(role: str, path: Path) -> dict[str, Any]:
         "role": role,
         "available": True,
         "commit_sha": _output(path, "rev-parse", "HEAD").lower(),
-        "remote_url": _remote(path),
+        "remote_url": _canonical_remote(path),
         "dirty": _dirty(path),
         "source_kind": "git",
     }
