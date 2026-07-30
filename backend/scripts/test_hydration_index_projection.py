@@ -13,6 +13,7 @@ os.environ["BETTER_AGENT_HOME"] = HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hydration_index_store as store
+from resilient_stdio import protect_standard_streams
 
 
 def _row(sid: str, value: int, newline: bool = True) -> bytes:
@@ -26,6 +27,31 @@ def main() -> int:
     journal.write_bytes(_row("a", 1))
     offsets, first = store.load("root", journal)
     assert first["cold"] == 1 and offsets["a"] == (0,), (offsets, first)
+
+    store._discard_pool()
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    read_fd, write_fd = os.pipe()
+    broken_stdout = os.fdopen(write_fd, "w")
+    broken_stderr = os.fdopen(os.dup(write_fd), "w")
+    os.close(read_fd)
+    sys.stdout = broken_stdout
+    sys.stderr = broken_stderr
+    try:
+        protect_standard_streams()
+        closed_pipe_journal = journal.with_name("closed-pipe-events.jsonl")
+        closed_pipe_journal.write_bytes(_row("closed-pipe", 1))
+        offsets, closed_pipe = store.load("closed-pipe", closed_pipe_journal)
+        assert closed_pipe["cold"] == 1
+        assert set(offsets) == {"closed-pipe"}
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        for stream in (broken_stdout, broken_stderr):
+            try:
+                stream.close()
+            except BrokenPipeError:
+                pass
 
     original_size = journal.stat().st_size
     append_before = journal.stat()

@@ -75,6 +75,9 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     mode, kind, run_dir = _dispatch(sys.argv[1:] if argv is None else argv)
+    if mode in {"server", "node_server"}:
+        from resilient_stdio import protect_standard_streams
+        protect_standard_streams()
     if mode == "communicate_mcp":
         from communicate_mcp import main as communicate_main
         return communicate_main()
