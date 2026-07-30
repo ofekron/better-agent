@@ -1235,6 +1235,7 @@
   "harnessProfile.saving": "جارٍ الحفظ…",
   "harnessProfile.extensionUnavailable": "غير متاح — {{reason}}",
   "harnessProfile.extensionEnabled": "مُفعّل في هذا الملف الشخصي",
+  "harnessProfile.extensionOffNote": "مُعطَّل في هذا الملف الشخصي — لن تُطبَّق هذه الإعدادات حتى تقوم بتفعيله.",
   "harnessProfile.extensionDisabled": "معطّل",
   "harnessProfile.group.mcp_servers": "خوادم MCP",
   "harnessProfile.group.skills": "المهارات",

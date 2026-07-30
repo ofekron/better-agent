@@ -1236,6 +1236,7 @@
   "harnessProfile.saving": "A guardar…",
   "harnessProfile.extensionUnavailable": "Indisponível — {{reason}}",
   "harnessProfile.extensionEnabled": "Ativada neste perfil",
+  "harnessProfile.extensionOffNote": "Desativada neste perfil — estas definições só se aplicam depois de a ativar.",
   "harnessProfile.extensionDisabled": "desativada",
   "harnessProfile.group.mcp_servers": "Servidores MCP",
   "harnessProfile.group.skills": "Competências",

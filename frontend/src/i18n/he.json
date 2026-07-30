@@ -1279,6 +1279,7 @@
   "harnessProfile.saving": "שומר…",
   "harnessProfile.extensionUnavailable": "לא זמין — {{reason}}",
   "harnessProfile.extensionEnabled": "מופעל בפרופיל הזה",
+  "harnessProfile.extensionOffNote": "כבוי בפרופיל הזה — ההגדרות האלה לא חלות עד שתפעיל אותו.",
   "harnessProfile.extensionDisabled": "מושבת",
   "harnessProfile.group.mcp_servers": "שרתי MCP",
   "harnessProfile.group.skills": "מיומנויות",

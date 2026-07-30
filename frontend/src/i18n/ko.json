@@ -1235,6 +1235,7 @@
   "harnessProfile.saving": "저장 중…",
   "harnessProfile.extensionUnavailable": "사용할 수 없음 — {{reason}}",
   "harnessProfile.extensionEnabled": "이 프로필에서 활성화됨",
+  "harnessProfile.extensionOffNote": "이 프로필에서 꺼져 있습니다 — 켜기 전까지 이 설정은 적용되지 않습니다.",
   "harnessProfile.extensionDisabled": "비활성화됨",
   "harnessProfile.group.mcp_servers": "MCP 서버",
   "harnessProfile.group.skills": "스킬",

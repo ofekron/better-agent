@@ -1236,6 +1236,7 @@
   "harnessProfile.saving": "सहेजा जा रहा है…",
   "harnessProfile.extensionUnavailable": "अनुपलब्ध — {{reason}}",
   "harnessProfile.extensionEnabled": "इस प्रोफ़ाइल में सक्षम",
+  "harnessProfile.extensionOffNote": "इस प्रोफ़ाइल में बंद है — इसे चालू करने तक ये सेटिंग्स लागू नहीं होंगी।",
   "harnessProfile.extensionDisabled": "अक्षम",
   "harnessProfile.group.mcp_servers": "MCP सर्वर",
   "harnessProfile.group.skills": "कौशल",

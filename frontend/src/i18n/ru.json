@@ -1238,6 +1238,7 @@
   "harnessProfile.saving": "Сохранение…",
   "harnessProfile.extensionUnavailable": "Недоступно — {{reason}}",
   "harnessProfile.extensionEnabled": "Включено в этом профиле",
+  "harnessProfile.extensionOffNote": "Отключено в этом профиле — эти настройки не применяются, пока вы его не включите.",
   "harnessProfile.extensionDisabled": "отключено",
   "harnessProfile.group.mcp_servers": "Серверы MCP",
   "harnessProfile.group.skills": "Навыки",

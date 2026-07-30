@@ -1236,6 +1236,7 @@
   "harnessProfile.saving": "正在保存…",
   "harnessProfile.extensionUnavailable": "不可用 — {{reason}}",
   "harnessProfile.extensionEnabled": "在此配置文件中启用",
+  "harnessProfile.extensionOffNote": "在此配置文件中已关闭 — 启用前这些设置不会生效。",
   "harnessProfile.extensionDisabled": "已禁用",
   "harnessProfile.group.mcp_servers": "MCP 服务器",
   "harnessProfile.group.skills": "技能",

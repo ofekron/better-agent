@@ -11167,6 +11167,38 @@ button.run-badge-clickable:focus-visible {
   font-weight: 600;
 }
 
+/* Everything the master switch gates. While the extension is off in this
+   profile the controls stay readable but visibly inert, so the card never
+   implies settings that currently reach the agent. */
+.harness-extension-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 1;
+  filter: none;
+  transition:
+    opacity 220ms ease,
+    filter 220ms ease;
+}
+
+.harness-extension-groups.is-extension-off {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
+
+.harness-extension-off-note {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-extension-groups {
+    transition: none;
+  }
+}
+
 .harness-group {
   display: flex;
   flex-direction: column;

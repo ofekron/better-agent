@@ -11,6 +11,7 @@ import {
   groupTitleKey,
   itemHintKey,
   itemLabelKey,
+  type HarnessDescriptorExtension,
   type HarnessDescriptorGroup,
   type HarnessDescriptorItem,
   type HarnessFieldWrite,
@@ -445,6 +446,43 @@ export function ExtensionEnabledToggle({
         item={item}
         labelOverride={t("harnessProfile.extensionEnabled")}
       />
+    </div>
+  );
+}
+
+/** Everything below the master switch is inert while the extension is off in
+ * this profile: its tools, skills and instructions do not reach the agent, so
+ * live-looking controls would misrepresent backend state. */
+export function ExtensionGroups({
+  extension,
+  enabledGroup,
+  ...rest
+}: Omit<GroupProps, "group" | "extensionId"> & {
+  extension: HarnessDescriptorExtension;
+  enabledGroup: HarnessDescriptorGroup;
+}) {
+  const { t } = useTranslation();
+  const enabledItem = enabledGroup.items.find((candidate) => candidate.name === extension.id);
+  const enabled = enabledItem
+    ? toggleState(rest.profile, enabledGroup, enabledItem, null).effective
+    : true;
+  return (
+    <div
+      className={`harness-extension-groups ${enabled ? "" : "is-extension-off"}`}
+      aria-disabled={!enabled}
+    >
+      {!enabled && (
+        <p className="harness-extension-off-note">{t("harnessProfile.extensionOffNote")}</p>
+      )}
+      {extension.groups.map((group) => (
+        <HarnessGroup
+          key={group.id}
+          {...rest}
+          group={group}
+          extensionId={extension.id}
+          disabled={rest.disabled || !enabled}
+        />
+      ))}
     </div>
   );
 }

@@ -6,7 +6,12 @@ import { trackedFetch } from "../progress/store";
 import { ProgressButton } from "../progress/ProgressButton";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
 import type { HarnessProfile } from "../types";
-import { DescriptionLink, ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
+import {
+  DescriptionLink,
+  ExtensionEnabledToggle,
+  ExtensionGroups,
+  HarnessGroup,
+} from "./harness/HarnessGroup";
 import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
   PROFILE_NOT_FOUND,
@@ -395,19 +400,16 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
                     onWrite={(write) => applyWrites([write])}
                     onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
                   />
-                  {extension.groups.map((group) => (
-                    <HarnessGroup
-                      key={group.id}
-                      group={group}
-                      profile={profile}
-                      extensionId={extension.id}
-                      isDefault={isDefault}
-                      disabled={disabled}
-                      diffOnly={diffOnly}
-                      onWrite={(write) => applyWrites([write])}
-                      onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
-                    />
-                  ))}
+                  <ExtensionGroups
+                    extension={extension}
+                    profile={profile}
+                    enabledGroup={descriptor.builtin_extensions}
+                    isDefault={isDefault}
+                    disabled={disabled}
+                    diffOnly={diffOnly}
+                    onWrite={(write) => applyWrites([write])}
+                    onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
+                  />
                 </article>
               ))}
 

@@ -1232,6 +1232,7 @@
   "harnessProfile.saving": "保存中…",
   "harnessProfile.extensionUnavailable": "利用不可 — {{reason}}",
   "harnessProfile.extensionEnabled": "このプロファイルで有効",
+  "harnessProfile.extensionOffNote": "このプロファイルでは無効です — 有効にするまでこれらの設定は適用されません。",
   "harnessProfile.extensionDisabled": "無効",
   "harnessProfile.group.mcp_servers": "MCP サーバー",
   "harnessProfile.group.skills": "スキル",

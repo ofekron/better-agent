@@ -1232,6 +1232,7 @@
   "harnessProfile.saving": "Opslaan…",
   "harnessProfile.extensionUnavailable": "Niet beschikbaar — {{reason}}",
   "harnessProfile.extensionEnabled": "Ingeschakeld in dit profiel",
+  "harnessProfile.extensionOffNote": "Uitgeschakeld in dit profiel — deze instellingen gelden pas als je het inschakelt.",
   "harnessProfile.extensionDisabled": "uitgeschakeld",
   "harnessProfile.group.mcp_servers": "MCP-servers",
   "harnessProfile.group.skills": "Vaardigheden",
