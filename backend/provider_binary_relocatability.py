@@ -1,4 +1,4 @@
-"""Static relocatability gate for materialized POSIX executables.
+"""Static relocatability gate for materialized executables.
 
 materialize_sdk_launch copies raw executable bytes without any awareness of
 the dynamic linker's search rules. A binary that resolves a dependency via a
@@ -11,6 +11,13 @@ nonzero CodeDirectory `platform` byte) exhibit the same wedge when copied
 out of the sealed system volume and executed, independent of their dylib
 layout, so they are rejected too. This module only inspects already-copied
 bytes; it never executes them.
+
+PE (Windows) imports are checked the same way: the Windows loader searches
+the launching executable's own directory before anywhere else for a normal
+implicit import, so any import (or delay-import) naming a DLL outside a
+small, conservative allowlist of always-present system/API-set DLLs is
+treated as location-relative and rejected. SxS/manifest-driven assembly
+redirection is not inspected — out of scope for this static check.
 """
 
 from __future__ import annotations
@@ -52,6 +59,36 @@ _DT_RUNPATH = 29
 _DT_STRTAB = 5
 _DT_NULL = 0
 
+_PE_SIGNATURE = b"PE\x00\x00"
+_OPTIONAL_HEADER_MAGIC_PE32 = 0x10B
+_OPTIONAL_HEADER_MAGIC_PE32_PLUS = 0x20B
+_IMAGE_DIRECTORY_ENTRY_IMPORT = 1
+_IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13
+
+# Names the Windows loader always resolves through System32/KnownDLLs or a
+# virtual API set, never through the launching executable's own directory —
+# so a copy of the executable elsewhere still finds them. Deliberately a
+# small, conservative allowlist: anything not on it (including redistributed
+# runtime DLLs such as vcruntime140.dll or an interpreter's own pythonXY.dll)
+# is treated as a bundled, location-relative dependency and rejected — fail
+# closed on ambiguity rather than guess at what else might "usually" be
+# present. Not a general Windows loader model: SxS/manifest-driven assembly
+# redirection is not inspected here (see card 222b255dfd7f for that scope).
+_WINDOWS_SYSTEM_DLLS = frozenset({
+    "kernel32.dll", "kernelbase.dll", "ntdll.dll", "user32.dll", "gdi32.dll",
+    "gdi32full.dll", "advapi32.dll", "ole32.dll", "oleaut32.dll",
+    "shell32.dll", "shlwapi.dll", "ws2_32.dll", "msvcrt.dll", "ucrtbase.dll",
+    "combase.dll", "rpcrt4.dll", "sechost.dll", "bcrypt.dll",
+    "bcryptprimitives.dll", "crypt32.dll", "version.dll", "winmm.dll",
+    "setupapi.dll", "cfgmgr32.dll", "imm32.dll", "comdlg32.dll",
+    "comctl32.dll", "wininet.dll", "wintrust.dll", "psapi.dll",
+    "powrprof.dll", "netapi32.dll", "iphlpapi.dll", "dbghelp.dll",
+    "win32u.dll", "msvcp_win.dll", "userenv.dll", "profapi.dll", "shcore.dll",
+    "uxtheme.dll", "dwmapi.dll", "oleacc.dll", "propsys.dll", "clbcatq.dll",
+    "mswsock.dll", "secur32.dll", "credui.dll", "authz.dll", "wtsapi32.dll",
+})
+_WINDOWS_API_SET_PREFIXES = ("api-ms-win-", "ext-ms-")
+
 
 def assert_relocatable_executable(path: Path) -> None:
     data = path.read_bytes()
@@ -67,6 +104,9 @@ def assert_relocatable_executable(path: Path) -> None:
         return
     if data[:4] == _ELF_MAGIC:
         _assert_elf_relocatable(data)
+        return
+    if data[:2] == b"MZ":
+        _assert_pe_relocatable(data)
         return
 
 
@@ -325,3 +365,104 @@ def _assert_elf_dynamic_relocatable(
         raise ExecutionContractError(
             "materialized executable has a malformed ELF string table",
         ) from exc
+
+
+def _is_trusted_windows_dll(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in _WINDOWS_SYSTEM_DLLS:
+        return True
+    return any(lowered.startswith(prefix) for prefix in _WINDOWS_API_SET_PREFIXES)
+
+
+def _assert_pe_relocatable(data: bytes) -> None:
+    try:
+        if len(data) < 0x40:
+            _malformed("PE")
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        if e_lfanew < 0 or e_lfanew + 24 > len(data) or (
+            data[e_lfanew:e_lfanew + 4] != _PE_SIGNATURE
+        ):
+            _malformed("PE")
+        file_header_offset = e_lfanew + 4
+        (
+            _machine, num_sections, _timestamp, _symtab, _numsym,
+            size_of_optional_header, _characteristics,
+        ) = struct.unpack_from("<HHIIIHH", data, file_header_offset)
+        optional_header_offset = file_header_offset + 20
+        header_end = optional_header_offset + size_of_optional_header
+        if size_of_optional_header < 2 or header_end > len(data):
+            _malformed("PE")
+        magic = struct.unpack_from("<H", data, optional_header_offset)[0]
+        if magic == _OPTIONAL_HEADER_MAGIC_PE32:
+            data_directory_offset = optional_header_offset + 96
+        elif magic == _OPTIONAL_HEADER_MAGIC_PE32_PLUS:
+            data_directory_offset = optional_header_offset + 112
+        else:
+            _malformed("PE")
+            return
+        section_table_offset = header_end
+        if section_table_offset + num_sections * 40 > len(data):
+            _malformed("PE")
+        sections: list[tuple[int, int, int]] = []
+        for index in range(num_sections):
+            entry_offset = section_table_offset + index * 40
+            virtual_size, virtual_address = struct.unpack_from(
+                "<II", data, entry_offset + 8,
+            )
+            size_of_raw_data, pointer_to_raw_data = struct.unpack_from(
+                "<II", data, entry_offset + 16,
+            )
+            sections.append((
+                virtual_address, max(virtual_size, size_of_raw_data),
+                pointer_to_raw_data,
+            ))
+
+        def rva_to_offset(rva: int) -> int:
+            for virtual_address, span, pointer_to_raw_data in sections:
+                if virtual_address <= rva < virtual_address + span:
+                    return pointer_to_raw_data + (rva - virtual_address)
+            _malformed("PE")
+            raise AssertionError("unreachable")
+
+        def read_cstring(offset: int) -> str:
+            end = data.index(b"\x00", offset)
+            return data[offset:end].decode("ascii", errors="surrogateescape")
+
+        dll_names: list[str] = []
+        for directory_index, descriptor_size, name_field_offset in (
+            (_IMAGE_DIRECTORY_ENTRY_IMPORT, 20, 12),
+            (_IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, 32, 4),
+        ):
+            directory_entry_offset = data_directory_offset + directory_index * 8
+            if directory_entry_offset + 8 > header_end:
+                # NumberOfRvaAndSizes didn't reach this directory slot: the
+                # loader itself would never process entries it doesn't know
+                # about, so there is nothing to check, not a malformed file.
+                continue
+            directory_rva, directory_size = struct.unpack_from(
+                "<II", data, directory_entry_offset,
+            )
+            if directory_rva == 0 or directory_size == 0:
+                continue
+            table_offset = rva_to_offset(directory_rva)
+            cursor = table_offset
+            end = table_offset + directory_size
+            while cursor + descriptor_size <= end:
+                descriptor = data[cursor:cursor + descriptor_size]
+                if descriptor == b"\x00" * descriptor_size:
+                    break
+                name_rva = struct.unpack_from(
+                    "<I", descriptor, name_field_offset,
+                )[0]
+                if name_rva == 0:
+                    break
+                dll_names.append(read_cstring(rva_to_offset(name_rva)))
+                cursor += descriptor_size
+    except (struct.error, IndexError, ValueError) as exc:
+        raise ExecutionContractError(
+            "materialized executable has a malformed PE image",
+        ) from exc
+
+    for name in dll_names:
+        if not _is_trusted_windows_dll(name):
+            _reject(f"PE import is not a recognized system DLL: {name}")

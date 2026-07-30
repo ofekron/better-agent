@@ -329,6 +329,109 @@ def test_elf_rejects_relative_needed_but_allows_bare_name() -> None:
             raise AssertionError("expected rejection")
 
 
+_PE_SIG = b"PE\x00\x00"
+
+
+def _build_pe(
+    imports: tuple[str, ...] = (),
+    delay_imports: tuple[str, ...] = (),
+) -> bytes:
+    """Build a minimal, syntactically valid PE32+ image for testing.
+
+    Only the import/delay-import directories assert_relocatable_executable
+    inspects are populated, with a single identity-mapped section (RVA ==
+    file offset) so the RVA-to-file-offset math stays trivial. Never
+    executed, only parsed.
+    """
+    dos_header = b"MZ" + b"\x00" * 0x3A + struct.pack("<I", 0x40)
+    assert len(dos_header) == 0x40
+    file_header = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0)
+    section_start = 0x40 + len(_PE_SIG) + len(file_header) + 240 + 40
+
+    import_table_size = (len(imports) + 1) * 20
+    delay_table_size = (len(delay_imports) + 1) * 32 if delay_imports else 0
+    names_start = import_table_size + delay_table_size
+
+    name_rvas: dict[str, int] = {}
+    cursor = names_start
+    for name in (*imports, *delay_imports):
+        name_rvas[name] = section_start + cursor
+        cursor += len(name.encode("ascii")) + 1
+
+    import_table = b"".join(
+        struct.pack("<IIIII", 0, 0, 0, name_rvas[name], 0) for name in imports
+    ) + b"\x00" * 20
+    delay_table = b""
+    if delay_imports:
+        delay_table = b"".join(
+            struct.pack("<IIIIIIII", 0, name_rvas[name], 0, 0, 0, 0, 0, 0)
+            for name in delay_imports
+        ) + b"\x00" * 32
+    names_blob = b"".join(
+        name.encode("ascii") + b"\x00" for name in (*imports, *delay_imports)
+    )
+    section_data = import_table + delay_table + names_blob
+
+    data_directory = bytearray(16 * 8)
+    if imports:
+        struct.pack_into(
+            "<II", data_directory, 8, section_start, len(import_table),
+        )
+    if delay_imports:
+        struct.pack_into(
+            "<II", data_directory, 13 * 8,
+            section_start + import_table_size, len(delay_table),
+        )
+    optional_header = struct.pack("<H", 0x20B) + b"\x00" * 110 + bytes(data_directory)
+    assert len(optional_header) == 240
+
+    section_header = (
+        b"test\x00\x00\x00\x00"
+        + struct.pack(
+            "<IIII", len(section_data), section_start,
+            len(section_data), section_start,
+        )
+        + b"\x00" * 16
+    )
+    assert len(section_header) == 40
+
+    return (
+        dos_header + _PE_SIG + file_header + optional_header
+        + section_header + section_data
+    )
+
+
+def test_pe_accepts_known_system_dlls() -> None:
+    _assert_accepted(_build_pe(imports=("KERNEL32.dll", "ntdll.dll")))
+
+
+def test_pe_accepts_api_set_prefix() -> None:
+    _assert_accepted(_build_pe(imports=("api-ms-win-core-file-l1-2-0.dll",)))
+
+
+def test_pe_rejects_bundled_import() -> None:
+    message = _assert_rejected(_build_pe(imports=("kernel32.dll", "pythonXY.dll")))
+    assert "pythonXY.dll" in message
+
+
+def test_pe_rejects_bundled_delay_import() -> None:
+    message = _assert_rejected(
+        _build_pe(
+            imports=("kernel32.dll",),
+            delay_imports=("vcruntime140.dll",),
+        ),
+    )
+    assert "vcruntime140.dll" in message
+
+
+def test_pe_with_no_imports_is_accepted() -> None:
+    _assert_accepted(_build_pe())
+
+
+def test_malformed_pe_is_rejected() -> None:
+    _assert_rejected(b"MZ" + b"\x00" * 0x3A + struct.pack("<I", 0x40) + b"XX")
+
+
 TESTS = (
     test_macho_rejects_executable_path_relative_dylib,
     test_macho_rejects_loader_path_relative_dylib,
@@ -342,6 +445,12 @@ TESTS = (
     test_elf_rejects_origin_relative_runpath,
     test_elf_accepts_absolute_rpath_and_runpath,
     test_elf_rejects_relative_needed_but_allows_bare_name,
+    test_pe_accepts_known_system_dlls,
+    test_pe_accepts_api_set_prefix,
+    test_pe_rejects_bundled_import,
+    test_pe_rejects_bundled_delay_import,
+    test_pe_with_no_imports_is_accepted,
+    test_malformed_pe_is_rejected,
 )
 
 
