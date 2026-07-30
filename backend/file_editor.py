@@ -34,6 +34,7 @@ from prompt_templates import render_prompt
 from provisioning import DirtyPolicy, ProvisionedConfig, ProvisionedSessionSpec, register
 from reasoning_effort import normalize_reasoning_effort
 import provisioning.manager as provisioning_manager
+from hot_path_executor import hot_path
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,20 @@ def _base_line_count(project_cwd: str, base_session: dict, base_agent_sid: str) 
         return 0
 
 
+async def _base_line_count_async(
+    project_cwd: str,
+    base_session: dict,
+    base_agent_sid: str,
+) -> int:
+    return await hot_path.run(
+        "file_editor.base_line_count",
+        _base_line_count,
+        project_cwd,
+        base_session,
+        base_agent_sid,
+    )
+
+
 async def _create_interactive_fork(
     *,
     project_cwd: str,
@@ -245,7 +260,11 @@ async def _create_interactive_fork(
     base_agent_sid = str(base_session.get("agent_session_id") or "").strip()
     if not base_agent_sid:
         raise RuntimeError("file-editing base did not initialize")
-    parent_lines = _base_line_count(project_cwd, base_session, base_agent_sid)
+    parent_lines = await _base_line_count_async(
+        project_cwd,
+        base_session,
+        base_agent_sid,
+    )
 
     session = session_manager.create(
         name=name,
