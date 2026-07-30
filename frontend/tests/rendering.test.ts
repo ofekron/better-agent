@@ -107,7 +107,7 @@ describe("message rendering", () => {
     hResolved.unmount();
   });
 
-  it("auto-collapses prior turns and only renders the latest assistant", async () => {
+  it("renders every turn expanded by default (collapse is user-initiated only)", async () => {
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "old" }),
@@ -120,15 +120,11 @@ describe("message rendering", () => {
     await h.selectSession(session.id);
 
     const ids = h.toJSON().chat.messages.map((m) => m.id);
-    expect(ids).toContain("u1");
-    expect(ids).toContain("u2");
-    expect(ids).toContain("a2");
-    // Prior turn's assistant is collapsed and therefore not in the DOM.
-    expect(ids).not.toContain("a1");
+    expect(ids).toEqual(["u1", "a1", "u2", "a2"]);
     h.unmount();
   });
 
-  it("'Expand All' toolbar button expands collapsed prior turns", async () => {
+  it("clicking a manually-collapsed turn's header again re-expands it", async () => {
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "old" }),
@@ -139,9 +135,18 @@ describe("message rendering", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+
+    // Collapse is only ever user-initiated — simulate the click a real
+    // user makes on the prior turn's header.
+    const header = h.$(
+      '[data-testid="user-message"][data-message-id="u1"] .message-box-header-main',
+    )!;
+    header.click();
+    await h.flush();
     expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
 
-    await h.clickByText(/^Expand All$/);
+    header.click();
+    await h.flush();
 
     const ids = h.toJSON().chat.messages.map((m) => m.id);
     expect(ids).toContain("a1");

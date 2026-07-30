@@ -3677,7 +3677,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         </div>
       )}
       {!responseCollapsed && !isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
-        <div className="turn-group-children">
+        <div
+          className="turn-group-children"
+          data-message-id={responseMessage?.id ?? initiatorMessage.id}
+        >
           {responseMessage && (
             <AssistantMessage
               message={responseMessage}

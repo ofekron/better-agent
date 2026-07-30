@@ -7,7 +7,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     name: "test session",
     model: "claude-sonnet-4-6",
     cwd: "/tmp/proj",
-    orchestration_mode: "manager",
+    orchestration_mode: "native",
     created_at: now,
     updated_at: now,
     messages: [],

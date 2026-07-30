@@ -650,7 +650,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       data: { app_session_id: partial.id, success: true },
     });
     await h.flush();
-    expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual(["u3"]);
+    expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual(["u3", "a3"]);
     expect(h.raw.container.textContent).toContain("partial failure");
 
     const authoritative = makeSession({
@@ -699,7 +699,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     h.reopenConnection();
     await waitFor(h, () =>
       h.toJSON().chat.messages.map((message) => message.id).join(",") ===
-      "u1,u2,u3"
+      "u1,a1,u2,a2,u3,a3"
     );
     const reconnectSubscribe = h.outbound
       .filter(
@@ -712,8 +712,11 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
 
     expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual([
       "u1",
+      "a1",
       "u2",
+      "a2",
       "u3",
+      "a3",
     ]);
     expect(h.raw.container.textContent).toContain("first missing prompt");
     expect(h.raw.container.textContent).toContain("second missing prompt");

@@ -1688,6 +1688,7 @@ export function Chat({
                       onRemoveTag={onRemoveTag}
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
+                      orchestrationMode={session?.orchestration_mode}
                       userDisplayName={userDisplayName}
                     />
                     {renderTurnFooter?.(g)}
