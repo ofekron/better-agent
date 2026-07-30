@@ -170,6 +170,15 @@ def test_mobile_lock_matches_merged_manifest() -> None:
     assert lock_root["devDependencies"] == manifest["devDependencies"]
 
 
+def test_rebuild_android_apk_creates_release_destination_before_copy() -> None:
+    source = REBUILD_ANDROID_APK.read_text()
+    mkdir_position = source.find("mkdirSync(dirname(RELEASES_APK)")
+    copy_position = source.find("copyFileSync(APK_OUT, RELEASES_APK)")
+    assert mkdir_position >= 0, "APK rebuild must create the gitignored releases directory"
+    assert copy_position >= 0, "expected APK copy into the releases directory"
+    assert mkdir_position < copy_position
+
+
 if __name__ == "__main__":
     test_mobile_deps_merged_in_during_the_call()
     test_package_json_restored_after_success()
@@ -178,4 +187,5 @@ if __name__ == "__main__":
     test_rebuild_android_apk_builds_vite_in_mobile_mode()
     test_rebuild_android_apk_installs_mobile_dependencies_before_vite()
     test_mobile_lock_matches_merged_manifest()
+    test_rebuild_android_apk_creates_release_destination_before_copy()
     print("cap-sync tests passed")
