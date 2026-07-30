@@ -148,6 +148,7 @@ from orchestration_tool_schemas import (
     harness_profile_wire_fields as _harness_profile_wire_fields,
     normalize_runtime_profile_runner as _normalize_runtime_profile_runner,
     runtime_profile_runner_input_property as _runtime_profile_runner_input_property,
+    resolve_tool_cwd as _resolve_tool_cwd,
 )
 from provider_catalog_mcp import available_provider_models_response
 from user_interaction_tool_contracts import (
@@ -1471,12 +1472,6 @@ def _recover_delegate_result(client_delegation_id: str) -> Optional[dict]:
         "total_bytes_now": total_bytes_now,
         "token_usage": complete.get("token_usage"),
     }
-
-
-def _resolve_tool_cwd(args: dict[str, Any], inherited_cwd: str) -> str:
-    """cwd override-or-inherit: use the caller-supplied cwd if provided,
-    otherwise inherit the creating session's cwd."""
-    return str(args.get("cwd") or "").strip() or inherited_cwd
 
 
 def _build_create_worker_tool(

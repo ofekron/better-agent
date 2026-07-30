@@ -100,6 +100,7 @@ from orchestration_tool_descriptions import (
     STOP_TURN_DESCRIPTION as _STOP_TURN_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
+    CREATE_SESSION_CWD_INPUT_PROPERTY as _CREATE_SESSION_CWD_INPUT_PROPERTY,
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
     HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
@@ -111,6 +112,7 @@ from orchestration_tool_schemas import (
     harness_profile_wire_fields as _harness_profile_wire_fields,
     normalize_runtime_profile_runner as _normalize_runtime_profile_runner,
     runtime_profile_runner_input_property as _runtime_profile_runner_input_property,
+    resolve_tool_cwd as _resolve_tool_cwd,
 )
 from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
@@ -876,6 +878,7 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
 _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        **_CREATE_SESSION_CWD_INPUT_PROPERTY,
         "name": {"type": "string"},
         "orchestration_mode": {
             "type": "string",
@@ -1714,7 +1717,7 @@ def _build_create_session_tool_handler(
                 {
                     "sender_session_id": sender_session_id,
                     "name": name,
-                    "cwd": cwd,
+                    "cwd": _resolve_tool_cwd(args, cwd),
                     "provider_id": str(args.get("provider_id") or "").strip() or None,
                     "model": str(args.get("model") or "").strip(),
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,

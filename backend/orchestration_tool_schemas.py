@@ -68,6 +68,21 @@ HARNESS_PROFILE_INPUT_PROPERTIES: dict[str, Any] = {
     },
 }
 
+CREATE_SESSION_CWD_INPUT_PROPERTY: dict[str, Any] = {
+    "cwd": {
+        "type": ["string", "null"],
+        "description": (
+            "OPTIONAL - working directory for the new session. Defaults to "
+            "(inherits) the creating session's cwd. Set this when targeting a "
+            "node whose filesystem path differs from the creating node."
+        ),
+    },
+}
+
+
+def resolve_tool_cwd(args: dict[str, Any], inherited_cwd: str) -> str:
+    return str(args.get("cwd") or "").strip() or inherited_cwd
+
 
 def harness_profile_wire_fields(profile_id: Any = "") -> dict[str, Any]:
     """Normalize a tool's harness-profile argument into the wire field every

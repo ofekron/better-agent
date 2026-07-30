@@ -88,11 +88,11 @@ def test_ensure_named_worker_no_longer_requires_cwd():
 
 def test_runner_resolve_helper():
     print("runner-native surface:")
-    assert runner._resolve_tool_cwd({}, INHERITED) == INHERITED
-    assert runner._resolve_tool_cwd({"cwd": ""}, INHERITED) == INHERITED
-    assert runner._resolve_tool_cwd({"cwd": "  "}, INHERITED) == INHERITED
-    assert runner._resolve_tool_cwd({"cwd": OVERRIDE}, INHERITED) == OVERRIDE
-    print("  ok: _resolve_tool_cwd inherit/override")
+    assert schemas.resolve_tool_cwd({}, INHERITED) == INHERITED
+    assert schemas.resolve_tool_cwd({"cwd": ""}, INHERITED) == INHERITED
+    assert schemas.resolve_tool_cwd({"cwd": "  "}, INHERITED) == INHERITED
+    assert schemas.resolve_tool_cwd({"cwd": OVERRIDE}, INHERITED) == OVERRIDE
+    print("  ok: resolve_tool_cwd inherit/override")
 
 
 def test_schemas():

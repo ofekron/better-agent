@@ -21,6 +21,10 @@ EXPECTED_RUNNERS = ["native", "better_agent_runner"]
 
 
 def _assert_schema(schema: dict, label: str) -> None:
+    assert schema["properties"]["cwd"]["type"] == ["string", "null"], (
+        f"{label} must expose the optional remote working directory"
+    )
+    assert "cwd" not in schema.get("required", [])
     runner_property = schema["properties"]["runner"]
     advertised = [
         value for value in runner_property["enum"] if value is not None
@@ -70,12 +74,14 @@ async def _exercise_handler(
         valid_result = json.loads(valid_result)
     assert "error" not in str(valid_result).lower()
     assert calls[-1]["runner"] == "native"
+    assert calls[-1]["cwd"] == "C:\\Users\\Lenovo\\remote-project"
 
     inherited_result = await handler({"arguments": {"name": "inherit"}})
     if isinstance(inherited_result, str):
         inherited_result = json.loads(inherited_result)
     assert "error" not in str(inherited_result).lower()
     assert calls[-1]["runner"] is None
+    assert calls[-1]["cwd"] == "/repo"
 
 
 def test_dynamic_handlers_reject_provider_kind_before_session_creation() -> None:
@@ -100,7 +106,11 @@ def test_dynamic_handlers_reject_provider_kind_before_session_creation() -> None
         asyncio.run(_exercise_handler(
             codex,
             invalid_arguments={"name": "bad", "runner": "codex"},
-            valid_arguments={"name": "valid", "runner": "native"},
+            valid_arguments={
+                "name": "valid",
+                "runner": "native",
+                "cwd": "C:\\Users\\Lenovo\\remote-project",
+            },
             calls=calls,
         ))
         calls.clear()
@@ -119,7 +129,11 @@ def test_dynamic_handlers_reject_provider_kind_before_session_creation() -> None
         asyncio.run(_exercise_handler(
             better_agent,
             invalid_arguments={"name": "bad", "runner": "codex"},
-            valid_arguments={"name": "valid", "runner": "native"},
+            valid_arguments={
+                "name": "valid",
+                "runner": "native",
+                "cwd": "C:\\Users\\Lenovo\\remote-project",
+            },
             calls=calls,
         ))
     finally:
@@ -149,13 +163,19 @@ def test_claude_handler_rejects_provider_kind_before_session_creation() -> None:
         assert "native" in invalid["content"][0]["text"]
         assert calls == []
 
-        valid = asyncio.run(tool.handler({"name": "valid", "runner": "native"}))
+        valid = asyncio.run(tool.handler({
+            "name": "valid",
+            "runner": "native",
+            "cwd": "C:\\Users\\Lenovo\\remote-project",
+        }))
         assert valid["is_error"] is False
         assert calls[-1]["runner"] == "native"
+        assert calls[-1]["cwd"] == "C:\\Users\\Lenovo\\remote-project"
 
         inherited = asyncio.run(tool.handler({"name": "inherit"}))
         assert inherited["is_error"] is False
         assert calls[-1]["runner"] is None
+        assert calls[-1]["cwd"] == "/repo"
     finally:
         runner._post_loopback_sync = original
 

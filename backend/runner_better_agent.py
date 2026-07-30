@@ -68,11 +68,13 @@ from orchestration_tool_descriptions import (
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
+    CREATE_SESSION_CWD_INPUT_PROPERTY as _CREATE_SESSION_CWD_INPUT_PROPERTY,
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
     harness_profile_wire_fields as _harness_profile_wire_fields,
     normalize_runtime_profile_runner as _normalize_runtime_profile_runner,
     runtime_profile_runner_input_property as _runtime_profile_runner_input_property,
+    resolve_tool_cwd as _resolve_tool_cwd,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
 from user_interaction_tool_contracts import (
@@ -975,6 +977,7 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
 _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        **_CREATE_SESSION_CWD_INPUT_PROPERTY,
         "name": {"type": "string"},
         "orchestration_mode": {"type": "string", "enum": ["native", "team"]},
         "node_id": {"type": "string"},
@@ -1975,7 +1978,7 @@ def _build_loopback_tool_handlers(
                 {
                     "sender_session_id": app_session_id,
                     "name": name,
-                    "cwd": cwd,
+                    "cwd": _resolve_tool_cwd(args, cwd),
                     "provider_id": str(args.get("provider_id") or "").strip() or None,
                     "model": str(args.get("model") or "").strip(),
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
