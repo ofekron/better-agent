@@ -25,6 +25,38 @@ service="better-claude" fallback.
 The "active provider" is the one whose env vars are applied to os.environ —
 read at user-prompt send time so the next CLI spawn picks them up. Switching
 providers re-applies env; previous providers' settings stay intact.
+
+Runtime profile record (state["runtime_profiles"]):
+    {
+      "id":            str,        # uuid, stable across tombstone/resurrect
+      "provider_id":   str,        # owning provider record (the account)
+      "runner":        str,        # identity with provider_id: one live profile per pair
+      "name":          str,        # user-facing label
+      "default_model": str,        # session-overridable default
+      "default_reasoning_effort": str,
+      "created_at":    str,        # ISO-8601 UTC
+      "updated_at":    str,
+      "deleted_at":    str | None, # tombstone: hidden from pickers, kept for display
+    }
+
+A runtime profile is the user-created execution identity (provider × runner)
+with session-overridable defaults. provider_id and runner are immutable after
+creation; deleting tombstones the record so old sessions still resolve it, and
+recreating the same (provider_id, runner) pair resurrects the tombstone under
+its original id.
+
+state["default_runtime_profile_id"] is the user-facing default: the single
+activation surface. When set it must reference a live profile whose
+provider_id equals default_provider_id — every mutation path keeps the two in
+lockstep (default_provider_id is a projection of the default profile for
+account-level consumers such as env application and suspension checks).
+
+state["deleted_providers"] is a display-only graveyard: {id, name, nickname,
+kind, deleted_at} for providers the user deleted (or a provider sync
+withdrew). Live iterators never see it by construction; tombstoned runtime
+profiles resolve their provider display through it. Credentials are wiped at
+burial time — the graveyard never holds secrets. Recreating a provider always
+mints a fresh id.
 """
 
 import logging
@@ -767,6 +799,7 @@ def apply_installation_profile_selection(make_default: bool = False) -> dict:
         if not created:
             _advance_provider_revision(target)
         state["default_provider_id"] = target["id"]
+        _reconcile_default_runtime_profile(state)
     elif target_changed:
         _advance_provider_revision(target)
     if created or target_changed or default_changed:
@@ -951,10 +984,21 @@ def _normalize_loaded_state(raw: dict) -> dict:
         raise RuntimeError(
             f"unsupported provider config schema: {exc}"
         ) from exc
+    runtime_profiles = _normalize_runtime_profiles(
+        raw.get("runtime_profiles"), providers
+    )
+    _validate_default_runtime_profile_id(
+        raw.get("default_runtime_profile_id"), active, runtime_profiles
+    )
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": active,
         "providers": providers,
+        "runtime_profiles": runtime_profiles,
+        "default_runtime_profile_id": raw.get("default_runtime_profile_id"),
+        "deleted_providers": _normalize_deleted_providers(
+            raw.get("deleted_providers"), providers
+        ),
         "provider_state_authority": provider_state_authority,
         "provider_state_projected": projected,
         "delegate_task_policy": _normalize_delegate_task_policy(
@@ -987,6 +1031,10 @@ def _migrate_schema_1_to_2(raw: dict) -> dict:
     expected_v1["schema_version"] = 1
     expected_v1.pop("provider_state_authority")
     expected_v1.pop("provider_state_projected")
+    # v1 predates runtime profiles; the keys only exist post-normalization.
+    expected_v1.pop("runtime_profiles")
+    expected_v1.pop("default_runtime_profile_id")
+    expected_v1.pop("deleted_providers")
     if raw != expected_v1:
         raise RuntimeError("unsupported provider config schema")
     return normalized
@@ -1327,6 +1375,13 @@ def _save_state(
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": default_provider_id,
         "providers": providers,
+        "runtime_profiles": _normalize_runtime_profiles(
+            state.get("runtime_profiles"), providers
+        ),
+        "default_runtime_profile_id": state.get("default_runtime_profile_id"),
+        "deleted_providers": _normalize_deleted_providers(
+            state.get("deleted_providers"), providers
+        ),
         "provider_state_authority": authority,
         "provider_state_projected": state.get("provider_state_projected", False),
         "delegate_task_policy": state.get("delegate_task_policy", "auto"),
@@ -2177,6 +2232,18 @@ def _import_provider_sync_state(
     next_state["default_provider_id"] = default_provider_id
     next_state["provider_state_authority"] = copy.deepcopy(incoming_authority)
     next_state["provider_state_projected"] = True
+    # Profiles are local-only state layered on the synced provider set: bury
+    # providers the sync withdrew, tombstone their live profiles, then
+    # re-derive the default profile for the incoming default provider.
+    incoming_ids = {p.get("id") for p in providers}
+    withdrawn = [
+        p
+        for p in (state.get("providers", []) if state is not None else [])
+        if p.get("id") not in incoming_ids
+    ]
+    _bury_providers(next_state, withdrawn)
+    _tombstone_orphaned_runtime_profiles(next_state)
+    _reconcile_default_runtime_profile(next_state)
     _validate_state_for_save(next_state)
     config_changed = not same_authority
     with _credential_transaction(
@@ -2554,6 +2621,7 @@ def update_provider(
             state["default_provider_id"] = (
                 default_replacement.get("id") if default_replacement else None
             )
+            _reconcile_default_runtime_profile(state)
     if "allowed_sinks" in payload:
         target["allowed_sinks"] = _clean_allowed_sinks(payload["allowed_sinks"])
     if "capabilities" in payload:
@@ -2624,10 +2692,488 @@ def delete_provider(
     state["providers"] = [
         p for p in state.get("providers", []) if p.get("id") != provider_id
     ]
+    _bury_providers(state, [target])
+    _tombstone_orphaned_runtime_profiles(state)
     _validate_state_for_save(state)
     with _credential_transaction([(provider_id, "")]):
         _save_state(state)
     return True, "ok"
+
+
+# ----------------------------------------------------------------------------
+# Public API: runtime profiles
+# ----------------------------------------------------------------------------
+
+_RUNTIME_PROFILE_FIELDS = frozenset({
+    "id", "provider_id", "runner", "name", "default_model",
+    "default_reasoning_effort", "created_at", "updated_at", "deleted_at",
+})
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def runtime_profile_is_deleted(profile: dict | None) -> bool:
+    return bool((profile or {}).get("deleted_at"))
+
+
+def _default_runtime_profile_name(provider: dict, runner: str) -> str:
+    label = str(
+        provider.get("nickname") or provider.get("name") or provider.get("kind") or "Provider"
+    ).strip()
+    return f"{label} ({runner})"
+
+
+def _validate_default_runtime_profile_id(
+    value, default_provider_id, runtime_profiles: list[dict]
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(
+            "unsupported provider config schema: default_runtime_profile_id is invalid"
+        )
+    target = next((p for p in runtime_profiles if p.get("id") == value), None)
+    if target is None or runtime_profile_is_deleted(target):
+        raise RuntimeError(
+            "unsupported provider config schema: default_runtime_profile_id "
+            "must reference a live runtime profile"
+        )
+    if target.get("provider_id") != default_provider_id:
+        raise RuntimeError(
+            "unsupported provider config schema: default runtime profile does "
+            "not belong to the default provider"
+        )
+
+
+_DELETED_PROVIDER_FIELDS = frozenset({"id", "name", "nickname", "kind", "deleted_at"})
+
+
+def _normalize_deleted_providers(raw, providers: list[dict]) -> list[dict]:
+    """Strict canonical validation of the provider graveyard. Display-only
+    records; ids must not collide with live providers or each other."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            "unsupported provider config schema: deleted_providers must be a list"
+        )
+    live_ids = {p.get("id") for p in providers}
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+    for record in raw:
+        if not isinstance(record, dict) or set(record) != _DELETED_PROVIDER_FIELDS:
+            raise RuntimeError(
+                "unsupported provider config schema: noncanonical deleted provider record"
+            )
+        pid = record.get("id")
+        if not isinstance(pid, str) or not pid or pid in seen_ids:
+            raise RuntimeError(
+                "unsupported provider config schema: invalid deleted provider id"
+            )
+        seen_ids.add(pid)
+        if pid in live_ids:
+            # A live record with the same id (ABA recreation, sync
+            # reintroduction) supersedes the tombstone — drop it.
+            continue
+        for field in ("kind", "deleted_at"):
+            if not isinstance(record.get(field), str) or not record.get(field):
+                raise RuntimeError(
+                    f"unsupported provider config schema: deleted provider {field} is invalid"
+                )
+        for field in ("name", "nickname"):
+            if not isinstance(record.get(field), str):
+                raise RuntimeError(
+                    f"unsupported provider config schema: deleted provider {field} is invalid"
+                )
+        out.append(copy.deepcopy(record))
+    return out
+
+
+def _bury_providers(state: dict, withdrawn: list[dict]) -> None:
+    """Move withdrawn provider records into the display-only graveyard.
+    Secrets never enter the graveyard; callers wipe credentials separately."""
+    if not withdrawn:
+        return
+    graveyard = state.setdefault("deleted_providers", [])
+    now = _utc_now_iso()
+    buried_ids = {record.get("id") for record in graveyard}
+    for provider in withdrawn:
+        if provider.get("id") in buried_ids:
+            continue
+        graveyard.append({
+            "id": str(provider.get("id") or ""),
+            "name": str(provider.get("name") or ""),
+            "nickname": str(provider.get("nickname") or ""),
+            "kind": str(provider.get("kind") or "claude"),
+            "deleted_at": now,
+        })
+
+
+def get_deleted_provider(provider_id: str) -> Optional[dict]:
+    """Display-only graveyard record for a deleted provider, or None."""
+    for record in _load_state().get("deleted_providers", []):
+        if record.get("id") == provider_id:
+            return copy.deepcopy(record)
+    return None
+
+
+def _tombstone_orphaned_runtime_profiles(state: dict) -> None:
+    """Tombstone live profiles whose provider left the provider set (provider
+    sync import). Mirrors the provider-deletion cascade semantics."""
+    known_provider_ids = {p.get("id") for p in state.get("providers", [])}
+    now = _utc_now_iso()
+    for profile in state.get("runtime_profiles", []):
+        if (
+            not runtime_profile_is_deleted(profile)
+            and profile.get("provider_id") not in known_provider_ids
+        ):
+            profile["deleted_at"] = now
+            profile["updated_at"] = now
+
+
+def _reconcile_default_runtime_profile(state: dict) -> None:
+    """Re-derive default_runtime_profile_id after a default/provider-set change
+    made outside profile activation (installation selection, suspension
+    fallback, provider sync import). Keeps the lockstep invariant without
+    bricking on external mutations."""
+    default_provider_id = state.get("default_provider_id")
+    profiles = state.get("runtime_profiles", [])
+    current_id = state.get("default_runtime_profile_id")
+    current = next((p for p in profiles if p.get("id") == current_id), None)
+    if (
+        current is not None
+        and not runtime_profile_is_deleted(current)
+        and current.get("provider_id") == default_provider_id
+    ):
+        return
+    replacement = None
+    if default_provider_id:
+        provider = next(
+            (
+                p for p in state.get("providers", [])
+                if p.get("id") == default_provider_id
+            ),
+            None,
+        )
+        if provider is not None:
+            replacement = next(
+                (
+                    p for p in profiles
+                    if p.get("provider_id") == default_provider_id
+                    and p.get("runner") == provider.get("runner")
+                    and not runtime_profile_is_deleted(p)
+                ),
+                None,
+            )
+    state["default_runtime_profile_id"] = (
+        replacement.get("id") if replacement else None
+    )
+
+
+def _normalize_runtime_profiles(raw, providers: list[dict]) -> list[dict]:
+    """Strict canonical validation of the runtime-profiles list.
+
+    Absent key → empty list (pre-profile states). Present records must carry
+    exactly the canonical field set, unique ids, and at most one live profile
+    per (provider_id, runner). Live profiles must reference an existing
+    provider; tombstones tolerate a missing provider so display-only data can
+    never brick the store."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            "unsupported provider config schema: runtime_profiles must be a list"
+        )
+    known_provider_ids = {p.get("id") for p in providers}
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    live_pairs: set[tuple[str, str]] = set()
+    for profile in raw:
+        if not isinstance(profile, dict) or set(profile) != _RUNTIME_PROFILE_FIELDS:
+            raise RuntimeError(
+                "unsupported provider config schema: noncanonical runtime profile record"
+            )
+        pid = profile.get("id")
+        if not isinstance(pid, str) or not pid or pid in seen_ids:
+            raise RuntimeError(
+                "unsupported provider config schema: invalid runtime profile id"
+            )
+        seen_ids.add(pid)
+        for field in ("provider_id", "runner", "name", "created_at", "updated_at"):
+            value = profile.get(field)
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(
+                    f"unsupported provider config schema: runtime profile {field} is invalid"
+                )
+        for field in ("default_model", "default_reasoning_effort"):
+            if not isinstance(profile.get(field), str):
+                raise RuntimeError(
+                    f"unsupported provider config schema: runtime profile {field} is invalid"
+                )
+        deleted_at = profile.get("deleted_at")
+        if deleted_at is not None and (not isinstance(deleted_at, str) or not deleted_at):
+            raise RuntimeError(
+                "unsupported provider config schema: runtime profile deleted_at is invalid"
+            )
+        if deleted_at is None:
+            if profile["provider_id"] not in known_provider_ids:
+                raise RuntimeError(
+                    "unsupported provider config schema: live runtime profile "
+                    "references unknown provider"
+                )
+            pair = (profile["provider_id"], profile["runner"])
+            if pair in live_pairs:
+                raise RuntimeError(
+                    "unsupported provider config schema: duplicate live runtime "
+                    "profile for provider/runner pair"
+                )
+            live_pairs.add(pair)
+        out.append(copy.deepcopy(profile))
+    return out
+
+
+def list_runtime_profiles(*, include_deleted: bool = False) -> list[dict]:
+    profiles = _load_state().get("runtime_profiles", [])
+    if include_deleted:
+        return copy.deepcopy(profiles)
+    return [copy.deepcopy(p) for p in profiles if not runtime_profile_is_deleted(p)]
+
+
+def get_runtime_profile(profile_id: str, *, include_deleted: bool = True) -> Optional[dict]:
+    for profile in _load_state().get("runtime_profiles", []):
+        if profile.get("id") == profile_id:
+            if not include_deleted and runtime_profile_is_deleted(profile):
+                return None
+            return copy.deepcopy(profile)
+    return None
+
+
+def find_live_runtime_profile(provider_id: str, runner: str) -> Optional[dict]:
+    """The single live profile for a (provider_id, runner) pair, or None."""
+    for profile in _load_state().get("runtime_profiles", []):
+        if (
+            profile.get("provider_id") == provider_id
+            and profile.get("runner") == runner
+            and not runtime_profile_is_deleted(profile)
+        ):
+            return copy.deepcopy(profile)
+    return None
+
+
+def _clean_runtime_profile_defaults(
+    provider: dict, runner: str, payload: dict, current: dict | None = None
+) -> tuple[str, str]:
+    base = current or {}
+    if "default_model" in payload:
+        default_model = str(payload.get("default_model") or "").strip()
+    else:
+        default_model = str(base.get("default_model") or "")
+    record = runtime_profile.provider_record_for_runner(provider, runner)
+    if "default_reasoning_effort" in payload:
+        effort_source = payload.get("default_reasoning_effort")
+    else:
+        effort_source = base.get("default_reasoning_effort")
+    default_effort = clean_default_reasoning_effort_for_provider(record, effort_source)
+    return default_model, default_effort
+
+
+@_serialized_provider_mutation
+def add_runtime_profile(payload: dict) -> dict:
+    """Create the live runtime profile for (provider_id, runner), or resurrect
+    the pair's tombstone under its original id. Fails on an existing live
+    profile for the pair, an unknown provider, or an unsupported runner."""
+    state = _load_state()
+    provider_id = str(payload.get("provider_id") or "").strip()
+    provider = next(
+        (p for p in state.get("providers", []) if p.get("id") == provider_id),
+        None,
+    )
+    if provider is None:
+        raise ValueError(f"unknown provider: {provider_id or '<empty>'}")
+    requested_runner = str(payload.get("runner") or "").strip()
+    if not requested_runner:
+        raise ValueError("runner is required")
+    runner = runtime_profile.resolve_runner(provider, requested_runner, strict=True)
+    profiles = state.setdefault("runtime_profiles", [])
+    now = _utc_now_iso()
+    existing = next(
+        (
+            p for p in profiles
+            if p.get("provider_id") == provider_id and p.get("runner") == runner
+        ),
+        None,
+    )
+    if existing is not None and not runtime_profile_is_deleted(existing):
+        raise ValueError(
+            f"a live runtime profile already exists for provider "
+            f"{provider_id} with runner {runner}"
+        )
+    name = str(payload.get("name") or "").strip()
+    default_model, default_effort = _clean_runtime_profile_defaults(
+        provider, runner, payload, current=existing
+    )
+    if existing is not None:
+        existing["deleted_at"] = None
+        existing["name"] = name or existing.get("name") or _default_runtime_profile_name(provider, runner)
+        existing["default_model"] = default_model
+        existing["default_reasoning_effort"] = default_effort
+        existing["updated_at"] = now
+        result = copy.deepcopy(existing)
+    else:
+        profile = {
+            "id": str(uuid.uuid4()),
+            "provider_id": provider_id,
+            "runner": runner,
+            "name": name or _default_runtime_profile_name(provider, runner),
+            "default_model": default_model,
+            "default_reasoning_effort": default_effort,
+            "created_at": now,
+            "updated_at": now,
+            "deleted_at": None,
+        }
+        profiles.append(profile)
+        result = copy.deepcopy(profile)
+    _validate_state_for_save(state)
+    _save_state(state)
+    return result
+
+
+@_serialized_provider_mutation
+def update_runtime_profile(profile_id: str, payload: dict) -> Optional[dict]:
+    """Patch a live profile's name/defaults. provider_id and runner are the
+    profile's identity and immutable; a tombstoned profile is not editable."""
+    immutable = {"provider_id", "runner", "id"} & set(payload)
+    if immutable:
+        raise ValueError(
+            f"runtime profile fields are immutable: {', '.join(sorted(immutable))}"
+        )
+    state = _load_state()
+    target = next(
+        (p for p in state.get("runtime_profiles", []) if p.get("id") == profile_id),
+        None,
+    )
+    if target is None:
+        return None
+    if runtime_profile_is_deleted(target):
+        raise ValueError(f"runtime profile {profile_id} is deleted")
+    provider = next(
+        (p for p in state.get("providers", []) if p.get("id") == target["provider_id"]),
+        None,
+    )
+    if provider is None:
+        raise ValueError(
+            f"runtime profile {profile_id} references unknown provider"
+        )
+    before = copy.deepcopy(target)
+    if "name" in payload:
+        target["name"] = (
+            str(payload.get("name") or "").strip()
+            or _default_runtime_profile_name(provider, target["runner"])
+        )
+    default_model, default_effort = _clean_runtime_profile_defaults(
+        provider, target["runner"], payload, current=target
+    )
+    target["default_model"] = default_model
+    target["default_reasoning_effort"] = default_effort
+    if target == before:
+        return copy.deepcopy(target)
+    target["updated_at"] = _utc_now_iso()
+    _validate_state_for_save(state)
+    _save_state(state)
+    return copy.deepcopy(target)
+
+
+@_serialized_provider_mutation
+def delete_runtime_profile(profile_id: str) -> tuple[bool, str]:
+    """Tombstone a profile: hidden from pickers/creation, kept for display on
+    old sessions. Refuses to delete the default profile. Returns
+    (deleted, reason)."""
+    state = _load_state()
+    target = next(
+        (p for p in state.get("runtime_profiles", []) if p.get("id") == profile_id),
+        None,
+    )
+    if target is None:
+        return False, "missing"
+    if runtime_profile_is_deleted(target):
+        return False, "already_deleted"
+    if state.get("default_runtime_profile_id") == profile_id:
+        return False, "default"
+    now = _utc_now_iso()
+    target["deleted_at"] = now
+    target["updated_at"] = now
+    _validate_state_for_save(state)
+    _save_state(state)
+    return True, "ok"
+
+
+def get_default_runtime_profile_id() -> Optional[str]:
+    return _load_state().get("default_runtime_profile_id")
+
+
+def get_default_runtime_profile() -> Optional[dict]:
+    state = _load_state()
+    profile_id = state.get("default_runtime_profile_id")
+    if not profile_id:
+        return None
+    return next(
+        (
+            copy.deepcopy(p)
+            for p in state.get("runtime_profiles", [])
+            if p.get("id") == profile_id
+        ),
+        None,
+    )
+
+
+@_serialized_provider_mutation
+def activate_runtime_profile(profile_id: str) -> Optional[dict]:
+    """Make a live profile the default. The single activation surface: also
+    projects default_provider_id (account-level consumers) and re-applies env.
+    Rejects tombstoned profiles and suspended providers."""
+    state = _load_state()
+    target = next(
+        (p for p in state.get("runtime_profiles", []) if p.get("id") == profile_id),
+        None,
+    )
+    if target is None:
+        return None
+    if runtime_profile_is_deleted(target):
+        raise ValueError(f"runtime profile {profile_id} is deleted")
+    provider = next(
+        (
+            p for p in state.get("providers", [])
+            if p.get("id") == target["provider_id"]
+        ),
+        None,
+    )
+    if provider is None:
+        raise ValueError(f"runtime profile {profile_id} references unknown provider")
+    if _provider_is_suspended(provider):
+        raise RuntimeError("provider is suspended")
+    if (
+        state.get("default_runtime_profile_id") == profile_id
+        and state.get("default_provider_id") == provider["id"]
+    ):
+        return copy.deepcopy(target)
+    previous_id = state.get("default_provider_id")
+    if previous_id != provider["id"]:
+        previous = next(
+            (p for p in state.get("providers", []) if p.get("id") == previous_id),
+            None,
+        )
+        if previous is not None:
+            _advance_provider_revision(previous)
+        _advance_provider_revision(provider)
+        state["default_provider_id"] = provider["id"]
+    state["default_runtime_profile_id"] = profile_id
+    _validate_state_for_save(state)
+    _save_state(state)
+    apply_provider_config_env_vars()
+    return copy.deepcopy(target)
 
 
 @_serialized_provider_mutation
@@ -2666,6 +3212,7 @@ def set_default_provider(
         _advance_provider_revision(previous)
     _advance_provider_revision(target)
     state["default_provider_id"] = provider_id
+    _reconcile_default_runtime_profile(state)
     _save_state(state)
     apply_provider_config_env_vars()
     return list_provider_ui_state()

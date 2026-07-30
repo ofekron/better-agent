@@ -22,6 +22,9 @@ state = json.loads(config_store._config_path().read_text(encoding="utf-8"))
 state["schema_version"] = config_store.MIN_SUPPORTED_CONFIG_SCHEMA_VERSION
 state.pop("provider_state_authority")
 state.pop("provider_state_projected")
+state.pop("runtime_profiles")
+state.pop("default_runtime_profile_id")
+state.pop("deleted_providers")
 active = next(
     provider
     for provider in state["providers"]

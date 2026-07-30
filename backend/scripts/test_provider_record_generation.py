@@ -99,6 +99,9 @@ def _unversioned_provider_state(canonical: dict) -> dict:
     state.pop("schema_version")
     state.pop("provider_state_authority")
     state.pop("provider_state_projected")
+    state.pop("runtime_profiles")
+    state.pop("default_runtime_profile_id")
+    state.pop("deleted_providers")
     for provider in state["providers"]:
         provider.pop("generation")
         provider.pop("revision")
@@ -110,6 +113,9 @@ def _schema_v1_state(canonical: dict) -> dict:
     state["schema_version"] = 1
     state.pop("provider_state_authority")
     state.pop("provider_state_projected")
+    state.pop("runtime_profiles")
+    state.pop("default_runtime_profile_id")
+    state.pop("deleted_providers")
     return state
 
 
