@@ -72,9 +72,24 @@ def _raises_value_error(fn) -> str:
     raise AssertionError("expected ValueError")
 
 
+def test_seeded_state_has_profiles() -> None:
+    ui = config_store.list_provider_ui_state()
+    default_profile = config_store.get_default_runtime_profile()
+    assert default_profile is not None
+    assert default_profile["provider_id"] == ui["default_provider_id"]
+    for provider in ui["providers"]:
+        live = [
+            p
+            for p in config_store.list_runtime_profiles()
+            if p["provider_id"] == provider["id"]
+        ]
+        assert len(live) == 1, "each seeded provider gets exactly one profile"
+
+
 def test_add_profile_creates_canonical_record() -> None:
     provider = _some_provider()
-    runner = provider["runner_options"][0]
+    assert len(provider["runner_options"]) > 1, "test needs a second runner"
+    runner = provider["runner_options"][-1]
     profile = config_store.add_runtime_profile(
         {"provider_id": provider["id"], "runner": runner}
     )
@@ -94,7 +109,7 @@ def test_add_profile_creates_canonical_record() -> None:
 
 def test_add_profile_rejections() -> None:
     provider = _some_provider()
-    runner = provider["runner_options"][0]
+    runner = provider["runner_options"][-1]
     message = _raises_value_error(
         lambda: config_store.add_runtime_profile(
             {"provider_id": provider["id"], "runner": runner}
@@ -121,7 +136,7 @@ def test_add_profile_rejections() -> None:
 
 def test_update_profile_patches_and_guards() -> None:
     provider = _some_provider()
-    runner = provider["runner_options"][0]
+    runner = provider["runner_options"][-1]
     profile = config_store.find_live_runtime_profile(provider["id"], runner)
     assert profile is not None
     updated = config_store.update_runtime_profile(
@@ -146,15 +161,20 @@ def test_update_profile_patches_and_guards() -> None:
 
 def test_soft_delete_and_listing() -> None:
     provider = _some_provider()
-    runner = provider["runner_options"][0]
+    runner = provider["runner_options"][-1]
     profile = config_store.find_live_runtime_profile(provider["id"], runner)
     assert profile is not None
     deleted, reason = config_store.delete_runtime_profile(profile["id"])
     assert deleted and reason == "ok"
     assert config_store.find_live_runtime_profile(provider["id"], runner) is None
-    assert config_store.list_runtime_profiles() == []
-    tombstones = config_store.list_runtime_profiles(include_deleted=True)
-    assert [p["id"] for p in tombstones] == [profile["id"]]
+    live_ids = {p["id"] for p in config_store.list_runtime_profiles()}
+    assert profile["id"] not in live_ids
+    tombstones = [
+        p
+        for p in config_store.list_runtime_profiles(include_deleted=True)
+        if p["id"] == profile["id"]
+    ]
+    assert len(tombstones) == 1
     assert tombstones[0]["deleted_at"]
     assert config_store.get_runtime_profile(profile["id"]) is not None
     assert (
@@ -172,8 +192,14 @@ def test_soft_delete_and_listing() -> None:
 
 def test_resurrect_keeps_id() -> None:
     provider = _some_provider()
-    runner = provider["runner_options"][0]
-    tombstone = config_store.list_runtime_profiles(include_deleted=True)[0]
+    runner = provider["runner_options"][-1]
+    tombstone = next(
+        p
+        for p in config_store.list_runtime_profiles(include_deleted=True)
+        if p["provider_id"] == provider["id"]
+        and p["runner"] == runner
+        and p["deleted_at"]
+    )
     revived = config_store.add_runtime_profile(
         {
             "provider_id": provider["id"],
@@ -187,7 +213,12 @@ def test_resurrect_keeps_id() -> None:
     assert revived["name"] == "Back Again"
     assert revived["default_model"] == "revived-model"
     assert revived["created_at"] == tombstone["created_at"]
-    assert len(config_store.list_runtime_profiles(include_deleted=True)) == 1
+    matching = [
+        p
+        for p in config_store.list_runtime_profiles(include_deleted=True)
+        if p["provider_id"] == provider["id"] and p["runner"] == runner
+    ]
+    assert len(matching) == 1
 
 
 def test_persistence_roundtrip() -> None:
@@ -201,6 +232,11 @@ def test_noncanonical_records_are_rejected() -> None:
     config_path = config_store._config_path()
     raw = json.loads(Path(config_path).read_text())
     assert raw.get("runtime_profiles"), "expected persisted profiles"
+    idx = next(
+        i
+        for i, p in enumerate(raw["runtime_profiles"])
+        if p["id"] != raw.get("default_runtime_profile_id") and not p["deleted_at"]
+    )
 
     def _expect_load_failure(mutate) -> None:
         broken = copy.deepcopy(raw)
@@ -217,28 +253,28 @@ def test_noncanonical_records_are_rejected() -> None:
         _reset_cache()
 
     _expect_load_failure(
-        lambda state: state["runtime_profiles"][0].update({"extra": True})
+        lambda state: state["runtime_profiles"][idx].update({"extra": True})
     )
     _expect_load_failure(
-        lambda state: state["runtime_profiles"][0].pop("created_at")
+        lambda state: state["runtime_profiles"][idx].pop("created_at")
     )
     _expect_load_failure(
         lambda state: state["runtime_profiles"].append(
-            copy.deepcopy(state["runtime_profiles"][0])
+            copy.deepcopy(state["runtime_profiles"][idx])
         )
     )
     _expect_load_failure(
-        lambda state: state["runtime_profiles"][0].update(
+        lambda state: state["runtime_profiles"][idx].update(
             {"provider_id": "ghost", "deleted_at": None}
         )
     )
 
     broken = copy.deepcopy(raw)
-    broken["runtime_profiles"][0].update({"provider_id": "ghost", "deleted_at": "2026-01-01T00:00:00+00:00"})
+    broken["runtime_profiles"][idx].update({"provider_id": "ghost", "deleted_at": "2026-01-01T00:00:00+00:00"})
     Path(config_path).write_text(json.dumps(broken))
     _reset_cache()
     tombstones = config_store.list_runtime_profiles(include_deleted=True)
-    assert tombstones and tombstones[0]["provider_id"] == "ghost"
+    assert any(p["provider_id"] == "ghost" for p in tombstones)
     Path(config_path).write_text(json.dumps(raw))
     _reset_cache()
 
@@ -370,6 +406,7 @@ def test_provider_deletion_cascade_and_graveyard() -> None:
 
 def main() -> int:
     tests = [
+        test_seeded_state_has_profiles,
         test_add_profile_creates_canonical_record,
         test_add_profile_rejections,
         test_update_profile_patches_and_guards,

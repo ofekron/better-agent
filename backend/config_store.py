@@ -807,6 +807,9 @@ def apply_installation_profile_selection(make_default: bool = False) -> dict:
     if target is None:
         target = _new_provider_record(kind)
         state["providers"].append(target)
+        state.setdefault("runtime_profiles", []).append(
+            _seed_profile_for_provider(target)
+        )
     target_changed = target["suspended"] is True
     if target_changed:
         target["suspended"] = False
@@ -955,11 +958,24 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
     for provider in providers:
         if not isinstance(provider, dict):
             raise RuntimeError("unsupported provider config schema: invalid provider record")
-        canonical = _clean_provider_record(provider)
+        # Unversioned-era records carry the execution fields that v3 moves
+        # onto runtime profiles; validate the account shape without them and
+        # keep them for the 2→3 conversion below.
+        working = dict(provider)
+        for field in ("runner", "default_model", "default_reasoning_effort"):
+            if not isinstance(working.get(field), str):
+                raise RuntimeError(
+                    f"unsupported provider config schema: provider {field} is invalid"
+                )
+        execution_fields = {
+            field: working.pop(field)
+            for field in ("runner", "default_model", "default_reasoning_effort")
+        }
+        canonical = _clean_provider_record(working)
         accepted = dict(canonical)
         if "nickname" not in provider and canonical["nickname"] == "":
             accepted.pop("nickname")
-        if provider != accepted:
+        if working != accepted:
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         provider_id = provider.get("id")
         if (
@@ -971,20 +987,17 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
         provider_ids.add(provider_id)
         migrated.append({
             **canonical,
+            **execution_fields,
             **_new_provider_authority(),
         })
-    default_provider_id = raw["default_provider_id"]
-    state = _normalize_loaded_state({
+    # No pre-migration authority: _migrate_schema_2_to_3 mints a fresh one
+    # over the final (field-stripped) provider set at revision 0.
+    return _migrate_schema_2_to_3({
         **raw,
-        "schema_version": CONFIG_SCHEMA_VERSION,
+        "schema_version": 2,
         "providers": migrated,
-        "provider_state_authority": provider_sync_authority.new_authority(
-            default_provider_id,
-            migrated,
-        ),
         "provider_state_projected": False,
     })
-    return state
 
 
 def _normalize_loaded_state(raw: dict) -> dict:
@@ -1115,6 +1128,18 @@ def _migrate_schema_2_to_3(raw: dict) -> dict:
     providers = state.get("providers")
     if not isinstance(providers, list):
         raise RuntimeError("unsupported provider config schema")
+    provider_state_authority = None
+    if "provider_state_authority" in state:
+        try:
+            provider_state_authority = provider_sync_authority.validate_authority(
+                state.get("provider_state_authority"),
+                state.get("default_provider_id"),
+                providers,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"unsupported provider config schema: {exc}"
+            ) from exc
     profiles = state.get("runtime_profiles")
     if profiles is None:
         profiles = []
@@ -1177,6 +1202,21 @@ def _migrate_schema_2_to_3(raw: dict) -> dict:
             default_profile.get("id") if default_profile else None
         )
     state["schema_version"] = 3
+    if provider_state_authority is None:
+        # Migration paths with no pre-existing authority (legacy unversioned
+        # states) mint a fresh one over the final provider set.
+        state["provider_state_authority"] = provider_sync_authority.new_authority(
+            state.get("default_provider_id"),
+            providers,
+        )
+    else:
+        # The field move changes the provider snapshot: advance so PCS peers
+        # see the shape change instead of a silent digest mismatch.
+        state["provider_state_authority"] = provider_sync_authority.advance_authority(
+            provider_state_authority,
+            state.get("default_provider_id"),
+            providers,
+        )
     return _normalize_loaded_state(state)
 
 
@@ -3217,6 +3257,13 @@ def add_runtime_profile(payload: dict) -> dict:
     if not requested_runner:
         raise ValueError("runner is required")
     runner = runtime_profile.resolve_runner(provider, requested_runner, strict=True)
+    # Runner-specific wire-format rules (e.g. claude better_agent_runner
+    # requires subscription mode) are enforced at profile creation.
+    _reject_unsupported_provider_config(
+        str(provider.get("kind") or "claude"),
+        provider.get("mode", "subscription"),
+        runner,
+    )
     profiles = state.setdefault("runtime_profiles", [])
     now = _utc_now_iso()
     existing = next(

@@ -22,9 +22,18 @@ state = json.loads(config_store._config_path().read_text(encoding="utf-8"))
 state["schema_version"] = config_store.MIN_SUPPORTED_CONFIG_SCHEMA_VERSION
 state.pop("provider_state_authority")
 state.pop("provider_state_projected")
-state.pop("runtime_profiles")
+profiles = {
+    profile["provider_id"]: profile
+    for profile in state.pop("runtime_profiles")
+    if not profile["deleted_at"]
+}
 state.pop("default_runtime_profile_id")
 state.pop("deleted_providers")
+for provider in state["providers"]:
+    profile = profiles[provider["id"]]
+    provider["runner"] = profile["runner"]
+    provider["default_model"] = profile["default_model"]
+    provider["default_reasoning_effort"] = profile["default_reasoning_effort"]
 active = next(
     provider
     for provider in state["providers"]

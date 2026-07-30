@@ -95,7 +95,7 @@ def _all_keys(value: object) -> set[str]:
 
 
 def _unversioned_provider_state(canonical: dict) -> dict:
-    state = copy.deepcopy(canonical)
+    state = _schema_v2_state(canonical)
     state.pop("schema_version")
     state.pop("provider_state_authority")
     state.pop("provider_state_projected")
@@ -109,13 +109,42 @@ def _unversioned_provider_state(canonical: dict) -> dict:
 
 
 def _schema_v1_state(canonical: dict) -> dict:
-    state = copy.deepcopy(canonical)
+    state = _schema_v2_state(canonical)
     state["schema_version"] = 1
     state.pop("provider_state_authority")
     state.pop("provider_state_projected")
     state.pop("runtime_profiles")
     state.pop("default_runtime_profile_id")
     state.pop("deleted_providers")
+    return state
+
+
+def _schema_v2_state(canonical: dict) -> dict:
+    state = copy.deepcopy(canonical)
+    state["schema_version"] = 2
+    profiles_by_provider = {
+        profile["provider_id"]: profile
+        for profile in state["runtime_profiles"]
+        if not profile["deleted_at"]
+    }
+    for provider in state["providers"]:
+        profile = profiles_by_provider.get(provider["id"])
+        kind = provider["kind"]
+        provider["runner"] = (
+            profile["runner"] if profile else config_store._clean_runner(kind, "")
+        )
+        provider["default_model"] = profile["default_model"] if profile else ""
+        provider["default_reasoning_effort"] = (
+            profile["default_reasoning_effort"]
+            if profile
+            else config_store._clean_default_reasoning_effort(kind, None)
+        )
+    state["provider_state_authority"] = (
+        config_store.provider_sync_authority.new_authority(
+            state["default_provider_id"],
+            state["providers"],
+        )
+    )
     return state
 
 
@@ -508,6 +537,30 @@ else:
     assert "secret-two" not in json.dumps(projection)
 
     canonical = json.loads(config_store._config_path().read_text(encoding="utf-8"))
+    schema_v2 = _schema_v2_state(canonical)
+    config_store._config_path().write_text(
+        json.dumps(schema_v2),
+        encoding="utf-8",
+    )
+    _reset_cache()
+    migrated_v2 = config_store.list_providers()
+    persisted_v2 = json.loads(
+        config_store._config_path().read_text(encoding="utf-8")
+    )
+    assert persisted_v2["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+    assert persisted_v2["provider_state_authority"]["generation"] == (
+        schema_v2["provider_state_authority"]["generation"]
+    )
+    assert persisted_v2["provider_state_authority"]["revision"] == (
+        schema_v2["provider_state_authority"]["revision"] + 1
+    )
+    assert persisted_v2["provider_state_authority"]["digest"] == (
+        config_store.provider_sync_authority.snapshot_digest(
+            persisted_v2["default_provider_id"],
+            persisted_v2["providers"],
+        )
+    )
+    canonical = json.loads(config_store._config_path().read_text(encoding="utf-8"))
     unsupported_states = []
     missing_generation = copy.deepcopy(canonical)
     missing_generation["providers"][0].pop("generation")
@@ -588,14 +641,31 @@ else:
     )
     assert persisted_v1_migration["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
     assert persisted_v1_migration["default_provider_id"] == schema_v1["default_provider_id"]
-    assert persisted_v1_migration["providers"] == schema_v1["providers"]
+    _EXECUTION_FIELDS = ("runner", "default_model", "default_reasoning_effort")
+    assert persisted_v1_migration["providers"] == [
+        {k: v for k, v in provider.items() if k not in _EXECUTION_FIELDS}
+        for provider in schema_v1["providers"]
+    ]
+    migrated_profiles = {
+        profile["provider_id"]: profile
+        for profile in persisted_v1_migration["runtime_profiles"]
+        if not profile["deleted_at"]
+    }
+    for provider in schema_v1["providers"]:
+        profile = migrated_profiles[provider["id"]]
+        for field in _EXECUTION_FIELDS:
+            assert profile[field] == provider[field]
+    assert persisted_v1_migration["default_runtime_profile_id"] == (
+        migrated_profiles[schema_v1["default_provider_id"]]["id"]
+    )
     assert persisted_v1_migration["provider_state_projected"] is False
-    assert persisted_v1_migration["provider_state_authority"]["revision"] == 0
+    # 1→2 mints the authority (revision 0), 2→3 advances it for the field move.
+    assert persisted_v1_migration["provider_state_authority"]["revision"] == 1
     uuid.UUID(persisted_v1_migration["provider_state_authority"]["generation"])
     assert persisted_v1_migration["provider_state_authority"]["digest"] == (
         config_store.provider_sync_authority.snapshot_digest(
-            schema_v1["default_provider_id"],
-            schema_v1["providers"],
+            persisted_v1_migration["default_provider_id"],
+            persisted_v1_migration["providers"],
         )
     )
     assert migrated_v1["provider_state_authority"] == (
