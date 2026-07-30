@@ -256,6 +256,28 @@ def _make_checkout(name: str) -> str:
     return str(root)
 
 
+backend_import_root = str(BACKEND)
+backend_import_index = sys.path.index(backend_import_root)
+saved_dependency_plan = sys.modules["backend.dependency_plan"]
+probe_dependency_plan = types.ModuleType("backend.dependency_plan")
+
+
+def _probe_verified_active_env(backend_root: Path) -> Path:
+    assert backend_import_root in sys.path
+    return backend_root / ".venvs" / "test"
+
+
+probe_dependency_plan.verified_active_env = _probe_verified_active_env
+sys.modules["backend.dependency_plan"] = probe_dependency_plan
+sys.path.remove(backend_import_root)
+try:
+    assert pointer._is_runnable_checkout(_make_checkout("co-import-context"))
+    assert backend_import_root not in sys.path
+finally:
+    sys.path.insert(backend_import_index, backend_import_root)
+    sys.modules["backend.dependency_plan"] = saved_dependency_plan
+
+
 dev = _make_checkout("co-dev")
 main = _make_checkout("co-main")
 

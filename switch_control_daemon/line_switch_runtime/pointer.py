@@ -12,6 +12,20 @@ from .paths import pointer_path, switch_journal_path
 from .transaction import mutation_lock
 
 
+def _verified_active_env(backend_root: Path) -> Path:
+    backend_import_root = str(Path(__file__).resolve().parents[2] / "backend")
+    added_import_root = backend_import_root not in sys.path
+    if added_import_root:
+        sys.path.insert(0, backend_import_root)
+    try:
+        from backend.dependency_plan import verified_active_env
+
+        return verified_active_env(backend_root)
+    finally:
+        if added_import_root:
+            sys.path.remove(backend_import_root)
+
+
 def _persist(data: dict[str, Any], event: str) -> None:
     write_json(pointer_path(), data)
     journal = switch_journal_path()
@@ -46,8 +60,7 @@ def _is_runnable_checkout(path: str) -> bool:
     if not (root / "backend" / "main.py").is_file():
         return False
     try:
-        from backend.dependency_plan import verified_active_env
-        env_dir = verified_active_env(root / "backend")
+        env_dir = _verified_active_env(root / "backend")
     except (ImportError, RuntimeError):
         return False
     return any(
