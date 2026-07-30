@@ -18,8 +18,14 @@ def _function_source(path: Path, name: str) -> str:
 
 def test_queue_record_survives_until_user_message_persist() -> None:
     processor = _function_source(BACKEND / "orchestrator.py", "_run_session_processor")
+    run_barrier = "await self.turn_manager.wait_for_clear_runs(app_session_id)"
+    lifecycle_barrier = "await self.lifecycle_commands.wait_for_phase("
+    begin_turn = "await self.lifecycle_commands.begin_turn("
+    assert lifecycle_barrier in processor
+    assert processor.index(run_barrier) < processor.index(lifecycle_barrier)
+    assert processor.index(lifecycle_barrier) < processor.index(begin_turn)
     delivery_gate = processor[
-        processor.index("await self.turn_manager.wait_for_clear_runs"):
+        processor.index(run_barrier):
         processor.index("if is_review:")
     ]
     assert "await consume_queue_item()" not in delivery_gate

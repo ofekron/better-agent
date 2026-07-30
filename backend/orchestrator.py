@@ -3742,6 +3742,9 @@ class Coordinator:
                     logical_turn_outcome = "stopped"
                     continue
                 if logical_turn_identity and logical_request_prefix:
+                    await self.lifecycle_commands.wait_for_phase(
+                        app_session_id, {"idle"},
+                    )
                     lifecycle_session = session_manager.get_fields(
                         app_session_id,
                         ("supervisor_enabled",),
