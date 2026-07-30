@@ -9,7 +9,6 @@ from fastapi import APIRouter, Body, Header, HTTPException
 
 import extension_store
 import session_search
-from i18n import t
 from internal_guards import require_builtin_runtime_extension, require_internal
 
 logger = logging.getLogger(__name__)
