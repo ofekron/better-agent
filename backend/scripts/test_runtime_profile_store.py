@@ -404,6 +404,38 @@ def test_provider_deletion_cascade_and_graveyard() -> None:
     assert config_store.get_deleted_provider(victim["id"]) is not None
 
 
+def test_installation_selection_seeds_profile() -> None:
+    import installation_profile
+
+    existing_kinds = {
+        p["kind"] for p in config_store.list_provider_ui_state()["providers"]
+    }
+    kind = next(
+        k for k in ("agy", "qwen", "kimi") if k not in existing_kinds
+    )
+    original_load = installation_profile.load
+    original_mark = installation_profile.mark_selection_applied
+    installation_profile.load = lambda: {"provider": kind}
+    installation_profile.mark_selection_applied = lambda: None
+    try:
+        config_store.apply_installation_profile_selection()
+    finally:
+        installation_profile.load = original_load
+        installation_profile.mark_selection_applied = original_mark
+    provider = next(
+        p
+        for p in config_store.list_provider_ui_state()["providers"]
+        if p["kind"] == kind
+    )
+    live = [
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == provider["id"]
+    ]
+    assert len(live) == 1, "installation selection seeds exactly one profile"
+    assert live[0]["runner"] in provider["runner_options"]
+
+
 def main() -> int:
     tests = [
         test_seeded_state_has_profiles,
@@ -419,6 +451,7 @@ def main() -> int:
         test_suspending_default_provider_reconciles_default_profile,
         test_deleting_deleted_tombstone_activation_fails,
         test_provider_deletion_cascade_and_graveyard,
+        test_installation_selection_seeds_profile,
     ]
     try:
         for test in tests:
