@@ -103,13 +103,13 @@ def _round_trip_and_idempotency(root: Path) -> None:
         written = publish_execution_payload_manifest(
             run_dir,
             payload_root,
-            materialized.files,
+            materialized.payload_files,
         )
         assert read_execution_payload_manifest(run_dir) == written
         assert publish_execution_payload_manifest(
             run_dir,
             payload_root,
-            materialized.files,
+            materialized.payload_files,
         ) == written
         assert materialized.attest()
         manifest = run_dir / MANIFEST_NAME
