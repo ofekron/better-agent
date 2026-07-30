@@ -1,4 +1,74 @@
-import type { ChatMessage, RunInfo, Session, WorkerInfo } from "../src/types";
+import type {
+  ChatMessage,
+  Provider,
+  RunInfo,
+  RuntimeProfile,
+  RuntimeProfilesSnapshot,
+  Session,
+  WorkerInfo,
+} from "../src/types";
+
+export function makeProvider(overrides: Partial<Provider> = {}): Provider {
+  return {
+    id: "claude",
+    generation: "generation-1",
+    revision: 1,
+    name: "Claude",
+    kind: "claude",
+    mode: "subscription",
+    base_url: "",
+    config_dir: "",
+    custom_models: [],
+    runner_options: ["native"],
+    runner_profiles: [
+      { runner: "native", reasoning_efforts: ["low", "medium", "high", "xhigh"] },
+    ],
+    suspended: false,
+    reasoning_effort_options: ["low", "medium", "high", "xhigh"],
+    permission_options: {},
+    default_permission: {},
+    has_api_key: false,
+    supports_fork: true,
+    supports_manager_mode: true,
+    supports_rewind: true,
+    supports_steering: true,
+    supports_native_subagents: false,
+    supports_reasoning_effort: true,
+    capability_overrides: {},
+    ...overrides,
+  };
+}
+
+export function makeRuntimeProfile(
+  overrides: Partial<RuntimeProfile> = {},
+): RuntimeProfile {
+  const now = "2026-01-01T00:00:00Z";
+  return {
+    id: "rp-1",
+    provider_id: "claude",
+    runner: "native",
+    name: "Claude",
+    default_model: "sonnet",
+    default_reasoning_effort: "medium",
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    ...overrides,
+  };
+}
+
+export function makeRuntimeProfilesSnapshot(
+  overrides: Partial<RuntimeProfilesSnapshot> = {},
+): RuntimeProfilesSnapshot {
+  return {
+    runtime_profiles: [makeRuntimeProfile()],
+    default_runtime_profile_id: "rp-1",
+    deleted_providers: [],
+    last_models: {},
+    last_reasoning_efforts: {},
+    ...overrides,
+  };
+}
 
 export function makeSession(overrides: Partial<Session> = {}): Session {
   const now = new Date().toISOString();

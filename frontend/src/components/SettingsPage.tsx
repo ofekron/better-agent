@@ -1,7 +1,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Capacitor } from "@capacitor/core";
-import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
+import type { Project, Provider, ProviderRunner, ProvidersState, ReasoningEffort, Permission } from "../types";
 import {
   defaultProviderAuthority,
   providerAuthority,
@@ -177,7 +177,7 @@ interface Template {
     base_url: string;
     config_dir: string;
     default_model: string;
-    runner?: Provider["runner"];
+    runner?: ProviderRunner;
     default_reasoning_effort: ReasoningEffort | "";
     api_key?: string;
     suspended?: boolean;
@@ -1856,14 +1856,6 @@ function ProvidersSettingsSection({
                   {isSuspended && (
                     <span className="provider-suspended-pill">{t('setup.suspended')}</span>
                   )}
-                  {p.runner && (
-                    <span
-                      className={`provider-runner-pill runner-${p.runner}`}
-                      title={t('setup.runnerHint')}
-                    >
-                      {t(runnerLabelKey(p.kind, p.runner), { defaultValue: p.runner })}
-                    </span>
-                  )}
                 </div>
                 <div className="provider-row-meta">
                   {p.mode === "subscription"
@@ -2349,7 +2341,7 @@ interface FormPayload {
   base_url: string;
   config_dir: string;
   default_model: string;
-  runner: Provider["runner"];
+  runner: ProviderRunner;
   default_reasoning_effort: ReasoningEffort | "";
   default_permission: Permission;
   api_key: string;
@@ -2423,11 +2415,18 @@ function ProviderForm({
    * the default_model dropdown. Undefined during the create wizard
    * (provider doesn't exist yet → free-text input). */
   providerId?: string;
-  initial: Omit<FormPayload, "api_key" | "default_permission" | "runner" | "suspended"> & {
+  initial: Omit<
+    FormPayload,
+    "api_key" | "default_permission" | "runner" | "suspended" | "default_model" | "default_reasoning_effort"
+  > & {
     api_key?: string;
     capability_overrides?: Partial<Record<string, boolean>>;
     default_permission?: Permission;
-    runner?: Provider["runner"];
+    /** Execution defaults now live on runtime profiles; provider records no
+     * longer carry them. Present only when seeded from a create template. */
+    default_model?: string;
+    default_reasoning_effort?: ReasoningEffort | "";
+    runner?: ProviderRunner;
     runner_options?: Provider["runner_options"];
     suspended?: boolean;
   };
@@ -2443,7 +2442,7 @@ function ProviderForm({
   const [kind] = useState(initial.kind || "claude");
   const runnerOptions = runnerOptionsForKind(kind, initial.runner_options);
   const initialRunner = initial.runner ?? runnerOptions[0];
-  const [runner, setRunner] = useState<Provider["runner"]>(
+  const [runner, setRunner] = useState<ProviderRunner>(
     runnerOptions.includes(initialRunner) ? initialRunner : runnerOptions[0],
   );
   const runtimeKind = runtimeKindForRunner(kind, runner);
@@ -2455,7 +2454,7 @@ function ProviderForm({
   const [configDir, setConfigDir] = useState(initial.config_dir);
   const configDirCopy = configDirCopyForKind(kind);
   const apiEnvCopy = apiEnvCopyForKind(runtimeKind);
-  const [defaultModel, setDefaultModel] = useState(initial.default_model);
+  const [defaultModel, setDefaultModel] = useState(initial.default_model ?? "");
   const effortOptions = effortOptionsForKind(kind, runner);
   const initialEffort =
     initial.default_reasoning_effort && effortOptions.includes(initial.default_reasoning_effort)
@@ -2520,7 +2519,7 @@ function ProviderForm({
     }
   }, [baseUrl, defaultModel, defaultReasoningEffort, effortOptions, kind, mode_, modes, runner]);
 
-  const updateRunner = (next: Provider["runner"]) => {
+  const updateRunner = (next: ProviderRunner) => {
     setRunner(next);
     if (kind === "fugu" && next === "better_agent_runner") {
       setMode("api_key");
@@ -2652,7 +2651,7 @@ function ProviderForm({
             <label>{t("setup.runnerLabel")}</label>
             <select
               value={runner}
-              onChange={(e) => updateRunner(e.target.value as Provider["runner"])}
+              onChange={(e) => updateRunner(e.target.value as ProviderRunner)}
             >
               {runnerOptions.map((option) => (
                 <option key={option} value={option}>

@@ -2146,7 +2146,6 @@ function SessionListImpl({
   const modelOptions = useMemo(() => {
     const models = new Set(modelFacet);
     for (const provider of providers) {
-      if (provider.default_model) models.add(provider.default_model);
       for (const model of provider.custom_models ?? []) {
         if (model) models.add(model);
       }

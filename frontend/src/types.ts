@@ -1032,6 +1032,10 @@ export interface Session {
   runner?: ProviderRunner;
   permission?: Permission;
   provider_id?: string;
+  /** Runtime profile this session was created from / switched to. Null on
+   * legacy sessions — their display falls back to a live-profile match on
+   * the stamped (provider_id, runner), else the raw stamped values. */
+  runtime_profile_id?: string | null;
   harness_profile_id?: string;
   cwd: string;
   /** Session belongs to every project regardless of cwd (e.g. the
@@ -1291,6 +1295,11 @@ export interface ToolApproval {
   summary: Record<string, unknown>;
 }
 
+/** Provider ACCOUNT record (company + auth + capabilities). Execution
+ * selection (runner, default model/effort) lives on runtime profiles —
+ * see `RuntimeProfile`. `runner_options`/`runner_profiles`/
+ * `reasoning_effort_options` are derived capability facts the profile
+ * wizard and pickers consume. */
 export interface Provider {
   id: string;
   generation: string;
@@ -1304,8 +1313,6 @@ export interface Provider {
   base_url: string;
   config_dir: string;
   custom_models: string[];
-  default_model: string;
-  runner: ProviderRunner;
   runner_options: ProviderRunner[];
   runner_profiles?: Array<{
     runner: ProviderRunner;
@@ -1313,13 +1320,8 @@ export interface Provider {
   }>;
   suspended: boolean;
   reasoning_effort_options: ReasoningEffort[];
-  default_reasoning_effort: ReasoningEffort | "";
   permission_options: PermissionOptions;
   default_permission: Permission;
-  /** Last model the user chose for this provider (backend-remembered).
-   * Pickers pre-choose it over `default_model` when switching provider. */
-  last_model?: string;
-  last_reasoning_effort?: ReasoningEffort;
   has_api_key: boolean;
   credential_status?: "unknown" | "available" | "missing" | "blocked";
   /** OAuth login/logout flow state for subscription claude/codex records.
@@ -1358,6 +1360,44 @@ export interface Provider {
 export interface ProvidersState {
   default_provider_id: string | null;
   providers: Provider[];
+}
+
+/** User-created runtime profile. Identity is (provider × runner); name is
+ * display-editable and model/effort are attached defaults, overridable per
+ * session. Soft-deleted profiles keep their record (`deleted_at` set) so old
+ * sessions still resolve and display them with a deleted badge. */
+export interface RuntimeProfile {
+  id: string;
+  provider_id: string;
+  runner: ProviderRunner;
+  name: string;
+  default_model: string;
+  default_reasoning_effort: ReasoningEffort | "";
+  created_at: string;
+  updated_at: string;
+  deleted_at?: string | null;
+}
+
+/** Tombstone of a deleted provider account — kept so profiles whose provider
+ * is gone can still resolve a display name. */
+export interface DeletedProviderRef {
+  id: string;
+  name: string;
+  nickname?: string;
+  kind: string;
+  deleted_at?: string | null;
+}
+
+/** Snapshot returned by GET /api/runtime-profiles; `runtime_profiles_changed`
+ * WS frames carry the same shape (push side of the pull+push contract). */
+export interface RuntimeProfilesSnapshot {
+  runtime_profiles: RuntimeProfile[];
+  default_runtime_profile_id: string | null;
+  deleted_providers: DeletedProviderRef[];
+  /** Per-profile last-used model — first link of the prefill chain
+   * last-used(profile) → profile default → catalog default. */
+  last_models: Record<string, string>;
+  last_reasoning_efforts: Record<string, ReasoningEffort>;
 }
 
 /** Generic resolved+override pairing for leaves where both sides share the
@@ -1422,11 +1462,11 @@ export interface HarnessProfile {
   skill_overrides: Record<string, unknown>;
   native_harness_overrides: Record<string, unknown>;
   provider_run_config_overlay: Record<string, unknown>;
-  /** Profile-meta: this profile's OWN base pointer and provider/model/effort
-   * pins (null when unset; the Default profile has none). */
+  /** Profile-meta: this profile's OWN base pointer and runtime-profile/
+   * model/effort pins (null when unset; the Default profile has none). */
   base_profile_id?: string | null;
   base_profile_revision?: string | null;
-  default_provider_id?: string | null;
+  default_runtime_profile_id?: string | null;
   default_model?: string | null;
   default_reasoning_effort?: string | null;
   provisioning_prompt?: string | null;

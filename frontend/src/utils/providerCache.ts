@@ -2,7 +2,7 @@ import type { Provider } from "../types";
 import { providerDisplayName } from "./providerDisplayName";
 
 const STORAGE_KEY = "better-agent-provider-cache";
-const VERSION = 5;
+const VERSION = 6;
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 export interface ProviderCache {
@@ -23,12 +23,8 @@ function isProvider(value: unknown): value is Provider {
     && typeof provider.config_dir === "string"
     && Array.isArray(provider.custom_models)
     && provider.custom_models.every((model) => typeof model === "string")
-    && typeof provider.default_model === "string"
     && Array.isArray(provider.reasoning_effort_options)
     && provider.reasoning_effort_options.every((effort) => typeof effort === "string" && EFFORTS.has(effort))
-    && (provider.default_reasoning_effort === "" || (typeof provider.default_reasoning_effort === "string" && EFFORTS.has(provider.default_reasoning_effort)))
-    && (provider.last_model === undefined || typeof provider.last_model === "string")
-    && (provider.last_reasoning_effort === undefined || (typeof provider.last_reasoning_effort === "string" && EFFORTS.has(provider.last_reasoning_effort)))
     && typeof provider.has_api_key === "boolean"
     && typeof provider.suspended === "boolean"
     && typeof provider.supports_fork === "boolean"

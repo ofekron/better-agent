@@ -17,6 +17,8 @@ import { withTokenQuery } from "./bearerAuth";
 import { extId } from "./extensionIds";
 import { readNativeServerUrl } from "./nativeServerConfig";
 import type {
+  RuntimeProfile,
+  RuntimeProfilesSnapshot,
   Schedule,
   SessionFolder,
   SessionOrganizationSnapshot,
@@ -68,6 +70,71 @@ async function _json<T>(res: Response): Promise<T> {
     throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
   }
   return (await res.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime profiles (pull side; push side is the `runtime_profiles_changed`
+// WS frame carrying the same snapshot).
+
+export async function fetchRuntimeProfiles(): Promise<RuntimeProfilesSnapshot> {
+  const res = await fetch(`${API}/api/runtime-profiles`, {
+    credentials: "include",
+  });
+  return _json(res);
+}
+
+export async function createRuntimeProfile(body: {
+  provider_id: string;
+  runner: string;
+  name?: string;
+  default_model?: string;
+  default_reasoning_effort?: string;
+}): Promise<RuntimeProfile> {
+  const res = await fetch(`${API}/api/runtime-profiles`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return _json(res);
+}
+
+export async function patchRuntimeProfile(
+  profileId: string,
+  body: {
+    name?: string;
+    default_model?: string;
+    default_reasoning_effort?: string;
+  },
+): Promise<RuntimeProfile> {
+  const res = await fetch(
+    `${API}/api/runtime-profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return _json(res);
+}
+
+export async function deleteRuntimeProfile(profileId: string): Promise<void> {
+  const res = await fetch(
+    `${API}/api/runtime-profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE", credentials: "include" },
+  );
+  await _json(res);
+}
+
+export async function activateRuntimeProfile(
+  profileId: string,
+): Promise<RuntimeProfile> {
+  const res = await fetch(
+    `${API}/api/runtime-profiles/${encodeURIComponent(profileId)}/activate`,
+    { method: "POST", credentials: "include" },
+  );
+  return _json(res);
 }
 
 /** Usage analytics over a time range. ``start``/``end`` are 'YYYY-MM-DD'.
