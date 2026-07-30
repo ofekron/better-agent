@@ -311,4 +311,58 @@ test.describe("change credentials", () => {
     expect(me.status).toBe(200);
     expect(me.body.username).toBe(backend.username);
   });
+
+  // auth_routes.change_credentials calls the SAME auth.rate_limit_check(ip)
+  // as /login (auth.py's sliding-window limiter, _RL_WINDOW = 300s,
+  // _RL_MAX = 5), keyed only by source IP — so repeated wrong-current-
+  // password attempts here get the same real 429 lock-out proven for
+  // /login in auth-login.spec.ts. Drives that directly against the
+  // endpoint, riding the real session cookie from a real UI login.
+  test("rate-limits repeated wrong-current-password change attempts with a 429", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    const changeUrl = `${backend.baseURL}/api/auth/change_credentials`;
+    const attempt = () =>
+      page.request.post(changeUrl, {
+        data: {
+          current_username: backend.username,
+          current_password: "definitely-wrong",
+          new_username: randomTestValue("ratelimited-user"),
+          new_password: randomTestValue("ratelimited-secret"),
+        },
+        failOnStatusCode: false,
+      });
+
+    const statuses: number[] = [];
+    let res = await attempt();
+    statuses.push(res.status());
+    while (res.status() !== 429 && statuses.length < 20) {
+      res = await attempt();
+      statuses.push(res.status());
+    }
+
+    // _RL_MAX (5) attempts are admitted (wrong current password → 401)
+    // before the limiter kicks in on the 6th request within the window.
+    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
+    expect((await res.json()).detail).toBe("too many attempts");
+
+    // The lock-out must not have mutated the credential store: the real
+    // (correct) credentials still work through the real login form.
+    await page.evaluate(async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+      localStorage.clear();
+    });
+    await page.goto(backend.baseURL);
+    await loginViaUI(page, backend);
+
+    const me = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(me.status).toBe(200);
+    expect(me.body.username).toBe(backend.username);
+  });
 });

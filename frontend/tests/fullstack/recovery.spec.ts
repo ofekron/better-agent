@@ -1,8 +1,14 @@
+import type { ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./harness/fixtures";
 import type { FullStackBackend } from "./harness/backend";
 import { createSessionWithPrompt } from "./harness/session";
 import { killBackendProcessOnly, spawnBackendAgainstExistingHome } from "./harness/recovery";
+import { BACKEND_DIR } from "./harness/paths";
+import { resolveVenvPython } from "./harness/venv";
+import { buildBackendEnv, makeGroupKiller, waitUntilHealthyOrExit } from "./harness/process-utils";
 
 // Validates scenario 3 ("Restore") from the repo root CLAUDE.md's "Session
 // event ingestion — three scenarios MUST converge": the detached runner and
@@ -57,6 +63,90 @@ async function waitForNotRunning(
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   throw new Error(`session ${sessionId} never reached is_running=false within ${timeoutMs}ms`);
+}
+
+interface SupervisedBackend {
+  baseURL: string;
+  /** Resolves the moment the process actually exits (real OS `exit` event,
+   * not a poll) — used to confirm a graceful self-restart really terminates
+   * the process rather than to arbitrarily wait out a timer. */
+  exited: Promise<void>;
+  stop(): Promise<void>;
+}
+
+/**
+ * Spawns a backend/uvicorn process against an EXISTING FullStackBackend's
+ * isolated home + port — same topology as
+ * harness/recovery.ts#spawnBackendAgainstExistingHome — but with
+ * `BETTER_CLAUDE_RUN_SH_SUPERVISOR=1` added to its env.
+ *
+ * `POST /api/admin/restart` (backend/main.py) 409s unless that env var is
+ * "1": it's the guard that stops a bare "SIGTERM myself" from running with
+ * nothing to bring the process back up. The `backend` fixture
+ * (harness/fixtures.ts -> harness/backend.ts#startFullStackBackend) never
+ * sets it, so this graceful-restart test needs its own supervisor-flagged
+ * process instead of the fixture's.
+ */
+function spawnSupervisedBackend(backend: FullStackBackend): Promise<SupervisedBackend> {
+  const python = resolveVenvPython();
+  const authDir = path.join(backend.homeDir, "_auth");
+
+  const env = {
+    ...buildBackendEnv({
+      homeDir: backend.homeDir,
+      port: backend.port,
+      username: backend.username,
+      passwordHashFile: path.join(authDir, "password.hash"),
+      sessionSecretFile: path.join(authDir, "session.secret"),
+    }),
+    BETTER_CLAUDE_RUN_SH_SUPERVISOR: "1",
+  };
+
+  const proc: ChildProcess = spawn(
+    python,
+    ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(backend.port)],
+    { cwd: BACKEND_DIR, env, stdio: ["ignore", "pipe", "pipe"], detached: true },
+  );
+
+  const logLines: string[] = [];
+  proc.stdout?.on("data", (chunk: Buffer) => logLines.push(chunk.toString()));
+  proc.stderr?.on("data", (chunk: Buffer) => logLines.push(chunk.toString()));
+
+  let exitDescription: string | null = null;
+  const exited = new Promise<void>((resolve) => {
+    proc.once("exit", (code, signal) => {
+      exitDescription = `code=${code} signal=${signal}\n${logLines.join("")}`;
+      resolve();
+    });
+  });
+
+  const killGroup = makeGroupKiller(proc);
+  const baseURL = backend.baseURL;
+
+  let stopped = false;
+  async function stop(): Promise<void> {
+    if (stopped) return;
+    stopped = true;
+    if (proc.exitCode === null && proc.signalCode === null) {
+      killGroup("SIGTERM");
+      await Promise.race([
+        exited,
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            killGroup("SIGKILL");
+            resolve();
+          }, 10_000),
+        ),
+      ]);
+    }
+  }
+
+  return waitUntilHealthyOrExit(baseURL, () => exitDescription, 60_000, "supervised backend")
+    .then(() => ({ baseURL, exited, stop }))
+    .catch((err) => {
+      killGroup("SIGKILL");
+      throw err;
+    });
 }
 
 test.describe("backend crash-recovery", () => {
@@ -512,6 +602,134 @@ test.describe("backend crash-recovery", () => {
       await expect(assistantMessages.nth(1)).toContainText("RECOVERED", { timeout: 120_000 });
     } finally {
       await restarted.stop();
+    }
+  });
+});
+
+test.describe("backend graceful-restart (POST /api/admin/restart)", () => {
+  test("render tree stays consistent after a graceful self-restart via POST /api/admin/restart", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(180_000);
+
+    // The `backend` fixture's process never sets
+    // BETTER_CLAUDE_RUN_SH_SUPERVISOR=1, so /api/admin/restart would just
+    // 409 on it (backend/main.py fails closed without the run.sh
+    // supervisor). Swap it for a supervisor-flagged process against the
+    // SAME isolated home/port before creating any session, so the swap
+    // itself has no bearing on the render-tree assertions below.
+    await killBackendProcessOnly(backend);
+    const supervised = await spawnSupervisedBackend(backend);
+
+    try {
+      await page.reload();
+      await page.locator(".session-new-button").waitFor({ state: "visible", timeout: 20_000 });
+
+      await createSessionWithPrompt(
+        page,
+        "Count from 1 to 40, one number per line, then write a short paragraph " +
+          "explaining why counting is a foundational skill. Do not rush, be thorough.",
+      );
+      const sessionId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+
+      // Wait until the real provider CLI turn is actually in flight before
+      // triggering the restart, exercising the same mid-turn window the
+      // SIGKILL crash tests cover — but through the app's own intentional
+      // shutdown path (`on_shutdown`, backend/main.py) instead of an
+      // abrupt process kill. That path runs real cleanup (model catalog
+      // refresh shutdown, lag-incident-queue stop, marketplace bridge
+      // stop, OAuth-subprocess shutdown, extension daemon shutdown, etc.)
+      // a SIGKILL never gets a chance to run, while still leaving the
+      // orphaned provider CLI runner alive for recovery, exactly like a
+      // crash (SIGTERM, not SIGINT, so `_intentional_shutdown` stays
+      // false and `provider.cancel_all` is skipped).
+      await waitForRunning(page, backend, sessionId, 30_000);
+
+      const restartRes = await page.request.post(`${supervised.baseURL}/api/admin/restart`, {
+        data: { mode: "now" },
+      });
+      expect(
+        restartRes.ok(),
+        `POST /api/admin/restart failed: ${restartRes.status()} ${await restartRes.text()}`,
+      ).toBe(true);
+
+      // `_trigger_supervisor_restart` (backend/main.py) SIGTERMs the
+      // process itself ~0.3s after answering, on the assumption a run.sh
+      // supervisor is watching to respawn it. This harness runs no such
+      // supervisor, so the process must actually exit and NOT come back on
+      // its own — confirm that real exit (a real OS `exit` event, not a
+      // fixed sleep) before bringing it back up manually, same as the
+      // crash tests.
+      await Promise.race([
+        supervised.exited,
+        new Promise((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error("backend did not exit after POST /api/admin/restart within 20s")),
+            20_000,
+          ),
+        ),
+      ]);
+
+      const restarted = await spawnBackendAgainstExistingHome(backend);
+      try {
+        const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+        expect(health.ok()).toBe(true);
+
+        await page.reload();
+        await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+        // Give recovery/reconcile the same generous convergence window as
+        // the crash tests: either the orphaned real provider CLI process
+        // finished the turn on its own, or the backend detected it was
+        // dead/gone and finalized the turn as stopped. Either is
+        // acceptable — stuck "running" forever is not.
+        await expect
+          .poll(
+            async () => {
+              const sessions = await getSessionsList(page, backend);
+              const match = sessions.find((s) => s.id === sessionId);
+              return match?.is_running === true;
+            },
+            { timeout: 120_000, intervals: [500, 1000, 2000] },
+          )
+          .toBe(false);
+
+        const detailRes = await page.request.get(
+          `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+        );
+        expect(detailRes.ok()).toBe(true);
+        const tree = await detailRes.json();
+        const messages = (tree.messages ?? []) as Array<{ id: string; role: string }>;
+        const ids = messages.map((m) => m.id);
+        expect(new Set(ids).size, `duplicate message ids in render tree: ${ids.join(",")}`).toBe(
+          ids.length,
+        );
+        expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+        expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+        await page.reload();
+        await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+        const userMessages = page.getByTestId("user-message");
+        const assistantMessages = page.getByTestId("assistant-message");
+        await expect(userMessages).toHaveCount(1);
+        await expect(assistantMessages).toHaveCount(1);
+
+        const assistantMessage = assistantMessages.first();
+        const text = (await assistantMessage.textContent()) ?? "";
+        const hasRealContent = text.trim().length > 0;
+        const hasStoppedIndicator = (await assistantMessage.locator(".stopped-indicator").count()) > 0;
+
+        expect(
+          hasRealContent || hasStoppedIndicator,
+          `assistant bubble has neither content nor a stopped indicator after graceful-restart recovery: ${JSON.stringify(text)}`,
+        ).toBe(true);
+      } finally {
+        await restarted.stop();
+      }
+    } finally {
+      await supervised.stop();
     }
   });
 });

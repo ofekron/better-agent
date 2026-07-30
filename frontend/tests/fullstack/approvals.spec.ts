@@ -1,4 +1,7 @@
+import { mkdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { test, expect } from "./harness/fixtures";
+import { addProjectByPath } from "./harness/projects";
 import { createSessionWithPrompt } from "./harness/session";
 import { openProviderSettings, pickCustomSelectOption, saveProviderSettings } from "./harness/settings";
 
@@ -279,4 +282,66 @@ test("a denied tool approval is delivered back to the model, which can course-co
   await expect(page.getByTestId("assistant-message").last()).toContainText("FALLBACK_USED", {
     timeout: 60_000,
   });
+});
+
+// Every previous test in this file gates a Bash call. toolApprovalArgRows
+// (Chat.tsx) is written generically — it reads whatever keys are present in
+// summary.input and renders one row per key, with no Bash-specific
+// branching — so a file-write tool (Write) should hit the exact same
+// approval-card path with its own keys (file_path/content) instead of a
+// Bash-shaped `command` row. This proves that generalization holds for a
+// real, different tool type, not just Bash under a different prompt.
+//
+// A fresh session's cwd defaults to the backend process's real Path.home(),
+// not an isolated dir, so we register a controlled workspace as a project
+// first (the same addProjectByPath flow file-editor.spec.ts uses) and let
+// the new-session modal pick it up as the default cwd — giving the model's
+// Write call a real, writable, known location to target.
+test("a non-Bash tool (Write) also triggers a real approval card", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const workspaceDir = path.join(backend.homeDir, "workspace-write-approval");
+  mkdirSync(workspaceDir, { recursive: true });
+  const fileName = "approval_test.txt";
+  const filePath = path.join(workspaceDir, fileName);
+
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+  // Settings is a distinct route from the app shell — createSessionWithPrompt
+  // needs the sidebar's "+ New" button, which only exists on "/".
+  await page.goto(backend.baseURL);
+
+  await addProjectByPath(page, workspaceDir);
+
+  await createSessionWithPrompt(
+    page,
+    `Create a file named ${fileName} with the content HELLO using your file write tool.`,
+  );
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+
+  // Proof this isn't the Bash path: no `command` arg row, and the tool name
+  // header names the file-write tool, not Bash.
+  await expect(
+    approvalCard.locator(".tool-approval-card__arg-key", { hasText: "command" }),
+  ).toHaveCount(0);
+  await expect(approvalCard).not.toContainText(/^Bash$/);
+
+  // toolApprovalArgRows renders every key in summary.input generically, so
+  // the file path and/or content the model is about to write should be
+  // visible verbatim before approval — the same trust guarantee L5 locks in
+  // for Bash's `command` key, generalized to Write's own keys.
+  await expect(approvalCard).toContainText(fileName, { timeout: 15_000 });
+
+  await approvalCard.locator(".user-input-card__actions button.primary").click();
+  await expect(approvalCard).not.toBeVisible({ timeout: 15_000 });
+
+  // The real proof: the file actually got created on disk with that
+  // content, not just a DOM assertion that the card disappeared.
+  await expect.poll(() => readFileSync(filePath, "utf-8").trim(), { timeout: 60_000 }).toBe(
+    "HELLO",
+  );
 });

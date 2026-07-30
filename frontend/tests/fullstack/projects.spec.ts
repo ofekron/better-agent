@@ -5,6 +5,7 @@ import path from "node:path";
 import { test, expect } from "./harness/fixtures";
 import { createRealGitRepo } from "./harness/git-repo";
 import { addProjectByPath } from "./harness/projects";
+import { createSessionWithPrompt } from "./harness/session";
 
 // Validates the real "project" feature — repo-path tabs in the sidebar
 // (frontend/src/components/ProjectTabs.tsx, backend/projects_api.py). A
@@ -248,6 +249,59 @@ test.describe("projects", () => {
       expect(project?.git_remote).toBe(remoteUrl);
     } finally {
       repo.cleanup();
+    }
+  });
+
+  test("sessions created under one project don't appear when a different project is selected", async ({
+    authedPage: page,
+  }) => {
+    // A session's `cwd` is set from whichever project is active at creation
+    // time; switching the active tab flows `backendProjectPath`
+    // (SessionList.tsx) -> `sessionListFilters.projectPath`
+    // (hooks/useSession.ts) -> a real `GET /api/sessions?project_path=...`
+    // refetch, matched server-side by `session_matches_project`
+    // (backend/session_manager.py) — this proves that real scoping, not
+    // stale/mixed client state.
+    const dirA = mkdtempSync(path.join(tmpdir(), "ba-fullstack-project-a-"));
+    const dirB = mkdtempSync(path.join(tmpdir(), "ba-fullstack-project-b-"));
+    try {
+      const labelA = path.basename(dirA);
+      const labelB = path.basename(dirB);
+      const uniquePrompt = `scope check ${labelA}`;
+
+      await addProjectByPath(page, dirA);
+      await addProjectByPath(page, dirB);
+
+      const tabA = page.locator(".project-tab", { hasText: labelA });
+      const tabB = page.locator(".project-tab", { hasText: labelB });
+
+      // handleAddProject selects the just-added project, so adding B second
+      // leaves B active — switch to A first so the session is really
+      // created under A's cwd, not B's.
+      await tabA.click();
+      await expect(tabA).toHaveClass(/\bactive\b/);
+
+      await createSessionWithPrompt(page, uniquePrompt);
+
+      const sessionRow = page.locator('[data-testid="session-item"] .session-item-name', {
+        hasText: uniquePrompt,
+      });
+      await expect(sessionRow).toBeVisible();
+
+      // Switch to B — the real project_path-filtered refetch must not
+      // surface A's session.
+      await tabB.click();
+      await expect(tabB).toHaveClass(/\bactive\b/);
+      await expect(sessionRow).toBeHidden();
+
+      // Switch back to A and confirm it reappears — proving this is real
+      // scoping, not a one-directional artifact of creation order.
+      await tabA.click();
+      await expect(tabA).toHaveClass(/\bactive\b/);
+      await expect(sessionRow).toBeVisible();
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
     }
   });
 });

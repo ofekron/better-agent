@@ -376,3 +376,114 @@ test("creates a brand-new file through the file chooser's create row and opens i
   await expect(fileViewer.locator(".file-viewer-dirty")).not.toBeVisible({ timeout: 15_000 });
   expect(readFileSync(newFilePath, "utf-8")).toBe(content);
 });
+
+// Validates opening a SECOND file while one is already open: this is a
+// genuine two-tab flow, not a single-viewer replace. Confirmed by reading
+// App.tsx's `handleOpenFilePanel` (the file tree's `onFileClick` target,
+// via `handleFileClick`): it APPENDS to the session's backend-owned
+// `open_file_panels` list (`[...panels, panel]` when the path isn't
+// already present) rather than overwriting a single "current file" slot.
+// FilePanels.tsx renders one `.file-panels-tab` per panel and, in the
+// default (non-split) tab mode, mounts exactly the ACTIVE panel's
+// `FileViewer` (`{renderViewer(active)}`) — so switching tabs unmounts the
+// previous file's editor and mounts a fresh one keyed by `panel.id` for
+// the newly active file, each with its own independent state. (This is
+// distinct from `MultiFileEditor.tsx`'s `multi-file-tab-*`/
+// `multi-file-pane-*` testids, which belong to the separate agent-driven
+// file-EDIT-session diff surface reached via "Engineer file" /
+// `startFileEditor`, not the plain file browser exercised by every other
+// test in this file.)
+test("opens a second file while the first stays open, as independent tabs with no cross-contamination", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const workspaceDir = path.join(backend.homeDir, "workspace-multi-file");
+  mkdirSync(workspaceDir, { recursive: true });
+  const filePathA = path.join(workspaceDir, "editor-one.txt");
+  const filePathB = path.join(workspaceDir, "editor-two.txt");
+  const contentA = "content that belongs only to file one";
+  const contentB = "totally different content that belongs only to file two";
+  writeFileSync(filePathA, contentA);
+  writeFileSync(filePathB, contentB);
+
+  await addProjectByPath(page, workspaceDir);
+  await createSessionWithPrompt(page, "Reply with exactly the single word: OK.");
+
+  const chooser = page.locator(".file-chooser-content");
+  const openViaChooser = async (fileName: string) => {
+    await page.getByTitle("Browse project files").click();
+    await expect(chooser).toBeVisible();
+    const fileRow = chooser.locator(".tree-node.tree-file", { hasText: fileName });
+    await fileRow.click();
+    await expect(chooser).not.toBeVisible();
+  };
+
+  // Open the first file.
+  await openViaChooser("editor-one.txt");
+  const fileViewer = page.locator(".file-viewer");
+  await expect(fileViewer).toBeVisible();
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText("editor-one.txt");
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).toContainText(contentA, {
+    timeout: 15_000,
+  });
+
+  // Open the second file WITHOUT closing the first: re-open the chooser
+  // (the sidebar control, still present) and click the second file's row.
+  // Since the two paths differ, `handleOpenFilePanel` appends a second
+  // panel instead of replacing the first.
+  await openViaChooser("editor-two.txt");
+
+  // Both tabs now exist — proof this genuinely opened a second tab rather
+  // than swapping the single file view.
+  const tabs = page.locator(".file-panels-tab");
+  await expect(tabs).toHaveCount(2);
+  const tabOne = tabs.filter({ hasText: "editor-one.txt" });
+  const tabTwo = tabs.filter({ hasText: "editor-two.txt" });
+  await expect(tabOne).toHaveCount(1);
+  await expect(tabTwo).toHaveCount(1);
+
+  // Opening file two focuses it (newest panel becomes active) — confirm
+  // its own content, not file one's, is what's actually shown.
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText("editor-two.txt");
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).toContainText(contentB, {
+    timeout: 15_000,
+  });
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).not.toContainText(contentA);
+
+  // Switch back to file one's tab and confirm ITS content, independently.
+  await tabOne.click();
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText("editor-one.txt");
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).toContainText(contentA, {
+    timeout: 15_000,
+  });
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).not.toContainText(contentB);
+
+  // Edit and save file one while file two remains open in the other tab.
+  const updatedContentA = "file one updated, saved while file two stayed open in its own tab";
+  const editor = fileViewer.locator(".monaco-editor").first();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.type(updatedContentA);
+  await expect(fileViewer.locator(".file-viewer-dirty")).toBeVisible();
+
+  const saveButton = fileViewer.locator('button[title="Save (Cmd+S)"]');
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+  await expect(fileViewer.locator(".file-viewer-dirty")).not.toBeVisible({ timeout: 15_000 });
+  await expect(fileViewer.locator(".file-viewer-sync-state.state-synced")).toBeVisible();
+  expect(readFileSync(filePathA, "utf-8")).toBe(updatedContentA);
+
+  // Switch to file two's tab: its own content and clean (non-dirty) state
+  // must be completely unaffected by the edit+save that just happened on
+  // file one — no cross-contamination between the two independent tabs.
+  await tabTwo.click();
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText("editor-two.txt");
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).toContainText(contentB, {
+    timeout: 15_000,
+  });
+  await expect(fileViewer.locator(".monaco-editor .view-lines")).not.toContainText(updatedContentA);
+  await expect(fileViewer.locator(".file-viewer-dirty")).not.toBeVisible();
+
+  // Real proof on disk: file two was never touched by file one's save.
+  expect(readFileSync(filePathB, "utf-8")).toBe(contentB);
+});

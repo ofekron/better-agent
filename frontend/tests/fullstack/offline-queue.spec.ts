@@ -485,3 +485,84 @@ test("a prompt queued while offline survives a real page reload that still happe
   // acknowledgement.
   await expect.poll(() => readBacklogPrompts(page)).not.toContain(reloadPrompt);
 });
+
+// Validates going offline WHILE a turn is actively streaming (not idle) —
+// every other test in this file goes offline only after the prior turn has
+// already finished. This proves two things that going-offline-while-idle
+// cannot: (1) the offline transition never touches the FIRST turn, which is
+// a real `claude` CLI subprocess already running server-side and delivered
+// back over `messages_replay` on WS reconnect (App.tsx ~4636-4638), so it
+// completes exactly as if the browser had stayed online; and (2) a SECOND
+// prompt typed while offline goes through the localStorage offline-queue
+// path (`data-status="offline"`), not the backend's online per-session
+// "queued banner" path (`queued-prompt-banner`) — because App.tsx's
+// `sendMessage(...)` call (~App.tsx:4889) simply fails when the WS isn't
+// connected regardless of whether a turn is streaming, and that failure is
+// what routes the prompt into the offline backlog (~App.tsx:4907-4925). The
+// `queued-prompt-banner` only ever appears once the backend WS-acks a queued
+// prompt (`queuedBySession`, App.tsx ~2543), which can't happen here since
+// the browser never reached the backend at all.
+test("goes offline while a turn is actively running, queues the next prompt through the offline path, and both turns complete in order on reconnect", async ({
+  authedPage: page,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Count from 1 to 40 slowly, one number per line, explaining each number's factors, then on a final line reply with exactly the single word: FIRSTDONE.",
+  );
+
+  await expect(page.getByTestId("user-message")).toBeVisible();
+
+  // `stop-btn` only renders while `isStreaming` is true — the same
+  // event-driven proxy chat-turn.spec.ts uses for "the turn is actually
+  // running". This is the precondition the whole test hinges on: we must
+  // go offline while this is still true, not after it disappears.
+  const stopBtn = page.getByTestId("stop-btn");
+  await expect(stopBtn).toBeVisible({ timeout: 30_000 });
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+  // The offline transition is a pure browser-network event — it must not
+  // touch the still-running server-side turn.
+  await expect(stopBtn).toBeVisible();
+
+  const secondPrompt = "Reply with exactly the single word: SECONDDONE. No punctuation, no other words.";
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(secondPrompt);
+  await textarea.press("Enter");
+
+  // Second bubble (index 1) — the first turn's user/assistant pair still
+  // occupies index 0.
+  const secondMessage = page.getByTestId("user-message").nth(1);
+  await expect(secondMessage).toContainText(secondPrompt);
+  await expect(secondMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(secondMessage.locator(".status-offline")).toContainText("Queued offline");
+  expect(await readBacklogPrompts(page)).toContain(secondPrompt);
+
+  // Proof this went through the offline backlog, not the backend's online
+  // per-session queue: that banner only appears on a real WS ack, which
+  // never happened here.
+  await expect(page.getByTestId("queued-prompt-banner")).toBeHidden();
+
+  await page.context().setOffline(false);
+
+  // The queued second prompt gets flushed and genuinely delivered.
+  await expect(secondMessage).not.toHaveAttribute("data-status", "offline", { timeout: 30_000 });
+
+  const assistantMessages = page.getByTestId("assistant-message");
+
+  // The FIRST turn — never interrupted, never stopped, never affected by
+  // the offline blip — completes on its own via WS reconnect + replay.
+  await expect(stopBtn).toBeHidden({ timeout: 240_000 });
+  await expect(assistantMessages.first()).toContainText("FIRSTDONE", { timeout: 240_000 });
+  await expect(assistantMessages.first().locator(".stopped-indicator")).toHaveCount(0);
+
+  // The SECOND (queued) prompt is delivered and answered afterward, in
+  // order — index 1, not swapped with the first.
+  await expect(page.getByTestId("user-message")).toHaveCount(2, { timeout: 30_000 });
+  await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+  await expect(assistantMessages.nth(1)).toContainText("SECONDDONE", { timeout: 120_000 });
+
+  // Durable backlog fully drained — no leftover trace of the queued action.
+  await expect.poll(() => readBacklogPrompts(page)).not.toContain(secondPrompt);
+});

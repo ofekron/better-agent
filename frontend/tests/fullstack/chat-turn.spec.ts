@@ -259,3 +259,44 @@ test("maintains history and context across multiple turns in one session", async
     .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid")));
   expect(bubbleOrder).toEqual(["user-message", "assistant-message", "user-message", "assistant-message"]);
 });
+
+// Validates that interrupting a turn fully resets composer state: after
+// stopping an in-flight turn, InputArea must be immediately usable again for
+// a brand-new prompt, not left disabled/wedged by stale `isStreaming` or
+// pending-interrupt state. Unlike the plain interrupt test above, this does
+// NOT wait for the stopped-indicator or any other post-interrupt settling —
+// it types and sends the next prompt the instant `stop-btn` disappears, to
+// prove the composer resets synchronously with the interrupt rather than
+// after some later cleanup step.
+test("composer is immediately usable for a new prompt after interrupting a turn", async ({ authedPage: page }) => {
+  await createSessionWithPrompt(
+    page,
+    "Count from 1 to 100 slowly, one number per line, explaining each number's factors.",
+  );
+
+  await expect(page.getByTestId("user-message")).toBeVisible();
+
+  const stopBtn = page.getByTestId("stop-btn");
+  await expect(stopBtn).toBeVisible({ timeout: 30_000 });
+
+  await stopBtn.click();
+  await expect(stopBtn).toBeHidden({ timeout: 30_000 });
+
+  // No further waiting: immediately drive a brand-new prompt through the
+  // real composer to prove it isn't stuck disabled or otherwise wedged.
+  const textarea = page.getByTestId("input-textarea");
+  const newPrompt = "Reply with exactly the single word: RESUMED. No punctuation, no other words.";
+  await textarea.fill(newPrompt);
+
+  const sendBtn = page.getByTestId("send-btn");
+  await expect(sendBtn).toBeEnabled();
+  await sendBtn.click();
+
+  // A real second user bubble plus a real, content-bearing second assistant
+  // reply proves the interrupt path left the composer and turn pipeline
+  // fully functional, not merely visually reset.
+  await expect(page.getByTestId("user-message")).toHaveCount(2);
+  const assistantMessages = page.getByTestId("assistant-message");
+  await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+  await expect(assistantMessages.nth(1)).toContainText("RESUMED", { timeout: 120_000 });
+});

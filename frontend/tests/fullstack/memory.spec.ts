@@ -441,3 +441,103 @@ test("GET /api/memory/all correctly buckets a mix of global and project-scoped m
   expect(scopedMemory?.content).toContain("scopes bucket");
   expect(scopeEntry?.memories.some((m) => m.name === "global-mix-memory")).toBe(false);
 });
+
+// MemoryProposalCard (frontend/src/components/Chat.tsx) renders its fields
+// twice: once inline in the card itself (the `.memory-proposal-card__content`
+// textarea there is fixed at `rows={4}`), and once inside a
+// `.memory-proposal-modal__overlay` modal that only mounts when `expanded`
+// state is true. Clicking "Expand" (the first, non-primary button in the
+// base card's `.user-input-card__actions` -- it has no click handler that
+// touches `resolve()`, only `setExpanded(true)`) mounts that modal, which
+// re-renders the identical fields in a `rows={18}` textarea -- room to read
+// far more of a long memory's content at once without scrolling, before the
+// user commits to approve/reject. This test proves: (1) Expand reveals that
+// larger, previously-absent modal view rather than mutating the base card in
+// place, (2) it does not call `resolve()` -- the request stays open, the
+// card stays mounted, no POST to the resolve endpoint fires -- and (3) the
+// normal Approve flow afterward still persists correctly, i.e. expanding
+// first has no side effect on the eventual outcome.
+test("expanding a memory proposal reveals the full-content modal without resolving the card, and approving afterward still persists it", async ({
+  authedPage: page,
+  backend,
+}) => {
+  // Ten lines: far more than the base card's 4-row textarea can show without
+  // scrolling, so the modal's 18-row textarea genuinely surfaces content that
+  // was scrolled out of view a moment ago.
+  const multilineContent = Array.from(
+    { length: 10 },
+    (_, i) => `Line ${i + 1} of the user's expand-test memory content.`,
+  ).join("\n");
+
+  await triggerMemoryProposal(page, {
+    name: "expand-test-memory",
+    description: "A memory whose content is long enough to require expanding.",
+    content: multilineContent,
+  });
+
+  const card = page.getByTestId("memory-proposal-card");
+  await expect(card).toBeVisible({ timeout: 60_000 });
+
+  // Scope to the base card's own action row (document order: this is the
+  // first `.user-input-card__actions` -- the modal's duplicate one, if any,
+  // would come after it once mounted).
+  const baseActions = card.locator(".user-input-card__actions").first();
+  const baseContent = card.locator(".memory-proposal-card__content").first();
+  await expect(baseContent).toHaveAttribute("rows", "4");
+  await expect(baseContent).toHaveValue(multilineContent);
+
+  // No modal yet.
+  const modalOverlay = card.locator(".memory-proposal-modal__overlay");
+  await expect(modalOverlay).toHaveCount(0);
+
+  // Click "Expand" -- the first button in the base card's action row.
+  await baseActions.locator("button").first().click();
+
+  // The card itself is still the same, unresolved request: still attached,
+  // still visible, still showing the same fields -- Expand did not resolve
+  // or dismiss it.
+  await expect(card).toBeVisible();
+  await expect(baseContent).toBeVisible();
+  await expect(baseContent).toHaveValue(multilineContent);
+
+  // New content became visible: the modal, with its own larger view of the
+  // same fields.
+  await expect(modalOverlay).toBeVisible();
+  const modalContent = modalOverlay.locator(".memory-proposal-card__content");
+  await expect(modalContent).toBeVisible();
+  await expect(modalContent).toHaveAttribute("rows", "18");
+  await expect(modalContent).toHaveValue(multilineContent);
+  // The name field is duplicated into the modal too, confirming this is the
+  // full field set re-rendered larger, not just the content box.
+  await expect(
+    modalOverlay.locator(".memory-proposal-card__field input").first(),
+  ).toHaveValue("expand-test-memory");
+
+  // The 4-row base textarea cannot show all 10 lines at once (its scrollable
+  // content exceeds its visible box); the 18-row modal textarea can. This is
+  // the concrete "additional detail visible" Expand provides.
+  const [baseOverflow, modalOverflow] = await Promise.all([
+    baseContent.evaluate((el: HTMLTextAreaElement) => el.scrollHeight - el.clientHeight),
+    modalContent.evaluate((el: HTMLTextAreaElement) => el.scrollHeight - el.clientHeight),
+  ]);
+  expect(baseOverflow).toBeGreaterThan(0);
+  expect(modalOverflow).toBeLessThanOrEqual(0);
+
+  // Collapse back (clicking outside/"Collapse" -- also not a resolve) and
+  // confirm the card is still open and unresolved.
+  await modalOverlay.locator(".user-input-card__actions button").first().click();
+  await expect(modalOverlay).toHaveCount(0);
+  await expect(card).toBeVisible();
+
+  // Now approve normally, exactly like every other test in this file.
+  await card.locator(".user-input-card__actions button.primary").click();
+  await expect(card).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+  const globalMemories = memoriesBody.global as Array<{ name: string; content: string }>;
+  const persisted = globalMemories.find((m) => m.name === "expand-test-memory");
+  expect(persisted).toBeDefined();
+  expect(persisted?.content).toBe(multilineContent);
+});

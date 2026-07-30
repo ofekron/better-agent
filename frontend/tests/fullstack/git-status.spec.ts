@@ -242,4 +242,63 @@ test.describe("git status and history", () => {
     }).trim();
     expect(subject).toBe("fullstack test commit");
   });
+
+  // `GET /api/git-tree` (backend/git_api.py) caps `limit` at 200 and passes
+  // it straight through to `git log -n <limit>` (backend/file_browser.py),
+  // which is newest-first by default (no `--reverse`). GitTreeView.tsx always
+  // requests `limit=200` and renders `commits` in the exact array order the
+  // API returns (gitGraph.ts's buildGitGraphRows does a 1:1 .map with no
+  // sort). A handful of real commits (well under the 200 cap) is enough to
+  // prove that pass-through/ordering logic end-to-end without the minutes a
+  // 200+-commit fixture would cost.
+  test("git-tree with the real limit=200 cap renders all real commits in exact reverse-chronological order, no dupes/off-by-one", async ({
+    authedPage: page,
+  }) => {
+    repo = createRealGitRepo("commit 1");
+
+    const commitCount = 8;
+    const shortHashes: string[] = [
+      execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
+        cwd: repo.dir,
+        encoding: "utf-8",
+      }).trim(),
+    ];
+    for (let i = 2; i <= commitCount; i++) {
+      addUntrackedFile(repo, "progress.txt", `progress ${i}\n`);
+      execFileSync("git", ["add", "progress.txt"], { cwd: repo.dir });
+      execFileSync("git", ["commit", "-m", `commit ${i}`], { cwd: repo.dir });
+      shortHashes.push(
+        execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
+          cwd: repo.dir,
+          encoding: "utf-8",
+        }).trim(),
+      );
+    }
+    // `shortHashes` is oldest-first (index 0 = "commit 1" ... last = "commit 8");
+    // the UI must render newest-first, i.e. this array reversed.
+    const expectedSubjectsNewestFirst = Array.from(
+      { length: commitCount },
+      (_, i) => `commit ${commitCount - i}`,
+    );
+    const expectedHashesNewestFirst = [...shortHashes].reverse();
+
+    await addProjectByPath(page, repo.dir);
+
+    await expect(page.locator(".project-git-status")).toBeVisible({ timeout: 15_000 });
+    await page.locator(".project-git-info").click();
+    const treeView = page.getByTestId("git-tree-view");
+    await expect(treeView).toBeVisible();
+    await expect(treeView.locator(".git-tree-summary")).toContainText(`Commits · ${commitCount}`);
+
+    // Exact count: not off-by-one (7 or 9), not duplicated.
+    await expect(treeView.locator(".git-tree-row")).toHaveCount(commitCount);
+
+    const renderedSubjects = await treeView.locator(".git-tree-row h2").allTextContents();
+    const renderedHashes = await treeView.locator(".git-tree-row code").allTextContents();
+
+    expect(renderedSubjects).toEqual(expectedSubjectsNewestFirst);
+    expect(renderedHashes).toEqual(expectedHashesNewestFirst);
+    // No duplicate rows hiding behind a correct count.
+    expect(new Set(renderedHashes).size).toBe(commitCount);
+  });
 });

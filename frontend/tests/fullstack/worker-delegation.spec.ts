@@ -332,3 +332,92 @@ test("closing a fork pane freezes it in place (still visible, session not delete
   if (!forkNode) throw new Error(`fork session ${forkSessionId} not found in root tree — was deleted`);
   expect(forkNode.fork_closed).toBe(true);
 });
+
+// Validates the other half of the close/reopen lifecycle: clicking the real
+// "Reopen" button (ForkPane's `fork-pane-reopen` button, ForkSplitView.tsx
+// ~line 557) flips the pane back to its normal interactive state. App.tsx's
+// `handleReopenFork` POSTs `${API}/api/sessions/${id}/reopen_fork`, which
+// backend/main.py resolves to `session_manager.set_fork_closed(id, false)` —
+// the mirror image of close_fork. So after reopening, the pane should lose
+// its `fork-pane-closed` class, regain its normal controls (the `!isClosed`
+// branch renders `fork-pane-view-button` for expand and `fork-pane-focus-radio`
+// for focus, plus `fork-pane-close` for the "x"), lose the Reopen/Delete
+// buttons (gated on `isClosed`), and the session detail endpoint should
+// report `fork_closed: false` again.
+test("reopening a closed fork pane via the Reopen button restores it to normal, interactive state", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Reply with exactly the single word: PARENT.");
+  await expect(page.getByTestId("assistant-message")).toContainText("PARENT", {
+    timeout: 120_000,
+  });
+
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: CHILD.");
+  await page.locator(".input-overflow-trigger").click();
+  await page.getByTestId("fork-btn").click();
+
+  const forkGrid = page.getByTestId("fork-grid");
+  await expect(forkGrid).toBeVisible({ timeout: 20_000 });
+  const forkPane = forkGrid.getByTestId("fork-pane").filter({ hasText: "CHILD" });
+  await expect(forkPane).toBeVisible();
+  await expect(forkPane.getByTestId("assistant-message")).toContainText("CHILD", {
+    timeout: 120_000,
+  });
+
+  const forkSessionId = await forkPane.getAttribute("data-session-id");
+  if (!forkSessionId) throw new Error("fork pane is missing data-session-id");
+
+  await page.getByTestId("fork-back-to-split").click();
+
+  await forkPane.locator(".fork-pane-close").click();
+  await expect(forkPane).toHaveClass(/fork-pane-closed/);
+  await expect(forkPane.locator(".fork-pane-reopen")).toBeVisible();
+
+  interface TreeNode {
+    id: string;
+    fork_closed?: boolean;
+    forks?: TreeNode[];
+  }
+  const findNode = (node: TreeNode, id: string): TreeNode | null => {
+    if (node.id === id) return node;
+    for (const f of node.forks ?? []) {
+      const found = findNode(f, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const closedRes = await page.request.get(
+    `${backend.baseURL}/api/sessions/${encodeURIComponent(forkSessionId)}?msg_limit=5`,
+  );
+  expect(closedRes.ok()).toBe(true);
+  const closedTree = (await closedRes.json()) as TreeNode;
+  const closedNode = findNode(closedTree, forkSessionId);
+  if (!closedNode) throw new Error(`fork session ${forkSessionId} not found in root tree`);
+  expect(closedNode.fork_closed).toBe(true);
+
+  // Click the real Reopen button.
+  await forkPane.locator(".fork-pane-reopen").click();
+
+  // The pane loses its closed styling and the Reopen/Delete controls...
+  await expect(forkPane).not.toHaveClass(/fork-pane-closed/);
+  await expect(forkPane.locator(".fork-pane-reopen")).toHaveCount(0);
+  await expect(forkPane.locator(".fork-pane-delete")).toHaveCount(0);
+
+  // ...and regains its normal interactive controls: expand, focus radio,
+  // and the close ("x") button.
+  await expect(forkPane.locator(".fork-pane-view-button")).toBeVisible();
+  await expect(forkPane.locator(".fork-pane-focus-radio")).toBeVisible();
+  await expect(forkPane.locator(".fork-pane-close")).toBeVisible();
+
+  // The server-side record reflects the reopen too.
+  const reopenedRes = await page.request.get(
+    `${backend.baseURL}/api/sessions/${encodeURIComponent(forkSessionId)}?msg_limit=5`,
+  );
+  expect(reopenedRes.ok()).toBe(true);
+  const reopenedTree = (await reopenedRes.json()) as TreeNode;
+  const reopenedNode = findNode(reopenedTree, forkSessionId);
+  if (!reopenedNode) throw new Error(`fork session ${forkSessionId} not found in root tree`);
+  expect(reopenedNode.fork_closed).toBe(false);
+});

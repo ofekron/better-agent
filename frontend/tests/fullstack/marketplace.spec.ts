@@ -364,4 +364,44 @@ test.describe("extension marketplace catalog", () => {
     const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
     expect(listRes.status()).toBe(200);
   });
+
+  test("extension id lookup is case-sensitive: a differently-cased real id is treated as not installed", async ({
+    authedPage,
+    backend,
+  }) => {
+    // The installed-extensions store (backend/extension_store.py) keys its
+    // records by the raw id string and looks them up with a plain dict
+    // `.get(extension_id)` in `_require_extension_source` — no
+    // `.lower()`/`.casefold()` normalization anywhere on the route handler
+    // -> `marketplace_service` -> `extension_store` path. So a case-varied
+    // spelling of a real, installed id must NOT resolve to that record; it
+    // must fail exactly like an unknown id (see the UNKNOWN_EXTENSION_ID
+    // test above), not like the "not marketplace-managed" case (which
+    // requires actually finding the record first).
+    const MIXED_CASE_ID = "Ofek-Dev.Ask";
+    expect(MIXED_CASE_ID.toLowerCase()).toBe(NON_MARKETPLACE_EXTENSION_ID);
+    expect(MIXED_CASE_ID).not.toBe(NON_MARKETPLACE_EXTENSION_ID);
+
+    const patchRes = await authedPage.request.patch(
+      `${backend.baseURL}/api/extensions/marketplace/${MIXED_CASE_ID}/enabled`,
+      { data: { enabled: false } },
+    );
+    expect(patchRes.status()).toBe(400);
+    expect((await patchRes.json()).detail).toBe("Extension not installed");
+
+    const deleteRes = await authedPage.request.delete(
+      `${backend.baseURL}/api/extensions/marketplace/${MIXED_CASE_ID}`,
+    );
+    expect(deleteRes.status()).toBe(400);
+    expect((await deleteRes.json()).detail).toBe("Extension not installed");
+
+    // The real, correctly-cased id is untouched by either rejected call.
+    const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
+    const { extensions } = (await listRes.json()) as {
+      extensions: Array<{ manifest: { id: string }; enabled: boolean; source: { type: string } }>;
+    };
+    const ask = extensions.find((item) => item.manifest.id === NON_MARKETPLACE_EXTENSION_ID);
+    expect(ask?.enabled).toBe(true);
+    expect(ask?.source.type).toBe("better_agent_bundled");
+  });
 });

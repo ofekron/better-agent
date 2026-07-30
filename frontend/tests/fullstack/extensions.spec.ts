@@ -394,4 +394,46 @@ test.describe("extensions settings", () => {
     }, extensionId);
     expect(configAfter.enabled).toBe(configBefore.enabled);
   });
+
+  // ExtensionHealthPromptContainer (frontend/src/components/ExtensionHealthPrompt.tsx)
+  // renders nothing until GET /api/extensions?include_hidden=true reports a
+  // `pending_health_decision` on some extension record. That field is only
+  // ever set by extension_store.py's `_record_backend_incident` (see
+  // `record_slow_backend_call` / `record_backend_timeout`), which requires
+  // _EXTENSION_SLOW_CALL_LIMIT (3) genuinely slow (>= the route's declared
+  // budget, default EXTENSION_SLOW_CALL_SECONDS = 2s) real HTTP calls to an
+  // extension backend route within a 10-minute window. None of the bundled
+  // extensions in this harness expose a deliberately slow backend route, and
+  // there's no mock/fake-data path to the "unhealthy" state without bypassing
+  // extension_store's real incident recording (which this suite avoids, same
+  // as the "no update available" case above). So this is the real, fully
+  // deterministic baseline: a fresh authed session is healthy, and the prompt
+  // is genuinely absent -- not just unasserted.
+  test("a healthy install shows no extension health prompt on a normal authed page load", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.getByTestId("settings-nav-extensions").click();
+
+    const rows = page.locator(".extension-ui-settings-row");
+    await expect(rows.first()).toBeVisible();
+
+    // --- UI: the global health prompt never mounts ---
+    await expect(page.locator('[data-testid="extension-health-prompt"]')).toHaveCount(0);
+
+    // --- REST: confirm the backend agrees -- no extension carries a pending
+    // health decision, which is the sole trigger for the prompt above ---
+    const catalog = await page.evaluate(async () => {
+      const res = await fetch(`/api/extensions?include_hidden=true`, { credentials: "include" });
+      return res.json();
+    });
+    const records: Array<{ pending_health_decision?: unknown }> = catalog.extensions ?? catalog;
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every((r) => !r.pending_health_decision)).toBe(true);
+
+    // --- stays absent across a real reload, not just on first paint ---
+    await page.goto(`${backend.baseURL}/settings`);
+    await expect(page.locator('[data-testid="extension-health-prompt"]')).toHaveCount(0);
+  });
 });

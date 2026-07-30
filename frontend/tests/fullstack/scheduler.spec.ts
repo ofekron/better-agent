@@ -296,3 +296,76 @@ test("creates two schedules from the same session and both appear as distinct ro
   // Both trace back to the one session they were scheduled from.
   expect(createdA?.app_session_id).toBe(createdB?.app_session_id);
 });
+
+// Orphaned-schedule edge case: schedule_store.create() (backend/stores/
+// schedule_store.py) only ever stores app_session_id — there is no back
+// reference from a session to its schedules, and `_delete_session_tree`
+// (backend/main.py) never touches schedule_store, so DELETE
+// /api/sessions/{id} does NOT cascade-delete that session's schedules; they
+// are left dangling. GET /api/schedules (backend/main.py's
+// get_all_schedules) resolves this per-record via session_manager.get() and
+// annotates each with `session_exists: false` when the owner is gone.
+// SchedulesPage.tsx renders that as `.schedules-orphan` ("Session deleted")
+// instead of the normal `.schedules-session-link` open-session button — no
+// crash, no broken link. This exercises the real DELETE /api/sessions/{id}
+// route (confirmed present in backend/main.py) the same way
+// offline-queue.spec.ts's session-deletion test does.
+test("a schedule survives its owning session being deleted, and the Schedules page shows it as orphaned instead of crashing", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Say hello. Keep it short.");
+
+  const sessionMatch = page.url().match(/\/s\/([^/?#]+)/);
+  if (!sessionMatch) throw new Error(`could not extract session id from URL: ${page.url()}`);
+  const sessionId = decodeURIComponent(sessionMatch[1]);
+
+  const scheduledPrompt = `Scheduled orphan test prompt ${Date.now()}`;
+  const draft = page.getByTestId("input-textarea");
+  await draft.fill(scheduledPrompt);
+
+  await page.locator(".input-overflow-trigger").click();
+  const scheduleBtn = page.getByTestId("schedule-btn");
+  await expect(scheduleBtn).toBeEnabled();
+  await scheduleBtn.click();
+
+  const popover = page.getByTestId("schedule-popover");
+  await expect(popover).toBeVisible();
+
+  const fireAt = toLocalInputValue(new Date(Date.now() + 2 * 60 * 60 * 1000));
+  await page.getByTestId("schedule-fire-at").fill(fireAt);
+  await page.getByTestId("schedule-repeat").selectOption("once");
+
+  await page.getByTestId("schedule-submit").click();
+  await expect(popover).not.toBeVisible({ timeout: 10_000 });
+  await expect(draft).toHaveValue("");
+
+  // Delete the owning session for real via the backend's own route.
+  const deleteRes = await page.request.delete(`${backend.baseURL}/api/sessions/${sessionId}`);
+  expect(deleteRes.ok()).toBe(true);
+
+  // The schedule is NOT cascade-deleted — it remains listed, now flagged
+  // as orphaned rather than silently vanishing or dangling unmarked.
+  const res = await page.request.get(`${backend.baseURL}/api/schedules`);
+  expect(res.ok()).toBe(true);
+  const { schedules } = (await res.json()) as {
+    schedules: Array<{ prompt: string; app_session_id: string; session_exists: boolean }>;
+  };
+  const orphan = schedules.find((s) => s.prompt === scheduledPrompt);
+  expect(orphan).toBeTruthy();
+  expect(orphan?.app_session_id).toBe(sessionId);
+  expect(orphan?.session_exists).toBe(false);
+
+  // The SchedulesPage UI handles it gracefully: the row still renders, but
+  // with the orphan marker instead of an "open session" link into a
+  // now-missing session.
+  await page.goto(`${backend.baseURL}/schedules`);
+  const row = page.locator(".schedules-row", { hasText: scheduledPrompt });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await expect(row.locator(".schedules-orphan")).toHaveText("Session deleted");
+  await expect(row.locator(".schedules-session-link")).toHaveCount(0);
+
+  // Still cancelable like any other schedule despite the missing owner.
+  await row.locator(".schedules-row-actions .schedules-danger").click();
+  await expect(row).toHaveCount(0, { timeout: 10_000 });
+});

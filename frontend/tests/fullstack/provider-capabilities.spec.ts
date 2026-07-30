@@ -291,3 +291,40 @@ test("the default permission mode persists and a new session inherits it without
     { timeout: 60_000 },
   );
 });
+
+// The provider "Nickname" field (ProviderForm's `nickname` state, submitted
+// as the `nickname` PATCH field) is distinct from the provider `name`: it's
+// shown alongside the name in the providers list as `.provider-nickname`
+// (SettingsPage.tsx, via utils/providerDisplayName's `providerNickname`)
+// only when non-empty. This proves a real round trip through PATCH
+// /api/providers/{id} and a real reload (not just in-memory state), and that
+// clearing it back to empty actually removes the persisted value and the
+// list span, not just visually hides stale text.
+test("a provider nickname persists, displays in the list, and can be cleared", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const nickname = `Alias ${Date.now()}`;
+
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await page.getByPlaceholder("Account alias (optional)").fill(nickname);
+  await saveProviderSettings(page);
+
+  const providerRow = page.getByTestId("provider-row-claude");
+  await expect(providerRow.locator(".provider-nickname")).toHaveText(nickname);
+
+  // A real full navigation (not client-side routing) proves the nickname
+  // survived a real reload, not just in-memory React state.
+  await page.goto(`${backend.baseURL}/settings`);
+  await expect(providerRow.locator(".provider-nickname")).toHaveText(nickname);
+
+  // Re-open the edit form on the reloaded page and clear the field.
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await page.getByPlaceholder("Account alias (optional)").fill("");
+  await saveProviderSettings(page);
+
+  await expect(providerRow.locator(".provider-nickname")).toHaveCount(0);
+
+  await page.goto(`${backend.baseURL}/settings`);
+  await expect(providerRow.locator(".provider-nickname")).toHaveCount(0);
+});
