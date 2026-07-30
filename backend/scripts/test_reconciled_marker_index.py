@@ -293,6 +293,7 @@ def test_large_recovery_dispatch_repairs_index_without_quadratic_scan() -> None:
         def __init__(self) -> None:
             self.defunct = False
             self.suspended = False
+            self.record = {"runner": "fake-runner"}
             self.seen: set[str] = set()
 
         def recover_in_flight(self, *, loop=None, run_id_filter=None):
@@ -307,6 +308,7 @@ def test_large_recovery_dispatch_repairs_index_without_quadratic_scan() -> None:
     elapsed = time.perf_counter() - started
     assert fake.seen == pending_ids
     assert {row["run_id"] for row in recovered} == pending_ids
+    assert {row["runner"] for row in recovered} == {"fake-runner"}
     assert elapsed < 5.0, elapsed
     print("PASS large recovery dispatch repairs index in bounded time")
 
