@@ -207,7 +207,11 @@ def test_windows_directory_acl_verification_failure_is_closed() -> None:
 
 def test_posix_directory_repairs_only_current_owner() -> None:
     original_name = paths.os.name
+    original_getuid = getattr(paths.os, "getuid", None)
+    original_pwd = paths._pwd
     paths.os.name = "posix"
+    paths.os.getuid = lambda: 1000
+    paths._pwd = object()
     current_uid = paths.os.getuid()
     insecure = _PosixDirectory(0o777, current_uid)
     secure = _PosixDirectory(0o700, current_uid)
@@ -223,6 +227,11 @@ def test_posix_directory_repairs_only_current_owner() -> None:
             raise AssertionError("foreign POSIX directory owner was mutated")
     finally:
         paths.os.name = original_name
+        paths._pwd = original_pwd
+        if original_getuid is None:
+            delattr(paths.os, "getuid")
+        else:
+            paths.os.getuid = original_getuid
 
     assert insecure.chmods == [0o700]
     assert secure.chmods == []
