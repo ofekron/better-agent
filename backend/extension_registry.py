@@ -49,19 +49,3 @@ def active_builtin_mcp_extensions(inputs: dict, *, user_facing: bool, bare: bool
         if extension.predicate(inputs):
             active.append(extension)
     return active
-
-
-# Built-in MCP servers added directly in builtin_mcp_config (not via the
-# active_builtin_mcp_extensions loop), listed here so Settings can show and
-# toggle them per extension.
-_SUPPLEMENTAL_BUILTIN_MCP_SERVERS: dict[str, tuple[tuple[str, str], ...]] = {}
-
-
-def builtin_mcp_servers_by_extension() -> dict[str, list[tuple[str, str]]]:
-    """extension_id → [(server_name, label)] for every built-in MCP server."""
-    result: dict[str, list[tuple[str, str]]] = {}
-    for ext in BUILTIN_MCP_EXTENSIONS:
-        result.setdefault(ext.extension_id, []).append((ext.mcp_server, ext.name))
-    for ext_id, servers in _SUPPLEMENTAL_BUILTIN_MCP_SERVERS.items():
-        result.setdefault(ext_id, []).extend(servers)
-    return result
