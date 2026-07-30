@@ -618,14 +618,6 @@ def _native_bucket_sql(column: str, granularity: str) -> str:
     return f"strftime('%Y-%m', {local})"
 
 
-def _native_projection_query(
-    snapshot: native_analytics_snapshot.NativeAnalyticsSnapshot,
-    sql: str,
-    params: tuple,
-) -> list[dict]:
-    return snapshot.query(sql, params)
-
-
 def _native_analytics_projection(
     start: datetime,
     end: datetime,
@@ -640,8 +632,7 @@ def _native_analytics_projection(
     start_z = _utc_z(start)
     end_z = _utc_z(end)
     session_bucket = _native_bucket_sql("fs.first_user_prompt_ts", granularity)
-    sessions = _native_projection_query(
-        snapshot,
+    sessions = snapshot.query(
         f"""
         SELECT
             COALESCE(fs.tag, 'unknown') AS provider_kind,
@@ -659,8 +650,7 @@ def _native_analytics_projection(
     )
     sid_rows = []
     if ba_session_ids:
-        sid_rows = _native_projection_query(
-            snapshot,
+        sid_rows = snapshot.query(
             """
             WITH requested(sid) AS (SELECT value FROM json_each(?))
             SELECT DISTINCT fs.sid
@@ -675,8 +665,7 @@ def _native_analytics_projection(
     if snapshot.status["state"] == "current":
         turn_bucket = _native_bucket_sql("m.ts_utc", granularity)
         try:
-            turns = _native_projection_query(
-                snapshot,
+            turns = snapshot.query(
                 f"""
                 SELECT
                     COALESCE(fs.tag, m.tag, 'unknown') AS provider_kind,
