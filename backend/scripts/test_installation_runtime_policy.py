@@ -945,7 +945,7 @@ def test_target_checkout_verifier_checks_plan_receipt_without_runtime_probe() ->
             assert dependency_plan.verified_active_env(backend) == env_dir.resolve()
 
         assert run.call_args.args[0][-1] == "assert-active-plan"
-        assert run.call_args.kwargs["timeout"] == 30
+        assert "timeout" not in run.call_args.kwargs
 
 
 def test_active_plan_receipt_check_does_not_repeat_runtime_probe() -> None:
