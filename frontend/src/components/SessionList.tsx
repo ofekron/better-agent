@@ -1260,6 +1260,7 @@ function SessionNodeImpl({
         <SessionStatsPopover
           anchor={statsPopover}
           session={session}
+          provider={provider}
           onClose={() => setStatsPopover(null)}
         />
       )}

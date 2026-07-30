@@ -1,52 +1,29 @@
 import { useTranslation } from "react-i18next";
 import type { TokenUsage as TokenUsageType } from "../types";
+import {
+  formatCost,
+  formatRate,
+  hasCacheWriteBreakdown,
+  usageCost,
+  type PriceEntry,
+} from "../utils/pricing";
 
 interface Props {
   usage?: TokenUsageType | null;
   /** Last turn's token usage (not cumulative) — used for context fill bar. */
   usageLast?: TokenUsageType | null;
   contextWindow?: number | null;
+  /** Published price for the provider x model that produced this usage,
+   * from the Usage extension's daily-refreshed table. Undefined while it
+   * is still loading; `available: false` when the model has no published
+   * price — both render as an explicit unknown, never as a fake number. */
+  price?: PriceEntry;
 }
 
 function formatNum(n: number): string {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
   return n.toString();
-}
-
-/** True when the provider reported the cache-write TTL split (Anthropic
- * only); absence means the split is unknown, not zero. */
-function hasCacheWriteBreakdown(usage: TokenUsageType): boolean {
-  return (
-    usage.cache_creation_5m_tokens !== undefined ||
-    usage.cache_creation_1h_tokens !== undefined
-  );
-}
-
-function estimateCost(usage: TokenUsageType): number {
-  // Approximate costs per 1M tokens (Sonnet 4.6 pricing)
-  const inputCost = 3; // $3/MTok
-  const outputCost = 15; // $15/MTok
-  const cacheReadCost = 0.3; // $0.30/MTok
-  const cacheCreate5mCost = 3.75; // 1.25x input
-  const cacheCreate1hCost = 6; // 2x input
-
-  const cacheWriteCost = hasCacheWriteBreakdown(usage)
-    ? (usage.cache_creation_5m_tokens ?? 0) * cacheCreate5mCost +
-      (usage.cache_creation_1h_tokens ?? 0) * cacheCreate1hCost
-    : (usage.cache_creation_input_tokens ?? 0) * cacheCreate5mCost;
-
-  return (
-    (usage.input_tokens * inputCost) / 1_000_000 +
-    (usage.output_tokens * outputCost) / 1_000_000 +
-    ((usage.cache_read_input_tokens ?? 0) * cacheReadCost) / 1_000_000 +
-    cacheWriteCost / 1_000_000
-  );
-}
-
-function formatCost(cost: number): string {
-  if (cost < 0.01) return "<$0.01";
-  return `$${cost.toFixed(2)}`;
 }
 
 /** Current context fill = latest turn's total input tokens.
@@ -80,7 +57,68 @@ function ContextFillBar({ used, capacity }: { used: number; capacity: number }) 
   );
 }
 
-export function TokenUsageDisplay({ usage, usageLast, contextWindow }: Props) {
+/** Cost of this usage at the model's published rates. Three honest states:
+ *  a real number, "still loading the price table", or "this model has no
+ *  published price" — never a stand-in figure. */
+function CostRow({
+  usage,
+  price,
+}: {
+  usage: TokenUsageType;
+  price?: PriceEntry;
+}) {
+  const { t } = useTranslation();
+  const cost = usageCost(usage, price);
+
+  if (cost === null) {
+    const pending = price === undefined;
+    return (
+      <div className="token-usage-row">
+        <span className="token-cost token-cost-unknown" aria-live="polite">
+          {pending
+            ? t("tokens.costLoading", { defaultValue: "Pricing…" })
+            : t("tokens.costUnavailable", { defaultValue: "No published price" })}
+        </span>
+      </div>
+    );
+  }
+
+  const currency = price?.currency || "USD";
+  const rates = price?.cost;
+  const rateHint = rates
+    ? t("tokens.rateHint", {
+        input: formatRate(rates.input, currency),
+        output: formatRate(rates.output, currency),
+        model: price?.catalog_model ?? "",
+        defaultValue: "{{model}} · {{input}} in / {{output}} out per 1M tokens",
+      })
+    : undefined;
+
+  return (
+    <div className="token-usage-row">
+      <span className="token-cost token-cost-resolved" title={rateHint}>
+        {formatCost(cost.amount, currency)}
+      </span>
+      {cost.partial && (
+        <span className="token-cost-note">
+          {t("tokens.costPartial", { defaultValue: "partial — some rates unpublished" })}
+        </span>
+      )}
+      {price?.basis === "underlying_vendor_list" && (
+        <span className="token-cost-note">
+          {t("tokens.costListPrice", { defaultValue: "model list price" })}
+        </span>
+      )}
+    </div>
+  );
+}
+
+export function TokenUsageDisplay({
+  usage,
+  usageLast,
+  contextWindow,
+  price,
+}: Props) {
   const { t } = useTranslation();
   const hasUsage = usage && (usage.input_tokens > 0 || usage.output_tokens > 0);
 
@@ -140,9 +178,7 @@ export function TokenUsageDisplay({ usage, usageLast, contextWindow }: Props) {
               )
             )}
           </div>
-          <div className="token-usage-row">
-            <span className="token-cost">{formatCost(estimateCost(usage))}</span>
-          </div>
+          <CostRow usage={usage} price={price} />
         </>
       )}
       {!hasUsage && (

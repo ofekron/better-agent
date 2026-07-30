@@ -2,14 +2,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
-import type { Session } from "../types";
+import type { Provider, Session } from "../types";
 import { TokenUsageDisplay } from "./TokenUsage";
 import type { PopoverAnchor } from "./SessionTagPopover";
 import { API } from "../api";
+import { usePricing } from "../hooks/usePricing";
+import { selectPrice, type PricingRequest } from "../utils/pricing";
 
 interface Props {
   anchor: PopoverAnchor;
   session: Session;
+  /** Provider that ran the session — its kind and base URL decide which
+   * published price applies to the session's model. */
+  provider?: Provider;
   onClose: () => void;
 }
 
@@ -20,9 +25,22 @@ const MARGIN = 8;
  *  viewport coords (position: fixed) so it is never clipped by the
  *  sidebar's overflow-y container; flipped/clamped to stay on screen.
  *  Modeled on SessionTagPopover. */
-export function SessionStatsPopover({ anchor, session, onClose }: Props) {
+export function SessionStatsPopover({ anchor, session, provider, onClose }: Props) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
+  // The session's own model priced by the provider that ran it. Cost stays
+  // unknown rather than guessed when either is missing.
+  const request: PricingRequest | null =
+    provider?.kind && session.model
+      ? {
+          provider_id: provider.id,
+          kind: provider.kind,
+          base_url: provider.base_url || "",
+          model: session.model,
+        }
+      : null;
+  const pricing = usePricing(API, request ? [request] : []);
+  const price = selectPrice(pricing, request);
   const [stats, setStats] = useState({
     usage: session.token_usage_total ?? null,
     usageLast: session.token_usage_last ?? null,
@@ -109,6 +127,7 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
         usage={stats.usage}
         usageLast={stats.usageLast}
         contextWindow={stats.contextWindow}
+        price={price}
       />
     </div>,
     document.body,

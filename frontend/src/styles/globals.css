@@ -9773,6 +9773,45 @@ button.run-badge-clickable:focus-visible {
   font-family: "SF Mono", "Fira Code", monospace;
 }
 
+/* No published price for this model, or the price table is still loading —
+   stated plainly instead of shown as a number. */
+.token-cost-unknown {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* The figure settles in once the daily price table resolves, so the switch
+   from "Pricing…" to a real number is perceptible rather than a silent swap. */
+.token-cost-resolved {
+  animation: token-cost-settle 320ms ease-out both;
+}
+
+@keyframes token-cost-settle {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Marks a figure taken from the underlying model's list price because the
+   provider publishes no rate of its own. */
+.token-cost-note {
+  font-size: calc(10px * var(--app-font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .token-cost-resolved {
+    animation: none;
+  }
+}
+
 /* Context fill bar — shows how full the model's context window is */
 .context-fill {
   display: flex;
