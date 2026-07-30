@@ -148,6 +148,7 @@ try {
 }
 if (!existsSync(APK_OUT)) { warn("APK was not produced — aborting."); process.exit(1); }
 
+mkdirSync(dirname(RELEASES_APK), { recursive: true });
 copyFileSync(APK_OUT, RELEASES_APK);
 const bcHome = resolveBcHome();
 const mobileDir = join(bcHome, "mobile");
