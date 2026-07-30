@@ -22,6 +22,7 @@ import main  # noqa: E402
 import auth  # noqa: E402
 import extension_store  # noqa: E402
 import session_store  # noqa: E402
+from session_manager import manager as session_manager  # noqa: E402
 from orchs.manager import _delegation  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -99,6 +100,7 @@ def test_rest_sets_policy(client: TestClient) -> bool:
     if response.status_code != 200:
         print(f"  expected 200, got {response.status_code}: {response.text}")
         return False
+    session_manager.flush_pending_persists()
     session = session_store.get_session(sid)
     if session.get("worker_creation_policy") != "approve":
         print(f"  persisted mismatch: {session}")
