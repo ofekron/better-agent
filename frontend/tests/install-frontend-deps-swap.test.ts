@@ -3,7 +3,10 @@ import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — build script, no type declarations
-import { retiredNodeModulesPath } from "../scripts/install-frontend-deps.mjs";
+import {
+  prepareInstallManifest,
+  retiredNodeModulesPath,
+} from "../scripts/install-frontend-deps.mjs";
 
 const scriptPath = join(
   dirname(dirname(fileURLToPath(import.meta.url))),
@@ -25,5 +28,20 @@ describe("frontend dependency install swap slot", () => {
 
   it("never parks the retired copy at a shared fixed path", () => {
     expect(readFileSync(scriptPath, "utf8")).not.toContain(".node_modules.previous");
+  });
+
+  it("does not run the frontend postinstall inside the temporary stage", () => {
+    const source = {
+      name: "frontend",
+      scripts: { postinstall: "node scripts/detect-ips.mjs", build: "vite build" },
+      dependencies: { react: "^19.0.0" },
+    };
+
+    expect(prepareInstallManifest(source, {})).toEqual({
+      name: "frontend",
+      scripts: { build: "vite build" },
+      dependencies: { react: "^19.0.0" },
+    });
+    expect(source.scripts.postinstall).toBe("node scripts/detect-ips.mjs");
   });
 });

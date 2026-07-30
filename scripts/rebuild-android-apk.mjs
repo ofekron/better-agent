@@ -16,6 +16,7 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withMobilePackageJson } from "../frontend/scripts/cap-sync.mjs";
+import { installFrontendDependencies } from "../frontend/scripts/install-frontend-deps.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -39,6 +40,8 @@ const RELEVANT = [
   /^frontend\/vite\.config\./,
   /^frontend\/tsconfig.*\.json$/,
   /^frontend\/package(-lock)?\.json$/,
+  /^frontend\/package-lock\.mobile\.json$/,
+  /^frontend\/mobile-dependencies\.json$/,
   /^frontend\/capacitor\.config\./,
   /^frontend\/android\/app\/src\//,
   /^frontend\/android\/(app\/)?build\.gradle(\.kts)?$/,
@@ -115,6 +118,7 @@ const VERSION_NAME = shortSha ? `build-${shortSha}` : `build-${VERSION_CODE}`;
 
 log(`APK-relevant changes detected — rebuilding debug APK (v${VERSION_NAME}, code ${VERSION_CODE})…`);
 try {
+  installFrontendDependencies("mobile");
   // --mode mobile is required: vite.config.ts aliases @capacitor/* to
   // src/platform/web/* no-op shims (isNativePlatform() => false) unless
   // mode is exactly "mobile". Without this flag the APK ships a bundle
