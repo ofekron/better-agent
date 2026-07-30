@@ -352,6 +352,11 @@ def test_pending_terminal_handoff_never_classifies_unrelated_active_runs() -> No
         ),
         patch.object(
             run_recovery.session_manager,
+            "get",
+            return_value=session,
+        ),
+        patch.object(
+            run_recovery.session_manager,
             "get_ref",
             return_value=session,
         ),
