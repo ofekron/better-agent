@@ -308,7 +308,6 @@ def _probe_runtime_module(python: Path, module: str) -> None:
         check=True,
         capture_output=True,
         text=True,
-        timeout=120,
     )
 
 
