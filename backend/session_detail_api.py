@@ -914,6 +914,38 @@ async def create_session(body: Any = Body(default=None)):
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    requested_profile_id = body.get("runtime_profile_id")
+    if requested_profile_id is not None:
+        if not isinstance(requested_profile_id, str) or not requested_profile_id.strip():
+            raise HTTPException(
+                status_code=400, detail="runtime_profile_id must be a string"
+            )
+        runtime_profile_record = await asyncio.to_thread(
+            config_store.get_runtime_profile, requested_profile_id
+        )
+        if runtime_profile_record is None or runtime_profile_record.get("deleted_at"):
+            raise HTTPException(
+                status_code=400, detail="runtime profile is unknown or deleted"
+            )
+        if (
+            body.get("provider_id")
+            and body["provider_id"] != runtime_profile_record["provider_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="provider_id conflicts with runtime_profile_id",
+            )
+        if body.get("runner") and body["runner"] != runtime_profile_record["runner"]:
+            raise HTTPException(
+                status_code=400, detail="runner conflicts with runtime_profile_id"
+            )
+        # The chosen profile is an explicit selection: its provider+runner
+        # win over harness pins; model/effort stay overridable below.
+        body = {
+            **body,
+            "provider_id": runtime_profile_record["provider_id"],
+            "runner": runtime_profile_record["runner"],
+        }
     harness_profile_id = _harness_profile_selection(body)
     # A harness profile may pin provider/model/reasoning-effort defaults used
     # ONLY for whichever the caller omitted; explicit body values always win.
@@ -1066,6 +1098,7 @@ async def create_session(body: Any = Body(default=None)):
         source=requested_source,
         provider_id=requested_provider_id,
         runner=requested_runner,
+        runtime_profile_id=requested_profile_id,
         reasoning_effort=requested_effort,
         permission=requested_permission or None,
         browser_harness_enabled=browser_harness_enabled,

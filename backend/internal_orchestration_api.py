@@ -33,6 +33,7 @@ from provider_validation import (
     api_optional_provisioned_tool_profile as _api_optional_provisioned_tool_profile,
     api_reasoning_effort as _api_reasoning_effort,
     inherited_reasoning_effort as _inherited_reasoning_effort,
+    profile_prefill_model,
     provider_reasoning_effort as _provider_reasoning_effort,
     provider_runner as _provider_runner,
     required_model_from_body_or_provider as _required_model_from_body_or_provider,
@@ -276,9 +277,9 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
         sender = await _session_lite(sender_session_id)
         provider_id = run_provider_id or str((sender or {}).get("provider_id") or "").strip() or None
         if not model and run_provider_id:
-            provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
-            model = str(provider.get("default_model") or "").strip()
+            model = await asyncio.to_thread(profile_prefill_model, provider_id)
             if not model:
+                provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
                 name = provider.get("name") or provider_id
                 raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
         if not model:
@@ -770,6 +771,39 @@ async def internal_create_session(
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    requested_profile_id = body.get("runtime_profile_id")
+    if requested_profile_id is not None:
+        if not isinstance(requested_profile_id, str) or not requested_profile_id.strip():
+            raise HTTPException(
+                status_code=400, detail="runtime_profile_id must be a string"
+            )
+        runtime_profile_record = await asyncio.to_thread(
+            config_store.get_runtime_profile, requested_profile_id
+        )
+        if runtime_profile_record is None or runtime_profile_record.get("deleted_at"):
+            raise HTTPException(
+                status_code=400, detail="runtime profile is unknown or deleted"
+            )
+        if (
+            str(body.get("provider_id") or "").strip()
+            and body["provider_id"] != runtime_profile_record["provider_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="provider_id conflicts with runtime_profile_id",
+            )
+        if (
+            str(body.get("runner") or "").strip()
+            and body["runner"] != runtime_profile_record["runner"]
+        ):
+            raise HTTPException(
+                status_code=400, detail="runner conflicts with runtime_profile_id"
+            )
+        body = {
+            **body,
+            "provider_id": runtime_profile_record["provider_id"],
+            "runner": runtime_profile_record["runner"],
+        }
     harness_profile_id = _harness_profile_selection(body)
     # Profile provider/model/effort pins fill in whatever the caller omitted,
     # outranking sender-session inheritance but never an explicit body value.
@@ -920,16 +954,15 @@ async def internal_create_sub_session(
     requested_model = str(profile_selectors["model"] or "").strip()
     model = requested_model
     if not model and requested_provider_id and provider_id:
-        provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
-        model = str(provider.get("default_model") or "").strip()
+        model = await asyncio.to_thread(profile_prefill_model, provider_id, runner)
         if not model:
+            provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
             name = provider.get("name") or provider_id
             raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
     if not model:
         model = str(parent.get("model") or "").strip()
     if not model and provider_id:
-        provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
-        model = str(provider.get("default_model") or "").strip()
+        model = await asyncio.to_thread(profile_prefill_model, provider_id, runner)
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     requested_effort = profile_selectors["reasoning_effort"]

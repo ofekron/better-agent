@@ -4237,6 +4237,7 @@ class SessionManager:
         source: str = "web",
         provider_id: Optional[str] = None,
         runner: Optional[str] = None,
+        runtime_profile_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         permission: Optional[dict] = None,
         browser_harness_enabled: bool = True,
@@ -4264,21 +4265,30 @@ class SessionManager:
         # created this session (see session_store user-initiation taxonomy).
         # Defaults to False — fail-closed so a caller that forgets it never
         # surfaces a hidden helper session as user-facing.
-        if provider_id is None:
+        if provider_id is None and runtime_profile_id is None:
             default_profile = config_store.resolve_internal_llm("default_session")
             provider_id = default_profile.get("provider_id")
             model = model or default_profile.get("model") or None
             runner = runner or default_profile.get("runner") or None
             if reasoning_effort is None:
                 reasoning_effort = default_profile.get("reasoning_effort") or None
+        validation_provider_id = provider_id
+        if validation_provider_id is None and runtime_profile_id:
+            # session_store re-validates the profile fail-closed; this peek
+            # only feeds the orchestration capability gate.
+            validation_provider_id = (
+                config_store.get_runtime_profile(runtime_profile_id) or {}
+            ).get("provider_id")
         _validate_orchestration_mode_against_provider(
-            orchestration_mode=orchestration_mode, provider_id=provider_id,
+            orchestration_mode=orchestration_mode,
+            provider_id=validation_provider_id,
         )
         sess = session_store.create_session(
             name=name, model=model, cwd=cwd,
             orchestration_mode=orchestration_mode, source=source,
             provider_id=provider_id,
             runner=runner,
+            runtime_profile_id=runtime_profile_id,
             reasoning_effort=reasoning_effort,
             permission=permission,
             browser_harness_enabled=browser_harness_enabled,

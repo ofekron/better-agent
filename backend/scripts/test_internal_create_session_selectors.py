@@ -39,12 +39,14 @@ def _post(client: TestClient, body: dict):
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
     provider = config_store.list_providers()["providers"][0]
+    defaults = config_store.provider_execution_defaults(provider["id"])
+    assert defaults["runtime_profile_id"], "fixture provider needs a live profile"
     assignments = config_store.get_internal_llm_assignments()
     for task in tasks:
         assignments[task] = {
-            "provider_id": provider["id"],
-            "model": provider["default_model"],
-            "reasoning_effort": provider.get("default_reasoning_effort") or "",
+            "runtime_profile_id": defaults["runtime_profile_id"],
+            "model": defaults["default_model"],
+            "reasoning_effort": defaults["default_reasoning_effort"],
         }
     config_store.set_internal_llm_assignments(assignments)
 
@@ -59,17 +61,24 @@ def _seed_default_provider(model: str) -> None:
     payload: dict = {}
     if not default.get("name"):
         payload["name"] = "Default Test Provider"
-    if not default.get("default_model"):
-        payload["default_model"] = model
+    defaults = config_store.provider_execution_defaults(default["id"])
+    if not defaults["default_model"]:
         payload["custom_models"] = [model]
-    efforts = runtime_profile.reasoning_efforts(default)
-    if not efforts:
-        efforts = ("low", "medium", "high", "xhigh")
-        payload["reasoning_effort_options"] = list(efforts)
-    if not default.get("default_reasoning_effort"):
-        payload["default_reasoning_effort"] = efforts[0]
     if payload:
         config_store.update_provider(default["id"], payload)
+    efforts = runtime_profile.reasoning_efforts(
+        config_store.get_provider(default["id"]) or {}
+    ) or ("low", "medium", "high", "xhigh")
+    profile_patch: dict = {}
+    if not defaults["default_model"]:
+        profile_patch["default_model"] = model
+    if not defaults["default_reasoning_effort"]:
+        profile_patch["default_reasoning_effort"] = efforts[0]
+    if profile_patch:
+        assert defaults["runtime_profile_id"], "fixture provider needs a live profile"
+        config_store.update_runtime_profile(
+            defaults["runtime_profile_id"], profile_patch
+        )
 
 
 def main_test() -> int:
@@ -79,8 +88,9 @@ def main_test() -> int:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     provider = config_store.get_default_provider()
     provider_id = provider["id"]
-    provider_model = provider["default_model"]
-    provider_reasoning_effort = provider.get("default_reasoning_effort") or ""
+    _defaults = config_store.provider_execution_defaults(provider_id)
+    provider_model = _defaults["default_model"]
+    provider_reasoning_effort = _defaults["default_reasoning_effort"]
     other_provider = config_store.add_provider({
         "name": "Other Test Provider",
         "kind": provider.get("kind") or "claude",
@@ -526,6 +536,76 @@ def main_test() -> int:
     assert fork["caller_agent_session_id"] == sender["id"]
     assert fork["forked_from_agent_sid"] == "provider-sub-sid"
     assert session_manager.get(fork["id"])["parent_session_id"] == target_session_id
+
+    # ── Runtime-profile creation matrix ────────────────────────────────
+    profile_defaults = config_store.provider_execution_defaults(provider_id)
+    live_profile_id = profile_defaults["runtime_profile_id"]
+    assert live_profile_id
+
+    by_profile = _post(client, {
+        "name": "profile based", "cwd": "/repo",
+        "runtime_profile_id": live_profile_id,
+    })
+    assert by_profile.status_code == 200, by_profile.text
+    created = session_manager.get(by_profile.json()["session_id"])
+    assert created["runtime_profile_id"] == live_profile_id
+    assert created["provider_id"] == provider_id
+    assert created["runner"] == profile_defaults["runner"]
+
+    conflict = _post(client, {
+        "name": "conflict", "cwd": "/repo",
+        "runtime_profile_id": live_profile_id,
+        "provider_id": other_provider_id,
+    })
+    assert conflict.status_code == 400, conflict.text
+
+    unknown = _post(client, {
+        "name": "ghost profile", "cwd": "/repo",
+        "runtime_profile_id": "ghost-profile",
+    })
+    assert unknown.status_code == 400, unknown.text
+
+    raw_attach = _post(client, {
+        "name": "raw attach", "cwd": "/repo",
+        "provider_id": provider_id,
+        "model": provider_model,
+    })
+    assert raw_attach.status_code == 200, raw_attach.text
+    attached = session_manager.get(raw_attach.json()["session_id"])
+    assert attached["runtime_profile_id"] == live_profile_id, (
+        "raw provider params must attach the pair's live profile"
+    )
+
+    sub = client.post(
+        "/api/internal/create-sub-session",
+        json={
+            "sender_session_id": raw_attach.json()["session_id"],
+            "name": "sub inherits pair",
+        },
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert sub.status_code == 200, sub.text
+    sub_session = session_manager.get(sub.json()["target_session_id"])
+    assert sub_session["runtime_profile_id"] == live_profile_id
+
+    deleted_ok, deleted_reason = config_store.delete_runtime_profile(
+        config_store.provider_execution_defaults(other_provider_id)["runtime_profile_id"]
+    )
+    assert deleted_ok, deleted_reason
+    tombstoned_id = config_store.provider_execution_defaults(other_provider_id)
+    assert tombstoned_id["runtime_profile_id"] is None
+    rejected = _post(client, {
+        "name": "deleted profile", "cwd": "/repo",
+        "runtime_profile_id": (
+            config_store.list_runtime_profiles(include_deleted=True)
+            and next(
+                p["id"]
+                for p in config_store.list_runtime_profiles(include_deleted=True)
+                if p["provider_id"] == other_provider_id and p["deleted_at"]
+            )
+        ),
+    })
+    assert rejected.status_code == 400, rejected.text
 
     print("ALL TESTS PASSED")
     return 0

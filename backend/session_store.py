@@ -3991,7 +3991,8 @@ def _session_reasoning_effort(
         raise ValueError(
             f"reasoning_effort {effort!r} is not supported for this runtime profile"
         )
-    default = normalize_reasoning_effort(record.get("default_reasoning_effort"))
+    profile_defaults = config_store.provider_execution_defaults(provider_id, runner)
+    default = normalize_reasoning_effort(profile_defaults["default_reasoning_effort"])
     return default if default in options else (options[0] if options else "")
 
 
@@ -3999,7 +4000,11 @@ def _session_runner(value: object, provider_id: Optional[str]) -> str:
     record = config_store.get_provider(provider_id) if provider_id else None
     if not record:
         raise SessionProviderNotConfiguredError("session provider is not configured")
-    return runtime_profile.resolve_runner(record, value)
+    requested = str(value or "").strip()
+    if not requested:
+        # No explicit choice: the provider's preferred live profile decides.
+        requested = config_store.provider_execution_defaults(provider_id)["runner"]
+    return runtime_profile.resolve_runner(record, requested)
 
 
 def _kind_for_provider(provider_id: Optional[str]) -> str:
@@ -4667,6 +4672,9 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
         ctx["dirty"][0] = True
     session.setdefault("last_active_runner", None)
     session.setdefault("last_active_supervisor_runner", None)
+    # Pre-profile sessions stay legacy (null profile): display resolves the
+    # stamped (provider_id, runner) pair's profile at read time (R1.4).
+    session.setdefault("runtime_profile_id", None)
     stored_permission = session.get("permission")
     normalized_permission = _session_permission(
         stored_permission, session.get("provider_id"), session.get("runner")
@@ -4935,6 +4943,7 @@ def create_session(
     source: str = "web",
     provider_id: Optional[str] = None,
     runner: Optional[str] = None,
+    runtime_profile_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     permission: Optional[dict] = None,
     browser_harness_enabled: bool = True,
@@ -4981,9 +4990,37 @@ def create_session(
     normalized_storage_scope = _normalize_storage_scope(storage_scope)
     storage_dir = _storage_dir_for_scope(normalized_storage_scope)
     storage_dir.mkdir(parents=True, exist_ok=True)
-    if provider_id is None:
+    if runtime_profile_id is not None:
+        # Profile-based creation: provider + runner come from the profile;
+        # model/effort layer on top as overridable defaults. A deleted or
+        # unknown profile is rejected — new work never starts on one.
+        profile = config_store.get_runtime_profile(runtime_profile_id)
+        if profile is None or profile.get("deleted_at"):
+            raise ValueError(
+                f"runtime profile is unknown or deleted: {runtime_profile_id}"
+            )
+        if provider_id is not None and provider_id != profile["provider_id"]:
+            raise ValueError(
+                "provider_id conflicts with the requested runtime profile"
+            )
+        if runner is not None and str(runner).strip() and runner != profile["runner"]:
+            raise ValueError("runner conflicts with the requested runtime profile")
+        provider_id = profile["provider_id"]
+        runner = profile["runner"]
+        if not model:
+            import user_prefs
+
+            model = (
+                user_prefs.get_last_models().get(runtime_profile_id)
+                or profile["default_model"]
+                or ""
+            )
+        if reasoning_effort is None:
+            reasoning_effort = profile["default_reasoning_effort"] or None
+    elif provider_id is None:
         default_profile = config_store.resolve_internal_llm("default_session")
         provider_id = default_profile.get("provider_id")
+        runtime_profile_id = default_profile.get("runtime_profile_id")
         if not model:
             model = default_profile.get("model") or ""
         if reasoning_effort is None:
@@ -4997,6 +5034,11 @@ def create_session(
         raise ValueError(f"session id already exists: {sid}")
     _remember_root_file_dir(sid, storage_dir)
     resolved_runner = _session_runner(runner, provider_id)
+    if runtime_profile_id is None and provider_id:
+        # Raw-parameter path: attach the pair's live profile when one exists;
+        # otherwise the session stays legacy (null profile).
+        matched = config_store.find_live_runtime_profile(provider_id, resolved_runner)
+        runtime_profile_id = matched["id"] if matched else None
     resolved_reasoning_effort = _session_reasoning_effort(
         reasoning_effort, provider_id, resolved_runner, model,
     )
@@ -5019,6 +5061,7 @@ def create_session(
             orchestration_mode
         ),
         "provider_id": provider_id,
+        "runtime_profile_id": runtime_profile_id,
         "last_active_provider_id": None,
         "last_active_model": None,
         "last_active_runner": None,
@@ -6045,6 +6088,19 @@ def create_sub_session(
         "updated_at": now,
         "orchestration_mode": "native",
         "provider_id": resolved_provider_id,
+        # Profile identity is (provider, runner): inheriting the parent's
+        # pair attaches the parent's profile; overrides re-attach their own
+        # pair; a tombstoned pair leaves the sub-session legacy (null).
+        "runtime_profile_id": (
+            (
+                config_store.find_live_runtime_profile(
+                    resolved_provider_id, resolved_runner
+                )
+                or {}
+            ).get("id")
+            if resolved_provider_id
+            else None
+        ),
         "last_active_provider_id": None,
         "last_active_model": None,
         "last_active_runner": None,

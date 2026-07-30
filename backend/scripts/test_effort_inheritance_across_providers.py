@@ -35,12 +35,14 @@ from session_manager import manager as session_manager  # noqa: E402
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
     provider = config_store.list_providers()["providers"][0]
+    defaults = config_store.provider_execution_defaults(provider["id"])
+    assert defaults["runtime_profile_id"], "fixture provider needs a live profile"
     assignments = config_store.get_internal_llm_assignments()
     for task in tasks:
         assignments[task] = {
-            "provider_id": provider["id"],
-            "model": provider["default_model"],
-            "reasoning_effort": provider.get("default_reasoning_effort") or "",
+            "runtime_profile_id": defaults["runtime_profile_id"],
+            "model": defaults["default_model"],
+            "reasoning_effort": defaults["default_reasoning_effort"],
         }
     config_store.set_internal_llm_assignments(assignments)
 
