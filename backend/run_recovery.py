@@ -28,6 +28,7 @@ from execution_template import (
     validate_recovery_sessions,
 )
 from provider import RecoveredPopen, live_recovery_pid, start_prepared_run
+from provider_watch_helpers import wait_for_complete_or_process_death
 from runs_dir import (
     iter_run_dirs,
     pid_alive as _pid_alive,
@@ -56,6 +57,11 @@ from process_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches the poll cadence every provider's own tailer uses for the same
+# "complete.json or process death" question (see e.g. provider_claude.py's
+# _TAIL_POLL_INTERVAL) — imperceptible latency, not a fixed multi-second wait.
+_RECOVERY_FINALIZE_POLL_INTERVAL = 0.05
 
 _RECOVERY_LEASE_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
@@ -3695,14 +3701,20 @@ async def _finalize_when_done(
     complete_path = run_dir / "complete.json"
     backend_state_path = run_dir / "backend_state.json"
     try:
-        while True:
-            if complete_path.exists():
-                break
-            if not pid or not _pid_alive(int(pid)):
-                break
-            await asyncio.sleep(2.0)
-
-        await asyncio.sleep(1.0)
+        # `complete.json` is written atomically (temp + rename in
+        # runner.py) strictly before the runner process exits, so its
+        # appearance or the process's death are the only preconditions
+        # that matter here — reuse the same event-driven wait every other
+        # provider uses for this exact question instead of a fixed poll
+        # cadence plus an unconditional settle sleep. Journal durability
+        # before the reconciled marker is separately guarded below by
+        # `_barrier_journal`, so no extra wait is needed for that either.
+        if pid:
+            await wait_for_complete_or_process_death(
+                complete_path=complete_path,
+                popen=RecoveredPopen(int(pid)),
+                poll_interval=_RECOVERY_FINALIZE_POLL_INTERVAL,
+            )
 
         sess, last_asst, msg_id = await asyncio.to_thread(
             _recovery_target_snapshot,
