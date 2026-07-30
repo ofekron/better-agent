@@ -56,10 +56,28 @@ def test_admission_does_not_demand_unobtainable_catalog() -> None:
     assert "codex" in _CATALOG_KINDS
 
 
+def test_admission_skips_catalog_only_for_delegated_family_contract() -> None:
+    from types import SimpleNamespace
+
+    from model_execution_admission import _delegated_family_contract
+
+    def artifact(contract):
+        return SimpleNamespace(provider_kind="codex", provider_contract=contract)
+
+    assert _delegated_family_contract(
+        artifact({"type": "openai", "contract": {}}),
+    )
+    # Native codex, missing, or unrelated contracts keep the gate closed.
+    assert not _delegated_family_contract(artifact({"type": "codex"}))
+    assert not _delegated_family_contract(artifact(None))
+    assert not _delegated_family_contract(artifact({"type": "claude"}))
+
+
 TESTS = (
     test_models_projection_serves_curated_catalog,
     test_headless_model_validation_uses_curated_catalog,
     test_admission_does_not_demand_unobtainable_catalog,
+    test_admission_skips_catalog_only_for_delegated_family_contract,
 )
 
 

@@ -183,6 +183,24 @@ def _admit_catalog_model(artifact: Any, descriptor: Mapping[str, Any]) -> None:
         raise ModelAdmissionError("model is absent from the runnable catalog")
 
 
+def _delegated_family_contract(artifact: Any) -> bool:
+    """True when the artifact executes through another family's runtime
+    (better_agent_runner delegation): its contract envelope carries a
+    family kind that legitimately binds to the record kind. A missing or
+    codex-typed contract is NOT delegation, so the catalog gate stays
+    closed for native codex runs."""
+    from runtime_profile import family_binds_to_kind
+
+    contract = artifact.provider_contract
+    contract_type = contract.get("type") if type(contract) is dict else None
+    return (
+        type(contract_type) is str
+        and contract_type != artifact.provider_kind
+        and contract_type != "codex"
+        and family_binds_to_kind(contract_type, artifact.provider_kind)
+    )
+
+
 def admit_execution_model(artifact: Any) -> None:
     from provider_manifest import SPECS
 
@@ -190,5 +208,8 @@ def admit_execution_model(artifact: Any) -> None:
     if spec is None or spec.virtual:
         return
     descriptor = _descriptor(artifact)
-    if artifact.provider_kind in _CATALOG_KINDS:
+    if (
+        artifact.provider_kind in _CATALOG_KINDS
+        and not _delegated_family_contract(artifact)
+    ):
         _admit_catalog_model(artifact, descriptor)
