@@ -43,6 +43,22 @@ async function waitForRunning(
   throw new Error(`session ${sessionId} never reached is_running=true within ${timeoutMs}ms`);
 }
 
+async function waitForNotRunning(
+  page: Page,
+  backend: FullStackBackend,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const sessions = await getSessionsList(page, backend);
+    const match = sessions.find((s) => s.id === sessionId);
+    if (match && match.is_running === false) return;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error(`session ${sessionId} never reached is_running=false within ${timeoutMs}ms`);
+}
+
 test.describe("backend crash-recovery", () => {
   test("render tree stays consistent (no duplicated messages) after a mid-turn backend crash + restart", async ({
     authedPage: page,
@@ -145,6 +161,151 @@ test.describe("backend crash-recovery", () => {
         hasRealContent || hasStoppedIndicator,
         `assistant bubble has neither content nor a stopped indicator after recovery: ${JSON.stringify(text)}`,
       ).toBe(true);
+    } finally {
+      await restarted.stop();
+    }
+  });
+
+  test("render tree stays consistent after a backend crash + restart with no in-flight turn", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(180_000);
+
+    await createSessionWithPrompt(page, "Reply with exactly the word: done.");
+
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash.length).toBeGreaterThan(0);
+    const sessionId = sessionsBeforeCrash[0].id as string;
+
+    // Let the turn fully finish BEFORE crashing — this is the simplest
+    // recovery case: no in-flight work at all, nothing for
+    // recover_all_in_flight/integrate_recovered_runs to reconcile. The
+    // restart should be a pure no-op on the render tree.
+    await waitForNotRunning(page, backend, sessionId, 60_000);
+
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      // The session must come back not-running (it already wasn't) and the
+      // render tree must be byte-for-byte the same single user+assistant
+      // pair — no duplication, no re-run triggered by the restart.
+      const sessionsAfterRestart = await getSessionsList(page, backend);
+      const matchAfterRestart = sessionsAfterRestart.find((s) => s.id === sessionId);
+      expect(matchAfterRestart?.is_running).toBe(false);
+
+      const detailRes = await page.request.get(
+        `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+      );
+      expect(detailRes.ok()).toBe(true);
+      const tree = await detailRes.json();
+      const messages = (tree.messages ?? []) as Array<{ id: string; role: string }>;
+      const ids = messages.map((m) => m.id);
+      expect(new Set(ids).size, `duplicate message ids in render tree: ${ids.join(",")}`).toBe(
+        ids.length,
+      );
+      expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+      const userMessages = page.getByTestId("user-message");
+      const assistantMessages = page.getByTestId("assistant-message");
+
+      // No duplicated bubbles and no re-run: exactly one prompt was sent
+      // and it had already completed before the crash, so the restart must
+      // not add a second copy of either bubble.
+      await expect(userMessages).toHaveCount(1);
+      await expect(assistantMessages).toHaveCount(1);
+
+      const assistantText = (await assistantMessages.first().textContent()) ?? "";
+      expect(assistantText.trim().length).toBeGreaterThan(0);
+    } finally {
+      await restarted.stop();
+    }
+  });
+
+  test("recovers TWO separate in-flight sessions at once after a single backend crash + restart", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(240_000);
+
+    // Create two independent real sessions, each with its own prompt that
+    // takes a bit of time, capturing each session's id from the URL right
+    // after creation (robust regardless of list ordering) rather than
+    // relying on GET /api/sessions ordering to disambiguate them.
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 40, one number per line, then write a short paragraph " +
+        "explaining why counting is a foundational skill. Do not rush, be thorough.",
+    );
+    const sessionIdA = new URL(page.url()).pathname.replace(/^\/s\//, "");
+
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 40 by twos, one number per line, then write a short " +
+        "paragraph explaining why even numbers matter. Do not rush, be thorough.",
+    );
+    const sessionIdB = new URL(page.url()).pathname.replace(/^\/s\//, "");
+
+    expect(sessionIdA).not.toBe(sessionIdB);
+
+    // Wait until BOTH real provider CLI turns are actually in flight before
+    // crashing the backend, so the crash genuinely lands mid-turn for both
+    // sessions at once — proving recovery scales per-session rather than
+    // only handling a single active session.
+    await waitForRunning(page, backend, sessionIdA, 30_000);
+    await waitForRunning(page, backend, sessionIdB, 30_000);
+
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      // Give recovery/reconcile a generous window to converge BOTH sessions
+      // independently: neither may stay stuck "running" forever.
+      for (const sessionId of [sessionIdA, sessionIdB]) {
+        await expect
+          .poll(
+            async () => {
+              const sessions = await getSessionsList(page, backend);
+              const match = sessions.find((s) => s.id === sessionId);
+              return match?.is_running === true;
+            },
+            { timeout: 120_000, intervals: [500, 1000, 2000] },
+          )
+          .toBe(false);
+      }
+
+      // Re-fetch each session's render tree independently from the NEW
+      // backend process and assert per-session consistency: no duplicate
+      // message ids, exactly one user + one assistant message each.
+      for (const sessionId of [sessionIdA, sessionIdB]) {
+        const detailRes = await page.request.get(
+          `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+        );
+        expect(detailRes.ok()).toBe(true);
+        const tree = await detailRes.json();
+        const messages = (tree.messages ?? []) as Array<{ id: string; role: string }>;
+        const ids = messages.map((m) => m.id);
+        expect(
+          new Set(ids).size,
+          `duplicate message ids in render tree for session ${sessionId}: ${ids.join(",")}`,
+        ).toBe(ids.length);
+        expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+        expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+      }
     } finally {
       await restarted.stop();
     }

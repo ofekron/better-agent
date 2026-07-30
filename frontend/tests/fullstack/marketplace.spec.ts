@@ -121,4 +121,130 @@ test.describe("extension marketplace catalog", () => {
     expect(deleteRes.status()).toBe(400);
     expect((await deleteRes.json()).detail).toBe("Extension not installed");
   });
+
+  test("preview/enabled reject path-traversal and malformed ids without ever escaping the extension registry", async ({
+    authedPage,
+    backend,
+  }) => {
+    // A literal `../` id is collapsed by the HTTP client's own URL
+    // dot-segment normalization BEFORE the request is sent — `.../marketplace/
+    // ../../../etc/passwd/preview` resolves to `/etc/passwd/preview`, a path
+    // outside `/api/` entirely. That falls through to `main.py`'s
+    // `mount_frontend` StaticFiles mount, which only serves GET/HEAD and
+    // rejects every other method with 405 before any extension_id-aware code
+    // ever runs. Reproduced directly against a real backend with both a
+    // normalized client and curl's `--path-as-is` (raw, unnormalized
+    // request-line) — both 405, so this holds however the HTTP layer treats
+    // the dots.
+    const RAW_TRAVERSAL_ID = "../../../etc/passwd";
+    // `%2F` is untouched by dot-segment collapsing (only literal
+    // `/`-delimited segments are processed), so this string survives the
+    // client as one opaque path component. Uvicorn's ASGI layer then
+    // percent-decodes the whole path before Starlette's router matches it,
+    // turning `%2F` back into `/` — producing extra path segments that don't
+    // fit the single-segment `{extension_id}` converter, so routing itself
+    // rejects it the same way (405), never reaching a handler.
+    const ENCODED_TRAVERSAL_ID = "..%2F..%2Fetc%2Fpasswd";
+
+    for (const travId of [RAW_TRAVERSAL_ID, ENCODED_TRAVERSAL_ID]) {
+      const previewRes = await authedPage.request.post(
+        `${backend.baseURL}/api/extensions/marketplace/${travId}/preview`,
+      );
+      expect(previewRes.status()).toBe(405);
+
+      const enabledRes = await authedPage.request.patch(
+        `${backend.baseURL}/api/extensions/marketplace/${travId}/enabled`,
+        { data: { enabled: false } },
+      );
+      expect(enabledRes.status()).toBe(405);
+    }
+
+    // A null-byte-style id has no literal "/", so it stays one path segment
+    // and DOES reach the real `{extension_id}` handlers — this is the case
+    // that proves the handlers themselves treat an unrecognized/unusual id
+    // as an inert string (dict/registry lookup miss) rather than doing
+    // anything filesystem- or auth-bypass-unsafe with it.
+    const WEIRD_ID = "null%00byte";
+
+    const weirdEnabledRes = await authedPage.request.patch(
+      `${backend.baseURL}/api/extensions/marketplace/${WEIRD_ID}/enabled`,
+      { data: { enabled: false } },
+    );
+    // Same `_require_extension_source` dict lookup as the UNKNOWN_EXTENSION_ID
+    // case above — the raw id string (with its embedded %00) simply isn't a
+    // key in the installed-extensions map.
+    expect(weirdEnabledRes.status()).toBe(400);
+    expect((await weirdEnabledRes.json()).detail).toBe("Extension not installed");
+
+    // preview_marketplace_extension always calls the marketplace extension's
+    // own `/metadata/{id}` route first, which unconditionally requires a
+    // stored marketplace access token before it ever looks at the id
+    // (extensions/marketplace/backend/routes.py `_require_access_token`) —
+    // so, like the "preview refuses without a marketplace login" test above,
+    // this fails closed without any id-specific logic running. It must never
+    // return 2xx; the exact non-2xx status can vary with how fast the local
+    // credential-store lookup resolves, so this asserts the safety contract
+    // (closed, and a real handled-error body) rather than one fixed code.
+    const weirdPreviewRes = await authedPage.request.post(
+      `${backend.baseURL}/api/extensions/marketplace/${WEIRD_ID}/preview`,
+    );
+    expect(weirdPreviewRes.ok()).toBe(false);
+    const weirdPreviewBody = await weirdPreviewRes.json();
+    expect(typeof weirdPreviewBody.detail).toBe("string");
+
+    // No side effects from any of the above: the catalog projection is still
+    // healthy and reachable.
+    const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
+    expect(listRes.ok()).toBe(true);
+  });
+
+  test("concurrent marketplace requests stay well-formed and leave installed-extension state consistent", async ({
+    authedPage,
+    backend,
+  }) => {
+    // Fire a mixed batch of preview/enabled/delete calls against both a
+    // real, non-marketplace-managed extension and an unknown one,
+    // concurrently. None of these should ever 2xx (see the tests above),
+    // but under concurrent load the goal here is different: every response
+    // must still be a well-formed HTTP response — not a connection reset,
+    // timeout, or an unhandled-exception 500 with no JSON body — and the
+    // installed-extensions projection must come out the other side
+    // unmutated.
+    const requests = [
+      () => authedPage.request.post(`${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/preview`),
+      () => authedPage.request.patch(`${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/enabled`, { data: { enabled: false } }),
+      () => authedPage.request.delete(`${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}`),
+      () => authedPage.request.post(`${backend.baseURL}/api/extensions/marketplace/${UNKNOWN_EXTENSION_ID}/preview`),
+      () => authedPage.request.patch(`${backend.baseURL}/api/extensions/marketplace/${UNKNOWN_EXTENSION_ID}/enabled`, { data: { enabled: true } }),
+      () => authedPage.request.delete(`${backend.baseURL}/api/extensions/marketplace/${UNKNOWN_EXTENSION_ID}`),
+      () => authedPage.request.post(`${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/preview`),
+      () => authedPage.request.patch(`${backend.baseURL}/api/extensions/marketplace/${UNKNOWN_EXTENSION_ID}/enabled`, { data: { enabled: false } }),
+    ];
+
+    const responses = await Promise.all(requests.map((fire) => fire()));
+
+    for (const res of responses) {
+      // A crash or connection error throws inside Playwright's request API
+      // rather than resolving, so simply reaching this point with a status
+      // code already rules that out. The body must also still be the
+      // handled-error JSON shape every synchronous variant of these calls
+      // returns above, not an empty/broken response from a half-crashed
+      // handler.
+      expect(res.status()).toBeGreaterThanOrEqual(400);
+      const body = await res.json();
+      expect(typeof body.detail).toBe("string");
+    }
+
+    // The real installed-extensions projection is untouched: the
+    // non-marketplace extension is still enabled with its original,
+    // non-marketplace source type.
+    const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
+    expect(listRes.status()).toBe(200);
+    const { extensions } = (await listRes.json()) as {
+      extensions: Array<{ manifest: { id: string }; enabled: boolean; source: { type: string } }>;
+    };
+    const ask = extensions.find((item) => item.manifest.id === NON_MARKETPLACE_EXTENSION_ID);
+    expect(ask?.enabled).toBe(true);
+    expect(ask?.source.type).toBe("better_agent_bundled");
+  });
 });
