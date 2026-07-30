@@ -654,16 +654,29 @@ def test_legacy_staging_root_migrates_only_on_write() -> None:
                 worker.join()
 
             assert failures == []
-            assert stat.S_IMODE(prepared_root.stat().st_mode) == 0o700
+            provider_runtime_payload_store.require_private_directory(
+                prepared_root,
+            )
+            if os.name != "nt":
+                assert stat.S_IMODE(prepared_root.stat().st_mode) == 0o700
             cleanup_staged_family_runtime_capabilities("legacy-a")
             cleanup_staged_family_runtime_capabilities("legacy-b")
 
-            prepared_root.chmod(0o777)
             original_make_private = (
                 provider_runtime_payload_store.make_private_directory
             )
+            original_require_private = (
+                provider_runtime_payload_store.require_private_directory
+            )
             mutations: list[Path] = []
+
+            def reject_private_directory(_path: Path) -> None:
+                raise PermissionError("unsafe")
+
             provider_runtime_payload_store.make_private_directory = mutations.append
+            provider_runtime_payload_store.require_private_directory = (
+                reject_private_directory
+            )
             try:
                 try:
                     cleanup_staged_family_runtime_capabilities("missing")
@@ -674,6 +687,9 @@ def test_legacy_staging_root_migrates_only_on_write() -> None:
             finally:
                 provider_runtime_payload_store.make_private_directory = (
                     original_make_private
+                )
+                provider_runtime_payload_store.require_private_directory = (
+                    original_require_private
                 )
             assert mutations == []
         finally:
