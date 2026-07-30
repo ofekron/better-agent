@@ -3,21 +3,20 @@ import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
-import type { Provider } from "../types";
-import { effortsForRunner, runnerForProvider, runnerLabelKey } from "./modelPicker";
-import { providerDisplayName } from "../utils/providerDisplayName";
+import type { Provider, RuntimeProfile } from "../types";
+import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
+import { effortsForRunner } from "./modelPicker";
 
-/** Per-task runtime profile assignment for the
- * backend's internal LLM calls (requirement analysis, config-sync review,
- * search/Ask worker, project-structure edit, and the default for new
- * sessions). Every field is optional — an unset field inherits from the
- * active provider at resolve time, so the unconfigured state is never a
- * hardcode. */
+/** Per-task runtime-profile assignment for the backend's internal LLM calls
+ * (requirement analysis, config-sync review, search/Ask worker,
+ * project-structure edit, and the default for new sessions). Every field is
+ * optional — an unset profile inherits the default runtime profile at
+ * resolve time, and unset model/effort inherit the assigned profile's
+ * defaults, so the unconfigured state is never a hardcode. */
 type Assignment = {
-  provider_id?: string;
+  runtime_profile_id?: string;
   model?: string;
   reasoning_effort?: string;
-  runner?: Provider["runner"];
 };
 
 const INHERIT = "";
@@ -33,7 +32,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
   const [loadedTasks, setLoadedTasks] = useState<string[]>([]);
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
+  const { snapshot, profiles, defaultProfileId } = useRuntimeProfiles();
   const [saving, setSaving] = useState(false);
   const settingsEndpoint = extensionId
     ? `${API}/api/extensions/${encodeURIComponent(extensionId)}/internal-llm`
@@ -51,9 +50,8 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
     trackPromise("internalLlm:providers", () =>
       fetch(`${API}/api/providers`)
         .then((r) => r.json())
-        .then((data: { providers?: Provider[]; default_provider_id?: string | null }) => {
+        .then((data: { providers?: Provider[] }) => {
           setProviders(data.providers || []);
-          setDefaultProviderId(data.default_provider_id ?? null);
         }),
     ).promise.catch(() => {});
   }, [settingsEndpoint]);
@@ -64,30 +62,39 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
     return m;
   }, [providers]);
 
-  const effectiveProvider = (task: string): Provider | undefined => {
+  const profileById = useMemo(() => {
+    const m: Record<string, RuntimeProfile> = {};
+    for (const p of snapshot?.runtime_profiles ?? []) m[p.id] = p;
+    return m;
+  }, [snapshot]);
+
+  const effectiveProfile = (task: string): RuntimeProfile | undefined => {
     const a = assignments[task];
-    const id = (a && a.provider_id) || defaultProviderId || "";
-    return id ? providerById[id] : undefined;
+    const id = (a && a.runtime_profile_id) || defaultProfileId || "";
+    return id ? profileById[id] : undefined;
+  };
+
+  const effortOptionsFor = (profile: RuntimeProfile | undefined) => {
+    if (!profile) return [];
+    const provider = providerById[profile.provider_id];
+    return provider ? effortsForRunner(provider, profile.runner) : [];
   };
 
   const change = async (task: string, field: keyof Assignment, value: string) => {
     const next: Record<string, Assignment> = { ...assignments };
     const entry: Assignment = { ...(next[task] || {}) };
     if (value === INHERIT) delete entry[field];
-    else (entry[field] as string) = value;
-    if (field === "provider_id" || field === "runner") {
-      const id = value === INHERIT ? defaultProviderId || "" : value;
-      const p = field === "provider_id" ? (id ? providerById[id] : undefined) : effectiveProvider(task);
-      if (field === "provider_id" && entry.runner && p && !p.runner_options.includes(entry.runner)) {
-        delete entry.runner;
-      }
-      const runner = field === "runner" && value !== INHERIT
-        ? value as Provider["runner"]
-        : p ? runnerForProvider(p) : "native";
-      const opts = p ? effortsForRunner(p, runner) : [];
-      if (entry.reasoning_effort && opts && !opts.includes(entry.reasoning_effort as never)) {
+    else entry[field] = value;
+    if (field === "runtime_profile_id") {
+      // The overrides are profile-scoped: re-validate them against the newly
+      // effective profile, dropping what no longer applies.
+      const id = value === INHERIT ? defaultProfileId || "" : value;
+      const profile = id ? profileById[id] : undefined;
+      const opts = effortOptionsFor(profile);
+      if (entry.reasoning_effort && !opts.includes(entry.reasoning_effort as never)) {
         delete entry.reasoning_effort;
       }
+      delete entry.model;
     }
     if (Object.keys(entry).length === 0) delete next[task];
     else next[task] = entry;
@@ -117,47 +124,45 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
       {showHint && <div className="context-strategy-hint">{t("settings.internalLlmHint")}</div>}
       {tasks.map((task) => {
         const a = assignments[task] || {};
-        const provider = effectiveProvider(task);
-        const runner = a.runner && provider?.runner_options.includes(a.runner)
-          ? a.runner
-          : provider ? runnerForProvider(provider) : "native";
-        const effortOptions = provider ? effortsForRunner(provider, runner) : [];
+        const profile = effectiveProfile(task);
+        const provider = profile ? providerById[profile.provider_id] : undefined;
+        const effortOptions = effortOptionsFor(profile);
         const modelSet = new Set<string>();
-        if (provider?.default_model) modelSet.add(provider.default_model);
+        if (a.model) modelSet.add(a.model);
+        if (profile?.default_model) modelSet.add(profile.default_model);
+        const lastModel = profile ? snapshot?.last_models?.[profile.id] : "";
+        if (lastModel) modelSet.add(lastModel);
         for (const m of provider?.custom_models || []) modelSet.add(m);
         const modelOptions = Array.from(modelSet);
+        // Assigned-but-tombstoned profile: keep it visible (badged) so the
+        // stored value stays truthful; the backend resolves it to the
+        // default profile until reassigned.
+        const assignedTombstone = a.runtime_profile_id
+          ? profileById[a.runtime_profile_id]?.deleted_at
+            ? profileById[a.runtime_profile_id]
+            : undefined
+          : undefined;
         return (
           <div key={task} className="internal-llm-row">
             <div className="internal-llm-task">{taskLabel(task)}</div>
             <label className="context-strategy-row">
-              <span>{t("settings.internalLlmProvider")}</span>
+              <span>{t("settings.internalLlmProfile")}</span>
               <Select
-                value={a.provider_id || INHERIT}
+                value={a.runtime_profile_id || INHERIT}
                 disabled={saving}
-                onChange={(v) => void change(task, "provider_id", v)}
+                onChange={(v) => void change(task, "runtime_profile_id", v)}
                 options={[
                   { value: INHERIT, label: t("settings.internalLlmInherit") },
-                  ...providers.map((p) => ({ value: p.id, label: providerDisplayName(p) })),
+                  ...(assignedTombstone
+                    ? [{
+                        value: assignedTombstone.id,
+                        label: `${assignedTombstone.name} — ${t("runtimeProfile.deletedBadge")}`,
+                      }]
+                    : []),
+                  ...profiles.map((p) => ({ value: p.id, label: p.name })),
                 ]}
               />
             </label>
-            {provider && provider.runner_options.length > 1 && (
-              <label className="context-strategy-row session-runtime-axis">
-                <span>{t("newSession.runner")}</span>
-                <Select
-                  value={a.runner || INHERIT}
-                  disabled={saving}
-                  onChange={(v) => void change(task, "runner", v)}
-                  options={[
-                    { value: INHERIT, label: t("settings.internalLlmInherit") },
-                    ...provider.runner_options.map((value) => ({
-                      value,
-                      label: t(runnerLabelKey(provider.kind, value)),
-                    })),
-                  ]}
-                />
-              </label>
-            )}
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmModel")}</span>
               <Select
