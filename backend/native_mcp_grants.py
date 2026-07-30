@@ -105,9 +105,17 @@ class ServerDeclaration:
     package_fingerprint: str
 
     def digest(self) -> str:
+        # `command` is deliberately excluded: it is the interpreter path of
+        # whichever platform process computes the declaration (the backend's
+        # dependency-plan venv vs. an ambient launcher's .venv python), never
+        # anything the extension controls. Binding it made one grant record
+        # unable to resolve in both contexts on the same machine — the grant
+        # silently stopped resolving wherever sys.executable differed from
+        # the creator's. Everything extension-controlled stays bound: args
+        # (launcher stub + identity), env key names, scopes, and the
+        # whole-package content fingerprint.
         payload = json.dumps(
             {
-                "command": self.command,
                 "args": list(self.args),
                 "env_keys": sorted(self.env_keys),
                 "scopes": sorted(self.scopes),

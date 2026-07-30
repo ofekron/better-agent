@@ -70,6 +70,36 @@ def test_digest_mismatch_fails_closed() -> bool:
     return ok
 
 
+def test_digest_ignores_interpreter_path_but_binds_everything_else() -> bool:
+    # The interpreter path is whichever platform process computes the
+    # declaration (backend dependency-plan venv vs. ambient launcher .venv);
+    # binding it made a grant created in one context silently unresolvable in
+    # the other. A grant created under one interpreter MUST resolve under
+    # another, while every extension-controlled field stays binding.
+    created = _decl(command="/backend/.venvs/abc/bin/python")
+    g.add_grant(
+        extension_id="ext-i", server_id="cards", scope="global", target="",
+        digest=created.digest(), created_at="2024-01-01T00:00:00Z",
+    )
+    other_interpreter = _decl(command="/backend/.venv/bin/python")
+    resolved = g.resolve_native_mcp_servers(active_declarations={("ext-i", "cards"): other_interpreter})
+    across_interpreters = "ext-i:cards" in resolved
+    still_binding = all(
+        created.digest() != changed.digest()
+        for changed in (
+            _decl(args=("server.py", "--extra")),
+            _decl(env_keys=("A_KEY",)),
+            _decl(scopes=("global",)),
+            _decl(package_fingerprint="fp-2"),
+        )
+    )
+    ok = across_interpreters and still_binding
+    print(f"{OK if ok else FAIL} digest ignores the interpreter path but binds args/env/scopes/fingerprint "
+          f"(across_interpreters={across_interpreters}, still_binding={still_binding})")
+    g.remove_grant(extension_id="ext-i", server_id="cards", scope="global", target="")
+    return ok
+
+
 def test_package_fingerprint_change_invalidates_grant_even_with_identical_launcher() -> bool:
     # command/args are always the fixed launcher stub (extension_id, item_name)
     # -- they never change between an extension's own versions. Without a
@@ -343,6 +373,7 @@ def main_run() -> int:
     tests = [
         test_global_grant_resolves_everywhere,
         test_digest_mismatch_fails_closed,
+        test_digest_ignores_interpreter_path_but_binds_everything_else,
         test_package_fingerprint_change_invalidates_grant_even_with_identical_launcher,
         test_project_scope_matches_only_its_own_project,
         test_disabled_extension_grant_resolves_to_nothing,
