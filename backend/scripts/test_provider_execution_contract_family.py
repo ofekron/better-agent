@@ -163,9 +163,36 @@ def _run_prepare(record: dict, family: str):
 def test_ba_runner_delegation_admits_runtime_family() -> None:
     record = {**PROVIDER, "kind": "codex", "runner": "better_agent_runner"}
     seen = _run_prepare(record, "openai")
-    assert seen["provider"]["kind"] == "openai"
+    # Artifact authority keeps the configured record kind; the contract
+    # envelope carries the runtime family.
+    assert seen["provider"]["kind"] == "codex"
     assert seen["contract_provider"]["kind"] == "openai"
     assert record["kind"] == "codex"
+
+
+def test_family_execution_kind_reads_frozen_runner_input() -> None:
+    artifact = SimpleNamespace(
+        provider_kind="codex",
+        runtime_policy={"runner_input": {"provider_kind": "openai"}},
+    )
+    assert runtime.family_execution_kind(artifact) == "openai"
+    native = SimpleNamespace(
+        provider_kind="claude",
+        runtime_policy={"runner_input": {"provider_kind": "claude"}},
+    )
+    assert runtime.family_execution_kind(native) == "claude"
+
+
+def test_family_execution_kind_rejects_unrelated_family() -> None:
+    artifact = SimpleNamespace(
+        provider_kind="codex",
+        runtime_policy={"runner_input": {"provider_kind": "claude"}},
+    )
+    try:
+        runtime.family_execution_kind(artifact)
+    except ExecutionContractError:
+        return
+    raise AssertionError("expected unrelated family rejection")
 
 
 def test_native_record_must_match_family() -> None:
@@ -188,6 +215,8 @@ TESTS = (
     test_secret_key_outside_manifest_still_fails_closed,
     test_malformed_manifest_fails_closed,
     test_ba_runner_delegation_admits_runtime_family,
+    test_family_execution_kind_reads_frozen_runner_input,
+    test_family_execution_kind_rejects_unrelated_family,
     test_native_record_must_match_family,
     test_matching_kind_passes_unchanged,
 )

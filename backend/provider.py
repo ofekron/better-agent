@@ -1158,9 +1158,14 @@ class Provider(ABC):
         self,
         artifact: ExecutionArtifact,
     ) -> None:
+        # artifact.provider_kind is the configured record's kind. For
+        # better_agent_runner delegation the executing instance class KIND
+        # is the runtime family (e.g. openai for a codex record), so the
+        # identity assertion compares against the record.
         if (
             artifact.provider_id != self.id
-            or artifact.provider_kind != self.KIND
+            or artifact.provider_kind
+            != str(self.runtime_record().get("kind") or self.KIND)
         ):
             raise ExecutionAuthorityError(
                 "prepared execution belongs to a different provider",

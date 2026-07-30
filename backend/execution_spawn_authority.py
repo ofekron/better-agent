@@ -24,7 +24,14 @@ def attest_execution_spawn_authority(
 def _attest_execution_spawn_authority(
     artifact: ExecutionArtifact,
 ) -> None:
-    if artifact.provider_kind in {"codex", "fugu"}:
+    # Spawn shape follows the execution contract, not the record kind:
+    # codex/fugu records executing through better_agent_runner carry an
+    # openai family contract and spawn family-style.
+    contract = artifact.provider_contract
+    contract_type = (
+        contract.get("type") if type(contract) is dict else None
+    )
+    if artifact.provider_kind in {"codex", "fugu"} and contract_type == "codex":
         from codex_execution_runtime import (
             codex_contract_from_artifact,
             codex_runner_launch_from_artifact,
@@ -39,7 +46,7 @@ def _attest_execution_spawn_authority(
         codex_runner_launch_from_artifact(artifact)
         codex_runtime_agent_manifest(artifact)
         return
-    if artifact.provider_kind in artifact_family_kinds():
+    if contract_type in artifact_family_kinds():
         from provider_family_execution_runtime import (
             family_capability_manifest_from_artifact,
             family_launch_from_artifact,

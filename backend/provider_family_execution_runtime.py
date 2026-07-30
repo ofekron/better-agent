@@ -39,11 +39,40 @@ class FamilyExecutionRuntime:
     inputs: dict[str, Any]
 
 
+def family_execution_kind(artifact: ExecutionArtifact) -> str:
+    """The runtime family an artifact executes through.
+
+    `artifact.provider_kind` is the configured record's kind (the
+    provider AUTHORITY); better_agent_runner delegation executes
+    codex/fugu records through the openai family, and the runtime family
+    is frozen into the fingerprinted runner input as `provider_kind`.
+    """
+    runner_input = artifact.runtime_policy.get("runner_input")
+    family = (
+        runner_input.get("provider_kind")
+        if type(runner_input) is dict
+        else None
+    )
+    if (
+        type(family) is not str
+        or family not in artifact_family_kinds()
+        or (
+            family != artifact.provider_kind
+            and family != runtime_profile.runtime_kind({
+                "kind": artifact.provider_kind,
+                "runner": "better_agent_runner",
+            })
+        )
+    ):
+        raise ExecutionContractError("family execution kind is unavailable")
+    return family
+
+
 def _contract_payload(artifact: ExecutionArtifact) -> dict[str, Any]:
     contract = artifact.provider_contract
     if (
         type(contract) is not dict
-        or contract.get("type") != artifact.provider_kind
+        or contract.get("type") != family_execution_kind(artifact)
         or type(contract.get("contract")) is not dict
         or type(contract["contract"].get("payload")) is not dict
     ):
@@ -59,7 +88,7 @@ def family_launch_from_artifact(
     launch = FamilyLaunchAttestation.from_payload(
         _contract_payload(artifact),
     )
-    if launch.family != artifact.provider_kind or not launch.attest():
+    if launch.family != family_execution_kind(artifact) or not launch.attest():
         raise ExecutionContractError("family launch authority mismatch")
     return launch
 
@@ -70,7 +99,7 @@ def family_capability_manifest_from_artifact(
     manifest = runtime_capability_manifest_from_payload(
         _contract_payload(artifact),
     )
-    if manifest["family"] != artifact.provider_kind:
+    if manifest["family"] != family_execution_kind(artifact):
         raise ExecutionContractError("family capability authority mismatch")
     return manifest
 
@@ -91,22 +120,20 @@ def prepare_family_execution(
         or capabilities.manifest["family"] != launch.family
     ):
         raise ExecutionContractError("invalid family execution preparation")
-    # better_agent_runner delegation executes one configured kind through
-    # another family's runtime (e.g. codex/fugu records through the openai
-    # family). The execution artifact's authority kind is the runtime
-    # family: provider._assert_execution_provider requires it to equal the
-    # executing provider class KIND, and every family read-side check
-    # compares against it.
-    provider = {**provider, "kind": launch.family}
     payload = {
         **launch.to_payload(),
         **family_runtime_capability_payload(capabilities),
     }
+    # The artifact keeps the configured record's kind (the provider
+    # AUTHORITY — require_authority re-checks it against the hydrated
+    # record at spawn). The contract envelope carries the runtime FAMILY:
+    # better_agent_runner delegation executes codex/fugu records through
+    # the openai family, and the family codec is keyed by envelope type.
     execution = prepare_execution(
         provider,
         runtime_policy={"runner_input": dict(runner_input)},
         provider_contract=provider_family_contract(
-            provider,
+            {**provider, "kind": launch.family},
             payload=payload,
         ),
         **dict(start_arguments),
@@ -127,8 +154,7 @@ def retry_family_execution(
     if not isinstance(execution, PreparedExecution):
         raise ExecutionContractError("invalid family retry execution")
     artifact = execution.artifact
-    if artifact.provider_kind not in artifact_family_kinds():
-        raise ExecutionContractError("invalid family retry provider")
+    family = family_execution_kind(artifact)
     runtime_policy = artifact.runtime_policy
     runner_input = runtime_policy.get("runner_input")
     if type(runner_input) is not dict:
@@ -172,7 +198,7 @@ def retry_family_execution(
         provider_contract=provider_family_contract(
             {
                 "id": artifact.provider_id,
-                "kind": artifact.provider_kind,
+                "kind": family,
                 "generation": artifact.provider_generation,
                 "revision": artifact.provider_revision,
             },
