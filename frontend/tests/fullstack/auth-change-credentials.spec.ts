@@ -365,4 +365,74 @@ test.describe("change credentials", () => {
     expect(me.status).toBe(200);
     expect(me.body.username).toBe(backend.username);
   });
+
+  // auth_routes.change_credentials calls auth_secrets.write_login_credentials,
+  // which only overwrites the username/password_hash keychain entries. Only
+  // the FIRST-run write_credentials mints a fresh session_secret; a regular
+  // credential change leaves it untouched, and auth.reload_credentials()
+  // re-reads the same secret. Bearer tokens (auth.create_token /
+  // create_access_token) are itsdangerous-signed with that session secret
+  // and carry only `{"username": ...}` — no password-hash-derived
+  // component — so they're invalidated by secret rotation or expiry only,
+  // never by a plain password change. This proves that against the real
+  // QR flow (auth-login.spec.ts's grant/redeem), whose access token is the
+  // purely bearer-token-based (no cookie) session per qr_redeem's own
+  // docstring ("No cookie is set").
+  test("a QR-redeemed bearer token keeps authenticating after the password changes in a different session", async ({
+    page,
+    browser,
+    backend,
+  }) => {
+    // Session A: real cookie-based login via the UI.
+    await loginViaUI(page, backend);
+
+    // Mint a QR grant from session A and redeem it into a brand-new browser
+    // context (session B), exactly like auth-login.spec.ts's QR test.
+    const grantRes = await page.request.get(`${backend.baseURL}/api/auth/qr_grant`);
+    expect(grantRes.ok()).toBe(true);
+    const { login_url } = await grantRes.json();
+    const grant = new URL(login_url).searchParams.get("qr");
+    expect(grant).toBeTruthy();
+
+    const sessionB = await browser.newContext();
+    try {
+      const redeemRes = await sessionB.request.post(`${backend.baseURL}/api/auth/qr_redeem`, {
+        data: { grant },
+      });
+      expect(redeemRes.ok()).toBe(true);
+      const { access_token } = await redeemRes.json();
+      expect(access_token).toBeTruthy();
+
+      const meBeforeChange = await sessionB.request.get(`${backend.baseURL}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${access_token}` },
+      });
+      expect(meBeforeChange.status()).toBe(200);
+      expect((await meBeforeChange.json()).username).toBe(backend.username);
+
+      // Change the password through session A's real Settings > Account form.
+      await page.goto(`${backend.baseURL}/settings`);
+      await page.locator(".settings-page-nav button", { hasText: "Account" }).click();
+
+      const newPassword = randomTestValue("qr-survives-secret");
+      const form = page.locator(".auth-credentials-setting");
+      await form.locator('input[autocomplete="username"]').nth(0).fill(backend.username);
+      await form.locator('input[autocomplete="current-password"]').fill(backend.password);
+      await form.locator('input[autocomplete="username"]').nth(1).fill(backend.username);
+      await form.locator('input[autocomplete="new-password"]').fill(newPassword);
+      await form.locator(".setup-save-btn").click();
+
+      await expect(form.locator(".auth-credentials-status")).toBeVisible();
+      await expect(form.locator(".auth-credentials-error")).not.toBeVisible();
+
+      // Session B's bearer token was never tied to the password hash, so
+      // it must still authenticate (still within its 15-minute TTL).
+      const meAfterChange = await sessionB.request.get(`${backend.baseURL}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${access_token}` },
+      });
+      expect(meAfterChange.status()).toBe(200);
+      expect((await meAfterChange.json()).username).toBe(backend.username);
+    } finally {
+      await sessionB.close();
+    }
+  });
 });

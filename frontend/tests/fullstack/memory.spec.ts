@@ -640,3 +640,79 @@ test("proposing a memory with an invalid scope_type is rejected before any card 
     scopes.every((s) => !s.memories.some((m) => m.name === "invalid-scope-type-memory")),
   ).toBe(true);
 });
+
+// Confirms rejection doesn't leave any residue -- blacklist, dedup key, or
+// otherwise -- keyed on the proposal's `name` that would block or corrupt a
+// later proposal reusing that same name. memory_store.write_memory only
+// runs on approval (backend/memory_api.py's resolve path), and a rejected
+// request is simply discarded, so nothing should exist for the backend to
+// even check against on the second, same-name proposal.
+test("rejecting a memory proposal does not block a later proposal with the same name", async ({
+  authedPage: page,
+  backend,
+}) => {
+  // Turn 1: propose and reject "retry-memory".
+  await triggerMemoryProposal(page, {
+    name: "retry-memory",
+    description: "First attempt at this memory, expected to be rejected.",
+    content: "This is the first, rejected version of retry-memory.",
+  });
+
+  const firstCard = page.getByTestId("memory-proposal-card");
+  await expect(firstCard).toBeVisible({ timeout: 60_000 });
+  await expect(firstCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "retry-memory",
+  );
+  await expect(firstCard.locator(".memory-proposal-card__content")).toHaveValue(
+    "This is the first, rejected version of retry-memory.",
+  );
+
+  // nth(1): Expand (0), Reject (1), Approve (2, `.primary`).
+  await firstCard.locator(".user-input-card__actions button").nth(1).click();
+  await expect(firstCard).not.toBeVisible({ timeout: 15_000 });
+
+  const afterRejectRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(afterRejectRes.ok()).toBeTruthy();
+  const afterRejectBody = await afterRejectRes.json();
+  const afterRejectGlobal = afterRejectBody.global as Array<{ name: string }>;
+  expect(afterRejectGlobal.some((m) => m.name === "retry-memory")).toBe(false);
+
+  // Turn 2: same session, second real turn -- propose a NEW "retry-memory"
+  // with different content and approve it.
+  const secondCommand = proposeMemoryCurlCommand({
+    name: "retry-memory",
+    description: "Second attempt at this memory, expected to be approved.",
+    content: "This is the second, approved version of retry-memory.",
+  });
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(
+    `Use the Bash tool to run exactly this single command, unmodified: ${secondCommand}`,
+  );
+  await textarea.press("Enter");
+
+  const secondCard = page.getByTestId("memory-proposal-card");
+  await expect(secondCard).toBeVisible({ timeout: 60_000 });
+  await expect(secondCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "retry-memory",
+  );
+  // Not blocked, blacklisted, or pre-filled from the rejected attempt: the
+  // card shows the second proposal's own content.
+  await expect(secondCard.locator(".memory-proposal-card__content")).toHaveValue(
+    "This is the second, approved version of retry-memory.",
+  );
+
+  await secondCard.locator(".user-input-card__actions button.primary").click();
+  await expect(secondCard).not.toBeVisible({ timeout: 15_000 });
+
+  const finalRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(finalRes.ok()).toBeTruthy();
+  const finalBody = await finalRes.json();
+  const finalGlobal = finalBody.global as Array<{ name: string; content: string }>;
+
+  // Exactly one "retry-memory" entry exists, holding the second proposal's
+  // content -- not merged with, or blocked by, the first rejected attempt.
+  const matches = finalGlobal.filter((m) => m.name === "retry-memory");
+  expect(matches).toHaveLength(1);
+  expect(matches[0].content).toBe("This is the second, approved version of retry-memory.");
+  expect(matches[0].content).not.toContain("first, rejected");
+});

@@ -603,3 +603,107 @@ test.skip(
   "no cancel affordance exists yet for a prompt queued while offline (documented gap, not tested)",
   async () => {},
 );
+
+// Validates that a prompt queued while offline is visible from a SECOND,
+// independent tab in the SAME browser context — not just after a reload of
+// the SAME tab (the previous test). `better_agent_offline_queue` lives in
+// `localStorage`, which is scoped per-origin and shared by every tab in the
+// same browser context/profile — proving this is genuine origin-scoped
+// durable storage, not state tied to one tab's React lifecycle.
+//
+// `page.context().setOffline(...)` is a BrowserContext-level API — Playwright
+// has no per-page variant. Reading Playwright's own implementation
+// (crNetworkManager / CRPage's FrameSession, in playwright-core's bundled
+// server code) confirms the offline flag lives on the BrowserContext's
+// options and is applied two ways: (a) `doUpdateOffline()` immediately
+// re-applies it to every currently-open page when `setOffline` is called,
+// and (b) every NEW page's FrameSession calls `updateOffline()` during its
+// own construction — before that page ever navigates — reading the SAME
+// context-level flag. Both paths consult the identical stored boolean, so a
+// tab created after `setOffline(true)` never "starts online by default": it
+// is offline from the moment it exists. That is asserted directly below,
+// twice — once for a tab that already existed when offline was toggled, and
+// once for a brand-new tab opened strictly afterward.
+test("a prompt queued while offline in one tab is visible from a second tab in the same browser context", async ({
+  authedPage: page,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: FIRST. No punctuation, no other words.",
+  );
+  await expect(page.getByTestId("assistant-message")).toContainText("FIRST", { timeout: 120_000 });
+
+  // Second tab, opened and navigated to the SAME session route while still
+  // online. This specific SPA route (`/s/<id>`) was never fetched as a real
+  // HTTP navigation before now — the app reaches it via client-side routing
+  // right after session creation, not a full page load — so a fresh
+  // cross-document navigation to it can't be assumed servable purely from
+  // cache the way `page.reload()` of an already-mounted document is (the
+  // previous test proves reload works while offline). Loading it here,
+  // before going offline, sidesteps that uncertainty entirely.
+  const secondTab = await page.context().newPage();
+  await secondTab.goto(page.url());
+  await secondTab.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+  await expect(secondTab.getByTestId("assistant-message")).toContainText("FIRST", { timeout: 20_000 });
+
+  await page.context().setOffline(true);
+
+  // Confirm the flag is genuinely context-wide, not scoped to the tab that
+  // called it: the second, already-open tab flips offline too.
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+  await expect.poll(() => secondTab.evaluate(() => navigator.onLine)).toBe(false);
+
+  // A brand-new tab, opened strictly AFTER setOffline(true) was already in
+  // effect — direct proof it does NOT start online by default.
+  const freshOfflineTab = await page.context().newPage();
+  await expect.poll(() => freshOfflineTab.evaluate(() => navigator.onLine)).toBe(false);
+  await freshOfflineTab.close();
+
+  const secondTabPrompt = "Reply with exactly the single word: SECONDTAB. No punctuation, no other words.";
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(secondTabPrompt);
+  await textarea.press("Enter");
+
+  const queuedMessage = page.getByTestId("user-message").last();
+  await expect(queuedMessage).toContainText(secondTabPrompt);
+  await expect(queuedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(queuedMessage.locator(".status-offline")).toContainText("Queued offline");
+  expect(await readBacklogPrompts(page)).toContain(secondTabPrompt);
+
+  // Force the second tab to re-hydrate from `better_agent_offline_queue`
+  // while STILL offline, via the same reload-while-offline mechanism the
+  // previous test proves works (CDP's offline emulation does not prevent a
+  // reload of an already-mounted document). The second tab's own React state
+  // never had this prompt in it — it mounted before the prompt was ever
+  // queued — so if the bubble appears after reload, that can only be because
+  // it read the SAME `better_agent_offline_queue` localStorage key tab 1
+  // wrote to, under the same origin, from a genuinely different Page
+  // instance.
+  await secondTab.reload();
+  await expect.poll(() => secondTab.evaluate(() => navigator.onLine)).toBe(false);
+
+  expect(await readBacklogPrompts(secondTab)).toContain(secondTabPrompt);
+  const secondTabQueuedMessage = secondTab.getByTestId("user-message").last();
+  await expect(secondTabQueuedMessage).toContainText(secondTabPrompt);
+  await expect(secondTabQueuedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(secondTabQueuedMessage.locator(".status-offline")).toContainText("Queued offline");
+
+  // Done proving cross-tab visibility — close the second tab before
+  // reconnecting so only tab 1's own flush loop delivers the queued prompt
+  // (two independently-mounted app instances both racing to flush the same
+  // backlog entry is a separate concern from what this test is proving).
+  await secondTab.close();
+
+  await page.context().setOffline(false);
+
+  // Proof the flush actually reached the real backend wire, not merely a UI
+  // relabel.
+  await expect(queuedMessage).not.toHaveAttribute("data-status", "offline", { timeout: 30_000 });
+  await expect(page.getByTestId("assistant-message").last()).toContainText("SECONDTAB", {
+    timeout: 120_000,
+  });
+
+  // The durable backlog entry is cleared only on explicit backend
+  // acknowledgement.
+  await expect.poll(() => readBacklogPrompts(page)).not.toContain(secondTabPrompt);
+});

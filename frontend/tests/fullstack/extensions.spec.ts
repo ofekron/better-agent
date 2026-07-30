@@ -1,4 +1,5 @@
 import { test, expect } from "./harness/fixtures";
+import { killBackendProcessOnly, spawnBackendAgainstExistingHome } from "./harness/recovery";
 
 // Validates enabling/disabling an already-installed bundled extension from
 // Settings > Extensions against a REAL backend (real extension registry,
@@ -435,5 +436,81 @@ test.describe("extensions settings", () => {
     // --- stays absent across a real reload, not just on first paint ---
     await page.goto(`${backend.baseURL}/settings`);
     await expect(page.locator('[data-testid="extension-health-prompt"]')).toHaveCount(0);
+  });
+
+  // The first test in this file only proves persistence survives a page
+  // reload (same backend process, same in-memory state -- disk write could
+  // still be optimistic). Prove the disabled flag is genuinely durable by
+  // crashing the real backend process (killBackendProcessOnly) and bringing
+  // a FRESH process back up against the same isolated home
+  // (spawnBackendAgainstExistingHome, harness/recovery.ts) -- if the config
+  // were only cached in memory, the new process would boot with the
+  // extension back to enabled.
+  test("a disabled extension's state survives a real backend crash + restart, not just a page reload", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.getByTestId("settings-nav-extensions").click();
+
+    const rows = page.locator(".extension-ui-settings-row");
+    await expect(rows.first()).toBeVisible();
+
+    // Same "pick a real toggleable row" pattern as the reload-persistence
+    // test above.
+    const toggleableRow = rows
+      .filter({ has: page.locator('input[type="checkbox"]:not([disabled])') })
+      .first();
+    await expect(toggleableRow).toBeVisible();
+    const extensionId = await toggleableRow.locator(".extension-ui-settings-id").innerText();
+    const toggle = toggleableRow.locator(".extension-ui-settings-main-toggle input[type=\"checkbox\"]");
+
+    // --- disable via the real UI ---
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect(toggleableRow).toHaveClass(/\bis-disabled\b/);
+    await expect(toggle).not.toBeChecked();
+
+    const fetchConfig = () =>
+      page.evaluate(async (id) => {
+        const res = await fetch(`/api/extensions/${encodeURIComponent(id)}/config`, {
+          credentials: "include",
+        });
+        return res.json();
+      }, extensionId);
+
+    expect((await fetchConfig()).enabled).toBe(false);
+
+    // --- crash the real backend process, then bring a FRESH process back
+    // up against the SAME isolated home (same on-disk extension store) ---
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("settings-nav-extensions").click();
+
+      const rowById = () =>
+        page
+          .locator(".extension-ui-settings-row")
+          .filter({ has: page.locator(".extension-ui-settings-id", { hasText: extensionId }) });
+
+      // --- UI: the NEW backend process still reports it disabled ---
+      await expect(rowById()).toBeVisible();
+      await expect(rowById()).toHaveClass(/\bis-disabled\b/);
+      await expect(
+        rowById().locator(".extension-ui-settings-main-toggle input[type=\"checkbox\"]"),
+      ).not.toBeChecked();
+
+      // --- REST: confirm against the NEW process directly, not just the DOM ---
+      expect((await fetchConfig()).enabled).toBe(false);
+    } finally {
+      await restarted.stop();
+    }
   });
 });

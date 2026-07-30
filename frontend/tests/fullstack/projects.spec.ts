@@ -354,4 +354,76 @@ test.describe("projects", () => {
       rmSync(unicodeDir, { recursive: true, force: true });
     }
   });
+
+  test("removing the currently active project doesn't leave the UI in a broken state", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    // handleAddProject (App.tsx) selects the just-added project
+    // (setSelectedProjectPath) as a side effect of the real POST
+    // /api/projects, so a single freshly-added project is already the
+    // active tab -- no extra selection step needed to set up this case.
+    const label = path.basename(projectDir);
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(String(err)));
+
+    await addProjectByPath(page, projectDir);
+
+    const tab = page.locator(".project-tab", { hasText: label });
+    await expect(tab).toBeVisible();
+    await expect(tab).toHaveClass(/\bactive\b/);
+
+    // Drive the same real manage-modal delete flow as the dedup/removal
+    // tests above (`.project-tab-manage` -> `.project-list-modal` ->
+    // checkbox -> `.project-list-modal-danger`), but this time against
+    // the project that is currently active/selected.
+    await page.locator(".project-tab-manage").click();
+    const modal = page.locator(".project-list-modal");
+    await modal.waitFor({ state: "visible", timeout: 10_000 });
+
+    const row = modal.locator(".project-list-modal-row", { hasText: label });
+    await row.locator("input[type='checkbox']").check();
+
+    const deleteButton = modal.locator(".project-list-modal-danger");
+    await expect(deleteButton).toBeEnabled();
+    await deleteButton.click();
+    await modal.waitFor({ state: "hidden", timeout: 15_000 });
+
+    await expect(tab).toBeHidden();
+
+    // App.tsx's handleRemoveProject only issues the DELETE + a
+    // refreshProjects() refetch -- it never clears `selectedProjectPath`,
+    // so the deleted path lingers in that state variable. The sane
+    // fallback this produces is implicit rather than an explicit reset:
+    // since no remaining project matches the stale path, ProjectTabs'
+    // `isActive` check (`p.path === currentPath`) is false for every tab,
+    // so nothing renders `.project-tab.active` and the tab strip shows
+    // the normal empty-state "+" affordance instead of a crash or a
+    // blank screen.
+    await expect(page.locator(".project-tab.active")).toHaveCount(0);
+    await expect(page.locator(".project-tab-add")).toBeVisible();
+
+    // Sidebar/composer must stay functional, not frozen behind the
+    // now-dangling selectedProjectPath.
+    const newSessionButton = page.locator(".session-new-button");
+    await expect(newSessionButton).toBeVisible();
+    await expect(newSessionButton).toBeEnabled();
+
+    // No uncaught exception from rendering with a selectedProjectPath
+    // that no longer matches any known project.
+    expect(pageErrors).toEqual([]);
+
+    // Confirm the backend agrees the project is really gone (same check
+    // as the base removal test), ruling out a client-only optimistic
+    // deletion that would resurrect the broken active-tab state on
+    // reload.
+    const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+    expect(projectsRes.ok()).toBeTruthy();
+    const projectsBody = await projectsRes.json();
+    const stillPersisted = (projectsBody.projects as Array<{ path: string }>).some((p) =>
+      p.path.endsWith(label),
+    );
+    expect(stillPersisted).toBeFalsy();
+  });
 });

@@ -1,4 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test, expect } from "./harness/fixtures";
 import {
   addUntrackedFile,
@@ -377,5 +380,88 @@ test.describe("git status and history", () => {
       (body.untracked?.length || 0);
     expect(dirtyCount).toBe(0);
     await expect(page.locator(".project-git-dirty")).toContainText("clean");
+  });
+
+  // Registers a project through a REAL symlink (`fs.symlinkSync`, not a
+  // string that merely looks like one) pointing at a real git repo, rather
+  // than the repo's real path directly. Exercises two backend seams at once:
+  // (1) `GET /api/browse` (backend/file_browser.py) resolving the symlink via
+  // `Path(path).expanduser().resolve()` before `POST /api/projects` ever
+  // fires, and (2) `project_store.add_project`'s dedup key, which is the
+  // *resolved* path (backend/project_store.py's `_normalize`), so a project
+  // added via the symlink and the same project added via its real path must
+  // collapse into one stored record/tab, not two.
+  //
+  // Honest finding: `addProjectByPath` (harness/projects.ts) types the
+  // symlink path directly into the DirPickerModal address bar and presses
+  // Enter — it never has to navigate a directory TREE through the symlink
+  // (no expand/click through intermediate folders), so there is no "file
+  // picker resolves symlinks weirdly mid-navigation" edge case to hit here.
+  // Also, because `browse()` (DirPickerModal.tsx) always sets `selected` from
+  // the server's already-resolved `GET /api/browse` response (never from the
+  // raw address-bar text), "Select directory" sends `POST /api/projects` the
+  // real resolved path, not the literal symlink string — the symlink-vs-real
+  // distinction is therefore proven by the persisted path and the dedup
+  // check below (both driven straight through `page.request`), not by
+  // inspecting what string the DirPickerModal happens to submit.
+  test("registering a project via a real symlink to a git repo resolves and dedupes against the real path", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    repo = createRealGitRepo("initial commit");
+    addUntrackedFile(repo, "scratch.txt", "real uncommitted content\n");
+
+    // The symlink itself lives in a separate temp location from the repo it
+    // points at, so this is a genuine symlink-to-elsewhere, not an alias
+    // inside the same directory.
+    const symlinkParent = mkdtempSync(path.join(tmpdir(), "ba-fullstack-symlink-"));
+    const symlinkPath = path.join(symlinkParent, "repo-link");
+    symlinkSync(repo.dir, symlinkPath, "dir");
+    const resolvedRealPath = realpathSync(repo.dir);
+
+    try {
+      await addProjectByPath(page, symlinkPath);
+
+      const label = path.basename(resolvedRealPath);
+      const tab = page.locator(".project-tab", { hasText: label });
+      await expect(tab).toBeVisible({ timeout: 15_000 });
+
+      // The real backend git RPCs must resolve correctly through the
+      // symlink: same branch and same dirty count as registering the repo
+      // by its real path would produce (compare against the first test in
+      // this file).
+      const gitStatus = page.locator(".project-git-status");
+      await expect(gitStatus).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator(".project-git-branch")).toContainText("main");
+      await expect(page.locator(".project-git-dirty")).toContainText("1 changed");
+
+      // project_store persists the SYMLINK-RESOLVED real path, not the raw
+      // symlink string that was typed into the address bar.
+      const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+      expect(projectsRes.ok()).toBeTruthy();
+      const projectsBody = await projectsRes.json();
+      const persisted = (projectsBody.projects as Array<{ path: string }>).find((p) =>
+        p.path.endsWith(label),
+      );
+      expect(persisted).toBeDefined();
+      expect(persisted?.path).toBe(resolvedRealPath);
+      expect(persisted?.path).not.toBe(symlinkPath);
+
+      // Registering the SAME repo again, this time by its real (non-symlink)
+      // path, must dedupe against the symlink-created record — one tab, one
+      // stored project — proving the dedup key is the resolved path, not the
+      // literal string each caller happened to submit.
+      await addProjectByPath(page, resolvedRealPath);
+      await expect(tab).toHaveCount(1);
+
+      const projectsResAfter = await page.request.get(`${backend.baseURL}/api/projects`);
+      const projectsBodyAfter = await projectsResAfter.json();
+      const matchesAfter = (projectsBodyAfter.projects as Array<{ path: string }>).filter((p) =>
+        p.path.endsWith(label),
+      );
+      expect(matchesAfter).toHaveLength(1);
+    } finally {
+      rmSync(symlinkParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
   });
 });

@@ -423,3 +423,65 @@ test("accepts, sends, and displays a very long prompt without truncation", async
   await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
   await expect(assistantMessage).toContainText("LONGINPUT_OK", { timeout: 120_000 });
 });
+
+// Trust/accuracy check, in the spirit of the approval-command-accuracy test
+// in approvals.spec.ts: the run-meta chips on an assistant bubble
+// (MessageBubble.tsx's `RunMetaChips`, rendered inside `AssistantRunMeta`
+// as `.run-meta-chip` spans with a `.run-meta-chip-value` per fact) are the
+// user's only visible signal for which provider/model actually answered a
+// given turn. If they showed a stale or wrong identity, the user would be
+// misled about what actually ran. Assert the chips match the REAL backend
+// truth — this exact message's persisted `run_meta.provider_id`/`model`
+// (session_manager.py stamps this from what the provider CLI actually ran
+// with) and the matching `/api/providers` record's display name — fetched
+// independently via REST, not assumed from client-side defaults.
+test("the run-meta provider/model chips reflect the real backend truth for the turn", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: PONG. No punctuation, no other words.",
+  );
+
+  const assistantMessage = page.getByTestId("assistant-message");
+  await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
+  await expect(assistantMessage).toContainText("PONG", { timeout: 120_000 });
+
+  const sessionId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+  const treeRes = await page.request.get(
+    `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+  );
+  expect(treeRes.ok()).toBe(true);
+  const tree = await treeRes.json();
+  const messages = (tree.messages ?? []) as Array<{
+    role: string;
+    run_meta?: { provider_id?: string; model?: string };
+  }>;
+  const assistantRecord = [...messages].reverse().find((m) => m.role === "assistant");
+  const runMeta = assistantRecord?.run_meta;
+  // The turn actually ran (PONG rendered above), so the backend must have
+  // stamped a real provider/model onto this message — not an empty scaffold.
+  expect(runMeta?.provider_id).toBeTruthy();
+  expect(runMeta?.model).toBeTruthy();
+
+  const providersRes = await page.request.get(`${backend.baseURL}/api/providers`);
+  expect(providersRes.ok()).toBe(true);
+  const providersBody = await providersRes.json();
+  const providers = (providersBody.providers ?? []) as Array<{
+    id: string;
+    name: string;
+    nickname?: string;
+  }>;
+  const provider = providers.find((p) => p.id === runMeta!.provider_id);
+  expect(provider).toBeTruthy();
+  // Mirrors providerDisplayName.ts (the frontend's single source of truth
+  // for provider labeling): base name, plus " · nickname" when set.
+  const expectedProviderName = provider!.nickname
+    ? `${provider!.name} · ${provider!.nickname}`
+    : provider!.name;
+
+  const chipValues = assistantMessage.locator(".run-meta-chip-value");
+  await expect(chipValues.filter({ hasText: expectedProviderName })).toBeVisible();
+  await expect(chipValues.filter({ hasText: runMeta!.model! })).toBeVisible();
+});
