@@ -1,9 +1,8 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Capacitor } from "@capacitor/core";
-import type { Project, Provider, ProviderRunner, ProvidersState, ReasoningEffort, Permission } from "../types";
+import type { Project, Provider, ProvidersState } from "../types";
 import {
-  defaultProviderAuthority,
   providerAuthority,
   requireProvider,
 } from "../providerAuthority";
@@ -23,18 +22,16 @@ import { InternalLLMSetting } from "./InternalLLMSetting";
 import { SearchInput } from "./SearchInput";
 import { eventBus } from "../lib/eventBus";
 import { LanguageSelector } from "./LanguageSelector";
-import {
-  availableModesForForm,
-  apiEnvCopyForKind,
-  showConfigDirForKind,
-} from "./providerFormShape";
-import { Select } from "./Select";
 import { cacheProviders } from "../utils/providerCache";
 import { providerNickname } from "../utils/providerDisplayName";
-import { runnerLabelKey, runtimeKindForRunner } from "./modelPicker";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
-import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
-import { ModelCatalogStatus } from "./ModelCatalogStatus";
+import {
+  ProviderForm,
+  TemplateGrid,
+  TEMPLATES,
+  type FormPayload,
+  type TemplateId,
+} from "./ProviderForm";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
@@ -100,12 +97,13 @@ type View =
   | { kind: "edit"; providerId: string }
   | { kind: "wizard-templates" }
   | { kind: "wizard-form"; templateId: TemplateId }
+  | { kind: "profile-wizard" }
   | { kind: "mobile" };
 
-type TemplateId = (typeof TEMPLATES)[number]["id"];
 type InstallableProviderKind = "claude" | "codex" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
 type SettingsSection =
   | "providers"
+  | "runtimeProfiles"
   | "account"
   | "language"
   | "appearance"
@@ -130,9 +128,9 @@ type SettingsSection =
  * section whose id matches one of these appends to that section instead of
  * adding a second nav entry with the same meaning. */
 const CORE_SETTINGS_SECTION_IDS: ReadonlySet<string> = new Set([
-  "providers", "account", "language", "appearance", "desktop", "recovery",
-  "shortcuts", "delegation", "context", "internalLlm", "sessions", "voice",
-  "extensions", "capabilities", "harnessProfiles", "passwords", "server",
+  "providers", "runtimeProfiles", "account", "language", "appearance", "desktop",
+  "recovery", "shortcuts", "delegation", "context", "internalLlm", "sessions",
+  "voice", "extensions", "capabilities", "harnessProfiles", "passwords", "server",
   "notifications",
 ]);
 
@@ -166,380 +164,39 @@ interface ProviderSetupStatus {
   install?: ProviderSetupCommandResult | null;
 }
 
-interface Template {
-  id: string;
-  label: string;
-  blurb: string;
-  defaults: {
-    name: string;
-    kind: string;
-    mode: Provider["mode"];
-    base_url: string;
-    config_dir: string;
-    default_model: string;
-    runner?: ProviderRunner;
-    default_reasoning_effort: ReasoningEffort | "";
-    api_key?: string;
-    suspended?: boolean;
-  };
-}
-
-const REASONING_EFFORT_OPTIONS: Record<string, ReasoningEffort[]> = {
-  claude: ["low", "medium", "high", "xhigh"],
-  codex: ["none", "minimal", "low", "medium", "high", "xhigh"],
-  fugu: ["high", "xhigh"],
-};
-
-// Better Agent runner's own generic 5-level enum (backend
-// reasoning_effort.ALL_REASONING_EFFORTS) — used by claude's
-// better_agent_runner backend instead of the native CLI's 4-level
-// CLAUDE_REASONING_EFFORTS (see ClaudeBetterAgentRunnerProvider).
-const BA_RUNNER_REASONING_EFFORT_OPTIONS: ReasoningEffort[] = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-];
-
 const HarnessSettingsEditor = lazyWithRetry(() =>
   import("./HarnessSettingsEditor").then((module) => ({
     default: module.HarnessSettingsEditor,
   })),
 );
-const SAKANA_FUGU_API_BASE_URL = "https://api.sakana.ai/v1";
+const RuntimeProfilesEditor = lazyWithRetry(() =>
+  import("./RuntimeProfilesEditor").then((module) => ({
+    default: module.RuntimeProfilesEditor,
+  })),
+);
+const RuntimeProfileWizard = lazyWithRetry(() =>
+  import("./RuntimeProfileWizard").then((module) => ({
+    default: module.RuntimeProfileWizard,
+  })),
+);
 
-function effortOptionsForKind(
-  kind: string,
-  runner?: string | null,
-): ReasoningEffort[] {
-  if (kind === "claude" && runner === "better_agent_runner") {
-    return BA_RUNNER_REASONING_EFFORT_OPTIONS;
-  }
-  return REASONING_EFFORT_OPTIONS[kind] ?? [];
+// Deep-link support: `/settings?section=<id>` opens a section directly and
+// `?createProfile=1` opens the runtime-profile wizard (used by the
+// NewSessionModal "new profile" affordance).
+function initialSectionFromLocation(): SettingsSection {
+  const requested = new URLSearchParams(window.location.search).get("section");
+  return requested && CORE_SETTINGS_SECTION_IDS.has(requested)
+    ? (requested as SettingsSection)
+    : "providers";
 }
 
-function defaultEffortForKind(
-  kind: string,
-  runner?: string | null,
-): ReasoningEffort | "" {
-  const options = effortOptionsForKind(kind, runner);
-  return options.includes("medium") ? "medium" : options[0] ?? "";
+function initialViewFromLocation(): View {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("createProfile") === "1"
+    ? { kind: "profile-wizard" }
+    : { kind: "list" };
 }
 
-function configDirCopyForKind(kind: string): {
-  labelKey: string;
-  placeholderKey: string;
-  hintKey: string;
-} {
-  if (kind === "codex") {
-    return {
-      labelKey: "setup.configDirLabelCodex",
-      placeholderKey: "setup.configDirPlaceholderCodex",
-      hintKey: "setup.configDirHintCodex",
-    };
-  }
-  if (kind === "fugu") {
-    // Fugu deploys its profile into the Codex CLI config dir (~/.codex).
-    return {
-      labelKey: "setup.configDirLabelCodex",
-      placeholderKey: "setup.configDirPlaceholderCodex",
-      hintKey: "setup.configDirHintCodex",
-    };
-  }
-  if (kind === "agy") {
-    return {
-      labelKey: "setup.configDirLabelAgy",
-      placeholderKey: "setup.configDirPlaceholderAgy",
-      hintKey: "setup.configDirHintAgy",
-    };
-  }
-  if (kind === "copilot") {
-    return {
-      labelKey: "setup.configDirLabelCopilot",
-      placeholderKey: "setup.configDirPlaceholderCopilot",
-      hintKey: "setup.configDirHintCopilot",
-    };
-  }
-  return {
-    labelKey: "setup.configDirLabelClaude",
-    placeholderKey: "setup.configDirPlaceholderClaude",
-    hintKey: "setup.configDirHintClaude",
-  };
-}
-
-const TEMPLATES = [
-  {
-    id: "claude",
-    label: "Claude",
-    blurb: "Anthropic subscription — OAuth via the Claude Code CLI.",
-    defaults: {
-      name: "Claude",
-      kind: "claude",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "claude-opus-5[1m]",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "codex",
-    label: "Codex",
-    blurb: "OpenAI Codex subscription — uses the Codex CLI with your ChatGPT account.",
-    defaults: {
-      name: "Codex",
-      kind: "codex",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "gpt-5.5",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "agy",
-    label: "Antigravity",
-    blurb: "Google Antigravity subscription — uses the agy CLI.",
-    defaults: {
-      name: "Antigravity",
-      kind: "agy",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "$HOME/.gemini/antigravity-cli",
-      default_model: "Gemini 3.5 Flash (Medium)",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "copilot",
-    label: "Copilot",
-    blurb: "GitHub Copilot subscription — uses the `copilot` CLI, OAuth via `gh auth login`.",
-    defaults: {
-      name: "Copilot",
-      kind: "copilot",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "pi",
-    label: "pi",
-    blurb: "Minimal open-source coding agent (pi-mono). Bring any Anthropic/OpenAI/Google API key or a ChatGPT/Claude/Copilot subscription via its /login.",
-    defaults: {
-      name: "pi",
-      kind: "pi",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "anthropic/claude-opus-4-7",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "qwen",
-    label: "Qwen Code",
-    blurb: "Alibaba's Qwen Code CLI — free Qwen OAuth tier or a DashScope/OpenAI-compatible API key.",
-    defaults: {
-      name: "Qwen Code",
-      kind: "qwen",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "coder-model",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "cursor",
-    label: "Cursor",
-    blurb: "Cursor's cursor-agent CLI — headless agent runs with your Cursor subscription (`cursor-agent login`).",
-    defaults: {
-      name: "Cursor",
-      kind: "cursor",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "kimi",
-    label: "Kimi CLI",
-    blurb: "Moonshot AI's Kimi coding agent (kimi-k2) — sign in with its /login or KIMI_API_KEY.",
-    defaults: {
-      name: "Kimi",
-      kind: "kimi",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "kimi-code/kimi-for-coding",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "amp",
-    label: "Amp",
-    blurb: "Sourcegraph's coding agent CLI. Headless (execute) mode needs paid Amp credits; sign in with `amp login`.",
-    defaults: {
-      name: "Amp",
-      kind: "amp",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "opencode",
-    label: "OpenCode",
-    blurb: "Open-source multi-provider coding agent. Works out of the box with free models; connect providers via `opencode auth login`.",
-    defaults: {
-      name: "OpenCode",
-      kind: "opencode",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "opencode/big-pickle",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "fugu",
-    label: "Sakana Fugu",
-    blurb: "Sakana Fugu multi-agent system via the `codex-fugu` launcher. Install it first (sakana.ai/fugu), then add it here.",
-    defaults: {
-      name: "Fugu",
-      kind: "fugu",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "$HOME/.codex",
-      default_model: "fugu",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "sakana",
-    label: "Sakana Fugu (API)",
-    blurb: "Sakana Fugu via its native OpenAI-compatible API, driven by Better Agent's own agent loop. Needs an API key.",
-    defaults: {
-      name: "Sakana Fugu (API)",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.sakana.ai/v1",
-      config_dir: "",
-      default_model: "fugu",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "meta-muse",
-    label: "Meta Muse Spark",
-    blurb: "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key.",
-    defaults: {
-      name: "Meta Muse Spark",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.meta.ai/v1",
-      config_dir: "",
-      default_model: "muse-spark-1.1",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "ollama",
-    label: "Ollama",
-    blurb: "Local Anthropic-compatible models via Claude Code.",
-    defaults: {
-      name: "Ollama",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "http://localhost:11434",
-      config_dir: "$HOME/.claude-ollama",
-      default_model: "qwen3-coder",
-      default_reasoning_effort: "medium",
-      api_key: "ollama",
-    },
-  },
-  {
-    id: "zai",
-    label: "Z.AI (Claude)",
-    blurb: "Z.AI's Anthropic-compatible API via the `claude` CLI. Needs an API key.",
-    defaults: {
-      name: "Z.AI (Claude)",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "https://api.z.ai/api/anthropic",
-      config_dir: "~/.claude-zai",
-      default_model: "glm-4.6",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "zai-openai",
-    label: "Z.AI (OpenAI)",
-    blurb: "Z.AI's native OpenAI endpoint (Coding plan key) driven by Better Agent's own agent loop. This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Needs an API key.",
-    defaults: {
-      name: "Z.AI (OpenAI)",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.z.ai/api/coding/paas/v4",
-      config_dir: "",
-      default_model: "glm-5.2",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "hetzner",
-    label: "Hetzner Inference",
-    blurb: "Hetzner's OpenAI-compatible inference endpoint, driven by Better Agent's own agent loop. Free experimental service with no SLA. Needs an API token from experiments.hetzner.com.",
-    defaults: {
-      name: "Hetzner Inference",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://inference.hetzner.com/api/v1",
-      config_dir: "",
-      default_model: "Qwen/Qwen3.6-35B-A3B-FP8",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "custom",
-    label: "Custom API",
-    blurb: "Any Anthropic-compatible endpoint. Provide URL + key yourself.",
-    defaults: {
-      name: "Custom API",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "",
-      config_dir: "",
-      default_model: "",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "custom-openai",
-    label: "Custom OpenAI",
-    blurb: "Any OpenAI-compatible endpoint. Driven by Better Agent's own agent loop. Provide URL, key, and model.",
-    defaults: {
-      name: "Custom OpenAI",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "",
-      config_dir: "",
-      default_model: "",
-      default_reasoning_effort: "",
-    },
-  },
-] as const satisfies readonly Template[];
-
-const KEEP = "__keep__";
 
 export function SettingsPage({
   onClose,
@@ -558,8 +215,8 @@ export function SettingsPage({
   const [networkBindAddress, setNetworkBindAddress] = useState<NetworkBindAddress>("127.0.0.1");
   const [mobileEnabled, setMobileEnabled] = useState(false);
   const [integrationsEnabled, setIntegrationsEnabled] = useState(false);
-  const [view, setView] = useState<View>({ kind: "list" });
-  const [section, setSection] = useState<SettingsSection>("providers");
+  const [view, setView] = useState<View>(initialViewFromLocation);
+  const [section, setSection] = useState<SettingsSection>(initialSectionFromLocation);
   const [busy, setBusy] = useState(false);
   const [credentialRetryingId, setCredentialRetryingId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -718,6 +375,7 @@ export function SettingsPage({
           refreshAppDisabled={refreshAppDisabled}
           hookActionContext={hookActionContext}
           onAdd={() => setView({ kind: "wizard-templates" })}
+          onCreateProfile={() => setView({ kind: "profile-wizard" })}
           onMobile={() => setView({ kind: "mobile" })}
           mobileEnabled={mobileEnabled}
           integrationsEnabled={integrationsEnabled}
@@ -755,17 +413,6 @@ export function SettingsPage({
               if (!r.ok) throw new Error(await r.text());
             }).promise;
             setNetworkBindAddress(address);
-          })}
-          onActivate={(p) => runBusyAction(setBusy, setError, "activate failed", async () => {
-            await trackPromise(`provider:activate:${p.id}`, async () => {
-              const r = await fetch(`${API}/api/providers/${p.id}/set-default`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(defaultProviderAuthority(p, providers, activeId)),
-              });
-              await requireProviderMutation(r);
-            }).promise;
-            await refetch();
           })}
           onSuspend={(p, suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
             await trackPromise(`provider:suspend:${p.id}`, async () => {
@@ -840,6 +487,20 @@ export function SettingsPage({
         />
       )}
 
+      {view.kind === "profile-wizard" && (
+        <Suspense fallback={<div className="modal-body settings-hint">{t("common.loading", "Loading…")}</div>}>
+          <RuntimeProfileWizard
+            providers={providers}
+            onRefetchProviders={refetch}
+            onDone={() => {
+              setSection("runtimeProfiles");
+              setView({ kind: "list" });
+            }}
+            onClose={onClose}
+          />
+        </Suspense>
+      )}
+
       {view.kind === "mobile" && (
         <MobileSetup open={true} onClose={() => setView({ kind: "list" })} />
       )}
@@ -867,18 +528,6 @@ export function SettingsPage({
             }).promise;
             await refetch();
             setView({ kind: "list" });
-          })}
-          onActivate={() => runBusyAction(setBusy, setError, "activate failed", async () => {
-            await trackPromise(`provider:activate:${view.providerId}`, async () => {
-              const provider = requireProvider(providers, view.providerId);
-              const r = await fetch(`${API}/api/providers/${view.providerId}/set-default`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(defaultProviderAuthority(provider, providers, activeId)),
-              });
-              await requireProviderMutation(r);
-            }).promise;
-            await refetch();
           })}
           onSuspend={(suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
             await trackPromise(`provider:suspend:${view.providerId}`, async () => {
@@ -930,11 +579,11 @@ interface ProvidersListProps {
   refreshAppDisabled: boolean;
   hookActionContext: HookActionContext;
   onAdd: () => void;
+  onCreateProfile: () => void;
   onMobile: () => void;
   mobileEnabled: boolean;
   integrationsEnabled: boolean;
   onEdit: (p: Provider) => void;
-  onActivate: (p: Provider) => void;
   onSuspend: (p: Provider, suspended: boolean) => void;
   credentialRetryingId: string | null;
   onRetryCredential: (p: Provider) => void;
@@ -1370,11 +1019,11 @@ function ProvidersList({
   refreshAppDisabled,
   hookActionContext,
   onAdd,
+  onCreateProfile,
   onMobile,
   mobileEnabled,
   integrationsEnabled,
   onEdit,
-  onActivate,
   onSuspend,
   credentialRetryingId,
   onRetryCredential,
@@ -1420,6 +1069,7 @@ function ProvidersList({
   type SettingsGroup = "general" | "harness";
   const coreSections: { id: SettingsSection; label: string; group: SettingsGroup }[] = [
     { id: "providers", label: t("setup.providersTitle"), group: "general" },
+    { id: "runtimeProfiles", label: t("settings.runtimeProfilesSection"), group: "general" },
     { id: "account", label: t("settings.accountTitle"), group: "general" },
     { id: "language", label: t("language.label"), group: "general" },
     { id: "appearance", label: t("settings.appearanceTitle"), group: "general" },
@@ -1484,9 +1134,8 @@ function ProvidersList({
           activeId={activeId}
           busy={busy}
           error={error}
-          onAdd={onAdd}
+          onCreateProfile={onCreateProfile}
           onEdit={onEdit}
-          onActivate={onActivate}
           onSuspend={onSuspend}
           credentialRetryingId={credentialRetryingId}
           onRetryCredential={onRetryCredential}
@@ -1504,6 +1153,17 @@ function ProvidersList({
           onVerifyProviders={onVerifyProviders}
           onNetworkBindChange={onNetworkBindChange}
         />
+      )}
+      {section === "runtimeProfiles" && (
+        <Suspense
+          fallback={
+            <div className="runtime-profiles-editor">
+              {t("common.loading", "Loading…")}
+            </div>
+          }
+        >
+          <RuntimeProfilesEditor providers={providers} onCreateProfile={onCreateProfile} />
+        </Suspense>
       )}
       {section === "language" && (
         <div className="language-setting">
@@ -1725,9 +1385,8 @@ function ProvidersSettingsSection({
   activeId,
   busy,
   error,
-  onAdd,
+  onCreateProfile,
   onEdit,
-  onActivate,
   onSuspend,
   credentialRetryingId,
   onRetryCredential,
@@ -1747,6 +1406,7 @@ function ProvidersSettingsSection({
 }: Omit<
   ProvidersListProps,
   | "onClose"
+  | "onAdd"
   | "onMobile"
   | "mobileEnabled"
   | "integrationsEnabled"
@@ -1811,7 +1471,7 @@ function ProvidersSettingsSection({
           onInstallProvider={onInstallProvider}
           installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
-          onAdd={onAdd}
+          onCreateProfile={onCreateProfile}
         />
       )}
       {firstRunDone && (
@@ -1936,16 +1596,6 @@ function ProvidersSettingsSection({
                       </button>
                     )}
                   </>
-                )}
-                {!isActive && !isSuspended && (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={busy}
-                    onClick={() => onActivate(p)}
-                  >
-                    {t('setup.setDefaultButton')}
-                  </button>
                 )}
                 <button
                   type="button"
@@ -2118,7 +1768,7 @@ function FirstRunWizard({
   onNetworkBindChange,
   onRefreshApp,
   refreshAppDisabled,
-  onAdd,
+  onCreateProfile,
 }: {
   statuses: ProviderSetupStatus[];
   providers: Provider[];
@@ -2133,7 +1783,7 @@ function FirstRunWizard({
   onNetworkBindChange: (address: NetworkBindAddress) => void;
   onRefreshApp?: () => void;
   refreshAppDisabled: boolean;
-  onAdd: () => void;
+  onCreateProfile: () => void;
 }) {
   const { t } = useTranslation();
   const [projectPath, setProjectPath] = useState("");
@@ -2251,8 +1901,8 @@ function FirstRunWizard({
             : t("setup.providerDefinitionMissing")}
         </span>
         <div>
-          <button type="button" className="btn-secondary" disabled={busy} onClick={onAdd}>
-            {t("setup.addProvider")}
+          <button type="button" className="btn-secondary" disabled={busy} onClick={onCreateProfile}>
+            {t("runtimeProfile.createCta")}
           </button>
         </div>
       </div>
@@ -2274,27 +1924,6 @@ function WizardTemplates({
   onPick: (id: TemplateId) => void;
 }) {
   const { t } = useTranslation();
-  const TEMPLATE_KEYS: Record<TemplateId, { labelKey: string; blurbKey: string }> = {
-    claude: { labelKey: "setup.templateClaudeLabel", blurbKey: "setup.templateClaudeBlurb" },
-    codex: { labelKey: "setup.templateCodexLabel", blurbKey: "setup.templateCodexBlurb" },
-    copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
-    agy: { labelKey: "setup.templateAgyLabel", blurbKey: "setup.templateAgyBlurb" },
-    fugu: { labelKey: "setup.templateFuguLabel", blurbKey: "setup.templateFuguBlurb" },
-    pi: { labelKey: "setup.templatePiLabel", blurbKey: "setup.templatePiBlurb" },
-    qwen: { labelKey: "setup.templateQwenLabel", blurbKey: "setup.templateQwenBlurb" },
-    cursor: { labelKey: "setup.templateCursorLabel", blurbKey: "setup.templateCursorBlurb" },
-    kimi: { labelKey: "setup.templateKimiLabel", blurbKey: "setup.templateKimiBlurb" },
-    amp: { labelKey: "setup.templateAmpLabel", blurbKey: "setup.templateAmpBlurb" },
-    opencode: { labelKey: "setup.templateOpencodeLabel", blurbKey: "setup.templateOpencodeBlurb" },
-    sakana: { labelKey: "setup.templateSakanaLabel", blurbKey: "setup.templateSakanaBlurb" },
-    "meta-muse": { labelKey: "setup.templateMetaMuseLabel", blurbKey: "setup.templateMetaMuseBlurb" },
-    ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
-    zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
-    "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },
-    hetzner: { labelKey: "setup.templateHetznerLabel", blurbKey: "setup.templateHetznerBlurb" },
-    custom: { labelKey: "setup.templateCustomLabel", blurbKey: "setup.templateCustomBlurb" },
-    "custom-openai": { labelKey: "setup.templateCustomOpenAILabel", blurbKey: "setup.templateCustomOpenAIBlurb" },
-  };
   return (
     <>
       <div className="modal-header">
@@ -2308,577 +1937,14 @@ function WizardTemplates({
       </div>
       <div className="modal-body">
         <p className="setup-mode-desc">{t('setup.pickTemplate')}</p>
-        <div className="provider-templates">
-          {TEMPLATES.map((tpl) => {
-            const keys = TEMPLATE_KEYS[tpl.id];
-            return (
-              <button
-                key={tpl.id}
-                type="button"
-                className="provider-template-card"
-                onClick={() => onPick(tpl.id)}
-              >
-                <div className="provider-template-name">{t(keys.labelKey)}</div>
-                <div className="provider-template-blurb">{t(keys.blurbKey)}</div>
-              </button>
-            );
-          })}
-        </div>
+        <TemplateGrid onPick={onPick} />
       </div>
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Provider form (used by both wizard create and edit)
-// ---------------------------------------------------------------------------
-
-interface FormPayload {
-  name: string;
-  nickname?: string;
-  kind: string;
-  mode: Provider["mode"];
-  base_url: string;
-  config_dir: string;
-  default_model: string;
-  runner: ProviderRunner;
-  default_reasoning_effort: ReasoningEffort | "";
-  default_permission: Permission;
-  api_key: string;
-  suspended: boolean;
-  capabilities?: Record<string, boolean>;
-}
-
-// Per-provider-native permission vocabularies (mirror backend/permission.py).
-// One axis for claude/openai/pi, two independent axes (approval + sandbox) for codex.
-const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
-  claude: { mode: ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"] },
-  codex: {
-    approval: ["untrusted", "on-request", "on-failure", "never"],
-    sandbox: ["read-only", "workspace-write", "danger-full-access"],
-  },
-  openai: { mode: ["default", "bypassPermissions"] },
-  pi: { mode: ["yolo", "plan"] },
-  qwen: { mode: ["auto_edit", "yolo", "plan"] },
-  cursor: { mode: ["default", "force"] },
-  amp: { mode: ["default", "dangerously-allow-all"] },
-  opencode: { mode: ["default", "auto", "readonly"] },
-};
-const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
-  claude: { mode: "bypassPermissions" },
-  codex: { approval: "never", sandbox: "danger-full-access" },
-  openai: { mode: "bypassPermissions" },
-  pi: { mode: "yolo" },
-  qwen: { mode: "yolo" },
-  cursor: { mode: "force" },
-  amp: { mode: "dangerously-allow-all" },
-  opencode: { mode: "auto" },
-};
-function permissionOptionsForKind(kind: string): Record<string, string[]> {
-  return PERMISSION_OPTIONS[kind] ?? {};
-}
-
-function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
-  if (saved?.length) return saved;
-  // codex's and claude's better_agent_runner choices speak their own
-  // subscription OAuth wire protocols (OpenAI's Codex ResponsesAPI and
-  // Anthropic's Messages API, respectively) — see the mode-forcing effect
-  // in ProviderForm below.
-  if (kind === "fugu" || kind === "codex" || kind === "claude") return ["native", "better_agent_runner"];
-  return kind === "openai" ? ["better_agent_runner"] : ["native"];
-}
-
-// Capability keys overridable per provider (kind gives the default; these
-// force it on/off). Tri-state in the editor: inherit / on / off.
-const CAPABILITY_KEYS = [
-  "supports_fork",
-  "supports_manager_mode",
-  "supports_rewind",
-  "supports_steering",
-  "supports_native_subagents",
-  "supports_reasoning_effort",
-] as const;
-type CapState = "inherit" | "on" | "off";
-
-function ProviderForm({
-  mode,
-  providerId,
-  initial,
-  initialHasKey,
-  credentialBlocked = false,
-  onClose,
-  onBack,
-  onSubmit,
-}: {
-  mode: "create" | "edit";
-  /** Set on edit only — used to fetch this provider's model list for
-   * the default_model dropdown. Undefined during the create wizard
-   * (provider doesn't exist yet → free-text input). */
-  providerId?: string;
-  initial: Omit<
-    FormPayload,
-    "api_key" | "default_permission" | "runner" | "suspended" | "default_model" | "default_reasoning_effort"
-  > & {
-    api_key?: string;
-    capability_overrides?: Partial<Record<string, boolean>>;
-    default_permission?: Permission;
-    /** Execution defaults now live on runtime profiles; provider records no
-     * longer carry them. Present only when seeded from a create template. */
-    default_model?: string;
-    default_reasoning_effort?: ReasoningEffort | "";
-    runner?: ProviderRunner;
-    runner_options?: Provider["runner_options"];
-    suspended?: boolean;
-  };
-  initialHasKey: boolean;
-  credentialBlocked?: boolean;
-  onClose: () => void;
-  onBack: () => void;
-  onSubmit: (payload: FormPayload) => Promise<void>;
-}) {
-  const { t } = useTranslation();
-  const [name, setName] = useState(initial.name);
-  const [nickname, setNickname] = useState(initial.nickname ?? "");
-  const [kind] = useState(initial.kind || "claude");
-  const runnerOptions = runnerOptionsForKind(kind, initial.runner_options);
-  const initialRunner = initial.runner ?? runnerOptions[0];
-  const [runner, setRunner] = useState<ProviderRunner>(
-    runnerOptions.includes(initialRunner) ? initialRunner : runnerOptions[0],
-  );
-  const runtimeKind = runtimeKindForRunner(kind, runner);
-  const modes = availableModesForForm(runtimeKind, mode, initial.mode, runner);
-  const [mode_, setMode] = useState<Provider["mode"]>(
-    modes.includes(initial.mode) ? initial.mode : modes[0],
-  );
-  const [baseUrl, setBaseUrl] = useState(initial.base_url);
-  const [configDir, setConfigDir] = useState(initial.config_dir);
-  const configDirCopy = configDirCopyForKind(kind);
-  const apiEnvCopy = apiEnvCopyForKind(runtimeKind);
-  const [defaultModel, setDefaultModel] = useState(initial.default_model ?? "");
-  const effortOptions = effortOptionsForKind(kind, runner);
-  const initialEffort =
-    initial.default_reasoning_effort && effortOptions.includes(initial.default_reasoning_effort)
-      ? initial.default_reasoning_effort
-      : defaultEffortForKind(kind, runner);
-  const [defaultReasoningEffort, setDefaultReasoningEffort] =
-    useState<ReasoningEffort | "">(initialEffort);
-  const permissionOptions = permissionOptionsForKind(runtimeKind);
-  const seedPermission = (): Permission => {
-    const opts = permissionOptions;
-    const saved = initial.default_permission;
-    const out: Permission = {};
-    for (const axis of Object.keys(opts)) {
-      const allowed = opts[axis];
-      const v = saved?.[axis];
-      out[axis] = v && allowed.includes(v) ? v : PERMISSION_DEFAULTS[runtimeKind]?.[axis] ?? allowed[0];
-    }
-    return out;
-  };
-  const [defaultPermission, setDefaultPermission] = useState<Permission>(seedPermission);
-  const [apiKey, setApiKey] = useState(initial.api_key ?? "");
-  const [suspended, setSuspended] = useState(initial.suspended === true);
-  const [submitting, setSubmitting] = useState(false);
-  const [customModelMode, setCustomModelMode] = useState(false);
-  // Per-capability tri-state: inherit (kind default) / on / off. Seeded
-  // from the provider's raw override map so an untouched save reproduces
-  // the same overrides (never silently clears them).
-  const initialOverrides = initial.capability_overrides || {};
-  const [capStates, setCapStates] = useState<Record<string, CapState>>(
-    Object.fromEntries(
-      CAPABILITY_KEYS.map((k) => [
-        k,
-        initialOverrides[k] === true
-          ? "on"
-          : initialOverrides[k] === false
-            ? "off"
-            : "inherit",
-      ]),
-    ) as Record<string, CapState>,
-  );
-
-  useEffect(() => {
-    if (!modes.includes(mode_)) {
-      setMode(modes[0]);
-    }
-    if (kind === "fugu" && runner === "better_agent_runner") {
-      if (mode_ !== "api_key") setMode("api_key");
-      if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
-      if (!defaultModel) setDefaultModel("fugu");
-    }
-    // codex's better_agent_runner choice is the ChatGPT-subscription
-    // ResponsesAPI wire protocol — there is no API-key variant of it.
-    if (kind === "codex" && runner === "better_agent_runner" && mode_ !== "subscription") {
-      setMode("subscription");
-    }
-    // Claude's better_agent_runner backend defaults/locks to subscription
-    // mode already via `modes` above (api_key is excluded from the
-    // options entirely, matching the backend's rejection) — no forced
-    // mode override needed here, unlike fugu's api_key force above.
-    if (defaultReasoningEffort && !effortOptions.includes(defaultReasoningEffort)) {
-      setDefaultReasoningEffort(defaultEffortForKind(kind, runner));
-    }
-  }, [baseUrl, defaultModel, defaultReasoningEffort, effortOptions, kind, mode_, modes, runner]);
-
-  const updateRunner = (next: ProviderRunner) => {
-    setRunner(next);
-    if (kind === "fugu" && next === "better_agent_runner") {
-      setMode("api_key");
-      if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
-      if (!defaultModel) setDefaultModel("fugu");
-    }
-    if (kind === "codex" && next === "better_agent_runner") {
-      setMode("subscription");
-    }
-  };
-
-  const {
-    catalog,
-    networkState,
-    refresh,
-    refreshing,
-    refreshError,
-  } = useProviderModelCatalog(
-    mode === "edit" ? providerId || "" : "",
-  );
-  const catalogDefaultInvalid = (
-    mode === "edit"
-    && catalog?.authoritative === true
-    && (
-      catalog.status === "pending"
-      || catalog.status === "unsupported"
-      || catalog.status === "unavailable"
-      || !catalog.models.includes(defaultModel)
-    )
-  );
-  const modelOptions = mode === "edit" ? catalog?.models ?? null : null;
-
-  const submit = async () => {
-    setSubmitting(true);
-    try {
-      await onSubmit({
-        name,
-        nickname,
-        kind,
-        mode: mode_,
-        base_url: baseUrl,
-        config_dir: configDir,
-        default_model: defaultModel,
-        runner,
-        default_reasoning_effort: defaultReasoningEffort,
-        default_permission: defaultPermission,
-        api_key:
-          mode_ === "api_key"
-            ? apiKey || (initialHasKey ? KEEP : "")
-            : "",
-        suspended,
-        capabilities: Object.fromEntries(
-          CAPABILITY_KEYS.filter((k) => capStates[k] !== "inherit").map((k) => [
-            k,
-            capStates[k] === "on",
-          ]),
-        ),
-      });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <>
-      <div className="modal-header">
-        <button className="modal-back" onClick={onBack} title={t('setup.backTitle')}>
-          &larr;
-        </button>
-        <h2>{mode === "create" ? t('setup.newProviderTitle') : t('setup.editProviderTitle')}</h2>
-        <button className="modal-close" onClick={onClose}>
-          &times;
-        </button>
-      </div>
-
-      <div className="modal-body">
-        <div className="setup-field-row setup-field-row-2col">
-          <div className="setup-field">
-            <label>{t('setup.nameLabel')}</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t('setup.namePlaceholder')}
-              spellCheck={false}
-            />
-          </div>
-          <div className="setup-field">
-            <label>{t('setup.nicknameLabel')}</label>
-            <input
-              type="text"
-              value={nickname}
-              onChange={(e) => setNickname(e.target.value)}
-              placeholder={t('setup.nicknamePlaceholder')}
-              spellCheck={false}
-            />
-          </div>
-        </div>
-
-        {modes.length > 1 && (
-          <div className="setup-mode-toggle">
-            {modes.includes("subscription") && (
-              <button
-                className={`setup-mode-btn ${
-                  mode_ === "subscription" ? "active" : ""
-                }`}
-                onClick={() => setMode("subscription")}
-                type="button"
-              >
-                <span className="setup-mode-icon"><Icon name="star" size={14} style={{ verticalAlign: "-2px" }} /></span>
-                {t('setup.subscriptionButton')}
-              </button>
-            )}
-            {modes.includes("api_key") && (
-              <button
-                className={`setup-mode-btn ${mode_ === "api_key" ? "active" : ""}`}
-                onClick={() => setMode("api_key")}
-                type="button"
-              >
-                <span className="setup-mode-icon"><Icon name="settings" size={14} style={{ verticalAlign: "-2px" }} /></span>
-                {t('setup.apiKeyButton')}
-              </button>
-            )}
-          </div>
-        )}
-
-        {runnerOptions.length > 1 && (
-          <div className="setup-field">
-            <label>{t("setup.runnerLabel")}</label>
-            <select
-              value={runner}
-              onChange={(e) => updateRunner(e.target.value as ProviderRunner)}
-            >
-              {runnerOptions.map((option) => (
-                <option key={option} value={option}>
-                  {t(runnerLabelKey(kind, option))}
-                </option>
-              ))}
-            </select>
-            <span className="setup-field-hint">{t("setup.runnerHint")}</span>
-          </div>
-        )}
-
-        {mode_ === "api_key" && (
-          <div className="setup-fields">
-            <div className="setup-field">
-              <label>{t(apiEnvCopy.keyLabelKey)}</label>
-              {credentialBlocked && (
-                <div className="setup-error">{t('setup.apiKeyBlockedReentryHint')}</div>
-              )}
-              <input
-                type="password"
-                aria-label={t(apiEnvCopy.keyLabelKey)}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={
-                  credentialBlocked
-                    ? t('setup.apiKeyReenterPlaceholder')
-                    : initialHasKey
-                    ? t('setup.apiKeyPlaceholderKeep')
-                    : t(apiEnvCopy.keyPlaceholderKey)
-                }
-                spellCheck={false}
-              />
-              <span className="setup-field-hint">{t("setup.apiKeySecurityHint")}</span>
-            </div>
-            <div className="setup-field">
-              <label>{t(apiEnvCopy.urlLabelKey)}</label>
-              <input
-                type="text"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder={t('setup.baseUrlPlaceholder')}
-                spellCheck={false}
-              />
-            </div>
-          </div>
-        )}
-
-        {showConfigDirForKind(runtimeKind) && (
-          <div className="setup-field">
-            <label>{t(configDirCopy.labelKey)}</label>
-            <input
-              type="text"
-              value={configDir}
-              onChange={(e) => setConfigDir(e.target.value)}
-              placeholder={t(configDirCopy.placeholderKey)}
-              spellCheck={false}
-            />
-            <span className="setup-field-hint">
-              {t(configDirCopy.hintKey)}
-            </span>
-          </div>
-        )}
-
-        <div className="setup-field">
-          <label>{t('setup.defaultModelLabel')}</label>
-          {mode === "edit" && modelOptions !== null && !customModelMode ? (
-            <div style={{ display: "flex", gap: 4 }}>
-              <Select
-                value={
-                  defaultModel && modelOptions.includes(defaultModel)
-                    ? defaultModel
-                    : ""
-                }
-                onChange={(v) => setDefaultModel(v)}
-                options={[
-                  ...(!modelOptions.includes(defaultModel)
-                    ? [{
-                        value: "",
-                        label: defaultModel
-                          ? t('setup.defaultModelNotInList', { model: defaultModel })
-                          : t('setup.defaultModelSelectPlaceholder'),
-                        disabled: true,
-                      }]
-                    : []),
-                  ...modelOptions.map((m) => ({ value: m, label: m })),
-                ]}
-              />
-              <button
-                type="button"
-                className="btn-icon"
-                title="Type a custom model name"
-                onClick={() => setCustomModelMode(true)}
-              >
-                +
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", gap: 4 }}>
-              <input
-                type="text"
-                value={defaultModel}
-                onChange={(e) => setDefaultModel(e.target.value)}
-                placeholder={t("setup.defaultModelCustomPlaceholder")}
-                spellCheck={false}
-              />
-              {mode === "edit" && modelOptions !== null && (
-                <button
-                  type="button"
-                  className="btn-icon"
-                  title={t("setup.defaultModelPickFromList")}
-                  onClick={() => setCustomModelMode(false)}
-                >
-                  <Icon name="check" size={18} />
-                </button>
-              )}
-            </div>
-          )}
-          {mode === "edit" && modelOptions === null && (
-            <span className="setup-field-hint">{t("model.catalogPending")}</span>
-          )}
-          {mode === "edit" ? (
-            <ModelCatalogStatus
-              catalog={catalog}
-              networkState={networkState}
-              onRefresh={refresh}
-              refreshing={refreshing}
-              refreshError={refreshError}
-            />
-          ) : null}
-        </div>
-
-        {effortOptions.length > 0 && (
-          <div className="setup-field">
-            <label>{t('setup.defaultReasoningEffortLabel')}</label>
-            <Select
-              value={defaultReasoningEffort}
-              onChange={(v) => setDefaultReasoningEffort(v as ReasoningEffort)}
-              options={effortOptions.map((effort) => ({
-                value: effort,
-                label: t(`reasoningEffort.${effort}`),
-              }))}
-            />
-          </div>
-        )}
-
-        {Object.keys(permissionOptions).length > 0 && (
-          <div className="setup-field">
-            <label>{t('setup.defaultPermissionLabel')}</label>
-            {Object.entries(permissionOptions).map(([axis, allowed]) => (
-              <Select
-                key={axis}
-                data-testid={`permission-axis-select-${axis}`}
-                className="permission-axis-select"
-                value={defaultPermission[axis] ?? allowed[0]}
-                onChange={(v) =>
-                  setDefaultPermission((prev) => ({ ...prev, [axis]: v }))
-                }
-                title={t(`permission.axis.${axis}`)}
-                options={allowed.map((value) => ({
-                  value,
-                  label: t(`permission.value.${value}`, { defaultValue: value }),
-                }))}
-              />
-            ))}
-          </div>
-        )}
-
-        <label className="setup-field provider-suspend-toggle">
-          <span>{t('setup.suspendProviderLabel')}</span>
-          <input
-            type="checkbox"
-            checked={suspended}
-            onChange={(e) => setSuspended(e.target.checked)}
-          />
-          <span className="setup-field-hint">{t('setup.suspendProviderHint')}</span>
-        </label>
-
-        <div className="setup-field">
-          <label>{t('setup.capabilitiesLabel')}</label>
-          <div className="capability-overrides">
-            {CAPABILITY_KEYS.map((key) => (
-              <label key={key} className="context-strategy-row">
-                <span>{t(`setup.capability.${key}`)}</span>
-                <Select
-                  data-testid={`capability-override-select-${key}`}
-                  value={capStates[key] || "inherit"}
-                  onChange={(v) =>
-                    setCapStates((prev) => ({ ...prev, [key]: v as CapState }))
-                  }
-                  options={[
-                    { value: "inherit", label: t('setup.capabilityInherit') },
-                    { value: "on", label: t('setup.capabilityOn') },
-                    { value: "off", label: t('setup.capabilityOff') },
-                  ]}
-                />
-              </label>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="modal-footer">
-        <button className="setup-cancel-btn" onClick={onBack}>
-          {t('setup.cancelButton')}
-        </button>
-        <button
-          className="setup-save-btn"
-          onClick={submit}
-          disabled={
-            submitting
-            || (credentialBlocked && !apiKey)
-            || catalogDefaultInvalid
-          }
-        >
-          {submitting
-            ? t('setup.saving')
-            : mode === "create"
-            ? t('setup.createProvider')
-            : t('setup.saveChanges')}
-        </button>
-      </div>
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Edit view (wraps ProviderForm + adds Activate/Delete)
+// Edit view (wraps ProviderForm + adds Suspend/Delete)
 // ---------------------------------------------------------------------------
 
 function EditProvider({
@@ -2890,7 +1956,6 @@ function EditProvider({
   onClose,
   onBack,
   onSubmit,
-  onActivate,
   onSuspend,
   onDelete,
 }: {
@@ -2902,7 +1967,6 @@ function EditProvider({
   onClose: () => void;
   onBack: () => void;
   onSubmit: (payload: FormPayload) => Promise<void>;
-  onActivate: () => Promise<void>;
   onSuspend: (suspended: boolean) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
@@ -2934,7 +1998,6 @@ function EditProvider({
     <>
       <ProviderForm
         mode="edit"
-        providerId={provider.id}
         initial={provider}
         initialHasKey={
           provider.credential_status !== "missing" && provider.credential_status !== "blocked"
@@ -2947,16 +2010,6 @@ function EditProvider({
       <div className="modal-body provider-edit-extra">
         {error && <div className="setup-error">{error}</div>}
         <div className="provider-edit-actions">
-          {!isActive && !provider.suspended && (
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={busy}
-              onClick={onActivate}
-            >
-              {t('setup.setDefaultButton')}
-            </button>
-          )}
           <button
             type="button"
             className={provider.suspended ? "btn-secondary" : "btn-warning"}

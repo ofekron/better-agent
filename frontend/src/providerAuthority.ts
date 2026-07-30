@@ -12,18 +12,3 @@ export function requireProvider(providers: Provider[], providerId: string) {
   if (!provider) throw new Error("provider is unavailable");
   return provider;
 }
-
-export function defaultProviderAuthority(
-  provider: Provider,
-  providers: Provider[],
-  activeId: string | null,
-) {
-  const active = providers.find((candidate) => candidate.id === activeId);
-  if (!active) throw new Error("current default provider is unavailable");
-  return {
-    ...providerAuthority(provider),
-    expected_default_provider_id: active.id,
-    expected_default_generation: active.generation,
-    expected_default_revision: active.revision,
-  };
-}

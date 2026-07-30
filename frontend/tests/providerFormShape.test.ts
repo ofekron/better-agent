@@ -8,7 +8,9 @@ import {
 } from "../src/components/providerFormShape";
 import { runtimeKindForRunner } from "../src/components/modelPicker";
 
+const providerFormSource = readFileSync("src/components/ProviderForm.tsx", "utf8");
 const settingsPageSource = readFileSync("src/components/SettingsPage.tsx", "utf8");
+const wizardSource = readFileSync("src/components/RuntimeProfileWizard.tsx", "utf8");
 const modelPickerSource = readFileSync("src/components/modelPicker.ts", "utf8");
 const englishSource = readFileSync("src/i18n/en.json", "utf8");
 
@@ -65,70 +67,58 @@ describe("showConfigDirForKind", () => {
   });
 });
 
-describe("Fugu runner selector wiring", () => {
-  it("offers both native and Better Agent runners for fugu", () => {
-    expect(settingsPageSource).toContain(
-      'if (kind === "fugu" || kind === "codex" || kind === "claude") return ["native", "better_agent_runner"]',
-    );
+describe("runner selection lives on runtime profiles, not the provider form", () => {
+  it("keeps the provider form auth-shaped (no runner/model/effort inputs)", () => {
+    // Templates still SEED profile defaults (default_model/effort strings),
+    // but the form renders no runner/model/effort controls.
+    expect(providerFormSource).not.toContain("runnerOptionsForKind");
+    expect(providerFormSource).not.toContain("setup.runnerLabel");
+    expect(providerFormSource).not.toContain("setup.defaultModelLabel");
+    expect(providerFormSource).not.toContain("setup.defaultReasoningEffortLabel");
+    expect(providerFormSource).not.toContain("useProviderModelCatalog");
   });
 
-  it("routes Better Agent runner form behavior through openai semantics", () => {
+  it("drives wizard runner cards from the backend-derived runner_options", () => {
+    expect(wizardSource).toContain("provider?.runner_options");
+  });
+
+  it("keeps runtime-kind resolution for better_agent_runner in modelPicker", () => {
     expect(modelPickerSource).toContain('if (runner === "better_agent_runner" && providerKind !== "claude")');
-    expect(settingsPageSource).toContain('runtimeKindForRunner(kind, runner)');
-    expect(settingsPageSource).toContain('setMode("api_key")');
-    expect(settingsPageSource).toContain('SAKANA_FUGU_API_BASE_URL');
-  });
-});
-
-describe("Claude Better Agent runner (subscription-via-runner_better_agent)", () => {
-  it("stays on the real claude runtime kind for both runners", () => {
     expect(runtimeKindForRunner("claude", "native")).toBe("claude");
     expect(runtimeKindForRunner("claude", "better_agent_runner")).toBe("claude");
     // regression: every other kind's better_agent_runner still collapses to openai
     expect(runtimeKindForRunner("fugu", "better_agent_runner")).toBe("openai");
     expect(runtimeKindForRunner("openai", "better_agent_runner")).toBe("openai");
   });
+});
 
-  it("hides api_key mode once better_agent_runner is selected", () => {
-    expect(modesForKind("claude")).toEqual(["subscription", "api_key"]);
-    expect(modesForKind("claude", "native")).toEqual(["subscription", "api_key"]);
-    expect(modesForKind("claude", "better_agent_runner")).toEqual(["subscription"]);
+describe("provider-level default surface is gone", () => {
+  it("has no set-default endpoint references left", () => {
+    expect(settingsPageSource).not.toContain("set-default");
+    expect(settingsPageSource).not.toContain("setup.setDefaultButton");
   });
-
-  it("availableModesForForm locks to subscription for better_agent_runner even on edit", () => {
-    expect(
-      availableModesForForm("claude", "edit", "subscription", "better_agent_runner"),
-    ).toEqual(["subscription"]);
-    // a legacy record somehow persisted as api_key is still surfaced (no
-    // silent rewrite) rather than hidden outright.
-    expect(
-      availableModesForForm("claude", "edit", "api_key", "better_agent_runner"),
-    ).toEqual(["subscription", "api_key"]);
-  });
-
-  it("offers claude's better_agent_runner choice without granting it to unrelated kinds", () => {
-    expect(settingsPageSource).toContain('runnerOptionsForKind');
-    // codex (not in the fugu/claude/openai special cases) stays native-only.
-    expect(settingsPageSource).toContain('return kind === "openai" ? ["better_agent_runner"] : ["native"]');
+  it("activation goes through the runtime-profile activate route", () => {
+    const editorSource = readFileSync("src/components/RuntimeProfilesEditor.tsx", "utf8");
+    expect(editorSource).toContain("activateRuntimeProfile");
   });
 });
 
 describe("Meta Muse Spark template", () => {
   it("uses the OpenAI-compatible Better Agent runner defaults", () => {
-    expect(settingsPageSource).toContain('id: "meta-muse"');
-    expect(settingsPageSource).toContain('base_url: "https://api.meta.ai/v1"');
-    expect(settingsPageSource).toContain('default_model: "muse-spark-1.1"');
-    expect(settingsPageSource).toContain('kind: "openai"');
+    expect(providerFormSource).toContain('id: "meta-muse"');
+    expect(providerFormSource).toContain('base_url: "https://api.meta.ai/v1"');
+    expect(providerFormSource).toContain('default_model: "muse-spark-1.1"');
+    expect(providerFormSource).toContain('kind: "openai"');
   });
 });
 
 describe("Hetzner Inference template", () => {
   it("uses the OpenAI-compatible Better Agent defaults and localized copy", () => {
-    expect(settingsPageSource).toContain('id: "hetzner"');
-    expect(settingsPageSource).toContain('base_url: "https://inference.hetzner.com/api/v1"');
-    expect(settingsPageSource).toContain('default_model: "Qwen/Qwen3.6-35B-A3B-FP8"');
-    expect(settingsPageSource).toContain('kind: "openai"');
-    expect(settingsPageSource).toContain(
+    expect(providerFormSource).toContain('id: "hetzner"');
+    expect(providerFormSource).toContain('base_url: "https://inference.hetzner.com/api/v1"');
+    expect(providerFormSource).toContain('default_model: "Qwen/Qwen3.6-35B-A3B-FP8"');
+    expect(providerFormSource).toContain('kind: "openai"');
+    expect(providerFormSource).toContain(
       'hetzner: { labelKey: "setup.templateHetznerLabel", blurbKey: "setup.templateHetznerBlurb" }',
     );
     expect(englishSource).toContain('"setup.templateHetznerLabel": "Hetzner Inference"');

@@ -23791,3 +23791,120 @@ button.progress-inflight {
     transform: translateY(0);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Runtime profiles — creation wizard (rpw-*) + management section (rpe-*)
+   --------------------------------------------------------------------------- */
+
+.rpw-steps {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.rpw-step-pip {
+  font-size: calc(11.5px * var(--app-font-scale));
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  opacity: 0.65;
+  transition: background-color 180ms ease, color 180ms ease,
+    border-color 180ms ease, opacity 180ms ease;
+}
+
+.rpw-step-pip.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text-primary);
+  opacity: 1;
+  font-weight: 600;
+}
+
+.rpw-step-pip.is-done {
+  opacity: 0.9;
+  border-color: var(--accent);
+}
+
+/* Each step's content rises in — same motion vocabulary as the modals. */
+.rpw-step {
+  animation: modalRiseIn 220ms ease both;
+}
+
+.provider-template-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.rpw-login-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.runtime-profiles-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rpe-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rpe-rail-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rpe-rail-item.is-deleted {
+  opacity: 0.55;
+}
+
+.rpe-rail-divider {
+  border-top: 1px solid var(--border);
+  margin: 8px 4px;
+}
+
+.rpe-deleted-badge {
+  font-size: calc(10.5px * var(--app-font-scale));
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  margin-inline-start: 6px;
+}
+
+.rpe-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: modalRiseIn 220ms ease both;
+}
+
+.rpe-pane.is-deleted {
+  opacity: 0.7;
+}
+
+.ns-modal-new-profile {
+  background: none;
+  border: none;
+  padding: 2px 0 0;
+  color: var(--accent);
+  font-size: calc(11.5px * var(--app-font-scale));
+  cursor: pointer;
+  align-self: flex-start;
+  transition: opacity 160ms ease;
+}
+
+.ns-modal-new-profile:hover {
+  opacity: 0.8;
+}

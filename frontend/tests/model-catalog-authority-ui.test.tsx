@@ -172,7 +172,6 @@ describe("authoritative model catalog UI", () => {
       "model.catalogActivity.unavailable",
       "model.notSelectable",
       "setup.defaultModelCustomPlaceholder",
-      "setup.defaultModelPickFromList",
     ];
     for (const file of readdirSync("src/i18n").filter((name) => name.endsWith(".json"))) {
       const locale = JSON.parse(readFileSync(join("src/i18n", file), "utf8"));

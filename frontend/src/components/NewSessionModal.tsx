@@ -21,6 +21,7 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { usePersistedDraft } from "../hooks/usePersistedDraft";
 import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
+import { navigateRoute } from "../hooks/useRoute";
 import { ConfirmModal } from "./ConfirmModal";
 import { ModelCatalogStatus } from "./ModelCatalogStatus";
 
@@ -361,6 +362,7 @@ function RoleProfilePicker({
   snapshot,
   value,
   onChange,
+  onCreateProfile,
 }: {
   label: string;
   role: "main" | "worker";
@@ -373,6 +375,8 @@ function RoleProfilePicker({
    * controls — system refinements (catalog-driven model resets) pass false
    * so the modal's defaults re-resolution isn't frozen by them. */
   onChange: (v: RoleSelection, userInitiated?: boolean) => void;
+  /** Renders a "new profile" affordance that jumps to the settings wizard. */
+  onCreateProfile?: () => void;
 }) {
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API, providers);
@@ -449,6 +453,16 @@ function RoleProfilePicker({
             );
           })}
         </select>
+        {onCreateProfile && (
+          <button
+            type="button"
+            className="ns-modal-new-profile"
+            data-testid="new-session-create-profile"
+            onClick={onCreateProfile}
+          >
+            + {t("runtimeProfile.newProfile")}
+          </button>
+        )}
       </div>
       {selectedQuota &&
       (selectedQuota.level === "warn" || selectedQuota.level === "critical") &&
@@ -615,6 +629,12 @@ export function NewSessionModal({
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
   const [providers, setProviders] = useState<Provider[]>([]);
+  // "New profile" jumps to the settings-hosted creation wizard; the modal
+  // closes so the wizard is the single active surface.
+  const openProfileWizard = useCallback(() => {
+    onClose();
+    navigateRoute("/settings?section=runtimeProfiles&createProfile=1");
+  }, [onClose]);
   const [editedPrompt, setEditedPrompt] = useState("");
   // Investigation prompts are supplied by the caller and edited in
   // `editedPrompt`, so only the plain new-session prompt is drafted.
@@ -1171,6 +1191,7 @@ export function NewSessionModal({
                 if (userInitiated) rolesTouchedRef.current = true;
                 setMain(v);
               }}
+              onCreateProfile={openProfileWizard}
             />
           )}
 
@@ -1187,6 +1208,7 @@ export function NewSessionModal({
                   if (userInitiated) rolesTouchedRef.current = true;
                   setMain(v);
                 }}
+                onCreateProfile={openProfileWizard}
               />
               <RoleProfilePicker
                 label={t("newSession.workerRuntimeProfile")}

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  defaultProviderAuthority,
   providerAuthority,
   requireProvider,
 } from "../src/providerAuthority";
@@ -17,12 +16,9 @@ const provider = (id: string, generation: string, revision: number): Provider =>
   base_url: "",
   config_dir: "",
   custom_models: [],
-  default_model: "",
-  runner: "native",
-  default_reasoning_effort: "",
   default_permission: {},
   suspended: false,
-});
+} as unknown as Provider);
 
 describe("provider authority payloads", () => {
   it("binds record mutations to the rendered provider revision", () => {
@@ -32,24 +28,7 @@ describe("provider authority payloads", () => {
     });
   });
 
-  it("binds default changes to target and current default revisions", () => {
-    const target = provider("target", "generation-target", 2);
-    const current = provider("current", "generation-current", 7);
-    expect(defaultProviderAuthority(target, [target, current], current.id)).toEqual({
-      expected_generation: "generation-target",
-      expected_revision: 2,
-      expected_default_provider_id: "current",
-      expected_default_generation: "generation-current",
-      expected_default_revision: 7,
-    });
-  });
-
   it("refuses authority payloads for absent providers", () => {
     expect(() => requireProvider([], "missing")).toThrow("provider is unavailable");
-    expect(() => defaultProviderAuthority(
-      provider("target", "generation", 0),
-      [],
-      null,
-    )).toThrow("current default provider is unavailable");
   });
 });
