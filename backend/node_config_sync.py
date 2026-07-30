@@ -165,21 +165,24 @@ def _schedule_push(loop: asyncio.AbstractEventLoop) -> None:
         _push_task = loop.create_task(_push_until_clean(), name="node-config-sync-push")
 
 
-async def _push_surface(surface: _Surface, node_ids: list[str]) -> None:
+async def _push_surface(surface: _Surface, node_ids: list[str]) -> bool:
     try:
         state = await asyncio.to_thread(surface.export)
     except Exception:
         # A broken exporter must not take the other surfaces down with it.
         logger.exception("node config sync export failed for surface %s", surface.name)
-        return
+        return False
+    succeeded = True
     for node_id in node_ids:
         try:
             await _call_rpc(node_id, surface, state)
             logger.info("node config sync of %s to node %s ok", surface.name, node_id)
         except Exception:
+            succeeded = False
             logger.exception(
                 "node config sync of %s to node %s failed", surface.name, node_id
             )
+    return succeeded
 
 
 async def _push_until_clean() -> None:
@@ -198,6 +201,9 @@ async def _push_until_clean() -> None:
 
 
 async def _project_connected_node(node_id: str) -> None:
+    import node_store
+
+    expected_connection = node_store.get_connection(node_id)
     try:
         nodes = await asyncio.to_thread(_snapshot_nodes)
     except Exception:
@@ -210,8 +216,35 @@ async def _project_connected_node(node_id: str) -> None:
         )
         return
     logger.info("node config sync: projecting all surfaces onto %s", node_id)
+    succeeded = True
     for surface in SURFACES:
-        await _push_surface(surface, [node_id])
+        succeeded = await _push_surface(surface, [node_id]) and succeeded
+    if succeeded:
+        _set_runtime_ready(node_id, expected_connection)
+    else:
+        _set_runtime_failed(node_id, expected_connection)
+
+
+def _set_runtime_ready(node_id: str, expected_connection=None) -> None:
+    import node_store
+
+    if expected_connection is None:
+        expected_connection = node_store.get_connection(node_id)
+    if expected_connection is not None:
+        node_store.mark_runtime_ready(node_id, expected_connection)
+
+
+def _set_runtime_failed(node_id: str, expected_connection=None) -> None:
+    import node_store
+
+    if expected_connection is None:
+        expected_connection = node_store.get_connection(node_id)
+    if expected_connection is not None:
+        node_store.mark_runtime_failed(
+            node_id,
+            expected_connection,
+            f"node {node_id!r} runtime projection failed",
+        )
 
 
 def _forget_connect_task(node_id: str, task: asyncio.Task[None]) -> None:
