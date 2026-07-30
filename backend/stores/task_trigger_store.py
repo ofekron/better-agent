@@ -342,6 +342,7 @@ def claim_event_run(
     trigger_id: str,
     session_id: str,
     *,
+    lifecycle_msg_id: str,
     expected_task_updated_at: str,
     now: Optional[datetime] = None,
 ) -> tuple[str, Optional[dict]]:
@@ -355,6 +356,7 @@ def claim_event_run(
             str(task.get("id") or ""),
             session_id,
             receipt_id=trigger_id,
+            lifecycle_msg_id=lifecycle_msg_id,
             expected_trigger_config=receipt.get("trigger_config") or {},
             expected_task_updated_at=expected_task_updated_at,
             now=now,

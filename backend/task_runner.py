@@ -4,6 +4,7 @@ import logging
 import hashlib
 import json
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -13,9 +14,16 @@ _TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
 
 class TaskLaunchError(Exception):
-    def __init__(self, message: str, *, status: int = 400):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int = 400,
+        retryable: bool = True,
+    ):
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
 
 
 async def _noop_ws_callback(_event: dict) -> None:
@@ -327,15 +335,24 @@ async def _launch_task_once(
 
     session_id = session["id"]
     prompt = _routine_run_prompt(task, str(run_prompt))
+    from user_msg_lifecycle import new_lifecycle_msg_id
+
+    lifecycle_msg_id = new_lifecycle_msg_id()
 
     if event_receipt_id is not None:
         status, admission = await asyncio.to_thread(
             task_trigger_store.claim_event_run,
             event_receipt_id,
             session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
             expected_task_updated_at=str(task.get("updated_at") or ""),
             now=datetime.now(),
         )
+        persisted_lifecycle_msg_id = str(
+            (admission or {}).get("lifecycle_msg_id") or ""
+        )
+        if persisted_lifecycle_msg_id:
+            lifecycle_msg_id = persisted_lifecycle_msg_id
         if status == "duplicate":
             admitted_session_id = str((admission or {}).get("session_id") or session_id)
             if admitted_session_id != session_id and not reused:
@@ -362,9 +379,12 @@ async def _launch_task_once(
             raise TaskLaunchError(
                 f"turn-end trigger admission rejected: {status}",
                 status=409,
+                retryable=status != "invalid",
             )
 
+    queue_item_id = uuid.uuid4().hex
     prompt_params = {
+        "_queued_id": queue_item_id,
         "prompt": prompt,
         "app_session_id": session_id,
         "model": session.get("model") or model,
@@ -376,6 +396,17 @@ async def _launch_task_once(
         "client_id": client_id,
         "source": "task",
         "user_initiated": False,
+        "lifecycle_msg_id": lifecycle_msg_id,
+    }
+    queue_item = {
+        "id": queue_item_id,
+        "content": prompt,
+        "client_id": client_id,
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "source": "task",
+        "orchestration_mode": (
+            session.get("orchestration_mode") or orchestration_mode
+        ),
     }
 
     item_id = None
@@ -385,11 +416,33 @@ async def _launch_task_once(
         collapse_key = f"routine:{task_id}"
         prompt_params["collapse_key"] = collapse_key
         prompt_params["collapse_policy"] = team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+        queue_item["collapse_key"] = collapse_key
+        queue_item["collapse_policy"] = team_messaging.COLLAPSE_POLICY_TAKE_LATEST
         item_id = await coordinator.collapse_queued_prompt_take_latest(
-            session_id, collapse_key, None, prompt_params,
+            session_id, collapse_key, queue_item, prompt_params,
         )
+        if item_id is not None:
+            await asyncio.to_thread(session_manager.flush_root_persist, session_id)
     if item_id is None:
-        item_id = await coordinator.submit_prompt_async(session_id, prompt_params)
+        admission = await asyncio.to_thread(
+            session_manager.admit_queued_prompt_durable,
+            session_id,
+            queue_item,
+        )
+        existing_queue_item = admission.get("existing_queued_prompt") or {}
+        if not admission.get("admitted") and existing_queue_item.get("id"):
+            queue_item_id = str(existing_queue_item["id"])
+            prompt_params["_queued_id"] = queue_item_id
+        try:
+            item_id = await coordinator.submit_prompt_async(session_id, prompt_params)
+        except Exception:
+            if admission.get("admitted"):
+                await asyncio.to_thread(
+                    session_manager.remove_queued_prompt,
+                    session_id,
+                    queue_item_id,
+                )
+            raise
 
     if event_receipt_id is not None:
         await asyncio.to_thread(

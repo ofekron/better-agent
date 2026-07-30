@@ -230,12 +230,20 @@ class Scheduler:
                     "scheduler: trigger %s launched task %s",
                     trigger_id, task_id,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "scheduler: launch failed for trigger %s task %s",
                     trigger_id, task_id,
                 )
                 if is_turn_end:
+                    if (
+                        isinstance(exc, task_runner.TaskLaunchError)
+                        and not exc.retryable
+                    ):
+                        await asyncio.to_thread(
+                            task_trigger_store.mark_fired, trigger_id, now,
+                        )
+                        continue
                     is_current, _task = await asyncio.to_thread(
                         task_trigger_store.receipt_task_snapshot, trigger_id,
                     )

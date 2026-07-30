@@ -644,6 +644,7 @@ def claim_event_run(
     session_id: str,
     *,
     receipt_id: str,
+    lifecycle_msg_id: str,
     expected_trigger_config: dict,
     expected_task_updated_at: str,
     now: Optional[datetime] = None,
@@ -672,6 +673,11 @@ def claim_event_run(
                 if run.get("event_receipt_id") != receipt_id:
                     continue
                 state = run.get("event_admission_state")
+                if not run.get("lifecycle_msg_id"):
+                    if state == "queued":
+                        return "invalid", dict(run)
+                    run["lifecycle_msg_id"] = lifecycle_msg_id
+                    _write(data)
                 return ("duplicate" if state == "queued" else "admitted"), dict(run)
             runs = [r for r in runs if r.get("session_id") != session_id]
             run = {
@@ -683,6 +689,7 @@ def claim_event_run(
                 "verdict_kind": (t.get("assessment") or {}).get("kind", "none"),
                 "event_receipt_id": receipt_id,
                 "event_admission_state": "reserved",
+                "lifecycle_msg_id": lifecycle_msg_id,
             }
             runs.insert(0, run)
             t["recent_runs"] = runs[:MAX_RECENT_RUNS]

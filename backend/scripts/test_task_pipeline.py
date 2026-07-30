@@ -17,6 +17,7 @@ sessions — launch_task is stubbed. Locks:
 import asyncio
 import os
 import sys
+import uuid
 from datetime import datetime
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -291,6 +292,7 @@ async def test_turn_end_receipt():
         check(not [item for item in task_trigger_store.due()
                    if item.get("kind") == "turn_end_once"],
               "routine-owned bus events cannot create feedback loops")
+
     finally:
         bus.unsubscribe("task_turn_end_triggers")
         __import__("event_bus_subscribers").session_manager.get_fields = original_get_fields
@@ -328,6 +330,7 @@ def test_turn_end_admission_races() -> None:
     task_store.update(task["id"], {"prompt": "updated"})
     status, _ = task_trigger_store.claim_event_run(
         receipt, "session-update",
+        lifecycle_msg_id=str(uuid.uuid4()),
         expected_task_updated_at=str(snap.get("updated_at") or ""),
     )
     check(status == "stale", "prompt update invalidates admission snapshot")
@@ -347,6 +350,7 @@ def test_turn_end_admission_races() -> None:
     check(status == "current", "retry preserves current receipt generation")
     status, _ = task_trigger_store.claim_event_run(
         retry_receipt, "session-retry",
+        lifecycle_msg_id=str(uuid.uuid4()),
         expected_task_updated_at=str(retry_task.get("updated_at") or ""),
     )
     check(status == "admitted", "retry can admit exactly its current generation")
