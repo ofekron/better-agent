@@ -30,6 +30,13 @@ from provider_family_runtime_capabilities import (  # noqa: E402
     snapshot_family_runtime_capabilities,
     stage_family_runtime_capabilities,
 )
+from provider_runtime_capability_model import (  # noqa: E402
+    frozen_manifest_json,
+)
+from provider_runtime_payload_codec import (  # noqa: E402
+    decode_runtime_capability_payload,
+    validate_runtime_capability_manifest,
+)
 import provider_runtime_payload_store  # noqa: E402
 import provider_runtime_resolver  # noqa: E402
 import provider  # noqa: E402
@@ -454,6 +461,96 @@ def test_prewarm_success_and_failure_preserve_capability_semantics() -> None:
             raise AssertionError("required prewarm readiness failed open")
 
 
+def test_secret_worded_server_name_is_not_treated_as_secret() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        plan = _plan()
+        plan["tools"].append("credential-broker.request")
+        plan["mcp_servers"].append({
+            "name": "credential-broker",
+            "transport": "stdio",
+            "config": {
+                "argv": ["/opt/better-agent/credential-broker", "--stdio"],
+                "env_refs": {},
+            },
+            "tool_names": ["credential-broker.request"],
+            "prewarm": {
+                "eligible": False,
+                "readiness_required": False,
+            },
+        })
+        prepared, _sources = _snapshot(Path(raw), plan=plan)
+
+        assert prepared.prewarm_status["credential-broker"]["status"] == (
+            "not_eligible"
+        )
+        assert validate_runtime_capability_manifest(prepared.manifest)
+        decoded, _files = decode_runtime_capability_payload(
+            prepared.payload,
+            prepared.manifest,
+        )
+        assert decoded["prewarm_status"]["credential-broker"]["status"] == (
+            "not_eligible"
+        )
+
+
+def test_manifest_prewarm_gate_still_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        prepared, _sources = _snapshot(Path(raw))
+
+        leaked = prepared.manifest
+        leaked["prewarm_status"]["scheduler"] = {
+            "status": "failed",
+            "error": "upstream rejected the token",
+            "launch_mode": "normal",
+        }
+        malformed = prepared.manifest
+        malformed["prewarm_status"]["scheduler"]["extra"] = True
+        unsafe_name = prepared.manifest
+        unsafe_name["prewarm_status"]["bad name!"] = {
+            "status": "not_eligible",
+            "error": None,
+            "launch_mode": "normal",
+        }
+        for manifest in (leaked, malformed, unsafe_name):
+            try:
+                validate_runtime_capability_manifest(manifest)
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("invalid prewarm status was accepted")
+
+        smuggled = {
+            "prewarm_status": {
+                "scheduler": {
+                    "status": "ready",
+                    "error": None,
+                    "launch_mode": "prewarmed",
+                },
+            },
+            "api_key": "must-not-freeze",
+        }
+        try:
+            frozen_manifest_json(smuggled, label="test manifest")
+        except ExecutionContractError:
+            pass
+        else:
+            raise AssertionError("secret manifest field was accepted")
+
+        try:
+            snapshot_family_runtime_capabilities(
+                family="claude",
+                skill_sources={},
+                agent_sources={},
+                resolved_plan=_plan(),
+                extension_state={"token": "must-not-freeze"},
+                installation_decisions={},
+            )
+        except ExecutionContractError:
+            pass
+        else:
+            raise AssertionError("secret extension state was accepted")
+
+
 def test_restart_clone_preserves_posix_and_windows_configs() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -705,6 +802,8 @@ TESTS = (
     test_harness_secret_refs_survive_artifact_round_trip,
     test_path_symlink_and_payload_tamper_fail_closed,
     test_prewarm_success_and_failure_preserve_capability_semantics,
+    test_secret_worded_server_name_is_not_treated_as_secret,
+    test_manifest_prewarm_gate_still_fails_closed,
     test_restart_clone_preserves_posix_and_windows_configs,
     test_resolved_executable_is_cleanup_safe,
     test_private_root_creation_and_nested_tree_security,
