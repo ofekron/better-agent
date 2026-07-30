@@ -607,6 +607,43 @@ def main_test() -> int:
     })
     assert rejected.status_code == 400, rejected.text
 
+    # ── Delegation accepts a runtime profile ───────────────────────────
+    original_run_delegate_task = main.coordinator.run_delegate_task
+    profile_delegate_call: dict = {}
+
+    async def fake_profile_delegate(**kwargs) -> dict:
+        profile_delegate_call.update(kwargs)
+        return {"success": True}
+
+    main.coordinator.run_delegate_task = fake_profile_delegate
+    try:
+        delegate_by_profile = client.post(
+            "/api/internal/delegate-task",
+            json={
+                "sender_session_id": sender["id"],
+                "task": "delegate via profile",
+                "runtime_profile_id": live_profile_id,
+                "cwd": "/repo",
+            },
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+        )
+        delegate_conflict = client.post(
+            "/api/internal/delegate-task",
+            json={
+                "sender_session_id": sender["id"],
+                "task": "delegate conflict",
+                "runtime_profile_id": live_profile_id,
+                "provider_id": no_default_provider_id,
+                "cwd": "/repo",
+            },
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+        )
+    finally:
+        main.coordinator.run_delegate_task = original_run_delegate_task
+    assert delegate_by_profile.status_code == 200, delegate_by_profile.text
+    assert profile_delegate_call.get("provider_id") == provider_id
+    assert delegate_conflict.status_code == 400, delegate_conflict.text
+
     print("ALL TESTS PASSED")
     return 0
 

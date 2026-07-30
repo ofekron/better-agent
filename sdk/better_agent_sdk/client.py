@@ -355,27 +355,27 @@ class Client:
         sender_session_id: str = "",
         node_id: str = "",
         provider_id: str = "",
+        runtime_profile_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
         bare_config: bool = False,
         capability_contexts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return self._post(
-            "/api/internal/create-session",
-            {
-                "name": name,
-                "cwd": cwd,
-                "orchestration_mode": orchestration_mode,
-                "sender_session_id": sender_session_id,
-                "node_id": node_id,
-                "provider_id": provider_id,
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "bare_config": bare_config,
-                "capability_contexts": capability_contexts or [],
-            },
-            timeout=10.0,
-        )
+        body = {
+            "name": name,
+            "cwd": cwd,
+            "orchestration_mode": orchestration_mode,
+            "sender_session_id": sender_session_id,
+            "node_id": node_id,
+            "provider_id": provider_id,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "bare_config": bare_config,
+            "capability_contexts": capability_contexts or [],
+        }
+        if runtime_profile_id:
+            body["runtime_profile_id"] = runtime_profile_id
+        return self._post("/api/internal/create-session", body, timeout=10.0)
 
     # ── provisioned sessions ──────────────────────────────────────────
     def create_provisioned_session(
@@ -1002,6 +1002,7 @@ class Client:
         sender_session_id: str = "",
         target_session_id: str | None = None,
         provider_id: str = "",
+        runtime_profile_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
         sub_session: bool = True,
@@ -1010,21 +1011,20 @@ class Client:
     ) -> dict[str, Any]:
         """Smart delegation router — resolves a target (auto-route or create)
         and dispatches fire-and-forget."""
-        return self._post(
-            "/api/internal/delegate-task",
-            {
-                "sender_session_id": sender_session_id or self.app_session_id,
-                "task": task,
-                "target_session_id": target_session_id,
-                "provider_id": provider_id,
-                "model": model or self.model,
-                "reasoning_effort": reasoning_effort,
-                "sub_session": sub_session,
-                "cwd": cwd or self.cwd,
-                "run_mode": run_mode,
-            },
-            timeout=30.0,
-        )
+        body = {
+            "sender_session_id": sender_session_id or self.app_session_id,
+            "task": task,
+            "target_session_id": target_session_id,
+            "provider_id": provider_id,
+            "model": model or self.model,
+            "reasoning_effort": reasoning_effort,
+            "sub_session": sub_session,
+            "cwd": cwd or self.cwd,
+            "run_mode": run_mode,
+        }
+        if runtime_profile_id:
+            body["runtime_profile_id"] = runtime_profile_id
+        return self._post("/api/internal/delegate-task", body, timeout=30.0)
 
     def ask_fork(
         self,

@@ -242,6 +242,32 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             status_code=400,
             detail="sender_session_id and task are required",
         )
+    requested_profile_id = body.get("runtime_profile_id")
+    if requested_profile_id is not None:
+        if not isinstance(requested_profile_id, str) or not requested_profile_id.strip():
+            raise HTTPException(
+                status_code=400, detail="runtime_profile_id must be a string"
+            )
+        delegation_profile = await asyncio.to_thread(
+            config_store.get_runtime_profile, requested_profile_id
+        )
+        if delegation_profile is None or delegation_profile.get("deleted_at"):
+            raise HTTPException(
+                status_code=400, detail="runtime profile is unknown or deleted"
+            )
+        if (
+            str(body.get("provider_id") or "").strip()
+            and body["provider_id"] != delegation_profile["provider_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="provider_id conflicts with runtime_profile_id",
+            )
+        body = {
+            **body,
+            "provider_id": delegation_profile["provider_id"],
+            "runner": delegation_profile["runner"],
+        }
     folder_id, tag_ids = _session_organization_input_from_body(body)
     harness_profile_id = _harness_profile_selection(body)
     # A profile's provider/model/effort pins fill in only what the caller left

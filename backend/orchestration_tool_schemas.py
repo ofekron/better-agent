@@ -165,6 +165,10 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "OPTIONAL - provider for auto-routing search and newly-created target sessions. Omit to search across providers and create fallback targets with the caller's provider; pass a provider to constrain search/creation to it. ANY also searches across providers.",
         },
+        "runtime_profile_id": {
+            "type": "string",
+            "description": "OPTIONAL - runtime profile for newly-created target sessions; supplies provider+runner (conflicting provider_id is rejected). Model/effort params still override its defaults.",
+        },
         "model": {
             "type": "string",
             "description": "OPTIONAL - model for a newly-created target session. Defaults to the creating session's model.",
@@ -235,6 +239,10 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {
             "type": "string",
             "description": "OPTIONAL - provider for the worker. Defaults to the creating session's provider.",
+        },
+        "runtime_profile_id": {
+            "type": "string",
+            "description": "OPTIONAL - runtime profile for the worker; supplies provider+runner. Model/effort params still override its defaults.",
         },
         "model": {
             "type": "string",
