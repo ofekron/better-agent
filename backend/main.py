@@ -5,7 +5,6 @@ from backend_launch_authority import assert_primary_backend_launch_authorized
 assert_primary_backend_launch_authorized()
 
 import asyncio
-import copy
 from contextlib import asynccontextmanager
 import faulthandler
 import json

@@ -38,7 +38,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import sys
 import urllib.error
 import urllib.parse

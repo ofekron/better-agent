@@ -1,6 +1,5 @@
 """File tree and git status utilities."""
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
