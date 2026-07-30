@@ -1021,12 +1021,14 @@ def _started_turns_for_candidates(
 def _finalize_pre_provider_orphan(
     session_id: str,
     assistant_id: str,
-) -> bool:
-    """Atomically fail the paired user and remove the empty placeholder."""
+) -> str | None:
+    """Project the durable terminal onto an empty pre-provider render tail."""
+    import user_msg_lifecycle
+
     with session_manager.batch(session_id):
         session = session_manager.get_ref(session_id)
         if session is None:
-            return False
+            return None
         messages = session.get("messages") or []
         assistant = next(
             (
@@ -1041,10 +1043,36 @@ def _finalize_pre_provider_orphan(
             or assistant.get("role") != "assistant"
             or not _is_empty_assistant_scaffold(assistant)
         ):
-            return False
+            return None
         user_msg = _last_user_before(session, assistant)
         if user_msg is None:
-            return False
+            return None
+        lifecycle_message_id = str(user_msg.get("lifecycle_msg_id") or "")
+        terminal = (
+            user_msg_lifecycle.terminal_event_for_lifecycle(
+                session_id,
+                lifecycle_message_id,
+            )
+            if lifecycle_message_id
+            else None
+        )
+        if terminal is not None:
+            outcome = _terminal_outcome(terminal)
+            now = datetime.now(timezone.utc).isoformat()
+            if outcome == "complete":
+                session_manager.set_completed_at(
+                    session_id,
+                    assistant_id,
+                    now,
+                )
+                return outcome
+            if outcome == "stopped":
+                session_manager.set_stopped_at(
+                    session_id,
+                    assistant_id,
+                    now,
+                )
+                return outcome
         session_manager.mark_user_error(
             session_id,
             user_msg["id"],
@@ -1055,7 +1083,7 @@ def _finalize_pre_provider_orphan(
             session_id,
             _PRE_PROVIDER_ORPHAN_ERROR,
         )
-    return True
+    return "failed"
 
 
 async def reconcile_pre_provider_orphans(
@@ -1105,23 +1133,32 @@ async def reconcile_pre_provider_orphans(
             continue
         held = await _acquire_recovery_root_lease(root_id)
         try:
-            if not await asyncio.to_thread(
+            outcome = await asyncio.to_thread(
                 _finalize_pre_provider_orphan,
                 session_id,
                 assistant_id,
-            ):
+            )
+            if outcome is None:
                 continue
             turn_id = started[key]
             from event_journal import publish_event
             await publish_event(
                 session_id=root_id,
                 context_id=session_id,
-                event_type="turn_stopped",
+                event_type=(
+                    "turn_complete"
+                    if outcome == "complete"
+                    else "turn_stopped"
+                ),
                 data={
                     "app_session_id": session_id,
                     "message_id": assistant_id,
                     "turn_id": turn_id,
-                    "reason": "orphaned_before_provider",
+                    "reason": (
+                        "recovered_terminal"
+                        if outcome != "failed"
+                        else "orphaned_before_provider"
+                    ),
                 },
                 source="run_recovery.pre_provider",
                 message_id=assistant_id,
@@ -1135,6 +1172,147 @@ async def reconcile_pre_provider_orphans(
     if reconciled:
         logger.warning(
             "recovery: finalized %d unmatched pre-provider turn(s)",
+            reconciled,
+        )
+    return reconciled
+
+
+def _terminal_outcome(event: dict) -> str:
+    if event.get("type") == "user_message_failed":
+        return "failed"
+    data = event.get("data") or {}
+    if data.get("cancelled") is True:
+        return "stopped"
+    return "complete" if data.get("success") is True else "failed"
+
+
+def _matches_unbound_lifecycle_candidate(
+    session_id: str,
+    assistant_id: str,
+    lifecycle_message_id: str,
+) -> bool:
+    with session_manager.batch(session_id):
+        session = session_manager.get_ref(session_id)
+        if session is None:
+            return False
+        messages = session.get("messages") or []
+        if not messages:
+            return False
+        assistant = messages[-1]
+        if (
+            not isinstance(assistant, dict)
+            or assistant.get("id") != assistant_id
+            or not _is_empty_assistant_scaffold(assistant)
+        ):
+            return False
+        user_msg = _last_user_before(session, assistant)
+        return bool(
+            user_msg
+            and user_msg.get("lifecycle_msg_id") == lifecycle_message_id
+        )
+
+
+async def reconcile_unbound_lifecycle_orphans(
+    coordinator,
+    recovered: list[dict],
+    *,
+    ownership_documents: Optional[list[dict]] = None,
+    ownership_safe: bool = True,
+    candidates: Optional[list[tuple[str, str, str]]] = None,
+) -> int:
+    """Release exact unbound executions stranded by a pre-spawn crash."""
+    import user_msg_lifecycle
+
+    if not ownership_safe:
+        return 0
+    if candidates is None:
+        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+    candidate_keys = {
+        (session_id, assistant_id)
+        for _, session_id, assistant_id in candidates
+    }
+    protected_targets, protected_sessions = _descriptor_ownership(recovered)
+    document_targets, document_sessions = _descriptor_ownership(
+        ownership_documents or [],
+    )
+    protected_targets.update(document_targets)
+    protected_sessions.update(document_sessions)
+    for _, session_id, _ in candidates:
+        for run in coordinator.turn_manager.get_run_state(session_id):
+            target_id = str(run.get("target_message_id") or "")
+            if target_id:
+                protected_targets.add((session_id, target_id))
+            else:
+                protected_sessions.add(session_id)
+    started = await asyncio.to_thread(_started_turns_for_candidates, candidates)
+    reconciled = 0
+    snapshots = await coordinator.lifecycle_commands.active_snapshots()
+    for session_id, snapshot in snapshots:
+        execution = snapshot.execution
+        identity = snapshot.identity
+        assistant_id = (
+            execution.identity.assistant_message_id
+            if execution is not None
+            else ""
+        )
+        key = (session_id, assistant_id)
+        if (
+            snapshot.phase != "starting"
+            or identity is None
+            or execution is None
+            or execution.phase not in {"starting", "aborted"}
+            or execution.provider_run_id is not None
+            or session_id in protected_sessions
+            or key in protected_targets
+            or key not in candidate_keys
+            or started.get(key) != execution.identity.execution_turn_id
+            or not await asyncio.to_thread(
+                _matches_unbound_lifecycle_candidate,
+                session_id,
+                assistant_id,
+                identity.lifecycle_message_id,
+            )
+        ):
+            continue
+
+        async def resolve_outcome() -> str | None:
+            terminal = (
+                await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+                    session_id,
+                    identity.lifecycle_message_id,
+                )
+            )
+            if terminal is None:
+                await user_msg_lifecycle.emit_failed(
+                    app_session_id=session_id,
+                    lifecycle_msg_id=identity.lifecycle_message_id,
+                    reason="orphaned_before_provider",
+                    error=_PRE_PROVIDER_ORPHAN_ERROR,
+                )
+                terminal = (
+                    await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+                        session_id,
+                        identity.lifecycle_message_id,
+                    )
+                )
+                if terminal is None:
+                    logger.error(
+                        "recovery: lifecycle terminal write was not durable "
+                        "session=%s",
+                        session_id,
+                    )
+                    return None
+            return _terminal_outcome(terminal)
+
+        if await coordinator.lifecycle_commands.recover_unbound_execution(
+            session_id,
+            expected_snapshot=snapshot,
+            resolve_outcome=resolve_outcome,
+        ):
+            reconciled += 1
+    if reconciled:
+        logger.warning(
+            "recovery: released %d abandoned unbound lifecycle execution(s)",
             reconciled,
         )
     return reconciled
@@ -1259,22 +1437,7 @@ def _recovery_family(desc: dict | None) -> str:
     """Recovery replay reader family ("claude"/"codex"/"session_events") for
     a run,
     from the canonical manifest. Unknown kinds fall back to the claude
-    reader, matching the historical else-branch.
-
-    Runner-aware ahead of the kind-based lookup: EVERY run whose runner is
-    `better_agent_runner` writes the identical Claude-shaped
-    session_events.jsonl regardless of which provider kind configured it
-    (see runner_better_agent.py's own docstring) — this is what already
-    made fugu's better_agent_runner runs recover correctly via the
-    "openai" kind's recovery_family. Claude's better_agent_runner branch
-    needs the same treatment but keeps `provider_kind=="claude"` (see
-    runtime_profile.runtime_kind), which the manifest's per-kind
-    recovery_family can't express (kind "claude" must keep
-    recovery_family="claude" for its native runner). Checking `runner`
-    directly here decouples the two without touching that manifest entry.
-    """
-    if str((desc or {}).get("runner") or "").strip() == "better_agent_runner":
-        return "session_events"
+    reader, matching the historical else-branch."""
     spec = _provider_manifest.spec_for(_provider_kind(desc))
     return spec.recovery_family if spec else "claude"
 
@@ -2579,8 +2742,6 @@ def _current_lifecycle_supersedes_recovered(
     current_index = current_indexes[0]
     if current_index <= recovered_indexes[0]:
         return False
-    if current_assistant_id is None:
-        return True
     assistant_indexes = (
         []
         if current_assistant_id is None

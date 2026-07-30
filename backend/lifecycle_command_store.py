@@ -345,6 +345,23 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
     return _snapshot_from_row(row) if row is not None else LifecycleSnapshot()
 
 
+def active_session_snapshots() -> list[tuple[str, LifecycleSnapshot]]:
+    with connection() as database:
+        rows = database.execute(
+            """
+            SELECT session_id, phase, identity_json, revision,
+                   execution_json, execution_policy, completed_execution_count
+            FROM sessions
+            WHERE phase != 'idle'
+            ORDER BY session_id
+            """
+        ).fetchall()
+    return [
+        (str(row["session_id"]), _snapshot_from_row(row))
+        for row in rows
+    ]
+
+
 def acquire_authority(
     owner_id: str,
     process_identity: ProcessIdentity,

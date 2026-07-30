@@ -44,22 +44,23 @@ def test_startup_orchestrator_failure_releases_recovery_gate() -> None:
 
 def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
-    reenqueue_create = source.index(
-        'name="startup-queued-prompt-rehydration"',
-    )
     scan = source.index("pre_provider_orphan_candidates")
     integrate = source.index("await integrate_recovered_runs")
     cold = source.index("_enqueue_recovered_cold_runs(cold)")
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
-    reenqueue_wait = source.index("rehydrated_session_ids = await reenqueue_task")
     register = source.index("register_session_recovery")
     candidates = source.index("candidates = await candidate_task")
+    lifecycle_reconciled = source.index(
+        "await reconcile_unbound_lifecycle_orphans("
+    )
+    reenqueue = source.index(
+        "rehydrated_session_ids = await _re_enqueue_queued_prompts()"
+    )
     start_processors = source.index(
         "await coordinator.start_session_processor_async(sid)",
     )
-    assert reenqueue_create < scan < integrate
-    assert register < opened < candidates < integrate
-    assert integrate < reenqueue_wait < start_processors < cold
+    assert scan < register < candidates < lifecycle_reconciled < opened
+    assert opened < integrate < reenqueue < start_processors < cold
 
 
 def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
@@ -86,6 +87,9 @@ def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
         async def reconcile(*args, **kwargs) -> None:
             return None
 
+        async def reconcile_lifecycle(*args, **kwargs) -> int:
+            return 0
+
         async def integrate(*args, **kwargs) -> None:
             live_integrated.set()
 
@@ -107,6 +111,11 @@ def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
             patch.object(main, "recover_all_in_flight", side_effect=recover),
             patch.object(main, "take_recovery_scan_ownership", return_value=({}, True)),
             patch.object(main, "reconcile_pre_provider_orphans", side_effect=reconcile),
+            patch.object(
+                run_recovery,
+                "reconcile_unbound_lifecycle_orphans",
+                side_effect=reconcile_lifecycle,
+            ),
             patch.object(main, "integrate_recovered_runs", side_effect=integrate),
             patch.object(
                 main.installation_profile,
@@ -126,12 +135,14 @@ def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
         ):
             recovery = asyncio.create_task(main._recover_in_flight_task())
             assert await asyncio.to_thread(recovery_started.wait, 1.0)
-            await asyncio.wait_for(
-                startup_recovery_gate.wait_for_recovery_ready(timeout=None),
-                timeout=1.0,
+            gate_wait = asyncio.create_task(
+                startup_recovery_gate.wait_for_recovery_ready(timeout=None)
             )
+            await asyncio.sleep(0)
+            assert not gate_wait.done()
             assert not live_integrated.is_set()
             candidate_release.set()
+            await asyncio.wait_for(gate_wait, timeout=1.0)
             await asyncio.wait_for(live_integrated.wait(), timeout=1.0)
             assert not recovery.done()
             assert not processor_started.is_set()

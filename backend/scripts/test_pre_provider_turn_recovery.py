@@ -21,15 +21,22 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from event_bus import EventBus  # noqa: E402
 from event_journal import publish_event  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from ingestion_versions import marker_matches_current, write_marker  # noqa: E402
-from run_recovery import reconcile_pre_provider_orphans  # noqa: E402
+from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
+from lifecycle_command_model import ExecutionTurnIdentity, UserTurnIdentity  # noqa: E402
+from run_recovery import (  # noqa: E402
+    reconcile_pre_provider_orphans,
+    reconcile_unbound_lifecycle_orphans,
+)
 from runs_dir import runs_root  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import provider  # noqa: E402
 import run_recovery  # noqa: E402
 import runs_dir  # noqa: E402
+import user_msg_lifecycle  # noqa: E402
 
 
 class _TurnManager:
@@ -51,8 +58,13 @@ class _TurnManager:
         )
 
 
-def _coordinator() -> SimpleNamespace:
-    return SimpleNamespace(turn_manager=_TurnManager())
+def _coordinator(
+    lifecycle_commands: LifecycleCommandEngine | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        turn_manager=_TurnManager(),
+        lifecycle_commands=lifecycle_commands,
+    )
 
 
 def _seed_tail(
@@ -157,6 +169,263 @@ async def _test_unmatched_orphan_finalizes_once() -> None:
         and (row.get("data") or {}).get("message_id") == assistant_id
         for row in rows
     ) == 1
+
+
+async def _seed_unbound_lifecycle(
+    engine: LifecycleCommandEngine,
+    *,
+    policy: str = "single",
+) -> tuple[str, UserTurnIdentity, ExecutionTurnIdentity]:
+    session_id, user_id, assistant_id, turn_id = _seed_tail()
+    identity = UserTurnIdentity(
+        user_turn_id=(lifecycle_id := str(uuid.uuid4())),
+        lifecycle_message_id=lifecycle_id,
+    )
+    with session_manager.batch(session_id):
+        session = session_manager.get_ref(session_id)
+        assert session is not None
+        user = next(
+            message
+            for message in session["messages"]
+            if message.get("id") == user_id
+        )
+        assert user is not None
+        user["lifecycle_msg_id"] = lifecycle_id
+    execution_identity = ExecutionTurnIdentity(
+        execution_turn_id=turn_id,
+        assistant_message_id=assistant_id,
+        role="native",
+    )
+    await engine.begin_turn(
+        request_id=f"begin-{session_id}",
+        session_id=session_id,
+        identity=identity,
+        execution_policy=policy,
+    )
+    await engine.start_execution(
+        session_id,
+        execution_identity=execution_identity,
+    )
+    await _publish_started(session_id, assistant_id, turn_id)
+    return session_id, identity, execution_identity
+
+
+async def _test_unbound_lifecycle_recovery() -> None:
+    engine = LifecycleCommandEngine(EventBus())
+    try:
+        session_id, identity, _ = await _seed_unbound_lifecycle(engine)
+        coordinator = _coordinator(engine)
+        async def durable_failed(**kwargs) -> None:
+            await publish_event(
+                session_id=kwargs["app_session_id"],
+                context_id=kwargs["app_session_id"],
+                event_type="user_message_failed",
+                data={
+                    "lifecycle_msg_id": kwargs["lifecycle_msg_id"],
+                    "reason": kwargs["reason"],
+                    "error": kwargs["error"],
+                },
+                source="test.lifecycle",
+                message_id=kwargs["lifecycle_msg_id"],
+            )
+
+        with patch.object(
+            user_msg_lifecycle,
+            "emit_failed",
+            durable_failed,
+        ):
+            assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 1
+        assert engine.snapshot(session_id).phase == "idle"
+        terminal = await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+            session_id,
+            identity.lifecycle_message_id,
+        )
+        assert terminal is not None
+        assert terminal["type"] == "user_message_failed"
+        assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 0
+
+        done_sid, done_identity, done_execution = await _seed_unbound_lifecycle(
+            engine,
+            policy="sequential",
+        )
+        await publish_event(
+            session_id=done_sid,
+            context_id=done_sid,
+            event_type="user_message_done",
+            data={
+                "lifecycle_msg_id": done_identity.lifecycle_message_id,
+                "success": True,
+            },
+            source="test.lifecycle",
+            message_id=done_identity.lifecycle_message_id,
+        )
+        assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 1
+        assert engine.snapshot(done_sid).phase == "idle"
+        await reconcile_pre_provider_orphans(coordinator, [])
+        completed = _message(
+            done_sid,
+            done_execution.assistant_message_id,
+        )
+        assert completed is not None and completed.get("completed_at")
+
+        stopped_sid, stopped_identity, stopped_execution = (
+            await _seed_unbound_lifecycle(engine)
+        )
+        await publish_event(
+            session_id=stopped_sid,
+            context_id=stopped_sid,
+            event_type="user_message_done",
+            data={
+                "lifecycle_msg_id": stopped_identity.lifecycle_message_id,
+                "success": False,
+                "cancelled": True,
+            },
+            source="test.lifecycle",
+            message_id=stopped_identity.lifecycle_message_id,
+        )
+        assert await reconcile_unbound_lifecycle_orphans(
+            coordinator,
+            [],
+        ) == 1
+        assert engine.snapshot(stopped_sid).phase == "idle"
+        await reconcile_pre_provider_orphans(coordinator, [])
+        stopped = _message(
+            stopped_sid,
+            stopped_execution.assistant_message_id,
+        )
+        assert stopped is not None and stopped.get("stopped_at")
+
+        failed_sid, failed_identity, failed_execution = (
+            await _seed_unbound_lifecycle(engine)
+        )
+        await durable_failed(
+            app_session_id=failed_sid,
+            lifecycle_msg_id=failed_identity.lifecycle_message_id,
+            reason="existing_failure",
+            error="existing failure",
+        )
+        assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 1
+        assert engine.snapshot(failed_sid).phase == "idle"
+        await reconcile_pre_provider_orphans(coordinator, [])
+        assert _message(
+            failed_sid,
+            failed_execution.assistant_message_id,
+        ) is None
+        failed_rows, _, _ = event_ingester.read_events(
+            failed_sid,
+            limit=10_000,
+        )
+        assert sum(
+            row.get("type") == "user_message_failed"
+            and (row.get("data") or {}).get("lifecycle_msg_id")
+            == failed_identity.lifecycle_message_id
+            for row in failed_rows
+        ) == 1
+
+        aborted_sid, aborted_identity, aborted_execution = (
+            await _seed_unbound_lifecycle(engine, policy="sequential")
+        )
+        await durable_failed(
+            app_session_id=aborted_sid,
+            lifecycle_msg_id=aborted_identity.lifecycle_message_id,
+            reason="existing_failure",
+            error="existing failure",
+        )
+        await engine.abort_execution(
+            aborted_sid,
+            execution_identity=aborted_execution,
+            outcome="failed",
+        )
+        assert engine.snapshot(aborted_sid).execution.phase == "aborted"
+        assert await reconcile_unbound_lifecycle_orphans(
+            coordinator,
+            [],
+        ) == 1
+        assert engine.snapshot(aborted_sid).phase == "idle"
+
+        bound_sid, _, bound_execution = await _seed_unbound_lifecycle(engine)
+        await engine.bind_execution_run(
+            bound_sid,
+            execution_identity=bound_execution,
+            provider_run_id=str(uuid.uuid4()),
+        )
+        assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 0
+        assert engine.snapshot(bound_sid).phase == "starting"
+
+        protected_sid, _, protected_execution = (
+            await _seed_unbound_lifecycle(engine)
+        )
+        recovered = [{
+            "app_session_id": protected_sid,
+            "target_message_id": protected_execution.assistant_message_id,
+        }]
+        assert await reconcile_unbound_lifecycle_orphans(
+            coordinator,
+            recovered,
+        ) == 0
+        assert engine.snapshot(protected_sid).phase == "starting"
+        protected_snapshot = engine.snapshot(protected_sid)
+        assert await engine.recover_unbound_execution(
+            protected_sid,
+            expected_snapshot=protected_snapshot,
+            resolve_outcome=lambda: asyncio.sleep(0, result="failed"),
+        )
+
+        nonempty_sid, _, nonempty_execution = (
+            await _seed_unbound_lifecycle(engine)
+        )
+        with session_manager.batch(nonempty_sid):
+            message = _message(
+                nonempty_sid,
+                nonempty_execution.assistant_message_id,
+            )
+            assert message is not None
+            message["content"] = "provider output"
+        assert await reconcile_unbound_lifecycle_orphans(
+            coordinator,
+            [],
+        ) == 0
+        assert engine.snapshot(nonempty_sid).phase == "starting"
+        nonempty_snapshot = engine.snapshot(nonempty_sid)
+        assert await engine.recover_unbound_execution(
+            nonempty_sid,
+            expected_snapshot=nonempty_snapshot,
+            resolve_outcome=lambda: asyncio.sleep(0, result="failed"),
+        )
+
+        changed_sid, _, _ = await _seed_unbound_lifecycle(engine)
+        stale = engine.snapshot(changed_sid)
+        await engine.request_active_stop(changed_sid)
+        assert not await engine.recover_unbound_execution(
+            changed_sid,
+            expected_snapshot=stale,
+            resolve_outcome=lambda: asyncio.sleep(0, result="failed"),
+        )
+        assert engine.snapshot(changed_sid).phase == "stopping"
+
+        raced_sid, _, _ = await _seed_unbound_lifecycle(engine)
+        original_recover = engine.recover_unbound_execution
+
+        async def race_recover(*args, **kwargs) -> bool:
+            await engine.request_active_stop(raced_sid)
+            return await original_recover(*args, **kwargs)
+
+        with (
+            patch.object(
+                user_msg_lifecycle,
+                "emit_failed",
+                durable_failed,
+            ),
+            patch.object(
+                engine,
+                "recover_unbound_execution",
+                race_recover,
+            ),
+        ):
+            assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 0
+        assert engine.snapshot(raced_sid).phase == "stopping"
+    finally:
+        await engine.close()
 
 
 async def _test_descriptor_target_is_protected() -> None:
@@ -538,6 +807,7 @@ async def _main() -> None:
     await _test_symlink_marker_is_not_read_and_aborts_sweep()
     _test_ownership_scan_is_single_pass_and_marker_first()
     _test_noncandidate_backend_runs_do_not_touch_inputs()
+    await _test_unbound_lifecycle_recovery()
 
 
 if __name__ == "__main__":

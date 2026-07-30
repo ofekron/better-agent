@@ -9988,8 +9988,6 @@ async def _recover_in_flight_task() -> None:
         )
         if live_session_ids:
             startup_recovery_gate.register_session_recovery(live_session_ids)
-        startup_recovery_gate.mark_recovery_done()
-        gate_open = True
         candidates = await candidate_task
         candidate_targets = {
             (session_id, assistant_id)
@@ -9997,6 +9995,14 @@ async def _recover_in_flight_task() -> None:
         }
         perf.record_count("startup.recovery.candidate_targets", len(candidate_targets))
         ownership_documents, ownership_safe = take_recovery_scan_ownership()
+        from run_recovery import reconcile_unbound_lifecycle_orphans
+        await reconcile_unbound_lifecycle_orphans(
+            coordinator,
+            recovered,
+            ownership_documents=ownership_documents,
+            ownership_safe=ownership_safe,
+            candidates=candidates,
+        )
         await reconcile_pre_provider_orphans(
             coordinator,
             recovered,
@@ -10004,6 +10010,8 @@ async def _recover_in_flight_task() -> None:
             ownership_safe=ownership_safe,
             candidates=candidates,
         )
+        startup_recovery_gate.mark_recovery_done()
+        gate_open = True
         if recovered:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]

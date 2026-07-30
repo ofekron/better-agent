@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -434,6 +434,61 @@ class LifecycleCommandEngine:
             execution_identity,
             outcome=outcome,
         )
+
+    async def active_snapshots(self) -> list[tuple[str, LifecycleSnapshot]]:
+        await self.bind()
+        return await asyncio.to_thread(
+            lifecycle_command_store.active_session_snapshots,
+        )
+
+    async def recover_unbound_execution(
+        self,
+        session_id: str,
+        *,
+        expected_snapshot: LifecycleSnapshot,
+        resolve_outcome: Callable[[], Awaitable[str | None]],
+    ) -> bool:
+        await self.bind()
+        async with self._lock_for(session_id):
+            snapshot = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            if snapshot != expected_snapshot:
+                return False
+            execution = snapshot.execution
+            if (
+                snapshot.phase != "starting"
+                or execution is None
+                or execution.phase not in {"starting", "aborted"}
+                or execution.provider_run_id is not None
+            ):
+                return False
+            outcome = await resolve_outcome()
+            if outcome is None:
+                return False
+            result_snapshot = snapshot
+            if execution.phase == "starting":
+                result = await self._execute_bound(LifecycleCommand(
+                    request_id=f"recovery:{snapshot.revision}:abort_execution",
+                    session_id=session_id,
+                    kind="abort_execution",
+                    identity=snapshot.identity,
+                    execution_identity=execution.identity,
+                    outcome=outcome,
+                ))
+                result_snapshot = result.snapshot
+            if result_snapshot.phase != "idle":
+                await self._execute_bound(LifecycleCommand(
+                    request_id=(
+                        f"recovery:{result_snapshot.revision}:finish_turn"
+                    ),
+                    session_id=session_id,
+                    kind="finish_turn",
+                    identity=result_snapshot.identity,
+                    outcome=outcome,
+                ))
+            return True
 
     async def _transition_execution(
         self,
