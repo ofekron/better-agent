@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 import sysconfig
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -11,6 +16,7 @@ from codex_execution_common import (
     AttestOnceCache,
     ExecutionContractError,
     required_string,
+    stable_stat_identity,
     timed_contract_step,
 )
 from codex_execution_identity import (
@@ -25,6 +31,7 @@ from provider_launch_identity import (
     _require_object,
     _validate_launch,
 )
+from paths import ba_home, make_private_directory
 
 
 @dataclass(frozen=True)
@@ -219,6 +226,83 @@ def _package_parent(package_name: str) -> Path:
     return Path(locations[0]).resolve(strict=True).parent
 
 
+_BARE_COPY_PROBE_TIMEOUT_SECONDS = 60
+_bare_copy_probe_lock = threading.Lock()
+_bare_copy_probe_results: dict[tuple[str, tuple[int, ...]], bool] = {}
+
+
+def _bare_copy_probe_root() -> Path:
+    # System temp dirs may be mounted noexec; probe from the state home,
+    # which already hosts executed materialized bundles.
+    root = ba_home() / "cache" / "interpreter-probe"
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        make_private_directory(root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionContractError(
+            "dev runtime probe root is unavailable",
+        ) from exc
+    return root
+
+
+def _run_bare_copy_probe(current: Path) -> bool:
+    staging = Path(
+        tempfile.mkdtemp(prefix="probe-", dir=_bare_copy_probe_root()),
+    )
+    try:
+        copy = staging / current.name
+        try:
+            shutil.copyfile(current, copy)
+            os.chmod(copy, 0o500)
+            process = subprocess.Popen(
+                [str(copy), "-I", "-c", "import ssl"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={},
+                cwd=staging,
+            )
+        except OSError as exc:
+            raise ExecutionContractError(
+                "dev runtime probe cannot run",
+            ) from exc
+        try:
+            return process.wait(timeout=_BARE_COPY_PROBE_TIMEOUT_SECONDS) == 0
+        except subprocess.TimeoutExpired:
+            # A dyld-crashing copy can wedge unkillably in kernel space;
+            # kill best-effort and abandon rather than blocking on reap.
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            return False
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _bare_interpreter_copy_boots(current: Path) -> bool:
+    """True when a bare copy of the interpreter binary alone boots and can
+    import an extension module — the runtime self-locates through absolute
+    dyld references and its compiled-in prefix (conda, homebrew, pyenv).
+    False for relocation-dependent store builds (uv python-build-standalone),
+    whose bare copies die before main() and need the runtime root bundled
+    alongside the pinned copy."""
+    try:
+        key = (str(current), stable_stat_identity(current.stat()))
+    except OSError as exc:
+        raise ExecutionContractError("dev runtime probe cannot run") from exc
+    with _bare_copy_probe_lock:
+        cached = _bare_copy_probe_results.get(key)
+    if cached is not None:
+        return cached
+    with timed_contract_step("provider.dev_runtime.bare_copy_probe"):
+        booted = _run_bare_copy_probe(current)
+    with _bare_copy_probe_lock:
+        _bare_copy_probe_results[key] = booted
+    return booted
+
+
 def _development_runtime(
     executable: FileIdentity,
 ) -> FrozenBundleIdentity | None:
@@ -250,6 +334,11 @@ def _development_runtime(
             Path("/usr/bin"),
         ):
             return None
+        if _bare_interpreter_copy_boots(current):
+            # Self-locating host runtime (conda/homebrew/pyenv): the pinned
+            # bare copy boots on its own, and base_prefix is a full host
+            # installation — never a scannable frozen bundle. Skip bundling.
+            return None
         runtime_root = base_root
     else:
         return None
@@ -261,18 +350,15 @@ def _development_runtime(
         if site_packages.exists() or site_packages.is_symlink()
         else ()
     )
-    try:
-        return FrozenBundleIdentity.capture(
-            executable_path=executable.resolved_path,
-            bundle_root=runtime_root,
-            sidecar_root=stdlib_root,
-            excluded_relative_paths=excluded,
-        )
-    except (ExecutionContractError, OSError):
-        # Best-effort dev-runtime fingerprint — a stale interpreter/env
-        # reference (e.g. a pruned conda pkgs-cache symlink target) must not
-        # fail the whole turn; every caller already treats None as skip.
-        return None
+    # A runtime that reaches here needs its root bundled for the pinned copy
+    # to run at all, so a capture failure is a real launch failure: fail
+    # closed and loud instead of degrading to a bare copy that dies at spawn.
+    return FrozenBundleIdentity.capture(
+        executable_path=executable.resolved_path,
+        bundle_root=runtime_root,
+        sidecar_root=stdlib_root,
+        excluded_relative_paths=excluded,
+    )
 
 
 def _validate_runner(value: RunnerLaunch) -> None:
