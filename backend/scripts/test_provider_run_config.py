@@ -1664,6 +1664,27 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
         ),
         "Better Agent runner omits requirements MCP without backend auth",
     )
+    # `internal_token` is always blank at structural-plan-build time for every
+    # provider (the runner subprocess mints the real one moments later), so
+    # `provider_claude.py`/`provider_agy.py`/`provider_codex.py` all set this
+    # flag on their real runner_input -- without it, every
+    # `requires_backend_auth` MCP server (session-bridge, coordination,
+    # session-control, requirements, ...) would be silently excluded from
+    # every real turn regardless of harness-profile selection or predicate
+    # match. `launcher_can_mint_token` legitimately substitutes for the
+    # not-yet-minted token here since `backend_url`/`app_session_id` are real.
+    launcher_context_no_token = dict(missing_token)
+    launcher_context_no_token["extension_mcp_launcher_context"] = True
+    check(
+        "better-agent-requirements" in effective_mcp_servers(
+            structural_provider_runtime_plan(
+                launcher_context_no_token,
+                "openai",
+            )["resolved_plan"],
+        ),
+        "Better Agent runner keeps requirements MCP without a token when "
+        "extension_mcp_launcher_context signals a real session/backend_url",
+    )
     check(
         "better-agent-requirements" in effective_mcp_servers(
             structural_provider_runtime_plan(

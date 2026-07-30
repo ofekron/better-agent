@@ -283,6 +283,13 @@ class AgyProvider(SessionEventsProvider):
         payload.update({
             "backend_url": backend_url,
             "internal_token": "",
+            # See provider_claude.py's matching flag: `internal_token` is
+            # always blank here (the runner subprocess mints the real one
+            # moments later), so without this, `requires_backend_auth`
+            # extension MCP servers outside extension_store's
+            # `_BROKERED_MCP_EXTENSION_IDS` allowlist are silently excluded
+            # from the frozen plan regardless of harness-profile selection.
+            "extension_mcp_launcher_context": True,
             "mode": mode,
             "provider_id": self.id,
             "provider_kind": self.KIND,

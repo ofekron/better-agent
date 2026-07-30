@@ -944,6 +944,20 @@ class ClaudeProvider(Provider):
             "setting_sources": setting_sources,
             "backend_url": resolved_backend_url,
             "internal_token": "",
+            # `internal_token` above is always blank here -- the runner
+            # subprocess's own `hydrate_runner_inputs` bootstrap RPC mints
+            # the real one moments later, after this structural plan is
+            # already frozen. Without this flag, every `requires_backend_auth`
+            # extension MCP server (session-bridge, coordination,
+            # session-control, ...) that isn't in extension_store's
+            # `_BROKERED_MCP_EXTENSION_IDS` allowlist is silently excluded
+            # from the frozen plan, regardless of harness-profile selection
+            # or predicate match -- reproduced live against session-bridge.
+            # `app_session_id`/`backend_url` below are always real for a
+            # genuine turn, so `launcher_can_mint_token` in
+            # `extension_store._mcp_item_available_for_inputs` legitimately
+            # substitutes for the not-yet-minted token.
+            "extension_mcp_launcher_context": True,
             "provider_id": self.id,
             "fork": bool(fork),
             "supervised": bool(supervised),
