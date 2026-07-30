@@ -1121,14 +1121,13 @@ class ClaudeProvider(Provider):
             execution.artifact,
             run_dir,
         )
+        # Not manifested via publish_execution_payload_manifest: that
+        # manifest's run device/inode binding exists so a future
+        # reclamation pass can trust "this file belongs exclusively to
+        # this run" — the opposite of what a shared, fingerprint-keyed
+        # cache entry is (mirrors how the frozen-bundle runtime cache is
+        # likewise never manifested).
         materialized_cli = launch.materialize_sdk()
-        from run_execution_payloads import publish_execution_payload_manifest
-
-        publish_execution_payload_manifest(
-            run_dir,
-            "claude-cli",
-            materialized_cli.payload_files,
-        )
         sdk_root = None
         if launch.runner.frozen:
             embedded_sdk = next(

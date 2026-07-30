@@ -11,7 +11,6 @@ from provider_family_execution_runtime import (
     restore_family_runner_runtime,
 )
 from provider_runtime_plan_source import hydrate_runner_operation_broker
-from run_execution_payloads import publish_execution_payload_manifest
 
 
 @dataclass(frozen=True)
@@ -51,16 +50,13 @@ def _runtime_capabilities(
     )
 
 
-def _materialize_provider(
-    runtime: FamilyExecutionRuntime,
-    run_dir: Path,
-) -> str:
+def _materialize_provider(runtime: FamilyExecutionRuntime) -> str:
+    # Not manifested via publish_execution_payload_manifest: that
+    # manifest's run device/inode binding exists so a future reclamation
+    # pass can trust "this file belongs exclusively to this run" — the
+    # opposite of what a shared, fingerprint-keyed cache entry is (mirrors
+    # how the frozen-bundle runtime cache is likewise never manifested).
     materialized = runtime.launch.materialize_sdk()
-    publish_execution_payload_manifest(
-        run_dir,
-        "provider-cli",
-        materialized.payload_files,
-    )
     return materialized.executable_path
 
 
@@ -76,7 +72,7 @@ def restore_session_events_runner(
     inputs = hydrate_runner_inputs(inputs, run_dir)
     capability_plan = _runtime_capabilities(inputs, runtime)
     provider_executable = (
-        _materialize_provider(runtime, run_dir)
+        _materialize_provider(runtime)
         if materialize_provider
         else None
     )
