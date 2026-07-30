@@ -1141,6 +1141,12 @@ class Provider(ABC):
                 expected_revision=artifact.provider_revision,
             )
             if hydration is None:
+                if config_store.provider_suspended(artifact.provider_id):
+                    self.suspended = True
+                    raise ProviderSuspendedError(
+                        f"provider {artifact.provider_id} is suspended; "
+                        "cannot start new runs"
+                    )
                 raise RuntimeError(
                     f"provider {artifact.provider_id} is unavailable",
                 )
