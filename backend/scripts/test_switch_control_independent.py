@@ -17,7 +17,6 @@ HOME = tempfile.mkdtemp(prefix="ba-independent-switch-")
 os.environ["BETTER_AGENT_HOME"] = HOME
 
 from daemonhost import pointer, switch_control  # noqa: E402
-import backend.dependency_plan as backend_dependency_plan  # noqa: E402
 from daemonhost.jsonio import read_json, write_json  # noqa: E402
 from daemonhost.paths import (  # noqa: E402
     restart_request_path,
@@ -25,13 +24,17 @@ from daemonhost.paths import (  # noqa: E402
 )
 from switch_control_daemon.line_switch_runtime.requests import _release_preparation_owner  # noqa: E402
 
-backend_dependency_plan.verified_active_env = backend_dependency_plan.active_env
-
-
 def make_checkout(path: Path) -> str:
     (path / "backend" / ".venvs" / "test" / "bin").mkdir(parents=True)
     (path / "backend" / "main.py").write_text("", encoding="utf-8")
-    (path / "backend" / ".venvs" / "test" / "bin" / "python").write_text("", encoding="utf-8")
+    python = path / "backend" / ".venvs" / "test" / "bin" / "python"
+    python.write_text(f"#!/bin/sh\nexec {sys.executable!r} \"$@\"\n", encoding="utf-8")
+    python.chmod(0o700)
+    (path / "backend" / "dependency_plan.py").write_text(
+        "import sys\n"
+        "raise SystemExit(0 if sys.argv[1:] == ['assert-active-plan'] else 2)\n",
+        encoding="utf-8",
+    )
     (path / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
     for relative in switch_control._REQUIRED_CHECKOUT_FILES:
         target = path / relative

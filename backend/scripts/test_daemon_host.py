@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,9 +23,7 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(BACKEND.parent))
 
 import paths
-import backend.dependency_plan as backend_dependency_plan
-
-backend_dependency_plan.verified_active_env = backend_dependency_plan.active_env
+from backend.dependency_environment import active_env as dependency_active_env
 
 _TMP = tempfile.mkdtemp(prefix="ba-daemon-host-")
 paths.engage_test_home(_TMP)
@@ -251,31 +250,18 @@ def _make_checkout(name: str) -> str:
     env = root / "backend" / ".venvs" / "test" / "bin"
     env.mkdir(parents=True, exist_ok=True)
     (root / "backend" / "main.py").write_text("", encoding="utf-8")
-    (env / "python").write_text("", encoding="utf-8")
+    (env / "python").write_text(
+        f"#!/bin/sh\nexec {sys.executable!r} \"$@\"\n",
+        encoding="utf-8",
+    )
+    (env / "python").chmod(0o700)
+    (root / "backend" / "dependency_plan.py").write_text(
+        "import sys\n"
+        "raise SystemExit(0 if sys.argv[1:] == ['assert-active-plan'] else 2)\n",
+        encoding="utf-8",
+    )
     (root / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
     return str(root)
-
-
-backend_import_root = str(BACKEND)
-backend_import_index = sys.path.index(backend_import_root)
-saved_dependency_plan = sys.modules["backend.dependency_plan"]
-probe_dependency_plan = types.ModuleType("backend.dependency_plan")
-
-
-def _probe_verified_active_env(backend_root: Path) -> Path:
-    assert backend_import_root in sys.path
-    return backend_root / ".venvs" / "test"
-
-
-probe_dependency_plan.verified_active_env = _probe_verified_active_env
-sys.modules["backend.dependency_plan"] = probe_dependency_plan
-sys.path.remove(backend_import_root)
-try:
-    assert pointer._is_runnable_checkout(_make_checkout("co-import-context"))
-    assert backend_import_root not in sys.path
-finally:
-    sys.path.insert(backend_import_index, backend_import_root)
-    sys.modules["backend.dependency_plan"] = saved_dependency_plan
 
 
 dev = _make_checkout("co-dev")
@@ -287,6 +273,25 @@ assert pointer.resolve(dev) == dev
 # Switch intent: resolve returns the target; revert-if-switching flips back.
 pointer.set_active(dev, "req-0")
 pointer.confirm_healthy(dev)
+resolve_code = (
+    "from daemonhost import pointer; "
+    f"print(pointer.resolve({str(Path(_TMP) / 'fallback')!r}))"
+)
+for pythonpath in (str(BACKEND.parent), os.pathsep.join((str(BACKEND.parent), str(BACKEND)))):
+    resolved = subprocess.run(
+        [sys.executable, "-c", resolve_code],
+        env={
+            **os.environ,
+            "BETTER_AGENT_HOME": _TMP,
+            "BETTER_CLAUDE_HOME": _TMP,
+            "PYTHONPATH": pythonpath,
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert resolved == str(Path(dev).resolve()), (pythonpath, resolved)
+
 pointer.set_active(main, "req-1")
 assert pointer.resolve(dev) == str(Path(main).resolve())
 assert pointer.read()["status"] == "switching"
@@ -312,6 +317,42 @@ try:
     raise AssertionError("set_active must reject a non-runnable checkout")
 except ValueError:
     pass
+
+stale = Path(_make_checkout("co-stale"))
+(stale / "backend" / "dependency_plan.py").write_text(
+    "raise SystemExit(1)\n",
+    encoding="utf-8",
+)
+assert not pointer._is_runnable_checkout(str(stale))
+
+ambient_import = Path(_TMP) / "ambient-import"
+ambient_import.mkdir()
+(ambient_import / "launcher_only.py").write_text("", encoding="utf-8")
+ambient_target = Path(_make_checkout("co-ambient-target"))
+(ambient_target / "backend" / "dependency_plan.py").write_text(
+    "import launcher_only\n",
+    encoding="utf-8",
+)
+saved_pythonpath = os.environ.get("PYTHONPATH")
+os.environ["PYTHONPATH"] = str(ambient_import)
+try:
+    assert not pointer._is_runnable_checkout(str(ambient_target))
+finally:
+    if saved_pythonpath is None:
+        os.environ.pop("PYTHONPATH", None)
+    else:
+        os.environ["PYTHONPATH"] = saved_pythonpath
+
+invalid_pointer = Path(_make_checkout("co-invalid-pointer"))
+(invalid_pointer / "backend" / ".active-venv").write_text(
+    "../outside",
+    encoding="utf-8",
+)
+assert not pointer._is_runnable_checkout(str(invalid_pointer))
+
+missing_interpreter = Path(_make_checkout("co-missing-interpreter"))
+(missing_interpreter / "backend" / ".venvs" / "test" / "bin" / "python").unlink()
+assert not pointer._is_runnable_checkout(str(missing_interpreter))
 
 # Broken active checkout: resolve falls back to default.
 shutil.rmtree(Path(main) / "backend")
@@ -429,6 +470,8 @@ windows_checkout = Path(_TMP) / "co-windows"
 (windows_checkout / "backend" / "main.py").write_text("", encoding="utf-8")
 (windows_checkout / "backend" / ".venvs" / "test" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
 (windows_checkout / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
-assert pointer._is_runnable_checkout(str(windows_checkout))
+assert dependency_active_env(windows_checkout / "backend") == (
+    windows_checkout / "backend" / ".venvs" / "test"
+).resolve()
 
 print("OK test_daemon_host")

@@ -21,13 +21,21 @@ BACKEND = Path(__file__).resolve().parent
 import installation_capabilities
 import installation_profile
 import provider_manifest
+from dependency_environment import (
+    ACTIVE_POINTER_NAME,
+    PLAN_MARKER,
+    VENV_ROOT_NAME,
+    DependencyEnvironmentError,
+    active_env as _active_env,
+    python_in as _python_in,
+    verified_active_env as _verified_active_env,
+)
 from paths import bc_home
 
 BASE_REQUIREMENTS = "requirements.txt"
 MOBILE_REQUIREMENTS = "requirements-mobile.txt"
-ACTIVE_POINTER = BACKEND / ".active-venv"
-VENV_ROOT = BACKEND / ".venvs"
-PLAN_MARKER = ".dependency-plan.json"
+ACTIVE_POINTER = BACKEND / ACTIVE_POINTER_NAME
+VENV_ROOT = BACKEND / VENV_ROOT_NAME
 BASE_PROBES = ("argon2", "fastapi", "uvicorn", "watchfiles", "mcp.server.fastmcp")
 
 
@@ -205,12 +213,6 @@ def resolve_plan(
     }
 
 
-def _python_in(env_dir: Path) -> Path:
-    if os.name == "nt":
-        return env_dir / "Scripts" / "python.exe"
-    return env_dir / "bin" / "python"
-
-
 def _write_pointer(env_dir: Path) -> None:
     relative = env_dir.relative_to(BACKEND)
     ACTIVE_POINTER.parent.mkdir(parents=True, exist_ok=True)
@@ -230,24 +232,10 @@ def _write_pointer(env_dir: Path) -> None:
 
 
 def active_env(backend_dir: Path | None = None) -> Path:
-    backend_dir = BACKEND if backend_dir is None else backend_dir
-    pointer = backend_dir / ACTIVE_POINTER.name
-    venv_root = backend_dir / VENV_ROOT.name
     try:
-        raw = pointer.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise DependencyPlanError("backend dependency environment is not activated") from exc
-    relative = Path(raw)
-    if not raw or relative.is_absolute() or ".." in relative.parts:
-        raise DependencyPlanError("backend dependency environment pointer is invalid")
-    env_dir = (backend_dir / relative).resolve()
-    runnable = any(
-        (env_dir / relative_python).is_file()
-        for relative_python in ("bin/python", "Scripts/python.exe")
-    )
-    if venv_root.resolve() not in env_dir.parents or not runnable:
-        raise DependencyPlanError("backend dependency environment pointer is not runnable")
-    return env_dir
+        return _active_env(BACKEND if backend_dir is None else backend_dir)
+    except DependencyEnvironmentError as exc:
+        raise DependencyPlanError(str(exc)) from exc
 
 
 def assert_active() -> None:
@@ -265,24 +253,10 @@ def assert_active_plan() -> None:
 
 
 def verified_active_env(backend_dir: Path) -> Path:
-    env_dir = active_env(backend_dir)
-    python = _python_in(env_dir)
-    planner = backend_dir / Path(__file__).name
-    if not planner.is_file():
-        raise DependencyPlanError("target checkout has no dependency planner")
     try:
-        subprocess.run(
-            [str(python), str(planner), "assert-active-plan"],
-            cwd=backend_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DependencyPlanError(
-            "target checkout dependency environment is stale"
-        ) from exc
-    return env_dir
+        return _verified_active_env(backend_dir)
+    except DependencyEnvironmentError as exc:
+        raise DependencyPlanError(str(exc)) from exc
 
 
 def verified_active_python(backend_dir: Path) -> Path:

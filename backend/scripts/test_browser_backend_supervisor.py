@@ -213,8 +213,27 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
 
 def test_control_server_keeps_handle_out_of_launcher(temp_root: Path) -> None:
     probe_path = temp_root / "control-probe.jsonl"
-    checkout = _fake_checkout(temp_root / "control-checkout", probe_path, read=False)
+    launcher_checkout = _fake_checkout(
+        temp_root / "control-launcher-checkout",
+        temp_root / "unused-launcher-probe.jsonl",
+        read=False,
+    )
+    checkout = _fake_checkout(temp_root / "control-target-checkout", probe_path, read=False)
     state = temp_root / "control-state"
+    state.mkdir()
+    (state / "active_checkout.json").write_text(
+        json.dumps(
+            {
+                "active": str(checkout),
+                "previous": str(launcher_checkout),
+                "request_id": "control-target",
+                "status": "active",
+                "error": "",
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
     raw_control_dir = tempfile.mkdtemp(prefix="ba-bs-", dir="/tmp")
     control_dir = Path(raw_control_dir)
     control_dir.chmod(0o700)
@@ -233,7 +252,7 @@ def test_control_server_keeps_handle_out_of_launcher(temp_root: Path) -> None:
             "--control",
             str(control_path),
             "--launcher-root",
-            str(checkout),
+            str(launcher_checkout),
             "--controller-pid",
             str(os.getpid()),
         ],
