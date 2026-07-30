@@ -132,7 +132,7 @@ def test_snapshot_is_immutable_across_every_authority_drift() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "run-a"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         prepared, sources = _snapshot(root)
         original_manifest = json.loads(json.dumps(prepared.manifest))
 
@@ -254,7 +254,7 @@ def test_harness_secret_refs_survive_artifact_round_trip() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "secret-ref-run"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         refs = {
             "example.extension": [
                 "extension-setting:example.extension:access_token",
@@ -327,7 +327,7 @@ def test_path_symlink_and_payload_tamper_fail_closed() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "run-tamper"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         prepared, _sources = _snapshot(root)
         previous = os.environ.get("BETTER_AGENT_HOME")
         os.environ["BETTER_AGENT_HOME"] = str(state_home)
@@ -452,8 +452,8 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
         state_home = root / "state"
         source_run = state_home / "runs" / "source"
         target_run = state_home / "runs" / "target"
-        source_run.mkdir(parents=True)
-        target_run.mkdir(parents=True)
+        provider._ensure_execution_run_dir(source_run)
+        provider._ensure_execution_run_dir(target_run)
         plan = _plan()
         plan["tools"].append("windows-tool.run")
         plan["mcp_servers"].append({
