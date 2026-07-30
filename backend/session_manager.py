@@ -7308,12 +7308,25 @@ class SessionManager:
         )
 
     def set_pinned(self, sid: str, value: bool) -> Optional[dict]:
+        pinned = bool(value)
+
         def _do(s: dict) -> None:
-            s["pinned"] = bool(value)
-        return self._run(
-            sid, _do, {"kind": "pinned_set", "value": bool(value)},
+            s["pinned"] = pinned
+        rid = self._root_id_for(sid)
+        result = self._run(
+            sid, _do, {"kind": "pinned_set", "value": pinned},
             bump_updated_at=False,
         )
+        # `_run`'s persist is debounced (up to `PERSIST_DEBOUNCE_S`) — refresh
+        # the sidebar-visible summary projection synchronously so a listing
+        # read immediately after this call sees the new pinned state instead
+        # of racing the debounced flush (matches set_current_todos/tasks).
+        if result is not None and not session_store._replace_summary_projection_field(sid, "pinned", pinned):
+            if rid is not None:
+                root = self.get(rid)
+                if root is not None:
+                    session_store._upsert_summary(root)
+        return result
 
     def unpin_others(self, keep_sid: str) -> Optional[list[str]]:
         keep = self.get_ref(keep_sid)
@@ -7336,7 +7349,8 @@ class SessionManager:
         def _do(s: dict) -> None:
             s["topbar_pinned"] = pinned
             s["topbar_pinned_at"] = pinned_at
-        return self._run(
+        rid = self._root_id_for(sid)
+        result = self._run(
             sid, _do, {
                 "kind": "topbar_pinned_set",
                 "value": pinned,
@@ -7344,6 +7358,20 @@ class SessionManager:
             },
             bump_updated_at=False,
         )
+        # See set_pinned: refresh the summary projection synchronously so it
+        # doesn't lag the debounced persist.
+        if result is not None:
+            replaced_pinned = session_store._replace_summary_projection_field(
+                sid, "topbar_pinned", pinned,
+            )
+            session_store._replace_summary_projection_field(
+                sid, "topbar_pinned_at", pinned_at,
+            )
+            if not replaced_pinned and rid is not None:
+                root = self.get(rid)
+                if root is not None:
+                    session_store._upsert_summary(root)
+        return result
 
     def set_marker(self, sid: str, extension_id: str, marker: dict) -> Optional[dict]:
         """Set an extension's attention marker on a session. Markers live in
