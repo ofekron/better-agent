@@ -31,7 +31,9 @@ SEMVER_RE = re.compile(
     r"\.(?P<patch>0|[1-9]\d*)"
     r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
     r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
-    r"(?:\+(?P<build>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+    # \Z, not $: `$` also matches before a trailing newline, so `$` would let
+    # "1.2.3\n" through a validator that must fail closed.
+    r"(?:\+(?P<build>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?\Z"
 )
 
 MAX_VERSION_LENGTH = 64

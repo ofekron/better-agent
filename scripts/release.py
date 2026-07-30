@@ -405,7 +405,10 @@ def main(argv: list[str]) -> int:
         ref = tag if tag_exists(tag) else "HEAD"
         if ref == "HEAD":
             print(f"release: tag {tag} not present yet — previewing from HEAD")
-        commit = git("rev-parse", ref).strip()
+        # `^{commit}` peels the ref: a bare rev-parse on an annotated tag
+        # returns the tag OBJECT sha, which would report a hash that is not a
+        # commit at all as the release's source commit.
+        commit = git("rev-parse", f"{ref}^{{commit}}").strip()
         audit_ref(ref)
         print(f"release: policy audit passed for {ref} ({commit[:12]})")
 
