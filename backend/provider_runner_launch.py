@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 import sysconfig
-from dataclasses import dataclass
+import tempfile
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 from codex_execution_common import (
+    AttestOnceCache,
     ExecutionContractError,
     required_string,
+    stable_stat_identity,
     timed_contract_step,
 )
 from codex_execution_identity import (
@@ -24,6 +31,7 @@ from provider_launch_identity import (
     _require_object,
     _validate_launch,
 )
+from paths import ba_home, make_private_directory
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,12 @@ class RunnerLaunch:
     runner_kind: str
     runner_module: str
     frozen: bool
+    _attest_cache: AttestOnceCache = field(
+        default_factory=AttestOnceCache,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
     def validate(self) -> None:
         _validate_runner(self)
@@ -46,7 +60,7 @@ class RunnerLaunch:
 
     def attest(self) -> bool:
         with timed_contract_step("provider.runner_launch.attest"):
-            return self._attest()
+            return self._attest_cache.resolve(self._attest, self.attest_metadata)
 
     def _attest(self) -> bool:
         try:
@@ -71,6 +85,35 @@ class RunnerLaunch:
             and (
                 self.frozen_bundle is None
                 or self.frozen_bundle.attest()
+            )
+        )
+
+    def attest_metadata(self) -> bool:
+        """Cheap stat-tuple-only re-check for a runner launch this same
+        instance already fully hash-attested earlier in the same
+        launch/spawn cycle."""
+        try:
+            self.validate()
+        except ExecutionContractError:
+            return False
+        if self.frozen:
+            return (
+                self.frozen_bundle is not None
+                and self.frozen_bundle.attest_metadata()
+            )
+        return (
+            self.launch.attest_metadata()
+            and (
+                self.runner_entry is None
+                or self.runner_entry.attest_metadata()
+            )
+            and (
+                self.development_runtime is None
+                or self.development_runtime.attest_metadata()
+            )
+            and (
+                self.frozen_bundle is None
+                or self.frozen_bundle.attest_metadata()
             )
         )
 
@@ -183,6 +226,83 @@ def _package_parent(package_name: str) -> Path:
     return Path(locations[0]).resolve(strict=True).parent
 
 
+_BARE_COPY_PROBE_TIMEOUT_SECONDS = 60
+_bare_copy_probe_lock = threading.Lock()
+_bare_copy_probe_results: dict[tuple[str, tuple[int, ...]], bool] = {}
+
+
+def _bare_copy_probe_root() -> Path:
+    # System temp dirs may be mounted noexec; probe from the state home,
+    # which already hosts executed materialized bundles.
+    root = ba_home() / "cache" / "interpreter-probe"
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        make_private_directory(root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionContractError(
+            "dev runtime probe root is unavailable",
+        ) from exc
+    return root
+
+
+def _run_bare_copy_probe(current: Path) -> bool:
+    staging = Path(
+        tempfile.mkdtemp(prefix="probe-", dir=_bare_copy_probe_root()),
+    )
+    try:
+        copy = staging / current.name
+        try:
+            shutil.copyfile(current, copy)
+            os.chmod(copy, 0o500)
+            process = subprocess.Popen(
+                [str(copy), "-I", "-c", "import ssl"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={},
+                cwd=staging,
+            )
+        except OSError as exc:
+            raise ExecutionContractError(
+                "dev runtime probe cannot run",
+            ) from exc
+        try:
+            return process.wait(timeout=_BARE_COPY_PROBE_TIMEOUT_SECONDS) == 0
+        except subprocess.TimeoutExpired:
+            # A dyld-crashing copy can wedge unkillably in kernel space;
+            # kill best-effort and abandon rather than blocking on reap.
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            return False
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _bare_interpreter_copy_boots(current: Path) -> bool:
+    """True when a bare copy of the interpreter binary alone boots and can
+    import an extension module — the runtime self-locates through absolute
+    dyld references and its compiled-in prefix (conda, homebrew, pyenv).
+    False for relocation-dependent store builds (uv python-build-standalone),
+    whose bare copies die before main() and need the runtime root bundled
+    alongside the pinned copy."""
+    try:
+        key = (str(current), stable_stat_identity(current.stat()))
+    except OSError as exc:
+        raise ExecutionContractError("dev runtime probe cannot run") from exc
+    with _bare_copy_probe_lock:
+        cached = _bare_copy_probe_results.get(key)
+    if cached is not None:
+        return cached
+    with timed_contract_step("provider.dev_runtime.bare_copy_probe"):
+        booted = _run_bare_copy_probe(current)
+    with _bare_copy_probe_lock:
+        _bare_copy_probe_results[key] = booted
+    return booted
+
+
 def _development_runtime(
     executable: FileIdentity,
 ) -> FrozenBundleIdentity | None:
@@ -197,10 +317,29 @@ def _development_runtime(
     if prefix_root == base_root:
         return None
     stdlib_root = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
+    # The venv's own prefix directory doesn't always contain the resolved
+    # interpreter and its stdlib/shared-library dependencies: tools like
+    # `uv venv` make bin/python a symlink out to a centrally-managed
+    # interpreter store rooted at base_prefix instead of copying the
+    # interpreter into the venv. Bundle from whichever resolved root
+    # actually contains both, so the pinned copy brings its dylib along.
     if current.is_relative_to(prefix_root) and stdlib_root.is_relative_to(
         prefix_root,
     ):
         runtime_root = prefix_root
+    elif current.is_relative_to(base_root) and stdlib_root.is_relative_to(
+        base_root,
+    ):
+        if current.is_relative_to(Path("/bin")) or current.is_relative_to(
+            Path("/usr/bin"),
+        ):
+            return None
+        if _bare_interpreter_copy_boots(current):
+            # Self-locating host runtime (conda/homebrew/pyenv): the pinned
+            # bare copy boots on its own, and base_prefix is a full host
+            # installation — never a scannable frozen bundle. Skip bundling.
+            return None
+        runtime_root = base_root
     else:
         return None
     site_packages = stdlib_root / "site-packages"
@@ -211,18 +350,15 @@ def _development_runtime(
         if site_packages.exists() or site_packages.is_symlink()
         else ()
     )
-    try:
-        return FrozenBundleIdentity.capture(
-            executable_path=executable.resolved_path,
-            bundle_root=runtime_root,
-            sidecar_root=stdlib_root,
-            excluded_relative_paths=excluded,
-        )
-    except (ExecutionContractError, OSError):
-        # Best-effort dev-runtime fingerprint — a stale interpreter/env
-        # reference (e.g. a pruned conda pkgs-cache symlink target) must not
-        # fail the whole turn; every caller already treats None as skip.
-        return None
+    # A runtime that reaches here needs its root bundled for the pinned copy
+    # to run at all, so a capture failure is a real launch failure: fail
+    # closed and loud instead of degrading to a bare copy that dies at spawn.
+    return FrozenBundleIdentity.capture(
+        executable_path=executable.resolved_path,
+        bundle_root=runtime_root,
+        sidecar_root=stdlib_root,
+        excluded_relative_paths=excluded,
+    )
 
 
 def _validate_runner(value: RunnerLaunch) -> None:
