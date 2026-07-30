@@ -89,7 +89,7 @@ def _record_model_switched_event(
     after: dict,
     updates: dict,
 ) -> None:
-    keys = ("model", "provider_id", "reasoning_effort", "runner")
+    keys = ("model", "provider_id", "reasoning_effort", "runner", "runtime_profile_id")
     changed = [
         key for key in keys
         if key in updates and before.get(key) != after.get(key)

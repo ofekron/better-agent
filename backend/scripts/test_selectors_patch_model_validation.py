@@ -208,6 +208,47 @@ def main_test() -> int:
         models_mod.available_models_including_retired = orig_incl
     assert r.status_code == 200, r.text
 
+# ── Runtime-profile selector switch ────────────────────────────────
+    profile_b = config_store.provider_execution_defaults(b_id)
+    assert profile_b["runtime_profile_id"]
+    switch = _patch(client, sid, {"runtime_profile_id": profile_b["runtime_profile_id"]})
+    assert switch.status_code == 200, switch.text
+    switched = session_manager.get(sid)
+    assert switched["runtime_profile_id"] == profile_b["runtime_profile_id"]
+    assert switched["provider_id"] == b_id
+    assert switched["runner"] == profile_b["runner"]
+    assert switched["model"] == "model-b", switched["model"]
+
+    conflict = _patch(client, sid, {
+        "runtime_profile_id": profile_b["runtime_profile_id"],
+        "provider_id": a_id,
+    })
+    assert conflict.status_code == 400, conflict.text
+
+    ghost = _patch(client, sid, {"runtime_profile_id": "ghost"})
+    assert ghost.status_code == 400, ghost.text
+
+    # Raw provider switch re-attaches the pair's live profile.
+    profile_a = config_store.provider_execution_defaults(a_id)
+    back = _patch(client, sid, {"provider_id": a_id, "model": "model-a"})
+    assert back.status_code == 200, back.text
+    reattached = session_manager.get(sid)
+    assert reattached["runtime_profile_id"] == profile_a["runtime_profile_id"]
+
+    # Deleting the pair's profile then switching to it must be rejected;
+    # switching AWAY (raw) detaches to legacy-null when no profile exists.
+    deleted_ok, deleted_reason = config_store.delete_runtime_profile(
+        profile_b["runtime_profile_id"]
+    )
+    assert deleted_ok, deleted_reason
+    deleted_switch = _patch(client, sid, {
+        "runtime_profile_id": profile_b["runtime_profile_id"]
+    })
+    assert deleted_switch.status_code == 400, deleted_switch.text
+    detach = _patch(client, sid, {"provider_id": b_id, "model": "model-b"})
+    assert detach.status_code == 200, detach.text
+    assert session_manager.get(sid)["runtime_profile_id"] is None
+
     print("test_selectors_patch_model_validation: OK")
     return 0
 

@@ -415,6 +415,9 @@ def _persist_scheduler_loop() -> None:
 Listener = Callable[[str, dict], None]
 
 
+_SELECTOR_UNSET = object()
+
+
 class IncompatibleOrchestrationMode(ValueError):
     """Raised when a session's `orchestration_mode` is incompatible with
     the chosen provider's capability flags. The single-chokepoint check
@@ -4905,6 +4908,7 @@ class SessionManager:
         permission: Optional[dict] = None,
         cwd: Optional[str] = None,
         provider_id: Optional[str] = None,
+        runtime_profile_id: object = _SELECTOR_UNSET,
         harness_profile_id: Optional[str] = None,
         client_id: Optional[str] = None,
     ) -> Optional[dict]:
@@ -4966,6 +4970,14 @@ class SessionManager:
             runner = session_store._session_runner(
                 runner, provider_id or existing.get("provider_id")
             )
+        if runtime_profile_id is not _SELECTOR_UNSET and runtime_profile_id is not None:
+            if not isinstance(runtime_profile_id, str) or not runtime_profile_id.strip():
+                raise ValueError("runtime_profile_id must be a non-empty string or None")
+            profile = config_store.get_runtime_profile(runtime_profile_id)
+            if profile is None or profile.get("deleted_at"):
+                raise ValueError(
+                    f"runtime profile is unknown or deleted: {runtime_profile_id}"
+                )
         def _do(s: dict) -> None:
             # Inside the per-root lock.
             pass
@@ -4981,6 +4993,10 @@ class SessionManager:
                 s["cwd"] = cwd
             if provider_id is not None:
                 s["provider_id"] = provider_id
+            if runtime_profile_id is not _SELECTOR_UNSET:
+                # None clears the reference (legacy session): a provider or
+                # runner change whose pair has no live profile detaches it.
+                s["runtime_profile_id"] = runtime_profile_id
             if harness_profile_id is not None:
                 s["harness_profile_id"] = str(harness_profile_id or "").strip()
         return self._run(
@@ -4993,6 +5009,11 @@ class SessionManager:
                 "permission": permission,
                 "cwd": cwd,
                 "provider_id": provider_id,
+                "runtime_profile_id": (
+                    None
+                    if runtime_profile_id is _SELECTOR_UNSET
+                    else runtime_profile_id
+                ),
                 "harness_profile_id": harness_profile_id,
                 "client_id": client_id,
             },

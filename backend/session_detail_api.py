@@ -1640,6 +1640,45 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
     session_snapshot = await _session_lite(session_id)
     if not session_snapshot:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    requested_profile_id = None
+    if "runtime_profile_id" in body:
+        raw_profile_id = body.get("runtime_profile_id")
+        if not isinstance(raw_profile_id, str) or not raw_profile_id.strip():
+            raise HTTPException(
+                status_code=400, detail="runtime_profile_id is required"
+            )
+        switch_profile = await asyncio.to_thread(
+            config_store.get_runtime_profile, raw_profile_id
+        )
+        if switch_profile is None or switch_profile.get("deleted_at"):
+            raise HTTPException(
+                status_code=400, detail="runtime profile is unknown or deleted"
+            )
+        if (
+            isinstance(body.get("provider_id"), str)
+            and body["provider_id"].strip()
+            and body["provider_id"].strip() != switch_profile["provider_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="provider_id conflicts with runtime_profile_id",
+            )
+        if (
+            isinstance(body.get("runner"), str)
+            and body["runner"].strip()
+            and body["runner"].strip() != switch_profile["runner"]
+        ):
+            raise HTTPException(
+                status_code=400, detail="runner conflicts with runtime_profile_id"
+            )
+        requested_profile_id = raw_profile_id
+        # Profile switch restamps provider+runner through the shared
+        # validation below; model/effort stay overridable.
+        body = {
+            **body,
+            "provider_id": switch_profile["provider_id"],
+            "runner": switch_profile["runner"],
+        }
     requested_provider_id = (
         body.get("provider_id").strip()
         if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
@@ -1692,6 +1731,21 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         updates["runner"] = _provider_runner(profile_provider_id, body["runner"])
     elif requested_provider_id:
         updates["runner"] = _provider_runner(profile_provider_id)
+    if requested_profile_id is not None:
+        updates["runtime_profile_id"] = requested_profile_id
+    elif "provider_id" in updates or "runner" in updates:
+        # Raw provider/runner change: re-attach the resulting pair's live
+        # profile, or detach (legacy) when the pair has none.
+        pair_provider = updates.get("provider_id") or session_snapshot.get("provider_id")
+        pair_runner = updates.get("runner") or session_snapshot.get("runner")
+        matched = (
+            await asyncio.to_thread(
+                config_store.find_live_runtime_profile, pair_provider, pair_runner
+            )
+            if pair_provider
+            else None
+        )
+        updates["runtime_profile_id"] = matched["id"] if matched else None
     profile_runner = updates.get("runner") or session_snapshot.get("runner")
     profile_model = updates.get("model") or session_snapshot.get("model") or ""
     profile_record = provider_record or config_store.get_provider(profile_provider_id)
