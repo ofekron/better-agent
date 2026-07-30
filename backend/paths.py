@@ -515,6 +515,20 @@ def make_private_file(path: Path) -> None:
     path.chmod(0o600)
 
 
+def require_private_file(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=False)
+    if os.name == "nt":
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private file ACL verification failed")
+        return
+    observed = path.lstat()
+    if (
+        stat.S_IMODE(observed.st_mode) & 0o077
+        or (_pwd is not None and observed.st_uid != os.getuid())
+    ):
+        raise PermissionError("private file permissions are unsafe")
+
+
 def windows_path_has_private_acl(path: Path) -> bool:
     if os.name != "nt":
         return False
@@ -547,6 +561,20 @@ def make_private_directory(path: Path) -> None:
             raise PermissionError("private directory ACL verification failed")
         return
     path.chmod(_PRIVATE_DIR_MODE)
+
+
+def require_private_directory(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=True)
+    if os.name == "nt":
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private directory ACL verification failed")
+        return
+    observed = path.lstat()
+    if (
+        stat.S_IMODE(observed.st_mode) & 0o077
+        or (_pwd is not None and observed.st_uid != os.getuid())
+    ):
+        raise PermissionError("private directory permissions are unsafe")
 
 
 _install_private_umask()

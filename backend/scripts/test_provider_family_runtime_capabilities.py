@@ -27,6 +27,9 @@ from provider_family_runtime_capabilities import (  # noqa: E402
     snapshot_family_runtime_capabilities,
     stage_family_runtime_capabilities,
 )
+import provider_runtime_payload_store  # noqa: E402
+import provider_runtime_resolver  # noqa: E402
+import provider  # noqa: E402
 
 
 def _write(path: Path, contents: bytes) -> None:
@@ -343,6 +346,31 @@ def test_path_symlink_and_payload_tamper_fail_closed() -> None:
             else:
                 raise AssertionError("tampered capability payload was installed")
             cleanup_staged_family_runtime_capabilities("run-tamper")
+
+            stage_family_runtime_capabilities("cleanup-redirect", prepared)
+            staged_dir = provider_runtime_payload_store._stage_dir(
+                "cleanup-redirect",
+            )
+            (
+                staged_dir
+                / provider_runtime_payload_store.CAPABILITY_PAYLOAD_NAME
+            ).unlink()
+            staged_dir.rmdir()
+            outside_dir = root / "outside-cleanup"
+            outside_dir.mkdir()
+            marker = outside_dir / "marker"
+            marker.write_text("preserve")
+            staged_dir.symlink_to(outside_dir, target_is_directory=True)
+            try:
+                cleanup_staged_family_runtime_capabilities(
+                    "cleanup-redirect",
+                )
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("redirected staged cleanup was accepted")
+            assert marker.read_text() == "preserve"
+            staged_dir.unlink()
         finally:
             if previous is None:
                 os.environ.pop("BETTER_AGENT_HOME", None)
@@ -480,6 +508,82 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
                 os.environ["BETTER_AGENT_HOME"] = previous
 
 
+def test_private_root_creation_and_nested_tree_security() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw) / "prepared"
+        original_make_private = provider_runtime_payload_store.make_private_directory
+        original_require_private = (
+            provider_runtime_payload_store.require_private_directory
+        )
+        secured: list[Path] = []
+        provider_runtime_payload_store.make_private_directory = secured.append
+        provider_runtime_payload_store.require_private_directory = lambda _path: None
+        try:
+            resolved = provider_runtime_payload_store._ensure_secure_directory(root)
+            provider_runtime_payload_store._ensure_secure_directory(root)
+        finally:
+            provider_runtime_payload_store.make_private_directory = original_make_private
+            provider_runtime_payload_store.require_private_directory = (
+                original_require_private
+            )
+
+        assert resolved == root.resolve()
+        assert secured == [root]
+
+        tree_root = Path(raw) / "tree"
+        tree_root.mkdir()
+        original_make_private = provider_runtime_resolver.make_private_directory
+        original_require_private = provider_runtime_resolver.require_private_directory
+        secured = []
+        verified: list[Path] = []
+        provider_runtime_resolver.make_private_directory = secured.append
+        provider_runtime_resolver.require_private_directory = verified.append
+        nested = tree_root / "skills" / "owner" / "scripts"
+        try:
+            provider_runtime_resolver._ensure_private_parent_tree(
+                tree_root,
+                nested,
+            )
+        finally:
+            provider_runtime_resolver.make_private_directory = original_make_private
+            provider_runtime_resolver.require_private_directory = (
+                original_require_private
+            )
+        expected = [
+            tree_root / "skills",
+            tree_root / "skills" / "owner",
+            nested,
+        ]
+        assert secured == expected
+        assert verified == expected
+
+
+def test_provider_secures_run_directory_before_use() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        run_dir = Path(raw) / "run"
+        original_make_private = provider.make_private_directory
+        original_require_private = provider.require_private_directory
+        events: list[tuple[str, Path]] = []
+        provider.make_private_directory = (
+            lambda path: events.append(("secure", path))
+        )
+        provider.require_private_directory = (
+            lambda path: events.append(("verify", path))
+        )
+        try:
+            assert provider._ensure_execution_run_dir(run_dir)
+            assert not provider._ensure_execution_run_dir(run_dir)
+        finally:
+            provider.make_private_directory = original_make_private
+            provider.require_private_directory = original_require_private
+
+        assert events == [
+            ("secure", run_dir),
+            ("verify", run_dir),
+            ("verify", run_dir),
+        ]
+
+
 TESTS = (
     test_snapshot_is_immutable_across_every_authority_drift,
     test_artifact_manifest_and_hydration_are_secret_free,
@@ -487,6 +591,8 @@ TESTS = (
     test_path_symlink_and_payload_tamper_fail_closed,
     test_prewarm_success_and_failure_preserve_capability_semantics,
     test_restart_clone_preserves_posix_and_windows_configs,
+    test_private_root_creation_and_nested_tree_security,
+    test_provider_secures_run_directory_before_use,
 )
 
 

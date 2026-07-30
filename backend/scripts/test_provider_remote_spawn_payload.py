@@ -45,6 +45,60 @@ def test_node_run_uses_node_local_backend_proxy() -> None:
     assert 'backend_url=msg.get("backend_url")' not in source
 
 
+def test_provider_secures_run_directory_before_payload_install() -> None:
+    source = Path(_BACKEND, "provider.py").read_text()
+    tree = ast.parse(source)
+    handler = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_persist_and_start_execution"
+    )
+    handler_source = ast.get_source_segment(source, handler) or ""
+    assert handler_source.index("_ensure_execution_run_dir(run_dir)") < (
+        handler_source.index("atomic_write_json(")
+    )
+    assert handler_source.index("_ensure_execution_run_dir(run_dir)") < (
+        handler_source.index("self._install_execution_payloads(")
+    )
+
+
+def test_node_execution_preparation_uses_thread_boundary() -> None:
+    source = Path(_BACKEND, "node_rpc_handlers.py").read_text()
+    tree = ast.parse(source)
+    handler = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_spawn_run"
+    )
+    handler_source = ast.get_source_segment(source, handler) or ""
+    assert "execution = await asyncio.to_thread(" in handler_source
+    assert "_prepare_node_execution," in handler_source
+    assert handler_source.index("renewal_task = asyncio.create_task(") < (
+        handler_source.index("execution = await asyncio.to_thread(")
+    )
+    assert handler_source.index("_ctx_by_run[run_id] = ctx") < (
+        handler_source.index("execution = await asyncio.to_thread(")
+    )
+
+
+def test_node_cancel_uses_authoritative_run_context() -> None:
+    source = Path(_BACKEND, "node_rpc_handlers.py").read_text()
+    tree = ast.parse(source)
+    handler = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_cancel_run"
+    )
+    handler_source = ast.get_source_segment(source, handler) or ""
+    assert "_ctx_by_run.get(run_id)" in handler_source
+    assert "ctx.cancel_requested = True" in handler_source
+    assert "_dispatch_ctx_cancel(ctx)" in handler_source
+    assert "default_provider()" not in handler_source
+
+
 def test_node_backend_url_defaults_to_node_listener(monkeypatch) -> None:
     monkeypatch.delenv("BETTER_CLAUDE_BACKEND_URL", raising=False)
     monkeypatch.delenv("BETTER_AGENT_BACKEND_URL", raising=False)
@@ -69,7 +123,7 @@ def test_remote_spawn_carries_strict_provider_authority() -> None:
     assert 'ExecutionArtifact.from_dict(msg["execution_artifact"])' in handler_source
     assert ").retry(" not in handler_source
     assert "provider = get_provider(artifact.provider_id)" in handler_source
-    assert "_prepare_node_execution(" in handler_source
+    assert "_prepare_node_execution," in handler_source
     assert "default_provider" not in handler_source
     authority = next(
         node
@@ -188,9 +242,7 @@ def test_remote_registration_requires_connection_and_send_failure_cleans_up() ->
     assert source.index("node_store.get_connection") < source.index(
         'atomic_write_json(run_dir / "backend_state.json"',
     )
-    assert 'self._runs.pop(run_id, None)' in source
-    assert 'conn.runs.pop(run_id, None)' in source
-    assert "_finalize_remote_run_dir(" in source
+    assert "self._dispatch_admission_or_fail" in source
     assert "routing_session_id = _execution.artifact.routing_session_id" in source
     assert '"app_session_id": routing_session_id' in source
     assert '"persist_to": app_session_id' in source
@@ -200,6 +252,9 @@ if __name__ == "__main__":
     test_start_run_does_not_reread_mutable_harness_policy()
     test_start_run_does_not_send_internal_token_field()
     test_node_run_uses_node_local_backend_proxy()
+    test_provider_secures_run_directory_before_payload_install()
+    test_node_execution_preparation_uses_thread_boundary()
+    test_node_cancel_uses_authoritative_run_context()
     test_remote_spawn_carries_strict_provider_authority()
     test_remote_spawn_forwards_effective_harness_policy()
     test_remote_registration_requires_connection_and_send_failure_cleans_up()

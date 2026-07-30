@@ -39,6 +39,53 @@ def state(run_id: str) -> _RemoteRunState:
     )
 
 
+class _CancellationArtifact:
+    provider_id = "exact-provider"
+
+    def __init__(self, run_id: str) -> None:
+        arguments = {
+            "run_id": run_id,
+            "cwd": "/tmp",
+            "app_session_id": "session",
+        }
+        self.template = type(
+            "Template",
+            (),
+            {"arguments": staticmethod(lambda: dict(arguments))},
+        )()
+
+
+class _CancellationProvider:
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+        self.released: list[object] = []
+
+    def cancel_run(self, target_run_id: str) -> None:
+        self.cancelled.append(target_run_id)
+
+    def _release_execution_authority(self, execution: object) -> None:
+        self.released.append(execution)
+
+
+class _ControlClient:
+    def __init__(self) -> None:
+        self.controls: list[dict] = []
+
+    async def send_run_control(self, **kwargs) -> None:
+        self.controls.append(kwargs)
+
+
+def _spawn_message(run_id: str) -> dict:
+    return {
+        "run_id": run_id,
+        "root_id": "root",
+        "app_session_id": "session",
+        "cwd": "/tmp",
+        "execution_artifact": {},
+        "admission_lease": {"token": "lease", "seconds": 300},
+    }
+
+
 def main() -> None:
     os.environ["BETTER_AGENT_REMOTE_ADMISSION_LEASE_SECONDS"] = "0"
     try:
@@ -108,6 +155,9 @@ def main() -> None:
     asyncio.run(executable_dispatch_and_expiry())
     asyncio.run(executable_malformed_handler())
     asyncio.run(executable_handler_exits())
+    asyncio.run(executable_cancel_during_preparation())
+    asyncio.run(executable_cancel_before_launch())
+    asyncio.run(executable_cancel_during_admitted_control())
     asyncio.run(executable_real_proxy_start())
     print("PASS remote admission lifecycle")
 
@@ -293,7 +343,7 @@ async def executable_handler_exits() -> None:
 
     original = {
         "from_dict": node_rpc_handlers.ExecutionArtifact.from_dict,
-        "restore": node_rpc_handlers.restore_prepared_execution,
+        "prepare": node_rpc_handlers._prepare_node_execution,
         "provider": node_rpc_handlers.get_provider,
         "start": node_rpc_handlers.start_prepared_run,
         "flush": node_rpc_handlers.session_manager.flush_pending_persists,
@@ -306,7 +356,7 @@ async def executable_handler_exits() -> None:
 
     async def run_case(start_result, admitted: bool) -> tuple[Client, BaseException | None]:
         client = Client()
-        node_rpc_handlers.restore_prepared_execution = (
+        node_rpc_handlers._prepare_node_execution = (
             lambda *_args, **_kwargs: Execution(admitted)
         )
         if isinstance(start_result, BaseException):
@@ -351,11 +401,196 @@ async def executable_handler_exits() -> None:
             await asyncio.gather(ctx.drain_task, return_exceptions=True)
     finally:
         node_rpc_handlers.ExecutionArtifact.from_dict = original["from_dict"]
-        node_rpc_handlers.restore_prepared_execution = original["restore"]
+        node_rpc_handlers._prepare_node_execution = original["prepare"]
         node_rpc_handlers.get_provider = original["provider"]
         node_rpc_handlers.start_prepared_run = original["start"]
         node_rpc_handlers.session_manager.flush_pending_persists = original["flush"]
         node_rpc_handlers._ctx_by_run.pop("handler-run", None)
+
+
+async def executable_cancel_during_preparation() -> None:
+    run_id = "cancel-during-preparation"
+    prepare_entered = threading.Event()
+    release_prepare = threading.Event()
+    provider = _CancellationProvider()
+    execution = object()
+    start_calls: list[object] = []
+
+    def prepare(*_args, **_kwargs):
+        prepare_entered.set()
+        release_prepare.wait()
+        return execution
+
+    original = {
+        "from_dict": node_rpc_handlers.ExecutionArtifact.from_dict,
+        "prepare": node_rpc_handlers._prepare_node_execution,
+        "provider": node_rpc_handlers.get_provider,
+        "start": node_rpc_handlers.start_prepared_run,
+    }
+    node_rpc_handlers.ExecutionArtifact.from_dict = (
+        lambda _value: _CancellationArtifact(run_id)
+    )
+    node_rpc_handlers._prepare_node_execution = prepare
+    node_rpc_handlers.get_provider = lambda _provider_id: provider
+    node_rpc_handlers.start_prepared_run = lambda *_args, **_kwargs: start_calls.append(
+        object()
+    )
+    client = _ControlClient()
+    spawn_task = asyncio.create_task(
+        node_rpc_handlers.handle_spawn_run(client, _spawn_message(run_id))
+    )
+    try:
+        await asyncio.to_thread(prepare_entered.wait)
+        await node_rpc_handlers.handle_cancel_run(client, {"run_id": run_id})
+        assert not spawn_task.done()
+        assert node_rpc_handlers._ctx_by_run[run_id].cancel_requested
+        release_prepare.set()
+        await spawn_task
+        assert start_calls == []
+        assert provider.cancelled == []
+        assert provider.released == [execution]
+        assert run_id not in node_rpc_handlers._ctx_by_run
+        assert [item["control_type"] for item in client.controls] == ["error"]
+        assert "cancelled during preparation" in client.controls[0]["data"]["error"]
+        renewals = [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(f"admission-renew-{run_id[:8]}")
+        ]
+        assert renewals == []
+    finally:
+        release_prepare.set()
+        if not spawn_task.done():
+            await spawn_task
+        node_rpc_handlers.ExecutionArtifact.from_dict = original["from_dict"]
+        node_rpc_handlers._prepare_node_execution = original["prepare"]
+        node_rpc_handlers.get_provider = original["provider"]
+        node_rpc_handlers.start_prepared_run = original["start"]
+        node_rpc_handlers._ctx_by_run.pop(run_id, None)
+
+
+async def executable_cancel_before_launch() -> None:
+    run_id = "cancel-before-launch"
+    recovery_entered = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def wait_for_recovery_ready() -> None:
+        recovery_entered.set()
+        await release_recovery.wait()
+
+    provider = _CancellationProvider()
+    execution = object()
+    start_calls: list[object] = []
+    import startup_recovery_gate
+
+    original = {
+        "from_dict": node_rpc_handlers.ExecutionArtifact.from_dict,
+        "prepare": node_rpc_handlers._prepare_node_execution,
+        "provider": node_rpc_handlers.get_provider,
+        "start": node_rpc_handlers.start_prepared_run,
+        "recovery": startup_recovery_gate.wait_for_recovery_ready,
+        "flush": node_rpc_handlers.session_manager.flush_pending_persists,
+    }
+    node_rpc_handlers.ExecutionArtifact.from_dict = (
+        lambda _value: _CancellationArtifact(run_id)
+    )
+    node_rpc_handlers._prepare_node_execution = lambda *_args, **_kwargs: execution
+    node_rpc_handlers.get_provider = lambda _provider_id: provider
+    node_rpc_handlers.start_prepared_run = lambda *_args, **_kwargs: start_calls.append(
+        object()
+    )
+    startup_recovery_gate.wait_for_recovery_ready = wait_for_recovery_ready
+    node_rpc_handlers.session_manager.flush_pending_persists = lambda: None
+    client = _ControlClient()
+    spawn_task = asyncio.create_task(
+        node_rpc_handlers.handle_spawn_run(client, _spawn_message(run_id))
+    )
+    try:
+        await recovery_entered.wait()
+        await node_rpc_handlers.handle_cancel_run(client, {"run_id": run_id})
+        assert node_rpc_handlers._ctx_by_run[run_id].cancel_requested
+        release_recovery.set()
+        await spawn_task
+        assert start_calls == []
+        assert provider.cancelled == []
+        assert provider.released == [execution]
+        assert run_id not in node_rpc_handlers._ctx_by_run
+        assert [item["control_type"] for item in client.controls] == ["error"]
+        assert "cancelled before launch" in client.controls[0]["data"]["error"]
+        assert client.controls[0]["data"]["lease_token"] == "lease"
+    finally:
+        release_recovery.set()
+        if not spawn_task.done():
+            await spawn_task
+        node_rpc_handlers.ExecutionArtifact.from_dict = original["from_dict"]
+        node_rpc_handlers._prepare_node_execution = original["prepare"]
+        node_rpc_handlers.get_provider = original["provider"]
+        node_rpc_handlers.start_prepared_run = original["start"]
+        startup_recovery_gate.wait_for_recovery_ready = original["recovery"]
+        node_rpc_handlers.session_manager.flush_pending_persists = original["flush"]
+        node_rpc_handlers._ctx_by_run.pop(run_id, None)
+
+
+async def executable_cancel_during_admitted_control() -> None:
+    run_id = "cancel-during-admitted-control"
+    admitted_send_entered = asyncio.Event()
+    release_admitted_send = asyncio.Event()
+    provider = _CancellationProvider()
+    execution = object()
+
+    class Client(_ControlClient):
+        async def send_run_control(self, **kwargs) -> None:
+            self.controls.append(kwargs)
+            if kwargs["control_type"] == "admitted":
+                admitted_send_entered.set()
+                await release_admitted_send.wait()
+
+    original = {
+        "from_dict": node_rpc_handlers.ExecutionArtifact.from_dict,
+        "prepare": node_rpc_handlers._prepare_node_execution,
+        "provider": node_rpc_handlers.get_provider,
+        "start": node_rpc_handlers.start_prepared_run,
+        "flush": node_rpc_handlers.session_manager.flush_pending_persists,
+    }
+    node_rpc_handlers.ExecutionArtifact.from_dict = (
+        lambda _value: _CancellationArtifact(run_id)
+    )
+    node_rpc_handlers._prepare_node_execution = lambda *_args, **_kwargs: execution
+    node_rpc_handlers.get_provider = lambda _provider_id: provider
+    node_rpc_handlers.start_prepared_run = lambda *_args, **_kwargs: True
+    node_rpc_handlers.session_manager.flush_pending_persists = lambda: None
+    client = Client()
+    spawn_task = asyncio.create_task(
+        node_rpc_handlers.handle_spawn_run(client, _spawn_message(run_id))
+    )
+    try:
+        await admitted_send_entered.wait()
+        await node_rpc_handlers.handle_cancel_run(client, {"run_id": run_id})
+        assert node_rpc_handlers._ctx_by_run[run_id].cancel_requested
+        assert provider.cancelled == []
+        release_admitted_send.set()
+        await spawn_task
+        assert [item["control_type"] for item in client.controls] == ["admitted"]
+        assert provider.cancelled == [run_id]
+        ctx = node_rpc_handlers._ctx_by_run.pop(run_id)
+        assert ctx.phase == "running"
+        assert ctx.drain_task is not None
+        ctx.drain_task.cancel()
+        await asyncio.gather(ctx.drain_task, return_exceptions=True)
+    finally:
+        release_admitted_send.set()
+        if not spawn_task.done():
+            await spawn_task
+        node_rpc_handlers.ExecutionArtifact.from_dict = original["from_dict"]
+        node_rpc_handlers._prepare_node_execution = original["prepare"]
+        node_rpc_handlers.get_provider = original["provider"]
+        node_rpc_handlers.start_prepared_run = original["start"]
+        node_rpc_handlers.session_manager.flush_pending_persists = original["flush"]
+        ctx = node_rpc_handlers._ctx_by_run.pop(run_id, None)
+        if ctx is not None and ctx.drain_task is not None:
+            ctx.drain_task.cancel()
+            await asyncio.gather(ctx.drain_task, return_exceptions=True)
+        shutil.rmtree(runs_root() / run_id, ignore_errors=True)
 
 
 async def executable_real_proxy_start() -> None:
@@ -371,7 +606,11 @@ async def executable_real_proxy_start() -> None:
     def authority_context(_execution, _arguments):
         yield authority
     proxy._execution_authority_context = authority_context
-    conn = type("Connection", (), {"runs": {}})()
+    conn = type("Connection", (), {
+        "runs": {},
+        "runtime_ready": True,
+        "runtime_error": None,
+    })()
     original_connection = provider_remote.node_store.get_connection
     original_spawn = provider_remote.node_link.send_spawn_run
     original_cancel = provider_remote.node_link.send_cancel_run

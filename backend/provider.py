@@ -54,7 +54,11 @@ from execution_template import (
     prepare_execution,
 )
 from env_compat import dual_env_many
-from paths import ba_home
+from paths import (
+    ba_home,
+    make_private_directory,
+    require_private_directory,
+)
 from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,24 @@ _PROVIDER_TASKS_ACCEPTING = True
 _DEFAULT_RECOVERY_SCAN_PARALLELISM = 4
 _MAX_RECOVERY_SCAN_PARALLELISM = 16
 _RECOVERY_SCAN_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_SCAN_PARALLELISM"
+
+
+def _ensure_execution_run_dir(run_dir: Path) -> bool:
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        require_private_directory(run_dir)
+        return False
+    try:
+        make_private_directory(run_dir)
+        require_private_directory(run_dir)
+    except BaseException:
+        try:
+            run_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def _run_was_likely_running_before_restart(runs_root: Path, run_id: str) -> bool:
@@ -835,7 +857,7 @@ class Provider(ABC):
         run_id = arguments["run_id"]
         run_dir = runs_root() / run_id
         artifact_path = run_dir / "execution.json"
-        if run_dir.exists():
+        if not _ensure_execution_run_dir(run_dir):
             existing = tuple(run_dir.iterdir())
             if existing != (artifact_path,):
                 raise RuntimeError(f"run directory already exists: {run_id}")
@@ -848,7 +870,6 @@ class Provider(ABC):
             if persisted != execution.artifact.to_dict():
                 raise RuntimeError(f"run execution authority conflicts: {run_id}")
         else:
-            run_dir.mkdir(parents=True)
             atomic_write_json(artifact_path, execution.artifact.to_dict())
         try:
             self._install_execution_payloads(execution, run_dir)
