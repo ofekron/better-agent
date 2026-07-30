@@ -138,10 +138,44 @@ def test_rebuild_android_apk_builds_vite_in_mobile_mode() -> None:
         )
 
 
+def test_rebuild_android_apk_installs_mobile_dependencies_before_vite() -> None:
+    source = REBUILD_ANDROID_APK.read_text()
+    install_call = re.search(
+        r'installFrontendDependencies\(\s*"mobile"\s*\)',
+        source,
+    )
+    vite_call = re.search(r'execSync\(\s*"npx vite build --mode mobile"', source)
+    assert install_call, "APK rebuild must activate the canonical mobile dependency profile"
+    assert vite_call, "expected the APK rebuild's mobile Vite build"
+    assert install_call.start() < vite_call.start(), (
+        "mobile dependencies must be installed before Vite resolves native imports"
+    )
+    assert r"^frontend\/package-lock\.mobile\.json$" in source
+    assert r"^frontend\/mobile-dependencies\.json$" in source
+
+
+def test_mobile_lock_matches_merged_manifest() -> None:
+    frontend = ROOT / "frontend"
+    manifest = json.loads((frontend / "package.json").read_text())
+    mobile_dependencies = json.loads(
+        (frontend / "mobile-dependencies.json").read_text()
+    )
+    lock_root = json.loads(
+        (frontend / "package-lock.mobile.json").read_text()
+    )["packages"][""]
+    assert lock_root["dependencies"] == {
+        **manifest["dependencies"],
+        **mobile_dependencies,
+    }
+    assert lock_root["devDependencies"] == manifest["devDependencies"]
+
+
 if __name__ == "__main__":
     test_mobile_deps_merged_in_during_the_call()
     test_package_json_restored_after_success()
     test_package_json_restored_after_failure()
     test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json()
     test_rebuild_android_apk_builds_vite_in_mobile_mode()
+    test_rebuild_android_apk_installs_mobile_dependencies_before_vite()
+    test_mobile_lock_matches_merged_manifest()
     print("cap-sync tests passed")

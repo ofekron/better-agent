@@ -38,7 +38,20 @@ export function retiredNodeModulesPath(stage) {
   return join(stage, "node_modules.retired");
 }
 
-function install(profile) {
+export function prepareInstallManifest(manifest, profileDependencies) {
+  const scripts = { ...(manifest.scripts || {}) };
+  delete scripts.postinstall;
+  return {
+    ...manifest,
+    scripts,
+    dependencies: {
+      ...manifest.dependencies,
+      ...profileDependencies,
+    },
+  };
+}
+
+export function installFrontendDependencies(profile) {
   if (profile !== "desktop" && profile !== "mobile") {
     throw new Error(`Unknown frontend dependency profile: ${profile}`);
   }
@@ -48,15 +61,13 @@ function install(profile) {
   const previous = retiredNodeModulesPath(stage);
 
   try {
-    const manifest = JSON.parse(
+    const sourceManifest = JSON.parse(
       readFileSync(join(frontend, "package.json"), "utf8"),
     );
-    if (profile === "mobile") {
-      manifest.dependencies = {
-        ...manifest.dependencies,
-        ...readMobileDependencies(frontend),
-      };
-    }
+    const manifest = prepareInstallManifest(
+      sourceManifest,
+      profile === "mobile" ? readMobileDependencies(frontend) : {},
+    );
     const lock = JSON.parse(
       readFileSync(
         join(
@@ -76,6 +87,10 @@ function install(profile) {
     );
     cpSync(join(frontend, "scripts"), join(stage, "scripts"), { recursive: true });
     execFileSync("npm", ["ci"], { cwd: stage, stdio: "inherit" });
+    execFileSync(process.execPath, [join(frontend, "scripts", "detect-ips.mjs")], {
+      cwd: frontend,
+      stdio: "inherit",
+    });
     if (existsSync(current)) {
       renameSync(current, previous);
     }
@@ -96,5 +111,5 @@ const invokedDirectly =
   process.argv[1] &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (invokedDirectly) {
-  install(process.argv[2]);
+  installFrontendDependencies(process.argv[2]);
 }
