@@ -270,23 +270,6 @@ def worker_count(cwd: str = "") -> int:
         return count
 
 
-def list_pools(cwd: str = "") -> list[dict]:
-    by_tag: dict[str, list[dict]] = {}
-    for worker in list_workers(cwd):
-        for tag in normalize_tags(worker.get("tags")):
-            by_tag.setdefault(tag, []).append(worker)
-    queues = _read().get("pool_queues") or {}
-    pools = []
-    for tag, workers in sorted(by_tag.items()):
-        queue = queues.get(tag) if isinstance(queues.get(tag), list) else []
-        pools.append({
-            "tag": tag,
-            "workers": workers,
-            "queued_count": len(queue),
-        })
-    return pools
-
-
 def get_worker(cwd: str, agent_session_id: str) -> Optional[dict]:
     with _lock_for():
         for w in _read().get("workers", []):
