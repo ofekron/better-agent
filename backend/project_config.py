@@ -1,6 +1,5 @@
 """Scan a project's cwd for Claude-related config files."""
 
-import os
 from pathlib import Path
 
 # Known config file definitions: (relative_path, display_name, category, description)

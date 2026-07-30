@@ -5,7 +5,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
 from session_queue_projection_runtime import ProjectionRuntime, StorageContext

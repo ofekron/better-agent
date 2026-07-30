@@ -41,7 +41,7 @@ import logging
 import os
 import stat
 import subprocess
-from typing import Callable, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 

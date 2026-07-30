@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import contextvars
 import copy
 import heapq
 import json

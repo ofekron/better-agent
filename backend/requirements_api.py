@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 import extension_jobs
 import extension_store

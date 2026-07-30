@@ -30,7 +30,6 @@ import logging
 import os
 import weakref
 from pathlib import Path
-from typing import Optional
 
 from paths import ba_home
 

@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-from typing import Callable, Optional
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
