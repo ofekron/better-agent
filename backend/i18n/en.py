@@ -2,7 +2,7 @@ TRANSLATIONS: dict[str, str] = {
     # --- HTTP / REST errors ---
     "error.session_not_found": "Session not found",
     "error.provider_not_found": "provider not found",
-    "error.cannot_delete_default_provider": "cannot delete the default provider — set another as default first",
+    "error.cannot_delete_default_provider": "cannot delete this provider — it backs the default runtime profile; activate another profile first",
     "error.name_required": "name required",
     "error.no_default_provider": "no default provider",
     "error.provider_suspended": "provider is suspended — cannot {action}",

@@ -2,7 +2,7 @@ TRANSLATIONS: dict[str, str] = {
     # --- HTTP / REST errors ---
     "error.session_not_found": "סשן לא נמצא",
     "error.provider_not_found": "ספק לא נמצא",
-    "error.cannot_delete_default_provider": "לא ניתן למחוק את ספק ברירת המחדל — קבעו ספק אחר כברירת מחדל קודם",
+    "error.cannot_delete_default_provider": "לא ניתן למחוק את הספק — הוא משמש את פרופיל הריצה שנקבע כברירת מחדל; הפעילו פרופיל אחר קודם",
     "error.name_required": "נדרש שם",
     "error.no_default_provider": "אין ספק ברירת מחדל",
     "error.provider_suspended": "הספק מושהה — לא ניתן לבצע: {action}",
