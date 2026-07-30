@@ -19,7 +19,8 @@ if _BACKEND not in sys.path:
 
 import main  # noqa: E402
 import app_lifecycle  # noqa: E402
-import config_store  # noqa: E402
+import config_store
+import _runtime_profile_test_helpers as _rp  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -29,7 +30,7 @@ def main_test() -> int:
         "kind": "claude",
         "mode": "subscription",
     })
-    config_store.set_default_provider(provider["id"])
+    _rp.activate_provider(provider["id"])
 
     route_paths = {route.path for route in walk_routes(main.app.routes)}
     assert not any("/adv_sync" in path for path in route_paths)

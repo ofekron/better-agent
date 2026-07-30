@@ -25,7 +25,8 @@ import paths  # noqa: E402
 _TMP = tempfile.mkdtemp(prefix="codex_cfgdir_home_")
 paths.engage_test_home(_TMP)
 
-import config_store  # noqa: E402
+import config_store
+import _runtime_profile_test_helpers as _rp  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
 
@@ -92,7 +93,7 @@ def test_engine_env_exports_active_credential_dir():
     pid = config_store.add_provider(
         {"name": "codex work", "kind": "codex", "mode": "subscription",
          "config_dir": WORK})["id"]
-    config_store.set_default_provider(pid)
+    _rp.activate_provider(pid)
     config_store.apply_env_vars(pid)
     text = config_store._engine_env_path().read_text()
     assert f"export CODEX_HOME='{paths.resolve_provider_config_dir(WORK)}'" in text

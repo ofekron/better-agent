@@ -65,11 +65,14 @@ def activate(
     provider_record = config_store._new_provider_record(provider)
     provider_record["id"] = provider_id
     providers = [provider_record]
+    profile_record = config_store._seed_profile_for_provider(provider_record)
     (root / "config.json").write_text(
         json.dumps({
             "schema_version": config_store.CONFIG_SCHEMA_VERSION,
             "default_provider_id": provider_id,
             "providers": providers,
+            "runtime_profiles": [profile_record],
+            "default_runtime_profile_id": profile_record["id"],
             "provider_state_authority": provider_sync_authority.new_authority(
                 provider_id,
                 providers,

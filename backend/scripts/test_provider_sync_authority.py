@@ -85,15 +85,10 @@ def _provider_by_id(payload: dict, provider_id: str) -> dict:
 
 
 def _set_default(target: dict, current: dict) -> None:
-    result = config_store.set_default_provider(
-        target["id"],
-        expected_generation=target["generation"],
-        expected_revision=target["revision"],
-        expected_default_provider_id=current["id"],
-        expected_default_generation=current["generation"],
-        expected_default_revision=current["revision"],
-    )
-    assert result is not None
+    del current  # default-switch authority moved to profile activation
+    import _runtime_profile_test_helpers as _rp
+
+    _rp.activate_provider(target["id"])
 
 
 def _recompute_digest(payload: dict) -> None:

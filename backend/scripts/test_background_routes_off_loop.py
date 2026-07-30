@@ -210,7 +210,11 @@ def test_delete_and_internal_session_mutations_stay_off_loop() -> None:
 def test_provider_and_prefs_routes_stay_off_loop() -> None:
     prefs_source = (ROOT / "user_prefs_api.py").read_text(encoding="utf-8")
     prefs_source = prefs_source[: prefs_source.index("# ---- Shortcut responses ----")]
-    route_source = (ROOT / "providers_api.py").read_text(encoding="utf-8") + prefs_source
+    route_source = (
+        (ROOT / "providers_api.py").read_text(encoding="utf-8")
+        + (ROOT / "runtime_profiles_api.py").read_text(encoding="utf-8")
+        + prefs_source
+    )
     for call in (
         "config_store.list_providers",
         "user_prefs.get_last_models",
@@ -219,7 +223,10 @@ def test_provider_and_prefs_routes_stay_off_loop() -> None:
         "config_store.get_provider",
         "config_store.update_provider",
         "config_store.delete_provider",
-        "config_store.set_default_provider",
+        "config_store.add_runtime_profile",
+        "config_store.update_runtime_profile",
+        "config_store.delete_runtime_profile",
+        "config_store.activate_runtime_profile",
         "config_store.add_custom_model_to_default",
         "config_store.get_default_provider",
         "user_prefs.get_all",

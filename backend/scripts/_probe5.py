@@ -319,19 +319,24 @@ class LiveHarness:
             "default_model": CHEAP_MODEL,
         })
         self.provider_id = created["id"]
-        state = (await self.client.get("/api/providers")).json()
-        current = next(
-            provider
-            for provider in state["providers"]
-            if provider["id"] == state["default_provider_id"]
+        profiles = (await self.client.get("/api/runtime-profiles")).json()
+        target = next(
+            (
+                profile
+                for profile in profiles["runtime_profiles"]
+                if profile["provider_id"] == self.provider_id
+                and not profile["deleted_at"]
+            ),
+            None,
         )
-        await self._post(f"/api/providers/{self.provider_id}/set-default", {
-            "expected_generation": created["generation"],
-            "expected_revision": created["revision"],
-            "expected_default_provider_id": current["id"],
-            "expected_default_generation": current["generation"],
-            "expected_default_revision": current["revision"],
-        })
+        if target is None:
+            providers = (await self.client.get("/api/providers")).json()["providers"]
+            record = next(p for p in providers if p["id"] == self.provider_id)
+            target = (await self._post("/api/runtime-profiles", {
+                "provider_id": self.provider_id,
+                "runner": record["runner_options"][0],
+            }))
+        await self._post(f"/api/runtime-profiles/{target['id']}/activate", {})
 
     async def session_on(self, name: str, profile: dict | None = None) -> str:
         payload = {

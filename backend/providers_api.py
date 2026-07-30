@@ -91,12 +91,6 @@ class ProviderSuspensionPayload(ProviderAuthorityPayload):
     suspended: bool = True
 
 
-class ProviderDefaultAuthorityPayload(ProviderAuthorityPayload):
-    expected_default_provider_id: str
-    expected_default_generation: str
-    expected_default_revision: int
-
-
 class ProviderSetupInstallPayload(BaseModel):
     kind: str
 
@@ -452,33 +446,6 @@ async def remove_provider(
     await _broadcast_provider_changed()
     return {"deleted": True}
 
-
-@router.post("/api/providers/{provider_id}/set-default")
-async def set_default_provider(
-    provider_id: str,
-    authority: ProviderDefaultAuthorityPayload,
-):
-    try:
-        state = await asyncio.to_thread(
-            config_store.set_default_provider,
-            provider_id,
-            expected_generation=authority.expected_generation,
-            expected_revision=authority.expected_revision,
-            expected_default_provider_id=authority.expected_default_provider_id,
-            expected_default_generation=authority.expected_default_generation,
-            expected_default_revision=authority.expected_default_revision,
-        )
-    except config_store.ProviderConfigConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=t("error.provider_suspended", action="set as default"),
-        ) from exc
-    if state is None:
-        raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
-    await _broadcast_provider_changed()
-    return state
 
 
 @router.post("/api/providers/default/custom_models")

@@ -70,16 +70,11 @@ def _provider(provider_id: str) -> dict:
 
 
 def _set_default(target: dict, current: dict) -> dict:
-    state = config_store.set_default_provider(
-        target["id"],
-        expected_generation=target["generation"],
-        expected_revision=target["revision"],
-        expected_default_provider_id=current["id"],
-        expected_default_generation=current["generation"],
-        expected_default_revision=current["revision"],
-    )
-    assert state is not None
-    return state
+    del current  # default-switch authority moved to profile activation
+    import _runtime_profile_test_helpers as _rp
+
+    _rp.activate_provider(target["id"])
+    return config_store.list_provider_ui_state()
 
 
 def _all_keys(value: object) -> set[str]:
@@ -413,23 +408,6 @@ else:
     )
     alternate_before = _provider(alternate_id)
     _set_default(alternate_before, previous_default_before)
-    stale_default_bytes = config_store._config_path().read_bytes()
-    stale_default_notifications = len(notifications)
-    try:
-        config_store.set_default_provider(
-            provider_id,
-            expected_generation=after_race["generation"],
-            expected_revision=after_race["revision"],
-            expected_default_provider_id=previous_default_before["id"],
-            expected_default_generation=previous_default_before["generation"],
-            expected_default_revision=previous_default_before["revision"],
-        )
-    except config_store.ProviderConfigConflict:
-        pass
-    else:
-        raise AssertionError("stale current-default authority was accepted")
-    assert config_store._config_path().read_bytes() == stale_default_bytes
-    assert len(notifications) == stale_default_notifications
     alternate_after = _provider(alternate_id)
     previous_default_after_alternate = _provider(previous_default_id)
     _set_default(previous_default_after_alternate, alternate_after)
@@ -497,7 +475,12 @@ else:
 
     original_uuid4 = config_store.uuid.uuid4
     replacement_generation = str(uuid.uuid4())
-    replacement_values = iter((uuid.UUID(provider_id), uuid.UUID(replacement_generation)))
+    # Third value: add_provider also seeds the account's starter profile.
+    replacement_values = iter((
+        uuid.UUID(provider_id),
+        uuid.UUID(replacement_generation),
+        uuid.uuid4(),
+    ))
     config_store.uuid.uuid4 = lambda: next(replacement_values)
     try:
         replacement = config_store.add_provider(

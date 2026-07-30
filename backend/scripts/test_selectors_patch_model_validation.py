@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from starlette.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
-import config_store  # noqa: E402
+import config_store
+import _runtime_profile_test_helpers as _rp  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 import main  # noqa: E402
 from render_tree_hydrate import hydrate_msg_events_from_jsonl  # noqa: E402
@@ -47,7 +48,7 @@ def main_test() -> int:
         "custom_models": ["model-b"],
     })
     a_id, b_id = prov_a["id"], prov_b["id"]
-    config_store.set_default_provider(a_id)
+    _rp.activate_provider(a_id)
 
     session = session_manager.create(
         name="victim",

@@ -135,13 +135,13 @@ def run() -> None:
         "name": "api-key-assigned",
         "kind": "codex",
         "mode": "subscription",
-    })
-    api_provider_id = api_provider["id"]
-    api_profile = config_store.add_runtime_profile({
-        "provider_id": api_provider_id,
-        "runner": api_provider["runner_options"][0],
         "default_model": "gpt-test",
     })
+    api_provider_id = api_provider["id"]
+    api_profile = config_store.get_runtime_profile(
+        config_store.provider_execution_defaults(api_provider_id)["runtime_profile_id"]
+    )
+    assert api_profile is not None and api_profile["default_model"] == "gpt-test"
     _set_provider_fields(api_provider_id, mode="api_key")
     config_store.set_internal_llm_assignments({
         "requirement_analysis": {

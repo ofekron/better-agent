@@ -173,51 +173,6 @@ def _advance_provider_revision(provider: dict) -> None:
     provider["revision"] += 1
 
 
-def _assert_default_provider_authority(
-    state: dict,
-    target: dict,
-    *,
-    expected_generation: str | None,
-    expected_revision: int | None,
-    expected_default_provider_id: str | None,
-    expected_default_generation: str | None,
-    expected_default_revision: int | None,
-) -> None:
-    values = (
-        expected_generation,
-        expected_revision,
-        expected_default_provider_id,
-        expected_default_generation,
-        expected_default_revision,
-    )
-    if all(value is None for value in values):
-        return
-    if any(value is None for value in values):
-        raise ValueError(
-            "target and current-default authority must be supplied together"
-        )
-    if not isinstance(expected_default_provider_id, str) or not expected_default_provider_id:
-        raise ValueError("expected_default_provider_id must be a non-empty string")
-    _assert_provider_authority(target, expected_generation, expected_revision)
-    current = next(
-        (
-            provider
-            for provider in state["providers"]
-            if provider["id"] == state.get("default_provider_id")
-        ),
-        None,
-    )
-    if current is None:
-        raise RuntimeError("provider config conflict: no current default provider")
-    if current["id"] != expected_default_provider_id:
-        raise ProviderConfigConflict(current)
-    _assert_provider_authority(
-        current,
-        expected_default_generation,
-        expected_default_revision,
-    )
-
-
 @contextmanager
 def _config_file_transaction():
     depth = int(getattr(_config_transaction_state, "depth", 0))
@@ -3117,6 +3072,11 @@ def get_deleted_provider(provider_id: str) -> Optional[dict]:
     return None
 
 
+def list_deleted_providers() -> list[dict]:
+    """The display-only provider graveyard (never holds secrets)."""
+    return copy.deepcopy(_load_state().get("deleted_providers", []))
+
+
 def _tombstone_orphaned_runtime_profiles(state: dict) -> None:
     """Tombstone live profiles whose provider left the provider set (provider
     sync import). Mirrors the provider-deletion cascade semantics."""
@@ -3541,48 +3501,6 @@ def activate_runtime_profile(profile_id: str) -> Optional[dict]:
     _save_state(state)
     apply_provider_config_env_vars()
     return copy.deepcopy(target)
-
-
-@_serialized_provider_mutation
-def set_default_provider(
-    provider_id: str,
-    *,
-    expected_generation: str | None = None,
-    expected_revision: int | None = None,
-    expected_default_provider_id: str | None = None,
-    expected_default_generation: str | None = None,
-    expected_default_revision: int | None = None,
-) -> Optional[dict]:
-    state = _load_state()
-    target = next((p for p in state.get("providers", []) if p.get("id") == provider_id), None)
-    if target is None:
-        return None
-    _assert_default_provider_authority(
-        state,
-        target,
-        expected_generation=expected_generation,
-        expected_revision=expected_revision,
-        expected_default_provider_id=expected_default_provider_id,
-        expected_default_generation=expected_default_generation,
-        expected_default_revision=expected_default_revision,
-    )
-    if _provider_is_suspended(target):
-        raise RuntimeError("provider is suspended")
-    previous_id = state.get("default_provider_id")
-    if previous_id == provider_id:
-        return list_provider_ui_state()
-    previous = next(
-        (p for p in state.get("providers", []) if p.get("id") == previous_id),
-        None,
-    )
-    if previous is not None:
-        _advance_provider_revision(previous)
-    _advance_provider_revision(target)
-    state["default_provider_id"] = provider_id
-    _reconcile_default_runtime_profile(state)
-    _save_state(state)
-    apply_provider_config_env_vars()
-    return list_provider_ui_state()
 
 
 def set_provider_suspended(

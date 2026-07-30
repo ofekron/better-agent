@@ -17,7 +17,8 @@ _test_installation.activate(Path(_TMP_HOME))
 
 import provider  # noqa: E402
 import runtime_profile  # noqa: E402
-import config_store  # noqa: E402
+import config_store
+import _runtime_profile_test_helpers as _rp  # noqa: E402
 from session_manager import IncompatibleOrchestrationMode  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -63,14 +64,14 @@ def test_default_provider_is_resolved_before_orchestration_validation() -> None:
     """A default provider whose kind has no team mode must fail session
     creation on the orchestration axis — proving the default is resolved
     before the orchestration check, not after."""
-    agy = config_store.add_provider({
-        "name": "AGY default",
-        "kind": "agy",
+    # kimi still lacks team-mode support (AGY gained it in 71294b348).
+    no_team = config_store.add_provider({
+        "name": "No-team default",
+        "kind": "kimi",
         "mode": "subscription",
-        "runner": "native",
-        "default_model": "Gemini 3.1 Pro (High)",
+        "default_model": "kimi-test",
     })
-    config_store.set_default_provider(agy["id"])
+    _rp.activate_provider(no_team["id"])
     try:
         session_manager.create(name="invalid default orchestration", cwd="/tmp")
     except IncompatibleOrchestrationMode as error:
@@ -84,17 +85,22 @@ def test_internal_profile_and_session_persist_runner() -> None:
         "name": "Fugu OpenAI runtime",
         "kind": "fugu",
         "mode": "api_key",
-        "runner": "native",
         "default_model": "fugu-flash",
     })
     # The installation fixture seeds its own provider as the default; the
     # assertions below read the resolved default, so point it at fugu.
-    config_store.set_default_provider(fugu["id"])
+    _rp.activate_provider(fugu["id"])
+    ba_profile = config_store.find_live_runtime_profile(
+        fugu["id"], "better_agent_runner"
+    ) or config_store.add_runtime_profile({
+        "provider_id": fugu["id"],
+        "runner": "better_agent_runner",
+        "default_model": "fugu-flash",
+    })
     config_store.set_internal_llm_assignments({
         "default_session": {
-            "provider_id": fugu["id"],
+            "runtime_profile_id": ba_profile["id"],
             "model": "fugu-flash",
-            "runner": "better_agent_runner",
         },
     })
     resolved = config_store.resolve_internal_llm("default_session")

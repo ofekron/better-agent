@@ -18,7 +18,8 @@ _test_installation.activate(Path(_HOME))
 from starlette.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
-import config_store  # noqa: E402
+import config_store
+import _runtime_profile_test_helpers as _rp  # noqa: E402
 import provider as provider_mod  # noqa: E402
 import main  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
@@ -60,7 +61,7 @@ def test_suspended_provider_is_not_default_or_selectable() -> None:
     client = _client()
     first = _add_provider("First", "model-first")
     second = _add_provider("Second", "model-second")
-    config_store.set_default_provider(first["id"])
+    _rp.activate_provider(first["id"])
 
     first = config_store.get_provider(first["id"])
     r = client.post(f"/api/providers/{first['id']}/suspended", json={
@@ -75,16 +76,11 @@ def test_suspended_provider_is_not_default_or_selectable() -> None:
     assert listed[first["id"]]["suspended"] is True
     assert not listed[body["default_provider_id"]]["suspended"]
 
-    state = config_store.list_providers()
-    target = next(p for p in state["providers"] if p["id"] == first["id"])
-    active = next(p for p in state["providers"] if p["id"] == state["default_provider_id"])
-    r = client.post(f"/api/providers/{first['id']}/set-default", json={
-        "expected_generation": target["generation"],
-        "expected_revision": target["revision"],
-        "expected_default_provider_id": active["id"],
-        "expected_default_generation": active["generation"],
-        "expected_default_revision": active["revision"],
-    })
+    suspended_profile_id = config_store.provider_execution_defaults(first["id"])[
+        "runtime_profile_id"
+    ]
+    assert suspended_profile_id is not None
+    r = client.post(f"/api/runtime-profiles/{suspended_profile_id}/activate")
     assert r.status_code == 409, r.text
 
     session = session_manager.create(

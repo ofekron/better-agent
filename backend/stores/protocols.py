@@ -308,16 +308,7 @@ class ConfigStorage(Protocol):
         expected_generation: str | None = None,
         expected_revision: int | None = None,
     ) -> tuple[bool, str]: ...
-    def set_default_provider(
-        self,
-        provider_id: str,
-        *,
-        expected_generation: str | None = None,
-        expected_revision: int | None = None,
-        expected_default_provider_id: str | None = None,
-        expected_default_generation: str | None = None,
-        expected_default_revision: int | None = None,
-    ) -> Optional[dict]: ...
+    def activate_runtime_profile(self, profile_id: str) -> Optional[dict]: ...
     def set_provider_suspended(
         self,
         provider_id: str,
