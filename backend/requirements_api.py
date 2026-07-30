@@ -24,7 +24,6 @@ from fastapi import APIRouter, Header, HTTPException
 import extension_jobs
 import extension_store
 import perf
-from i18n import t
 from internal_guards import require_builtin_runtime_extension, require_internal
 from requirements_query_runner import (
     PROCESSOR_RESULT_TIMEOUT_SECONDS,
