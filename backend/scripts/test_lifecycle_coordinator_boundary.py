@@ -417,7 +417,6 @@ async def prove_recovery_requires_ordered_supersession(
             "role": "user",
             "lifecycle_msg_id": current_lifecycle_id,
         },
-        {"id": "recovery-new-assistant", "role": "assistant"},
     ]
     original_terminal = user_msg_lifecycle.terminal_event_for_lifecycle_async
     original_emit_done = coordinator.user_prompt_manager.emit_user_msg_done
@@ -472,6 +471,16 @@ async def prove_recovery_requires_ordered_supersession(
         ]
         and len(terminal_emits) == 1,
     )
+    check(
+        "missing projected assistant is accepted only before admission",
+        not run_recovery._current_lifecycle_supersedes_recovered(
+            {"messages": ordered_messages},
+            recovered_lifecycle_id=recovered_lifecycle_id,
+            current_lifecycle_id=current_lifecycle_id,
+            current_assistant_id="recovery-new-assistant",
+            current_execution_phase="running",
+        ),
+    )
 
     later_user = {
         "id": "recovery-later-user",
@@ -483,7 +492,6 @@ async def prove_recovery_requires_ordered_supersession(
             "reverse",
             [
                 ordered_messages[2],
-                ordered_messages[3],
                 ordered_messages[0],
                 ordered_messages[1],
             ],
@@ -505,7 +513,11 @@ async def prove_recovery_requires_ordered_supersession(
         (
             "assistant-after-later-user",
             ordered_messages[:3]
-            + [later_user, ordered_messages[3], ordered_messages[1]],
+            + [
+                later_user,
+                {"id": "recovery-new-assistant", "role": "assistant"},
+                ordered_messages[1],
+            ],
             ordered_messages[1],
         ),
     ):
@@ -529,6 +541,10 @@ async def prove_recovery_requires_ordered_supersession(
                 f"{name} lifecycle correlation did not fail closed"
             )
     try:
+        current_assistant = {
+            "id": "recovery-new-assistant",
+            "role": "assistant",
+        }
         await run_recovery._emit_recovered_user_message_terminal(
             coordinator=coordinator,
             app_session_id=app_session_id,
@@ -538,8 +554,8 @@ async def prove_recovery_requires_ordered_supersession(
             run_id="recovery-wrong-run",
             execution_turn_id="recovery-wrong-execution",
             cancelled=True,
-            sess={"messages": ordered_messages},
-            assistant_msg=ordered_messages[3],
+            sess={"messages": ordered_messages + [current_assistant]},
+            assistant_msg=current_assistant,
         )
     except RuntimeError:
         pass

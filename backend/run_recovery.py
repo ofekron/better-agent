@@ -2555,6 +2555,7 @@ def _current_lifecycle_supersedes_recovered(
     recovered_lifecycle_id: str,
     current_lifecycle_id: str,
     current_assistant_id: str | None,
+    current_execution_phase: str,
 ) -> bool:
     messages = sess.get("messages")
     if not isinstance(messages, list):
@@ -2580,13 +2581,22 @@ def _current_lifecycle_supersedes_recovered(
         return False
     if current_assistant_id is None:
         return True
-    assistant_indexes = [
-        index
-        for index, message in enumerate(messages)
-        if isinstance(message, dict)
-        and message.get("role") == "assistant"
-        and message.get("id") == current_assistant_id
-    ]
+    assistant_indexes = (
+        []
+        if current_assistant_id is None
+        else [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and message.get("id") == current_assistant_id
+        ]
+    )
+    if not assistant_indexes:
+        return (
+            current_execution_phase == "starting"
+            and current_index == len(messages) - 1
+        )
     if len(assistant_indexes) != 1:
         return False
     assistant_index = assistant_indexes[0]
@@ -2658,6 +2668,11 @@ async def _emit_recovered_user_message_terminal_on_main(
                     recovered_lifecycle_id=lifecycle_msg_id,
                     current_lifecycle_id=current_lifecycle_id,
                     current_assistant_id=current_assistant_id,
+                    current_execution_phase=(
+                        execution.phase
+                        if execution is not None
+                        else snapshot.phase
+                    ),
                 ):
                     raise RuntimeError(
                         "recovered terminal execution identity is ambiguous"
