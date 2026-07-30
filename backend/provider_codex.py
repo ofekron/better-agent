@@ -1534,6 +1534,8 @@ class CodexProvider(Provider):
                         child.name,
                     )
                 continue
+            complete_path = child / "complete.json"
+            has_complete_json = complete_path.exists()
             try:
                 execution_payload = json.loads(
                     (child / "execution.json").read_text(encoding="utf-8"),
@@ -1544,11 +1546,6 @@ class CodexProvider(Provider):
                 )
 
                 contract = codex_contract_from_artifact(artifact)
-                codex_runner_launch_from_artifact(artifact)
-                read_codex_runtime_agent_payload(
-                    child,
-                    codex_runtime_agent_manifest(artifact),
-                )
                 execution_arguments = artifact.template.arguments()
                 persist_to = (
                     execution_arguments.get("worker_agent_session_id")
@@ -1562,17 +1559,22 @@ class CodexProvider(Provider):
                 if (
                     artifact.provider_id != self.id
                     or artifact.provider_kind != self.KIND
-                    or not contract.attest()
                 ):
                     raise ValueError("Codex recovery authority mismatch")
+                read_codex_runtime_agent_payload(
+                    child,
+                    codex_runtime_agent_manifest(artifact),
+                )
+                if not has_complete_json:
+                    codex_runner_launch_from_artifact(artifact)
+                    if not contract.attest():
+                        raise ValueError("Codex recovery authority mismatch")
             except Exception:
                 logger.exception(
                     "codex recover_in_flight: invalid execution authority for %s",
                     child.name,
                 )
                 continue
-            complete_path = child / "complete.json"
-            has_complete_json = complete_path.exists()
 
             backend_state_path = child / "backend_state.json"
             runner_state_path = child / "state.json"
