@@ -806,6 +806,21 @@ def _register_core() -> None:
     )
 
 
+def _resolve_handler_fn(function_name: str, module_name: str = "") -> Callable[..., Any]:
+    """Resolve a capability handler function by name.
+
+    Looks up `module_name` (or `_HANDLER_MODULES.get(function_name, "main")`
+    when omitted) and returns the named attribute from that module. Single
+    source of truth for module resolution shared by every handler factory
+    below, so a function extracted out of main.py only needs its
+    `_HANDLER_MODULES` entry updated once.
+    """
+    import importlib
+
+    module_name = module_name or _HANDLER_MODULES.get(function_name, "main")
+    return getattr(importlib.import_module(module_name), function_name)
+
+
 def _legacy_main_handler(
     extension_id: str,
     function_name: str,
@@ -815,8 +830,6 @@ def _legacy_main_handler(
     exclude_defaults: bool = False,
 ) -> Callable[[BaseModel], Awaitable[Any]]:
     async def handler(payload: BaseModel) -> Any:
-        import main
-
         body = payload.model_dump(
             by_alias=True,
             exclude_unset=exclude_unset,
@@ -824,7 +837,7 @@ def _legacy_main_handler(
         )
         if action:
             body["action"] = action
-        fn = getattr(main, function_name)
+        fn = _resolve_handler_fn(function_name)
         result = fn(body, x_internal_token=extension_token_registry.mint(extension_id))
         return await result if inspect.isawaitable(result) else result
 
@@ -838,8 +851,6 @@ def _role_main_handler(
     action: str = "",
 ) -> Callable[[BaseModel], Awaitable[Any]]:
     async def handler(payload: BaseModel) -> Any:
-        import main
-
         extension_id = extension_store.extension_id_for_role(role)
         if not extension_id:
             raise HTTPException(
@@ -848,7 +859,7 @@ def _role_main_handler(
         body = payload.model_dump()
         if action:
             body["action"] = action
-        result = getattr(main, function_name)(
+        result = _resolve_handler_fn(function_name)(
             body,
             x_internal_token=extension_token_registry.mint(extension_id),
         )
@@ -1103,6 +1114,7 @@ _HANDLER_MODULES = {
     "internal_session_bridge_delegate_resolve": "session_bridge_api",
     "internal_agent_board_run_prompt": "session_bridge_api",
     "internal_marketplace": "internal_extension_api",
+    "internal_auto_tagging": "internal_extension_api",
 }
 for _credential_ui_action in (
     "internal_list_pending_credentials",
@@ -1129,11 +1141,8 @@ def _main_action(
     is resolved from `_HANDLER_MODULES`, defaulting to `main` for
     everything that has not been extracted into its own router yet.
     """
-    module_name = module_name or _HANDLER_MODULES.get(function_name, "main")
     async def invoke(payload: BaseModel) -> Any:
-        import importlib
-
-        fn = getattr(importlib.import_module(module_name), function_name)
+        fn = _resolve_handler_fn(function_name, module_name)
         kwargs: dict[str, Any] = {}
         if extension_role:
             extension_id = extension_store.extension_id_for_role(extension_role)

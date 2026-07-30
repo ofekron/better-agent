@@ -61,7 +61,7 @@ def _materialize_provider(
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
-        materialized.payload_files,
+        materialized.files,
     )
     return materialized.executable_path
 

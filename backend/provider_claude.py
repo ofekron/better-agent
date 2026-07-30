@@ -1129,7 +1129,7 @@ class ClaudeProvider(Provider):
         publish_execution_payload_manifest(
             run_dir,
             "claude-cli",
-            materialized_cli.payload_files,
+            materialized_cli.files,
         )
         sdk_root = None
         if launch.runner.frozen:

@@ -19,7 +19,7 @@ def _install_extension(
     if not paths.is_test_mode() or resolved_root != paths.ba_home().resolve():
         raise RuntimeError("extension fixture requires the engaged isolated test home")
 
-    manifest = extension_store.validate_manifest({
+    raw_manifest = {
         "kind": extension_store.MANIFEST_KIND,
         "id": extension_id,
         "name": extension_id,
@@ -30,13 +30,14 @@ def _install_extension(
         "entrypoints": {},
         "permissions": {},
         "marketplace": {},
-    })
+    }
+    extension_store.validate_manifest(raw_manifest)
     package = resolved_root / "extension-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
     package.mkdir(parents=True)
     (package / "better-agent-extension.json").write_text(
-        json.dumps(manifest),
+        json.dumps(raw_manifest),
         encoding="utf-8",
     )
     extension_store._install_from_package_dir(  # type: ignore[attr-defined]
