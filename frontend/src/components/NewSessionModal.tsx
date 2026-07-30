@@ -121,11 +121,13 @@ export type NewSessionCreationAction = "create" | "send" | "send-and-open";
 interface Props {
   open: boolean;
   onClose: () => void;
+  /** Returns whether the session was actually created/queued. `false` keeps
+   * the prompt draft so a failed create never loses the user's text. */
   onCreate: (
     config: SessionConfig,
     investigation: InvestigationContext | undefined,
     action: NewSessionCreationAction,
-  ) => void | Promise<void>;
+  ) => boolean | Promise<boolean>;
   defaultCwd: string;
   /** Existing projects (paths + names). Drives the project picker so
    * users don't have to type a path. Required so the modal can render
@@ -937,8 +939,8 @@ export function NewSessionModal({
       const ctx = investigation
         ? { ...investigation, prompt: promptOverride ?? editedPrompt, images: initialImages, files: initialFiles }
         : undefined;
-      await onCreate(config, ctx, action);
-      clearPromptDraft();
+      const created = await onCreate(config, ctx, action);
+      if (created) clearPromptDraft();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
     } finally {

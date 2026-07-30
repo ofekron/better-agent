@@ -154,7 +154,7 @@ import {
   type UiSelectionSnapshot,
 } from "./utils/uiSelection";
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
-import { isRetryableOfflineError } from "src/utils/offlineRequest";
+import { planSessionCreateFailure } from "src/utils/sessionCreateFailure";
 import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
@@ -5677,46 +5677,11 @@ function AppMain({
         return true;
       };
 
-      if (!config.fileEditEnabled) {
-        try {
-          const session = await createSession({
-            name: "",
-            clientSessionId: sessionId,
-            model: config.main.model,
-            cwd: config.cwd,
-            orchestrationMode: config.orchestrationMode,
-            providerId: config.main.providerId,
-            nodeId: config.nodeId,
-            reasoningEffort: config.main.reasoningEffort,
-            runner: config.main.runner,
-            permission: config.main.permission,
-            harnessProfileId: config.harnessProfileId || undefined,
-            folderId: config.folderId,
-          });
-          finishCreatedSession(session);
-        } catch (e) {
-          if (isRetryableOfflineError(e)) {
-            queueLocalFirstSession(
-              sessionId,
-              config,
-              initialPrompt,
-              images,
-              files,
-              initialPromptImages,
-              action,
-              connected ? "sending" : "offline",
-            );
-            return;
-          }
-          const msg = e instanceof Error ? e.message : String(e);
-          window.alert(msg);
-        }
-        return;
-      }
-
-      if (!connected) {
-        queueLocalFirstSession(sessionId, config, initialPrompt, images, files, initialPromptImages, action);
-        return;
+      // File-edit sessions need the backend to materialize a worktree, so a
+      // known-offline create is refused up front (queueLocalFirstSession
+      // alerts and keeps the draft) instead of burning a doomed POST.
+      if (config.fileEditEnabled && !connected) {
+        return queueLocalFirstSession(sessionId, config, initialPrompt, images, files, initialPromptImages, action);
       }
 
       try {
@@ -5727,8 +5692,9 @@ function AppMain({
           cwd: config.cwd,
           orchestrationMode: config.orchestrationMode,
           providerId: config.main.providerId,
-          fileEditEnabled: true,
-          fileEditPath: config.fileEditPath,
+          ...(config.fileEditEnabled
+            ? { fileEditEnabled: true, fileEditPath: config.fileEditPath }
+            : {}),
           nodeId: config.nodeId,
           reasoningEffort: config.main.reasoningEffort,
           runner: config.main.runner,
@@ -5736,17 +5702,31 @@ function AppMain({
           harnessProfileId: config.harnessProfileId || undefined,
           folderId: config.folderId,
         });
-        finishCreatedSession(session);
+        return finishCreatedSession(session);
       } catch (e) {
-        if (isRetryableOfflineError(e)) {
-          queueLocalFirstSession(sessionId, config, initialPrompt, images, files, initialPromptImages, action);
-          return;
+        const plan = planSessionCreateFailure(e, {
+          fileEditEnabled: config.fileEditEnabled,
+          timeoutMessage: t("app.createSessionTimeout"),
+        });
+        // Only non-file-edit transient failures queue; file-edit failures
+        // always alert with the real cause even while connected.
+        if (plan.kind === "queue-offline") {
+          return queueLocalFirstSession(
+            sessionId,
+            config,
+            initialPrompt,
+            images,
+            files,
+            initialPromptImages,
+            action,
+            connected ? "sending" : "offline",
+          );
         }
-        const msg = e instanceof Error ? e.message : String(e);
-        window.alert(msg);
+        window.alert(plan.message);
+        return false;
       }
     },
-    [applySessionMetadata, connected, createSession, flushDraftPatch, navigateToCreatedSession, persistInitialPromptForSession, queueLocalFirstSession, sendInitialPromptToSession],
+    [applySessionMetadata, connected, createSession, flushDraftPatch, navigateToCreatedSession, persistInitialPromptForSession, queueLocalFirstSession, sendInitialPromptToSession, t],
   );
 
 

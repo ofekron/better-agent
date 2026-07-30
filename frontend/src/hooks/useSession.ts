@@ -30,6 +30,10 @@ import { sameProjectPath } from "../utils/projectPath";
 
 export { sortSessionsForList };
 
+// File-edit session creation waits on server-side git worktree setup, which
+// can far exceed the default offline-detection timeout on a loaded machine.
+const FILE_EDIT_CREATE_TIMEOUT_MS = 60_000;
+
 export interface CreateSessionOptions {
   name: string;
   model: string;
@@ -1568,6 +1572,8 @@ export function useSession(authStatus?: string) {
       } = opts;
       startOp("session:create");
       try {
+        // File-edit creates materialize a git worktree server-side, which can
+        // far exceed the default offline-detection timeout under load.
         const res = await fetchWithTimeout(`${API}/api/sessions`, {
           method: "POST",
           credentials: "include",
@@ -1589,7 +1595,7 @@ export function useSession(authStatus?: string) {
             harness_profile_id: wireHarnessProfileId(harnessProfileId),
             folder_id: folderId || undefined,
           }),
-        });
+        }, fileEditEnabled ? FILE_EDIT_CREATE_TIMEOUT_MS : undefined);
         if (!res.ok) {
           throw await responseError(res);
         }

@@ -11,6 +11,7 @@ import {
 } from "vitest";
 
 import {
+  NEW_SESSION_PROMPT_TESTID,
   NewSessionModal,
   type NewSessionExtensionOption,
   type SessionConfig,
@@ -152,6 +153,51 @@ describe("NewSessionModal offline provider cache", () => {
       act(() => completeOp("session:create"));
       vi.unstubAllGlobals();
     }
+  });
+
+  it("keeps the prompt draft when create fails and clears it only on success", async () => {
+    cacheProviders([provider], provider.id);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    const onCreate = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const modal = await renderSettled(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(modal.container.querySelector(".ns-create-primary")).toBeTruthy();
+    });
+    const textarea = modal.getByTestId(NEW_SESSION_PROMPT_TESTID) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "my important prompt" } });
+    expect(localStorage.getItem("better-agent-new-session-prompt-draft")).toBe(
+      "my important prompt",
+    );
+
+    const createButton = modal.container.querySelector(".ns-create-primary") as HTMLButtonElement;
+
+    // Failed create (onCreate → false): the draft and textarea must survive.
+    await clickSettled(createButton);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("better-agent-new-session-prompt-draft")).toBe(
+      "my important prompt",
+    );
+    expect(textarea.value).toBe("my important prompt");
+
+    // Successful create: the draft is cleared.
+    await clickSettled(createButton);
+    expect(onCreate).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(localStorage.getItem("better-agent-new-session-prompt-draft")).toBeNull();
+    });
   });
 
   it("offers all create actions and remembers the last selection", async () => {

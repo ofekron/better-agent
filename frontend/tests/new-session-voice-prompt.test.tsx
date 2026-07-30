@@ -100,7 +100,7 @@ describe("new session modal voice mode", () => {
   it("dictates into the initial prompt and creates on the send command", async () => {
     cacheProviders([provider], provider.id);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
-    const onCreate = vi.fn();
+    const onCreate = vi.fn().mockResolvedValue(true);
 
     const modal = render(
       <NewSessionModal
