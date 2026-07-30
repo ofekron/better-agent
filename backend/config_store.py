@@ -1201,6 +1201,58 @@ def _migrate_schema_2_to_3(raw: dict) -> dict:
         state["default_runtime_profile_id"] = (
             default_profile.get("id") if default_profile else None
         )
+    # Internal-LLM assignments: v2 pinned {provider_id, runner, model,
+    # reasoning_effort}; v3 pins the (provider, runner) pair's profile.
+    # A pinned pair with no profile gets one (empty defaults) so the user's
+    # pin survives the migration; an unknown provider pin falls back to the
+    # default profile by dropping the reference.
+    converted_internal_llm: dict = {}
+    known_provider_ids = {p.get("id") for p in providers}
+    for task, entry in (state.get("internal_llm") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        new_entry = {
+            key: value
+            for key, value in entry.items()
+            if key in ("model", "reasoning_effort")
+            and isinstance(value, str)
+            and value.strip()
+        }
+        pinned_provider = entry.get("provider_id")
+        if pinned_provider in known_provider_ids:
+            provider = next(
+                p for p in providers if p.get("id") == pinned_provider
+            )
+            runner = str(entry.get("runner") or "").strip() or provider_runners.get(
+                pinned_provider, ""
+            )
+            pinned_profile = next(
+                (
+                    p for p in profiles
+                    if p.get("provider_id") == pinned_provider
+                    and p.get("runner") == runner
+                    and not p.get("deleted_at")
+                ),
+                None,
+            )
+            if pinned_profile is None and runner:
+                pinned_profile = {
+                    "id": str(uuid.uuid4()),
+                    "provider_id": pinned_provider,
+                    "runner": runner,
+                    "name": _default_runtime_profile_name(provider, runner),
+                    "default_model": "",
+                    "default_reasoning_effort": "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "deleted_at": None,
+                }
+                profiles.append(pinned_profile)
+            if pinned_profile is not None:
+                new_entry["runtime_profile_id"] = pinned_profile["id"]
+        if new_entry:
+            converted_internal_llm[task] = new_entry
+    state["internal_llm"] = converted_internal_llm
     state["schema_version"] = 3
     if provider_state_authority is None:
         # Migration paths with no pre-existing authority (legacy unversioned
@@ -1704,7 +1756,7 @@ _CORE_INTERNAL_LLM_TASKS = (
     "delegation_ask",
     "delegation_session_bridge",
 )
-_INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort", "runner")
+_INTERNAL_LLM_FIELDS = ("runtime_profile_id", "model", "reasoning_effort")
 
 
 def internal_llm_tasks() -> tuple[str, ...]:
@@ -1720,8 +1772,9 @@ def internal_llm_tasks() -> tuple[str, ...]:
 
 
 def _normalize_internal_llm(raw) -> dict:
-    """Coerce a raw mapping into `{task: {provider_id?, model?,
-    reasoning_effort?}}` with only known tasks and non-empty string fields."""
+    """Coerce a raw mapping into `{task: {runtime_profile_id?, model?,
+    reasoning_effort?}}` with only known tasks and non-empty string fields.
+    A missing field means "inherit" at resolve time."""
     out: dict[str, dict[str, str]] = {}
     if not isinstance(raw, dict):
         return out
@@ -1764,76 +1817,80 @@ def get_internal_llm_task(task_key: str) -> dict:
 
 
 def resolve_internal_llm(task_key: str) -> dict:
-    """Concrete `{provider_id, model, reasoning_effort, runner}` for a task.
+    """Concrete `{provider_id, model, reasoning_effort, runner,
+    runtime_profile_id}` for a task.
 
-    Each field falls back to the active provider's value when the assignment
-    doesn't pin it, so a fully-unconfigured task resolves to the active
-    provider + its default model + its default effort. `reasoning_effort`
-    is "" when the resolved provider has no effort support."""
+    Assignments reference a runtime profile; model/effort overrides layer on
+    top of the profile's defaults. Fallback chain when the assigned profile is
+    missing, deleted, or its provider unavailable: default profile → the
+    active provider's preferred live profile. `reasoning_effort` is "" when
+    the resolved provider has no effort support."""
     state = _load_state()
     raw_assignments = _normalize_internal_llm(state.get("internal_llm"))
     assignment = dict(raw_assignments.get(task_key, {})) if task_key in internal_llm_tasks() else {}
-    provider = None
-    provider_id = assignment.get("provider_id")
-    if provider_id:
-        provider = next(
-            (p for p in state.get("providers", []) if p.get("id") == provider_id),
-            None,
+    providers = state.get("providers", [])
+    profiles = state.get("runtime_profiles", [])
+
+    def _usable(profile_id: object) -> Optional[tuple[dict, dict]]:
+        candidate = next(
+            (p for p in profiles if p.get("id") == profile_id), None
         )
-        if provider and not _provider_available_for_state(state, provider):
-            provider = None
-            provider_id = None
-    if provider is None:
-        active_id = _runtime_default_provider_id(state)
+        if candidate is None or runtime_profile_is_deleted(candidate):
+            return None
         provider = next(
-            (p for p in state.get("providers", []) if p.get("id") == active_id),
-            None,
-        )
-        if provider and not _provider_available_for_state(state, provider):
-            provider = None
-        provider_id = provider["id"] if provider else None
-    profile = None
-    model = assignment.get("model") or ""
-    runner = ""
-    effort = ""
-    if provider:
-        requested_runner = assignment.get("runner") or ""
-        if not requested_runner:
-            preferred = _preferred_live_profile_in_state(state, provider)
-            requested_runner = preferred.get("runner") if preferred else ""
-        runner = runtime_profile.resolve_runner(provider, requested_runner)
-        profile = next(
             (
-                p for p in state.get("runtime_profiles", [])
-                if p.get("provider_id") == provider.get("id")
-                and p.get("runner") == runner
-                and not runtime_profile_is_deleted(p)
+                p for p in providers
+                if p.get("id") == candidate.get("provider_id")
             ),
             None,
         )
-        if not model:
-            model = str(profile.get("default_model") or "") if profile else ""
-        options = runtime_profile.reasoning_efforts(
-            {
-                **provider,
-                "reasoning_effort_options": reasoning_effort_options_for_provider(provider),
-            },
-            runner,
-            model=model,
+        if provider is None or not _provider_available_for_state(state, provider):
+            return None
+        return candidate, provider
+
+    resolved = _usable(assignment.get("runtime_profile_id"))
+    if resolved is None:
+        resolved = _usable(state.get("default_runtime_profile_id"))
+    if resolved is None:
+        active_id = _runtime_default_provider_id(state)
+        provider = next(
+            (p for p in providers if p.get("id") == active_id), None
         )
-        chosen = assignment.get("reasoning_effort")
-        if chosen in options:
-            effort = chosen
-        else:
-            default_effort = (
-                str(profile.get("default_reasoning_effort") or "") if profile else ""
-            )
-            effort = default_effort if default_effort in options else (options[0] if options else "")
+        if provider is not None and _provider_available_for_state(state, provider):
+            preferred = _preferred_live_profile_in_state(state, provider)
+            if preferred is not None:
+                resolved = (preferred, provider)
+    if resolved is None:
+        return {
+            "provider_id": None,
+            "model": assignment.get("model") or "",
+            "reasoning_effort": "",
+            "runner": "",
+            "runtime_profile_id": None,
+        }
+    profile, provider = resolved
+    runner = profile.get("runner") or ""
+    model = assignment.get("model") or str(profile.get("default_model") or "")
+    options = runtime_profile.reasoning_efforts(
+        {
+            **provider,
+            "reasoning_effort_options": reasoning_effort_options_for_provider(provider),
+        },
+        runner,
+        model=model,
+    )
+    chosen = assignment.get("reasoning_effort")
+    if chosen in options:
+        effort = chosen
+    else:
+        default_effort = str(profile.get("default_reasoning_effort") or "")
+        effort = default_effort if default_effort in options else (options[0] if options else "")
     return {
-        "provider_id": provider_id,
+        "provider_id": provider.get("id"),
         "model": model,
         "reasoning_effort": effort,
         "runner": runner,
+        "runtime_profile_id": profile.get("id"),
     }
 
 

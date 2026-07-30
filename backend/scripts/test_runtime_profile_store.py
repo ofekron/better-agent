@@ -436,6 +436,60 @@ def test_installation_selection_seeds_profile() -> None:
     assert live[0]["runner"] in provider["runner_options"]
 
 
+def test_v2_internal_llm_assignment_migrates_to_profile_ref() -> None:
+    config_path = config_store._config_path()
+    raw = json.loads(Path(config_path).read_text())
+    v2 = copy.deepcopy(raw)
+    v2["schema_version"] = 2
+    profiles_by_provider = {
+        p["provider_id"]: p for p in v2.pop("runtime_profiles") if not p["deleted_at"]
+    }
+    v2.pop("default_runtime_profile_id")
+    v2.pop("deleted_providers")
+    pinned_provider = None
+    pinned_runner = None
+    for provider in v2["providers"]:
+        profile = profiles_by_provider.get(provider["id"])
+        provider["runner"] = profile["runner"] if profile else "native"
+        provider["default_model"] = profile["default_model"] if profile else ""
+        provider["default_reasoning_effort"] = (
+            profile["default_reasoning_effort"] if profile else ""
+        )
+        if pinned_provider is None:
+            pinned_provider = provider["id"]
+            pinned_runner = provider["runner"]
+    v2["internal_llm"] = {
+        "default_session": {
+            "provider_id": pinned_provider,
+            "runner": pinned_runner,
+            "model": "pinned-model",
+        }
+    }
+    v2["provider_state_authority"] = config_store.provider_sync_authority.new_authority(
+        v2["default_provider_id"], v2["providers"]
+    )
+    Path(config_path).write_text(json.dumps(v2))
+    _reset_cache()
+    try:
+        migrated = config_store.get_internal_llm_assignments()
+        entry = migrated.get("default_session") or {}
+        expected_profile = config_store.find_live_runtime_profile(
+            pinned_provider, pinned_runner
+        )
+        assert expected_profile is not None
+        assert entry.get("runtime_profile_id") == expected_profile["id"]
+        assert entry.get("model") == "pinned-model"
+        assert "provider_id" not in entry and "runner" not in entry
+        resolved = config_store.resolve_internal_llm("default_session")
+        assert resolved["provider_id"] == pinned_provider
+        assert resolved["runner"] == pinned_runner
+        assert resolved["model"] == "pinned-model"
+        assert resolved["runtime_profile_id"] == expected_profile["id"]
+    finally:
+        Path(config_path).write_text(json.dumps(raw))
+        _reset_cache()
+
+
 def main() -> int:
     tests = [
         test_seeded_state_has_profiles,
@@ -452,6 +506,7 @@ def main() -> int:
         test_deleting_deleted_tombstone_activation_fails,
         test_provider_deletion_cascade_and_graveyard,
         test_installation_selection_seeds_profile,
+        test_v2_internal_llm_assignment_migrates_to_profile_ref,
     ]
     try:
         for test in tests:

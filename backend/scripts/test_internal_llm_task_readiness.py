@@ -135,13 +135,17 @@ def run() -> None:
         "name": "api-key-assigned",
         "kind": "codex",
         "mode": "subscription",
-        "default_model": "gpt-test",
     })
     api_provider_id = api_provider["id"]
+    api_profile = config_store.add_runtime_profile({
+        "provider_id": api_provider_id,
+        "runner": api_provider["runner_options"][0],
+        "default_model": "gpt-test",
+    })
     _set_provider_fields(api_provider_id, mode="api_key")
     config_store.set_internal_llm_assignments({
         "requirement_analysis": {
-            "provider_id": api_provider_id,
+            "runtime_profile_id": api_profile["id"],
             "model": "",
             "reasoning_effort": "",
         }
@@ -164,7 +168,7 @@ def run() -> None:
     )
     config_store.set_internal_llm_assignments({
         "requirement_analysis": {
-            "provider_id": "missing-provider",
+            "runtime_profile_id": "missing-profile",
             "model": "",
             "reasoning_effort": "",
         }
@@ -183,13 +187,24 @@ def run() -> None:
     # Source options the same way resolve_internal_llm does (runner+model aware),
     # not the kind-only config_store helper, so the chosen effort is one the
     # resolver will actually preserve.
-    resolved_runner = runtime_profile.resolve_runner(default_raw, "")
-    resolved_model = default_raw.get("default_model") or ""
-    options = runtime_profile.reasoning_efforts(default_raw, resolved_runner, model=resolved_model)
+    default_profile = config_store.get_default_runtime_profile()
+    assert default_profile is not None
+    resolved_runner = default_profile["runner"]
+    resolved_model = default_profile["default_model"] or ""
+    options = runtime_profile.reasoning_efforts(
+        {
+            **default_raw,
+            "reasoning_effort_options": (
+                config_store.reasoning_effort_options_for_provider(default_raw)
+            ),
+        },
+        resolved_runner,
+        model=resolved_model,
+    )
     chosen_effort = options[0] if options else "xhigh"
     config_store.set_internal_llm_assignments({
         "default_session": {
-            "provider_id": default_provider_id,
+            "runtime_profile_id": default_profile["id"],
             "model": "",
             "reasoning_effort": chosen_effort,
         }
