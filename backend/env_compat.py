@@ -32,6 +32,16 @@ def dual_env(legacy_name: str, value: object) -> dict[str, str]:
     }
 
 
+def dual_env_raw(legacy_name: str, value: object) -> dict[str, object]:
+    """Like `dual_env` but keeps the value as-is. For typed hydration
+    placeholders (e.g. the runner-operation-broker ref) that must survive as
+    dicts until runner-side hydration replaces them."""
+    return {
+        agent_env_name(legacy_name): value,
+        legacy_name: value,
+    }
+
+
 def dual_env_many(values: dict[str, object]) -> dict[str, str]:
     env: dict[str, str] = {}
     for legacy_name, value in values.items():

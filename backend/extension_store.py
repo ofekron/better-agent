@@ -29,7 +29,7 @@ from urllib.parse import quote, urlparse
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from env_compat import dual_env_many, get_env
+from env_compat import dual_env_many, dual_env_raw, get_env
 from extension_identifiers import (
     EXTENSION_ID_RE as _ID_RE,
     EXTENSION_SETTING_KEY_RE as _SETTING_KEY_RE,
@@ -6539,7 +6539,24 @@ def _module_declares_build_server(module_name: str) -> bool:
     return "def build_server(" in source
 
 
-def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
+def _runtime_broker_value(inputs: dict[str, Any]) -> Any:
+    """Per-run operation-broker address for a server/launcher env.
+
+    Runtime contexts (runner-side rebuilds, the extension_mcp_launcher
+    subprocess) carry the real address in the process env. The backend
+    structural-plan build has none — the broker only exists once the runner
+    starts its host — so the plan source threads a hydration placeholder
+    through inputs["runtime_broker"] and `hydrate_runner_operation_broker`
+    swaps in the real address runner-side. Snapshotting get_env alone would
+    freeze an explicit empty broker into the env, overriding inheritance and
+    failing every brokered tools/call with "runtime broker is unavailable"."""
+    address = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
+    if address:
+        return address
+    return inputs.get("runtime_broker") or ""
+
+
+def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, Any]:
     backend_url = str(
         inputs.get("backend_url")
         or get_env("BETTER_CLAUDE_BACKEND_URL")
@@ -6565,9 +6582,8 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         if str(item or "").strip()
     ]
     provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
-    return dual_env_many({
+    env = dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_RUNTIME_BROKER": get_env("BETTER_CLAUDE_RUNTIME_BROKER"),
         "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
         "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
         "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
@@ -6587,6 +6603,10 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
             sort_keys=True,
         ),
     })
+    # Raw merge: the broker value may be a typed hydration placeholder dict
+    # that dual_env_many would stringify.
+    env.update(dual_env_raw("BETTER_CLAUDE_RUNTIME_BROKER", _runtime_broker_value(inputs)))
+    return env
 
 
 def resolve_native_mcp_server_config(
@@ -6655,12 +6675,16 @@ def _runtime_mcp_server_config_for_item(
     internal_token = ""
     base_env = dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_RUNTIME_BROKER": get_env("BETTER_CLAUDE_RUNTIME_BROKER"),
         "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
         "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
         "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
         "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
     })
+    # Raw merge: the broker value may be a typed hydration placeholder dict
+    # that dual_env_many would stringify.
+    base_env.update(
+        dual_env_raw("BETTER_CLAUDE_RUNTIME_BROKER", _runtime_broker_value(inputs))
+    )
     if (
         manifest["id"] == extension_id_for_role('requirements')
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
@@ -6805,7 +6829,7 @@ def _mcp_item_available_for_inputs(
         or "http://localhost:8000"
     ).strip()
     internal_token = str(inputs.get("internal_token") or "").strip()
-    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
+    runtime_broker = _runtime_broker_value(inputs)
     launcher_can_mint_token = (
         bool(inputs.get("extension_mcp_launcher_context"))
         and bool(explicit_backend_url)

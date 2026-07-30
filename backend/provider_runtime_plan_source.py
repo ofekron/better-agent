@@ -12,6 +12,7 @@ from provider_runtime_capability_model import (
     normalize_plan,
 )
 from provider_runtime_plan_hydration import (
+    RUNNER_OPERATION_BROKER_REF as _RUNNER_OPERATION_BROKER_REF,
     apply_runtime_hydration,
     capture_runtime_hydration,
 )
@@ -19,7 +20,6 @@ from provider_manifest import artifact_family_kinds
 
 
 _FAMILIES = artifact_family_kinds()
-_RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|auth|authorization|credential|password|secret|token)($|_)",
 )
@@ -380,6 +380,12 @@ def _structural_provider_runtime_plan(
     if type(inputs) is not dict or provider_kind not in _FAMILIES:
         raise ExecutionContractError("invalid provider runtime plan source")
     frozen_inputs = _json_copy(inputs, label="provider runtime inputs")
+    # The per-run operation-broker address only exists once the runner starts
+    # its host; extension server configs built here carry this placeholder so
+    # `hydrate_runner_operation_broker` swaps in the real address runner-side
+    # (snapshotting the backend's own — absent — env here would freeze an
+    # explicit empty broker into every brokered server env).
+    frozen_inputs["runtime_broker"] = _RUNNER_OPERATION_BROKER_REF
     bare = bool(frozen_inputs.get("bare_config"))
     user_facing = bool(frozen_inputs.get("user_facing"))
 

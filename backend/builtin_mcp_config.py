@@ -8,7 +8,8 @@ from typing import Any
 import extension_store
 import installation_profile
 import harness_run_projection
-from env_compat import dual_env_many, get_env
+from env_compat import dual_env_many, dual_env_raw, get_env
+from provider_runtime_plan_hydration import RUNNER_OPERATION_BROKER_REF
 
 
 def _with_sdk_pythonpath(env: dict[str, Any]) -> dict[str, Any]:
@@ -121,10 +122,7 @@ def _communicate_server_config(
 
 
 def _runtime_broker_env(runtime_broker: Any) -> dict[str, Any]:
-    return {
-        "BETTER_AGENT_RUNTIME_BROKER": runtime_broker,
-        "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
-    }
+    return dual_env_raw("BETTER_CLAUDE_RUNTIME_BROKER", runtime_broker)
 
 
 def with_builtin_mcp_servers(
@@ -163,7 +161,7 @@ def with_builtin_mcp_servers(
     )
     if broker and (
         type(broker) is not str
-        and broker != {"kind": "runner_operation_broker"}
+        and broker != RUNNER_OPERATION_BROKER_REF
     ):
         raise ValueError("runtime broker reference is invalid")
     cwd = str(inputs.get("cwd") or "")

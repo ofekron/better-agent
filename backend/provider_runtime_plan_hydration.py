@@ -7,6 +7,12 @@ from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError
 
+# Placeholder for the per-run operation-broker address, unknowable before the
+# runner starts its host; `hydrate_runner_operation_broker` swaps it for the
+# real address runner-side. Any env value equal to this dict that survives to
+# an actual spawn is a wiring bug and fails loudly (env values must be str).
+RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
+
 
 def hydration_key(reference: Mapping[str, Any]) -> str:
     return hashlib.sha256(
@@ -104,6 +110,7 @@ def apply_runtime_hydration(
 
 
 __all__ = [
+    "RUNNER_OPERATION_BROKER_REF",
     "apply_runtime_hydration",
     "capture_runtime_hydration",
     "hydration_key",
