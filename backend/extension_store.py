@@ -1055,6 +1055,31 @@ def _install_synced_artifact(
     current_source = record.get("source")
     source = copy.deepcopy(current_source) if isinstance(current_source, dict) else {}
     target = _install_root() / extension_id / "versions" / actual_sha
+    current_record = current_records.get(extension_id)
+    current_record_source = (
+        current_record.get("source")
+        if isinstance(current_record, dict)
+        else {}
+    )
+    if (
+        isinstance(current_record_source, dict)
+        and current_record_source.get("synced_artifact_sha256") == actual_sha
+        and _package_published(target)
+    ):
+        manifest = validate_manifest(json.loads(
+            (target / "better-agent-extension.json").read_text(encoding="utf-8")
+        ))
+        if manifest["id"] != extension_id:
+            raise ExtensionError(f"sync artifact id mismatch for {extension_id}")
+        _reject_legacy_authority_replacement(current_record, manifest)
+        _validate_declared_files(manifest, target)
+        record["manifest"] = manifest
+        record["smoke_test"] = copy.deepcopy(current_record.get("smoke_test"))
+        source["install_path"] = str(target)
+        source.setdefault("commit_sha", str(artifact.get("commit_sha") or actual_sha))
+        source["synced_artifact_sha256"] = actual_sha
+        record["source"] = source
+        return
     staging = target.parent / f".sync-staging-{uuid.uuid4().hex}"
     try:
         _safe_extract_tar_gz(archive, staging)
