@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 
 import auth_routes
 import config_store
+import extension_store
 import runtime_profile
 from hot_path_executor import hot_path
 from i18n import t
@@ -73,6 +74,17 @@ def api_optional_provision_prompt(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise HTTPException(status_code=400, detail="provision_prompt must be a non-empty string")
     return value
+
+
+def api_optional_pool_affinity_key(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    key = str(value).strip()
+    if not key:
+        return ""
+    if len(key) > 200:
+        raise HTTPException(status_code=400, detail="pool_affinity_key must be at most 200 characters")
+    return key
 
 
 _REQUIREMENTS_PROCESSOR_PROFILE = "requirements_processor"
@@ -360,3 +372,53 @@ def validate_provider_default_reasoning_effort(
             detail=f"{name} does not support reasoning_effort={parsed!r}",
         )
     return parsed
+
+
+def api_extra_mcp_servers(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="mcp_servers must be a list")
+    names = []
+    for item in value:
+        name = str(item).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="mcp_servers entries must be non-empty strings")
+        names.append(name)
+    names = list(dict.fromkeys(names))
+    known = extension_store.all_extension_mcp_server_names()
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown extension MCP servers: {', '.join(unknown)}",
+        )
+    return names
+
+
+def api_disallowed_tools(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="disallowed_tools must be a list")
+    tools = []
+    for item in value:
+        tool = str(item).strip()
+        if not tool:
+            raise HTTPException(status_code=400, detail="disallowed_tools entries must be non-empty strings")
+        tools.append(tool)
+    return list(dict.fromkeys(tools))
+
+
+def api_disabled_builtin_extensions(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="disabled_builtin_extensions must be a list")
+    extensions = []
+    for item in value:
+        extension_id = str(item).strip()
+        if not extension_id:
+            raise HTTPException(status_code=400, detail="disabled_builtin_extensions entries must be non-empty strings")
+        extensions.append(extension_id)
+    return list(dict.fromkeys(extensions))

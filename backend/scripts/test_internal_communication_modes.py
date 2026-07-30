@@ -14,7 +14,11 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import internal_extension_api  # noqa: E402
+import internal_guards  # noqa: E402
+import internal_messaging_api  # noqa: E402
 import main  # noqa: E402
+import worker_pools_api  # noqa: E402
 from stores import worker_store  # noqa: E402
 from communication_modes import (  # noqa: E402
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
@@ -53,11 +57,11 @@ class _Coordinator:
 async def _run() -> None:
     from fastapi import BackgroundTasks
 
-    original_coordinator = main.coordinator
-    original_validate = main._validate_optional_run_selector
-    original_resolve = main._resolve_communication_target
-    original_pick_pool_worker = main._pick_pool_worker_for_sender
-    original_enqueue_pool_message = main._enqueue_worker_pool_message
+    original_coordinator = internal_messaging_api._coordinator_ref
+    original_validate = internal_messaging_api._validate_optional_run_selector
+    original_resolve = internal_messaging_api._resolve_communication_target
+    original_pick_pool_worker = worker_pools_api._pick_pool_worker_for_sender
+    original_enqueue_pool_message = worker_pools_api._enqueue_worker_pool_message
     coordinator = _Coordinator()
     pool_enqueues: list[dict] = []
 
@@ -75,13 +79,13 @@ async def _run() -> None:
         return {"item": {"id": "pool-item-1"}}
 
     try:
-        main.coordinator = coordinator  # type: ignore[assignment]
-        main._validate_optional_run_selector = validate  # type: ignore[assignment]
-        main._resolve_communication_target = resolve  # type: ignore[assignment]
-        main._pick_pool_worker_for_sender = pick_pool_worker  # type: ignore[assignment]
-        main._enqueue_worker_pool_message = enqueue_pool_message  # type: ignore[assignment]
+        internal_messaging_api._coordinator_ref = coordinator  # type: ignore[assignment]
+        internal_messaging_api._validate_optional_run_selector = validate  # type: ignore[assignment]
+        internal_messaging_api._resolve_communication_target = resolve  # type: ignore[assignment]
+        worker_pools_api._pick_pool_worker_for_sender = pick_pool_worker  # type: ignore[assignment]
+        worker_pools_api._enqueue_worker_pool_message = enqueue_pool_message  # type: ignore[assignment]
 
-        await main._handle_internal_mssg({
+        await internal_messaging_api._handle_internal_mssg({
                 "sender_session_id": "sender-1",
                 "target_session_id": "target-1",
                 "message": "fire and forget",
@@ -99,7 +103,7 @@ async def _run() -> None:
             "value": "target-1",
         }
 
-        await main._handle_internal_mssg({
+        await internal_messaging_api._handle_internal_mssg({
                 "sender_session_id": "sender-1",
                 "target_worker_id": "worker-session-1",
                 "message": "worker target",
@@ -112,7 +116,7 @@ async def _run() -> None:
         }
 
         background_tasks = BackgroundTasks()
-        await main._handle_internal_ask({
+        await internal_messaging_api._handle_internal_ask({
             "sender_session_id": "sender-1",
             "target_session_id": "target-1",
             "message": "continue",
@@ -128,7 +132,7 @@ async def _run() -> None:
             "session_id": "target-1",
         }
 
-        await main._handle_internal_ask({
+        await internal_messaging_api._handle_internal_ask({
             "sender_session_id": "sender-1",
             "target_worker_pool": "review",
             "message": "continue when a worker is free",
@@ -136,7 +140,7 @@ async def _run() -> None:
         })
         assert pool_enqueues[-1]["expect_inbox_response"] is True
 
-        await main._handle_internal_ask({
+        await internal_messaging_api._handle_internal_ask({
             "sender_session_id": "sender-1",
             "target_session_id": "target-1",
             "message": "wait",
@@ -149,7 +153,7 @@ async def _run() -> None:
         }
         assert coordinator.calls[-1]["user_initiated"] is False
 
-        await main._handle_internal_ask({
+        await internal_messaging_api._handle_internal_ask({
             "sender_session_id": "sender-1",
             "target_session_id": "target-1",
             "message": "user-facing QA turn",
@@ -158,7 +162,7 @@ async def _run() -> None:
         })
         assert coordinator.calls[-1]["user_initiated"] is False
 
-        await main._handle_internal_ask(
+        await internal_messaging_api._handle_internal_ask(
             {
                 "sender_session_id": "sender-1",
                 "target_session_id": "target-1",
@@ -169,11 +173,11 @@ async def _run() -> None:
         )
         assert coordinator.calls[-1]["user_initiated"] is True
     finally:
-        main.coordinator = original_coordinator
-        main._validate_optional_run_selector = original_validate  # type: ignore[assignment]
-        main._resolve_communication_target = original_resolve  # type: ignore[assignment]
-        main._pick_pool_worker_for_sender = original_pick_pool_worker  # type: ignore[assignment]
-        main._enqueue_worker_pool_message = original_enqueue_pool_message  # type: ignore[assignment]
+        internal_messaging_api._coordinator_ref = original_coordinator
+        internal_messaging_api._validate_optional_run_selector = original_validate  # type: ignore[assignment]
+        internal_messaging_api._resolve_communication_target = original_resolve  # type: ignore[assignment]
+        worker_pools_api._pick_pool_worker_for_sender = original_pick_pool_worker  # type: ignore[assignment]
+        worker_pools_api._enqueue_worker_pool_message = original_enqueue_pool_message  # type: ignore[assignment]
 
 
 def test_internal_communication_modes() -> None:
@@ -194,9 +198,9 @@ def test_testape_qa_ask_requires_runtime_capability_and_exact_session(
     monkeypatch.delenv("BETTER_AGENT_TESTAPE_QA_RUNTIME_ID", raising=False)
     monkeypatch.setattr(testape_qa_runtime, "_expected_token", None)
     monkeypatch.setattr(testape_qa_runtime, "_runtime_id", None)
-    monkeypatch.setattr(main, "_internal_authority_is_valid", lambda: True)
+    monkeypatch.setattr(internal_guards, "authority_is_valid", lambda: True)
     with pytest.raises(main.HTTPException) as disabled:
-        asyncio.run(main.internal_testape_qa_ask(body, "internal", "qa"))
+        asyncio.run(internal_messaging_api.internal_testape_qa_ask(body, "internal", "qa"))
     assert disabled.value.status_code == 403
 
     monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_TOKEN", "qa")
@@ -212,8 +216,8 @@ def test_testape_qa_ask_requires_runtime_capability_and_exact_session(
         captured["trusted"] = trusted_user_initiated
         return {"success": True}
 
-    monkeypatch.setattr(main, "_handle_internal_ask", handle)
-    assert asyncio.run(main.internal_testape_qa_ask(body, "internal", "qa")) == {
+    monkeypatch.setattr(internal_messaging_api, "_handle_internal_ask", handle)
+    assert asyncio.run(internal_messaging_api.internal_testape_qa_ask(body, "internal", "qa")) == {
         "success": True,
     }
     assert captured == {
@@ -222,7 +226,7 @@ def test_testape_qa_ask_requires_runtime_capability_and_exact_session(
     }
 
     with pytest.raises(main.HTTPException) as foreign:
-        asyncio.run(main.internal_testape_qa_ask(
+        asyncio.run(internal_messaging_api.internal_testape_qa_ask(
             {**body, "target_session_id": "foreign"},
             "internal",
             "qa",
@@ -230,7 +234,7 @@ def test_testape_qa_ask_requires_runtime_capability_and_exact_session(
     assert foreign.value.status_code == 403
 
     with pytest.raises(main.HTTPException) as pooled:
-        asyncio.run(main.internal_testape_qa_ask(
+        asyncio.run(internal_messaging_api.internal_testape_qa_ask(
             {
                 "sender_session_id": "sender",
                 "target_worker_pool": "pool",
@@ -249,7 +253,7 @@ def test_testape_qa_ask_uses_durable_idempotent_operation(monkeypatch) -> None:
     monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_RUNTIME_ID", "runtime")
     monkeypatch.setattr(testape_qa_runtime, "_expected_token", None)
     monkeypatch.setattr(testape_qa_runtime, "_runtime_id", None)
-    monkeypatch.setattr(main, "_internal_authority_is_valid", lambda: True)
+    monkeypatch.setattr(internal_guards, "authority_is_valid", lambda: True)
     testape_qa_runtime.claim("runtime", "sender")
     testape_qa_runtime.claim("runtime", "target")
     captured = {}
@@ -258,7 +262,7 @@ def test_testape_qa_ask_uses_durable_idempotent_operation(monkeypatch) -> None:
         captured.update(operation=operation, body=body)
         return {"success": True, "id": body["_mcp_job_id"], "ready": False}
 
-    monkeypatch.setattr(main, "_maybe_run_core_mcp_job", durable)
+    monkeypatch.setattr(internal_extension_api, "maybe_run_core_mcp_job", durable)
     body = {
         "sender_session_id": "sender",
         "target_session_id": "target",
@@ -266,7 +270,7 @@ def test_testape_qa_ask_uses_durable_idempotent_operation(monkeypatch) -> None:
         "_mcp_job_id": "stable-job",
     }
     result = asyncio.run(
-        main.internal_testape_qa_ask(body, "internal", "qa")
+        internal_messaging_api.internal_testape_qa_ask(body, "internal", "qa")
     )
 
     assert result == {"success": True, "id": "stable-job", "ready": False}
@@ -274,9 +278,9 @@ def test_testape_qa_ask_uses_durable_idempotent_operation(monkeypatch) -> None:
         "operation": "testape-qa-ask",
         "body": {**body, "_testape_qa_runtime_id": "runtime"},
     }
-    assert "testape-qa-ask" in main._CORE_MCP_RESUMABLE_OPERATIONS
-    assert main._core_mcp_job_handler("testape-qa-ask") is (
-        main._handle_internal_testape_qa_ask
+    assert "testape-qa-ask" in internal_extension_api._CORE_MCP_RESUMABLE_OPERATIONS
+    assert internal_extension_api._core_mcp_job_handler("testape-qa-ask") is (
+        internal_messaging_api._handle_internal_testape_qa_ask
     )
 
 
@@ -287,10 +291,12 @@ def test_pool_enqueue_endpoint_maps_unavailable_inbox_to_400(monkeypatch) -> Non
         orchestration_mode="native",
         disallowed_tools=["inbox"],
     )
-    monkeypatch.setattr(main, "_require_team_orchestration_internal", lambda _token: None)
+    monkeypatch.setattr(
+        worker_pools_api.internal_guards, "require_role_internal", lambda _role: None
+    )
 
     try:
-        asyncio.run(main.internal_enqueue_worker_pool_prompt(
+        asyncio.run(worker_pools_api.internal_enqueue_worker_pool_prompt(
             body={
                 "tag": "review",
                 "sender_session_id": sender["id"],
@@ -327,7 +333,7 @@ def test_pool_dispatch_rejects_inbox_blocked_target(monkeypatch) -> None:
     queued = iter((item, None))
     failures = []
     submitted = []
-    original_coordinator = main.coordinator
+    original_coordinator = worker_pools_api._coordinator_ref
     coordinator = main.Coordinator()
 
     monkeypatch.setattr(worker_store, "peek_pool_task", lambda _tag: next(queued))
@@ -337,7 +343,7 @@ def test_pool_dispatch_rejects_inbox_blocked_target(monkeypatch) -> None:
         lambda _tag, _item_id, error: failures.append(error) or {"action": "failed"},
     )
     monkeypatch.setattr(
-        main,
+        worker_pools_api,
         "_pick_pool_worker_for_sender",
         lambda *_args: {"agent_session_id": target["id"]},
     )
@@ -348,10 +354,10 @@ def test_pool_dispatch_rejects_inbox_blocked_target(monkeypatch) -> None:
 
     monkeypatch.setattr(coordinator, "broadcast_workers_changed", broadcast_workers_changed)
     try:
-        main.coordinator = coordinator
-        asyncio.run(main._process_worker_pool_queue("review"))
+        worker_pools_api._coordinator_ref = coordinator
+        asyncio.run(worker_pools_api._process_worker_pool_queue("review"))
     finally:
-        main.coordinator = original_coordinator
+        worker_pools_api._coordinator_ref = original_coordinator
 
     assert failures == ["async response requires inbox for the target session"]
     assert submitted == []

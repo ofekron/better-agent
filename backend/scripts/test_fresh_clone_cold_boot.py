@@ -36,6 +36,7 @@ import _test_installation  # noqa: E402
 _test_installation.activate(Path(_home), provider="claude")
 
 import main  # noqa: E402
+import frontend_mount  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 _RESTART_WAIT_SECONDS = 30.0
@@ -60,7 +61,7 @@ def run() -> None:
     dist_dir = Path(dist_root) / "dist"
     dist_index = dist_dir / "index.html"
     assert not dist_dir.exists()
-    main.frontend_dist_dir = lambda: dist_dir
+    frontend_mount.frontend_dist_dir = lambda: dist_dir
 
     # The watcher's restart request is the one real side effect we replace: the
     # real call SIGTERMs this process. A threading.Event lets the sync test body
@@ -72,13 +73,13 @@ def run() -> None:
         restart_calls.append(request_id)
         restart_requested.set()
 
-    main._trigger_supervisor_restart = _fake_restart
+    frontend_mount._trigger_supervisor_restart = _fake_restart
 
-    main._deferred_startup_tasks.clear()
-    main._cold_build_watcher_armed = False
+    frontend_mount._deferred_startup_tasks.clear()
+    frontend_mount._cold_build_watcher_armed = False
 
-    main.mount_frontend(main.app)
-    assert len(main._deferred_startup_tasks) == 1, "cold clone must arm the watcher"
+    frontend_mount.mount_frontend(main.app)
+    assert len(frontend_mount._deferred_startup_tasks) == 1, "cold clone must arm the watcher"
 
     # Real ASGI lifespan: entering the context sends `lifespan.startup` and
     # waits for `lifespan.startup.complete`; a boot failure raises here.

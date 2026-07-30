@@ -17,6 +17,7 @@ if _BACKEND not in sys.path:
 from event_ingester import event_ingester  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import main as main_mod  # noqa: E402
+import session_detail_api  # noqa: E402
 from _test_request import http_request  # noqa: E402
 
 
@@ -60,7 +61,7 @@ def _fresh_session_with_render_event() -> tuple[str, str]:
 
 def test_non_render_event_keeps_detail_cache_valid() -> bool:
     sid, _msg_id = _fresh_session_with_render_event()
-    key = main_mod._session_detail_response_cache_key_sync(
+    key = session_detail_api._session_detail_response_cache_key_sync(
         sid, msg_limit=50, exchange_count=None,
     )
     if key is None:
@@ -76,7 +77,7 @@ def test_non_render_event_keeps_detail_cache_valid() -> bool:
         msg_id=None,
     )
 
-    if not main_mod._session_detail_cached_key_still_current(
+    if not session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
     ):
         print("  non-render event invalidated detail cache")
@@ -86,7 +87,7 @@ def test_non_render_event_keeps_detail_cache_valid() -> bool:
 
 def test_render_event_invalidates_detail_cache() -> bool:
     sid, msg_id = _fresh_session_with_render_event()
-    key = main_mod._session_detail_response_cache_key_sync(
+    key = session_detail_api._session_detail_response_cache_key_sync(
         sid, msg_limit=50, exchange_count=None,
     )
     if key is None:
@@ -102,7 +103,7 @@ def test_render_event_invalidates_detail_cache() -> bool:
         msg_id=msg_id,
     )
 
-    if main_mod._session_detail_cached_key_still_current(
+    if session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
     ):
         print("  render event did not invalidate detail cache")
@@ -112,19 +113,19 @@ def test_render_event_invalidates_detail_cache() -> bool:
 
 def test_route_populates_reusable_semantic_cache_key() -> bool:
     sid, _msg_id = _fresh_session_with_render_event()
-    main_mod._session_detail_response_cache.clear()
-    main_mod._session_detail_response_cache_latest.clear()
+    session_detail_api._session_detail_response_cache.clear()
+    session_detail_api._session_detail_response_cache_latest.clear()
 
-    asyncio.run(main_mod.get_session(
+    asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         ))
     simple_key = (sid, 50, None)
-    key = main_mod._session_detail_response_cache_latest.get(simple_key)
+    key = session_detail_api._session_detail_response_cache_latest.get(simple_key)
     if not isinstance(key, tuple) or len(key) != 4:
         print(f"  route stored unexpected cache key: {key!r}")
         return False
-    if main_mod._session_detail_cache_get(key) is None:
+    if session_detail_api._session_detail_cache_get(key) is None:
         print("  route did not populate detail response cache")
         return False
 
@@ -136,17 +137,17 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
         source="test",
         msg_id=None,
     )
-    if not main_mod._session_detail_cached_key_still_current(
+    if not session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
     ):
         print("  route-populated key became stale after non-render event")
         return False
 
-    asyncio.run(main_mod.get_session(
+    asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         ))
-    if main_mod._session_detail_response_cache_latest.get(simple_key) != key:
+    if session_detail_api._session_detail_response_cache_latest.get(simple_key) != key:
         print("  second route read replaced reusable cache key")
         return False
     return True
@@ -154,11 +155,11 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
 
 def test_last_opened_invalidates_cached_detail_response() -> bool:
     sid, _msg_id = _fresh_session_with_render_event()
-    main_mod._session_detail_response_cache.clear()
-    main_mod._session_detail_response_cache_latest.clear()
+    session_detail_api._session_detail_response_cache.clear()
+    session_detail_api._session_detail_response_cache_latest.clear()
 
     before = _response_json(
-        asyncio.run(main_mod.get_session(
+        asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         )),
@@ -168,21 +169,21 @@ def test_last_opened_invalidates_cached_detail_response() -> bool:
         return False
 
     simple_key = (sid, 50, None)
-    old_key = main_mod._session_detail_response_cache_latest.get(simple_key)
+    old_key = session_detail_api._session_detail_response_cache_latest.get(simple_key)
     if not isinstance(old_key, tuple):
         print(f"  route stored unexpected cache key: {old_key!r}")
         return False
 
     opened_at = "2026-07-22T08:01:28.643495"
     session_manager.set_last_opened_at(sid, opened_at, return_session=False)
-    if main_mod._session_detail_cached_key_still_current(
+    if session_detail_api._session_detail_cached_key_still_current(
         old_key, sid, msg_limit=50, exchange_count=None,
     ):
         print("  last-opened mutation did not invalidate detail cache")
         return False
 
     after = _response_json(
-        asyncio.run(main_mod.get_session(
+        asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         )),

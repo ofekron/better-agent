@@ -24,7 +24,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import main as app_main  # noqa: E402
+import session_listing_api  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -50,7 +50,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [folderized_old, unfiled_new],
-                key=lambda s: app_main._session_list_sort_key(s, True, "updated_at"),
+                key=lambda s: session_listing_api._session_list_sort_key(s, True, "updated_at"),
                 reverse=True,
             )
         ]
@@ -64,7 +64,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [folderized_old, unfiled_new],
-                key=lambda s: app_main._session_filtered_sort_key(
+                key=lambda s: session_listing_api._session_filtered_sort_key(
                     s, folder_view=True, search="x", content_scores={}
                 ),
                 reverse=True,
@@ -81,7 +81,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [folderized_old, unfiled_new],
-                key=lambda s: app_main._session_list_sort_key(s, False, "updated_at"),
+                key=lambda s: session_listing_api._session_list_sort_key(s, False, "updated_at"),
                 reverse=True,
             )
         ]

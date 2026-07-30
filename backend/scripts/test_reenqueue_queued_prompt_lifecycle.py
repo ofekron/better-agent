@@ -16,6 +16,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import recovery  # noqa: E402
 import lifecycle_command_store  # noqa: E402
 import session_queue_projection  # noqa: E402
 
@@ -109,15 +110,15 @@ class _Coordinator:
 
 
 def main_test() -> int:
-    real_session_manager = main.session_manager
-    real_coordinator = main.coordinator
+    real_session_manager = recovery.session_manager
+    real_coordinator = recovery._coordinator_ref
     real_projection_list = session_queue_projection.list_queued_records
     real_projection_ensure = session_queue_projection.ensure_current_or_rebuild
     real_transition_for = lifecycle_command_store.transition_for
     fake_session_manager = _SessionManager()
     fake_coordinator = _Coordinator()
-    main.session_manager = fake_session_manager
-    main.coordinator = fake_coordinator
+    recovery.session_manager = fake_session_manager
+    recovery._coordinator_ref = fake_coordinator
     session_queue_projection.list_queued_records = (
         lambda **_kwargs: [fake_session_manager.session]
     )
@@ -125,7 +126,7 @@ def main_test() -> int:
     no_transition = lambda *_args: None
     lifecycle_command_store.transition_for = no_transition
     try:
-        rehydrated_session_ids = asyncio.run(main._re_enqueue_queued_prompts())
+        rehydrated_session_ids = asyncio.run(recovery._re_enqueue_queued_prompts())
         assert rehydrated_session_ids == {"sid"}
         assert fake_coordinator.start_processor_values == [False]
         assert len(fake_session_manager.updated) == 1
@@ -143,7 +144,7 @@ def main_test() -> int:
         lifecycle_command_store.transition_for = lambda *_args: {"status": "done"}
         try:
             retired_attempt = asyncio.run(
-                main._reconcile_queued_delivery_attempt(
+                recovery._reconcile_queued_delivery_attempt(
                     "sid", "q1", lifecycle_msg_id, 1,
                 )
             )
@@ -170,7 +171,7 @@ def main_test() -> int:
             finish_turn=finish_turn,
         )
         active_attempt = asyncio.run(
-            main._reconcile_queued_delivery_attempt(
+            recovery._reconcile_queued_delivery_attempt(
                 "sid", "q1", lifecycle_msg_id, 2,
             )
         )
@@ -182,8 +183,8 @@ def main_test() -> int:
         session_queue_projection.ensure_current_or_rebuild = real_projection_ensure
         session_queue_projection.list_queued_records = real_projection_list
         lifecycle_command_store.transition_for = real_transition_for
-        main.coordinator = real_coordinator
-        main.session_manager = real_session_manager
+        recovery._coordinator_ref = real_coordinator
+        recovery.session_manager = real_session_manager
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

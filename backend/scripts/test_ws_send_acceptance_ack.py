@@ -24,6 +24,7 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import ws_chat  # noqa: E402
 import auth  # noqa: E402
 import session_queue_projection  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -522,7 +523,7 @@ def duplicate_persisted_user_test(client: TestClient) -> bool:
         "client_id": client_id,
     })
     original_submit = main.coordinator.submit_prompt_async
-    original_emit_queued = main.emit_queued
+    original_emit_queued = ws_chat.emit_queued
     original_projection_get = session_queue_projection.get
     original_has_active_turn = main.coordinator.turn_manager.has_active_turn
     original_has_active_runs = main.coordinator.turn_manager.has_active_runs
@@ -538,7 +539,7 @@ def duplicate_persisted_user_test(client: TestClient) -> bool:
         queued_emits.append(kwargs)
 
     main.coordinator.submit_prompt_async = _unexpected_submit
-    main.emit_queued = _unexpected_emit_queued
+    ws_chat.emit_queued = _unexpected_emit_queued
     session_queue_projection.get = lambda _sid: None
     main.coordinator.turn_manager.has_active_turn = lambda _sid: False
     main.coordinator.turn_manager.has_active_runs = lambda _sid: False
@@ -561,7 +562,7 @@ def duplicate_persisted_user_test(client: TestClient) -> bool:
             )
     finally:
         main.coordinator.submit_prompt_async = original_submit
-        main.emit_queued = original_emit_queued
+        ws_chat.emit_queued = original_emit_queued
         session_queue_projection.get = original_projection_get
         main.coordinator.turn_manager.has_active_turn = original_has_active_turn
         main.coordinator.turn_manager.has_active_runs = original_has_active_runs

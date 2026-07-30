@@ -38,7 +38,7 @@ def test_queue_record_survives_until_user_message_persist() -> None:
 
 
 def test_invalid_promote_action_fails_closed() -> None:
-    websocket = _function_source(BACKEND / "main.py", "websocket_chat")
+    websocket = _function_source(BACKEND / "ws_chat.py", "websocket_chat")
     promote = websocket.split('elif msg_type == "promote_queued":', 1)[1]
     promote = promote.split('elif msg_type == "cancel_queued":', 1)[0]
     assert 'action = "interrupt"' not in promote

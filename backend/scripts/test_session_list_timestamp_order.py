@@ -71,7 +71,7 @@ def main() -> int:
             f"chronologically{'' if ok else f' — got {order[:2]}'}"
         )
 
-        import main as app_main  # noqa: E402
+        import session_listing_api  # noqa: E402
 
         selected_old = {
             "id": older,
@@ -92,7 +92,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [selected_old, unselected_new],
-                key=lambda s: app_main._session_list_sort_key(s, True, "updated_at"),
+                key=lambda s: session_listing_api._session_list_sort_key(s, True, "updated_at"),
                 reverse=True,
             )
         ]
@@ -105,7 +105,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [selected_old, unselected_new, pinned_old],
-                key=lambda s: app_main._session_list_sort_key(s, True, "updated_at"),
+                key=lambda s: session_listing_api._session_list_sort_key(s, True, "updated_at"),
                 reverse=True,
             )
         ]

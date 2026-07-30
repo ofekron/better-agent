@@ -19,6 +19,7 @@ paths.engage_test_home(_home)
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import main  # noqa: E402
+import frontend_mount  # noqa: E402
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -37,7 +38,7 @@ def run() -> None:
         def _guarded():
             raise HTTPException(status_code=404, detail="Machine nodes is not installed")
 
-        main.mount_frontend(app, dist_dir=dist_dir)
+        frontend_mount.mount_frontend(app, dist_dir=dist_dir)
         client = TestClient(app)
 
         r = client.get("/assets/missing-chunk-zzz.js")

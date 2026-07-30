@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import session_detail_api  # noqa: E402
 import session_store  # noqa: E402
 import session_manager as _sm_mod  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -88,7 +89,7 @@ def test_retry_preserves_previous_turn() -> bool:
     main.coordinator.submit_prompt_async = _record_submit
     try:
         body = asyncio.run(
-            main.rewind_and_retry(
+            session_detail_api.rewind_and_retry(
                 sid,
                 {"assistant_message_id": "a1"},
             )

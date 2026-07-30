@@ -81,8 +81,8 @@ def test_turn_cancel_sweep_is_sentinel_gated():
 
 def test_non_tty_shutdown_leaves_runners_alive():
     print("T4 non-TTY shutdown defaults to leaving runners alive")
-    src = _func_source("main.py", "_prompt_kill_runners")
-    _check(src is not None, "main.py defines _prompt_kill_runners")
+    src = _func_source("app_lifecycle.py", "_prompt_kill_runners")
+    _check(src is not None, "app_lifecycle.py defines _prompt_kill_runners")
     if src is None:
         return
     # The non-TTY `if not (...isatty...)` branch must assign
@@ -110,8 +110,8 @@ def test_non_tty_shutdown_leaves_runners_alive():
 
 def test_interactive_shutdown_requires_explicit_yes():
     print("T5 interactive shutdown only kills on explicit yes")
-    src = _func_source("main.py", "_prompt_kill_runners")
-    _check(src is not None, "main.py defines _prompt_kill_runners")
+    src = _func_source("app_lifecycle.py", "_prompt_kill_runners")
+    _check(src is not None, "app_lifecycle.py defines _prompt_kill_runners")
     if src is None:
         return
     _check('answer in ("y", "yes")' in src,

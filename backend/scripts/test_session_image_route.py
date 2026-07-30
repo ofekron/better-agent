@@ -14,7 +14,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from fastapi import HTTPException  # noqa: E402
-from main import resolve_session_image_path  # noqa: E402
+from session_detail_api import resolve_session_image_path  # noqa: E402
 from paths import ba_home  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"

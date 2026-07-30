@@ -1,4 +1,4 @@
-"""Regression lock for session read hot paths in main.py.
+"""Regression lock for session read hot paths in the API modules.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_main_hot_paths_use_lite_session_reads.py
@@ -12,18 +12,36 @@ from pathlib import Path
 
 
 BACKEND = Path(__file__).resolve().parents[1]
-MAIN = BACKEND / "main.py"
+SOURCES = [
+    BACKEND / "main.py",
+    BACKEND / "ws_chat.py",
+    BACKEND / "internal_messaging_api.py",
+    BACKEND / "internal_orchestration_api.py",
+    BACKEND / "internal_session_state_api.py",
+    BACKEND / "workers_api.py",
+    BACKEND / "worker_pools_api.py",
+    BACKEND / "user_input_api.py",
+    BACKEND / "schedules_api.py",
+    BACKEND / "session_detail_api.py",
+    BACKEND / "session_panels_api.py",
+    BACKEND / "file_editor_api.py",
+    BACKEND / "offline_actions_api.py",
+    BACKEND / "ops_api.py",
+    BACKEND / "recovery.py",
+]
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _functions_by_name(tree: ast.Module) -> dict[str, ast.AST]:
-    return {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+def _functions_by_name() -> dict[str, ast.AST]:
+    found: dict[str, ast.AST] = {}
+    for path in SOURCES:
+        tree = ast.parse(path.read_text(), filename=os.fspath(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                found.setdefault(node.name, node)
+    return found
 
 
 def _session_manager_calls(node: ast.AST, method: str) -> list[int]:
@@ -70,8 +88,7 @@ def _offloads_session_manager_call(node: ast.AST, method: str) -> bool:
 
 
 def _run() -> bool:
-    tree = ast.parse(MAIN.read_text(), filename=os.fspath(MAIN))
-    funcs = _functions_by_name(tree)
+    funcs = _functions_by_name()
     results: list[tuple[str, bool, str]] = []
 
     no_full_get = [

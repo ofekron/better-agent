@@ -21,6 +21,7 @@ paths.engage_test_home(HOME)
 
 import extension_jobs  # noqa: E402
 import main  # noqa: E402
+import ops_api  # noqa: E402
 import requirements_api  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 
@@ -54,7 +55,7 @@ async def _scenario() -> None:
         assert first["id"] == duplicate["id"]
         await asyncio.sleep(0)
         assert calls == [first["id"]]
-        assert main._has_restart_blocking_agent_work() is True
+        assert ops_api._has_restart_blocking_agent_work() is True
 
         try:
             await requirements_api.fire_processed_requirements_for_caller(

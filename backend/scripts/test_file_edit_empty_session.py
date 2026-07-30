@@ -18,7 +18,8 @@ if _BACKEND not in sys.path:
 
 import file_editor  # noqa: E402
 import config_store  # noqa: E402
-import main as main_api  # noqa: E402
+import main as main_api  # noqa: E402,F401  (import wires the app)
+import session_detail_api  # noqa: E402
 import models  # noqa: E402
 import render_stub  # noqa: E402
 import synthetic_messages  # noqa: E402
@@ -94,9 +95,9 @@ file_editor._require_fork_support = lambda provider_id: None  # type: ignore[ass
 config_store.get_provider = lambda provider_id: dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None  # type: ignore[assignment]
 models.available_models = lambda provider_id=None: ["test-model"] if provider_id == "test-provider" else []  # type: ignore[assignment]
 models.available_models_including_retired = models.available_models  # type: ignore[assignment]
-main_api._provider_for_required_model = lambda provider_id: dict(_FAKE_PROVIDER)  # type: ignore[assignment]
-main_api._provider_reasoning_effort = lambda *args, **kwargs: ""  # type: ignore[assignment]
-main_api._provider_permission = lambda provider_id, requested, *args, **kwargs: requested or {}  # type: ignore[assignment]
+session_detail_api._provider_for_required_model = lambda provider_id: dict(_FAKE_PROVIDER)  # type: ignore[assignment]
+session_detail_api._provider_reasoning_effort = lambda *args, **kwargs: ""  # type: ignore[assignment]
+session_detail_api._provider_permission = lambda provider_id, requested, *args, **kwargs: requested or {}  # type: ignore[assignment]
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -206,7 +207,7 @@ def test_empty_ask_appends_visible_operator_message() -> bool:
 def test_create_session_returns_visible_empty_ask() -> bool:
     d = _project("create_session")
     session = asyncio.run(
-        main_api.create_session(
+        session_detail_api.create_session(
             {
                 "name": "",
                 "model": "test-model",

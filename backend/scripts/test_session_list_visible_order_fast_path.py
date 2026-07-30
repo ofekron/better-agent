@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 
 import main  # noqa: E402
+import session_listing_api  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -50,14 +51,14 @@ def _filters() -> dict:
 def test_visible_order_page_uses_version_guarded_indexed_lookup() -> None:
     page = [{"id": "a"}, {"id": "b"}]
     with mock.patch.object(session_store, "summary_index_version", return_value=7), \
-        mock.patch.object(main, "_local_visible_order_page_ids", return_value=(["a", "b"], 2)), \
+        mock.patch.object(session_listing_api, "_local_visible_order_page_ids", return_value=(["a", "b"], 2)), \
         mock.patch.object(
             session_store,
             "get_indexed_session_summaries_by_ids_if_current",
             return_value=page,
         ) as indexed, \
         mock.patch.object(session_store, "get_session_summaries_by_ids") as broad:
-        result, total = main._local_session_page_for_sidebar_preserving_order(**_filters())
+        result, total = session_listing_api._local_session_page_for_sidebar_preserving_order(**_filters())
 
     assert result == page
     assert total == 2
@@ -68,14 +69,14 @@ def test_visible_order_page_uses_version_guarded_indexed_lookup() -> None:
 def test_visible_order_page_falls_back_when_index_guard_misses() -> None:
     page = [{"id": "a"}]
     with mock.patch.object(session_store, "summary_index_version", return_value=7), \
-        mock.patch.object(main, "_local_visible_order_page_ids", return_value=(["a"], 1)), \
+        mock.patch.object(session_listing_api, "_local_visible_order_page_ids", return_value=(["a"], 1)), \
         mock.patch.object(
             session_store,
             "get_indexed_session_summaries_by_ids_if_current",
             return_value=None,
         ), \
         mock.patch.object(session_store, "get_session_summaries_by_ids", return_value=page) as broad:
-        result, total = main._local_session_page_for_sidebar_preserving_order(**_filters())
+        result, total = session_listing_api._local_session_page_for_sidebar_preserving_order(**_filters())
 
     assert result == page
     assert total == 1
@@ -83,7 +84,7 @@ def test_visible_order_page_falls_back_when_index_guard_misses() -> None:
 
 
 def test_visible_order_page_does_not_materialize_non_page_visible_ids() -> None:
-    main._local_visible_order_cache.clear()
+    session_listing_api._local_visible_order_cache.clear()
     filters = _filters()
     filters.update({"offset": 2, "limit": 3, "project_path": "/target"})
     summaries = [
@@ -118,7 +119,7 @@ def test_visible_order_page_does_not_materialize_non_page_visible_ids() -> None:
         ) as indexed, \
         mock.patch.object(session_store, "get_indexed_session_summaries_by_ids") as full_lookup, \
         mock.patch.object(session_store, "get_session_summaries_by_ids") as broad:
-        result, total = main._local_session_page_for_sidebar_preserving_order(**filters)
+        result, total = session_listing_api._local_session_page_for_sidebar_preserving_order(**filters)
 
     assert result == page
     assert total == 6

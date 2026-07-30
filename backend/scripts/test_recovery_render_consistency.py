@@ -329,7 +329,7 @@ def _ws_subscribe_projection(app_sid: str, since_seq: int = 0) -> list[dict]:
     Used by DIV-1 regression tests so an accidental refactor of either
     the WS path or this helper is caught by the test failing."""
     from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
-    from main import _strip_synthetic_events_from_tree
+    from session_detail_api import _strip_synthetic_events_from_tree
     tree = session_manager.get_root_tree(app_sid)
     if tree is None:
         return []

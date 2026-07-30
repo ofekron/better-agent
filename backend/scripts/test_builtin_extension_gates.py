@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import extension_store  # noqa: E402
+import internal_guards  # noqa: E402
 import main  # noqa: E402
 import auth  # noqa: E402
 
@@ -151,12 +152,16 @@ def test_project_update_substrate_does_not_require_runtime_ready(client: TestCli
     # Identity is token-derived: act as project-structure via ITS minted token.
     ps_token = extension_token_registry.mint(project_structure_id)
     original_enabled = main._builtin_extension_enabled
-    original_runtime_ready = main._builtin_extension_runtime_ready
+    original_runtime_gate = internal_guards.require_builtin_runtime_extension
+
+    def _never_runtime_ready(extension_id: str) -> None:
+        raise main.HTTPException(status_code=404, detail="not runtime ready")
+
     try:
         main._builtin_extension_enabled = (
             lambda extension_id: extension_id == project_structure_id
         )
-        main._builtin_extension_runtime_ready = lambda _extension_id: False
+        internal_guards.require_builtin_runtime_extension = _never_runtime_ready
         response = client.post(
             "/api/internal/project-updates/total",
             headers={"X-Internal-Token": ps_token},
@@ -166,7 +171,7 @@ def test_project_update_substrate_does_not_require_runtime_ready(client: TestCli
         check(isinstance(response.json().get("count"), int), "project updates total returns count")
     finally:
         main._builtin_extension_enabled = original_enabled
-        main._builtin_extension_runtime_ready = original_runtime_ready
+        internal_guards.require_builtin_runtime_extension = original_runtime_gate
 
 
 def test_disabled_ask_extension_blocks_routes(client: TestClient) -> None:

@@ -25,6 +25,8 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc_test_status_filter_")
 
 import main  # noqa: E402
+import session_list_cache  # noqa: E402
+import session_listing_api  # noqa: E402
 
 failures: list[str] = []
 
@@ -70,7 +72,7 @@ def ids(rows: list[dict]) -> list[str]:
 
 # ── 1. keys mirror ranks ─────────────────────────────────────────────────
 def key(session: dict) -> str:
-    return main._session_status_key(session, MON, UNREAD, {})
+    return session_listing_api._session_status_key(session, MON, UNREAD, {})
 
 
 check("key.error", key({"id": "err", "has_error": True}) == "error")
@@ -78,47 +80,47 @@ check("key.needs_decision", key({"id": "blocked"}) == "needs_decision")
 check("key.unread", key({"id": "new"}) == "unread")
 check("key.open_work", key({"id": "x", "current_todos": [{"status": "pending"}]}) == "open_work")
 check("key.running", key({"id": "run"}) == "running")
-check("key.all_done", key({"id": "x", "markers": {"e": {"tag": main._MARKER_TAG_ALL_TASKS_DONE}}}) == "all_done")
+check("key.all_done", key({"id": "x", "markers": {"e": {"tag": session_listing_api._MARKER_TAG_ALL_TASKS_DONE}}}) == "all_done")
 check("key.idle", key({"id": "quiet"}) == "idle")
 check(
     "key.rank_parity",
     all(
-        main._session_status_rank(session, MON, UNREAD, {})
-        == len(main.SESSION_STATUS_KEYS) - 1 - main.SESSION_STATUS_KEYS.index(key(session))
+        session_listing_api._session_status_rank(session, MON, UNREAD, {})
+        == len(session_listing_api.SESSION_STATUS_KEYS) - 1 - session_listing_api.SESSION_STATUS_KEYS.index(key(session))
         for session in SESSIONS
     ),
 )
 
 # ── 2. gate semantics ────────────────────────────────────────────────────
-check("gate.none_when_empty", main._session_status_gate(frozenset(), frozenset(), SNAPSHOT) is None)
+check("gate.none_when_empty", session_listing_api._session_status_gate(frozenset(), frozenset(), SNAPSHOT) is None)
 
-include_only = main._session_status_gate(frozenset({"error", "running"}), frozenset(), SNAPSHOT)
+include_only = session_listing_api._session_status_gate(frozenset({"error", "running"}), frozenset(), SNAPSHOT)
 check("gate.include.keeps", include_only({"id": "err", "has_error": True}) is True)
 check("gate.include.keeps_second", include_only({"id": "run"}) is True)
 check("gate.include.drops_others", include_only({"id": "quiet"}) is False)
 
-exclude_only = main._session_status_gate(frozenset(), frozenset({"idle"}), SNAPSHOT)
+exclude_only = session_listing_api._session_status_gate(frozenset(), frozenset({"idle"}), SNAPSHOT)
 check("gate.exclude.drops", exclude_only({"id": "quiet"}) is False)
 check("gate.exclude.keeps_rest", exclude_only({"id": "run"}) is True)
 
-both = main._session_status_gate(frozenset({"idle", "running"}), frozenset({"idle"}), SNAPSHOT)
+both = session_listing_api._session_status_gate(frozenset({"idle", "running"}), frozenset({"idle"}), SNAPSHOT)
 check("gate.exclude_wins", both({"id": "quiet"}) is False)
 check("gate.include_still_applies", both({"id": "run"}) is True)
 check("gate.include_excludes_unlisted", both({"id": "new"}) is False)
 
-check("split.drops_unknown", main._split_session_statuses("error,bogus,idle") == frozenset({"error", "idle"}))
-check("split.empty", main._split_session_statuses(None) == frozenset())
+check("split.drops_unknown", session_listing_api._split_session_statuses("error,bogus,idle") == frozenset({"error", "idle"}))
+check("split.empty", session_listing_api._split_session_statuses(None) == frozenset())
 
 # ── 3. the gate reaches every filter path ────────────────────────────────
-gate = main._session_status_gate(frozenset(), frozenset({"idle", "unread"}), SNAPSHOT)
+gate = session_listing_api._session_status_gate(frozenset(), frozenset({"idle", "unread"}), SNAPSHOT)
 
 check(
     "funnel.matches_list_filters",
-    main._session_matches_list_filters({"id": "quiet"}, **NO_FILTERS, status_gate=gate) is False
-    and main._session_matches_list_filters({"id": "run"}, **NO_FILTERS, status_gate=gate) is True,
+    session_listing_api._session_matches_list_filters({"id": "quiet"}, **NO_FILTERS, status_gate=gate) is False
+    and session_listing_api._session_matches_list_filters({"id": "run"}, **NO_FILTERS, status_gate=gate) is True,
 )
 
-sorted_rows = main._filter_sort_sessions_for_list(
+sorted_rows = session_listing_api._filter_sort_sessions_for_list(
     list(SESSIONS),
     project_path=None,
     search=None,
@@ -137,7 +139,7 @@ sorted_rows = main._filter_sort_sessions_for_list(
 )
 check("funnel.filter_sort_sessions", ids(sorted_rows) == ["err", "blocked", "run"])
 
-page, total = main._filter_sort_page_for_list(
+page, total = session_listing_api._filter_sort_page_for_list(
     list(SESSIONS),
     offset=0,
     limit=2,
@@ -159,25 +161,25 @@ page, total = main._filter_sort_page_for_list(
 check("funnel.filter_sort_page.total_excludes_filtered", total == 3)
 check("funnel.filter_sort_page.page", ids(page) == ["err", "blocked"])
 
-preserved = main._filter_sessions_for_list_preserving_order(
+preserved = session_listing_api._filter_sessions_for_list_preserving_order(
     list(SESSIONS), **NO_FILTERS, status_gate=gate
 )
 check("funnel.preserving_order", ids(preserved) == ["err", "blocked", "run"])
 
-page2, total2 = main._filter_page_for_list_preserving_order(
+page2, total2 = session_listing_api._filter_page_for_list_preserving_order(
     list(SESSIONS), offset=1, limit=2, **NO_FILTERS, status_gate=gate
 )
 check("funnel.preserving_order_page", ids(page2) == ["blocked", "run"] and total2 == 3)
 
 check(
     "funnel.no_gate_keeps_all",
-    ids(main._filter_sessions_for_list_preserving_order(list(SESSIONS), **NO_FILTERS)) == ids(SESSIONS),
+    ids(session_listing_api._filter_sessions_for_list_preserving_order(list(SESSIONS), **NO_FILTERS)) == ids(SESSIONS),
 )
 
 # ── 4. fast paths stand down while a status filter is active ─────────────
 check(
     "fastpath.local_visible_order",
-    main._can_page_default_local_visible_order(
+    session_listing_api._can_page_default_local_visible_order(
         project_path=None,
         search=None,
         show_archived=False,
@@ -195,14 +197,14 @@ check(
 )
 check(
     "fastpath.local_summary_order",
-    main._can_page_local_summary_order(
+    session_listing_api._can_page_local_summary_order(
         search_query="", folder_view=False, sort_by="updated_at", status_sort=False, status_filter=True
     )
     is False,
 )
 check(
     "fastpath.updated_at_with_virtual",
-    main._can_page_default_updated_at_with_virtual(
+    session_listing_api._can_page_default_updated_at_with_virtual(
         search_query="",
         project_path=None,
         show_archived=False,
@@ -222,7 +224,7 @@ check(
 )
 check(
     "fastpath.preserve_summary_order",
-    main._can_preserve_summary_order(
+    session_listing_api._can_preserve_summary_order(
         search_query="",
         appended_virtual_sessions=False,
         folder_view=False,
@@ -234,7 +236,7 @@ check(
 )
 check(
     "fastpath.local_search_scores",
-    main._can_page_local_search_scores(
+    session_listing_api._can_page_local_search_scores(
         project_path=None,
         show_archived=False,
         file_edit_mode=None,
@@ -254,7 +256,7 @@ check(
 )
 check(
     "fastpath.still_eligible_without_status_filter",
-    main._can_page_local_summary_order(
+    session_listing_api._can_page_local_summary_order(
         search_query="", folder_view=False, sort_by="updated_at", status_sort=False, status_filter=False
     )
     is True,
@@ -266,15 +268,15 @@ class _FakeRequest:
 
 
 def route_ids(**params) -> list[str]:
-    main._local_session_summaries_for_sidebar = lambda: [dict(s) for s in SESSIONS]
-    main._local_session_summaries_by_ids_for_sidebar = lambda ids: [
+    session_listing_api._local_session_summaries_for_sidebar = lambda: [dict(s) for s in SESSIONS]
+    session_listing_api._local_session_summaries_by_ids_for_sidebar = lambda ids: [
         dict(s) for s in SESSIONS if s["id"] in set(ids)
     ]
-    main._sidebar_state_snapshot = lambda: SNAPSHOT
-    main._decorate_local_sidebar_sessions = lambda rows, _snapshot=None: list(rows)
-    main._sessions_list_cache_get = lambda *a, **k: None
-    main._sessions_list_response_maybe_cache = lambda _key, payload, **k: payload
-    main._schedule_session_event_meta_warm = lambda _page: None
+    session_listing_api._sidebar_state_snapshot = lambda: SNAPSHOT
+    session_listing_api._decorate_local_sidebar_sessions = lambda rows, _snapshot=None: list(rows)
+    session_list_cache._sessions_list_cache_get = lambda *a, **k: None
+    session_list_cache._sessions_list_response_maybe_cache = lambda _key, payload, **k: payload
+    session_list_cache._schedule_session_event_meta_warm = lambda _page: None
     route_args = dict(
         offset=0,
         limit=50,
@@ -295,7 +297,7 @@ def route_ids(**params) -> list[str]:
         exclude_statuses=None,
     )
     route_args.update(params)
-    payload = asyncio.run(main.get_sessions(request=_FakeRequest(), **route_args))
+    payload = asyncio.run(session_listing_api.get_sessions(request=_FakeRequest(), **route_args))
     return [row["id"] for row in payload["sessions"]]
 
 

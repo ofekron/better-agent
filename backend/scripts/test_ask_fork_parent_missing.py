@@ -15,6 +15,7 @@ if str(BACKEND) not in sys.path:
 
 from fastapi import HTTPException  # noqa: E402
 import config_store  # noqa: E402
+import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
 from session_manager import (  # noqa: E402
     DelegateForkParentMissing,
@@ -85,7 +86,7 @@ def test_ask_fork_missing_parent_returns_409_not_500():
     error = None
     try:
         try:
-            asyncio.run(main.internal_ask_fork(
+            asyncio.run(internal_orchestration_api.internal_ask_fork(
                 body,
                 x_internal_token=main.coordinator.internal_token,
             ))

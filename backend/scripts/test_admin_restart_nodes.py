@@ -16,6 +16,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import app_lifecycle  # noqa: E402
+import ops_api  # noqa: E402
 import node_link  # noqa: E402
 import node_store  # noqa: E402
 import session_store  # noqa: E402
@@ -55,21 +57,21 @@ async def _run() -> None:
     old_supervisor = os.environ.get("BETTER_CLAUDE_RUN_SH_SUPERVISOR")
     old_snapshot = node_store.snapshot
     old_send_restart = node_link.send_restart
-    old_kill = main.os.kill
+    old_kill = os.kill
     try:
         os.environ["BETTER_CLAUDE_RUN_SH_SUPERVISOR"] = "1"
         node_store.snapshot = fake_snapshot
         node_link.send_restart = fake_send_restart
-        main.os.kill = fake_kill
+        os.kill = fake_kill
 
-        result = await main.admin_restart({"request_id": "restart-test"})
+        result = await ops_api.admin_restart({"request_id": "restart-test"})
         await asyncio.sleep(0.35)
 
         assert sent == ["node-a"], f"expected only connected worker restart, got {sent!r}"
         assert result["restarted_nodes"] == ["node-a"], result
         assert killed, "primary restart signal was not scheduled"
         assert consume_restart_request(ba_home() / "restart_requested") == "restart-test"
-        status = await main.admin_restart_status("restart-test")
+        status = await ops_api.admin_restart_status("restart-test")
         assert status["accepted"] is True, status
         assert status["status"] == "pending", status
         assert status["refresh_result"] is None, status
@@ -80,7 +82,7 @@ async def _run() -> None:
             "status": "accepted",
             "error": "",
         })
-        switch_status = await main.admin_restart_status("line-switch-test")
+        switch_status = await ops_api.admin_restart_status("line-switch-test")
         assert switch_status["accepted"] is True, switch_status
         assert switch_status["status"] == "accepted", switch_status
         write_json(switch_request_path(), {
@@ -89,7 +91,7 @@ async def _run() -> None:
             "status": "failed",
             "error": "backend failed",
         })
-        switch_status = await main.admin_restart_status("line-switch-test")
+        switch_status = await ops_api.admin_restart_status("line-switch-test")
         assert switch_status["status"] == "failed", switch_status
         assert switch_status["error"] == "backend failed", switch_status
     finally:
@@ -99,7 +101,7 @@ async def _run() -> None:
             os.environ["BETTER_CLAUDE_RUN_SH_SUPERVISOR"] = old_supervisor
         node_store.snapshot = old_snapshot
         node_link.send_restart = old_send_restart
-        main.os.kill = old_kill
+        os.kill = old_kill
 async def _run_idle_wait_test() -> str:
     session = session_manager.create(
         name="idle-wait",
@@ -122,7 +124,7 @@ async def _run_idle_wait_test() -> str:
         },
     )
 
-    waiter = asyncio.create_task(main._wait_for_all_agents_idle())
+    waiter = asyncio.create_task(ops_api._wait_for_all_agents_idle())
     try:
         await asyncio.sleep(0.05)
         assert not waiter.done(), "idle wait returned while accepted request was queued"
@@ -145,7 +147,7 @@ def main_test() -> int:
     except Exception as exc:
         errors.append(exc)
     try:
-        asyncio.run(main._shutdown_session_persistence_pipeline())
+        asyncio.run(app_lifecycle._shutdown_session_persistence_pipeline())
     except Exception as exc:
         errors.append(exc)
     try:

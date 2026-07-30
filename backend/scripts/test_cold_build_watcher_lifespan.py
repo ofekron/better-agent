@@ -25,12 +25,13 @@ paths.engage_test_home(_home)
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import main  # noqa: E402
+import frontend_mount  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 
 
 def _reset() -> None:
-    main._deferred_startup_tasks.clear()
-    main._cold_build_watcher_armed = False
+    frontend_mount._deferred_startup_tasks.clear()
+    frontend_mount._cold_build_watcher_armed = False
 
 
 def _supervisor(enabled: bool) -> None:
@@ -50,11 +51,11 @@ def run() -> None:
     _reset()
     _supervisor(False)
     dist_index = Path(tempfile.mkdtemp()) / "dist" / "index.html"
-    main._arm_cold_build_restart(app, dist_index)
-    assert main._deferred_startup_tasks == [], "no task armed without supervisor"
+    frontend_mount._arm_cold_build_restart(app, dist_index)
+    assert frontend_mount._deferred_startup_tasks == [], "no task armed without supervisor"
     assert app.router.on_startup == [], "lifespan owns startup; no legacy handler"
     assert app.router.on_shutdown == [], "lifespan owns shutdown; no legacy handler"
-    assert main._cold_build_watcher_armed is False
+    assert frontend_mount._cold_build_watcher_armed is False
 
     # Supervisor present + dist missing: one deferred task, still no router handlers.
     _reset()
@@ -62,20 +63,20 @@ def run() -> None:
     dist_root = Path(tempfile.mkdtemp())
     dist_index = dist_root / "index.html"
     assert not dist_index.exists()
-    main._arm_cold_build_restart(app, dist_index)
+    frontend_mount._arm_cold_build_restart(app, dist_index)
     assert app.router.on_startup == [], "must not register legacy startup handler"
     assert app.router.on_shutdown == [], "must not register legacy shutdown handler"
-    assert len(main._deferred_startup_tasks) == 1, "exactly one deferred startup task"
+    assert len(frontend_mount._deferred_startup_tasks) == 1, "exactly one deferred startup task"
 
     # No double-arm: a second call must not enqueue another watcher.
-    main._arm_cold_build_restart(app, dist_index)
-    assert len(main._deferred_startup_tasks) == 1, "double-arm must not duplicate"
-    assert main._cold_build_watcher_armed is True
+    frontend_mount._arm_cold_build_restart(app, dist_index)
+    assert len(frontend_mount._deferred_startup_tasks) == 1, "double-arm must not duplicate"
+    assert frontend_mount._cold_build_watcher_armed is True
 
     # Drain launches exactly one watcher; creating the dist makes it exit cleanly
     # and call _trigger_supervisor_restart("") once (mocked, no real SIGTERM).
     restart_mock = AsyncMock()
-    main._trigger_supervisor_restart = restart_mock
+    frontend_mount._trigger_supervisor_restart = restart_mock
 
     async def _drive() -> None:
         captured: list[asyncio.Task] = []
@@ -90,7 +91,7 @@ def run() -> None:
         try:
             dist_root.mkdir(parents=True, exist_ok=True)
             dist_index.write_text("ok", encoding="utf-8")
-            for deferred in list(main._deferred_startup_tasks):
+            for deferred in list(frontend_mount._deferred_startup_tasks):
                 await deferred()
             for task in captured:
                 await task

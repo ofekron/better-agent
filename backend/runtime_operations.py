@@ -496,10 +496,10 @@ async def _await_mcp_job_result(
     response = initial
     if isinstance(response, dict) and response.get("ready") is False:
         import extension_jobs
-        import main
+        import internal_extension_api
 
         task = extension_jobs.get_active(
-            main._CORE_MCP_JOB_OWNER,
+            internal_extension_api._CORE_MCP_JOB_OWNER,
             operation,
             request_id,
         )
@@ -520,6 +520,26 @@ async def _await_mcp_job_result(
     return response.get("result")
 
 
+def _walk_app_routes(routes):
+    """Yield every leaf route reachable from an app's route list.
+
+    FastAPI wraps each `include_router()` in an `_IncludedRouter` proxy whose
+    real routes hang off `original_router`, so a flat scan of `app.routes` sees
+    only the routes the app declares itself — not the ones any router owns.
+    """
+    for item in routes:
+        path = getattr(item, "path", None)
+        nested = getattr(item, "original_router", None) or (
+            getattr(item, "routes", None) if not path else None
+        )
+        if not path and nested is not None:
+            yield from _walk_app_routes(getattr(nested, "routes", nested))
+            continue
+        if not path:
+            continue
+        yield item
+
+
 async def _call_route(
     path: str,
     body: dict[str, Any],
@@ -532,7 +552,7 @@ async def _call_route(
     route = next(
         (
             item
-            for item in main.app.routes
+            for item in _walk_app_routes(main.app.routes)
             if getattr(item, "path", None) == path and "POST" in getattr(item, "methods", ())
         ),
         None,

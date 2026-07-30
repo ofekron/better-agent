@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-_MAIN = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+_BACKEND = Path(__file__).resolve().parents[1]
+_MAIN = (_BACKEND / "app_lifecycle.py").read_text(encoding="utf-8")
+_RECOVERY = (_BACKEND / "recovery.py").read_text(encoding="utf-8")
 
 
 def test_subscribers_are_pinned_before_recovery_starts() -> None:
@@ -31,18 +33,18 @@ def test_default_subscribers_registered_before_pinning() -> None:
 
 
 def test_scan_phase_goes_through_the_recovery_manager() -> None:
-    assert "recovery_manager.manager.run(factory)" in _MAIN
+    assert "recovery_manager.manager.run(factory)" in _RECOVERY
     # Both scan call sites — the live pass and the background pass.
-    assert _MAIN.count("await _scan_recovered_runs(") >= 1
-    assert _MAIN.count("_scan_recovered_runs(") >= 3  # def + 2 call sites
+    assert _RECOVERY.count("await _scan_recovered_runs(") >= 1
+    assert _RECOVERY.count("_scan_recovered_runs(") >= 3  # def + 2 call sites
 
 
 def test_integration_still_runs_on_the_main_loop() -> None:
     # Integration reaches loop-bound state (per-session prompt queue,
     # turn_manager cancel events, the reattach queue). It must NOT be
     # routed through the recovery manager.
-    integrate = _MAIN.index("await integrate_recovered_runs(coordinator, batch)")
-    window = _MAIN[integrate - 400:integrate]
+    integrate = _RECOVERY.index("await integrate_recovered_runs(_coordinator_ref, batch)")
+    window = _RECOVERY[integrate - 400:integrate]
     assert "recovery_manager" not in window
 
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import harness_profile_store  # noqa: E402
 import main  # noqa: E402
+import workers_api  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -38,7 +39,7 @@ def main_test() -> None:
         revision=child["revision"],
     )
 
-    explicit = main._worker_provision_prompt_for_body(
+    explicit = workers_api._worker_provision_prompt_for_body(
         body={
             "provision_prompt": "Explicit prep",
             "harness_profile_id": "prompted.profile",
@@ -48,7 +49,7 @@ def main_test() -> None:
     )
     check(explicit == "Explicit prep", "explicit provision_prompt wins over profile prompt")
 
-    inherited = main._worker_provision_prompt_for_body(
+    inherited = workers_api._worker_provision_prompt_for_body(
         body={"harness_profile_id": "prompted.child"},
         bc_session_id="",
         description="worker",
@@ -63,14 +64,14 @@ def main_test() -> None:
         provider_id=None,
         harness_profile_id="prompted.profile",
     )
-    from_session = main._worker_provision_prompt_for_body(
+    from_session = workers_api._worker_provision_prompt_for_body(
         body={},
         bc_session_id=sess["id"],
         description="Existing Worker",
     )
     check(from_session == "Profile prep", "existing session profile supplies provisioning prompt")
 
-    fallback = main._worker_provision_prompt_for_body(
+    fallback = workers_api._worker_provision_prompt_for_body(
         body={},
         bc_session_id="",
         description="Fallback Worker",

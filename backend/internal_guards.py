@@ -40,6 +40,17 @@ def authority_is_valid() -> bool:
     return _principal_provider() is not None
 
 
+def internal_authority_extension_id() -> Optional[str]:
+    """The calling extension's id, if the bound principal is an extension.
+    None for the core/runner principal or when unauthenticated."""
+    if _principal_provider is None:
+        return None
+    principal = _principal_provider()
+    if principal is None or getattr(principal, "kind", None) != "extension":
+        return None
+    return principal.extension_id
+
+
 def require_internal() -> None:
     if not authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))

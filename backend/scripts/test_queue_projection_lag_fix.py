@@ -15,6 +15,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
+import recovery  # noqa: E402
+import session_detail_api  # noqa: E402
 import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -73,19 +76,19 @@ async def test_reenqueue_uses_projection_without_full_root_load() -> bool:
     session_queue_projection.rebuild_from_disk()
 
     original_get_root_tree = session_store.get_root_tree
-    original_coordinator = main.coordinator
+    original_coordinator = recovery._coordinator_ref
     coordinator = _Coordinator()
-    main.coordinator = coordinator
+    recovery._coordinator_ref = coordinator
 
     def fail_get_root_tree(*_args, **_kwargs):
         raise AssertionError("re-enqueue must not cold-load full root trees")
 
     session_store.get_root_tree = fail_get_root_tree
     try:
-        await main._re_enqueue_queued_prompts()
+        await recovery._re_enqueue_queued_prompts()
     finally:
         session_store.get_root_tree = original_get_root_tree
-        main.coordinator = original_coordinator
+        recovery._coordinator_ref = original_coordinator
 
     projected = session_queue_projection.get(sid) or {}
     queued = projected.get("queued_prompts") or []
@@ -121,13 +124,13 @@ async def test_reenqueue_dedupes_from_projection() -> bool:
     session_manager.flush_pending_persists()
     session_queue_projection.rebuild_from_disk()
 
-    original_coordinator = main.coordinator
+    original_coordinator = recovery._coordinator_ref
     coordinator = _Coordinator()
-    main.coordinator = coordinator
+    recovery._coordinator_ref = coordinator
     try:
-        await main._re_enqueue_queued_prompts()
+        await recovery._re_enqueue_queued_prompts()
     finally:
-        main.coordinator = original_coordinator
+        recovery._coordinator_ref = original_coordinator
 
     queued = session_queue_projection.queued_prompts(sid)
     ok = coordinator.submitted == [] and queued == []
@@ -137,12 +140,12 @@ async def test_reenqueue_dedupes_from_projection() -> bool:
 
 async def test_get_session_context_scan_is_off_thread() -> bool:
     sid = _make_session()
-    original_max_seq = main.event_ingester.max_seq_by_sid
-    original_cursor = main.event_ingester.cursor
-    original_render_seq = main.event_ingester.render_seq_by_sid
+    original_max_seq = event_ingester.max_seq_by_sid
+    original_cursor = event_ingester.cursor
+    original_render_seq = event_ingester.render_seq_by_sid
     original_tree = session_manager.get_root_tree_stubbed
 
-    main.event_ingester.cursor = lambda _root_id: 1
+    event_ingester.cursor = lambda _root_id: 1
     session_manager.get_root_tree_stubbed = (
         lambda _sid, msg_limit=50, exchange_count=None: {"id": sid, "messages": []}
     )
@@ -152,8 +155,8 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
         time.sleep(0.2)
         return {sid: 1}
 
-    main.event_ingester.max_seq_by_sid = slow_max_seq
-    main.event_ingester.render_seq_by_sid = lambda _root_id: {sid: 1}
+    event_ingester.max_seq_by_sid = slow_max_seq
+    event_ingester.render_seq_by_sid = lambda _root_id: {sid: 1}
     ticks = 0
 
     async def heartbeat() -> None:
@@ -164,12 +167,12 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
 
     task = asyncio.create_task(heartbeat())
     try:
-        result = await main.get_session(sid)
+        result = await session_detail_api.get_session(sid)
     finally:
         task.cancel()
-        main.event_ingester.max_seq_by_sid = original_max_seq
-        main.event_ingester.cursor = original_cursor
-        main.event_ingester.render_seq_by_sid = original_render_seq
+        event_ingester.max_seq_by_sid = original_max_seq
+        event_ingester.cursor = original_cursor
+        event_ingester.render_seq_by_sid = original_render_seq
         session_manager.get_root_tree_stubbed = original_tree
         try:
             await task

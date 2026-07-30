@@ -25,6 +25,8 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc_test_status_sort_")
 
 import main  # noqa: E402
+import session_store  # noqa: E402
+import session_listing_api  # noqa: E402
 
 failures: list[str] = []
 
@@ -37,8 +39,8 @@ def check(name: str, cond: bool) -> None:
         print(f"ok   {name}")
 
 
-NEEDS = main._MARKER_TAG_NEEDS_DECISION
-DONE = main._MARKER_TAG_ALL_TASKS_DONE
+NEEDS = session_listing_api._MARKER_TAG_NEEDS_DECISION
+DONE = session_listing_api._MARKER_TAG_ALL_TASKS_DONE
 
 
 def marker(tag: str) -> dict:
@@ -54,22 +56,22 @@ mon = {
 }
 unread = {"new": 3}
 
-check("rank.error.has_error", main._session_status_rank({"id": "err", "has_error": True}, mon, unread) == 6)
-check("rank.error.unseen_error", main._session_status_rank({"id": "err", "unseen_error": {"msg": "x"}}, mon, unread) == 6)
-check("rank.running.active", main._session_status_rank({"id": "run"}, mon, unread) == 2)
-check("rank.running.waiting_bg", main._session_status_rank({"id": "bg"}, mon, unread) == 2)
-check("rank.approval.blocked_state", main._session_status_rank({"id": "blocked"}, mon, unread) == 5)
-check("rank.input.pending_snapshot", main._session_status_rank({"id": "ask"}, mon, unread, {"ask": 1}) == 5)
-check("rank.input.row_fallback", main._session_status_rank({"id": "ask", "pending_user_input_count": 1}, mon, unread) == 5)
+check("rank.error.has_error", session_listing_api._session_status_rank({"id": "err", "has_error": True}, mon, unread) == 6)
+check("rank.error.unseen_error", session_listing_api._session_status_rank({"id": "err", "unseen_error": {"msg": "x"}}, mon, unread) == 6)
+check("rank.running.active", session_listing_api._session_status_rank({"id": "run"}, mon, unread) == 2)
+check("rank.running.waiting_bg", session_listing_api._session_status_rank({"id": "bg"}, mon, unread) == 2)
+check("rank.approval.blocked_state", session_listing_api._session_status_rank({"id": "blocked"}, mon, unread) == 5)
+check("rank.input.pending_snapshot", session_listing_api._session_status_rank({"id": "ask"}, mon, unread, {"ask": 1}) == 5)
+check("rank.input.row_fallback", session_listing_api._session_status_rank({"id": "ask", "pending_user_input_count": 1}, mon, unread) == 5)
 check(
     "rank.needs.marker_tag",
-    main._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 5,
+    session_listing_api._session_status_rank({"id": "idle", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
-check("rank.hasnew.unread", main._session_status_rank({"id": "new"}, mon, unread) == 4)
-check("rank.running_unread", main._session_status_rank({"id": "run"}, mon, {"run": 3}) == 2)
+check("rank.hasnew.unread", session_listing_api._session_status_rank({"id": "new"}, mon, unread) == 4)
+check("rank.running_unread", session_listing_api._session_status_rank({"id": "run"}, mon, {"run": 3}) == 2)
 check(
     "rank.open_todo",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "idle", "current_todos": [{"content": "A", "status": "in_progress"}]},
         mon,
         unread,
@@ -77,7 +79,7 @@ check(
 )
 check(
     "rank.open_task",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "idle", "current_tasks": [{"content": "A", "status": "pending"}]},
         mon,
         unread,
@@ -85,38 +87,38 @@ check(
 )
 check(
     "rank.alldone.marker_tag",
-    main._session_status_rank({"id": "idle", "markers": marker(DONE)}, mon, unread) == 1,
+    session_listing_api._session_status_rank({"id": "idle", "markers": marker(DONE)}, mon, unread) == 1,
 )
-check("rank.none", main._session_status_rank({"id": "idle"}, mon, unread) == 0)
+check("rank.none", session_listing_api._session_status_rank({"id": "idle"}, mon, unread) == 0)
 
 # precedence: waiting-for-user beats running (both via the snapshot)
 check(
     "rank.precedence.approval_over_running",
-    main._session_status_rank({"id": "blocked"}, mon, unread)
-    > main._session_status_rank({"id": "run"}, mon, unread),
+    session_listing_api._session_status_rank({"id": "blocked"}, mon, unread)
+    > session_listing_api._session_status_rank({"id": "run"}, mon, unread),
 )
 check(
     "rank.precedence.input_over_running",
-    main._session_status_rank({"id": "run"}, mon, unread, {"run": 1}) == 5,
+    session_listing_api._session_status_rank({"id": "run"}, mon, unread, {"run": 1}) == 5,
 )
 # row fallback: a remote row reporting blocked_on_user is rank 5
 check(
     "rank.row_fallback.blocked",
-    main._session_status_rank({"id": "remote", "monitoring_state": "blocked_on_user"}, {}, {}) == 5,
+    session_listing_api._session_status_rank({"id": "remote", "monitoring_state": "blocked_on_user"}, {}, {}) == 5,
 )
 # precedence: needs-decision beats running on the same session
 check(
     "rank.precedence.needs_over_running",
-    main._session_status_rank({"id": "run", "markers": marker(NEEDS)}, mon, unread) == 5,
+    session_listing_api._session_status_rank({"id": "run", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
 # precedence: needs-decision beats unread
 check(
     "rank.precedence.needs_over_unread",
-    main._session_status_rank({"id": "new", "markers": marker(NEEDS)}, mon, unread) == 5,
+    session_listing_api._session_status_rank({"id": "new", "markers": marker(NEEDS)}, mon, unread) == 5,
 )
 check(
     "rank.precedence.unread_over_open_todo",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "new", "current_todos": [{"content": "A", "status": "pending"}]},
         mon,
         unread,
@@ -124,7 +126,7 @@ check(
 )
 check(
     "rank.precedence.open_todo_over_running_unread",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "run", "current_todos": [{"content": "A", "status": "pending"}]},
         mon,
         {"run": 3},
@@ -132,7 +134,7 @@ check(
 )
 check(
     "rank.precedence.open_todo_over_running",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "run", "current_todos": [{"content": "A", "status": "pending"}]},
         mon,
         unread,
@@ -141,7 +143,7 @@ check(
 # classification is by TAG, not color/tooltip — a marker with no tag is inert
 check(
     "rank.untagged_marker_inert",
-    main._session_status_rank(
+    session_listing_api._session_status_rank(
         {"id": "idle", "markers": {"ext": {"color": "#d29922", "tooltip": "x"}}},
         mon, unread,
     ) == 0,
@@ -149,16 +151,16 @@ check(
 # row fallback: sid absent from snapshot → read the row's own fields
 check(
     "rank.row_fallback.monitoring",
-    main._session_status_rank({"id": "remote", "monitoring_state": "active"}, {}, {}) == 2,
+    session_listing_api._session_status_rank({"id": "remote", "monitoring_state": "active"}, {}, {}) == 2,
 )
 check(
     "rank.row_fallback.unread",
-    main._session_status_rank({"id": "remote", "unread_count": 5}, {}, {}) == 4,
+    session_listing_api._session_status_rank({"id": "remote", "unread_count": 5}, {}, {}) == 4,
 )
 
 # ── 2. list sort key (non-search): empty > pinned > status > ts ───────────
 def lkey(sess):
-    return main._session_list_sort_key(
+    return session_listing_api._session_list_sort_key(
         sess, False, "updated_at",
         status_sort=True, monitoring_by_sid=mon, unread_by_sid=unread,
     )
@@ -179,8 +181,8 @@ pinned_running = {"id": "run", "updated_at": "2020-01-01T00:00:00", "message_cou
 check("listkey.empty_beats_all", lkey(empty_new) > lkey(pinned_running))
 
 # status_sort=False → identical to the legacy (isEmpty, pinned, ts) shape
-off = main._session_list_sort_key(running_old, False, "updated_at")
-legacy_ts = main.session_store.timestamp_sort_value("2020-01-01T00:00:00")
+off = session_listing_api._session_list_sort_key(running_old, False, "updated_at")
+legacy_ts = session_store.timestamp_sort_value("2020-01-01T00:00:00")
 check(
     "listkey.off_is_legacy_shape",
     len(off) == 3 and off == (False, False, legacy_ts),
@@ -190,7 +192,7 @@ check(
 scores = {"hi": 10, "lo": 1}
 
 def fkey(sess):
-    return main._session_filtered_sort_key(
+    return session_listing_api._session_filtered_sort_key(
         sess, folder_view=False, search="q", content_scores=scores,
         sort_by="updated_at", status_sort=True,
         monitoring_by_sid=mon, unread_by_sid=unread,

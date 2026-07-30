@@ -34,6 +34,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import recovery  # noqa: E402
 import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -106,20 +107,20 @@ async def _run_reenqueue(stale_records: list[dict]) -> _Coordinator:
     runs against the home; `session_manager` stays real so `is_live_session`
     is authoritative."""
     coordinator = _Coordinator()
-    original_coordinator = main.coordinator
+    original_coordinator = recovery._coordinator_ref
     original_list = session_queue_projection.list_queued_records
     original_ensure = session_queue_projection.ensure_current_or_rebuild
-    main.coordinator = coordinator
+    recovery._coordinator_ref = coordinator
     session_queue_projection.list_queued_records = (
         lambda **_kwargs: list(stale_records)
     )
     session_queue_projection.ensure_current_or_rebuild = lambda **_kwargs: False
     try:
-        await main._re_enqueue_queued_prompts()
+        await recovery._re_enqueue_queued_prompts()
     finally:
         session_queue_projection.ensure_current_or_rebuild = original_ensure
         session_queue_projection.list_queued_records = original_list
-        main.coordinator = original_coordinator
+        recovery._coordinator_ref = original_coordinator
     return coordinator
 
 

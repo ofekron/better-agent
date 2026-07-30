@@ -186,20 +186,24 @@ def test_routes_validate_the_selection_before_creating() -> None:
     """Every session-creating route resolves the selection through the one
     validating helper, so an unknown profile fails closed at the boundary
     instead of producing a session that cannot start a turn."""
-    source = (BACKEND / "main.py").read_text(encoding="utf-8")
-    for marker, end_marker in (
-        ('@app.post("/api/internal/create-session")', '@app.post("/api/internal/create-sub-session")'),
-        ('@app.post("/api/internal/create-sub-session")', '@app.post('),
-        ('@app.post("/api/internal/create-worker")', '@app.post('),
-        ('async def _handle_internal_delegate_task(', 'def _require_team_orchestration_internal('),
-        ('async def _provision_workers_from_body(', 'def _register_provisioned_team_member('),
-        ('def _create_pending_worker_from_body(', 'async def _create_worker_from_body('),
-        ('async def _create_worker_from_body(', '@app.post('),
-        ('async def _handle_internal_session_bridge_delegate(', '\n_AGENT_BOARD_MAX_PROMPT_LEN'),
+    sources = {
+        name: (BACKEND / name).read_text(encoding="utf-8")
+        for name in ("workers_api.py", "internal_orchestration_api.py", "session_bridge_api.py")
+    }
+    for owner, marker, end_marker in (
+        ("internal_orchestration_api.py", '@router.post("/api/internal/create-session")', '@router.post("/api/internal/create-sub-session")'),
+        ("internal_orchestration_api.py", '@router.post("/api/internal/create-sub-session")', ''),
+        ("internal_orchestration_api.py", '@router.post("/api/internal/create-worker")', '@router.post('),
+        ("internal_orchestration_api.py", 'async def _handle_internal_delegate_task(', '@router.post('),
+        ("workers_api.py", 'async def provision_workers_from_body(', 'def _register_provisioned_team_member('),
+        ("workers_api.py", 'def _create_pending_worker_from_body(', 'async def _create_worker_from_body('),
+        ("workers_api.py", 'async def _create_worker_from_body(', '@router.post('),
+        ("session_bridge_api.py", 'async def _handle_internal_session_bridge_delegate(', '\n_AGENT_BOARD_MAX_PROMPT_LEN'),
     ):
+        source = sources[owner]
         start = source.index(marker)
         body_start = start + len(marker)
-        end = source.index(end_marker, body_start)
+        end = source.index(end_marker, body_start) if end_marker else len(source)
         handler = source[start:end]
         assert "_harness_profile_selection(" in handler, (
             f"{marker} does not validate its harness profile selection"

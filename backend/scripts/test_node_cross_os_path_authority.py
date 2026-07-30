@@ -87,6 +87,7 @@ def test_invalid_paths_fail_closed() -> None:
 
 def test_session_admission_uses_target_node_path_flavor() -> None:
     import main
+    import session_detail_api
     import node_registry_store
     from topology import NodeSpec
 
@@ -98,7 +99,7 @@ def test_session_admission_uses_target_node_path_flavor() -> None:
         cwd_roots=(WINDOWS_ROOT,),
     )
     try:
-        assert main._resolve_session_node_id({
+        assert session_detail_api._resolve_session_node_id({
             "node_id": "windows",
             "cwd": "C:/Users/Lenovo/code/project",
         }) == "windows"
@@ -109,7 +110,7 @@ def test_session_admission_uses_target_node_path_flavor() -> None:
         )
         for cwd in rejected:
             try:
-                main._resolve_session_node_id({
+                session_detail_api._resolve_session_node_id({
                     "node_id": "windows",
                     "cwd": cwd,
                 })

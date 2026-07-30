@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
 import auth  # noqa: E402
 import remote_sessions_cache  # noqa: E402
+import session_list_cache  # noqa: E402
+import session_listing_api  # noqa: E402
 import session_search_index  # noqa: E402
 import session_store  # noqa: E402
 
@@ -53,8 +55,8 @@ def _reset_home() -> None:
     session_store._metadata_text_by_id_cache_version = -1
     session_store._metadata_trigram_index = {}
     session_store._metadata_trigram_index_version = -1
-    main._sessions_list_response_cache.clear()
-    main._session_summaries_response_cache.clear()
+    session_list_cache._sessions_list_response_cache.clear()
+    session_list_cache._session_summaries_response_cache.clear()
     remote_sessions_cache.cache.clear()
     with session_search_index._lock:
         session_search_index._close_writer_connection_locked()
@@ -252,19 +254,19 @@ def test_default_list_preserves_summary_order_without_resort(client: TestClient)
     _write(_record("new", "2026-06-18T00:00:00+00:00"))
     _write(_record("pinned-old", "2026-06-15T00:00:00+00:00", pinned=True))
 
-    original = main._filter_sort_sessions_for_list
-    original_prefs = main._session_list_user_prefs
+    original = session_listing_api._filter_sort_sessions_for_list
+    original_prefs = session_list_cache._session_list_user_prefs
 
     def fail_full_sort(*_args, **_kwargs):
         raise AssertionError("default session list should preserve summary order")
 
-    main._filter_sort_sessions_for_list = fail_full_sort
-    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    session_listing_api._filter_sort_sessions_for_list = fail_full_sort
+    session_list_cache._session_list_user_prefs = lambda: (False, "updated_at", False)
     try:
         response = client.get("/api/sessions?offset=1&limit=1", headers=HEADERS)
     finally:
-        main._filter_sort_sessions_for_list = original
-        main._session_list_user_prefs = original_prefs
+        session_listing_api._filter_sort_sessions_for_list = original
+        session_list_cache._session_list_user_prefs = original_prefs
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions presorted fast path status {response.status_code}")
         return False
@@ -280,12 +282,12 @@ def test_default_list_uses_indexed_summary_lookup(client: TestClient) -> bool:
     _write(_record("old", "2026-06-16T00:00:00+00:00"))
     _write(_record("new", "2026-06-18T00:00:00+00:00"))
 
-    original_prefs = main._session_list_user_prefs
-    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    original_prefs = session_list_cache._session_list_user_prefs
+    session_list_cache._session_list_user_prefs = lambda: (False, "updated_at", False)
     try:
         response = client.get("/api/sessions?offset=0&limit=1", headers=HEADERS)
     finally:
-        main._session_list_user_prefs = original_prefs
+        session_list_cache._session_list_user_prefs = original_prefs
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions indexed summary lookup status {response.status_code}")
         return False
@@ -469,16 +471,16 @@ def test_search_avoids_full_sidebar_list(client: TestClient) -> bool:
     ))
     _write(_record("miss", "2026-06-21T00:00:00+00:00"))
 
-    original = main._local_session_summaries_for_sidebar
+    original = session_listing_api._local_session_summaries_for_sidebar
 
     def fail_full_list():
         raise AssertionError("search should not build the full sidebar list")
 
-    main._local_session_summaries_for_sidebar = fail_full_list
+    session_listing_api._local_session_summaries_for_sidebar = fail_full_list
     try:
         response = client.get("/api/sessions?search=needle", headers=HEADERS)
     finally:
-        main._local_session_summaries_for_sidebar = original
+        session_listing_api._local_session_summaries_for_sidebar = original
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions search fast path status {response.status_code}")
         return False
@@ -502,22 +504,22 @@ def test_simple_search_skips_generic_filter_sort(client: TestClient) -> bool:
     ))
     _write(_record("miss", "2026-06-21T00:00:00+00:00"))
 
-    original = main._filter_sort_page_for_list
-    original_prefs = main._session_list_user_prefs
+    original = session_listing_api._filter_sort_page_for_list
+    original_prefs = session_list_cache._session_list_user_prefs
 
     def fail_filter_sort(*_args, **_kwargs):
         raise AssertionError("simple search should page ranked score results directly")
 
-    main._filter_sort_page_for_list = fail_filter_sort
-    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    session_listing_api._filter_sort_page_for_list = fail_filter_sort
+    session_list_cache._session_list_user_prefs = lambda: (False, "updated_at", False)
     try:
         response = client.get(
             "/api/sessions?search=needle&search_fields=title&offset=1&limit=1",
             headers=HEADERS,
         )
     finally:
-        main._filter_sort_page_for_list = original
-        main._session_list_user_prefs = original_prefs
+        session_listing_api._filter_sort_page_for_list = original
+        session_list_cache._session_list_user_prefs = original_prefs
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions simple search page status {response.status_code}")
         return False
@@ -548,12 +550,12 @@ def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool
         print(f"{FAIL} /api/sessions first cached search status {first.status_code}")
         return False
 
-    original = main._build_local_sessions_page_for_list
+    original = session_listing_api._build_local_sessions_page_for_list
 
     def fail_recompute(*_args, **_kwargs):
         raise AssertionError("identical session search should use response cache")
 
-    main._build_local_sessions_page_for_list = fail_recompute
+    session_listing_api._build_local_sessions_page_for_list = fail_recompute
     try:
         second = client.get(
             "/api/sessions?search=needle&search_fields=title",
@@ -563,7 +565,7 @@ def test_repeated_session_search_uses_response_cache(client: TestClient) -> bool
         print(f"{FAIL} /api/sessions repeated search recomputed page")
         return False
     finally:
-        main._build_local_sessions_page_for_list = original
+        session_listing_api._build_local_sessions_page_for_list = original
 
     ids = [session["id"] for session in second.json().get("sessions", [])]
     ok = second.status_code == 200 and ids == ["matched"]
@@ -593,8 +595,8 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
         print(f"{FAIL} /api/sessions/summaries first status {first.status_code}")
         return False
 
-    original = main._decorate_local_sidebar_sessions
-    original_lookup = main._local_session_summaries_by_ids
+    original = session_listing_api._decorate_local_sidebar_sessions
+    original_lookup = session_listing_api._local_session_summaries_by_ids
 
     def fail_decorate(*_args, **_kwargs):
         raise AssertionError("identical summaries request should use response cache")
@@ -602,13 +604,13 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
     def fail_lookup(*_args, **_kwargs):
         raise AssertionError("identical summaries request should skip summary lookup")
 
-    main._decorate_local_sidebar_sessions = fail_decorate
-    main._local_session_summaries_by_ids = fail_lookup
+    session_listing_api._decorate_local_sidebar_sessions = fail_decorate
+    session_listing_api._local_session_summaries_by_ids = fail_lookup
     try:
         second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
     finally:
-        main._decorate_local_sidebar_sessions = original
-        main._local_session_summaries_by_ids = original_lookup
+        session_listing_api._decorate_local_sidebar_sessions = original
+        session_listing_api._local_session_summaries_by_ids = original_lookup
     if second.status_code != 200:
         print(f"{FAIL} /api/sessions/summaries cached status {second.status_code}")
         return False
@@ -662,7 +664,7 @@ def test_repeated_content_session_search_uses_response_cache(client: TestClient)
     while time.monotonic() < deadline:
         if session_search_index.has_cached_result(
             "needle",
-            main._session_search_candidate_limit(0, 50),
+            session_list_cache._session_search_candidate_limit(0, 50),
         ):
             content_ready = True
             break
@@ -678,12 +680,12 @@ def test_repeated_content_session_search_uses_response_cache(client: TestClient)
         print(f"{FAIL} /api/sessions warm content search status {warm.status_code}")
         return False
 
-    original = main._build_local_sessions_page_for_list
+    original = session_listing_api._build_local_sessions_page_for_list
 
     def fail_recompute(*_args, **_kwargs):
         raise AssertionError("identical content session search should use response cache")
 
-    main._build_local_sessions_page_for_list = fail_recompute
+    session_listing_api._build_local_sessions_page_for_list = fail_recompute
     try:
         second = client.get(
             "/api/sessions?search=needle&search_fields=content",
@@ -693,7 +695,7 @@ def test_repeated_content_session_search_uses_response_cache(client: TestClient)
         print(f"{FAIL} /api/sessions repeated content search recomputed page")
         return False
     finally:
-        main._build_local_sessions_page_for_list = original
+        session_listing_api._build_local_sessions_page_for_list = original
 
     ids = [session["id"] for session in second.json().get("sessions", [])]
     ok = second.status_code == 200 and ids == ["matched"]
@@ -710,12 +712,12 @@ def test_search_paginates_without_full_sort(client: TestClient) -> bool:
             name="needle title",
         ))
 
-    original = main._filter_sort_sessions_for_list
+    original = session_listing_api._filter_sort_sessions_for_list
 
     def fail_full_sort(*_args, **_kwargs):
         raise AssertionError("search should select the requested page without full sort")
 
-    main._filter_sort_sessions_for_list = fail_full_sort
+    session_listing_api._filter_sort_sessions_for_list = fail_full_sort
     try:
         response = client.get(
             "/api/sessions?search=needle&search_fields=title&limit=2",
@@ -725,7 +727,7 @@ def test_search_paginates_without_full_sort(client: TestClient) -> bool:
         print(f"{FAIL} /api/sessions search used full sort")
         return False
     finally:
-        main._filter_sort_sessions_for_list = original
+        session_listing_api._filter_sort_sessions_for_list = original
 
     body = response.json()
     ok = (
@@ -923,8 +925,8 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
         pinned=True,
     ))
 
-    original = main._local_sessions_for_sidebar
-    main._local_sessions_for_sidebar = lambda: (_ for _ in ()).throw(
+    original = session_listing_api._local_sessions_for_sidebar
+    session_listing_api._local_sessions_for_sidebar = lambda: (_ for _ in ()).throw(
         AssertionError("unpin-others must not build the decorated sidebar list")
     )
     try:
@@ -934,7 +936,7 @@ def test_unpin_others_ignores_backend_filters(client: TestClient) -> bool:
             json={"project_path": "/tmp/project-a"},
         )
     finally:
-        main._local_sessions_for_sidebar = original
+        session_listing_api._local_sessions_for_sidebar = original
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions unpin-others status {response.status_code}")
         return False
@@ -1186,8 +1188,8 @@ def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool
         connected_worker_node_ids_snapshot=lambda: (1, ("node-a",)),
     )
     original_node_store = sys.modules.get("node_store")
-    original_enabled = main._machine_nodes_enabled_cached
-    original_prefs = main._session_list_user_prefs
+    original_enabled = session_list_cache._machine_nodes_enabled_cached
+    original_prefs = session_list_cache._session_list_user_prefs
     copied_lengths: list[int] = []
     original_copy = remote_sessions_cache.copy_sessions
 
@@ -1198,15 +1200,15 @@ def test_connected_first_page_caps_remote_cache_copy(client: TestClient) -> bool
         return copied
 
     sys.modules["node_store"] = fake_node_store
-    main._machine_nodes_enabled_cached = lambda: True
-    main._session_list_user_prefs = lambda: (False, "updated_at", False)
+    session_list_cache._machine_nodes_enabled_cached = lambda: True
+    session_list_cache._session_list_user_prefs = lambda: (False, "updated_at", False)
     remote_sessions_cache.copy_sessions = tracking_copy
     try:
         response = client.get("/api/sessions?offset=0&limit=2", headers=HEADERS)
     finally:
         remote_sessions_cache.copy_sessions = original_copy
-        main._session_list_user_prefs = original_prefs
-        main._machine_nodes_enabled_cached = original_enabled
+        session_list_cache._session_list_user_prefs = original_prefs
+        session_list_cache._machine_nodes_enabled_cached = original_enabled
         if original_node_store is None:
             sys.modules.pop("node_store", None)
         else:

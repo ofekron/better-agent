@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import session_listing_api  # noqa: E402
 import session_store  # noqa: E402
 import auth  # noqa: E402
 
@@ -48,14 +49,14 @@ def _write_root_session(session_id: str) -> None:
 def test_incomplete_snapshot_is_marked() -> None:
     _write_root_session("root-a")
     _reset_summary_index()
-    original_wait = main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS
+    original_wait = session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS
     original_warm = session_store._start_summary_index_warm
-    main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0
+    session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0
     session_store._start_summary_index_warm = lambda: None
     try:
         body = TestClient(main.app).get("/api/sessions", headers=HEADERS).json()
     finally:
-        main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = original_wait
+        session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = original_wait
         session_store._start_summary_index_warm = original_warm
     assert body["sessions"] == []
     assert body["snapshot_complete"] is False
@@ -66,14 +67,14 @@ def test_empty_home_snapshot_is_complete() -> None:
     for path in (Path(_TMP_HOME) / "sessions").glob("*.json"):
         path.unlink()
     _reset_summary_index()
-    original_wait = main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS
+    original_wait = session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS
     original_warm = session_store._start_summary_index_warm
-    main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0
+    session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0
     session_store._start_summary_index_warm = lambda: None
     try:
         body = TestClient(main.app).get("/api/sessions", headers=HEADERS).json()
     finally:
-        main._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = original_wait
+        session_listing_api._SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = original_wait
         session_store._start_summary_index_warm = original_warm
     assert body["sessions"] == []
     assert body["snapshot_complete"] is True

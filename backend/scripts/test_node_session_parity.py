@@ -332,16 +332,16 @@ def test_recovery_rpc_validation() -> None:
 
 
 async def test_offline_gate() -> None:
-    import main
+    import session_detail_api
     import node_store
 
     install_machine_nodes_extension(_BC_HOME)
 
     check(
         "gate: primary session passes",
-        await main._node_offline_error({"node_id": "primary"}) is None,
+        await session_detail_api._node_offline_error({"node_id": "primary"}) is None,
     )
-    err = await main._node_offline_error({"node_id": "ghost-node"})
+    err = await session_detail_api._node_offline_error({"node_id": "ghost-node"})
     check(
         "gate: disconnected node session rejected with clear error",
         isinstance(err, str) and "ghost-node" in err and "offline" in err,
@@ -356,7 +356,7 @@ async def test_offline_gate() -> None:
     )
     node_store.app_version.current_commit_sha = lambda: "a" * 40
     try:
-        err = await main._node_offline_error({"node_id": "node-b"})
+        err = await session_detail_api._node_offline_error({"node_id": "node-b"})
     finally:
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
         node_store.app_version.current_commit_sha = original_commit

@@ -19,7 +19,12 @@ if not dist_dir.exists():
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "index.html").write_text("<!doctype html><title>stub</title>", encoding="utf-8")
 
+import internal_messaging_api  # noqa: E402
 import main  # noqa: E402
+import worker_pools_api  # noqa: E402
+import workers_api  # noqa: E402
+import session_listing_api  # noqa: E402
+import session_store  # noqa: E402
 import extension_store  # noqa: E402
 import config_store  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
@@ -326,7 +331,7 @@ def test_pool_worker_provisioning_hides_router_owned_workers_from_sidebar():
     assert worker_session["working_mode_meta"]["parent_session_id"] == router["id"]
     assert worker_session["working_mode_meta"]["pool_tags"] == ["testape-router-owned"]
 
-    visible_ids = {session["id"] for session in main._local_session_summaries_for_sidebar()}
+    visible_ids = {session["id"] for session in session_listing_api._local_session_summaries_for_sidebar()}
     assert router["id"] in visible_ids
     assert worker["agent_session_id"] not in visible_ids
 
@@ -409,7 +414,7 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         assert response.status_code == 200, response.text
 
         import asyncio
-        asyncio.run(main._process_worker_pool_queue("review"))
+        asyncio.run(worker_pools_api._process_worker_pool_queue("review"))
         assert dispatched
         assert dispatched[0]["sender_session_id"] == sender["id"]
         assert dispatched[0]["message"] == "review this"
@@ -446,9 +451,9 @@ def test_worker_pool_wait_ask_queues_when_no_worker_idle():
 
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
     real_ask = main.coordinator.ask_team_message
-    real_pick = main._pick_pool_worker_for_sender
+    real_pick = worker_pools_api._pick_pool_worker_for_sender
     main.coordinator.ask_team_message = fake_ask_team_message
-    main._pick_pool_worker_for_sender = fake_pick
+    worker_pools_api._pick_pool_worker_for_sender = fake_pick
     sender = main.session_manager.create(
         name="manager",
         cwd="/tmp/pool-wait-ask",
@@ -456,7 +461,7 @@ def test_worker_pool_wait_ask_queues_when_no_worker_idle():
     )
 
     async def run() -> dict:
-        return await main._handle_internal_ask({
+        return await internal_messaging_api._handle_internal_ask({
             "sender_session_id": sender["id"],
             "target_worker_pool": "review",
             "message": "answer later",
@@ -468,7 +473,7 @@ def test_worker_pool_wait_ask_queues_when_no_worker_idle():
         result = asyncio.run(run())
     finally:
         main.coordinator.ask_team_message = real_ask
-        main._pick_pool_worker_for_sender = real_pick
+        worker_pools_api._pick_pool_worker_for_sender = real_pick
 
     assert result["success"] is True
     assert result["assistant_content"] == "done"
@@ -526,9 +531,9 @@ def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
 
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
     real_ask = main.coordinator.ask_team_message
-    real_pick = main._pick_pool_worker_for_sender
+    real_pick = worker_pools_api._pick_pool_worker_for_sender
     main.coordinator.ask_team_message = fake_ask_team_message
-    main._pick_pool_worker_for_sender = fake_pick
+    worker_pools_api._pick_pool_worker_for_sender = fake_pick
     sender = main.session_manager.create(
         id="sender-retry",
         name="manager",
@@ -537,7 +542,7 @@ def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
     )
 
     async def run() -> dict:
-        return await main._handle_internal_ask({
+        return await internal_messaging_api._handle_internal_ask({
             "sender_session_id": sender["id"],
             "target_worker_pool": "review",
             "message": "answer existing",
@@ -549,7 +554,7 @@ def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
         result = asyncio.run(run())
     finally:
         main.coordinator.ask_team_message = real_ask
-        main._pick_pool_worker_for_sender = real_pick
+        worker_pools_api._pick_pool_worker_for_sender = real_pick
 
     assert result["success"] is True
     assert result["assistant_content"] == "existing done"
@@ -597,7 +602,7 @@ def test_worker_pool_dispatch_failure_requeues_without_blocking_later_items():
             )
             assert response.status_code == 200, response.text
 
-        asyncio.run(main._process_worker_pool_queue("review"))
+        asyncio.run(worker_pools_api._process_worker_pool_queue("review"))
         assert [item["message"] for item in dispatched] == ["later work", "bad head"]
         assert worker_store.peek_pool_task("review") is None
     finally:
@@ -623,7 +628,7 @@ def test_worker_pool_affinity_reuses_bound_worker_even_when_busy():
         ],
     })
     assert provision.status_code == 200, provision.text
-    first_target = asyncio.run(main._resolve_communication_target({
+    first_target = asyncio.run(internal_messaging_api._resolve_communication_target({
         "sender_session_id": sender["id"],
         "target_worker_pool": "review",
         "pool_affinity_key": "thread-1",
@@ -632,12 +637,12 @@ def test_worker_pool_affinity_reuses_bound_worker_even_when_busy():
     real_running = main.coordinator.turn_manager.is_running_cached
     main.coordinator.turn_manager.is_running_cached = lambda sid: sid == first_target
     try:
-        repeated_target = asyncio.run(main._resolve_communication_target({
+        repeated_target = asyncio.run(internal_messaging_api._resolve_communication_target({
             "sender_session_id": sender["id"],
             "target_worker_pool": "review",
             "pool_affinity_key": "thread-1",
         }))
-        different_thread_target = asyncio.run(main._resolve_communication_target({
+        different_thread_target = asyncio.run(internal_messaging_api._resolve_communication_target({
             "sender_session_id": sender["id"],
             "target_worker_pool": "review",
             "pool_affinity_key": "thread-2",
@@ -702,7 +707,7 @@ def test_find_worker_removes_stale_provider_session_and_continues():
 
     def fake_get_lite(session_id):
         if session_id == "stale-session":
-            raise main.session_store.SessionProviderNotConfiguredError(
+            raise session_store.SessionProviderNotConfiguredError(
                 "session provider is not configured"
             )
         return {
@@ -715,7 +720,7 @@ def test_find_worker_removes_stale_provider_session_and_continues():
 
     main.session_manager.get_lite = fake_get_lite
     try:
-        found = main._find_worker_by_session_name("/tmp/project", "worker:current")
+        found = workers_api._find_worker_by_session_name("/tmp/project", "worker:current")
     finally:
         _ws._read = real_read
         _ws.remove_worker = real_remove
@@ -757,7 +762,7 @@ def test_bare_provision_worker_persists_disallowed_tools():
 
     main.coordinator._init_target_agent_session = _fail_init_target_agent_session
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
-    result = _asyncio.run(main._provision_workers_from_body({
+    result = _asyncio.run(workers_api.provision_workers_from_body({
         "cwd": "/tmp/restricted-worker-project",
         "bare_config": True,
         "workers": [
@@ -780,7 +785,7 @@ def test_bare_provision_worker_persists_disabled_builtin_extensions():
 
     main.coordinator._init_target_agent_session = _fail_init_target_agent_session
     main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
-    result = _asyncio.run(main._provision_workers_from_body({
+    result = _asyncio.run(workers_api.provision_workers_from_body({
         "cwd": "/tmp/restricted-extension-worker-project",
         "bare_config": True,
         "workers": [
@@ -817,8 +822,8 @@ def test_provision_can_replace_uninitialized_existing_worker():
         ],
     }
 
-    first = _asyncio.run(main._provision_workers_from_body(body))
-    second = _asyncio.run(main._provision_workers_from_body(body))
+    first = _asyncio.run(workers_api.provision_workers_from_body(body))
+    second = _asyncio.run(workers_api.provision_workers_from_body(body))
 
     first_worker = first["workers"][0]
     second_worker = second["workers"][0]
@@ -846,14 +851,14 @@ def test_existing_provision_worker_can_clear_disabled_builtin_extensions():
             }
         ],
     }
-    first = _asyncio.run(main._provision_workers_from_body(body))
+    first = _asyncio.run(workers_api.provision_workers_from_body(body))
     worker = first["workers"][0]
     session_manager.set_disabled_builtin_extensions(
         worker["agent_session_id"],
         ["ofek.testape-internal"],
     )
 
-    second = _asyncio.run(main._provision_workers_from_body({
+    second = _asyncio.run(workers_api.provision_workers_from_body({
         **body,
         "workers": [
             {
@@ -910,7 +915,7 @@ def test_pool_picker_skips_uninitialized_workers_and_clears_affinity():
 
     pool_affinity_store.bind("review", sender["id"], "thread-1", pending["id"])
 
-    target = main._pick_pool_worker_for_sender("review", sender["id"], "thread-1", True)
+    target = worker_pools_api._pick_pool_worker_for_sender("review", sender["id"], "thread-1", True)
 
     assert target["agent_session_id"] == ready["id"]
     assert pool_affinity_store.get_binding("review", sender["id"], "thread-1") == ready["id"]
@@ -1266,20 +1271,20 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
         async def __aexit__(self, *_exc):
             return False
 
-    real_find = main._find_worker_by_session_name
-    real_create = main._create_worker_from_body
-    real_lock = main._provision_lock
-    main._find_worker_by_session_name = fake_find
-    main._create_worker_from_body = fake_create
+    real_find = workers_api._find_worker_by_session_name
+    real_create = workers_api._create_worker_from_body
+    real_lock = workers_api._provision_lock
+    workers_api._find_worker_by_session_name = fake_find
+    workers_api._create_worker_from_body = fake_create
     try:
         # Locked (real): concurrent provisions serialize -> 1 create.
         created_names.clear()
         create_order.clear()
-        main._provision_lock = real_lock
+        workers_api._provision_lock = real_lock
         async def _two_provisions():
             return await _asyncio.gather(
-                main._provision_workers_from_body(body),
-                main._provision_workers_from_body(body),
+                workers_api.provision_workers_from_body(body),
+                workers_api.provision_workers_from_body(body),
             )
 
         results = _asyncio.run(_two_provisions())
@@ -1294,13 +1299,13 @@ def test_concurrent_provision_of_same_worker_creates_exactly_one():
         created_names.clear()
         create_order.clear()
         force_unlocked_race = True
-        main._provision_lock = lambda _name, _cwd: _NoLock()
+        workers_api._provision_lock = lambda _name, _cwd: _NoLock()
         _asyncio.run(_two_provisions())
         assert len(create_order) == 2, f"unlocked: expected 2 creates (race), got {len(create_order)}"
     finally:
-        main._find_worker_by_session_name = real_find
-        main._create_worker_from_body = real_create
-        main._provision_lock = real_lock
+        workers_api._find_worker_by_session_name = real_find
+        workers_api._create_worker_from_body = real_create
+        workers_api._provision_lock = real_lock
 
 
 def test_provision_broadcasts_created_worker_before_later_failure():
@@ -1338,22 +1343,22 @@ def test_provision_broadcasts_created_worker_before_later_failure():
             "delegation_count": 0,
         }
 
-    real_find = main._find_worker_by_session_name
-    real_create = main._create_worker_from_body
+    real_find = workers_api._find_worker_by_session_name
+    real_create = workers_api._create_worker_from_body
     real_broadcast = main.coordinator.broadcast_workers_changed
-    main._find_worker_by_session_name = fake_find
-    main._create_worker_from_body = fake_create
+    workers_api._find_worker_by_session_name = fake_find
+    workers_api._create_worker_from_body = fake_create
     main.coordinator.broadcast_workers_changed = fake_broadcast
     try:
         try:
-            _asyncio.run(main._provision_workers_from_body(body))
+            _asyncio.run(workers_api.provision_workers_from_body(body))
         except RuntimeError as exc:
             assert str(exc) == "init failed"
         else:
             raise AssertionError("expected failing worker to abort the batch")
     finally:
-        main._find_worker_by_session_name = real_find
-        main._create_worker_from_body = real_create
+        workers_api._find_worker_by_session_name = real_find
+        workers_api._create_worker_from_body = real_create
         main.coordinator.broadcast_workers_changed = real_broadcast
 
     assert create_order == ["created-worker", "failing-worker"]

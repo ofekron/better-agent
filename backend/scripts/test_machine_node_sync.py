@@ -803,7 +803,7 @@ async def test_node_cwd_is_validated_against_the_node() -> None:
     Windows node under a POSIX primary that reached the runner and failed
     as a bare `NotADirectoryError: [WinError 267]` mid-turn.
     """
-    import main
+    import session_detail_api
     import node_rpc_handlers
 
     calls: list[dict] = []
@@ -818,24 +818,24 @@ async def test_node_cwd_is_validated_against_the_node() -> None:
 
     original = node_rpc_handlers.call_local_or_remote
     node_rpc_handlers.call_local_or_remote = fake_rpc
-    main._node_cwd_verified.clear()
+    session_detail_api._node_cwd_verified.clear()
     try:
-        assert await main._node_cwd_error("n1", "") is None, "empty cwd should not be probed"
+        assert await session_detail_api._node_cwd_error("n1", "") is None, "empty cwd should not be probed"
         assert not calls
 
-        bad = await main._node_cwd_error("n1", "/does/not/exist")
+        bad = await session_detail_api._node_cwd_error("n1", "/does/not/exist")
         assert bad and "/does/not/exist" in bad and "n1" in bad, bad
 
         # A transport failure is the offline/version checks' job, not this one.
-        assert await main._node_cwd_error("n1", "/transport/flake") is None
+        assert await session_detail_api._node_cwd_error("n1", "/transport/flake") is None
 
-        assert await main._node_cwd_error("n1", "/good") is None
+        assert await session_detail_api._node_cwd_error("n1", "/good") is None
         before = len(calls)
-        assert await main._node_cwd_error("n1", "/good") is None
+        assert await session_detail_api._node_cwd_error("n1", "/good") is None
         assert len(calls) == before, "a verified cwd should not be re-probed"
     finally:
         node_rpc_handlers.call_local_or_remote = original
-        main._node_cwd_verified.clear()
+        session_detail_api._node_cwd_verified.clear()
 
 
 def _write_package(root, name: str):

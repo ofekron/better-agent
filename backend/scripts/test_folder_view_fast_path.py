@@ -26,6 +26,7 @@ os.environ["BETTER_AGENT_HOME"] = HOME.name
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main  # noqa: E402
+import session_listing_api  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -96,18 +97,18 @@ def test_folder_reassignment_invalidates_the_cached_fast_path_order() -> None:
 
 
 def test_fast_path_gates_no_longer_exclude_folder_view() -> None:
-    assert main._can_preserve_summary_order(
+    assert session_listing_api._can_preserve_summary_order(
         search_query="",
         appended_virtual_sessions=False,
         sort_by="updated_at",
         status_sort=False,
     )
-    assert main._can_page_local_summary_order(
+    assert session_listing_api._can_page_local_summary_order(
         search_query="",
         sort_by="updated_at",
         status_sort=False,
     )
-    assert main._can_page_default_updated_at_with_virtual(
+    assert session_listing_api._can_page_default_updated_at_with_virtual(
         search_query="",
         project_path=None,
         show_archived=False,
@@ -129,7 +130,7 @@ def test_local_page_for_sidebar_preserving_order_forwards_folder_view() -> None:
         "sidebar_session_summary_page",
         return_value=([{"id": "a"}], 1, 1, 1),
     ) as fast_path:
-        page, total = main._local_session_page_for_sidebar_preserving_order(
+        page, total = session_listing_api._local_session_page_for_sidebar_preserving_order(
             sort_by="updated_at",
             offset=0,
             limit=10,

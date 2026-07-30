@@ -21,6 +21,8 @@ if str(BACKEND) not in sys.path:
 import extension_api
 import extension_store
 import extension_token_registry
+import hooks_push_api
+import internal_guards
 import internal_token_file
 import main
 import orchestrator
@@ -200,7 +202,7 @@ async def test_extension_content_reads_are_off_loop() -> None:
 async def test_project_gates_load_roles_off_loop() -> None:
     entered = threading.Event()
     original_roles = extension_store.core_role_owners
-    original_runtime = main._require_builtin_runtime_extension
+    original_runtime = internal_guards.require_builtin_runtime_extension
     original_builtin = main._require_builtin_extension
 
     def delayed_roles():
@@ -209,11 +211,11 @@ async def test_project_gates_load_roles_off_loop() -> None:
         return {"project-structure": "project.owner"}
 
     extension_store.core_role_owners = delayed_roles
-    main._require_builtin_runtime_extension = lambda _owner: None
+    internal_guards.require_builtin_runtime_extension = lambda _owner: None
     main._require_builtin_extension = lambda _owner: None
     try:
         for gate in (
-            main._require_project_structure_internal_async,
+            hooks_push_api._require_project_structure_internal_async,
             main._require_project_updates_internal_async,
         ):
             state = type("State", (), {
@@ -239,7 +241,7 @@ async def test_project_gates_load_roles_off_loop() -> None:
             entered.clear()
     finally:
         extension_store.core_role_owners = original_roles
-        main._require_builtin_runtime_extension = original_runtime
+        internal_guards.require_builtin_runtime_extension = original_runtime
         main._require_builtin_extension = original_builtin
 
 

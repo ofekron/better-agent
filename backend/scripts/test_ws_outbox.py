@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
 
 
 import main  # noqa: E402
+import ws_chat  # noqa: E402
+import lag_watchdog  # noqa: E402
 import ws_serialization  # noqa: E402
 from jsonl_tailer import _Subscriber  # noqa: E402
 from ws_snapshot_transport import SNAPSHOT_THRESHOLD_BYTES, SnapshotTransport  # noqa: E402
@@ -61,7 +63,7 @@ class _StallingWebSocket(_RecordingWebSocket):
 
 class _StallingBinaryWebSocket(_RecordingWebSocket):
     async def send_bytes(self, payload: bytes) -> None:
-        main._LAG_LOOP_EVIDENCE["sentinel_at"] = time.perf_counter()
+        lag_watchdog._LAG_LOOP_EVIDENCE["sentinel_at"] = time.perf_counter()
         await asyncio.sleep(0.01)
         await super().send_bytes(payload)
 
@@ -103,7 +105,7 @@ def test_ws_outbox_blocked_writer_times_out_without_accepting_frame() -> None:
         async def on_close() -> None:
             closed.set()
 
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=on_close,
             enqueue_timeout_s=0.02,
@@ -142,7 +144,7 @@ def test_ws_outbox_sends_queued_frames_fifo() -> None:
         async def on_close() -> None:
             closed.set()
 
-        outbox = main._WebSocketOutbox(websocket, on_close=on_close)
+        outbox = ws_chat._WebSocketOutbox(websocket, on_close=on_close)
         await outbox.send({"type": "first", "data": {"n": 1}})
         await outbox.send({"type": "second", "data": {"n": 2}})
         await _wait_for(lambda: len(websocket.sent) == 2)
@@ -160,7 +162,7 @@ def test_ws_outbox_sends_queued_frames_fifo() -> None:
 def test_ws_outbox_text_and_binary_frames_share_one_fifo() -> None:
     async def run() -> None:
         websocket = _RecordingWebSocket()
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=lambda: asyncio.sleep(0),
         )
@@ -185,12 +187,12 @@ def test_ws_outbox_binary_records_timeline_and_lag_overlap() -> None:
         counts: list[tuple[str, int]] = []
         with (
             mock.patch.object(
-                main.perf,
+                ws_chat.perf,
                 "record",
                 side_effect=lambda name, value: records.append((name, value)),
             ),
             mock.patch.object(
-                main.perf,
+                ws_chat.perf,
                 "record_count",
                 side_effect=lambda name, value=1: counts.append((name, value)),
             ),
@@ -200,7 +202,7 @@ def test_ws_outbox_binary_records_timeline_and_lag_overlap() -> None:
                 {},
             ),
         ):
-            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            outbox = ws_chat._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
             assert await outbox.send_binary(b"x" * 1024, event_type="snapshot_chunk")
             await _wait_for(lambda: len(websocket.binary_sent) == 1)
             await outbox.close()
@@ -225,10 +227,10 @@ def test_ws_outbox_records_writer_start_payload_and_wire_without_payload() -> No
         records: list[tuple[str, float]] = []
         counts: list[tuple[str, int]] = []
         with (
-            mock.patch.object(main.perf, "record", side_effect=lambda name, value: records.append((name, value))),
-            mock.patch.object(main.perf, "record_count", side_effect=lambda name, value=1: counts.append((name, value))),
+            mock.patch.object(ws_chat.perf, "record", side_effect=lambda name, value: records.append((name, value))),
+            mock.patch.object(ws_chat.perf, "record_count", side_effect=lambda name, value=1: counts.append((name, value))),
         ):
-            outbox = main._WebSocketOutbox(websocket, on_close=on_close)
+            outbox = ws_chat._WebSocketOutbox(websocket, on_close=on_close)
             assert await outbox.send({"type": "instrumented", "data": {"secret": "not-logged"}})
             await _wait_for(lambda: len(websocket.sent) == 1)
             await outbox.close()
@@ -260,9 +262,9 @@ def test_ws_outbox_precompleted_serialization_has_disjoint_timeline() -> None:
         await event._bc_serialized_json_task
         records: list[tuple[str, float]] = []
         with mock.patch.object(
-            main.perf, "record", side_effect=lambda name, value: records.append((name, value)),
+            ws_chat.perf, "record", side_effect=lambda name, value: records.append((name, value)),
         ):
-            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            outbox = ws_chat._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
             assert await outbox.send(event)
             await _wait_for(lambda: len(websocket.sent) == 1)
             await outbox.close()
@@ -281,9 +283,9 @@ def test_ws_outbox_injected_loop_stall_is_attributed_to_wire_only() -> None:
         websocket = _StallingWebSocket()
         records: list[tuple[str, float]] = []
         with mock.patch.object(
-            main.perf, "record", side_effect=lambda name, value: records.append((name, value)),
+            ws_chat.perf, "record", side_effect=lambda name, value: records.append((name, value)),
         ):
-            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            outbox = ws_chat._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
             assert await outbox.send({"type": "instrumented", "data": {}})
             await _wait_for(lambda: len(websocket.sent) == 1)
             await outbox.close()
@@ -299,7 +301,7 @@ def test_ws_outbox_injected_loop_stall_is_attributed_to_wire_only() -> None:
 def test_ws_outbox_slow_wire_stays_open_until_backpressure() -> None:
     async def run() -> None:
         websocket = _LongStallingWebSocket()
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=lambda: asyncio.sleep(0),
             max_items=1,
@@ -356,7 +358,7 @@ def test_ws_outbox_backpressures_burst_larger_than_capacity() -> None:
         async def on_close() -> None:
             raise AssertionError("draining websocket must not close")
 
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=on_close,
             max_items=4,
@@ -381,7 +383,7 @@ def test_ws_outbox_close_rejects_waiting_enqueue() -> None:
         async def on_close() -> None:
             return None
 
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=on_close,
             max_items=1,
@@ -408,7 +410,7 @@ def test_ws_outbox_close_is_timeout_bounded() -> None:
         async def on_close() -> None:
             closed.set()
 
-        outbox = main._WebSocketOutbox(
+        outbox = ws_chat._WebSocketOutbox(
             websocket,
             on_close=on_close,
             max_items=1,
@@ -430,7 +432,7 @@ def test_production_callback_rejection_preserves_subscriber_watermark() -> None:
         async def on_close() -> None:
             return None
 
-        outbox: main._WebSocketOutbox | None = main._WebSocketOutbox(
+        outbox: ws_chat._WebSocketOutbox | None = ws_chat._WebSocketOutbox(
             websocket,
             on_close=on_close,
         )
@@ -453,7 +455,7 @@ def test_production_callback_rejection_preserves_subscriber_watermark() -> None:
             {"type": "agent_message", "data": {}, "seq": 1},
         )
         assert sub.next_seq == 1
-        production_source = inspect.getsource(main.websocket_chat)
+        production_source = inspect.getsource(ws_chat.websocket_chat)
         assert "return False\n        return await snapshot_transport.send_event(event_dict)" in production_source
 
     asyncio.run(run())
@@ -466,7 +468,7 @@ def test_snapshot_transport_preserves_outbox_fifo_with_live_interleave() -> None
         async def on_close() -> None:
             return None
 
-        outbox = main._WebSocketOutbox(websocket, on_close=on_close)
+        outbox = ws_chat._WebSocketOutbox(websocket, on_close=on_close)
 
         async def send(frame, serialized=None) -> bool:
             return await outbox.send(frame, serialized)
@@ -527,15 +529,15 @@ def test_snapshot_refresh_roots_have_correlated_terminal_boundary() -> None:
             "root-b": {"root-b"},
         }
         with mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "_root_id_for",
             side_effect=lambda sid: roots[sid],
         ), mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "subtree_ids",
             side_effect=lambda sid: set(scopes[sid]),
         ):
-            assert await main._send_snapshot_refresh_roots(
+            assert await ws_chat._send_snapshot_refresh_roots(
                 (("sid-b", "m2"), ("fork", "m3"), ("sid-a", "m1")),
                 "f" * 32,
                 send,
@@ -579,18 +581,18 @@ def test_snapshot_refresh_scope_cap_fails_closed_without_partial_authority() -> 
             return True
 
         oversized = {"root", *(
-            f"fork-{index}" for index in range(main._SNAPSHOT_REFRESH_MAX_SCOPE_SIDS)
+            f"fork-{index}" for index in range(ws_chat._SNAPSHOT_REFRESH_MAX_SCOPE_SIDS)
         )}
         with mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "_root_id_for",
             return_value="root",
         ), mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "subtree_ids",
             return_value=oversized,
         ):
-            assert await main._send_snapshot_refresh_roots(
+            assert await ws_chat._send_snapshot_refresh_roots(
                 (("root", None),),
                 "e" * 32,
                 send,
@@ -621,15 +623,15 @@ def test_snapshot_refresh_scope_cap_is_aggregate_across_roots() -> None:
             "root-b": {"root-b", *(f"b-{index}" for index in range(299))},
         }
         with mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "_root_id_for",
             side_effect=lambda sid: roots[sid],
         ), mock.patch.object(
-            main.session_manager,
+            ws_chat.session_manager,
             "subtree_ids",
             side_effect=lambda root_id: set(scopes[root_id]),
         ):
-            assert await main._send_snapshot_refresh_roots(
+            assert await ws_chat._send_snapshot_refresh_roots(
                 (("sid-a", None), ("sid-b", None)),
                 "d" * 32,
                 send,

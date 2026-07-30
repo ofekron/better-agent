@@ -27,7 +27,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 def main() -> int:
     try:
-        import main as app_main  # noqa: E402
+        import session_listing_api  # noqa: E402
 
         empty_new = {
             "id": "empty-new",
@@ -52,7 +52,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [busy_pinned, busy_recent, empty_new],
-                key=lambda s: app_main._session_list_sort_key(
+                key=lambda s: session_listing_api._session_list_sort_key(
                     s, False, "updated_at"
                 ),
                 reverse=True,
@@ -73,7 +73,7 @@ def main() -> int:
             s["id"]
             for s in sorted(
                 [empty_a, empty_b],
-                key=lambda s: app_main._session_list_sort_key(
+                key=lambda s: session_listing_api._session_list_sort_key(
                     s, False, "updated_at"
                 ),
                 reverse=True,

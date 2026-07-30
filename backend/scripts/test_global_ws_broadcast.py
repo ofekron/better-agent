@@ -317,7 +317,7 @@ async def test_same_process_lifespan_reopens_after_drain() -> bool:
 
 
 async def test_shutdown_drains_before_serializer_shutdown() -> bool:
-    source = (Path(_BACKEND) / "main.py").read_text()
+    source = (Path(_BACKEND) / "app_lifecycle.py").read_text()
     shutdown = source[source.index("async def on_shutdown():"):]
     unsubscribe_pos = shutdown.index("unbind_session_ws_broadcaster()")
     drain_pos = shutdown.index("await coordinator.drain_global_broadcasts()")

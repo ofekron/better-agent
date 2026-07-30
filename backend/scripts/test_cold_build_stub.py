@@ -24,6 +24,7 @@ paths.engage_test_home(_home)
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import main  # noqa: E402
+import frontend_mount  # noqa: E402
 import daemonhost.pointer as pointer  # noqa: E402
 from daemonhost.jsonio import write_json  # noqa: E402
 from daemonhost.paths import pointer_path  # noqa: E402
@@ -37,14 +38,14 @@ def run() -> None:
     # callers naming a specific dist must hear about its absence, not get a stub.
     missing = Path(tempfile.mkdtemp()) / "missing"
     try:
-        main.mount_frontend(FastAPI(), dist_dir=missing)
+        frontend_mount.mount_frontend(FastAPI(), dist_dir=missing)
         raise AssertionError("explicit missing dist_dir must raise RuntimeError")
     except RuntimeError:
         pass
 
     # Stub path: a non-API GET serves the placeholder, never crashes.
     app = FastAPI()
-    main._mount_cold_build_stub(app)
+    frontend_mount._mount_cold_build_stub(app)
     client = TestClient(app)
     r = client.get("/")
     assert r.status_code == 200, r.status_code
@@ -57,7 +58,7 @@ def run() -> None:
     # handler is registered and nothing throws. (Under the supervisor the
     # watcher would SIGTERM this process, so it is not exercised live here.)
     os.environ.pop("BETTER_CLAUDE_RUN_SH_SUPERVISOR", None)
-    main._arm_cold_build_restart(app, Path(tempfile.mkdtemp()) / "dist" / "index.html")
+    frontend_mount._arm_cold_build_restart(app, Path(tempfile.mkdtemp()) / "dist" / "index.html")
 
     # is-switching reflects the pointer status and its CLI mirrors that.
     write_json(pointer_path(), {"status": "switching", "active": "/x"})

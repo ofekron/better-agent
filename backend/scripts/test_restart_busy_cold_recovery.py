@@ -31,6 +31,8 @@ _TMP_HOME = _test_home.isolate("ba-test-restart-busy-cold-recovery-")
 atexit.register(lambda: shutil.rmtree(_TMP_HOME, ignore_errors=True))
 
 import main  # noqa: E402
+import recovery  # noqa: E402
+import ops_api  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -43,8 +45,8 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def _reset_cold_recovery_state() -> None:
-    main._RECOVERED_COLD_PENDING.clear()
-    main._RECOVERED_COLD_ACTIVE.clear()
+    recovery._RECOVERED_COLD_PENDING.clear()
+    recovery._RECOVERED_COLD_ACTIVE.clear()
 
 
 def main_() -> int:
@@ -53,35 +55,35 @@ def main_() -> int:
     # 1. Baseline: no cold-recovery work pending/active -> not blocking.
     check(
         "no cold recovery -> not pending",
-        main._cold_recovery_integration_pending() is False,
+        recovery._cold_recovery_integration_pending() is False,
         "expected False with empty pending/active sets",
     )
 
     # 2. A pending (not yet started) cold batch counts as busy.
-    main._RECOVERED_COLD_PENDING["sid-1"] = [{"run_id": "r1"}]
+    recovery._RECOVERED_COLD_PENDING["sid-1"] = [{"run_id": "r1"}]
     check(
         "pending cold batch -> integration pending",
-        main._cold_recovery_integration_pending() is True,
+        recovery._cold_recovery_integration_pending() is True,
         "expected True with a non-empty pending dict",
     )
     check(
         "pending cold batch -> restart-blocking work",
-        main._has_restart_blocking_agent_work() is True,
+        ops_api._has_restart_blocking_agent_work() is True,
         "expected True: cold recovery must block a restart-cadence idle read",
     )
     _reset_cold_recovery_state()
 
     # 3. An in-flight (actively integrating) cold batch counts as busy too,
     #    even once it's been popped out of the pending dict.
-    main._RECOVERED_COLD_ACTIVE.add("sid-2")
+    recovery._RECOVERED_COLD_ACTIVE.add("sid-2")
     check(
         "active cold batch -> integration pending",
-        main._cold_recovery_integration_pending() is True,
+        recovery._cold_recovery_integration_pending() is True,
         "expected True with a non-empty active set",
     )
     check(
         "active cold batch -> restart-blocking work",
-        main._has_restart_blocking_agent_work() is True,
+        ops_api._has_restart_blocking_agent_work() is True,
         "expected True: an in-flight cold integration must block idle too",
     )
     _reset_cold_recovery_state()
@@ -89,7 +91,7 @@ def main_() -> int:
     # 4. Draining back to empty clears the busy signal.
     check(
         "drained cold recovery -> not pending",
-        main._cold_recovery_integration_pending() is False,
+        recovery._cold_recovery_integration_pending() is False,
         "expected False after clearing pending/active",
     )
 

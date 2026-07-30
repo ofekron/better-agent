@@ -13,6 +13,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import session_listing_api  # noqa: E402
 
 
 def test_sidebar_decoration_uses_summary_error_projection() -> bool:
@@ -23,7 +24,7 @@ def test_sidebar_decoration_uses_summary_error_projection() -> bool:
 
     main.session_manager.has_unseen_error = fail_load
     try:
-        rows = main._decorate_local_sidebar_sessions([{
+        rows = session_listing_api._decorate_local_sidebar_sessions([{
             "id": "sid-hot-path",
             "name": "hot path",
             "cwd": "/tmp",

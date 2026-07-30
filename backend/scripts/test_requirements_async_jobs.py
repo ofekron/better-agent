@@ -315,6 +315,7 @@ def test_running_progress_does_not_overwrite_terminal_records() -> None:
 def test_results_timeout_returns_persisted_running_progress() -> None:
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
 
         original_auth = requirements_api.require_internal
@@ -358,6 +359,7 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
 def test_running_results_include_native_session_file_paths() -> None:
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
 
         original_auth = requirements_api.require_internal
@@ -409,9 +411,10 @@ def test_running_results_include_native_session_file_paths() -> None:
 def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
 
-        original_persist_running = main.extension_jobs.persist_running
+        original_persist_running = extension_jobs.persist_running
         original_prepare = requirement_context.prepare_requirements_local_read_context
         original_processor = requirement_context._run_requirements_processor
         original_build = requirement_context.build_processed_requirements_response
@@ -429,7 +432,7 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
             return {"success": True, "text": ""}
 
         try:
-            main.extension_jobs.persist_running = _boom
+            extension_jobs.persist_running = _boom
             requirement_context.prepare_requirements_local_read_context = _prepare
             requirement_context._run_requirements_processor = _processor
             requirement_context.build_processed_requirements_response = _build
@@ -440,7 +443,7 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
             )
             assert result["success"] is True
         finally:
-            main.extension_jobs.persist_running = original_persist_running
+            extension_jobs.persist_running = original_persist_running
             requirement_context.prepare_requirements_local_read_context = original_prepare
             requirement_context._run_requirements_processor = original_processor
             requirement_context.build_processed_requirements_response = original_build
@@ -451,6 +454,7 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
 def test_phase_progress_includes_processor_queue_state() -> None:
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
 
         original_state = requirements_api._requirements_processor_queue_fields
@@ -493,6 +497,7 @@ def test_phase_progress_includes_processor_queue_state() -> None:
 def test_processor_on_queued_observes_registered_waiter() -> None:
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
         from requirements_query_runner import (
             REQUIREMENTS_PROCESSOR_EXECUTOR,
@@ -788,6 +793,7 @@ def test_results_recovery_persists_completed_async_job() -> None:
 
     async def scenario():
         import main
+        import extension_jobs
         import requirements_api
 
         request_id = "job-results-recover"

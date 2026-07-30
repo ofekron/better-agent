@@ -19,6 +19,8 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import user_input_api  # noqa: E402
+import session_listing_api  # noqa: E402
 import session_store  # noqa: E402
 import user_input_store  # noqa: E402
 from scripts.auth_test_helpers import authenticate_client  # noqa: E402
@@ -116,8 +118,8 @@ def test_duplicate_internal_request_reuses_pending_dialog(client: TestClient) ->
     }]
     requested_events: list[dict] = []
     state_events: list[dict] = []
-    original_broadcast = main._broadcast_user_input
-    original_state = main._broadcast_user_input_state
+    original_broadcast = user_input_api._broadcast_user_input
+    original_state = user_input_api._broadcast_user_input_state
 
     async def fake_broadcast(event_type: str, payload: dict) -> None:
         if event_type == "user_input_requested":
@@ -128,8 +130,8 @@ def test_duplicate_internal_request_reuses_pending_dialog(client: TestClient) ->
         state_events.append({"app_session_id": app_session_id})
         await original_state(app_session_id)
 
-    main._broadcast_user_input = fake_broadcast
-    main._broadcast_user_input_state = fake_state
+    user_input_api._broadcast_user_input = fake_broadcast
+    user_input_api._broadcast_user_input_state = fake_state
     responses: list = []
 
     def post_request(timeout_seconds: float) -> None:
@@ -182,8 +184,8 @@ def test_duplicate_internal_request_reuses_pending_dialog(client: TestClient) ->
         if any(t.is_alive() for t in threads) or resolve.status_code != 200:
             return False
     finally:
-        main._broadcast_user_input = original_broadcast
-        main._broadcast_user_input_state = original_state
+        user_input_api._broadcast_user_input = original_broadcast
+        user_input_api._broadcast_user_input_state = original_state
     if len(responses) != 2 or any(r.status_code != 200 for r in responses):
         return False
     bodies = [r.json() for r in responses]
@@ -318,7 +320,7 @@ def test_sidebar_decoration_exposes_pending_count() -> bool:
         questions=[{"id": "q", "header": "H", "question": "Q", "options": []}],
         timeout_seconds=60,
     )
-    rows = main._decorate_local_sidebar_sessions([{
+    rows = session_listing_api._decorate_local_sidebar_sessions([{
         "id": sid,
         "name": "user-input",
         "cwd": "/tmp",
@@ -379,8 +381,8 @@ def test_request_payload_is_session_scoped() -> bool:
     main.coordinator.dispatch_raw = fake_dispatch
     main.coordinator.broadcast_global = fake_global
     try:
-        asyncio.run(main._broadcast_user_input("user_input_requested", req))
-        asyncio.run(main._broadcast_user_input_state(sid))
+        asyncio.run(user_input_api._broadcast_user_input("user_input_requested", req))
+        asyncio.run(user_input_api._broadcast_user_input_state(sid))
     finally:
         main.coordinator.dispatch_raw = original_dispatch
         main.coordinator.broadcast_global = original_global

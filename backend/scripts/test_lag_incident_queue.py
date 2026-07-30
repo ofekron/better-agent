@@ -21,6 +21,7 @@ atexit.register(lambda: shutil.rmtree(_TMP_HOME, ignore_errors=True))
 
 import lag_incident_queue as queue
 import main
+import lag_watchdog  # noqa: E402
 import paths
 
 
@@ -56,7 +57,7 @@ async def _blocked_loop_eventual_exactly_once() -> None:
     def enqueue_during_stall() -> None:
         time.sleep(0.05)
         for _ in range(2):
-            main._report_lag_watchdog_issue(
+            lag_watchdog._report_lag_watchdog_issue(
                 label="blocking stack candidate",
                 heartbeat_age=3.0,
                 dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
@@ -129,7 +130,7 @@ async def _corruption_fails_closed() -> None:
 
 def test_redaction_bounds_and_dedup() -> None:
     _reset_spool()
-    main._report_lag_watchdog_issue(
+    lag_watchdog._report_lag_watchdog_issue(
         label="blocking stack candidate",
         heartbeat_age=2.0,
         dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
@@ -139,7 +140,7 @@ def test_redaction_bounds_and_dedup() -> None:
     files = list((paths.ba_home() / "lag-incidents").glob("*.json"))
     assert len(files) == 1
     raw = files[0].read_bytes()
-    assert len(raw) <= main._LAG_REPORT_BODY_LIMIT_BYTES
+    assert len(raw) <= lag_watchdog._LAG_REPORT_BODY_LIMIT_BYTES
     assert b"private-value" not in raw
     assert not queue.enqueue(raw)
     assert len(list((paths.ba_home() / "lag-incidents").glob("*.json"))) == 1
@@ -590,7 +591,7 @@ async def _manually_disabled_destination_drops_spooled_incident() -> None:
 
     extension_backend_loader.invoke_named_core_destination_sync = disabled_destination
     try:
-        queue.start(main._dispatch_lag_watchdog_issue)
+        queue.start(lag_watchdog._dispatch_lag_watchdog_issue)
         for _ in range(50):
             if queue.depth() == 0:
                 break

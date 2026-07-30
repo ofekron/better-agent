@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 import main  # noqa: E402
+import user_prefs_api  # noqa: E402
+import recovery  # noqa: E402
 import auth  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
@@ -106,7 +108,7 @@ def test_removed_auto_restart_preference_rejected() -> bool:
     try:
         try:
             asyncio.run(
-                main.patch_user_prefs(
+                user_prefs_api.patch_user_prefs(
                     request=SimpleNamespace(session={}),
                     body={"auto_restart_on_idle": True},
                 )
@@ -148,7 +150,7 @@ def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
         if r.status_code != 200:
             print(f"  prefs patch failed: {r.status_code} {r.text}")
             return False
-        asyncio.run(main._auto_delete_expired_sessions())
+        asyncio.run(recovery._auto_delete_expired_sessions())
         r = client.get("/api/sessions")
         if r.status_code != 200:
             print(f"  sessions get failed: {r.status_code} {r.text}")
