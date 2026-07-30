@@ -1896,7 +1896,9 @@ class Coordinator:
             )
         if provider_id and not model:
             provider = config_store.get_provider(provider_id) or {}
-            model = str(provider.get("default_model") or "").strip()
+            from provider_validation import profile_prefill_model
+
+            model = profile_prefill_model(provider.get("id"))
             if not model:
                 name = provider.get("name") or provider_id
                 raise ValueError(f"{name} has no default model configured")
@@ -2003,7 +2005,9 @@ class Coordinator:
         name = (task or "").strip()[:60] or "delegate_task"
         if not model and provider_id:
             provider = config_store.get_provider(provider_id) or {}
-            model = str(provider.get("default_model") or "").strip()
+            from provider_validation import profile_prefill_model
+
+            model = profile_prefill_model(provider.get("id"))
         if not model:
             model = config_store.default_session_model()
         if sub_session:

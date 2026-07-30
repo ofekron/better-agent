@@ -572,7 +572,13 @@ OPENAI_SUBSCRIPTION_UNSUPPORTED = (
 
 
 def _runtime_kind_for_provider(provider: dict) -> str:
-    return _runtime_kind_for_config(provider.get("kind", "claude"), provider.get("runner"))
+    runner = provider.get("runner")
+    if not runner:
+        # Store-shape records carry no runner; the provider's preferred live
+        # profile decides its effective runtime kind.
+        preferred = _preferred_live_profile_in_state(_load_state(), provider)
+        runner = preferred.get("runner") if preferred else ""
+    return _runtime_kind_for_config(provider.get("kind", "claude"), runner)
 
 
 def _runtime_kind_for_config(kind: str, runner: object) -> str:
@@ -703,30 +709,18 @@ def _seed_profile_for_provider(provider: dict) -> dict:
 
 
 def _ensure_runtime_profiles_for_providers(state: dict) -> None:
-    """Guarantee every provider in `state` owns a live runtime profile.
-
-    Paths that build or replace the provider set wholesale (catalog
-    provisioning, provider-sync import) converge here so a provider can never
-    land without an execution identity. Resurrects the pair's tombstone under
-    its original id, matching `add_runtime_profile`."""
+    """Seed a starter profile for providers that arrived with NO profile
+    history at all (catalog provisioning, provider-sync import of a brand-new
+    provider). Provider-scoped on purpose: a provider whose profiles the user
+    deliberately deleted (tombstones present) or reshaped (another live pair)
+    is left exactly as the user arranged it — this guard never resurrects."""
     profiles = state.setdefault("runtime_profiles", [])
-    now = _utc_now_iso()
     for provider in state.get("providers", []):
-        runner = _clean_runner(str(provider.get("kind") or "claude"), "")
-        existing = next(
-            (
-                p
-                for p in profiles
-                if p.get("provider_id") == provider.get("id")
-                and p.get("runner") == runner
-            ),
-            None,
+        has_history = any(
+            p.get("provider_id") == provider.get("id") for p in profiles
         )
-        if existing is None:
+        if not has_history:
             profiles.append(_seed_profile_for_provider(provider))
-        elif runtime_profile_is_deleted(existing):
-            existing["deleted_at"] = None
-            existing["updated_at"] = now
 
 
 def _seed_default_state() -> dict:

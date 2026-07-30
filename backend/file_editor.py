@@ -170,11 +170,15 @@ def _file_edit_config(
     if not resolved_provider_id:
         raise ValueError("provider not found")
     from runtime_profile import resolve_runner
-    resolved_runner = resolve_runner(provider, runner)
+
+    profile_defaults = config_store.provider_execution_defaults(
+        resolved_provider_id, runner
+    )
+    resolved_runner = resolve_runner(
+        provider, runner or profile_defaults["runner"]
+    )
     _require_fork_support(resolved_provider_id, resolved_runner)
-    resolved_model = str(model or provider.get("default_model") or "").strip()
-    if not resolved_model:
-        resolved_model = config_store.default_session_model()
+    resolved_model = str(model or profile_defaults["default_model"] or "").strip()
     if not resolved_model:
         name = provider.get("name") or resolved_provider_id
         raise ValueError(f"{name} has no default model configured")
@@ -182,7 +186,7 @@ def _file_edit_config(
     if not resolved_effort and provider.get("supports_reasoning_effort"):
         options = provider.get("reasoning_effort_options") or []
         default_effort = normalize_reasoning_effort(
-            provider.get("default_reasoning_effort")
+            profile_defaults["default_reasoning_effort"]
         )
         if default_effort and default_effort in options:
             resolved_effort = default_effort

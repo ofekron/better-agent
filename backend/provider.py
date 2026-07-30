@@ -1772,11 +1772,14 @@ class Provider(ABC):
                 raise ValueError("headless reasoning effort is unsupported")
         elif effort:
             raise ValueError("headless provider does not support reasoning effort")
-        if (
-            self.KIND not in {"claude", "openai"}
-            and payload["model"] != str(record.get("default_model") or "")
-        ):
-            raise ValueError("headless provider cannot override its configured model")
+        if self.KIND not in {"claude", "openai"}:
+            configured_model = config_store.provider_execution_defaults(
+                str(record.get("id") or ""), record.get("runner")
+            )["default_model"]
+            if payload["model"] != configured_model:
+                raise ValueError(
+                    "headless provider cannot override its configured model"
+                )
         hydration = config_store.hydrate_provider_execution(
             authority["id"],
             expected_generation=authority["generation"],

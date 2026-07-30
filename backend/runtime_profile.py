@@ -148,6 +148,13 @@ def fit_reasoning_effort(
     if candidate in options:
         return candidate
     default_effort = str(record.get("default_reasoning_effort") or "").strip()
+    if not default_effort and record.get("id"):
+        # Store-shape records carry no effort default; the pair's profile does.
+        import config_store
+
+        default_effort = config_store.provider_execution_defaults(
+            str(record["id"]), runner
+        )["default_reasoning_effort"]
     if default_effort in options:
         return default_effort
     return options[0] if options else ""

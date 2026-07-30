@@ -49,10 +49,10 @@ def _session() -> dict:
     }
 
 
-def _provider() -> dict:
+def _provider(kind: str = "claude") -> dict:
     return {
         "id": "provider-1",
-        "kind": "claude",
+        "kind": kind,
         "generation": str(uuid.uuid4()),
         "revision": 3,
         "runner": "native",
@@ -304,12 +304,119 @@ async def test_tombstoned_profile_never_blocks_turns() -> None:
     assert executor.calls[-1]["runner"] == "native"
 
 
+async def test_non_claude_kind_headless_uses_profile_default_model() -> None:
+    """Cross-provider parity: the no-model-override guard for generic kinds
+    compares against the PROFILE default (provider records no longer carry
+    default_model), so a matching admitted model must pass and a mismatched
+    one must fail."""
+    import config_store
+
+    created = config_store.add_provider({
+        "name": "Kimi Headless",
+        "kind": "kimi",
+        "mode": "api_key",
+        "default_model": "kimi-headless-model",
+        "custom_models": ["kimi-headless-model"],
+    })
+    stored = next(
+        p
+        for p in config_store._load_state()["providers"]
+        if p["id"] == created["id"]
+    )
+    record = dict(stored) | {"runner": "native"}
+    profile_model = config_store.provider_execution_defaults(created["id"])[
+        "default_model"
+    ]
+    assert profile_model == "kimi-headless-model"
+
+    class KimiProvider:
+        KIND = "kimi"
+        id = record["id"]
+        supports_fork = True
+        supports_headless_no_tools = True
+        supports_reasoning_effort = False
+        reasoning_effort_options = ()
+        run_admitted_headless = provider_module.Provider.run_admitted_headless
+        _run_admitted_headless_legacy = (
+            provider_module.Provider._run_admitted_headless_legacy
+        )
+
+        def __init__(self):
+            self.record = dict(record)
+            self._execution_record = threading.local()
+            self._headless_authority_lock = asyncio.Lock()
+
+        async def run_headless(self, **kwargs):
+            return {"result": "kimi-ok"}
+
+    def admitted(model: str):
+        request = HeadlessRequest.from_dict({
+            "schema": 1,
+            "prompt": "prompt",
+            "owner": {"kind": "session", "id": "session-1"},
+            "fork": False,
+            "no_tools": True,
+            "timeout": 30,
+        })
+        return admit_headless_request(
+            request,
+            HeadlessAuthority.create(
+                owner_kind="session",
+                owner_id="session-1",
+                provider={
+                    key: record[key]
+                    for key in ("id", "kind", "generation", "revision")
+                },
+                model=model,
+                reasoning_effort="",
+                runner="native",
+                permission_scope="internal_generation",
+                routing={"node_id": "primary"},
+                cwd="/tmp/project",
+                resume_sid=None,
+                supports_fork=True,
+                supports_no_tools=True,
+            ),
+        )
+
+    class Hydration:
+        def runtime_record(self):
+            return dict(record)
+
+    original_hydrate = provider_module.config_store.hydrate_provider_execution
+    provider_module.config_store.hydrate_provider_execution = (
+        lambda *a, **k: Hydration()
+    )
+    instance = KimiProvider()
+    try:
+        import models as models_mod
+
+        original_models = models_mod.models_for_record
+        models_mod.models_for_record = lambda _r: ["kimi-headless-model"]
+        try:
+            result = await instance.run_admitted_headless(
+                admitted("kimi-headless-model")
+            )
+            assert result == {"result": "kimi-ok"}
+            try:
+                await instance.run_admitted_headless(admitted("other-model"))
+            except ValueError as exc:
+                assert "model" in str(exc)
+            else:
+                raise AssertionError("mismatched model must be rejected")
+        finally:
+            models_mod.models_for_record = original_models
+    finally:
+        provider_module.config_store.hydrate_provider_execution = original_hydrate
+
+
 async def main_async() -> None:
     await test_session_owner_is_frozen_for_every_caller_class()
     await test_stale_selectors_and_missing_authority_fail_closed()
     await test_generic_provider_consumes_admitted_authority()
     test_legacy_caller_bypasses_are_removed()
     await test_tombstoned_profile_never_blocks_turns()
+    await test_non_claude_kind_headless_uses_profile_default_model()
 
 
 def main() -> None:

@@ -7,7 +7,7 @@ description: Use for Better Agent repo orientation before looking for backend, f
 
 Better Agent is a multi-provider desktop/web agent runtime. The backend owns durable state, subprocess orchestration, provider adapters, recovery, event ingestion, extensions, and configuration sync. The frontend reflects backend state through REST snapshots and WebSocket events.
 
-Runtime profile is the formal name for a provider/model/reasoning-effort selection resolved through that provider's runner.
+Runtime profile is a user-created execution identity stored in the provider config store: a (provider, runner) pair — one live profile per pair, immutable after creation, soft-deleted to a tombstone — carrying session-overridable defaults (model, reasoning effort). Sessions, internal-LLM task assignments, and harness-profile pins reference profiles by id; `default_runtime_profile_id` is the single user-facing default (the old provider-level set-default is gone), and per-profile last-used model/effort feed the prefill chain last-used → profile default → catalog. CRUD + activation live in `backend/runtime_profiles_api.py` (`/api/runtime-profiles`, `runtime_profiles_changed` WS event); entity/migration logic in `backend/config_store.py` (config schema v3 moved runner/default_model/default_reasoning_effort off provider records onto profiles).
 
 ## Routing
 

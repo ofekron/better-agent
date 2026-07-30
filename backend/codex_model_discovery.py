@@ -170,6 +170,12 @@ def _catalog_semantics(provider: Mapping[str, object]) -> tuple[
 ]:
     kind = provider.get("kind")
     runner = provider.get("runner")
+    if not runner:
+        import config_store
+
+        runner = config_store.provider_execution_defaults(
+            str(provider.get("id") or "")
+        )["runner"]
     if kind not in {"codex", "fugu"}:
         raise _PreparationFailure("unsupported", "provider_unsupported")
     if runner != "native":

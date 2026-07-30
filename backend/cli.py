@@ -1033,11 +1033,13 @@ async def _async_main(args: argparse.Namespace) -> int:
 
     selected_provider = resolve_provider(args.provider)
     provider_id = selected_provider.get("id") if selected_provider else None
-    requested_model = (
-        args.model
-        or (selected_provider or {}).get("default_model")
-        or config_store.default_session_model()
-    )
+    requested_model = args.model
+    if not requested_model and provider_id:
+        from provider_validation import profile_prefill_model
+
+        requested_model = profile_prefill_model(provider_id)
+    if not requested_model:
+        requested_model = config_store.default_session_model()
     session = resolve_backend_session(
         port=args.port,
         session_id=args.session,

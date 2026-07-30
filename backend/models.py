@@ -309,7 +309,16 @@ def fetch_openai_models(base_url: str, api_key: str) -> list[str]:
 
 def _runtime_kind_for_provider(provider: dict) -> str:
     kind = provider.get("kind", "claude")
-    if str(provider.get("runner") or "").strip() != "better_agent_runner":
+    runner = str(provider.get("runner") or "").strip()
+    if not runner:
+        # Store-shape records carry no runner; the preferred live profile
+        # decides which catalog-refresh semantics apply.
+        import config_store
+
+        runner = config_store.provider_execution_defaults(
+            str(provider.get("id") or "")
+        )["runner"]
+    if runner != "better_agent_runner":
         return kind
     # Claude's Better Agent runner backend still speaks Claude's own wire
     # format (Anthropic Messages API), so refresh must stay on the
