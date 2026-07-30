@@ -8,7 +8,7 @@
     "framer-motion": "^12.40.0"
   },
   "name": "better-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local web workspace for coding agents — Claude, Codex, Gemini, and more in one inspectable, LAN-ready hub.",
   "homepage": "https://ofek-dev.com/better-agent/",
   "repository": {
