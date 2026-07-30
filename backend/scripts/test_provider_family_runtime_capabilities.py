@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -528,7 +530,7 @@ def test_private_root_creation_and_nested_tree_security() -> None:
             )
 
         assert resolved == root.resolve()
-        assert secured == [root]
+        assert secured == [root, root]
 
         tree_root = Path(raw) / "tree"
         tree_root.mkdir()
@@ -584,6 +586,67 @@ def test_provider_secures_run_directory_before_use() -> None:
         ]
 
 
+def test_legacy_staging_root_migrates_only_on_write() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        state_home = root / "state"
+        prepared_root = state_home / "prepared-execution-payloads"
+        prepared_root.mkdir(parents=True)
+        prepared_root.chmod(0o777)
+        prepared, _sources = _snapshot(root)
+        previous = os.environ.get("BETTER_AGENT_HOME")
+        os.environ["BETTER_AGENT_HOME"] = str(state_home)
+        try:
+            barrier = threading.Barrier(3)
+            failures: list[BaseException] = []
+
+            def stage(run_id: str) -> None:
+                barrier.wait()
+                try:
+                    stage_family_runtime_capabilities(run_id, prepared)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            workers = [
+                threading.Thread(target=stage, args=(run_id,))
+                for run_id in ("legacy-a", "legacy-b")
+            ]
+            for worker in workers:
+                worker.start()
+            barrier.wait()
+            for worker in workers:
+                worker.join()
+
+            assert failures == []
+            assert stat.S_IMODE(prepared_root.stat().st_mode) == 0o700
+            cleanup_staged_family_runtime_capabilities("legacy-a")
+            cleanup_staged_family_runtime_capabilities("legacy-b")
+
+            prepared_root.chmod(0o777)
+            original_make_private = (
+                provider_runtime_payload_store.make_private_directory
+            )
+            mutations: list[Path] = []
+            provider_runtime_payload_store.make_private_directory = mutations.append
+            try:
+                try:
+                    cleanup_staged_family_runtime_capabilities("missing")
+                except ExecutionContractError:
+                    pass
+                else:
+                    raise AssertionError("insecure cleanup root was accepted")
+            finally:
+                provider_runtime_payload_store.make_private_directory = (
+                    original_make_private
+                )
+            assert mutations == []
+        finally:
+            if previous is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous
+
+
 TESTS = (
     test_snapshot_is_immutable_across_every_authority_drift,
     test_artifact_manifest_and_hydration_are_secret_free,
@@ -593,6 +656,7 @@ TESTS = (
     test_restart_clone_preserves_posix_and_windows_configs,
     test_private_root_creation_and_nested_tree_security,
     test_provider_secures_run_directory_before_use,
+    test_legacy_staging_root_migrates_only_on_write,
 )
 
 

@@ -560,6 +560,11 @@ def make_private_directory(path: Path) -> None:
         if not windows_path_has_private_acl(path):
             raise PermissionError("private directory ACL verification failed")
         return
+    observed = path.lstat()
+    if _pwd is not None and observed.st_uid != os.getuid():
+        raise PermissionError("private directory owner is unsafe")
+    if stat.S_IMODE(observed.st_mode) == _PRIVATE_DIR_MODE:
+        return
     path.chmod(_PRIVATE_DIR_MODE)
 
 

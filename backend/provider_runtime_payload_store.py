@@ -71,6 +71,13 @@ def _ensure_secure_directory(path: Path) -> Path:
     try:
         path.mkdir(mode=0o700, exist_ok=False)
     except FileExistsError:
+        try:
+            require_private_directory(path.parent)
+            make_private_directory(path)
+        except PermissionError as exc:
+            raise ExecutionContractError(
+                "runtime capability directory is unsafe",
+            ) from exc
         return _secure_directory(path, create=False)
     except OSError as exc:
         raise ExecutionContractError(
