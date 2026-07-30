@@ -44,13 +44,19 @@ class BetterAgent < Formula
   depends_on "git"
 
   def install
-    libexec.install Dir["*"]
+    # Only the bootstrap entry point is needed in the Cellar: bootstrap.sh
+    # syncs its own git checkout and execs that checkout's installer, so
+    # staging the rest of the tree here would be dead weight that also goes
+    # stale the moment the checkout updates.
+    libexec.install "scripts"
 
     # Delegate to the repo's own bootstrap, with brew attribution.
     # scripts/install_channel.py owns the BETTER_AGENT_FROM allowlist and is
     # the only place that validates it; "brew" is an allowlisted value.
-    bin.write_env_script libexec/"scripts/bootstrap.sh", "better-agent-setup",
-                         BETTER_AGENT_FROM: "brew"
+    # write_env_script is a Pathname method on the wrapper being written, not
+    # on the bin directory.
+    (bin/"better-agent-setup").write_env_script libexec/"scripts/bootstrap.sh",
+                                                BETTER_AGENT_FROM: "brew"
 
     # Launcher for the installed checkout. run.sh lives in the synced
     # checkout (not in the Cellar), because that checkout is what
