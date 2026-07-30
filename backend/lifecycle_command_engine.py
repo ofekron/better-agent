@@ -91,6 +91,7 @@ class LifecycleCommandEngine:
         ] = {}
         self._authority_key: str | None = None
         self._owner_id = str(uuid.uuid4())
+        self._subscriber_name = f"lifecycle_command_engine_{self._owner_id}"
         self._process_identity: ProcessIdentity | None = None
         self._lease_acquired = False
 
@@ -137,6 +138,13 @@ class LifecycleCommandEngine:
             process_identity,
         )
         self._lease_acquired = True
+        self._bus.subscribe(
+            "session.deleted",
+            self._retire_deleted_sessions,
+            priority=5,
+            name=self._subscriber_name,
+            loop=self._loop,
+        )
         try:
             pending = await asyncio.to_thread(
                 lifecycle_command_store.unfinished_transitions
@@ -145,8 +153,55 @@ class LifecycleCommandEngine:
                 async with self._lock_for(session_id):
                     await self._resume_transition(session_id, request_id)
         except BaseException:
+            self._bus.unsubscribe(self._subscriber_name)
             await self._release_lease()
             raise
+
+    async def _retire_deleted_sessions(self, event: BusEvent) -> None:
+        deleted_sids = event.payload.get("deleted_sids")
+        deleted_incarnations = event.payload.get("deleted_incarnations")
+        if not isinstance(deleted_sids, list) or not isinstance(
+            deleted_incarnations,
+            dict,
+        ):
+            return
+        for session_id in deleted_sids:
+            if not isinstance(session_id, str):
+                continue
+            owner_incarnation = deleted_incarnations.get(session_id)
+            if not isinstance(owner_incarnation, str) or not owner_incarnation:
+                continue
+            async with self._lock_for(session_id):
+                import session_manager
+
+                current_owner = await asyncio.to_thread(
+                    session_manager.manager.claim_owner,
+                    session_id,
+                )
+                if current_owner is not None:
+                    if current_owner.incarnation != owner_incarnation:
+                        continue
+                await asyncio.to_thread(
+                    lifecycle_command_store.retire_session,
+                    session_id,
+                    expected_owner_incarnation=owner_incarnation,
+                    allow_unbound_owner=True,
+                )
+
+    async def _align_session_owner(self, session_id: str) -> None:
+        import session_manager
+
+        owner = await asyncio.to_thread(
+            session_manager.manager.claim_owner,
+            session_id,
+        )
+        if owner is None or not owner.incarnation:
+            return
+        await asyncio.to_thread(
+            lifecycle_command_store.align_session_owner,
+            session_id,
+            owner.incarnation,
+        )
 
     async def close(self) -> None:
         self._assert_owner()
@@ -154,6 +209,7 @@ class LifecycleCommandEngine:
             if self._bind_task is not None:
                 await asyncio.shield(self._bind_task)
         finally:
+            self._bus.unsubscribe(self._subscriber_name)
             await self._release_lease()
             for waiters in self._waiters.values():
                 for waiter in waiters:
@@ -619,6 +675,7 @@ class LifecycleCommandEngine:
         self,
         command: LifecycleCommand,
     ) -> CommandResult:
+        await self._align_session_owner(command.session_id)
         existing = await asyncio.to_thread(
             lifecycle_command_store.transition_for,
             command.session_id,

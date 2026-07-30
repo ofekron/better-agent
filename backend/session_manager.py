@@ -4748,7 +4748,11 @@ class SessionManager:
             # plus every descendant fork) so projections that key off session
             # ids — e.g. the ui_selection open-tab list — can prune all of
             # them, not just the root of the delete.
-            self._fire(sid, {"kind": "deleted", "deleted_sids": deleted_sids})
+            self._fire(sid, {
+                "kind": "deleted",
+                "deleted_sids": deleted_sids,
+                "deleted_incarnations": deleted_incarnations,
+            })
         return True, revocations
 
     # ── Top-level metadata patches ─────────────────────────────────

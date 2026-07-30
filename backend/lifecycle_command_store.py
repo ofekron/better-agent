@@ -20,7 +20,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -113,6 +113,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
             schema = """
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
+                owner_incarnation TEXT,
                 phase TEXT NOT NULL,
                 identity_json TEXT,
                 revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -180,7 +181,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 4")
+            connection.execute("PRAGMA user_version = 5")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
@@ -189,6 +190,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
             version = 3
         if version == 3:
             _migrate_v3_to_v4(connection)
+            version = 4
+        if version == 4:
+            _migrate_v4_to_v5(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -352,6 +356,11 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 4")
 
 
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE sessions ADD COLUMN owner_incarnation TEXT")
+    connection.execute("PRAGMA user_version = 5")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -425,6 +434,46 @@ def pending_terminal_render(session_id: str) -> dict[str, str] | None:
     return dict(row) if row is not None else None
 
 
+def align_session_owner(session_id: str, owner_incarnation: str) -> None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(owner_incarnation, "owner_incarnation")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT owner_incarnation FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            database.execute(
+                """
+                INSERT INTO sessions(
+                    session_id, owner_incarnation, phase, identity_json,
+                    revision, execution_json, execution_policy,
+                    completed_execution_count
+                ) VALUES (?, ?, 'idle', NULL, 0, NULL, NULL, 0)
+                """,
+                (session_id, owner_incarnation),
+            )
+        elif row["owner_incarnation"] is None:
+            database.execute(
+                "UPDATE sessions SET owner_incarnation = ? WHERE session_id = ?",
+                (owner_incarnation, session_id),
+            )
+        elif row["owner_incarnation"] != owner_incarnation:
+            _delete_session_rows(database, session_id)
+            database.execute(
+                """
+                INSERT INTO sessions(
+                    session_id, owner_incarnation, phase, identity_json,
+                    revision, execution_json, execution_policy,
+                    completed_execution_count
+                ) VALUES (?, ?, 'idle', NULL, 0, NULL, NULL, 0)
+                """,
+                (session_id, owner_incarnation),
+            )
+        database.commit()
+
+
 def acknowledge_terminal_render(session_id: str, request_id: str) -> bool:
     validate_identifier(session_id, "session_id")
     validate_identifier(request_id, "request_id")
@@ -438,6 +487,85 @@ def acknowledge_terminal_render(session_id: str, request_id: str) -> bool:
             (session_id, request_id),
         )
         database.commit()
+    return cursor.rowcount == 1
+
+
+def retire_session(
+    session_id: str,
+    *,
+    expected_terminal_request_id: str | None = None,
+    expected_owner_incarnation: str | None = None,
+    allow_unbound_owner: bool = False,
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    if expected_terminal_request_id is not None:
+        validate_identifier(
+            expected_terminal_request_id,
+            "expected_terminal_request_id",
+        )
+    if expected_owner_incarnation is not None:
+        validate_identifier(
+            expected_owner_incarnation,
+            "expected_owner_incarnation",
+        )
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        if expected_terminal_request_id is not None:
+            pending = database.execute(
+                """
+                SELECT 1
+                FROM pending_terminal_renders
+                WHERE session_id = ? AND request_id = ?
+                """,
+                (session_id, expected_terminal_request_id),
+            ).fetchone()
+            if pending is None:
+                database.rollback()
+                return False
+        if expected_owner_incarnation is not None:
+            owner = database.execute(
+                """
+                SELECT 1 FROM sessions
+                WHERE session_id = ?
+                  AND (
+                    owner_incarnation = ?
+                    OR (? AND owner_incarnation IS NULL)
+                  )
+                """,
+                (
+                    session_id,
+                    expected_owner_incarnation,
+                    allow_unbound_owner,
+                ),
+            ).fetchone()
+            if owner is None:
+                database.rollback()
+                return False
+        deleted = _delete_session_rows(database, session_id)
+        database.commit()
+    return deleted
+
+
+def _delete_session_rows(
+    database: sqlite3.Connection,
+    session_id: str,
+) -> bool:
+    database.execute(
+        "DELETE FROM pending_terminal_renders WHERE session_id = ?",
+        (session_id,),
+    )
+    database.execute(
+        "DELETE FROM effects WHERE session_id = ?",
+        (session_id,),
+    )
+    database.execute(
+        "DELETE FROM transitions WHERE session_id = ?",
+        (session_id,),
+    )
+    cursor = database.execute(
+        "DELETE FROM sessions WHERE session_id = ?",
+        (session_id,),
+    )
     return cursor.rowcount == 1
 
 
@@ -605,10 +733,10 @@ def persist_plan(
         database.execute(
             """
             INSERT INTO sessions(
-                session_id, phase, identity_json, revision,
+                session_id, owner_incarnation, phase, identity_json, revision,
                 execution_json, execution_policy, completed_execution_count
             )
-            VALUES (?, 'idle', NULL, 0, NULL, NULL, 0)
+            VALUES (?, NULL, 'idle', NULL, 0, NULL, NULL, 0)
             ON CONFLICT(session_id) DO NOTHING
             """,
             (command.session_id,),

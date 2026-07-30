@@ -1139,7 +1139,12 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+    session_columns = {
+        row[1]
+        for row in migrated.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    assert "owner_incarnation" in session_columns
     assert migrated.execute(
         "SELECT COUNT(*) FROM authority_owner"
     ).fetchone()[0] == 0
@@ -1274,7 +1279,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 4
+        assert type(version) is int and version == 5
 
 
 async def test_terminal_render_reconciliation_inbox() -> None:

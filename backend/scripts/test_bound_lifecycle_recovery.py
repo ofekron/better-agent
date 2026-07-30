@@ -15,7 +15,7 @@ import _test_home  # noqa: E402
 
 TEST_HOME = Path(_test_home.isolate("ba-test-bound-lifecycle-recovery-"))
 
-from event_bus import EventBus  # noqa: E402
+from event_bus import EventBus, bus  # noqa: E402
 from event_journal import publish_event  # noqa: E402
 from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
 from lifecycle_command_model import (  # noqa: E402
@@ -23,8 +23,12 @@ from lifecycle_command_model import (  # noqa: E402
     UserTurnIdentity,
 )
 from provider import BoundRunAuthority  # noqa: E402
-from run_recovery import reconcile_missing_bound_lifecycle_orphans  # noqa: E402
+from run_recovery import (  # noqa: E402
+    reconcile_missing_bound_lifecycle_orphans,
+    reconcile_pending_terminal_renders,
+)
 from session_manager import manager as session_manager  # noqa: E402
+import lifecycle_command_store  # noqa: E402
 import user_msg_lifecycle  # noqa: E402
 
 
@@ -43,6 +47,7 @@ async def _seed_bound(
     engine: LifecycleCommandEngine,
     *,
     publish_provider_start: bool = True,
+    session_id: str | None = None,
 ) -> tuple[str, UserTurnIdentity, ExecutionTurnIdentity, str, str]:
     provider_id = str(uuid.uuid4())
     provider_run_id = str(uuid.uuid4())
@@ -51,6 +56,7 @@ async def _seed_bound(
         model="test-model",
         cwd=str(TEST_HOME),
         orchestration_mode="native",
+        id=session_id,
     )
     session_id = session["id"]
     lifecycle_id = str(uuid.uuid4())
@@ -148,6 +154,188 @@ def _target_message(session_id: str, assistant_id: str) -> dict | None:
         ),
         None,
     )
+
+
+async def _finish_with_pending_render(
+    engine: LifecycleCommandEngine,
+) -> tuple[str, str, str]:
+    session_id, _, execution, _, provider_run_id = await _seed_bound(engine)
+    result = await engine.finish_execution_and_turn(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="complete",
+    )
+    return session_id, result.request_id, execution.assistant_message_id
+
+
+def _lifecycle_rows(session_id: str) -> dict[str, int]:
+    with lifecycle_command_store.connection() as database:
+        return {
+            table: database.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            for table in (
+                "sessions",
+                "transitions",
+                "effects",
+                "pending_terminal_renders",
+            )
+        }
+
+
+def _lifecycle_owner_incarnation(session_id: str) -> str | None:
+    with lifecycle_command_store.connection() as database:
+        row = database.execute(
+            "SELECT owner_incarnation FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return None if row is None else row["owner_incarnation"]
+
+
+async def _test_deleted_session_lifecycle_retirement() -> None:
+    engine = LifecycleCommandEngine(bus)
+    await engine.bind()
+    session_manager.bind_loop(asyncio.get_running_loop())
+    deleted_seen = asyncio.Event()
+    deletion_started = asyncio.Event()
+    release_deletion = asyncio.Event()
+
+    async def delay_deleted(event) -> None:
+        deletion_started.set()
+        await release_deletion.wait()
+
+    async def observe_deleted(event) -> None:
+        deleted_seen.set()
+
+    bus.subscribe(
+        "session.deleted",
+        delay_deleted,
+        priority=1,
+        name="test_delay_deleted_session_lifecycle_retirement",
+    )
+    bus.subscribe(
+        "session.deleted",
+        observe_deleted,
+        priority=100,
+        name="test_deleted_session_lifecycle_retirement",
+    )
+    try:
+        deleted_sid, deleted_request_id, _ = await _finish_with_pending_render(engine)
+        deleted_owner = session_manager.claim_owner(deleted_sid)
+        assert deleted_owner is not None
+        assert (
+            _lifecycle_owner_incarnation(deleted_sid)
+            == deleted_owner.incarnation
+        )
+        deleted_transition = lifecycle_command_store.transition_for(
+            deleted_sid,
+            deleted_request_id,
+        )
+        assert deleted_transition is not None
+        valid_sid, valid_request_id, _ = await _finish_with_pending_render(engine)
+        assert session_manager.delete(deleted_sid)
+        await asyncio.wait_for(deletion_started.wait(), timeout=2)
+        replacement_sid, _, replacement_execution, _, replacement_run_id = (
+            await _seed_bound(engine, session_id=deleted_sid)
+        )
+        replacement_owner = session_manager.claim_owner(replacement_sid)
+        assert replacement_owner is not None
+        assert replacement_owner.incarnation != deleted_owner.incarnation
+        assert (
+            _lifecycle_owner_incarnation(replacement_sid)
+            == replacement_owner.incarnation
+        )
+        replacement_result = await engine.finish_execution_and_turn(
+            replacement_sid,
+            execution_identity=replacement_execution,
+            provider_run_id=replacement_run_id,
+            outcome="complete",
+        )
+        release_deletion.set()
+        await asyncio.wait_for(deleted_seen.wait(), timeout=2)
+        replacement_pending = lifecycle_command_store.pending_terminal_render(
+            replacement_sid,
+        )
+        assert replacement_pending is not None
+        assert replacement_pending["request_id"] == replacement_result.request_id
+        replacement_transition = lifecycle_command_store.transition_for(
+            replacement_sid,
+            deleted_request_id,
+        )
+        assert replacement_transition is not None
+        assert (
+            replacement_transition["fingerprint"]
+            != deleted_transition["fingerprint"]
+        )
+        assert _lifecycle_rows(replacement_sid)["sessions"] == 1
+        assert lifecycle_command_store.acknowledge_terminal_render(
+            replacement_sid,
+            replacement_result.request_id,
+        )
+        valid_pending = lifecycle_command_store.pending_terminal_render(valid_sid)
+        assert valid_pending is not None
+        assert valid_pending["request_id"] == valid_request_id
+        assert lifecycle_command_store.acknowledge_terminal_render(
+            valid_sid,
+            valid_request_id,
+        )
+    finally:
+        release_deletion.set()
+        bus.unsubscribe("test_delay_deleted_session_lifecycle_retirement")
+        bus.unsubscribe("test_deleted_session_lifecycle_retirement")
+        await engine.close()
+
+
+async def _test_deleted_session_startup_repair() -> None:
+    engine = LifecycleCommandEngine(bus)
+    await engine.bind()
+    deleted_sid, deleted_request_id, _ = await _finish_with_pending_render(engine)
+    valid_sid, _, valid_assistant_id = await _finish_with_pending_render(engine)
+    await engine.close()
+    assert session_manager.delete(deleted_sid)
+    assert (
+        lifecycle_command_store.pending_terminal_render(deleted_sid) or {}
+    ).get("request_id") == deleted_request_id
+    assert not lifecycle_command_store.retire_session(
+        deleted_sid,
+        expected_terminal_request_id="replacement-request",
+    )
+    assert _lifecycle_rows(deleted_sid)["pending_terminal_renders"] == 1
+
+    restarted = LifecycleCommandEngine(bus)
+    await restarted.bind()
+    coordinator = SimpleNamespace(
+        lifecycle_commands=restarted,
+        turn_manager=_TurnManager(),
+    )
+    try:
+        with patch.object(
+            user_msg_lifecycle,
+            "terminal_event_for_lifecycle_async",
+            return_value={
+                "type": "user_message_done",
+                "data": {"success": True},
+            },
+        ):
+            assert await reconcile_pending_terminal_renders(
+                coordinator,
+                recovered=[],
+                ownership_documents=[],
+            ) == 1
+        assert _lifecycle_rows(deleted_sid) == {
+            "sessions": 0,
+            "transitions": 0,
+            "effects": 0,
+            "pending_terminal_renders": 0,
+        }
+        assert lifecycle_command_store.pending_terminal_render(valid_sid) is None
+        valid_assistant = _target_message(valid_sid, valid_assistant_id)
+        assert valid_assistant is not None
+        assert valid_assistant.get("completed_at")
+    finally:
+        await restarted.close()
 
 
 async def main() -> None:
@@ -522,6 +710,8 @@ async def main() -> None:
     finally:
         await engine.close()
         session_manager.flush_pending_persists()
+    await _test_deleted_session_lifecycle_retirement()
+    await _test_deleted_session_startup_repair()
     print("bound lifecycle recovery integration: ok")
 
 

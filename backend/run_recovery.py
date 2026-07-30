@@ -1563,6 +1563,13 @@ async def _reconcile_terminal_empty_assistant_tails(
         assistant_id = item["assistant_message_id"]
         request_id = item["request_id"]
 
+        async def retire_deleted_session() -> None:
+            await asyncio.to_thread(
+                lifecycle_command_store.retire_session,
+                session_id,
+                expected_terminal_request_id=request_id,
+            )
+
         async def acknowledge() -> None:
             await asyncio.to_thread(
                 lifecycle_command_store.acknowledge_terminal_render,
@@ -1577,6 +1584,9 @@ async def _reconcile_terminal_empty_assistant_tails(
                 for run in coordinator.turn_manager.get_run_state(session_id)
             )
 
+        if session_manager.get(session_id) is None:
+            await retire_deleted_session()
+            continue
         if (
             session_id in protected_sessions
             or (session_id, assistant_id) in protected_targets
@@ -1586,26 +1596,32 @@ async def _reconcile_terminal_empty_assistant_tails(
         obsolete = False
         assistant_empty = False
         lifecycle_message_id = ""
-        with session_manager.batch(session_id):
-            session = session_manager.get_ref(session_id)
-            if session is None or not session.get("messages"):
-                obsolete = True
-            else:
-                assistant = session["messages"][-1]
-                if (
-                    not isinstance(assistant, dict)
-                    or assistant.get("id") != assistant_id
-                    or assistant.get("role") != "assistant"
-                ):
+        try:
+            with session_manager.batch(session_id):
+                session = session_manager.get_ref(session_id)
+                if session is None or not session.get("messages"):
                     obsolete = True
                 else:
-                    assistant_empty = _is_empty_assistant_scaffold(assistant)
-                    user_msg = _last_user_before(session, assistant)
-                    lifecycle_message_id = (
-                        str(user_msg.get("lifecycle_msg_id") or "")
-                        if user_msg is not None
-                        else ""
-                    )
+                    assistant = session["messages"][-1]
+                    if (
+                        not isinstance(assistant, dict)
+                        or assistant.get("id") != assistant_id
+                        or assistant.get("role") != "assistant"
+                    ):
+                        obsolete = True
+                    else:
+                        assistant_empty = _is_empty_assistant_scaffold(assistant)
+                        user_msg = _last_user_before(session, assistant)
+                        lifecycle_message_id = (
+                            str(user_msg.get("lifecycle_msg_id") or "")
+                            if user_msg is not None
+                            else ""
+                        )
+        except KeyError:
+            if session_manager.get(session_id) is not None:
+                raise
+            await retire_deleted_session()
+            continue
         if obsolete or lifecycle_message_id != item["lifecycle_message_id"]:
             await acknowledge()
             continue
