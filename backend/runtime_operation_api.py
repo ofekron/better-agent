@@ -40,7 +40,7 @@ class RuntimeOperationEnvelope(BaseModel):
 
 async def handle(raw: dict[str, Any]) -> dict[str, Any]:
     envelope = RuntimeOperationEnvelope.model_validate(raw)
-    catalog = operation_catalog.current()
+    catalog = operation_catalog.published()
     available = tuple(
         key
         for key, descriptor in catalog.descriptors.items()
@@ -55,10 +55,7 @@ async def handle(raw: dict[str, Any]) -> dict[str, Any]:
             "success": True,
             "generation": catalog.generation,
             "schema": {
-                key: {
-                    "request": catalog.snapshot.get(key).request_schema(),
-                    "response": catalog.snapshot.get(key).response_schema(),
-                }
+                key: json.loads(catalog.operation_schema_json[key])
                 for key in available
             },
         }

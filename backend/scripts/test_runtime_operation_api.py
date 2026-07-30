@@ -71,14 +71,46 @@ async def _scenario() -> None:
             "provider_id": "provider-one",
             "cwd": "/tmp/project",
         }
-        catalog_response = await runtime_operation_api.handle(
+        expected_operation = catalog.snapshot.get(descriptor.key)
+        expected_schema = {
+            "request": expected_operation.request_schema(),
+            "response": expected_operation.response_schema(),
+        }
+        snapshot_type = type(catalog.snapshot)
+        original_snapshot_get = snapshot_type.get
+        operation_type = type(catalog.snapshot.operations[0])
+        original_request_schema = operation_type.request_schema
+        original_response_schema = operation_type.response_schema
+
+        def _unexpected_schema_lookup(*_args, **_kwargs):
+            raise AssertionError("catalog request regenerated operation schemas")
+
+        snapshot_type.get = _unexpected_schema_lookup
+        operation_type.request_schema = _unexpected_schema_lookup
+        operation_type.response_schema = _unexpected_schema_lookup
+        try:
+            catalog_response = await runtime_operation_api.handle(
+                {
+                    **context,
+                    "request": {"version": 1, "kind": "catalog"},
+                }
+            )
+        finally:
+            snapshot_type.get = original_snapshot_get
+            operation_type.request_schema = original_request_schema
+            operation_type.response_schema = original_response_schema
+        assert catalog_response["generation"] == catalog.generation
+        assert descriptor.key in catalog_response["schema"]
+        assert catalog_response["schema"][descriptor.key] == expected_schema
+        original_catalog_json = json.dumps(catalog_response, sort_keys=True)
+        catalog_response["schema"][descriptor.key]["request"]["title"] = "poisoned"
+        second_catalog_response = await runtime_operation_api.handle(
             {
                 **context,
                 "request": {"version": 1, "kind": "catalog"},
             }
         )
-        assert catalog_response["generation"] == catalog.generation
-        assert descriptor.key in catalog_response["schema"]
+        assert json.dumps(second_catalog_response, sort_keys=True) == original_catalog_json
         result = await runtime_operation_api.handle(
             {
                 **context,
@@ -118,6 +150,23 @@ async def _scenario() -> None:
             pass
         else:
             raise AssertionError("runtime broker crossed its session scope")
+        manager.register_capability(
+            "runtime",
+            "unpublished.read",
+            ReadRequest,
+            lambda request: {"value": request.value},
+        )
+        try:
+            await runtime_operation_api.handle(
+                {
+                    **context,
+                    "request": {"version": 1, "kind": "catalog"},
+                }
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "operation catalog is not published"
+        else:
+            raise AssertionError("runtime request published an invalidated catalog")
     finally:
         node_store.get_connection = original_get_connection
         session_manager.get_ref = original_get_ref

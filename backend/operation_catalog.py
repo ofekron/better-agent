@@ -122,6 +122,7 @@ class PublishedCatalog:
     generation: str
     snapshot: RegistrySnapshot
     descriptors: Mapping[str, OperationDescriptor]
+    operation_schema_json: Mapping[str, str]
     client: OperationClient
 
     def descriptor(self, key: str) -> OperationDescriptor:
@@ -215,12 +216,26 @@ class CatalogBuilder:
             )
         snapshot = registry.snapshot()
         descriptors = MappingProxyType(dict(self._descriptors))
+        operation_schema_json = MappingProxyType(
+            {
+                operation.name: json.dumps(
+                    {
+                        "request": operation.request_schema(),
+                        "response": operation.response_schema(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for operation in snapshot.all()
+            }
+        )
         generation = _execution_generation(snapshot, descriptors)
         client = OperationClient(snapshot, _CatalogExecutor(descriptors))
         return PublishedCatalog(
             generation=generation,
             snapshot=snapshot,
             descriptors=descriptors,
+            operation_schema_json=operation_schema_json,
             client=client,
         )
 
@@ -302,6 +317,12 @@ class CatalogManager:
     def current(self) -> PublishedCatalog:
         return self.publish()
 
+    def published(self) -> PublishedCatalog:
+        with self._lock:
+            if self._current is None:
+                raise RuntimeError("operation catalog is not published")
+            return self._current
+
     def get(self, generation: str) -> PublishedCatalog:
         with self._lock:
             try:
@@ -365,6 +386,10 @@ def publish() -> PublishedCatalog:
 
 def current() -> PublishedCatalog:
     return _MANAGER.current()
+
+
+def published() -> PublishedCatalog:
+    return _MANAGER.published()
 
 
 def manager() -> CatalogManager:
