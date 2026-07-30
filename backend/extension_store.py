@@ -6617,6 +6617,27 @@ def resolve_native_mcp_server_config(
     return _runtime_mcp_server_config_for_item(record, item, inputs)
 
 
+def _extension_identity_token_mintable(
+    record: dict[str, Any],
+    item: dict[str, Any],
+    inputs: dict[str, Any],
+) -> bool:
+    """True when `_runtime_mcp_server_config_for_item` will mint a real
+    per-extension identity token for this item (its
+    `BETTER_CLAUDE_INTERNAL_TOKEN` injection below) -- independent of
+    `inputs.get("internal_token")`, which is blank at structural-plan time
+    for every live turn (the real per-session token is only minted later,
+    runner-side). `_mcp_item_available_for_inputs` uses this same condition
+    so a `requires_backend_auth` item isn't gated out for lacking a token
+    that will, in fact, be minted for it a few lines below."""
+    is_ambient = _is_ambient_launch(item, inputs)
+    return (
+        needs_identity_token(record)
+        and (not is_ambient or _ambient_launcher_auth(item))
+        and (record["manifest"]["id"] not in _BROKERED_MCP_EXTENSION_IDS or is_ambient)
+    )
+
+
 def _runtime_mcp_server_config_for_item(
     record: dict[str, Any],
     item: dict[str, Any],
@@ -6654,14 +6675,7 @@ def _runtime_mcp_server_config_for_item(
     # token -- an extension-scoped one, never the core private token, so the
     # backend principal stays the extension and owner-based lock ops remain
     # refused.
-    if (
-        needs_identity_token(record)
-        and (not _is_ambient_launch(item, inputs) or _ambient_launcher_auth(item))
-        and (
-            manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
-            or _is_ambient_launch(item, inputs)
-        )
-    ):
+    if _extension_identity_token_mintable(record, item, inputs):
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
         # `inputs` is intentionally ignored here.
@@ -6807,6 +6821,7 @@ def _mcp_item_available_for_inputs(
             (backend_url and internal_token)
             or brokered
             or launcher_can_mint_token
+            or _extension_identity_token_mintable(record, item, inputs)
         )
     ):
         return False
