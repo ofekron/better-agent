@@ -303,6 +303,22 @@ class NodeClient:
         identity = node_identity.load_or_create()
         token = identity.secret
         my_id = identity.node_id
+        build_info = await asyncio.to_thread(app_version.current_build_info)
+        repositories = await asyncio.to_thread(
+            repository_alignment.current_repositories,
+            build_info,
+        )
+        handshake = {
+            "type": "handshake",
+            "protocol_version": PROTOCOL_VERSION,
+            "node_id": my_id,
+            "app_version": build_info,
+            "repositories": repositories,
+            "registration": {
+                "address": identity.address,
+                "cwd_roots": list(identity.cwd_roots),
+            },
+        }
 
         logger.info("node_client: dialing %s", primary_url)
         async with websockets.connect(
@@ -315,19 +331,7 @@ class NodeClient:
             # Outbound handshake. `registration` metadata is what the
             # primary shows in its approval popup for a brand-new node;
             # a topology-static / already-approved node ignores it.
-            await ws.send(_to_json({
-                "type": "handshake",
-                "protocol_version": PROTOCOL_VERSION,
-                "node_id": my_id,
-                "app_version": app_version.current_build_info(),
-                "repositories": repository_alignment.current_repositories(
-                    app_version.current_build_info()
-                ),
-                "registration": {
-                    "address": identity.address,
-                    "cwd_roots": list(identity.cwd_roots),
-                },
-            }))
+            await ws.send(_to_json(handshake))
 
             # Inbound handshake. A brand-new node first gets a
             # `registration_pending` frame and must keep waiting (up to
