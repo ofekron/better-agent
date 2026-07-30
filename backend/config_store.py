@@ -219,6 +219,8 @@ def _serialized_provider_mutation(function):
                         result = function(*args, **kwargs)
                     finally:
                         committed = bool(_config_transaction_state.committed)
+                    if committed:
+                        _notify_provider_config_committed()
         finally:
             if committed:
                 _notify_provider_config_changed()
@@ -227,13 +229,15 @@ def _serialized_provider_mutation(function):
     return wrapped
 
 
-def _notify_provider_config_changed() -> None:
-    """Publish the "provider config changed" fact for worker-node projection.
+def _notify_provider_config_committed() -> None:
+    """Synchronously advance auth projection authority before unlocking."""
+    import provider_auth
 
-    Fired outside the mutation lock so a slow subscriber cannot serialize
-    provider writes. Nodes receive a credential-free projection; API keys sync
-    only through the explicit per-node route.
-    """
+    provider_auth.provider_config_committed()
+
+
+def _notify_provider_config_changed() -> None:
+    """Publish the committed provider-config change fact outside its lock."""
     try:
         import model_catalog_refresh
 
@@ -246,6 +250,12 @@ def _notify_provider_config_changed() -> None:
         node_config_sync.notify_changed("providers")
     except Exception:
         logger.exception("node provider sync notify failed")
+    try:
+        import provider_auth
+
+        provider_auth.notify_provider_config_changed()
+    except Exception:
+        logger.exception("provider auth config-change notify failed")
 
 
 def _config_path():
@@ -272,6 +282,20 @@ def provider_state_read_transaction():
             with _state_cache_lock:
                 _state_cache = None
             yield
+
+
+def apply_if_provider_matches(
+    provider_id: str,
+    predicate: Callable[[dict], bool],
+    apply: Callable[[], None],
+) -> bool:
+    """Apply an in-memory projection update atomically with provider config."""
+    with provider_state_read_transaction():
+        provider = get_provider(provider_id)
+        if provider is None or not predicate(provider):
+            return False
+        apply()
+        return True
 
 
 def _engine_env_path():

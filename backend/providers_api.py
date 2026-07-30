@@ -36,6 +36,7 @@ def configure(broadcast_global: Callable[[str, dict], Any]) -> None:
     """Bind the coordinator capability this router needs."""
     global _broadcast_global
     _broadcast_global = broadcast_global
+    provider_auth.configure_config_change_broadcast(_broadcast_provider_changed)
 
 
 def _require_configured() -> Callable[[str, dict], Any]:

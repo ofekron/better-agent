@@ -22,9 +22,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, TypeAlias
 
 import config_store
 from paths import ba_home, user_home
@@ -32,6 +33,8 @@ from proc_control import process_control
 from process_identity import capture_process_identity
 
 logger = logging.getLogger(__name__)
+
+BroadcastFn = Callable[[], Awaitable[None]]
 
 # Fixed argv suffix per kind. Never assemble these from caller input.
 _AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
@@ -79,7 +82,7 @@ _states: dict[str, dict] = {}
 _locks: dict[str, asyncio.Lock] = {}
 _procs: dict[str, asyncio.subprocess.Process] = {}
 _tasks: set = set()
-_auth_cache: dict[str, tuple[float, Optional[bool]]] = {}
+_auth_cache: dict[str, tuple[float, Optional[bool], AuthFingerprint]] = {}
 _pending_refresh: set[str] = set()
 _status_global_semaphore: asyncio.Semaphore | None = None
 _status_kind_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -88,8 +91,23 @@ _status_tasks: set[asyncio.Task] = set()
 _status_procs: dict[object, asyncio.subprocess.Process] = {}
 _status_cleanup_tasks: dict[object, asyncio.Task] = {}
 _status_shutting_down = False
+_config_change_broadcast: BroadcastFn | None = None
+_config_change_loop: asyncio.AbstractEventLoop | None = None
+_config_reconcile_task: asyncio.Task | None = None
+_config_reconcile_requested = False
 
-BroadcastFn = Callable[[], Awaitable[None]]
+AuthFingerprint: TypeAlias = tuple[
+    str,
+    str,
+    int,
+    str,
+    str,
+    tuple[str, str] | None,
+]
+_provider_auth_fingerprints: dict[str, AuthFingerprint] = {}
+_projection_lock = threading.RLock()
+_flow_fingerprints: dict[str, AuthFingerprint] = {}
+_committed_config_changes: set[str] = set()
 
 
 def supports_auth(provider: dict) -> bool:
@@ -101,41 +119,236 @@ def supports_auth(provider: dict) -> bool:
     return (provider.get("kind") or "claude") in _AUTH_COMMANDS
 
 
+def _auth_fingerprint(provider: dict) -> AuthFingerprint | None:
+    if not supports_auth(provider):
+        return None
+    provider_id = str(provider.get("id") or "")
+    generation = str(provider.get("generation") or "")
+    try:
+        revision = int(provider.get("revision"))
+    except (TypeError, ValueError):
+        return None
+    if not provider_id or not generation:
+        return None
+    credential = config_store.provider_credential_env(provider)
+    return (
+        provider_id,
+        generation,
+        revision,
+        str(provider.get("kind") or "claude"),
+        str(provider.get("mode") or ""),
+        credential,
+    )
+
+
+def configure_config_change_broadcast(broadcast: BroadcastFn) -> None:
+    global _config_change_broadcast
+    _config_change_broadcast = broadcast
+
+
+def bind_config_change_loop() -> None:
+    global _config_change_loop
+    _config_change_loop = asyncio.get_running_loop()
+    _request_config_reconcile()
+
+
+def provider_config_committed() -> None:
+    """Synchronously advance auth authority inside the config commit lock."""
+    try:
+        state = config_store.list_providers()
+        current = {
+            str(record.get("id") or ""): fingerprint
+            for record in state.get("providers", [])
+            if isinstance(record, dict)
+            and record.get("id")
+            and (fingerprint := _auth_fingerprint(record)) is not None
+        }
+    except Exception:
+        logger.exception("provider auth committed-config snapshot failed closed")
+        current = {}
+    with _projection_lock:
+        changed = {
+            provider_id
+            for provider_id in (
+                set(_provider_auth_fingerprints)
+                | set(current)
+                | set(_auth_cache)
+                | set(_flow_fingerprints)
+            )
+            if _provider_auth_fingerprints.get(provider_id)
+            != current.get(provider_id)
+            or (
+                provider_id in _flow_fingerprints
+                and _flow_fingerprints[provider_id] != current.get(provider_id)
+            )
+        }
+        _committed_config_changes.update(changed)
+        obsolete_procs = [
+            proc
+            for provider_id, proc in _procs.items()
+            if provider_id in changed and proc.returncode is None
+        ]
+        for provider_id in changed:
+            _auth_cache.pop(provider_id, None)
+            _states.pop(provider_id, None)
+            _flow_fingerprints.pop(provider_id, None)
+        _provider_auth_fingerprints.clear()
+        _provider_auth_fingerprints.update(current)
+    for proc in obsolete_procs:
+        _kill_proc(proc)
+
+
+def notify_provider_config_changed() -> None:
+    loop = _config_change_loop
+    if loop is None or loop.is_closed() or _status_shutting_down:
+        return
+    loop.call_soon_threadsafe(_request_config_reconcile)
+
+
+def _request_config_reconcile() -> None:
+    global _config_reconcile_requested, _config_reconcile_task
+    if _status_shutting_down or _config_change_loop is not asyncio.get_running_loop():
+        return
+    _config_reconcile_requested = True
+    if _config_reconcile_task is not None and not _config_reconcile_task.done():
+        return
+    _config_reconcile_task = asyncio.create_task(
+        _reconcile_provider_config(),
+        name="provider_auth:config-reconcile",
+    )
+
+    def _reconcile_completed(task: asyncio.Task) -> None:
+        error = None if task.cancelled() else task.exception()
+        if error is not None:
+            logger.error(
+                "provider auth config reconciliation failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        if _config_reconcile_requested and not _status_shutting_down:
+            _request_config_reconcile()
+
+    _config_reconcile_task.add_done_callback(_reconcile_completed)
+
+
+async def _reconcile_provider_config() -> None:
+    global _config_reconcile_requested
+    while _config_reconcile_requested and not _status_shutting_down:
+        _config_reconcile_requested = False
+        state = await asyncio.to_thread(config_store.list_providers)
+        providers = {
+            str(record.get("id") or ""): record
+            for record in state.get("providers", [])
+            if isinstance(record, dict) and record.get("id")
+        }
+        current = {
+            provider_id: fingerprint
+            for provider_id, record in providers.items()
+            if (fingerprint := _auth_fingerprint(record)) is not None
+        }
+        with _projection_lock:
+            changed = {
+                provider_id
+                for provider_id in (
+                    set(_provider_auth_fingerprints)
+                    | set(current)
+                    | set(_flow_fingerprints)
+                    | set(_auth_cache)
+                )
+                if _provider_auth_fingerprints.get(provider_id)
+                != current.get(provider_id)
+                or (
+                    provider_id in _flow_fingerprints
+                    and _flow_fingerprints[provider_id] != current.get(provider_id)
+                )
+                or (
+                    provider_id in _auth_cache
+                    and _auth_cache[provider_id][2] != current.get(provider_id)
+                )
+            }
+            changed.update(_committed_config_changes)
+            _committed_config_changes.difference_update(changed)
+        if not changed:
+            continue
+        for provider_id in changed:
+            _invalidate_auth(provider_id)
+            with _projection_lock:
+                flow_fingerprint = _flow_fingerprints.get(provider_id)
+                proc = _procs.get(provider_id)
+            if flow_fingerprint != current.get(provider_id):
+                if proc is not None and proc.returncode is None:
+                    _kill_proc(proc)
+            clear_state(provider_id)
+        with _projection_lock:
+            _provider_auth_fingerprints.clear()
+            _provider_auth_fingerprints.update(current)
+        broadcast = _config_change_broadcast
+        if broadcast is not None:
+            await broadcast()
+        if broadcast is not None:
+            for provider_id in sorted(changed & set(current)):
+                maybe_schedule_refresh(provider_id, broadcast)
+
+
 def _lock_for(provider_id: str) -> asyncio.Lock:
     return _locks.setdefault(provider_id, asyncio.Lock())
 
 
 def _set_state(provider_id: str, status: str, message: str = "") -> None:
-    _states[provider_id] = {"status": status, "message": message}
+    with _projection_lock:
+        _states[provider_id] = {"status": status, "message": message}
+
+
+def _flow_is_current(provider_id: str, fingerprint: AuthFingerprint) -> bool:
+    with _projection_lock:
+        return (
+            _flow_fingerprints.get(provider_id) == fingerprint
+            and _provider_auth_fingerprints.get(provider_id) == fingerprint
+        )
 
 
 def clear_state(provider_id: str) -> None:
     """Drop all transient state for a record (called on provider delete)."""
-    _states.pop(provider_id, None)
-    _auth_cache.pop(provider_id, None)
+    with _projection_lock:
+        proc = _procs.get(provider_id)
+    if proc is not None and proc.returncode is None:
+        _kill_proc(proc)
     _locks.pop(provider_id, None)
+    with _projection_lock:
+        _states.pop(provider_id, None)
+        _auth_cache.pop(provider_id, None)
+        _flow_fingerprints.pop(provider_id, None)
 
 
 def _cached_auth(provider_id: str) -> Optional[bool]:
-    entry = _auth_cache.get(provider_id)
+    with _projection_lock:
+        entry = _auth_cache.get(provider_id)
+        current = _provider_auth_fingerprints.get(provider_id)
     if not entry:
         return None
-    ts, value = entry
-    if time.monotonic() - ts > _AUTH_CACHE_TTL_SECONDS:
+    ts, value, fingerprint = entry
+    if fingerprint != current or time.monotonic() - ts > _AUTH_CACHE_TTL_SECONDS:
         return None
     return value
 
 
 def _invalidate_auth(provider_id: str) -> None:
-    _auth_cache.pop(provider_id, None)
+    with _projection_lock:
+        _auth_cache.pop(provider_id, None)
 
 
 def login_state(provider_id: str) -> dict:
     """Snapshot of the record's in-flight auth-flow state + the cached
     durable auth-status, for UI serialization. Cheap: no subprocess."""
+    with _projection_lock:
+        state = _states.get(provider_id, {})
+        if (
+            _flow_fingerprints.get(provider_id)
+            != _provider_auth_fingerprints.get(provider_id)
+        ):
+            state = {}
     return {
-        "status": _states.get(provider_id, {}).get("status", STATE_IDLE),
-        "message": _states.get(provider_id, {}).get("message", ""),
+        "status": state.get("status", STATE_IDLE),
+        "message": state.get("message", ""),
         "authenticated": _cached_auth(provider_id),
     }
 
@@ -486,7 +699,10 @@ async def _spawn_owned_status(
     return proc
 
 
-async def _status_authenticated(provider: dict) -> bool:
+async def _status_authenticated(
+    provider: dict,
+    expected_fingerprint: AuthFingerprint | None = None,
+) -> bool:
     """Authoritative logged-in check via the provider's own status
     subcommand. Returns True on a 0-exit (authenticated). Any failure
     (binary missing, non-zero, timeout) is treated as not-logged-in."""
@@ -504,6 +720,13 @@ async def _status_authenticated(provider: dict) -> bool:
         kind_semaphore, global_semaphore = await _acquire_status_admission(kind)
         if _status_shutting_down:
             return False
+        if expected_fingerprint is not None:
+            current = await asyncio.to_thread(
+                config_store.get_provider,
+                expected_fingerprint[0],
+            )
+            if _auth_fingerprint(current or {}) != expected_fingerprint:
+                return False
         try:
             proc = await _spawn_owned_status(provider, token)
         except FileNotFoundError:
@@ -522,22 +745,32 @@ async def _status_authenticated(provider: dict) -> bool:
             return False
         return proc.returncode == 0
     finally:
-        proc = _status_procs.get(token)
-        if proc is not None:
-            if proc.returncode is None:
-                await _await_status_cleanup(token, proc)
-            else:
-                _status_procs.pop(token, None)
-        if global_semaphore is not None:
-            global_semaphore.release()
-        if kind_semaphore is not None:
-            kind_semaphore.release()
-        _status_tasks.discard(task)
+        try:
+            proc = _status_procs.get(token)
+            if proc is not None:
+                if proc.returncode is None:
+                    await _await_status_cleanup(token, proc)
+                else:
+                    _status_procs.pop(token, None)
+        finally:
+            if global_semaphore is not None:
+                global_semaphore.release()
+            if kind_semaphore is not None:
+                kind_semaphore.release()
+            _status_tasks.discard(task)
 
 
 async def shutdown_status_probes() -> None:
-    global _status_shutting_down
+    global _status_shutting_down, _config_change_loop
+    global _config_reconcile_requested, _config_reconcile_task
     _status_shutting_down = True
+    _config_change_loop = None
+    _config_reconcile_requested = False
+    reconcile = _config_reconcile_task
+    _config_reconcile_task = None
+    if reconcile is not None and not reconcile.done():
+        reconcile.cancel()
+        await asyncio.gather(reconcile, return_exceptions=True)
     current = asyncio.current_task()
     tasks = [task for task in tuple(_status_tasks) if task is not current]
     for task in tasks:
@@ -559,21 +792,57 @@ async def shutdown_status_probes() -> None:
         )
 
 
-async def refresh_auth_status(provider_id: str, broadcast: BroadcastFn) -> None:
+async def _commit_auth_status(
+    provider_id: str,
+    fingerprint: AuthFingerprint,
+    authenticated: bool,
+) -> bool:
+    def apply() -> None:
+        with _projection_lock:
+            _auth_cache[provider_id] = (
+                time.monotonic(),
+                authenticated,
+                fingerprint,
+            )
+            _provider_auth_fingerprints[provider_id] = fingerprint
+        _notify_catalog_auth_changed(provider_id)
+
+    committed = await asyncio.to_thread(
+        config_store.apply_if_provider_matches,
+        provider_id,
+        lambda current: _auth_fingerprint(current) == fingerprint,
+        apply,
+    )
+    if not committed:
+        _request_config_reconcile()
+        return False
+    return True
+
+
+async def refresh_auth_status(
+    provider_id: str,
+    broadcast: BroadcastFn,
+) -> Optional[bool]:
     """Recompute and cache the authoritative auth-status for a record,
     then broadcast so the UI reflects the durable truth (not just
     in-flight progress). Called after login/logout and at backend boot."""
-    provider = config_store.get_provider(provider_id)
-    if provider is None or not supports_auth(provider):
-        return
+    provider = await asyncio.to_thread(config_store.get_provider, provider_id)
+    fingerprint = _auth_fingerprint(provider or {})
+    if provider is None or fingerprint is None:
+        return None
     try:
-        authenticated = await _status_authenticated(provider)
+        authenticated = await _status_authenticated(provider, fingerprint)
     except Exception as exc:
         logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
         authenticated = False
-    _auth_cache[provider_id] = (time.monotonic(), authenticated)
-    _notify_catalog_auth_changed(provider_id)
+    if not await _commit_auth_status(
+        provider_id,
+        fingerprint,
+        authenticated,
+    ):
+        return None
     await broadcast()
+    return authenticated
 
 
 def maybe_schedule_refresh(provider_id: str, broadcast: BroadcastFn) -> None:
@@ -590,10 +859,17 @@ def maybe_schedule_refresh(provider_id: str, broadcast: BroadcastFn) -> None:
     _pending_refresh.add(provider_id)
 
     async def _run() -> None:
+        published = False
         try:
-            await refresh_auth_status(provider_id, broadcast)
+            published = await refresh_auth_status(provider_id, broadcast) is not None
         finally:
             _pending_refresh.discard(provider_id)
+            if (
+                not published
+                and not _status_shutting_down
+                and _cached_auth(provider_id) is None
+            ):
+                maybe_schedule_refresh(provider_id, broadcast)
 
     try:
         loop = asyncio.get_running_loop()
@@ -606,8 +882,27 @@ def maybe_schedule_refresh(provider_id: str, broadcast: BroadcastFn) -> None:
 
 
 def _forget_proc(provider_id: str, proc: asyncio.subprocess.Process) -> None:
-    if _procs.get(provider_id) is proc:
-        _procs.pop(provider_id, None)
+    with _projection_lock:
+        if _procs.get(provider_id) is proc:
+            _procs.pop(provider_id, None)
+
+
+async def _discard_registered_flow(
+    provider_id: str,
+    fingerprint: AuthFingerprint,
+    proc: asyncio.subprocess.Process,
+) -> None:
+    _kill_proc(proc)
+    await proc.wait()
+    with _projection_lock:
+        if (
+            _procs.get(provider_id) is proc
+            and _flow_fingerprints.get(provider_id) == fingerprint
+        ):
+            _procs.pop(provider_id, None)
+            _flow_fingerprints.pop(provider_id, None)
+            _states.pop(provider_id, None)
+    _clear_marker(provider_id)
 
 
 def _notify_catalog_auth_changed(provider_id: str) -> None:
@@ -626,6 +921,7 @@ async def _monitor(
     provider_id: str,
     action: str,
     proc: asyncio.subprocess.Process,
+    fingerprint: AuthFingerprint,
     broadcast: BroadcastFn,
 ) -> None:
     """Await a login/logout subprocess with a bounded timeout, classify
@@ -639,20 +935,23 @@ async def _monitor(
             exit_code = proc.returncode
         except asyncio.TimeoutError:
             _kill_proc(proc)
-            _set_state(provider_id, STATE_LOGIN_FAILED, "login timed out")
-            # The exchange may have completed server-side before the kill;
-            # recompute the durable auth-status rather than trusting the
-            # pre-login cache value (mirrors the logout path).
-            await refresh_auth_status(provider_id, broadcast)
+            if _flow_is_current(provider_id, fingerprint):
+                _set_state(provider_id, STATE_LOGIN_FAILED, "login timed out")
+                # The exchange may have completed server-side before the kill;
+                # recompute durable auth status rather than trusting the cache.
+                await refresh_auth_status(provider_id, broadcast)
             return
     except Exception as exc:
-        _set_state(provider_id, STATE_LOGIN_FAILED, f"login error: {exc}")
-        await broadcast()
+        if _flow_is_current(provider_id, fingerprint):
+            _set_state(provider_id, STATE_LOGIN_FAILED, f"login error: {exc}")
+            await broadcast()
         return
     finally:
         _forget_proc(provider_id, proc)
         _clear_marker(provider_id)
-        _notify_catalog_auth_changed(provider_id)
+
+    if not _flow_is_current(provider_id, fingerprint):
+        return
 
     tail = ""
     for stream in (stderr, stdout):
@@ -676,19 +975,29 @@ async def _monitor(
     # login: confirm authoritatively rather than trusting exit code alone,
     # since a browser-closed-midflow can still exit 0 on some providers.
     authenticated = False
+    status_fingerprint: AuthFingerprint | None = None
     if exit_code == 0:
-        fresh = config_store.get_provider(provider_id) or {}
-        if supports_auth(fresh):
+        fresh = await asyncio.to_thread(config_store.get_provider, provider_id)
+        fresh = fresh or {}
+        status_fingerprint = _auth_fingerprint(fresh)
+        if status_fingerprint == fingerprint:
             try:
-                authenticated = await _status_authenticated(fresh)
+                authenticated = await _status_authenticated(fresh, fingerprint)
             except Exception as exc:
                 logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
     _invalidate_auth(provider_id)
-    _auth_cache[provider_id] = (time.monotonic(), authenticated)
-    if authenticated:
+    if status_fingerprint != fingerprint or not await _commit_auth_status(
+        provider_id,
+        fingerprint,
+        authenticated,
+    ):
+        return
+    if _flow_is_current(provider_id, fingerprint) and authenticated:
         _set_state(provider_id, STATE_LOGIN_SUCCESS)
-    else:
+    elif _flow_is_current(provider_id, fingerprint):
         _set_state(provider_id, STATE_LOGIN_FAILED, tail or "login did not complete")
+    else:
+        return
     await broadcast()
 
 
@@ -702,6 +1011,9 @@ async def _start(
     if provider is None:
         return {"ok": False, "error": "not_found"}
     if not supports_auth(provider):
+        return {"ok": False, "error": "unsupported"}
+    fingerprint = _auth_fingerprint(provider)
+    if fingerprint is None:
         return {"ok": False, "error": "unsupported"}
 
     async with _lock_for(provider_id):
@@ -727,16 +1039,48 @@ async def _start(
             _set_state(provider_id, STATE_LOGIN_FAILED, "provider CLI not found")
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
-        _procs[provider_id] = proc
-        _write_marker(provider_id, proc)
-        _set_state(provider_id, running_state)
+        def register() -> None:
+            with _projection_lock:
+                _procs[provider_id] = proc
+                _flow_fingerprints[provider_id] = fingerprint
+                _write_marker(provider_id, proc)
+                _states[provider_id] = {
+                    "status": running_state,
+                    "message": "",
+                }
+
+        registration = asyncio.create_task(
+            asyncio.to_thread(
+                config_store.apply_if_provider_matches,
+                provider_id,
+                lambda current: _auth_fingerprint(current) == fingerprint,
+                register,
+            ),
+            name=f"provider_auth:{action}:register:{provider_id}",
+        )
+        try:
+            still_current = await asyncio.shield(registration)
+        except asyncio.CancelledError:
+            still_current = await registration
+            if still_current:
+                await _discard_registered_flow(provider_id, fingerprint, proc)
+            else:
+                _kill_proc(proc)
+                await proc.wait()
+            raise
+        if not still_current:
+            _kill_proc(proc)
+            await proc.wait()
+            return {"ok": False, "error": "obsolete"}
         task = asyncio.create_task(
-            _monitor(provider_id, action, proc, broadcast),
+            _monitor(provider_id, action, proc, fingerprint, broadcast),
             name=f"provider_auth:{action}:{provider_id}",
         )
         # Strong reference so the monitor task is not GC'd mid-flow.
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
+    if not _flow_is_current(provider_id, fingerprint):
+        return {"ok": False, "error": "obsolete"}
     await broadcast()
     return {"ok": True, "state": login_state(provider_id)}
 
@@ -754,7 +1098,8 @@ async def cancel(provider_id: str) -> bool:
     confirm it died. Returns True only after the process has actually
     exited (reaped), so the caller cannot mistake "signal sent" for "port
     freed". The monitor's finally clears the marker regardless."""
-    proc = _procs.get(provider_id)
+    with _projection_lock:
+        proc = _procs.get(provider_id)
     if proc is None or proc.returncode is not None:
         return False
     _kill_proc(proc)
@@ -777,7 +1122,9 @@ def shutdown_all() -> None:
     startup's reap (identity-checked) gets another chance — otherwise the
     orphan becomes permanently invisible. Normal monitor completion and
     reap clear markers; a clean restart resolves any leftover as dead-pid."""
-    for _provider_id, proc in list(_procs.items()):
+    with _projection_lock:
+        procs = list(_procs.values())
+        _procs.clear()
+    for proc in procs:
         if proc.returncode is None:
             _kill_proc(proc)
-    _procs.clear()
