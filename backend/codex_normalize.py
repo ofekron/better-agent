@@ -48,13 +48,6 @@ def _codex_primary_assistant_text(record: dict) -> str:
     return ""
 
 
-def _codex_primary_final_answer_text(record: dict) -> str:
-    payload = record.get("payload")
-    if not isinstance(payload, dict) or payload.get("phase") != "final_answer":
-        return ""
-    return _codex_primary_assistant_text(record)
-
-
 def _mark_final_answer(event: dict, *, origin: str = "") -> dict:
     """Stamp a normalized assistant event as a final-answer emission.
 
@@ -242,7 +235,7 @@ def _normalize_file_change(item: dict, parent_uuid: str) -> dict:
         else:
             parts.append(f"Update: {path}")
     description = "\n".join(parts)
-    tool_name = "Edit" if status != "failed" else "Edit"
+    tool_name = "Edit"
     result = description if status == "completed" else f"Failed: {description}"
     return {
         "type": "assistant",
@@ -987,20 +980,6 @@ def _normalize_response_tool_result(payload: dict, parent_uuid: str) -> tuple[di
         "parentUuid": parent_uuid,
         "timestamp": datetime.now().isoformat(),
     }, payload), tool_use_id
-
-def _normalize_item(payload: dict, parent_uuid: str, provider: Optional[Any] = None) -> dict:
-    # ... inside payload_type checks for tool outputs ...
-    if payload_type in (
-        "function_call_output",
-        "custom_tool_call_output",
-        "tool_search_output",
-    ):
-        event, _ = _normalize_response_tool_result(payload, parent_uuid)
-        if provider:
-            return provider.format_tool_result(event["tool_use_id"], event["content"])
-        return event
-    # ...
-
 
 def _web_search_item_from_payload(payload: dict) -> dict:
     action = payload.get("action") or {}
