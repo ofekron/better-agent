@@ -30,16 +30,12 @@ Run with:
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import re
-import secrets
 import shutil
-import socket
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -50,37 +46,12 @@ import _test_home  # noqa: E402
 
 BA_HOME = _test_home.isolate("bc-int-harness-profile-")
 
+import _live_turn_harness as harness  # noqa: E402
 
-def _engage_headless_auth(home: Path) -> None:
-    """Throwaway credentials for this run only.
-
-    The keychain entries are home-scoped, so an isolated home has none and
-    the backend would refuse to start. Headless auth reads the secrets from
-    files instead — written here into the temp home and destroyed with it.
-    No login is performed: the test signs its own cookie with this secret.
-    """
-    import bcrypt
-
-    secret_file = home / "session-secret"
-    secret_file.write_text(secrets.token_hex(32), encoding="utf-8")
-    hash_file = home / "password-hash"
-    hash_file.write_text(
-        bcrypt.hashpw(secrets.token_hex(16).encode(), bcrypt.gensalt()).decode(),
-        encoding="utf-8",
-    )
-    os.environ["BETTER_AGENT_HEADLESS_AUTH"] = "1"
-    os.environ["BETTER_AGENT_USERNAME"] = "integration-test"
-    os.environ["BETTER_AGENT_SESSION_SECRET_FILE"] = str(secret_file)
-    os.environ["BETTER_AGENT_PASSWORD_HASH_FILE"] = str(hash_file)
-
-
-_engage_headless_auth(Path(BA_HOME))
+harness.engage_headless_auth(Path(BA_HOME))
 
 import _test_installation  # noqa: E402
 import httpx  # noqa: E402
-import itsdangerous  # noqa: E402
-import uvicorn  # noqa: E402
-import websockets  # noqa: E402
 
 from live_llm_test_guard import require_live_llm_tests  # noqa: E402
 
@@ -94,76 +65,13 @@ PROMPT = "Reply with exactly the word: pong"
 # reads settings (and therefore its MCP servers) from.
 CLI_SETTINGS = Path("agy-home/.gemini/antigravity-cli/settings.json")
 _APP_DATA_DIR = re.compile(r"appDataDir=(\S+)")
-# Every way a turn can end. Watching only `turn_complete` turns a failed run
-# into a full-length timeout instead of an immediate, explained failure.
-TERMINAL_FRAMES = frozenset({"turn_complete", "turn_stopped", "turn_detached"})
-# Provider-side conditions that say nothing about this repo — the vendor
-# account is out of quota or its endpoint is down, so there is no harness
-# claim left to test.
-_PROVIDER_UNAVAILABLE = ("quota reached", "RESOURCE_EXHAUSTED", "model unreachable")
 
-
-def _ok(label: str) -> None:
-    print(f"\033[92mPASS\033[0m  {label}")
-
-
-def _fail(label: str, why: str) -> None:
-    print(f"\033[91mFAIL\033[0m  {label}: {why}")
-
-
-def _assistant_text(frame: object) -> str:
-    """Every assistant text block anywhere in a frame.
-
-    Assistant output rides inside nested `agent_message` envelopes, and the
-    flat `content` field carries user prompts rather than agent output. A
-    recursive scan for assistant `message.content` blocks reads the same
-    words the UI renders without depending on the envelope depth.
-    """
-    chunks: list[str] = []
-    seen: set[tuple[str, str]] = set()
-
-    def walk(node: object) -> None:
-        if isinstance(node, list):
-            for entry in node:
-                walk(entry)
-            return
-        if not isinstance(node, dict):
-            return
-        message = node.get("message")
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            # The same event is re-wrapped at more than one depth; the
-            # envelope's uuid identifies the one underlying block.
-            uuid = str(node.get("uuid") or "")
-            for block in message.get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "text":
-                    continue
-                text = str(block.get("text") or "")
-                if (uuid, text) in seen:
-                    continue
-                seen.add((uuid, text))
-                chunks.append(text)
-        for value in node.values():
-            walk(value)
-
-    walk(frame)
-    return "".join(chunks).strip()
+_ok = harness.ok
+_fail = harness.fail
 
 
 def _run_dir_for(session_id: str) -> Path | None:
-    """The run directory the turn spawned, found by the session id the
-    runner was handed. Newest wins if a session ever runs more than once."""
-    runs = Path(BA_HOME) / "runs"
-    matches: list[tuple[float, Path]] = []
-    for candidate in runs.glob("*/input.json"):
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if payload.get("app_session_id") == session_id:
-            matches.append((candidate.stat().st_mtime, candidate.parent))
-    if not matches:
-        return None
-    return max(matches)[1]
+    return harness.run_dir_for(Path(BA_HOME), session_id)
 
 
 def _cli_mcp_servers(run_dir: Path) -> set[str]:
@@ -176,26 +84,6 @@ def _cli_mcp_servers(run_dir: Path) -> set[str]:
     except (OSError, ValueError):
         return set()
     return set((loaded.get("mcpServers") or {}).keys())
-
-
-def _run_failure(run_dir: Path | None) -> str:
-    """The runner's own verdict on the turn, empty when it succeeded."""
-    if run_dir is None:
-        return ""
-    complete = run_dir / "complete.json"
-    if not complete.is_file():
-        return ""
-    try:
-        verdict = json.loads(complete.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    if verdict.get("success"):
-        return ""
-    return str(verdict.get("error") or "the run failed without an error")
-
-
-def _provider_unavailable(reason: str) -> bool:
-    return any(marker.lower() in reason.lower() for marker in _PROVIDER_UNAVAILABLE)
 
 
 def _cli_app_data_dir(run_dir: Path) -> str:
@@ -223,118 +111,10 @@ def _first_extension_mcp_pair(
     return None
 
 
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class BackgroundUvicorn:
-    def __init__(self, app_path: str, port: int) -> None:
-        self.port = port
-        self.app_path = app_path
-        self.server: uvicorn.Server | None = None
-        self.thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        cfg = uvicorn.Config(
-            self.app_path, host="127.0.0.1", port=self.port, log_level="warning",
-        )
-        self.server = uvicorn.Server(cfg)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
-        self.thread.start()
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            try:
-                with socket.create_connection(("127.0.0.1", self.port), 0.2):
-                    return
-            except OSError:
-                time.sleep(0.2)
-        raise RuntimeError("uvicorn failed to start in 180s")
-
-    def stop(self) -> None:
-        if self.server:
-            self.server.should_exit = True
-        if self.thread:
-            self.thread.join(timeout=10)
-
-
-def _mint_session_cookie() -> str:
-    """Sign a session cookie the way Starlette's SessionMiddleware does.
-    Read-only against the keychain — never writes credentials."""
-    import auth_secrets
-
-    signer = itsdangerous.TimestampSigner(str(auth_secrets.get_session_secret()))
-    payload = base64.b64encode(
-        json.dumps({"user": {"username": "integration-test"}}).encode()
-    )
-    return signer.sign(payload).decode("utf-8")
-
-
-class TurnResult:
-    """What one turn put on the wire: the errors, and what the model said.
-
-    The text is read from the streamed frames rather than re-fetched after
-    `turn_complete`, because the render-tree projection is finalized by
-    post-turn work — a REST read racing that finish sees an empty message.
-    """
-
-    __slots__ = ("errors", "text")
-
-    def __init__(self, errors: list[str], text: str) -> None:
-        self.errors = errors
-        self.text = text
-
-
-async def _drive_turn(ws_url: str, cookie: str, sid: str, cwd: str) -> TurnResult:
-    """One real turn, observed on the socket the frontend uses."""
-    errors: list[str] = []
-    spoken: list[str] = []
-    try:
-        async with websockets.connect(
-            ws_url, additional_headers={"Cookie": f"better_agent_session={cookie}"},
-        ) as ws:
-            await ws.send(json.dumps({"type": "subscribe", "app_session_id": sid}))
-            await asyncio.sleep(0.3)
-            await ws.send(json.dumps({
-                "type": "send_message",
-                "prompt": PROMPT,
-                "app_session_id": sid,
-                "model": CHEAP_MODEL,
-                "cwd": cwd,
-            }))
-            deadline = time.monotonic() + 240
-            while time.monotonic() < deadline:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                except asyncio.TimeoutError:
-                    # A run that died at the provider records its verdict on
-                    # disk; a failed agy turn emits no terminal frame, so
-                    # waiting for one would burn the whole budget.
-                    failed = _run_failure(_run_dir_for(sid))
-                    if failed:
-                        errors.append(failed)
-                        break
-                    continue
-                evt = json.loads(raw)
-                said = _assistant_text(evt)
-                if said and said not in spoken:
-                    spoken.append(said)
-                if evt.get("type") in TERMINAL_FRAMES:
-                    break
-                if evt.get("type") == "error":
-                    errors.append(str(evt.get("data")))
-            else:
-                errors.append("the turn never reached a terminal frame within 240s")
-    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-        errors.append(f"{type(exc).__name__}: {exc}")
-    return TurnResult(errors, "".join(spoken).strip())
-
-
 async def _speak(live: "LiveHarness", sid: str) -> tuple[str, str]:
     """Run one turn. Returns (what the model said, why it did not speak)."""
     turn = await live.turn(sid)
-    reason = _run_failure(_run_dir_for(sid)) or "; ".join(turn.errors)
+    reason = harness.run_failure(_run_dir_for(sid)) or "; ".join(turn.errors)
     if reason:
         return "", reason
     if not turn.text:
@@ -411,8 +191,11 @@ class LiveHarness:
             payload["harness_profile_id"] = profile["id"]
         return (await self._post("/api/sessions", payload))["id"]
 
-    async def turn(self, sid: str) -> TurnResult:
-        return await _drive_turn(self.ws_url, self.cookie, sid, self.cwd)
+    async def turn(self, sid: str) -> harness.TurnResult:
+        return await harness.drive_turn(
+            self.ws_url, self.cookie, sid, self.cwd, PROMPT, Path(BA_HOME),
+            model=CHEAP_MODEL,
+        )
 
     async def profile_disabling(self, name: str, writes: list[dict]) -> dict:
         profile = await self._post("/api/harness-profiles", {"name": name})
@@ -449,11 +232,11 @@ async def _run() -> int:  # noqa: PLR0911, PLR0915 - a linear end-to-end script
     import harness_run_projection  # noqa: PLC0415
     from session_manager import manager as session_manager  # noqa: PLC0415
 
-    port = free_port()
-    server = BackgroundUvicorn("main:app", port)
+    port = harness.free_port()
+    server = harness.BackgroundUvicorn("main:app", port)
     server.start()
     cwd = tempfile.mkdtemp(prefix="bc-int-harness-profile-cwd-")
-    cookie = _mint_session_cookie()
+    cookie = harness.mint_session_cookie()
     failures = 0
 
     try:
@@ -487,7 +270,7 @@ async def _run() -> int:  # noqa: PLR0911, PLR0915 - a linear end-to-end script
             control_sid = await live.session_on("Control")
             control_text, reason = await _speak(live, control_sid)
             if reason:
-                if _provider_unavailable(reason):
+                if harness.provider_unavailable(reason):
                     print(f"SKIP — the provider is unavailable: {reason}")
                     return 0
                 _fail("control turn", reason)
@@ -553,7 +336,7 @@ async def _run() -> int:  # noqa: PLR0911, PLR0915 - a linear end-to-end script
 
             scoped_text, reason = await _speak(live, scoped_sid)
             if reason:
-                if _provider_unavailable(reason):
+                if harness.provider_unavailable(reason):
                     print(f"SKIP — the provider is unavailable: {reason}")
                     return 0
                 _fail("scoped turn", reason)

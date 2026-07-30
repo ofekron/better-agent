@@ -56,11 +56,9 @@ SKIP = "\033[93mSKIP\033[0m"
 EXTENSION_ID = "ofek-dev.coordination"
 SERVER_ID = "better-agent-coordination"
 
-CHEAP_MODELS = {
-    "claude": os.environ.get("BA_AMBIENT_E2E_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
-    "codex": os.environ.get("BA_AMBIENT_E2E_CODEX_MODEL", "gpt-5.4-mini"),
-    "agy": os.environ.get("BA_AMBIENT_E2E_AGY_MODEL", "Gemini 3.5 Flash (Low)"),
-}
+import _live_turn_harness  # noqa: E402
+
+CHEAP_MODELS = _live_turn_harness.cheap_models("BA_AMBIENT_E2E")
 
 def _agent_prompt(lock_key: str) -> str:
     return (
