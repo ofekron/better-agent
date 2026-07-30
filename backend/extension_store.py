@@ -184,10 +184,11 @@ _BROKERED_MCP_EXTENSION_IDS = frozenset({
 })
 REQUIRED_EXTENSION_IDS = {MARKETPLACE_EXTENSION_ID}
 PUBLIC_EXTENSION_LIST_HIDDEN_IDS = frozenset()
-_OBSOLETE_EXTENSION_IDS = {
-    "better-agent.marketplace": MARKETPLACE_EXTENSION_ID,
-    "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
-}
+_OBSOLETE_EXTENSION_IDS = frozenset({
+    "better-agent.marketplace",
+    "ofek-dev.needs-user-decision",
+    "ofek-dev.provider-config-sync",
+})
 _PUBLIC_EXTENSION_PATHS = PUBLIC_EXTENSION_PATHS
 _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
@@ -970,7 +971,7 @@ def export_extension_sync_state() -> dict[str, Any]:
     extensions = {
         extension_id: _extension_record_sync_copy(record)
         for extension_id, record in (data.get("extensions") or {}).items()
-        if isinstance(record, dict)
+        if extension_id not in _OBSOLETE_EXTENSION_IDS and isinstance(record, dict)
     }
     artifacts: list[dict[str, Any]] = []
     # Packages that could not be shipped. Reported in the payload so the node
@@ -978,7 +979,7 @@ def export_extension_sync_state() -> dict[str, Any]:
     # believing it received every extension.
     artifact_failures: list[dict[str, str]] = []
     for extension_id, record in (data.get("extensions") or {}).items():
-        if not isinstance(record, dict):
+        if extension_id in _OBSOLETE_EXTENSION_IDS or not isinstance(record, dict):
             continue
         source = record.get("source") or {}
         raw_install_path = str(source.get("install_path") or "")
@@ -1118,7 +1119,7 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
     records = {
         _safe_sync_artifact_name(str(extension_id)): copy.deepcopy(record)
         for extension_id, record in raw_extensions.items()
-        if isinstance(record, dict)
+        if extension_id not in _OBSOLETE_EXTENSION_IDS and isinstance(record, dict)
     }
     current_records = copy.deepcopy(_load().get("extensions") or {})
     for record in records.values():
@@ -1136,6 +1137,8 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
                 "extension_id": f"artifact[{index}]",
                 "error": "extension sync artifacts must be objects",
             })
+            continue
+        if str(artifact.get("extension_id") or "") in _OBSOLETE_EXTENSION_IDS:
             continue
         try:
             extension_id = _safe_sync_artifact_name(str(artifact.get("extension_id") or ""))
@@ -3776,13 +3779,17 @@ def _purge_obsolete_extension_records(data: dict[str, Any]) -> bool:
         if obsolete_id in extensions:
             extensions.pop(obsolete_id, None)
             changed = True
-        # Also remove the on-disk installed package so
-        # `_rehydrate_installed_extension_records` cannot resurrect the
-        # retired id on the next load (it is no longer in managed paths).
         pkg_dir = _install_root() / obsolete_id
-        if pkg_dir.exists():
-            shutil.rmtree(pkg_dir, ignore_errors=True)
+        for _attempt in range(2):
+            if not pkg_dir.exists():
+                break
             changed = True
+            try:
+                shutil.rmtree(pkg_dir)
+            except OSError:
+                continue
+        if pkg_dir.exists():
+            logger.error("obsolete extension package cleanup failed for %s", obsolete_id)
     return changed
 
 
@@ -3795,7 +3802,11 @@ def _rehydrate_installed_extension_records(data: dict[str, Any]) -> bool:
     changed = False
     for extension_dir in sorted(root.iterdir()):
         extension_id = extension_dir.name
-        if extension_id in data["extensions"] or extension_id in deleted:
+        if (
+            extension_id in _OBSOLETE_EXTENSION_IDS
+            or extension_id in data["extensions"]
+            or extension_id in deleted
+        ):
             continue
         if extension_id in managed_ids and _managed_extension_package_exists(extension_id):
             continue
@@ -4005,6 +4016,10 @@ def _ensure_local_extensions(data: dict[str, Any]) -> tuple[bool, list[str]]:
     changed = False
     recovered: list[str] = []
     for extension_id, record in list((data.get("extensions") or {}).items()):
+        if extension_id in _OBSOLETE_EXTENSION_IDS:
+            data["extensions"].pop(extension_id, None)
+            changed = True
+            continue
         if not isinstance(record, dict):
             continue
         package_dir = _local_package_from_record(record)
@@ -4092,7 +4107,7 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
     configured_repo_root = _required_marketplace_repo_root()
     deleted = set((data.get("deleted_extensions") or {}).keys())
     for extension_id, extension_path in _PUBLIC_EXTENSION_PATHS.items():
-        if extension_id in deleted:
+        if extension_id in _OBSOLETE_EXTENSION_IDS or extension_id in deleted:
             continue
         repo_root = configured_repo_root
         if repo_root is None or not (repo_root / extension_path).exists():
