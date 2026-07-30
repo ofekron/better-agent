@@ -401,6 +401,7 @@ class BackendSupervisor:
         self._generation_healthy_at: float | None = None
         self._generation_id = ""
         self._generation_pid: int | None = None
+        self._pending_launch_generation = ""
         self._last_restart_request_id = ""
         self._consecutive_crashes = 0
         self._monotonic = time.monotonic
@@ -562,7 +563,8 @@ class BackendSupervisor:
         self._generation_started_at = self._monotonic()
         self._generation_started_wall_time = time.time()
         self._generation_healthy_at = None
-        self._generation_id = uuid.uuid4().hex
+        self._generation_id = self._pending_launch_generation or uuid.uuid4().hex
+        self._pending_launch_generation = ""
         self._generation_pid = int(proc.pid)
 
     def _record_exit(
@@ -721,7 +723,22 @@ class BackendSupervisor:
         self._close_credential_session()
         session = self._credential_broker.open_session()
         session.start()
-        child_env = {**backend_child_env(self._env, checkout), **session.backend_env()}
+        from backend_launch_authority import issue_primary_backend_launch
+
+        launch_generation = uuid.uuid4().hex if self.role == "primary" else ""
+        launch_env = (
+            issue_primary_backend_launch(
+                checkout=checkout,
+                generation=launch_generation,
+            )
+            if launch_generation
+            else {}
+        )
+        child_env = {
+            **backend_child_env(self._env, checkout),
+            **launch_env,
+            **session.backend_env(),
+        }
         try:
             proc = subprocess.Popen(
                 command, env=child_env, cwd=checkout / "backend",
@@ -732,6 +749,7 @@ class BackendSupervisor:
         except Exception:
             session.stop()
             raise
+        self._pending_launch_generation = launch_generation
         session.revoke_backend_inheritance()
         self._credential_session = session
         threading.Thread(

@@ -50,6 +50,26 @@ export BETTER_AGENT_BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-18765}"
 # app packaging, not server runtime.
 export PYTHONPATH="/repo:/repo/backend:/repo/sdk"
 
+IFS='|' read -r BACKEND_LAUNCH_TOKEN BACKEND_LAUNCH_GENERATION \
+  BACKEND_ACTIVE_CHECKOUT BACKEND_LEGACY_ACTIVE_CHECKOUT <<EOF
+$("$PY" - <<'PY'
+from backend_launch_authority import issue_primary_backend_launch
+
+env = issue_primary_backend_launch(checkout="/repo")
+print("|".join((
+    env["BETTER_AGENT_BACKEND_LAUNCH_TOKEN"],
+    env["BETTER_AGENT_BACKEND_LAUNCH_GENERATION"],
+    env["BETTER_AGENT_ACTIVE_CHECKOUT"],
+    env["BETTER_CLAUDE_ACTIVE_CHECKOUT"],
+)))
+PY
+)
+EOF
+export BETTER_AGENT_BACKEND_LAUNCH_TOKEN="$BACKEND_LAUNCH_TOKEN"
+export BETTER_AGENT_BACKEND_LAUNCH_GENERATION="$BACKEND_LAUNCH_GENERATION"
+export BETTER_AGENT_ACTIVE_CHECKOUT="$BACKEND_ACTIVE_CHECKOUT"
+export BETTER_CLAUDE_ACTIVE_CHECKOUT="$BACKEND_LEGACY_ACTIVE_CHECKOUT"
+
 echo "entrypoint: starting uvicorn on 0.0.0.0:${BETTER_AGENT_BACKEND_PORT}"
 # proxy_headers left at uvicorn's default-off (matches backend/app_entry.py's
 # production invocation): auth.py's per-IP rate limiting keys off the real
