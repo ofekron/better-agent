@@ -125,6 +125,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
         module = runner_module or provider_manifest.runner_module_for(kind)
         runner_main = importlib.import_module(module).main
         return runner_main(run_dir)
+    if mode == "server":
+        from backend_launch_authority import assert_primary_backend_launch_authorized
+        assert_primary_backend_launch_authorized()
     import uvicorn
     from server_config import graceful_shutdown_timeout_seconds
 

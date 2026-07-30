@@ -184,10 +184,19 @@ class BrowserBackendSupervisor:
             self._retire_generation_locked()
             session = self._broker.open_session()
             session.start()
+            generation_id = uuid.uuid4().hex
             env = {
                 **backend_launch_env(self._base_env, checkout, port),
                 **session.backend_env(),
             }
+            from backend_launch_authority import issue_primary_backend_launch
+
+            env.update(
+                issue_primary_backend_launch(
+                    checkout=checkout,
+                    generation=generation_id,
+                )
+            )
             command = [
                 str(python),
                 "-m",
@@ -240,9 +249,8 @@ class BrowserBackendSupervisor:
             self._proc = proc
             self._owner = owner
             self._last_exit_code = None
-            self._generation_id = uuid.uuid4().hex
+            self._generation_id = generation_id
             self._generation_started_at = time.time()
-            generation_id = self._generation_id
             threading.Thread(
                 target=self._forward_output,
                 args=(proc,),

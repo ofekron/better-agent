@@ -7,6 +7,10 @@ import socket
 import time
 from pathlib import Path
 
+from backend_launch_authority import (
+    assert_primary_backend_launch_authorized,
+    clear_primary_backend_launch_token,
+)
 from paths import ba_home
 from portable_lock import try_lock_ex, unlock
 
@@ -40,6 +44,7 @@ def acquire_backend_instance_lock() -> None:
             f"cannot also use {path}"
         )
 
+    authority = assert_primary_backend_launch_authorized()
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + _LOCK_ACQUIRE_RETRY_SECONDS
     warned = False
@@ -70,18 +75,26 @@ def acquire_backend_instance_lock() -> None:
         os.close(fd)
         raise
 
-    os.ftruncate(fd, 0)
-    os.write(
-        fd,
-        (
-            f"pid={os.getpid()}\n"
-            f"host={socket.gethostname()}\n"
-            f"ba_home={ba_home()}\n"
-        ).encode("utf-8"),
-    )
-    os.fsync(fd)
-    _LOCK_FD = fd
-    _LOCK_PATH = path
+    try:
+        authority = assert_primary_backend_launch_authorized()
+        os.ftruncate(fd, 0)
+        os.write(
+            fd,
+            (
+                f"pid={os.getpid()}\n"
+                f"host={socket.gethostname()}\n"
+                f"ba_home={ba_home()}\n"
+                f"generation={authority.generation}\n"
+            ).encode("utf-8"),
+        )
+        os.fsync(fd)
+        clear_primary_backend_launch_token(authority)
+        _LOCK_FD = fd
+        _LOCK_PATH = path
+    except Exception:
+        unlock(fd)
+        os.close(fd)
+        raise
 
 
 def release_backend_instance_lock() -> None:

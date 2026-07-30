@@ -28,6 +28,7 @@ for _p in (_HERE, _BACKEND):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import supervisor as supervisor_module
 from supervisor import (
     BackendSupervisor,
     backend_argv,

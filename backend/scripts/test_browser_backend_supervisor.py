@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import socket
@@ -92,7 +93,10 @@ def _fake_checkout(
         f"with open({str(probe_path)!r}, 'a', encoding='utf-8') as probe:\n"
         " probe.write(json.dumps({'fd_before': bool(fd_before), "
         "'fd_after': 'BETTER_AGENT_CREDENTIAL_SESSION_FD' in os.environ, "
-        "'child_available': child.stdout.strip(), 'response': response}) + '\\n')\n"
+        "'child_available': child.stdout.strip(), 'response': response, "
+        "'launch_token': os.environ.get('BETTER_AGENT_BACKEND_LAUNCH_TOKEN'), "
+        "'launch_generation': os.environ.get('BETTER_AGENT_BACKEND_LAUNCH_GENERATION'), "
+        "'active_checkout': os.environ.get('BETTER_AGENT_ACTIVE_CHECKOUT')}) + '\\n')\n"
         "import asyncio\n"
         "async def app(scope, receive, send):\n"
         " if scope['type'] == 'lifespan':\n"
@@ -185,6 +189,23 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
         assert all(row["fd_before"] is True for row in rows)
         assert all(row["fd_after"] is False for row in rows)
         assert all(row["child_available"] == "False" for row in rows)
+        assert all(isinstance(row["launch_token"], str) and row["launch_token"] for row in rows)
+        assert [row["launch_generation"] for row in rows] == generation_ids
+        assert all(
+            Path(row["active_checkout"]).resolve() == checkout.resolve()
+            for row in rows
+        )
+        authority = json.loads(
+            (temp_root / "state" / "backend_launch_authority.json").read_text(
+                encoding="utf-8",
+            )
+        )
+        assert authority["generation"] == generation_ids[-1]
+        assert Path(authority["checkout"]).resolve() == checkout.resolve()
+        assert Path(authority["state_root"]).resolve() == (temp_root / "state").resolve()
+        assert authority["token_sha256"] == hashlib.sha256(
+            rows[-1]["launch_token"].encode("utf-8")
+        ).hexdigest()
     finally:
         supervisor.shutdown()
         provider_credentials.oskeychain.native_get = real_get
@@ -248,7 +269,10 @@ def test_control_server_keeps_handle_out_of_launcher(temp_root: Path) -> None:
             and bool(probe_path.read_text(encoding="utf-8").splitlines())
         )
         row = json.loads(probe_path.read_text(encoding="utf-8").splitlines()[0])
-        assert row == {
+        assert {
+            key: row[key]
+            for key in ("fd_before", "fd_after", "child_available", "response")
+        } == {
             "fd_before": True,
             "fd_after": False,
             "child_available": "False",
