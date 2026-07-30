@@ -126,9 +126,9 @@ def prepare_codex_headless(
         or _authority_tuple(record) != _authority_tuple(authority)
     ):
         raise ValueError("headless provider authority conflicts")
-    runtime_profile = str(record.get("runner") or "native")
-    if payload["runtime_profile"] != runtime_profile:
-        raise ValueError("headless runtime profile conflicts")
+    expected_runner = str(record.get("runner") or "native")
+    if payload["runner"] != expected_runner:
+        raise ValueError("headless runner conflicts")
     if payload["no_tools"] and not provider.supports_headless_no_tools:
         raise ValueError("headless provider cannot guarantee no-tools")
     if payload["fork"] and not provider.supports_fork:

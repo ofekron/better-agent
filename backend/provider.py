@@ -1753,11 +1753,11 @@ class Provider(ABC):
         )
         if actual != expected:
             raise ValueError("headless provider authority changed")
-        if payload["runtime_profile"] != runtime_profile.resolve_runner(
+        if payload["runner"] != runtime_profile.resolve_runner(
             record,
             record.get("runner"),
         ):
-            raise ValueError("headless runtime profile changed")
+            raise ValueError("headless runner changed")
         if payload["fork"] and not self.supports_fork:
             raise ValueError("headless provider does not support fork")
         if payload["no_tools"] and not self.supports_headless_no_tools:

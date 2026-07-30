@@ -98,7 +98,7 @@ async def test_session_owner_is_frozen_for_every_caller_class() -> None:
         assert call["owner"] == {"kind": "session", "id": "session-1"}
         assert call["provider"]["id"] == "provider-1"
         assert call["model"] == "claude-model"
-        assert call["runtime_profile"] == "native"
+        assert call["runner"] == "native"
         assert call["routing"] == {"node_id": "primary"}
     assert executor.calls[0]["resume_sid"] == "agent-parent"
     assert executor.calls[1]["resume_sid"] == "agent-parent"
@@ -209,7 +209,7 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
                 },
                 model=model,
                 reasoning_effort="high",
-                runtime_profile="native",
+                runner="native",
                 permission_scope="internal_generation",
                 routing={"node_id": "primary"},
                 cwd="/tmp/project",
@@ -271,11 +271,45 @@ def test_legacy_caller_bypasses_are_removed() -> None:
     assert "session_id:" not in run_headless
 
 
+async def test_tombstoned_profile_never_blocks_turns() -> None:
+    """R1.3(c): turns run off stamped session fields — a session whose
+    runtime profile was deleted keeps admitting headless runs."""
+    session = {**_session(), "runtime_profile_id": "deleted-profile-id"}
+    provider = _provider()
+    executor = FakeExecutor()
+    original_snapshot = headless_admission._session_snapshot
+    original_provider = headless_admission._provider_record
+    original_executor = headless_admission._session_executor
+    original_capabilities = headless_admission._provider_capabilities
+    headless_admission._session_snapshot = lambda _sid: dict(session)
+    headless_admission._provider_record = lambda _pid: dict(provider)
+    headless_admission._session_executor = lambda *_args: executor
+    headless_admission._provider_capabilities = lambda *_args: executor
+    try:
+        result = await headless_admission.run_session_headless(
+            "session-1",
+            prompt="prompt",
+            fork=False,
+            resume=True,
+            no_tools=True,
+            timeout=30,
+            permission_scope="internal_generation",
+        )
+        assert result["result"] == "ok"
+    finally:
+        headless_admission._session_snapshot = original_snapshot
+        headless_admission._provider_record = original_provider
+        headless_admission._session_executor = original_executor
+        headless_admission._provider_capabilities = original_capabilities
+    assert executor.calls[-1]["runner"] == "native"
+
+
 async def main_async() -> None:
     await test_session_owner_is_frozen_for_every_caller_class()
     await test_stale_selectors_and_missing_authority_fail_closed()
     await test_generic_provider_consumes_admitted_authority()
     test_legacy_caller_bypasses_are_removed()
+    await test_tombstoned_profile_never_blocks_turns()
 
 
 def main() -> None:

@@ -102,7 +102,7 @@ def _admitted(
         provider={key: record[key] for key in ("id", "kind", "generation", "revision")},
         model=selected_model,
         reasoning_effort="high",
-        runtime_profile="native",
+        runner="native",
         permission_scope="spawn_runs",
         routing={"node_id": "primary"},
         cwd=str(Path(TEST_HOME)),

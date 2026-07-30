@@ -1281,7 +1281,7 @@ async def _rpc_run_admitted_headless(params: dict) -> dict:
     payload = admitted.to_dict()
     provider = get_provider(
         payload["provider"]["id"],
-        payload["runtime_profile"],
+        payload["runner"],
     )
     result = await provider.run_admitted_headless(admitted)
     return {"result": result}

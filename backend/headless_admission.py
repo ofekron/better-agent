@@ -140,7 +140,7 @@ async def run_session_headless(
                 },
                 model=model,
                 reasoning_effort=str(session.get("reasoning_effort") or ""),
-                runtime_profile=runner,
+                runner=runner,
                 permission_scope=permission_scope,
                 routing={"node_id": str(session.get("node_id") or "primary")},
                 cwd=_required_string(session.get("cwd"), "cwd"),

@@ -144,7 +144,7 @@ class HeadlessAuthority:
     _provider_json: str = field(repr=False)
     model: str
     reasoning_effort: str
-    runtime_profile: str
+    runner: str
     permission_scope: str
     _routing_json: str = field(repr=False)
     cwd: str
@@ -161,7 +161,7 @@ class HeadlessAuthority:
         provider: Mapping[str, Any],
         model: str,
         reasoning_effort: str,
-        runtime_profile: str,
+        runner: str,
         permission_scope: str,
         routing: Mapping[str, Any],
         cwd: str,
@@ -199,7 +199,7 @@ class HeadlessAuthority:
         for value, label, allow_empty in (
             (model, "model", False),
             (reasoning_effort, "reasoning effort", True),
-            (runtime_profile, "runtime profile", False),
+            (runner, "runner", False),
             (permission_scope, "permission scope", False),
             (cwd, "cwd", False),
         ):
@@ -231,7 +231,7 @@ class HeadlessAuthority:
             ),
             model=model,
             reasoning_effort=reasoning_effort,
-            runtime_profile=runtime_profile,
+            runner=runner,
             permission_scope=permission_scope,
             _routing_json=_canonical_json(
                 routing,
@@ -282,7 +282,7 @@ class AdmittedHeadlessRequest:
             "provider": authority.provider,
             "model": authority.model,
             "reasoning_effort": authority.reasoning_effort,
-            "runtime_profile": authority.runtime_profile,
+            "runner": authority.runner,
             "permission_scope": authority.permission_scope,
             "routing": authority.routing,
             "cwd": authority.cwd,
@@ -300,7 +300,7 @@ class AdmittedHeadlessRequest:
     ) -> AdmittedHeadlessRequest:
         expected = {
             "schema", "prompt", "owner", "provider", "model",
-            "reasoning_effort", "runtime_profile", "routing", "cwd",
+            "reasoning_effort", "runner", "routing", "cwd",
             "permission_scope", "resume_sid", "fork", "no_tools", "timeout",
             "fingerprint",
         }
@@ -320,7 +320,7 @@ class AdmittedHeadlessRequest:
             provider=raw["provider"],
             model=raw["model"],
             reasoning_effort=raw["reasoning_effort"],
-            runtime_profile=raw["runtime_profile"],
+            runner=raw["runner"],
             permission_scope=raw["permission_scope"],
             routing=raw["routing"],
             cwd=raw["cwd"],
@@ -375,7 +375,7 @@ def admit_headless_request(
         provider=authority.provider,
         model=authority.model,
         reasoning_effort=authority.reasoning_effort,
-        runtime_profile=authority.runtime_profile,
+        runner=authority.runner,
         permission_scope=authority.permission_scope,
         routing=authority.routing,
         cwd=authority.cwd,

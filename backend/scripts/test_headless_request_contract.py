@@ -37,7 +37,7 @@ def _authority(kind: str = "claude", **overrides) -> HeadlessAuthority:
         "provider": _provider(kind),
         "model": "model-1",
         "reasoning_effort": "high",
-        "runtime_profile": "subscription",
+        "runner": "subscription",
         "permission_scope": "spawn_runs",
         "routing": {"node_id": "primary"},
         "cwd": "/tmp/project",
@@ -204,7 +204,7 @@ def test_provider_parity_contract() -> None:
         assert payload["provider"]["kind"] == kind
         assert payload["model"] == "model-1"
         assert payload["reasoning_effort"] == "high"
-        assert payload["runtime_profile"] == "subscription"
+        assert payload["runner"] == "subscription"
         assert payload["permission_scope"] == "spawn_runs"
         assert payload["routing"]["node_id"] == "primary"
         assert payload["fork"] is True
