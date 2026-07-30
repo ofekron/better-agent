@@ -8,6 +8,7 @@ interface GitTreeResponse {
   is_git: boolean;
   branch?: string;
   dirty_count?: number;
+  conflicted_count?: number;
   commits?: GitCommit[];
 }
 
@@ -162,6 +163,11 @@ export function GitTreeView({ cwd, nodeId, onClose }: Props) {
               {(data.dirty_count ?? 0) > 0 && (
                 <span className="git-tree-dirty">
                   {t("gitTree.changed", { count: data.dirty_count })}
+                </span>
+              )}
+              {(data.conflicted_count ?? 0) > 0 && (
+                <span className="git-tree-conflict">
+                  {t("gitTree.conflicts", { count: data.conflicted_count })}
                 </span>
               )}
             </div>

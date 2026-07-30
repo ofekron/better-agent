@@ -551,6 +551,15 @@ def reconstruct_before_edit(file_path: str, old_string: str, new_string: str) ->
     }
 
 
+# Porcelain v1 XY codes for an unmerged/conflicted path (git status --porcelain
+# docs: "Unmerged"). These share letters with the plain M/A/D buckets below
+# (e.g. "AA", "DD" contain "A"/"D"), so they MUST be checked before the
+# substring checks or a conflicted path silently lands in the wrong bucket
+# (or, for "UU"/"AU"/"UA"/"DU"/"UD" which contain none of M/A/D/?, in no
+# bucket at all).
+_UNMERGED_STATUS_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+
+
 def get_git_status(cwd: str) -> dict:
     """Return parsed git status."""
     try:
@@ -563,7 +572,7 @@ def get_git_status(cwd: str) -> dict:
 
         lines = result.stdout.strip().splitlines()
         branch = ""
-        modified, added, deleted, untracked = [], [], [], []
+        modified, added, deleted, untracked, conflicted = [], [], [], [], []
 
         for line in lines:
             if line.startswith("##"):
@@ -571,7 +580,9 @@ def get_git_status(cwd: str) -> dict:
                 continue
             status = line[:2]
             filepath = line[3:]
-            if "M" in status:
+            if status in _UNMERGED_STATUS_CODES:
+                conflicted.append(filepath)
+            elif "M" in status:
                 modified.append(filepath)
             elif "A" in status:
                 added.append(filepath)
@@ -587,6 +598,7 @@ def get_git_status(cwd: str) -> dict:
             "added": added,
             "deleted": deleted,
             "untracked": untracked,
+            "conflicted": conflicted,
         }
     except Exception:
         return {"is_git": False}
@@ -608,11 +620,14 @@ def get_git_tree(cwd: str, limit: int = 200) -> dict:
         ],
         cwd=cwd, capture_output=True, text=True, timeout=15,
     )
+    dirty_keys = ("modified", "added", "deleted", "untracked", "conflicted")
+
     if result.returncode != 0:
         return {
             "is_git": True,
             "branch": status.get("branch", ""),
-            "dirty_count": sum(len(status.get(key, [])) for key in ("modified", "added", "deleted", "untracked")),
+            "dirty_count": sum(len(status.get(key, [])) for key in dirty_keys),
+            "conflicted_count": len(status.get("conflicted", [])),
             "commits": [],
         }
 
@@ -634,7 +649,8 @@ def get_git_tree(cwd: str, limit: int = 200) -> dict:
     return {
         "is_git": True,
         "branch": status.get("branch", ""),
-        "dirty_count": sum(len(status.get(key, [])) for key in ("modified", "added", "deleted", "untracked")),
+        "dirty_count": sum(len(status.get(key, [])) for key in dirty_keys),
+        "conflicted_count": len(status.get("conflicted", [])),
         "commits": commits,
     }
 

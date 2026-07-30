@@ -559,6 +559,17 @@ select:focus-visible,
   color: var(--green, #4caf50);
 }
 
+.project-git-conflict {
+  flex-shrink: 0;
+  font-size: calc(10px * var(--app-font-scale));
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border: 1px solid var(--error);
+  color: var(--error);
+  font-weight: 600;
+}
+
 .project-git-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1951,6 +1962,11 @@ select:focus-visible,
 
 .git-tree-dirty {
   color: #e7a84b;
+}
+
+.git-tree-conflict {
+  color: var(--error);
+  font-weight: 600;
 }
 
 .git-tree-header-actions {

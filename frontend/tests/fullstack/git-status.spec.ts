@@ -309,8 +309,9 @@ test.describe("git status and history", () => {
   // real file, `git merge` is run and exits non-zero (real, expected
   // outcome), leaving real "<<<<<<<" conflict markers on disk and a real
   // "UU README.md" line in `git status --porcelain`. Registering this as a
-  // project must not crash the real backend's git RPCs.
-  test("a real git merge conflict does not crash git-status and reports a sensible real state", async ({
+  // project must not crash the real backend's git RPCs, and the conflicted
+  // file must be surfaced distinctly -- not silently dropped as "clean".
+  test("a real git merge conflict is surfaced as a distinct conflict, not dropped or marked clean", async ({
     authedPage: page,
     backend,
   }) => {
@@ -354,21 +355,15 @@ test.describe("git status and history", () => {
     const body = await res.json();
     expect(body.is_git).toBe(true);
 
-    // backend/file_browser.py's get_git_status buckets each 2-char XY
-    // porcelain status by substring match against a fixed priority order:
-    // "M" in status -> modified, elif "A" -> added, elif "D" -> deleted,
-    // elif "?" -> untracked. A real both-modified conflict reports XY
-    // status "UU", which contains NONE of "M"/"A"/"D"/"?" -- unlike other
-    // conflict codes (e.g. "AA", "DD", "AU", "UA", "DU", "UD") that happen
-    // to contain one of those letters and fall into a bucket by accident.
-    // So README.md here matches no bucket at all and is silently dropped:
-    // it appears in none of modified/added/deleted/untracked, and
-    // dirty_count (which just sums those four buckets, both here and in
-    // ProjectGitStatus.tsx's `dirty` array) is 0 for this repo, even though
-    // `git status --porcelain` itself reports a real, unresolved "UU
-    // README.md" line above. This asserts that real, verified (if
-    // surprising) backend behavior precisely, rather than assuming the
-    // conflicted file lands in "modified".
+    // backend/file_browser.py's get_git_status classifies unmerged/conflict
+    // porcelain XY codes (DD, AU, UD, UA, DU, AA, UU) into a distinct
+    // "conflicted" bucket, checked BEFORE the M/A/D/? substring checks. A
+    // real both-modified conflict reports XY status "UU" here, which must
+    // land in "conflicted" and nowhere else -- previously (bug) "UU"
+    // contained none of "M"/"A"/"D"/"?" and was silently dropped from every
+    // bucket, so dirty_count read 0 and the UI showed "clean" during an
+    // active, unresolved merge conflict.
+    expect(body.conflicted).toContain("README.md");
     expect(body.modified).not.toContain("README.md");
     expect(body.added).not.toContain("README.md");
     expect(body.deleted).not.toContain("README.md");
@@ -377,9 +372,16 @@ test.describe("git status and history", () => {
       (body.modified?.length || 0) +
       (body.added?.length || 0) +
       (body.deleted?.length || 0) +
-      (body.untracked?.length || 0);
-    expect(dirtyCount).toBe(0);
-    await expect(page.locator(".project-git-dirty")).toContainText("clean");
+      (body.untracked?.length || 0) +
+      (body.conflicted?.length || 0);
+    expect(dirtyCount).toBe(1);
+
+    // The UI must not read "clean" while a conflict is unresolved, and must
+    // surface the conflict as its own distinct indicator (ProjectGitStatus.tsx),
+    // separate from the plain "changed" dirty count.
+    await expect(page.locator(".project-git-dirty")).not.toContainText("clean");
+    await expect(page.locator(".project-git-dirty")).toContainText("1 changed");
+    await expect(page.locator(".project-git-conflict")).toContainText("1 conflict");
   });
 
   // Registers a project through a REAL symlink (`fs.symlinkSync`, not a

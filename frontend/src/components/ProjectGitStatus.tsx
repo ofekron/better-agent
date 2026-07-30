@@ -9,6 +9,7 @@ interface GitStatus {
   added?: string[];
   deleted?: string[];
   untracked?: string[];
+  conflicted?: string[];
 }
 
 interface Props {
@@ -76,8 +77,10 @@ export function ProjectGitStatus({ cwd, nodeId, onOpenTree }: Props) {
     ...(status.added || []),
     ...(status.deleted || []),
     ...(status.untracked || []),
+    ...(status.conflicted || []),
   ];
   const dirtyCount = dirty.length;
+  const conflictedCount = (status.conflicted || []).length;
   const isClean = dirtyCount === 0;
 
   async function doCommit(andPush: boolean) {
@@ -134,6 +137,14 @@ export function ProjectGitStatus({ cwd, nodeId, onOpenTree }: Props) {
         <span className={`project-git-dirty${isClean ? " clean" : ""}`}>
           {isClean ? "clean" : `${dirtyCount} changed`}
         </span>
+        {conflictedCount > 0 && (
+          <span
+            className="project-git-conflict"
+            title={t("projectGitStatus.conflictedTitle", { count: conflictedCount })}
+          >
+            {t("projectGitStatus.conflicted", { count: conflictedCount })}
+          </span>
+        )}
       </button>
       {lastResult && (
         <button
