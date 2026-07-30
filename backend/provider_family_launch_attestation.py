@@ -34,6 +34,7 @@ from provider_pinned_launch import (
     MaterializedSdkLaunch,
     PinnedLaunch,
     materialize_sdk_launch,
+    materialize_sdk_launch_cached,
     open_pinned_launch,
     open_pinned_runner_launch,
 )
@@ -326,12 +327,9 @@ class FamilyLaunchAttestation:
         with open_pinned_launch(self.downstream) as pinned:
             yield pinned
 
-    def materialize_sdk(
-        self,
-        destination: str | Path,
-    ) -> MaterializedSdkLaunch:
+    def materialize_sdk(self) -> MaterializedSdkLaunch:
         self._assert_attested()
-        return materialize_sdk_launch(self.downstream, destination)
+        return materialize_sdk_launch_cached(self.downstream)
 
     def _unsigned_dict(self) -> dict[str, Any]:
         return {

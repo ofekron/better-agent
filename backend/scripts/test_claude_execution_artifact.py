@@ -350,10 +350,7 @@ def test_run_local_payload_rejects_tamper_and_materializes_sdk_cli() -> None:
             provider._install_execution_payloads(prepared, run_dir)
 
             runtime = restore_family_runner_runtime(run_dir)
-            (run_dir / "claude-cli").mkdir(mode=0o700)
-            materialized_cli = runtime.launch.materialize_sdk(
-                run_dir / "claude-cli",
-            )
+            materialized_cli = runtime.launch.materialize_sdk()
             package_root = materialize_claude_sdk_package(
                 next(
                     package
@@ -690,10 +687,7 @@ def test_frozen_runner_is_the_explicit_sdk_authority() -> None:
             )
             provider._install_execution_payloads(prepared, run_dir)
             runtime = restore_family_runner_runtime(run_dir)
-            (run_dir / "claude-cli").mkdir(mode=0o700)
-            materialized_cli = runtime.launch.materialize_sdk(
-                run_dir / "claude-cli",
-            )
+            materialized_cli = runtime.launch.materialize_sdk()
             hydration = {
                 "agent_files": {
                     name: str(path)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,12 +15,15 @@ from pathlib import Path
 from typing import Iterator
 
 from codex_execution_common import (
+    SHA256_RE,
     ExecutionContractError,
     binary_open_flags,
+    canonical_json,
     record_step_since,
 )
 from codex_execution_identity import FileIdentity
-from paths import make_private_directory, make_private_file
+from paths import ba_home, make_private_directory, make_private_file
+from portable_lock import lock_ex, unlock
 from provider_binary_relocatability import assert_relocatable_executable
 from provider_frozen_bundle import (
     frozen_bundle_destination,
@@ -557,3 +561,218 @@ def materialize_sdk_launch(
         raise
     payload_files = files if not interpreter_is_trusted else (files[-1],)
     return MaterializedSdkLaunch(str(script), files, payload_files)
+
+
+_SDK_LAUNCH_CACHE_SEGMENTS = ("cache", "sdk-launches")
+
+
+def _sdk_launch_fingerprint(launch: AttestedLaunch) -> str:
+    payload = {
+        "mode": launch.mode,
+        "logical_command": launch.logical_command,
+        "argv_tail": list(launch.argv[1:-1]) if launch.mode != "native" else [],
+        "components": [
+            {"sha256": component.sha256, "size": component.size}
+            for component in launch.components
+        ],
+    }
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def sdk_launch_cache_root() -> Path:
+    """The shared, private state-home directory every SDK launch cache
+    entry lives under — the additional trusted prefix a hydrated
+    `MaterializedSdkLaunch` may resolve into, alongside `run_dir` and
+    `trusted_system_interpreter_path`.
+    """
+    try:
+        ancestor = ba_home()
+        for name in _SDK_LAUNCH_CACHE_SEGMENTS:
+            ancestor = ancestor / name
+            ancestor.mkdir(mode=0o700, exist_ok=True)
+            make_private_directory(ancestor)
+    except (OSError, PermissionError) as exc:
+        raise ExecutionContractError(
+            "SDK launch cache is unavailable",
+        ) from exc
+    return ancestor
+
+
+def sdk_launch_cache_destination(launch: AttestedLaunch) -> Path:
+    """Stable, fingerprint-keyed materialization target under the state
+    home, mirroring `frozen_bundle_destination`: the same attested SDK
+    launch always maps to the same destination, so one attested copy is
+    materialized once and reused by every subsequent turn instead of a
+    fresh copy per run.
+    """
+    _validate_launch(launch)
+    fingerprint = _sdk_launch_fingerprint(launch)
+    if not SHA256_RE.fullmatch(fingerprint):
+        raise ExecutionContractError("invalid SDK launch cache fingerprint")
+    root = sdk_launch_cache_root()
+    fingerprint_dir = root / fingerprint
+    try:
+        fingerprint_dir.mkdir(mode=0o700, exist_ok=True)
+        make_private_directory(fingerprint_dir)
+    except (OSError, PermissionError) as exc:
+        raise ExecutionContractError(
+            "SDK launch cache is unavailable",
+        ) from exc
+    return fingerprint_dir / "root"
+
+
+def _expected_sdk_component_paths(
+    launch: AttestedLaunch,
+    destination: Path,
+) -> tuple[Path, ...]:
+    if launch.mode == "native":
+        suffix = Path(launch.argv[0]).suffix
+        return (destination / f"provider-cli{suffix}",)
+    interpreter_source = Path(launch.components[0].resolved_path)
+    interpreter_path = (
+        interpreter_source
+        if trusted_system_interpreter_path(interpreter_source)
+        else destination / f"provider-runtime{Path(launch.argv[0]).suffix}"
+    )
+    return (
+        interpreter_path,
+        destination / f"provider-cli{Path(launch.argv[-1]).suffix}",
+    )
+
+
+def _expected_shebang_script_sha256(
+    launch: AttestedLaunch,
+    interpreter: Path,
+) -> str:
+    # The materialized script is not a byte-identical copy of its source:
+    # `materialize_sdk_launch` rewrites the shebang line to point at the
+    # (destination-relative) interpreter path. A cached copy's identity is
+    # therefore checked against this same deterministic rewrite rather than
+    # against the source component's own sha256.
+    with _open_file_identities((launch.components[-1],)) as handles:
+        descriptor = handles[0]
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        source = b"".join(chunks)
+        _verify_file_handle(descriptor, launch.components[-1])
+    if hashlib.sha256(source).hexdigest() != launch.components[-1].sha256:
+        raise ExecutionContractError("SDK launcher identity mismatch")
+    newline = source.find(b"\n")
+    body = b"" if newline < 0 else source[newline + 1:]
+    arguments = launch.argv[1:-1]
+    shebang = f"#!{interpreter}"
+    if arguments:
+        shebang += " " + " ".join(arguments)
+    return hashlib.sha256(shebang.encode("utf-8") + b"\n" + body).hexdigest()
+
+
+def _adopt_materialized_sdk_launch(
+    launch: AttestedLaunch,
+    destination: Path,
+) -> MaterializedSdkLaunch | None:
+    """Adopt an existing cache entry if it still attests.
+
+    Mirrors `provider_frozen_bundle._adopt_materialized_bundle`: nothing
+    at `destination` yet is the normal cold-cache case (returns None, the
+    caller materializes fresh); something at `destination` that does NOT
+    hash-verify against the attested launch is a tampered or corrupted
+    shared cache entry and fails closed (raises) instead of being silently
+    overwritten.
+    """
+    paths = _expected_sdk_component_paths(launch, destination)
+    trusted_interpreter = launch.mode != "native" and trusted_system_interpreter_path(
+        paths[0],
+    )
+    check_paths = paths[1:] if trusted_interpreter else paths
+    if not any(path.exists() for path in check_paths):
+        return None
+    if not all(path.is_file() for path in check_paths):
+        raise ExecutionContractError(
+            "materialized SDK launch identity mismatch: destination layout differs",
+        )
+    if launch.mode == "native":
+        observed = FileIdentity.capture(paths[0])
+        expected = launch.components[0]
+        if observed.sha256 != expected.sha256 or observed.size != expected.size:
+            raise ExecutionContractError(
+                "materialized SDK launch identity mismatch: hash differs",
+            )
+        return MaterializedSdkLaunch(str(paths[0]), (observed,), (observed,))
+    interpreter, script = paths
+    observed_interpreter = FileIdentity.capture(interpreter)
+    if not trusted_interpreter:
+        expected_interpreter = launch.components[0]
+        if (
+            observed_interpreter.sha256 != expected_interpreter.sha256
+            or observed_interpreter.size != expected_interpreter.size
+        ):
+            raise ExecutionContractError(
+                "materialized SDK launch identity mismatch: "
+                "interpreter hash differs",
+            )
+    observed_script = FileIdentity.capture(script)
+    if observed_script.sha256 != _expected_shebang_script_sha256(
+        launch, interpreter,
+    ):
+        raise ExecutionContractError(
+            "materialized SDK launch identity mismatch: script hash differs",
+        )
+    adopted_files = (observed_interpreter, observed_script)
+    adopted_payload_files = (
+        adopted_files if not trusted_interpreter else (observed_script,)
+    )
+    return MaterializedSdkLaunch(str(script), adopted_files, adopted_payload_files)
+
+
+def materialize_sdk_launch_cached(launch: AttestedLaunch) -> MaterializedSdkLaunch:
+    """Cache-aware wrapper around `materialize_sdk_launch`.
+
+    The same attested launch always maps to the same fingerprint-keyed
+    destination under the state home (see `sdk_launch_cache_destination`),
+    so a turn reuses a prior turn's materialized copy — up to hundreds of
+    MB for a CLI bundle — instead of paying a fresh copy every time.
+
+    Materializes directly at the fingerprint-keyed destination rather than
+    materializing into a scratch directory and renaming into place: a
+    posix-shebang launch's script bakes its own destination-relative
+    interpreter path into the shebang line, so renaming the populated
+    directory afterward would leave that shebang pointing at a path that
+    no longer exists. Concurrent first-time materializers of the same
+    fingerprint are serialized with a blocking advisory lock (the kernel
+    wakes a waiter exactly when the lock releases — no polling) rather
+    than a rename-based race, since the destination cannot be populated
+    behind the writer's back and then atomically swapped in.
+    """
+    destination = sdk_launch_cache_destination(launch)
+    adopted = _adopt_materialized_sdk_launch(launch, destination)
+    if adopted is not None:
+        return adopted
+    lock_path = destination.parent / ".materializing.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        lock_ex(lock_fd)
+        # Re-check now that we hold the lock: another process may have
+        # materialized this fingerprint while we were waiting for it.
+        adopted = _adopt_materialized_sdk_launch(launch, destination)
+        if adopted is not None:
+            return adopted
+        destination.mkdir(mode=0o700)
+        try:
+            materialize_sdk_launch(launch, destination)
+        except BaseException:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+    finally:
+        unlock(lock_fd)
+        os.close(lock_fd)
+    adopted = _adopt_materialized_sdk_launch(launch, destination)
+    if adopted is None:
+        raise ExecutionContractError(
+            "materialized SDK launch identity mismatch",
+        )
+    return adopted

@@ -173,6 +173,7 @@ from provider_runtime_plan_source import hydrate_runner_operation_broker
 from codex_execution_identity import file_identity_from_dict
 from provider_pinned_launch import (
     MaterializedSdkLaunch,
+    sdk_launch_cache_root,
     trusted_system_interpreter_path,
 )
 
@@ -3307,7 +3308,11 @@ def _runtime_capabilities(
             for item in cli_raw["files"]
         ),
     )
-    cli_root = (run_dir / "claude-cli").resolve(strict=True)
+    # The CLI is materialized once into the shared, fingerprint-keyed SDK
+    # launch cache (see provider_pinned_launch.materialize_sdk_launch_cached)
+    # and reused across turns/runs, rather than copied fresh into this run's
+    # own directory — so the trusted root is the shared cache, not run_dir.
+    cli_root = sdk_launch_cache_root()
     executable = Path(cli.executable_path).resolve(strict=True)
     if (
         not executable.is_relative_to(cli_root)

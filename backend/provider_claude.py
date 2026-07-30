@@ -1121,9 +1121,7 @@ class ClaudeProvider(Provider):
             execution.artifact,
             run_dir,
         )
-        cli_root = run_dir / "claude-cli"
-        cli_root.mkdir(mode=0o700)
-        materialized_cli = launch.materialize_sdk(cli_root)
+        materialized_cli = launch.materialize_sdk()
         from run_execution_payloads import publish_execution_payload_manifest
 
         publish_execution_payload_manifest(

@@ -398,6 +398,34 @@ class FrozenBundleIdentity:
             return False
         return current == self
 
+    def attest_metadata(self) -> bool:
+        """Cheap re-check for a bundle this same instance already fully
+        hash-attested earlier in the same launch/spawn cycle.
+
+        Re-walks the directory layout (stat only - no content hashing,
+        no worker-process spawns) to catch added/removed/retyped
+        entries, then re-checks each known file's stat tuple instead of
+        re-hashing every file in the bundle (which, for a dev-venv or
+        packaged-app bundle, can be hundreds of files)."""
+        with timed_contract_step("provider.frozen_bundle.attest_metadata"):
+            try:
+                self.validate()
+                if not self.root.attest():
+                    return False
+                root = Path(self.root.requested_path)
+                excluded = tuple(
+                    Path(path) for path in self.excluded_relative_paths
+                )
+                if _capture_layout(root, excluded) != _expected_layout(self):
+                    return False
+            except (ExecutionContractError, OSError):
+                return False
+            return all(
+                entry.file.attest_metadata()
+                for entry in self.entries
+                if entry.file is not None
+            )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "root": self.root.to_dict(),

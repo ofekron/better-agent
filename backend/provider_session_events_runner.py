@@ -55,9 +55,7 @@ def _materialize_provider(
     runtime: FamilyExecutionRuntime,
     run_dir: Path,
 ) -> str:
-    root = run_dir / "provider-cli"
-    root.mkdir(mode=0o700)
-    materialized = runtime.launch.materialize_sdk(root)
+    materialized = runtime.launch.materialize_sdk()
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
