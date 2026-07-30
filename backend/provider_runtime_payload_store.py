@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Mapping
 
-from codex_execution_common import ExecutionContractError
+from codex_execution_common import ExecutionContractError, binary_open_flags
 from provider_runtime_capability_model import (
     CAPABILITY_PAYLOAD_NAME,
     PreparedRuntimeCapabilities,
@@ -107,7 +107,9 @@ def _read_private_payload(
         ) from exc
     if path.is_symlink():
         raise ExecutionContractError("runtime capability payload is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -136,7 +138,7 @@ def _read_private_payload(
 
 def _write_private_payload(path: Path, payload: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1

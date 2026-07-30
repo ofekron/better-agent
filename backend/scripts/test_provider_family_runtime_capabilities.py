@@ -76,6 +76,10 @@ def _snapshot(
         b"---\nname: planning\ndescription: Plan work\n---\nbody\n",
     )
     _write(skill / "scripts" / "run.sh", b"#!/bin/sh\nexit 0\n")
+    _write(
+        skill / "assets" / "binary.bin",
+        b"lf\ncrlf\r\nsub\x1a\x00non-utf8\xff",
+    )
     agent = root / "sources" / "agents" / "reviewer.md"
     _write(agent, b"Review changes adversarially.\n")
     package_root = root / "sources" / "packages" / "runtime_pkg"
@@ -190,6 +194,9 @@ def test_snapshot_is_immutable_across_every_authority_drift() -> None:
         assert (resolved.skill_dirs["planning"] / "SKILL.md").read_bytes().endswith(
             b"body\n",
         )
+        assert (
+            resolved.skill_dirs["planning"] / "assets" / "binary.bin"
+        ).read_bytes() == b"lf\ncrlf\r\nsub\x1a\x00non-utf8\xff"
         assert resolved.agent_files["reviewer.md"].read_bytes() == (
             b"Review changes adversarially.\n"
         )

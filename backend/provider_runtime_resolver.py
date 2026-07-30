@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from codex_execution_common import ExecutionContractError
+from codex_execution_common import ExecutionContractError, binary_open_flags
 from provider_runtime_capability_model import (
     CAPABILITY_FILES_DIR,
     CAPABILITY_PAYLOAD_NAME,
@@ -46,7 +46,7 @@ def _write_resolved_file(
     mode: int,
 ) -> None:
     _ensure_private_parent_tree(root, path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, mode)
