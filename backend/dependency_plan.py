@@ -312,12 +312,17 @@ def _probe_runtime_module(python: Path, module: str) -> None:
     )
 
 
+def _runtime_probe_workers(probe_count: int, platform: str = os.name) -> int:
+    return 1 if platform == "nt" else min(probe_count, 8)
+
+
 def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
     if not probes:
         return
     python = _python_in(env_dir)
     failures: list[tuple[str, BaseException]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(probes), 8)) as executor:
+    workers = _runtime_probe_workers(len(probes))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         pending = {
             executor.submit(_probe_runtime_module, python, module): module
             for module in probes
