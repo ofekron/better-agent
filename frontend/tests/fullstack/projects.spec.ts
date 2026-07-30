@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, expect } from "./harness/fixtures";
@@ -51,5 +51,127 @@ test.describe("projects", () => {
     const tabAfterReload = page.locator(".project-tab", { hasText: label });
     await expect(tabAfterReload).toBeVisible();
     await expect(tabAfterReload.locator(".project-tab-label")).toHaveText(label);
+  });
+
+  test("removing a project via the manage modal deletes it server-side", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    const label = path.basename(projectDir);
+
+    await addProjectByPath(page, projectDir);
+
+    const tab = page.locator(".project-tab", { hasText: label });
+    await expect(tab).toBeVisible();
+
+    // Drive the real "manage" modal (ProjectTabs.tsx's `.project-tab-manage`
+    // trigger → `.project-list-modal`): select the project's row, then hit
+    // the real DELETE /api/projects via the danger button.
+    await page.locator(".project-tab-manage").click();
+    const modal = page.locator(".project-list-modal");
+    await modal.waitFor({ state: "visible", timeout: 10_000 });
+
+    const row = modal.locator(".project-list-modal-row", { hasText: label });
+    await row.locator("input[type='checkbox']").check();
+
+    const deleteButton = modal.locator(".project-list-modal-danger");
+    await expect(deleteButton).toBeEnabled();
+    await deleteButton.click();
+
+    // deleteSelectedProjects awaits the real DELETE /api/projects for each
+    // selected project before closing the modal, so a hidden modal means
+    // the backend call has already resolved.
+    await modal.waitFor({ state: "hidden", timeout: 15_000 });
+
+    await expect(tab).toBeHidden();
+
+    // Confirm the backend actually removed it (project_store), not just
+    // optimistic client state.
+    const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+    expect(projectsRes.ok()).toBeTruthy();
+    const projectsBody = await projectsRes.json();
+    const stillPersisted = (projectsBody.projects as Array<{ path: string }>).some((p) =>
+      p.path.endsWith(label),
+    );
+    expect(stillPersisted).toBeFalsy();
+
+    // Real reload — the removal must not be undone by a fresh
+    // GET /api/projects on mount.
+    await page.goto(backend.baseURL);
+    await page.locator(".session-new-button").waitFor({ state: "visible", timeout: 30_000 });
+
+    const tabAfterReload = page.locator(".project-tab", { hasText: label });
+    await expect(tabAfterReload).toBeHidden();
+  });
+
+  test("switching between two projects scopes the file browser to whichever is selected", async ({
+    authedPage: page,
+  }) => {
+    // Two separate real directories, each with a distinctly-named file, so
+    // a stale/mixed file browser would be caught by seeing the wrong file
+    // (or both files) rather than just the right one.
+    const dirA = mkdtempSync(path.join(tmpdir(), "ba-fullstack-project-a-"));
+    const dirB = mkdtempSync(path.join(tmpdir(), "ba-fullstack-project-b-"));
+    try {
+      writeFileSync(path.join(dirA, "alpha.txt"), "alpha");
+      writeFileSync(path.join(dirB, "beta.txt"), "beta");
+
+      const labelA = path.basename(dirA);
+      const labelB = path.basename(dirB);
+
+      await addProjectByPath(page, dirA);
+      await addProjectByPath(page, dirB);
+
+      const tabA = page.locator(".project-tab", { hasText: labelA });
+      const tabB = page.locator(".project-tab", { hasText: labelB });
+
+      // handleAddProject (App.tsx) selects the just-added project, so
+      // adding B second leaves B active — this is itself part of what we
+      // assert below rather than assumed.
+      await expect(tabB).toHaveClass(/\bactive\b/);
+      await expect(tabA).not.toHaveClass(/\bactive\b/);
+
+      const assertFileChooserShowsOnly = async (visibleFile: string, hiddenFile: string) => {
+        // App.tsx's sidebar folder button opens FileChooserModal scoped to
+        // its `cwd` state, which handleSelectProject (ProjectTabs' onSelect)
+        // sets synchronously to the clicked project's path — this is the
+        // real project-scoped file browser, not a mock.
+        await page.getByTitle("Browse project files").click();
+        const chooser = page.locator(".file-chooser-content");
+        await expect(chooser).toBeVisible();
+
+        await expect(
+          chooser.locator(".tree-node.tree-file", { hasText: visibleFile }),
+        ).toBeVisible();
+        await expect(
+          chooser.locator(".tree-node.tree-file", { hasText: hiddenFile }),
+        ).toHaveCount(0);
+
+        await chooser.locator(".modal-close").click();
+        await expect(chooser).toBeHidden();
+      };
+
+      // B is already the active tab — verify its file browser shows only
+      // beta.txt, not alpha.txt from the other project.
+      await assertFileChooserShowsOnly("beta.txt", "alpha.txt");
+
+      // Switch to A via its tab (ProjectTabs' onSelect → handleSelectProject
+      // → real POST /api/projects/touch) and confirm the file browser now
+      // scopes to A only — not a stale mix of both.
+      await tabA.click();
+      await expect(tabA).toHaveClass(/\bactive\b/);
+      await expect(tabB).not.toHaveClass(/\bactive\b/);
+      await assertFileChooserShowsOnly("alpha.txt", "beta.txt");
+
+      // Switch back to B and confirm the scope flips back cleanly — proving
+      // this isn't a one-directional artifact of initial selection.
+      await tabB.click();
+      await expect(tabB).toHaveClass(/\bactive\b/);
+      await expect(tabA).not.toHaveClass(/\bactive\b/);
+      await assertFileChooserShowsOnly("beta.txt", "alpha.txt");
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
   });
 });

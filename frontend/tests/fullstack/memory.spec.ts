@@ -140,3 +140,102 @@ test("rejecting an agent-proposed memory does not persist it", async ({
   const globalMemories = memoriesBody.global as Array<{ name: string }>;
   expect(globalMemories.some((m) => m.name === "least-favorite-color")).toBe(false);
 });
+
+test("editing a proposed memory's fields before approving persists the edited values", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await triggerMemoryProposal(page, {
+    name: "favorite-drink",
+    description: "The user's favorite drink.",
+    content: "The user's favorite drink is coffee.",
+  });
+
+  const card = page.getByTestId("memory-proposal-card");
+  await expect(card).toBeVisible({ timeout: 60_000 });
+
+  const nameInput = card.locator(".memory-proposal-card__field input").first();
+  await expect(nameInput).toHaveValue("favorite-drink");
+  const contentField = card.locator(".memory-proposal-card__content");
+  await expect(contentField).toHaveValue("The user's favorite drink is coffee.");
+
+  await nameInput.fill("favorite-beverage");
+  await contentField.fill("The user's favorite drink is actually tea.");
+
+  await card.locator(".user-input-card__actions button.primary").click();
+  await expect(card).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+  const globalMemories = memoriesBody.global as Array<{ name: string; content: string }>;
+
+  expect(globalMemories.some((m) => m.name === "favorite-drink")).toBe(false);
+
+  const persisted = globalMemories.find((m) => m.name === "favorite-beverage");
+  expect(persisted).toBeDefined();
+  expect(persisted?.content).toContain("tea");
+  expect(persisted?.content).not.toContain("coffee");
+});
+
+test("two memory proposals in the same session are approved and rejected independently", async ({
+  authedPage: page,
+  backend,
+}) => {
+  // Turn 1: create the session and propose the first memory via the shared
+  // helper (which drives the real "+ New" flow).
+  await triggerMemoryProposal(page, {
+    name: "favorite-season",
+    description: "The user's favorite season.",
+    content: "The user's favorite season is autumn.",
+  });
+
+  const firstCard = page.getByTestId("memory-proposal-card");
+  await expect(firstCard).toBeVisible({ timeout: 60_000 });
+  await expect(firstCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "favorite-season",
+  );
+
+  await firstCard.locator(".user-input-card__actions button.primary").click();
+  await expect(firstCard).not.toBeVisible({ timeout: 15_000 });
+
+  // Turn 2: same session, second real turn -- send a follow-up prompt
+  // through the chat input (createSessionWithPrompt always opens a *new*
+  // session via "+ New", so a plain textarea send is what keeps this in the
+  // same session) proposing a second, distinct memory.
+  const secondCommand = proposeMemoryCurlCommand({
+    name: "least-favorite-season",
+    description: "The user's least favorite season.",
+    content: "The user's least favorite season is winter.",
+  });
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(
+    `Use the Bash tool to run exactly this single command, unmodified: ${secondCommand}`,
+  );
+  await textarea.press("Enter");
+
+  const secondCard = page.getByTestId("memory-proposal-card");
+  await expect(secondCard).toBeVisible({ timeout: 60_000 });
+  await expect(secondCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "least-favorite-season",
+  );
+
+  // nth(1): Expand (0), Reject (1), Approve (2, `.primary`).
+  await secondCard.locator(".user-input-card__actions button").nth(1).click();
+  await expect(secondCard).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+  const globalMemories = memoriesBody.global as Array<{ name: string; content: string }>;
+
+  // The approved first proposal persisted, unaffected by the second turn's
+  // rejection...
+  const approved = globalMemories.find((m) => m.name === "favorite-season");
+  expect(approved).toBeDefined();
+  expect(approved?.content).toContain("autumn");
+
+  // ...and the rejected second proposal did not, unaffected by the first
+  // turn's approval.
+  expect(globalMemories.some((m) => m.name === "least-favorite-season")).toBe(false);
+});

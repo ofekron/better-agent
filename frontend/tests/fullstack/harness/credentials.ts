@@ -1,4 +1,11 @@
 import { randomBytes } from "node:crypto";
+
+/** A random, non-secret test value (usernames, throwaway passwords for
+ * change-credentials specs, etc.) — generated at runtime, never a literal,
+ * so it can't be mistaken for a checked-in credential. */
+export function randomTestValue(label: string): string {
+  return `${label}-${randomBytes(9).toString("base64url")}`;
+}
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
