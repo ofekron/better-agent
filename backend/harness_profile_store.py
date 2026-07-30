@@ -676,15 +676,6 @@ def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
         return upsert_profile(clean_payload, profile_id)
 
 
-def _get_at_path(tree: dict[str, Any], path: list[str]) -> Any:
-    node: Any = tree
-    for key in path:
-        if not isinstance(node, dict) or key not in node:
-            return None
-        node = node[key]
-    return node
-
-
 def _set_at_path(tree: dict[str, Any], path: list[str], value: Any) -> None:
     node = tree
     for key in path[:-1]:
