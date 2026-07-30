@@ -465,6 +465,26 @@ test("the run-meta provider/model chips reflect the real backend truth for the t
   expect(runMeta?.provider_id).toBeTruthy();
   expect(runMeta?.model).toBeTruthy();
 
+  // Runtime-profiles reality: the session was created through the default
+  // runtime profile (the modal's profile picker pre-selects it), so the
+  // persisted session record must carry that profile's id, and the profile
+  // must be live and back the same provider the turn actually ran with —
+  // the run-meta chips and the profile identity may never disagree.
+  const profilesRes = await page.request.get(`${backend.baseURL}/api/runtime-profiles`);
+  expect(profilesRes.ok()).toBe(true);
+  const profilesBody = (await profilesRes.json()) as {
+    runtime_profiles: Array<{ id: string; provider_id: string; deleted_at: string | null }>;
+    default_runtime_profile_id: string | null;
+  };
+  expect(tree.runtime_profile_id).toBeTruthy();
+  expect(tree.runtime_profile_id).toBe(profilesBody.default_runtime_profile_id);
+  const backingProfile = profilesBody.runtime_profiles.find(
+    (p) => p.id === tree.runtime_profile_id,
+  );
+  expect(backingProfile).toBeTruthy();
+  expect(backingProfile!.deleted_at).toBeNull();
+  expect(backingProfile!.provider_id).toBe(runMeta!.provider_id);
+
   const providersRes = await page.request.get(`${backend.baseURL}/api/providers`);
   expect(providersRes.ok()).toBe(true);
   const providersBody = await providersRes.json();

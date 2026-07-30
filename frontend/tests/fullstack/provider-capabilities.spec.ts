@@ -93,19 +93,29 @@ test("multiple capability overrides set together all persist independently", asy
   await expect(page.getByTestId("capability-override-select-supports_steering")).toHaveText(/inherit/i);
 });
 
-// The "Suspend provider usage" checkbox (SettingsPage.tsx's
-// `.provider-suspend-toggle`) must actually take effect elsewhere in the
-// real app, not just persist as inert state: NewSessionModal disables the
-// provider's <option> (`disabled={p.suspended}`) so it can't be picked for
-// a new session, and unsuspending must restore real usability (a real turn
-// against it succeeds again).
+// The Suspend/Resume button in the provider edit view (SettingsPage.tsx's
+// `.provider-edit-actions`, firing a real POST /api/providers/{id}/suspended
+// immediately — no separate save step) must actually take effect elsewhere in
+// the real app, not just persist as inert state: NewSessionModal's
+// runtime-profile picker disables every profile <option> backed by the
+// suspended provider (`disabled={suspended}` in RoleProfilePicker) so no
+// profile of that provider can be picked for a new session, and unsuspending
+// must restore real usability (a real turn against it succeeds again).
 test("suspending a provider blocks new sessions and unsuspending restores it", async ({
   authedPage: page,
   backend,
 }) => {
+  const suspendedToggled = () =>
+    page.waitForResponse(
+      (res) =>
+        /\/api\/providers\/[^/]+\/suspended$/.test(new URL(res.url()).pathname) &&
+        res.request().method() === "POST",
+    );
+
   await openProviderSettings(page, backend.baseURL, "claude");
-  await page.locator(".provider-suspend-toggle input[type=checkbox]").check();
-  await saveProviderSettings(page);
+  const suspendRes = suspendedToggled();
+  await page.locator(".provider-edit-actions").getByRole("button", { name: "Suspend", exact: true }).click();
+  expect((await suspendRes).ok()).toBe(true);
 
   // SettingsPage is a full route swap (App.tsx renders it instead of the
   // main session view), so the sidebar's `.session-new-button` only exists
@@ -113,19 +123,22 @@ test("suspending a provider blocks new sessions and unsuspending restores it", a
   // routing state.
   await page.goto(backend.baseURL);
   await page.locator(".session-new-button").click();
-  const providerSelect = page.getByTestId("new-session-provider-select");
-  await providerSelect.waitFor({ state: "visible", timeout: 10_000 });
+  const profileSelect = page.getByTestId("new-session-profile-select");
+  await profileSelect.waitFor({ state: "visible", timeout: 10_000 });
 
-  const claudeOption = providerSelect.locator("option", { hasText: "Suspended" });
-  await expect(claudeOption).toHaveCount(1);
-  await expect(claudeOption).toBeDisabled();
+  // The fresh install seeds exactly one runtime profile (claude/native), so
+  // exactly one option must render suspended-and-disabled.
+  const suspendedOption = profileSelect.locator("option", { hasText: "Suspended" });
+  await expect(suspendedOption).toHaveCount(1);
+  await expect(suspendedOption).toBeDisabled();
 
   await page.locator(".modal-close").click();
-  await providerSelect.waitFor({ state: "hidden", timeout: 10_000 });
+  await profileSelect.waitFor({ state: "hidden", timeout: 10_000 });
 
   await openProviderSettings(page, backend.baseURL, "claude");
-  await page.locator(".provider-suspend-toggle input[type=checkbox]").uncheck();
-  await saveProviderSettings(page);
+  const resumeRes = suspendedToggled();
+  await page.locator(".provider-edit-actions").getByRole("button", { name: "Resume", exact: true }).click();
+  expect((await resumeRes).ok()).toBe(true);
   await page.goto(backend.baseURL);
 
   await createSessionWithPrompt(
@@ -205,6 +218,20 @@ test("the create-provider wizard creates a real, usable, additional provider ent
   // immediately-usable entry, not a placeholder stub.
   expect(persisted?.credential_status).toBe("available");
 
+  // Runtime-profiles reality: creating a provider seeds one live runtime
+  // profile for it (config_store._seed_profile_for_provider via
+  // add_provider), so the new entry is immediately usable through the
+  // profile picker without a separate manual profile-creation step.
+  const profilesAfterCreateRes = await page.request.get(`${backend.baseURL}/api/runtime-profiles`);
+  expect(profilesAfterCreateRes.ok()).toBe(true);
+  const profilesAfterCreate = ((await profilesAfterCreateRes.json()) as {
+    runtime_profiles: Array<{ id: string; provider_id: string; deleted_at: string | null }>;
+  }).runtime_profiles;
+  const seededProfiles = profilesAfterCreate.filter(
+    (p) => p.provider_id === createdProvider.id && !p.deleted_at,
+  );
+  expect(seededProfiles).toHaveLength(1);
+
   // --- cleanup: delete the new provider via the real delete flow ---
   await newProviderRow.locator(".provider-row-main").click();
   await expect(page.locator(".provider-edit-actions")).toBeVisible();
@@ -223,6 +250,21 @@ test("the create-provider wizard creates a real, usable, additional provider ent
   const afterDeleteRes = await page.request.get(`${backend.baseURL}/api/providers`);
   const afterDeleteProviders = ((await afterDeleteRes.json()) as { providers: Array<{ id: string }> }).providers;
   expect(afterDeleteProviders.map((p) => p.id).sort()).toEqual([...beforeIds].sort());
+
+  // Provider deletion cascades to its runtime profiles as soft-delete: the
+  // seeded profile must now be a tombstone (deleted_at set), never a live
+  // pickable profile for a provider that no longer exists.
+  const profilesAfterDeleteRes = await page.request.get(`${backend.baseURL}/api/runtime-profiles`);
+  expect(profilesAfterDeleteRes.ok()).toBe(true);
+  const profilesAfterDelete = ((await profilesAfterDeleteRes.json()) as {
+    runtime_profiles: Array<{ id: string; provider_id: string; deleted_at: string | null }>;
+  }).runtime_profiles;
+  const orphanLive = profilesAfterDelete.filter(
+    (p) => p.provider_id === createdProvider.id && !p.deleted_at,
+  );
+  expect(orphanLive).toHaveLength(0);
+  const tombstoned = profilesAfterDelete.find((p) => p.id === seededProfiles[0].id);
+  expect(tombstoned?.deleted_at).toBeTruthy();
 });
 
 // Distinct from the `capability_overrides` tests above: this covers the
@@ -230,7 +272,7 @@ test("the create-provider wizard creates a real, usable, additional provider ent
 // provider-native permission vocabulary (backend/permission.py), not a
 // capability flag. It must (a) actually persist server-side across a real
 // reload, and (b) be what a *brand-new* session inherits by default with no
-// per-session override — NewSessionModal.tsx seeds a new profile's
+// per-session override — NewSessionModal.tsx seeds a new role selection's
 // `permission` as `{}` (resolvePermission's "no saved override" branch), and
 // its own permission <select> renders the live provider default inline as
 // "Inherit default (<value>)" (fetched fresh via GET /api/providers on every
@@ -329,14 +371,17 @@ test("a provider nickname persists, displays in the list, and can be cleared", a
   await expect(providerRow.locator(".provider-nickname")).toHaveCount(0);
 });
 
-// The default provider is protected from deletion both in the UI (edit
-// view's `.provider-edit-actions` renders no `.btn-danger` delete button for
-// the active/default provider — SettingsPage.tsx's `isActive` branch — and
+// The default provider (the one backing the default runtime profile —
+// `default_provider_id` is a derived projection of that profile) is
+// protected from deletion both in the UI (edit view's
+// `.provider-edit-actions` renders no `.btn-danger` delete button for the
+// active/default provider — SettingsPage.tsx's `isActive` branch — and
 // instead shows a `.setup-field-hint` explaining why) and, independently, on
-// the backend: DELETE /api/providers/{id} for the current default rejects
-// with 409 and `error.cannot_delete_default_provider`
-// (backend/providers_api.py's `reason == "default"` branch), proving this
-// isn't just a UI-only restriction that a direct API call could bypass.
+// the backend: DELETE /api/providers/{id} for the provider backing the
+// default runtime profile rejects with 409 and
+// `error.cannot_delete_default_provider` (backend/providers_api.py's
+// `reason == "default"` branch), proving this isn't just a UI-only
+// restriction that a direct API call could bypass.
 test("the default provider cannot be deleted, in the UI or via a direct API call", async ({
   authedPage: page,
   backend,
@@ -366,7 +411,7 @@ test("the default provider cannot be deleted, in the UI or via a direct API call
   });
   expect(deleteRes.status()).toBe(409);
   const deleteBody = (await deleteRes.json()) as { detail?: string };
-  expect(deleteBody.detail).toMatch(/cannot delete the default provider/i);
+  expect(deleteBody.detail).toMatch(/backs the default runtime profile/i);
 
   const afterRes = await page.request.get(`${backend.baseURL}/api/providers`);
   const afterProviders = ((await afterRes.json()) as { providers: Array<{ id: string }> }).providers;

@@ -224,6 +224,23 @@ test.describe("backend crash-recovery", () => {
       expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
       expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
 
+      // Runtime-profile stamping must survive the crash + restart: the
+      // recovered session still references the runtime profile it was
+      // created from, and the restarted backend's /api/runtime-profiles
+      // snapshot still lists that profile as live — recovery never strips
+      // or reshuffles the session's profile identity.
+      const profilesRes = await page.request.get(`${backend.baseURL}/api/runtime-profiles`);
+      expect(profilesRes.ok()).toBe(true);
+      const profilesBody = (await profilesRes.json()) as {
+        runtime_profiles: Array<{ id: string; deleted_at: string | null }>;
+      };
+      expect(tree.runtime_profile_id).toBeTruthy();
+      expect(
+        profilesBody.runtime_profiles.some(
+          (p) => p.id === tree.runtime_profile_id && !p.deleted_at,
+        ),
+      ).toBe(true);
+
       // Reload once more so the UI is guaranteed to be rendering from the
       // now-settled backend state (not a stale in-flight WS projection from
       // before the crash).
