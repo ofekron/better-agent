@@ -482,6 +482,144 @@ async def test_run_headless_requires_version_ready() -> None:
     assert seen["version_ready_required"] is True
 
 
+async def test_node_runtime_readiness_waits_across_reconnect() -> None:
+    spec = node_store.NodeSpec(
+        id="runtime-ready-node",
+        role="worker_node",
+        address="ws://node",
+        cwd_roots=("/tmp",),
+    )
+    first = await node_store.register(spec, SimpleNamespace())
+    waiter = asyncio.create_task(
+        node_store.wait_for_runtime_ready("runtime-ready-node"),
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await node_store.unregister("runtime-ready-node")
+    second = await node_store.register(spec, SimpleNamespace())
+    assert node_store.mark_runtime_ready("runtime-ready-node", first) is False
+    assert not waiter.done()
+    assert node_store.mark_runtime_ready("runtime-ready-node", second) is True
+    assert await asyncio.wait_for(waiter, timeout=1) is second
+    await node_store.unregister("runtime-ready-node")
+
+
+async def test_remote_admission_starts_only_after_runtime_ready() -> None:
+    original_wait = node_store.wait_for_runtime_ready
+    original_send = node_link.send_spawn_run
+    gate = asyncio.Event()
+    calls: list[str] = []
+    conn = SimpleNamespace(runs={})
+    proxy = provider_remote.RemoteProviderProxy("node-a")
+    state = SimpleNamespace(
+        run_id="run-a",
+        admission=provider_remote.Future(),
+    )
+
+    async def wait_for_runtime_ready(_node_id):
+        await gate.wait()
+        calls.append("ready")
+        return conn
+
+    async def send_spawn_run(_node_id, _payload):
+        calls.append("send")
+
+    proxy._arm_admission_lease = lambda _state, _conn: calls.append("lease")  # type: ignore[method-assign]
+    node_store.wait_for_runtime_ready = wait_for_runtime_ready  # type: ignore[assignment]
+    node_link.send_spawn_run = send_spawn_run  # type: ignore[assignment]
+    try:
+        dispatch = asyncio.create_task(
+            proxy._dispatch_admission_when_ready(state, {"run_id": "run-a"}),
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+        assert conn.runs == {}
+        gate.set()
+        assert await dispatch is conn
+    finally:
+        node_store.wait_for_runtime_ready = original_wait  # type: ignore[assignment]
+        node_link.send_spawn_run = original_send  # type: ignore[assignment]
+
+    assert calls == ["ready", "lease", "send"]
+    assert conn.runs == {"run-a": state}
+
+
+async def test_failed_remote_send_cleans_exact_connection_and_lease() -> None:
+    original_wait = node_store.wait_for_runtime_ready
+    original_send = node_link.send_spawn_run
+    conn_a = SimpleNamespace(runs={})
+    conn_b = SimpleNamespace(runs={"other-run": object()})
+    proxy = provider_remote.RemoteProviderProxy("node-a")
+
+    class Lease:
+        cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    lease = Lease()
+    state = SimpleNamespace(
+        run_id="run-a",
+        admission=provider_remote.Future(),
+        admission_lock=threading.Lock(),
+        admission_lease_handle=None,
+        finished=False,
+    )
+    proxy._runs["run-a"] = state
+
+    async def wait_for_runtime_ready(_node_id):
+        return conn_a
+
+    async def send_spawn_run(_node_id, _payload):
+        node_store.get_connection = lambda _node_id: conn_b  # type: ignore[assignment]
+        raise ConnectionError("socket closed")
+
+    original_get_connection = node_store.get_connection
+    proxy._arm_admission_lease = (  # type: ignore[method-assign]
+        lambda target, _conn: setattr(target, "admission_lease_handle", lease)
+    )
+    node_store.wait_for_runtime_ready = wait_for_runtime_ready  # type: ignore[assignment]
+    node_link.send_spawn_run = send_spawn_run  # type: ignore[assignment]
+    try:
+        await proxy._dispatch_admission_or_fail(
+            state,
+            {"run_id": "run-a"},
+            asyncio.Queue(),
+        )
+    finally:
+        node_store.wait_for_runtime_ready = original_wait  # type: ignore[assignment]
+        node_link.send_spawn_run = original_send  # type: ignore[assignment]
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+
+    assert state.admission.done()
+    assert isinstance(state.admission.exception(), ConnectionError)
+    assert state.finished is True
+    assert "run-a" not in proxy._runs
+    assert "run-a" not in conn_a.runs
+    assert set(conn_b.runs) == {"other-run"}
+    assert lease.cancelled is True
+    assert state.admission_lease_handle is None
+
+
+async def test_node_json_iterator_preserves_disconnect_evidence() -> None:
+    disconnect = node_link.WebSocketDisconnect(code=1006, reason="transport lost")
+
+    class Ws:
+        async def receive_json(self):
+            raise disconnect
+
+    iterator = node_link._iter_json(Ws())
+    try:
+        await anext(iterator)
+    except node_link.WebSocketDisconnect as exc:
+        assert exc is disconnect
+        assert exc.code == 1006
+        assert exc.reason == "transport lost"
+        return
+    raise AssertionError("node JSON iterator erased WebSocket close evidence")
+
+
 def test_export_provider_sync_state_excludes_api_keys_by_default() -> None:
     original_read = config_store._read_api_key
     providers = [
@@ -1012,6 +1150,10 @@ async def _main() -> None:
     await test_version_ready_rpc_rejects_mismatched_node_before_send()
     await test_spawn_run_rejects_mismatched_node_before_send()
     await test_run_headless_requires_version_ready()
+    await test_node_runtime_readiness_waits_across_reconnect()
+    await test_remote_admission_starts_only_after_runtime_ready()
+    await test_failed_remote_send_cleans_exact_connection_and_lease()
+    await test_node_json_iterator_preserves_disconnect_evidence()
     test_export_provider_sync_state_excludes_api_keys_by_default()
     test_export_provider_sync_state_includes_only_selected_api_keys()
     test_import_provider_sync_writes_api_key_before_default_selection()

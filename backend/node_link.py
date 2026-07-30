@@ -501,8 +501,13 @@ async def node_connect(websocket: WebSocket) -> None:
                 )
                 return
             await _route_inbound(node_id, raw)
-    except WebSocketDisconnect:
-        logger.info("node_link: %s disconnected", node_id)
+    except WebSocketDisconnect as exc:
+        logger.warning(
+            "node_link: %s disconnected code=%s reason=%r",
+            node_id,
+            exc.code,
+            exc.reason,
+        )
     except Exception:
         logger.exception("node_link: %s inbound loop crashed", node_id)
     finally:
@@ -511,10 +516,7 @@ async def node_connect(websocket: WebSocket) -> None:
 
 async def _iter_json(ws: WebSocket):
     while True:
-        try:
-            yield await ws.receive_json()
-        except WebSocketDisconnect:
-            return
+        yield await ws.receive_json()
 
 
 async def _route_inbound(node_id: str, msg: dict) -> None:

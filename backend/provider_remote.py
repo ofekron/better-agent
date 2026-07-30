@@ -116,6 +116,7 @@ class _RemoteRunState:
     )
     admission_lease_handle: Any = None
     admission_expiry_cancel_task: asyncio.Task | None = None
+    admission_dispatch: Future[Any] | None = None
 
 
 class _FakePopen:
@@ -197,6 +198,57 @@ class RemoteProviderProxy(Provider):
             return False
         self._arm_admission_lease(state, conn)
         return True
+
+    async def _dispatch_admission_when_ready(
+        self,
+        state: _RemoteRunState,
+        payload: dict[str, Any],
+    ):
+        ready_conn = await node_store.wait_for_runtime_ready(self.node_id)
+        if state.admission.done():
+            return None
+        ready_conn.runs[state.run_id] = state
+        self._arm_admission_lease(state, ready_conn)
+        try:
+            await node_link.send_spawn_run(self.node_id, payload)
+        except BaseException:
+            if ready_conn.runs.get(state.run_id) is state:
+                ready_conn.runs.pop(state.run_id, None)
+            if state.admission_lease_handle is not None:
+                state.admission_lease_handle.cancel()
+                state.admission_lease_handle = None
+            raise
+        return ready_conn
+
+    async def _dispatch_admission_or_fail(
+        self,
+        state: _RemoteRunState,
+        payload: dict[str, Any],
+        queue: asyncio.Queue,
+    ) -> None:
+        try:
+            await self._dispatch_admission_when_ready(state, payload)
+        except Exception as error:
+            logger.exception(
+                "RemoteProviderProxy: send_spawn_run failed run=%s",
+                state.run_id,
+            )
+            try:
+                queue.put_nowait(StreamEvent(
+                    type="error",
+                    data={
+                        "error": (
+                            f"remote spawn failed: "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    },
+                ))
+            except Exception:
+                pass
+            state.finished = True
+            resolve_remote_admission(state, error=error)
+            with self._lock:
+                self._runs.pop(state.run_id, None)
     # ASSUMPTION (v1): a worker-node always runs the Claude provider —
     # the KIND name encodes this. Capability flags inherit Provider's
     # defaults (`supports_fork=True`, `supports_manager_mode=True`,
@@ -417,9 +469,6 @@ class RemoteProviderProxy(Provider):
         with self._lock:
             self._runs[run_id] = state
 
-        # Track in node_store so inbound messages can find this run.
-        conn.runs[run_id] = state
-
         # Provider-native config stays local to the executing node's CLI.
         # The coordinator's local config paths do not apply to remote runs.
         node_execution = _execution
@@ -438,27 +487,10 @@ class RemoteProviderProxy(Provider):
         # MUST enqueue an `error` StreamEvent so the caller's queue.get()
         # drain loop doesn't hang forever. Done via a wrapper task,
         # not fire-and-forget.
-        async def _send_or_fail() -> None:
-            try:
-                await node_link.send_spawn_run(self.node_id, payload)
-            except Exception as e:
-                logger.exception(
-                    "RemoteProviderProxy: send_spawn_run failed run=%s", run_id,
-                )
-                try:
-                    queue.put_nowait(StreamEvent(
-                        type="error",
-                        data={"error": f"remote spawn failed: {type(e).__name__}: {e}"},
-                    ))
-                except Exception:
-                    pass
-                state.finished = True
-                resolve_remote_admission(state, error=e)
-                with self._lock:
-                    self._runs.pop(run_id, None)
-                conn.runs.pop(run_id, None)
-        loop.call_soon_threadsafe(self._arm_admission_lease, state, conn)
-        asyncio.run_coroutine_threadsafe(_send_or_fail(), loop)
+        state.admission_dispatch = asyncio.run_coroutine_threadsafe(
+            self._dispatch_admission_or_fail(state, payload, queue),
+            loop,
+        )
         return state.admission.result()
 
     # ------------------------------------------------------------------
@@ -472,6 +504,9 @@ class RemoteProviderProxy(Provider):
         if rs is None:
             return False
         rs.cancelled = True
+        if rs.admission_dispatch is not None:
+            rs.admission_dispatch.cancel()
+            rs.admission_dispatch = None
         cancelled_pending = resolve_remote_admission(rs, admitted=False)
         if cancelled_pending:
             rs.finished = True
@@ -517,6 +552,9 @@ class RemoteProviderProxy(Provider):
         if state is None:
             return
         state.finished = True
+        if state.admission_dispatch is not None:
+            state.admission_dispatch.cancel()
+            state.admission_dispatch = None
         if state.admission_lease_handle is not None:
             state.admission_lease_handle.cancel()
             state.admission_lease_handle = None
