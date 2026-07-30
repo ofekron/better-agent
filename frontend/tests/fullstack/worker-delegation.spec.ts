@@ -154,3 +154,95 @@ test("forks a second time from an already-forked child into a depth-2 grandchild
   // pane as inherited ancestor history, alongside its distinct new reply.
   await expect(grandchildPane).toContainText("CHILDFORK");
 });
+
+// Validates that fork-btn is genuinely disabled — not just styled to look
+// disabled — when the session has no valid fork source yet.
+// InputArea.tsx's fork button (line ~1198) is
+// `disabled={!localDraft.trim() || disabled || !canFork}`; `canFork` is
+// wired from App.tsx's `currentSessionCanFork`, which is
+// `sessionHasForkSource(currentSession) && ...` (App.tsx ~1998), and
+// `sessionHasForkSource` (utils/sessionFork.ts) is `Boolean(session?.
+// agent_session_id)` — the real provider CLI session id, only populated
+// once a turn has actually run. So a session with zero completed turns has
+// no fork source structurally, regardless of draft content.
+//
+// To get that state without racing turn-completion timing, this uses the
+// New Session modal's "Create" action (no send) instead of the usual
+// "Create & Send & Open" — it creates a session with zero turns and does
+// NOT navigate into it, so the session is opened manually from the
+// sidebar afterward.
+test("fork-btn is disabled with no completed turns and toggles with the draft once one exists", async ({
+  authedPage: page,
+}) => {
+  await page.locator(".session-new-button").click();
+  const promptBox = page.getByTestId("new-session-prompt-textarea");
+  await promptBox.waitFor({ state: "visible", timeout: 10_000 });
+
+  // Open the create-action dropdown and pick "Create" (create only, no
+  // send, no auto-open) so the new session genuinely has zero turns.
+  await page.locator(".ns-create-toggle").click();
+  await page.getByRole("menuitem", { name: "Create", exact: true }).click();
+  await promptBox.waitFor({ state: "hidden", timeout: 10_000 });
+
+  // Empty sessions float to the top of the sidebar, so the freshly created
+  // zero-turn session is the first item.
+  await page.getByTestId("session-item").first().click();
+  await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+  // Non-empty draft, but zero completed turns: fork-btn must stay disabled
+  // because there is no fork source, not because the draft is empty.
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: FORKSOURCE.");
+  await page.locator(".input-overflow-trigger").click();
+  await expect(page.getByTestId("fork-btn")).toBeDisabled();
+
+  // Send the real first turn (closes the overflow menu as a side effect,
+  // since the click lands outside .input-overflow-wrapper).
+  await page.getByTestId("send-btn").click();
+  await expect(page.getByTestId("assistant-message")).toContainText("FORKSOURCE", {
+    timeout: 120_000,
+  });
+
+  // Now that a real turn has completed, a non-empty draft makes fork-btn
+  // enabled.
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: NEWFORK.");
+  await page.locator(".input-overflow-trigger").click();
+  await expect(page.getByTestId("fork-btn")).toBeEnabled();
+
+  // Clearing the draft disables it again, even though a valid fork source
+  // now exists.
+  await page.getByTestId("input-textarea").fill("");
+  await expect(page.getByTestId("fork-btn")).toBeDisabled();
+});
+
+// Validates the OTHER half of fork-btn's disabled expression independently
+// of the previous test: `disabled={!localDraft.trim() || disabled ||
+// !canFork}` (InputArea.tsx ~1198) has two conditions guarding it, and the
+// previous test only exercised `!canFork` (no fork source at all). This
+// test holds a valid fork source constant (a real completed turn, so
+// `canFork` is true throughout) and toggles only `localDraft.trim()`, to
+// confirm the empty-draft half is enforced on its own rather than being
+// incidentally satisfied by the fork-source check.
+test("fork-btn is disabled with an empty draft even when a valid fork source exists", async ({
+  authedPage: page,
+}) => {
+  await createSessionWithPrompt(page, "Reply with exactly the single word: PARENT.");
+  await expect(page.getByTestId("assistant-message")).toContainText("PARENT", {
+    timeout: 120_000,
+  });
+
+  // Empty composer, valid fork source (the PARENT turn already completed):
+  // fork-btn must stay disabled because the draft is empty, not because
+  // there's no fork source.
+  await page.getByTestId("input-textarea").fill("");
+  await page.locator(".input-overflow-trigger").click();
+  await expect(page.getByTestId("fork-btn")).toBeDisabled();
+
+  // Typing a draft flips it enabled, with the same fork source still valid.
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: CHILD.");
+  await expect(page.getByTestId("fork-btn")).toBeEnabled();
+
+  // Clearing the draft again disables it, even though the fork source is
+  // still valid throughout.
+  await page.getByTestId("input-textarea").fill("");
+  await expect(page.getByTestId("fork-btn")).toBeDisabled();
+});

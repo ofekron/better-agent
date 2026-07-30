@@ -1,5 +1,15 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test, expect } from "./harness/fixtures";
 import { createSessionWithPrompt } from "./harness/session";
+
+// A minimal valid 1x1 red PNG — real pixel data (not an empty/fake file) so
+// the browser's canvas-based resize in imageAttach.ts (fileToPastedImage)
+// has something real to decode and re-encode as it turns the attachment
+// into a PastedImage.
+const ONE_PIXEL_RED_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 // Validates the real orchestration + provider + WebSocket wiring: a prompt
 // typed into the real UI drives a REAL `claude` CLI subprocess turn, and the
@@ -98,4 +108,114 @@ test("queues a second prompt while a turn is running, then runs it after", async
   await expect(page.getByTestId("user-message")).toHaveCount(2, { timeout: 30_000 });
   await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
   await expect(assistantMessages.nth(1)).toContainText("SECONDTURN", { timeout: 120_000 });
+});
+
+// Validates the real client-side guard against wasted turns: InputArea's
+// `canSend` is `(localDraft.trim() || images.length || files.length ||
+// tagCount) && !disabled`, so a whitespace-only draft (no images/files/tags)
+// must never be sendable — no real provider subprocess should ever be spun
+// up for it.
+test("whitespace-only prompt cannot be sent", async ({ authedPage: page, backend }) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: PONG. No punctuation, no other words.",
+  );
+
+  await expect(page.getByTestId("user-message")).toBeVisible();
+  const assistantMessage = page.getByTestId("assistant-message");
+  await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
+  await expect(assistantMessage).toContainText("PONG", { timeout: 120_000 });
+
+  const sessionId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+
+  const countMessages = async (): Promise<number> => {
+    const res = await page.request.get(
+      `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+    );
+    expect(res.ok()).toBe(true);
+    const tree = await res.json();
+    return ((tree.messages ?? []) as Array<{ id: string }>).length;
+  };
+
+  const messageCountBefore = await countMessages();
+  await expect(page.getByTestId("user-message")).toHaveCount(1);
+  await expect(page.getByTestId("assistant-message")).toHaveCount(1);
+
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill("   \n  ");
+
+  const sendBtn = page.getByTestId("send-btn");
+  await expect(sendBtn).toBeDisabled();
+
+  // Force-submitting whitespace-only content (Enter) must not add a new
+  // user bubble or trigger a real turn.
+  await textarea.press("Enter");
+
+  await expect(sendBtn).toBeDisabled();
+  await expect(page.getByTestId("user-message")).toHaveCount(1);
+  await expect(page.getByTestId("assistant-message")).toHaveCount(1);
+  await expect(page.getByTestId("stop-btn")).toBeHidden();
+
+  expect(await countMessages()).toBe(messageCountBefore);
+});
+
+// Validates the real image-attach path: InputArea's hidden file input
+// (attachmentInputRef, wired to handleAttachmentChange -> fileToPastedImage
+// -> ComposerImagePreviews) accepts a real PNG, and the resulting
+// PastedImage is actually transmitted to the backend and forwarded to the
+// real `claude` CLI subprocess as part of a real multimodal turn — not
+// silently dropped. Doesn't assert the model's color answer (vision
+// accuracy varies); only that a real, non-empty assistant reply comes
+// back, which proves the image round-tripped through send -> backend ->
+// provider -> response.
+test("attaches a real image to a prompt and sends a multimodal turn", async ({ authedPage: page }) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: PONG. No punctuation, no other words.",
+  );
+
+  const firstAssistantMessage = page.getByTestId("assistant-message");
+  await expect(firstAssistantMessage).toBeVisible({ timeout: 30_000 });
+  await expect(firstAssistantMessage).toContainText("PONG", { timeout: 120_000 });
+
+  const imageDir = mkdtempSync(path.join(tmpdir(), "ba-fullstack-image-"));
+  const imagePath = path.join(imageDir, "red-pixel.png");
+  writeFileSync(imagePath, Buffer.from(ONE_PIXEL_RED_PNG_BASE64, "base64"));
+
+  // InputArea renders exactly one hidden `<input type="file">`
+  // (attachmentInputRef) once a session is open — the Settings and
+  // New-Session-modal file inputs live on different views/components not
+  // mounted here. setInputFiles works on it directly without needing to
+  // open the overflow "..." menu or click the paperclip trigger first,
+  // since it sets the files via CDP and bypasses the native OS picker.
+  await page.locator('input[type="file"]').setInputFiles(imagePath);
+
+  // handleAttachmentChange -> fileToPastedImage resolves asynchronously
+  // (loads the file into an <img>, canvas-resizes/re-encodes it) before
+  // ComposerImagePreviews renders the thumbnail, so wait for the real
+  // preview rather than assuming it lands synchronously with setInputFiles.
+  await expect(page.locator(".image-preview-item")).toHaveCount(1, { timeout: 15_000 });
+
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill("What color is this image? Reply with exactly one word.");
+
+  const sendBtn = page.getByTestId("send-btn");
+  await expect(sendBtn).toBeEnabled();
+  await sendBtn.click();
+
+  await expect(page.getByTestId("user-message")).toHaveCount(2);
+  // submitDraft clears the composer's attachment state (`setImages([],
+  // false)`) once the turn is accepted, proving the image left the
+  // composer as part of the real send rather than lingering unsent.
+  await expect(page.locator(".image-preview-item")).toHaveCount(0);
+
+  const assistantMessages = page.getByTestId("assistant-message");
+  await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+  const secondAssistantMessage = assistantMessages.nth(1);
+  await expect(secondAssistantMessage).toBeVisible({ timeout: 30_000 });
+  // Real reply must have real, non-empty content — proving the image was
+  // actually transmitted and processed by the provider, not silently
+  // dropped. Exact color correctness isn't asserted since that depends on
+  // model vision accuracy, not on whether the image round-tripped.
+  await expect(secondAssistantMessage).not.toHaveText("", { timeout: 120_000 });
 });

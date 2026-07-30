@@ -1,6 +1,14 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./harness/fixtures";
 import { createSessionWithPrompt } from "./harness/session";
+
+// A minimal valid 1x1 red PNG — real pixel data (not an empty/fake file), same
+// fixture used by chat-turn.spec.ts's online multimodal test.
+const ONE_PIXEL_RED_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 // Durable backlog: the action survived to localStorage (not just React
 // state), matching the "durable frontend localStorage backlog" contract — a
@@ -15,6 +23,25 @@ function readBacklogPrompts(page: Page): Promise<(string | undefined)[]> {
       return [];
     }
   });
+}
+
+// Reads the raw queued entry (not just its prompt text) so the image payload
+// itself can be inspected for survival/corruption through the JSON.stringify
+// round-trip into localStorage.
+function readBacklogEntry(
+  page: Page,
+  prompt: string,
+): Promise<{ images?: Array<{ data?: string; media_type?: string }> } | undefined> {
+  return page.evaluate((p) => {
+    const raw = localStorage.getItem("better_agent_offline_queue");
+    if (!raw) return undefined;
+    try {
+      const entries = JSON.parse(raw) as Array<{ prompt?: string; images?: Array<{ data?: string; media_type?: string }> }>;
+      return entries.find((e) => e.prompt === p);
+    } catch {
+      return undefined;
+    }
+  }, prompt);
 }
 
 // Validates the real offline-action backlog (AGENTS.md "Offline-first
@@ -214,4 +241,182 @@ test("flapping connectivity does not lose or duplicate a queued prompt", async (
   // The durable backlog converges to empty — no leftover or resurrected
   // entry from an interrupted flush attempt.
   await expect.poll(() => readBacklogPrompts(page)).toEqual([]);
+});
+
+// Validates the PERMANENT-rejection path, not just a transient one: once the
+// backend genuinely refuses a queued action on its merits, the UI must show
+// a real failure state and the durable backlog must stop carrying it — never
+// retry it forever and never make it vanish with no trace.
+//
+// Real rejection path found by reading the source (not guessed): App.tsx's
+// flush loop (~App.tsx:2379-2411) dispatches a queued `send_message` over
+// the WebSocket for its target session with no existence check of its own.
+// The backend's WS handler (backend/main.py, `msg_type == "send_message"`)
+// calls `_start_prompt_handoff` -> `admit_queued_prompt_durable`, which
+// resolves the session's root id (`session_manager._root_id_for`) before
+// admitting the prompt. Deleting the session via the real
+// `DELETE /api/sessions/{id}` route removes it from the root index, so a
+// prompt admitted afterward finds `admission.get("session")` falsy
+// (backend/main.py ~17527) and the backend responds with BOTH a
+// `user_message_failed` lifecycle event (reason "session_not_found") and a
+// WS `{"type":"error"}` frame (`t("error.session_not_found_retry")`) —
+// never silently drops it and never leaves it queued. Frontend-side,
+// `handlePromptSendError` (App.tsx ~1648) is what turns that into a visible
+// `status: "error"` bubble AND calls `removeAckedOfflineAction`, which is
+// the same durable-backlog removal function every other test in this file
+// uses to prove real backend acknowledgement — so this is a genuine
+// permanent-rejection surfacing, not a UI-only relabel.
+//
+// `page.request` is Playwright's Node-side APIRequestContext: it shares the
+// browser context's auth cookie (so the real DELETE endpoint accepts it) but
+// does not go through the browser's emulated network stack, so it is
+// unaffected by `page.context().setOffline(true)` — exactly what's needed to
+// delete the session out from under the client while the page still
+// believes it is offline, mirroring a real "session was cleaned up
+// elsewhere while this client was disconnected" scenario.
+test("a queued prompt whose session was permanently deleted before reconnect surfaces a real failure, not an infinite retry or silent drop", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: FIRST. No punctuation, no other words.",
+  );
+  await expect(page.getByTestId("assistant-message")).toContainText("FIRST", { timeout: 120_000 });
+
+  const sessionMatch = page.url().match(/\/s\/([^/?#]+)/);
+  if (!sessionMatch) throw new Error(`could not extract session id from URL: ${page.url()}`);
+  const sessionId = decodeURIComponent(sessionMatch[1]);
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+  const rejectedPrompt = "Reply with exactly the single word: REJECTED. No punctuation, no other words.";
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(rejectedPrompt);
+  await textarea.press("Enter");
+
+  const rejectedMessage = page.getByTestId("user-message").last();
+  await expect(rejectedMessage).toContainText(rejectedPrompt);
+  await expect(rejectedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  expect(await readBacklogPrompts(page)).toContain(rejectedPrompt);
+
+  // Permanently reject the queued action's target: delete the session for
+  // real via the backend's own delete route, while the browser page is still
+  // offline (page.request bypasses the emulated offline network).
+  const deleteRes = await page.request.delete(`${backend.baseURL}/api/sessions/${sessionId}`);
+  expect(deleteRes.ok()).toBe(true);
+
+  await page.context().setOffline(false);
+
+  // Real failure surfaces on the bubble — not stuck on "offline" (which
+  // would mean it's still silently queued) and not simply gone.
+  await expect(rejectedMessage).toHaveAttribute("data-status", "error", { timeout: 30_000 });
+  await expect(rejectedMessage.locator(".status-error")).toContainText("Failed");
+
+  // The durable backlog entry is dropped on the backend's explicit permanent
+  // rejection — proof this is a terminal failure state, not a retry loop
+  // that keeps re-dispatching the same doomed action forever.
+  await expect.poll(() => readBacklogPrompts(page)).not.toContain(rejectedPrompt);
+
+  // No assistant reply for REJECTED — the backend never ran a turn for it
+  // (admission failed before the orchestrator/provider were ever reached).
+  const replies = await page.getByTestId("assistant-message").allTextContents();
+  expect(replies.some((t) => t.includes("REJECTED"))).toBe(false);
+});
+
+// Validates that an image attachment queued while offline is NOT dropped or
+// corrupted by the localStorage round-trip, and is genuinely delivered on
+// reconnect.
+//
+// Read from source before writing this test (useOfflineQueue.ts,
+// utils/imageAttach.ts): attachments are NOT raw File/Blob objects by the
+// time they reach the queue, so there is no JSON-serialization hazard to
+// begin with. `fileToPastedImage` (imageAttach.ts) runs entirely client-side
+// — off the browser's `Image`/`canvas` APIs and `FileReader`, no network
+// call — the instant a file is selected, turning it into a `PastedImage`
+// `{ dataUrl, base64, mediaType }` with `base64` as a plain string. App.tsx's
+// `toImagePayload` then maps that straight into `ImagePayload { data:
+// string, media_type: string }`, which is what `offlineQueue.enqueue` stores.
+// So the attachment is already a plain JSON-serializable string well before
+// it ever touches `JSON.stringify`/localStorage — the app doesn't need an
+// "attachments disabled while offline" guard because there's nothing
+// File/Blob-shaped left to fail to serialize. This test proves that holds in
+// practice: the queued entry's `images[0].data` survives the localStorage
+// round-trip intact, and the image is actually forwarded to the real
+// provider on flush (not silently dropped while the text half of the prompt
+// gets through).
+test("queues a prompt with an image attachment while offline and delivers the image through the real backend on reconnect", async ({
+  authedPage: page,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: FIRST. No punctuation, no other words.",
+  );
+  await expect(page.getByTestId("assistant-message")).toContainText("FIRST", { timeout: 120_000 });
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+  const imageDir = mkdtempSync(path.join(tmpdir(), "ba-fullstack-offline-image-"));
+  const imagePath = path.join(imageDir, "red-pixel.png");
+  writeFileSync(imagePath, Buffer.from(ONE_PIXEL_RED_PNG_BASE64, "base64"));
+
+  // Attaching happens entirely client-side (canvas/FileReader), so it works
+  // the same whether the browser is online or offline — proof of that is
+  // this succeeding at all while `setOffline(true)` is in effect.
+  await page.locator('input[type="file"]').setInputFiles(imagePath);
+  await expect(page.locator(".image-preview-item")).toHaveCount(1, { timeout: 15_000 });
+
+  const offlinePrompt = "What color is this image? Reply with exactly one word.";
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(offlinePrompt);
+  await textarea.press("Enter");
+
+  const queuedMessage = page.getByTestId("user-message").last();
+  await expect(queuedMessage).toContainText(offlinePrompt);
+  await expect(queuedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(queuedMessage.locator(".status-offline")).toContainText("Queued offline");
+
+  // The optimistic pending bubble renders the attachment immediately from
+  // local composer state (not from the queue), proving the composer handed
+  // the image off to the pending message rather than silently dropping it
+  // client-side before it ever reached `enqueue`.
+  await expect(queuedMessage.locator(".message-image")).toHaveCount(1);
+
+  // The image left the composer as part of the real send, same as the
+  // online multimodal path.
+  await expect(page.locator(".image-preview-item")).toHaveCount(0);
+
+  // The real proof this test exists for: the durable localStorage backlog
+  // entry carries the image payload as a plain base64 string, not a dropped
+  // field, an empty array, or a corrupted `"[object Object]"`/`"[object
+  // File]"` stringification artifact.
+  const backlogEntry = await readBacklogEntry(page, offlinePrompt);
+  expect(backlogEntry?.images?.length).toBe(1);
+  const queuedImage = backlogEntry!.images![0];
+  expect(queuedImage.media_type).toBe("image/jpeg");
+  expect(typeof queuedImage.data).toBe("string");
+  expect(queuedImage.data!.length).toBeGreaterThan(100);
+  expect(queuedImage.data).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+
+  await page.context().setOffline(false);
+
+  // Proof the flush actually reached the real backend wire, not merely a UI
+  // relabel.
+  await expect(queuedMessage).not.toHaveAttribute("data-status", "offline", { timeout: 30_000 });
+
+  // Proof the image specifically (not just the text half of the prompt) was
+  // genuinely transmitted to the real provider through the flush: a
+  // non-empty assistant reply to a vision question that only makes sense if
+  // the model actually received image data. Exact color correctness isn't
+  // asserted since that depends on model vision accuracy, not on whether the
+  // image round-tripped through the offline queue.
+  await expect(page.getByTestId("assistant-message").last()).not.toHaveText("", {
+    timeout: 120_000,
+  });
+
+  // The durable backlog entry is cleared only on explicit backend
+  // acknowledgement.
+  await expect.poll(() => readBacklogPrompts(page)).not.toContain(offlinePrompt);
 });

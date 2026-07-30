@@ -174,4 +174,45 @@ test.describe("projects", () => {
       rmSync(dirB, { recursive: true, force: true });
     }
   });
+
+  test("adding the same directory twice dedupes instead of crashing or duplicating the tab", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    // project_store.add_project (backend/project_store.py) upserts by
+    // (node_id, normalized path): a second POST /api/projects for the same
+    // path hits the existing-record branch, refreshes `last_used`, and
+    // returns the same record rather than inserting a second one.
+    const label = path.basename(projectDir);
+
+    await addProjectByPath(page, projectDir);
+    await addProjectByPath(page, projectDir);
+
+    const tabs = page.locator(".project-tab", { hasText: label });
+    await expect(tabs).toHaveCount(1);
+    await expect(tabs).toBeVisible();
+
+    const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+    expect(projectsRes.ok()).toBeTruthy();
+    const projectsBody = await projectsRes.json();
+    const matches = (projectsBody.projects as Array<{ path: string }>).filter((p) =>
+      p.path.endsWith(label),
+    );
+    expect(matches).toHaveLength(1);
+  });
+
+  test("zero projects renders a clean empty state with just the add button", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    // authedPage's backend is freshly spawned per test, so no project has
+    // been added yet — this is the real first-run empty state, not a mock.
+    await expect(page.locator(".project-tab")).toHaveCount(0);
+    await expect(page.locator(".project-tab-add")).toBeVisible();
+
+    const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+    expect(projectsRes.ok()).toBeTruthy();
+    const projectsBody = await projectsRes.json();
+    expect(projectsBody.projects).toEqual([]);
+  });
 });

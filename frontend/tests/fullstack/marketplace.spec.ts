@@ -247,4 +247,88 @@ test.describe("extension marketplace catalog", () => {
     expect(ask?.enabled).toBe(true);
     expect(ask?.source.type).toBe("better_agent_bundled");
   });
+
+  test("marketplace endpoints reject completely unauthenticated requests before any marketplace-specific check", async ({
+    backend,
+    playwright,
+  }) => {
+    // A brand-new APIRequestContext with no cookie jar and no bearer token
+    // at all — deliberately not `authedPage.request`, which carries the real
+    // logged-in session cookie. This proves the outer app-auth gate (the
+    // dependency every `/api/*` route sits behind) runs and rejects BEFORE
+    // any marketplace-specific "no marketplace login" logic gets a chance
+    // to run — those 401s asserted elsewhere in this file are a different,
+    // later failure mode that only fires once the caller is already an
+    // authenticated app user.
+    const anonymous = await playwright.request.newContext({ baseURL: backend.baseURL });
+    try {
+      const previewRes = await anonymous.post(
+        `/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/preview`,
+      );
+      expect(previewRes.status()).toBe(401);
+
+      const listRes = await anonymous.get(`/api/extensions`);
+      expect(listRes.status()).toBe(401);
+    } finally {
+      await anonymous.dispose();
+    }
+  });
+
+  test("preview has no rate-limiting, so a burst of repeated requests must still not fall over", async ({
+    authedPage,
+    backend,
+  }) => {
+    // Unlike backend/auth.py's login endpoint (`_RL_MAX` / `_RL_WINDOW`,
+    // a sliding-window lock-out per IP), none of the marketplace routes
+    // in backend/extension_api.py or the marketplace extension's own
+    // extensions/marketplace/backend/routes.py implement any local
+    // rate-limiting. The only 429 in that code
+    // (extensions/marketplace/backend/routes.py's `_server_request`) is a
+    // passthrough of the *remote* marketplace server's own response, and
+    // it's unreachable here: `preview_marketplace_extension` always calls
+    // `_require_access_token()` first (routes.py), which 401s from local
+    // credential-store state alone, before any network call is made. So
+    // there is no real rate-limit contract to prove for this route today.
+    //
+    // What's tested instead is the honest fallback: that the handler is
+    // cheap and stateless enough to take a real burst of sequential
+    // requests without degrading — no crash, no non-JSON/broken response,
+    // and no runaway latency growth (which would point at something like
+    // an unbounded per-request allocation or a lock held too long).
+    const BURST_SIZE = 20;
+    const latenciesMs: number[] = [];
+
+    for (let i = 0; i < BURST_SIZE; i += 1) {
+      const start = Date.now();
+      const res = await authedPage.request.post(
+        `${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/preview`,
+      );
+      latenciesMs.push(Date.now() - start);
+
+      expect(res.status()).toBe(401);
+      expect((await res.json()).detail).toBe("marketplace login required");
+    }
+
+    // No ever-growing latency: compare the mean of the first half against
+    // the mean of the second half of the burst. A real leak (e.g. an
+    // unbounded list/dict growing per call) would show up as the back
+    // half taking substantially longer than the front half. A generous
+    // multiplier avoids flaking on ordinary scheduling jitter while still
+    // catching genuine unbounded growth.
+    const half = BURST_SIZE / 2;
+    const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+    const firstHalfMean = mean(latenciesMs.slice(0, half));
+    const secondHalfMean = mean(latenciesMs.slice(half));
+    expect(secondHalfMean).toBeLessThan(Math.max(firstHalfMean * 4, firstHalfMean + 200));
+
+    // The backend is still healthy and the projection is unmutated after
+    // the burst.
+    const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
+    expect(listRes.status()).toBe(200);
+    const { extensions } = (await listRes.json()) as {
+      extensions: Array<{ manifest: { id: string }; enabled: boolean }>;
+    };
+    const ask = extensions.find((item) => item.manifest.id === NON_MARKETPLACE_EXTENSION_ID);
+    expect(ask?.enabled).toBe(true);
+  });
 });

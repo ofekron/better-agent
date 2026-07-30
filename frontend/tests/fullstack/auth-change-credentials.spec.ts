@@ -158,4 +158,114 @@ test.describe("change credentials", () => {
     expect(me.status).toBe(200);
     expect(me.body.username).toBe(backend.username);
   });
+
+  test("rejects an empty new password, client-side and server-side, and leaves credentials unchanged", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.locator(".settings-page-nav button", { hasText: "Account" }).click();
+
+    const newUsername = randomTestValue("emptypw-user");
+
+    // The new-password input is `required` (AuthCredentialsSetting.tsx), so
+    // the browser's own constraint validation must block the submit event
+    // before the component's fetch ever fires — leave it blank and confirm
+    // neither a status nor an error appears (i.e. no request was made).
+    const form = page.locator(".auth-credentials-setting");
+    await form.locator('input[autocomplete="username"]').nth(0).fill(backend.username);
+    await form.locator('input[autocomplete="current-password"]').fill(backend.password);
+    await form.locator('input[autocomplete="username"]').nth(1).fill(newUsername);
+    await form.locator(".setup-save-btn").click();
+
+    await expect(form.locator(".auth-credentials-status")).not.toBeVisible();
+    await expect(form.locator(".auth-credentials-error")).not.toBeVisible();
+
+    // Bypass the client-side `required` guard entirely and hit the real
+    // endpoint directly, riding the same session cookie the page holds, to
+    // prove the server itself rejects an empty new_password
+    // (auth_routes.change_credentials: `if not new_username or not
+    // body.new_password: raise HTTPException(400, ...)`).
+    const direct = await page.request.post(`${backend.baseURL}/api/auth/change_credentials`, {
+      data: {
+        current_username: backend.username,
+        current_password: backend.password,
+        new_username: newUsername,
+        new_password: "",
+      },
+    });
+    expect(direct.status()).toBe(400);
+
+    // Neither attempt may have mutated the credential store: the original
+    // credentials must still log in through the real form.
+    await page.evaluate(async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+      localStorage.clear();
+    });
+    await page.goto(backend.baseURL);
+    await loginViaUI(page, backend);
+
+    const me = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(me.status).toBe(200);
+    expect(me.body.username).toBe(backend.username);
+  });
+
+  test("accepts an HTML/script-injection-shaped username and renders it as inert text", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.locator(".settings-page-nav button", { hasText: "Account" }).click();
+
+    // ChangeCredentialsBody.new_username (backend/auth_routes.py) is an
+    // untyped `str` with no length/character validation server-side (only
+    // `.strip()` + non-empty), so this is accepted verbatim. The frontend
+    // never renders usernames via dangerouslySetInnerHTML/innerHTML
+    // (App.tsx's .sidebar-user-name span, MessageBubble.tsx headers all use
+    // plain JSX text interpolation), so React must auto-escape it into
+    // inert text rather than live markup.
+    const newUsername = "<script>alert(1)</script>";
+    const newPassword = randomTestValue("xss-secret");
+
+    const form = page.locator(".auth-credentials-setting");
+    await form.locator('input[autocomplete="username"]').nth(0).fill(backend.username);
+    await form.locator('input[autocomplete="current-password"]').fill(backend.password);
+    await form.locator('input[autocomplete="username"]').nth(1).fill(newUsername);
+    await form.locator('input[autocomplete="new-password"]').fill(newPassword);
+    await form.locator(".setup-save-btn").click();
+
+    await expect(form.locator(".auth-credentials-status")).toBeVisible();
+    await expect(form.locator(".auth-credentials-error")).not.toBeVisible();
+
+    // Log out fully (cookie + localStorage bearer token; see comment above).
+    await page.evaluate(async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+      localStorage.clear();
+    });
+
+    // Log back in with the new, weird username. loginViaUI already waits
+    // for the composer textarea to be visible, which proves the app shell
+    // booted normally (no injected script broke rendering).
+    await page.goto(backend.baseURL);
+    await loginViaUI(page, { ...backend, username: newUsername, password: newPassword });
+
+    const me = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(me.status).toBe(200);
+    expect(me.body.username).toBe(newUsername);
+
+    // The username must appear as plain, inert text — not be interpreted
+    // as markup by the DOM.
+    await expect(page.locator(".sidebar-user-name")).toHaveText(newUsername);
+    await expect(page.locator('script:has-text("alert(1)")')).toHaveCount(0);
+  });
 });

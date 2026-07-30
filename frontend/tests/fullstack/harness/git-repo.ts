@@ -50,3 +50,26 @@ export function createRealGitRepo(commitSubject = "initial commit"): RealGitRepo
 export function addUntrackedFile(repo: RealGitRepo, name: string, content: string): void {
   writeFileSync(path.join(repo.dir, name), content);
 }
+
+export interface PlainDir {
+  dir: string;
+  cleanup(): void;
+}
+
+/**
+ * Creates a REAL plain directory on disk with a real file in it, but
+ * deliberately WITHOUT `git init` — a fixture for exercising the
+ * non-git-repo path of the git-status/git-tree RPCs (`is_git: false`),
+ * as distinct from a real git repo.
+ */
+export function createPlainDir(): PlainDir {
+  const dir = mkdtempSync(path.join(tmpdir(), "ba-fullstack-nongit-"));
+  writeFileSync(path.join(dir, "readme.txt"), "not a git repo\n");
+
+  return {
+    dir,
+    cleanup(): void {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    },
+  };
+}

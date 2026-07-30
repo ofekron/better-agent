@@ -150,3 +150,99 @@ test("a second decide on an already-decided approval is rejected, not re-run", a
   const occurrences = (fullText?.match(/DOUBLE_DECIDE_MARKER/g) ?? []).length;
   expect(occurrences).toBe(1);
 });
+
+// Regression guard for the permission "mode" axis getting stuck once a
+// session has already been through an approval-gated turn: flips mode to
+// "Default (prompt)", drives one real approval-gated turn, flips mode back
+// to "Bypass all permissions" and saves, then drives a second real turn and
+// asserts the approval card never appears — proof the mode is read live per
+// turn from the provider's current settings, not cached/latched from the
+// first turn.
+test("switching back to bypass mid-session stops future turns from prompting", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+  // Settings is a distinct route from the app shell — createSessionWithPrompt
+  // needs the sidebar's "+ New" button, which only exists on "/".
+  await page.goto(backend.baseURL);
+
+  await createSessionWithPrompt(
+    page,
+    "Use the Bash tool to run exactly this command: echo BYPASS_REGRESSION_FIRST_MARKER",
+  );
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+  await approvalCard.locator(".user-input-card__actions button.primary").click();
+
+  await expect(page.getByTestId("assistant-message").last()).toContainText(
+    "BYPASS_REGRESSION_FIRST_MARKER",
+    { timeout: 60_000 },
+  );
+
+  // Flip the mode back to full bypass now that one approval-gated turn has
+  // already happened, and confirm it actually takes effect for the next turn.
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Bypass all permissions");
+  await saveProviderSettings(page);
+  await page.goto(backend.baseURL);
+
+  await createSessionWithPrompt(
+    page,
+    "Use the Bash tool to run exactly this command: echo BYPASS_REGRESSION_SECOND_MARKER",
+  );
+
+  await expect(page.getByTestId("assistant-message").last()).toContainText(
+    "BYPASS_REGRESSION_SECOND_MARKER",
+    { timeout: 60_000 },
+  );
+  await expect(approvalCard).not.toBeVisible();
+});
+
+// Trust/accuracy check: the user approves based on what the card SHOWS them,
+// so the card must render the real command, not a generic "Bash tool call"
+// placeholder. ToolApprovalCard (Chat.tsx) builds its argument rows from
+// toolApprovalArgRows(approval.summary), which reads summary.input (or the
+// legacy summary.args) and renders each entry as a
+// `.tool-approval-card__arg-value` <dd> keyed by `.tool-approval-card__arg-key`
+// <dt> — for the Bash tool that's the `command` key holding the exact shell
+// string. Assert the visible card text contains the distinctive command
+// verbatim, before it's approved.
+test("the approval card displays the real command, not a placeholder", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+  // Settings is a distinct route from the app shell — createSessionWithPrompt
+  // needs the sidebar's "+ New" button, which only exists on "/".
+  await page.goto(backend.baseURL);
+
+  const command = "echo UNIQUE_VISIBLE_MARKER_XYZ";
+  await createSessionWithPrompt(page, `Use the Bash tool to run exactly this command: ${command}`);
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+
+  // The full, exact command string must be visible verbatim — not truncated,
+  // not paraphrased, not swapped for a generic "run a shell command" message.
+  await expect(approvalCard).toContainText(command, { timeout: 15_000 });
+
+  // Pin down which field carries it: the `command` arg row's value cell.
+  const commandValue = approvalCard.locator(".tool-approval-card__arg-value", {
+    hasText: "UNIQUE_VISIBLE_MARKER_XYZ",
+  });
+  await expect(commandValue).toBeVisible();
+  await expect(commandValue).toHaveText(command);
+
+  await approvalCard.locator(".user-input-card__actions button.primary").click();
+
+  await expect(page.getByTestId("assistant-message").last()).toContainText(
+    "UNIQUE_VISIBLE_MARKER_XYZ",
+    { timeout: 60_000 },
+  );
+});

@@ -130,4 +130,92 @@ test.describe("real login", () => {
       await contextB.close();
     }
   });
+
+  // Login.tsx's scan-to-login path: an authenticated session mints a
+  // one-time grant via GET /api/auth/qr_grant (loopback-or-authed gated in
+  // auth_routes.py); a phone (here, a fresh unauthenticated browser
+  // context) opens .../?qr=<grant>, Login.tsx auto-redeems it via
+  // POST /api/auth/qr_redeem for a bearer token pair, and no password is
+  // ever typed there. qr_auth.consume_grant is single-use, so redeeming
+  // the same grant again must fail with 401.
+  test("QR scan-to-login redeems a real grant exactly once, no password typed", async ({
+    page,
+    browser,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    const grantRes = await page.request.get(`${backend.baseURL}/api/auth/qr_grant`);
+    expect(grantRes.ok()).toBe(true);
+    const { login_url } = await grantRes.json();
+    const grant = new URL(login_url).searchParams.get("qr");
+    expect(grant).toBeTruthy();
+
+    const scanContext = await browser.newContext();
+    try {
+      const scanPage = await scanContext.newPage();
+      await scanPage.goto(login_url);
+      await scanPage.getByTestId("input-textarea").waitFor({ state: "visible", timeout: 15_000 });
+
+      // Reached the app shell without ever seeing (let alone filling) a
+      // password field in this fresh, unauthenticated context.
+      await expect(scanPage.locator('input[autocomplete="current-password"]')).toHaveCount(0);
+
+      const me = await scanPage.evaluate(async () => {
+        const res = await fetch("/api/auth/me", { credentials: "include" });
+        return { status: res.status, body: await res.json() };
+      });
+      expect(me.status).toBe(200);
+      expect(me.body.username).toBe(backend.username);
+
+      // The grant is one-time: redeeming it again must be rejected.
+      const replay = await scanPage.request.post(`${backend.baseURL}/api/auth/qr_redeem`, {
+        data: { grant },
+        failOnStatusCode: false,
+      });
+      expect(replay.status()).toBe(401);
+    } finally {
+      await scanContext.close();
+    }
+  });
+
+  // The signed session payload lives entirely in the `better_agent_session`
+  // cookie (Starlette SessionMiddleware, see main.py's
+  // `session_cookie="better_agent_session"` wiring) — there is no
+  // server-side session table. Tampering with the cookie's value must fail
+  // the itsdangerous signature check server-side and bounce the SPA back to
+  // the login screen on reload, not leave it half-authed or crashed.
+  test("rejects a tampered session cookie and returns to the login screen", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    const cookiesBefore = await page.context().cookies();
+    const sessionCookie = cookiesBefore.find((c) => c.name === "better_agent_session");
+    expect(sessionCookie).toBeTruthy();
+
+    const meBefore = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(meBefore).toBe(200);
+
+    await page.context().addCookies([
+      {
+        ...sessionCookie!,
+        value: "tampered.garbage.value",
+      },
+    ]);
+
+    const meAfterTamper = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(meAfterTamper).toBe(401);
+
+    await page.reload();
+    await expect(page.locator(".login-submit")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("input-textarea")).not.toBeVisible();
+  });
 });

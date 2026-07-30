@@ -236,3 +236,143 @@ test("silently overwrites an externally-modified file on save, with only a passi
   // buffer clobbered it with no conflict detection at the point of save.
   expect(readFileSync(filePath, "utf-8")).toBe(localEditContent);
 });
+
+// Validates the app's actual (lack of) binary handling: FileViewer.tsx's
+// `categorize()` only special-cases markdown/csv/tsv/pdf/video extensions
+// and JSON content — there is no "image" ViewerKind and no content-type or
+// decode-failure check anywhere in the file. A file with an image extension
+// (or any other non-special extension) always falls through to `kind ===
+// "code"` and is fetched as TEXT via `GET /api/file` → `get_file_content`
+// (backend/file_browser.py), which reads with
+// `path.read_text(encoding="utf-8", errors="replace")` — invalid byte
+// sequences become U+FFFD replacement characters, never an exception. So
+// the real "fallback" for a binary file is: it opens in the same Monaco
+// text editor as any other file, showing the mangled decode instead of a
+// dedicated binary/unsupported-file message. This test locks in that real,
+// current behavior and proves it doesn't crash the app.
+test("opens a real binary file without crashing, falling back to a mangled text decode", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const workspaceDir = path.join(backend.homeDir, "workspace-binary");
+  mkdirSync(workspaceDir, { recursive: true });
+  const filePath = path.join(workspaceDir, "image.png");
+
+  // Real binary bytes: the genuine 8-byte PNG signature followed by every
+  // byte value 0-255 twice over. Bytes >= 0x80 that don't form a valid
+  // UTF-8 sequence (most of this range, taken byte-by-byte) are exactly
+  // what forces Python's `errors="replace"` decode to emit U+FFFD.
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const allByteValues = Array.from({ length: 256 }, (_, i) => i);
+  const binaryBytes = Buffer.from([...pngSignature, ...allByteValues, ...allByteValues]);
+  writeFileSync(filePath, binaryBytes);
+
+  await addProjectByPath(page, workspaceDir);
+  await createSessionWithPrompt(page, "Reply with exactly the single word: OK.");
+
+  await page.getByTitle("Browse project files").click();
+  const chooser = page.locator(".file-chooser-content");
+  await expect(chooser).toBeVisible();
+  const fileRow = chooser.locator(".tree-node.tree-file", { hasText: "image.png" });
+  await fileRow.click();
+  await expect(chooser).not.toBeVisible();
+
+  // No crash: the file viewer mounts and renders the file in Monaco (the
+  // "code" kind is the fallback for any extension categorize() doesn't
+  // recognize) instead of a blank page or an uncaught exception.
+  const fileViewer = page.locator(".file-viewer");
+  await expect(fileViewer).toBeVisible();
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText("image.png");
+  const editor = fileViewer.locator(".monaco-editor").first();
+  await expect(editor).toBeVisible({ timeout: 15_000 });
+
+  // The graceful fallback: the invalid UTF-8 bytes were decoded with
+  // replacement characters, not rejected — real evidence the backend read
+  // the binary content successfully and the frontend rendered it as-is.
+  await expect(editor.locator(".view-lines")).toContainText("�", { timeout: 15_000 });
+
+  // The rest of the app is still alive and interactive after loading
+  // binary content — no uncaught exception broke React. Re-open the file
+  // chooser (sidebar control)...
+  await page.getByTitle("Browse project files").click();
+  await expect(chooser).toBeVisible();
+  await page.locator(".modal-close").click();
+  await expect(chooser).not.toBeVisible();
+
+  // ...and the chat composer still accepts input.
+  const composer = page.getByTestId("input-textarea");
+  await composer.fill("still alive after opening a binary file");
+  await expect(composer).toHaveValue("still alive after opening a binary file");
+});
+
+// Validates the real "create a brand-new file" path (not editing an
+// existing one): the file chooser itself has a create affordance —
+// FileTree.tsx renders a `.file-tree-create-row` (kind <select> + name
+// <input> + Create button, `allowCreate` defaults to true) whenever the
+// chooser isn't mid-search. Submitting it POSTs `/api/files/create`
+// (backend/file_api.py `create_file_entry` → `file_browser.create_file`,
+// which does a real `Path.touch()`), then `createEntry()` in FileTree.tsx
+// calls `onFileClick(created.path)` to open the brand-new file straight
+// into the same Monaco editor used for existing files. This test proves
+// the file did not exist on disk beforehand, creates it purely through
+// the UI, and confirms both the DOM (editor opens on an empty new file)
+// and the real filesystem reflect the creation.
+test("creates a brand-new file through the file chooser's create row and opens it", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const workspaceDir = path.join(backend.homeDir, "workspace-create");
+  mkdirSync(workspaceDir, { recursive: true });
+  const newFileName = "brand-new-file.txt";
+  const newFilePath = path.join(workspaceDir, newFileName);
+
+  await addProjectByPath(page, workspaceDir);
+  await createSessionWithPrompt(page, "Reply with exactly the single word: OK.");
+
+  await page.getByTitle("Browse project files").click();
+  const chooser = page.locator(".file-chooser-content");
+  await expect(chooser).toBeVisible();
+
+  // Real proof the file doesn't exist yet, before we create it.
+  await expect(
+    chooser.locator(".tree-node.tree-file", { hasText: newFileName }),
+  ).toHaveCount(0);
+
+  const createRow = chooser.locator(".file-tree-create-row");
+  await expect(createRow).toBeVisible();
+  // Default kind is already "file" (FileTree.tsx's `createKind` state), so
+  // no need to touch the kind <select>.
+  const nameInput = createRow.locator("input[type='text']");
+  await nameInput.fill(newFileName);
+  const createButton = createRow.locator("button");
+  await expect(createButton).toBeEnabled();
+  await createButton.click();
+
+  // createEntry() closes the chooser and opens the new file automatically.
+  await expect(chooser).not.toBeVisible();
+
+  const fileViewer = page.locator(".file-viewer");
+  await expect(fileViewer).toBeVisible();
+  await expect(fileViewer.locator(".file-viewer-path")).toContainText(newFileName);
+
+  const editor = fileViewer.locator(".monaco-editor").first();
+  await expect(editor).toBeVisible({ timeout: 15_000 });
+
+  // The real proof: the backend's `Path.touch()` actually created the file
+  // on disk, empty, before any content was ever typed into the editor.
+  await expect.poll(() => readFileSync(newFilePath, "utf-8")).toBe("");
+
+  // Prove the editor is genuinely wired to this new file: typing and
+  // saving writes real content to the file `create_file` produced.
+  const content = "content typed into a freshly created file";
+  await editor.click();
+  await page.keyboard.type(content);
+  await expect(fileViewer.locator(".file-viewer-dirty")).toBeVisible();
+
+  const saveButton = fileViewer.locator('button[title="Save (Cmd+S)"]');
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+
+  await expect(fileViewer.locator(".file-viewer-dirty")).not.toBeVisible({ timeout: 15_000 });
+  expect(readFileSync(newFilePath, "utf-8")).toBe(content);
+});

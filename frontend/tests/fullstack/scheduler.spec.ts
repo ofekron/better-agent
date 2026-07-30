@@ -152,3 +152,82 @@ test("schedules a recurring (daily) prompt and it persists as recurring on the S
   expect(created?.kind).toBe("recurring");
   expect(created?.interval_seconds).toBe(86400);
 });
+
+// Documents the REAL (lack of) past-`fire_at` validation: ScheduleSendPopover's
+// `canSubmit` (frontend/src/components/ScheduleSendPopover.tsx) only checks
+// the prompt and that a value is present — no min-date/past-time guard — and
+// schedule_store.create() (backend/stores/schedule_store.py) only bounds
+// `fire_at` from ABOVE (MAX_HORIZON), never from below. So a past `fire_at`
+// is accepted end-to-end rather than blocked, and because it's already
+// overdue the moment it's created, schedule_ticker (10s tick, backend/
+// scheduler.py) treats it as due on its very next tick and fires it through
+// the normal turn path — deleting the "once" record afterward — instead of
+// sitting un-fired or being rejected up front.
+test("schedules a prompt with a past fire_at is accepted (no validation) and fires promptly as overdue", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Say hello. Keep it short.");
+
+  const scheduledPrompt = `Scheduled past fire_at test prompt ${Date.now()}`;
+  const draft = page.getByTestId("input-textarea");
+  await draft.fill(scheduledPrompt);
+
+  await page.locator(".input-overflow-trigger").click();
+  const scheduleBtn = page.getByTestId("schedule-btn");
+  await expect(scheduleBtn).toBeEnabled();
+  await scheduleBtn.click();
+
+  const popover = page.getByTestId("schedule-popover");
+  await expect(popover).toBeVisible();
+
+  // A real past datetime — yesterday, well outside any clock-skew margin.
+  const pastFireAt = toLocalInputValue(new Date(Date.now() - 24 * 60 * 60 * 1000));
+  await page.getByTestId("schedule-fire-at").fill(pastFireAt);
+  await page.getByTestId("schedule-repeat").selectOption("once");
+
+  // No client-side past-time guard: submit stays enabled for a past value.
+  const submitBtn = page.getByTestId("schedule-submit");
+  await expect(submitBtn).toBeEnabled();
+  await submitBtn.click();
+
+  // No server-side rejection either: the popover closes like any other
+  // successful schedule creation, not a validation error.
+  await expect(popover).not.toBeVisible({ timeout: 10_000 });
+  await expect(draft).toHaveValue("");
+
+  // The schedule was accepted as already-overdue and fires on the ticker's
+  // next pass, then (being "once") is deleted from the store. Poll instead
+  // of asserting a fixed visible-then-gone order, since it can fire before
+  // this test's first fetch lands.
+  await expect(async () => {
+    const res = await page.request.get(`${backend.baseURL}/api/schedules`);
+    expect(res.ok()).toBe(true);
+    const { schedules } = (await res.json()) as { schedules: Array<{ prompt: string }> };
+    expect(schedules.some((s) => s.prompt === scheduledPrompt)).toBe(false);
+  }).toPass({ timeout: 60_000 });
+});
+
+// Validates SchedulesPage's zero-schedules render (frontend/src/components/
+// SchedulesPage.tsx): once the initial `fetchAllSchedules()` resolves with
+// an empty list, it must show the real `.schedules-empty` copy
+// (schedulesPage.empty → "No schedules" in en.json) instead of an empty
+// `.schedules-list` or a blank/crashed page — no schedule is ever created
+// in this test, so this is a genuinely fresh backend.
+test("renders the empty state on a fresh backend with zero schedules", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await page.goto(`${backend.baseURL}/schedules`);
+
+  await expect(page.locator(".schedules-row")).toHaveCount(0);
+
+  const empty = page.locator(".schedules-empty");
+  await expect(empty).toBeVisible({ timeout: 15_000 });
+  await expect(empty).toHaveText("No schedules");
+
+  // The header and its controls still render sanely around the empty body.
+  await expect(page.getByRole("heading", { name: "Schedules" })).toBeVisible();
+  // "Clear all" only renders when there's something to clear.
+  await expect(page.getByRole("button", { name: "Clear all" })).toHaveCount(0);
+});

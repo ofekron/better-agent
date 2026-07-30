@@ -44,6 +44,8 @@ function proposeMemoryCurlCommand(memory: {
   name: string;
   description: string;
   content: string;
+  scope_type?: "global" | "project" | "folder";
+  scope_path?: string;
 }): string {
   // `$BETTER_CLAUDE_APP_SESSION_ID` stays inside its JSON string quotes --
   // the shell still expands it because the whole `-d` argument is
@@ -59,8 +61,8 @@ function proposeMemoryCurlCommand(memory: {
       description: memory.description,
       type: "user",
       content: memory.content,
-      scope_type: "global",
-      scope_path: "",
+      scope_type: memory.scope_type ?? "global",
+      scope_path: memory.scope_path ?? "",
     },
   });
   const escapedBody = body.replace(/"/g, '\\"');
@@ -74,7 +76,13 @@ function proposeMemoryCurlCommand(memory: {
 
 async function triggerMemoryProposal(
   page: import("@playwright/test").Page,
-  memory: { name: string; description: string; content: string },
+  memory: {
+    name: string;
+    description: string;
+    content: string;
+    scope_type?: "global" | "project" | "folder";
+    scope_path?: string;
+  },
 ): Promise<void> {
   const command = proposeMemoryCurlCommand(memory);
   await createSessionWithPrompt(
@@ -238,4 +246,113 @@ test("two memory proposals in the same session are approved and rejected indepen
   // ...and the rejected second proposal did not, unaffected by the first
   // turn's approval.
   expect(globalMemories.some((m) => m.name === "least-favorite-season")).toBe(false);
+});
+
+test("approving a project-scoped memory with a nonexistent scope_path is accepted and stored verbatim, not silently corrupting the store", async ({
+  authedPage: page,
+  backend,
+}) => {
+  // memory_store.write_memory (backend/memory_store.py) never checks that
+  // `scope_path` refers to a real, existing directory -- `scope_dir()` just
+  // lexically resolves it (Path.resolve() doesn't require the path to
+  // exist) and hashes it via `encode_cwd`, same as any real project path.
+  // `memory_api.validate_memory_proposal` only checks scope_path is
+  // non-empty/single-line/<=1000 chars for scope_type "project"/"folder" --
+  // it never stats the filesystem either. So this is expected to succeed,
+  // not be rejected, with the scope_path preserved verbatim in `_scope.json`
+  // (read back here through the real, non-internal GET /api/memory/all
+  // route's `scopes` array) rather than silently dropped or corrupting the
+  // global/other-scope stores.
+  const fakeScopePath = "/nonexistent/fake/path/for/fullstack-test";
+
+  await triggerMemoryProposal(page, {
+    name: "bogus-scope-memory",
+    description: "A memory proposed against a scope_path that doesn't exist.",
+    content: "This memory is scoped to a project directory that was never created.",
+    scope_type: "project",
+    scope_path: fakeScopePath,
+  });
+
+  const card = page.getByTestId("memory-proposal-card");
+  await expect(card).toBeVisible({ timeout: 60_000 });
+
+  const nameInput = card.locator(".memory-proposal-card__field input").first();
+  await expect(nameInput).toHaveValue("bogus-scope-memory");
+
+  await card.locator(".user-input-card__actions button.primary").click();
+  await expect(card).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+
+  // Not silently dropped into global, and the global store isn't corrupted
+  // by a project-scoped write.
+  const globalMemories = memoriesBody.global as Array<{ name: string }>;
+  expect(globalMemories.some((m) => m.name === "bogus-scope-memory")).toBe(false);
+
+  // Accepted as a real scope with the invalid path stored verbatim.
+  const scopes = memoriesBody.scopes as Array<{
+    type: string;
+    path: string;
+    memories: Array<{ name: string; content: string }>;
+  }>;
+  const fakeScope = scopes.find((s) => s.type === "project" && s.path === fakeScopePath);
+  expect(fakeScope).toBeDefined();
+  const persisted = fakeScope?.memories.find((m) => m.name === "bogus-scope-memory");
+  expect(persisted).toBeDefined();
+  expect(persisted?.content).toContain("never created");
+});
+
+test("a memory's content with unicode, embedded quotes, newlines, and markdown-shaped text round-trips byte-for-byte", async ({
+  authedPage: page,
+  backend,
+}) => {
+  // Exercises the full propose -> approve -> persist -> re-fetch pipeline
+  // with content designed to break naive escaping at any layer: real
+  // multi-byte unicode (accented letters, an emoji outside the BMP, CJK
+  // text), an embedded double-quote (the same character
+  // `proposeMemoryCurlCommand` and the shell command wrapper both use as
+  // their delimiter), a literal newline, and markdown-looking syntax that
+  // could be misinterpreted by a naive sanitizer. `proposeMemoryCurlCommand`
+  // already JSON.stringify()s the payload (which turns a literal newline
+  // into the two-character escape `\n` and leaves unicode as real UTF-8
+  // characters) before backslash-escaping every `"` for the outer
+  // double-quoted shell string -- reused unmodified here, since that
+  // generic recipe is exactly what's under test.
+  const specialContent =
+    'Café ☕ 日本語 memory content with a "quoted phrase", an emoji 🎉, ' +
+    'markdown-looking text like **bold**, _italic_, `code`, and a literal\nnewline right here.';
+
+  await triggerMemoryProposal(page, {
+    name: "special-characters-round-trip",
+    description: "Memory content with unicode, quotes, newlines, and markdown syntax.",
+    content: specialContent,
+  });
+
+  const card = page.getByTestId("memory-proposal-card");
+  await expect(card).toBeVisible({ timeout: 60_000 });
+
+  const nameInput = card.locator(".memory-proposal-card__field input").first();
+  await expect(nameInput).toHaveValue("special-characters-round-trip");
+  // Exact match (not `.toContain`) on the proposal card itself: confirms the
+  // content survived the curl -> internal user-input request -> WS-pushed
+  // card round trip with no mangling before approval even happens.
+  await expect(card.locator(".memory-proposal-card__content")).toHaveValue(specialContent);
+
+  await card.locator(".user-input-card__actions button.primary").click();
+  await expect(card).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+  const globalMemories = memoriesBody.global as Array<{ name: string; content: string }>;
+  const persisted = globalMemories.find((m) => m.name === "special-characters-round-trip");
+  expect(persisted).toBeDefined();
+  // Exact, byte-for-byte equality on the on-disk-persisted, re-fetched
+  // content -- not `.toContain` -- to catch truncation, double-escaping
+  // (e.g. `\"` becoming `\\"`, or `\n` becoming a literal two-char
+  // backslash-n instead of a real newline), or any corruption of the
+  // unicode bytes anywhere in the propose/approve/persist/re-fetch chain.
+  expect(persisted?.content).toBe(specialContent);
 });

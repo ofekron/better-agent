@@ -310,4 +310,138 @@ test.describe("backend crash-recovery", () => {
       await restarted.stop();
     }
   });
+
+  test("converges after crashing and restarting the backend TWICE in a row", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(240_000);
+
+    // Repeated-failure resilience check: a real restart is not necessarily
+    // stable on its own (e.g. it could re-adopt an orphan and start a
+    // *second* in-flight run that itself gets orphaned by a second crash).
+    // Crashing the freshly-restarted backend again, immediately, proves
+    // recovery converges even when it never gets a quiet moment to settle.
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 40, one number per line, then write a short paragraph " +
+        "explaining why counting is a foundational skill. Do not rush, be thorough.",
+    );
+
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash.length).toBeGreaterThan(0);
+    const sessionId = sessionsBeforeCrash[0].id as string;
+
+    await waitForRunning(page, backend, sessionId, 30_000);
+
+    // First crash + restart.
+    await killBackendProcessOnly(backend);
+    const restarted1 = await spawnBackendAgainstExistingHome(backend);
+
+    // `spawnBackendAgainstExistingHome` returns a `RestartedBackend`
+    // ({baseURL, port, pid, stop}), not a `FullStackBackend` — it's missing
+    // `username`/`password`/`homeDir`, which `killBackendProcessOnly` and
+    // `spawnBackendAgainstExistingHome` need (the latter to locate the
+    // headless-auth credential files under `<homeDir>/_auth/`). Those three
+    // fields don't change across a restart (same isolated home), so the
+    // restarted process is fed back in by reusing them from the original
+    // `backend` and overlaying the new `baseURL`/`port`/`stop` — no change
+    // to backend.ts or recovery.ts was needed.
+    const backendAfterFirstRestart: FullStackBackend = {
+      ...backend,
+      baseURL: restarted1.baseURL,
+      port: restarted1.port,
+      stop: restarted1.stop,
+    };
+
+    let restarted2: Awaited<ReturnType<typeof spawnBackendAgainstExistingHome>> | undefined;
+    try {
+      // Second crash + restart, immediately, on the backend that just came
+      // back up — no quiet/settled window in between.
+      await killBackendProcessOnly(backendAfterFirstRestart);
+      restarted2 = await spawnBackendAgainstExistingHome(backendAfterFirstRestart);
+
+      const health = await page.request.get(`${restarted2.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const sessions = await getSessionsList(page, backend);
+            const match = sessions.find((s) => s.id === sessionId);
+            return match?.is_running === true;
+          },
+          { timeout: 120_000, intervals: [500, 1000, 2000] },
+        )
+        .toBe(false);
+
+      const detailRes = await page.request.get(
+        `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+      );
+      expect(detailRes.ok()).toBe(true);
+      const tree = await detailRes.json();
+      const messages = (tree.messages ?? []) as Array<{ id: string; role: string }>;
+      const ids = messages.map((m) => m.id);
+      expect(new Set(ids).size, `duplicate message ids in render tree: ${ids.join(",")}`).toBe(
+        ids.length,
+      );
+      expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      const userMessages = page.getByTestId("user-message");
+      const assistantMessages = page.getByTestId("assistant-message");
+
+      await expect(userMessages).toHaveCount(1);
+      await expect(assistantMessages).toHaveCount(1);
+
+      const assistantMessage = assistantMessages.first();
+      const text = (await assistantMessage.textContent()) ?? "";
+      const hasRealContent = text.trim().length > 0;
+      const hasStoppedIndicator = (await assistantMessage.locator(".stopped-indicator").count()) > 0;
+
+      expect(
+        hasRealContent || hasStoppedIndicator,
+        `assistant bubble has neither content nor a stopped indicator after double recovery: ${JSON.stringify(text)}`,
+      ).toBe(true);
+    } finally {
+      await restarted2?.stop();
+    }
+  });
+
+  test("crash + restart with ZERO sessions ever created recovers cleanly", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(60_000);
+
+    // The cleanest possible recovery case: no session was ever created, so
+    // there is nothing at all for recover_all_in_flight/
+    // integrate_recovered_runs to reconcile. This is the baseline the other
+    // tests in this file build on top of — a restart must not materialize
+    // any phantom/corrupted session out of thin air.
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash).toHaveLength(0);
+
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.locator(".session-new-button").waitFor({ state: "visible", timeout: 20_000 });
+
+      const sessionsAfterRestart = await getSessionsList(page, backend);
+      expect(sessionsAfterRestart).toHaveLength(0);
+    } finally {
+      await restarted.stop();
+    }
+  });
 });

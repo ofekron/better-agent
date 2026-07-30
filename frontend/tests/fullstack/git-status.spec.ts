@@ -1,6 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { test, expect } from "./harness/fixtures";
-import { addUntrackedFile, createRealGitRepo, type RealGitRepo } from "./harness/git-repo";
+import {
+  addUntrackedFile,
+  createPlainDir,
+  createRealGitRepo,
+  type PlainDir,
+  type RealGitRepo,
+} from "./harness/git-repo";
 import { addProjectByPath } from "./harness/projects";
 
 // Validates the real git integration end-to-end: a REAL git repository on
@@ -12,9 +18,11 @@ import { addProjectByPath } from "./harness/projects";
 // mocked backend.
 test.describe("git status and history", () => {
   let repo: RealGitRepo;
+  let plainDir: PlainDir;
 
   test.afterEach(() => {
     repo?.cleanup();
+    plainDir?.cleanup();
   });
 
   test("reflects real branch, dirty count, and commit history from disk", async ({
@@ -138,5 +146,69 @@ test.describe("git status and history", () => {
     const treeView = page.getByTestId("git-tree-view");
     await expect(treeView).toBeVisible();
     await expect(treeView.locator(".git-tree-dirty")).toContainText("Changes · 3");
+  });
+
+  // A project directory with no `.git` at all — ProjectGitStatus.tsx returns
+  // `null` (no `.project-git-status` panel) when `status.is_git` is false
+  // (line 72: `if (!status || !status.is_git) return null;`), so the real
+  // backend's `is_git: false` response must both keep the UI free of a
+  // stale/crashed git panel AND be verifiable directly via the real
+  // `GET /api/git-status` REST call, no mocked git, no mocked backend.
+  test("a non-git project directory reports is_git: false and shows no git-status panel", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    plainDir = createPlainDir();
+
+    // ProjectGitStatus's own effect fires the real `GET /api/git-status`
+    // on mount — wait for that exact real response (not an arbitrary
+    // delay) before asserting the panel stays absent, so the assertion is
+    // anchored to the real precondition (the fetch having resolved) rather
+    // than a guessed timeout.
+    const [statusResp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/api/git-status") && r.url().includes(encodeURIComponent(plainDir.dir)),
+      ),
+      addProjectByPath(page, plainDir.dir),
+    ]);
+    expect(statusResp.ok()).toBe(true);
+    const polledBody = await statusResp.json();
+    expect(polledBody.is_git).toBe(false);
+
+    await expect(page.locator(".project-tab").last()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".project-git-status")).toHaveCount(0);
+
+    // Also drive the real REST surface directly, matching the pattern used
+    // by the git-diff test above.
+    const res = await page.request.get(`${backend.baseURL}/api/git-status`, {
+      params: { cwd: plainDir.dir },
+    });
+    expect(res.ok()).toBe(true);
+    const body = await res.json();
+    expect(body.is_git).toBe(false);
+  });
+
+  // ProjectGitStatus.tsx has no manual refresh control — its only re-fetch
+  // path after mount is the component's own `setInterval(refresh, 15_000)`
+  // poll of `/api/git-status` (no button/click can force it). So after the
+  // real `git checkout -b` below, this test waits on that same real poll via
+  // `expect(...).toContainText`'s built-in retry-until-timeout, rather than
+  // an arbitrary sleep, to assert the UI picks up the real new branch name
+  // from a real `git branch --show-current` re-read on the real backend.
+  test("reflects the real current branch name after a real git checkout -b on disk", async ({
+    authedPage: page,
+  }) => {
+    repo = createRealGitRepo("initial commit");
+
+    await addProjectByPath(page, repo.dir);
+
+    await expect(page.locator(".project-git-status")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".project-git-branch")).toContainText("main");
+
+    execFileSync("git", ["checkout", "-b", "feature-xyz"], { cwd: repo.dir });
+
+    await expect(page.locator(".project-git-branch")).toContainText("feature-xyz", {
+      timeout: 20_000,
+    });
   });
 });
