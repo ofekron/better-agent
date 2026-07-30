@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Capacitor } from '@capacitor/core'
 import { App as CapApp } from '@capacitor/app'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { MobileBundleReady } from './components/MobileBundleReady'
 import { cleanupRestoredModalSentinel, getModalStackSize } from './hooks/useBackButtonDismiss'
 import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
@@ -23,10 +24,12 @@ import App from './App'
 // a token is stored (QR redeem / login). Installs BEFORE any module
 // fires a request.
 installBearerAuthInterceptor()
-if (Capacitor.isNativePlatform()) {
-  initializeMobileUpdater((error) => {
-    logFailure('mobile-ota', 'commit_running_bundle_failed', error)
+const mobileBundleReady = Capacitor.isNativePlatform()
+  ? initializeMobileUpdater((error) => {
+    logFailure('mobile-ota', 'startup_failed', error)
   })
+  : () => {}
+if (Capacitor.isNativePlatform()) {
   const applyServerUrl = (url?: string | null) => {
     if (!url || !applyNativeServerConfigUrl(url)) return
     window.history.replaceState(null, '', '/')
@@ -44,22 +47,21 @@ installFrontendLogger()
 cleanupRestoredModalSentinel()
 clearHardRefreshMarker()
 
-// Private/commercial extension ids are fetched from the backend (never
-// hardcoded in this repo) and must be available before any runtime call
-// site that builds an extension API URL.
 const bootStartedAt = performance.now()
+const root = createRoot(document.getElementById('root')!)
+root.render(
+  <StrictMode>
+    <ErrorBoundary>
+      <MobileBundleReady onReady={mobileBundleReady} />
+      <ScreenWakeLock />
+      <App />
+    </ErrorBoundary>
+  </StrictMode>,
+)
 loadBuiltinExtensionIds().catch((error) => {
   logFailure('boot', 'builtin_extension_ids_failed', error)
 }).finally(() => {
   logTiming('boot', 'pre_render_ready', bootStartedAt, memorySnapshot(), 100)
-  createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <ErrorBoundary>
-        <ScreenWakeLock />
-        <App />
-      </ErrorBoundary>
-    </StrictMode>,
-  )
 })
 
 // The workbox service worker is intentionally NOT registered. On a
