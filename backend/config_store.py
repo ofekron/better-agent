@@ -92,7 +92,7 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
 MIN_SUPPORTED_CONFIG_SCHEMA_VERSION = 1
 
 _state_cache_lock = threading.RLock()
@@ -703,7 +703,6 @@ def _new_provider_record(kind: str) -> dict:
     if spec is None or spec.virtual:
         raise ValueError(f"unsupported provider kind: {kind}")
     provider_id = str(uuid.uuid4())
-    default_models = {"claude": "opus", "codex": "gpt-5.5"}
     return {
         **_new_provider_authority(),
         "id": provider_id,
@@ -714,13 +713,36 @@ def _new_provider_record(kind: str) -> dict:
         "base_url": "",
         "config_dir": "",
         "custom_models": [],
-        "default_model": default_models.get(kind, ""),
-        "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
-        "runner": _clean_runner(kind, ""),
         "default_permission": default_permission_for_kind(kind),
         "suspended": False,
         "allowed_sinks": [],
         "capabilities": {},
+    }
+
+
+# Seed model for a fresh provider kind's first runtime profile.
+_SEED_DEFAULT_MODELS = {"claude": "opus", "codex": "gpt-5.5"}
+
+
+def _seed_profile_for_provider(provider: dict) -> dict:
+    """Canonical runtime profile seeded for a freshly created provider record
+    (fresh installs, installation selection, legacy flat migration)."""
+    kind = str(provider.get("kind") or "claude")
+    runner = _clean_runner(kind, "")
+    now = _utc_now_iso()
+    return {
+        "id": str(uuid.uuid4()),
+        "provider_id": provider["id"],
+        "runner": runner,
+        "name": _default_runtime_profile_name(provider, runner),
+        "default_model": _SEED_DEFAULT_MODELS.get(kind, ""),
+        "default_reasoning_effort": clean_default_reasoning_effort_for_provider(
+            runtime_profile.provider_record_for_runner(provider, runner),
+            DEFAULT_REASONING_EFFORT,
+        ),
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
     }
 
 
@@ -732,17 +754,26 @@ def _seed_default_state() -> dict:
     if not kind:
         claude = _new_provider_record("claude")
         codex = _new_provider_record("codex")
+        profiles = [
+            _seed_profile_for_provider(claude),
+            _seed_profile_for_provider(codex),
+        ]
         return {
             "schema_version": CONFIG_SCHEMA_VERSION,
             "default_provider_id": claude["id"],
             "providers": [claude, codex],
+            "runtime_profiles": profiles,
+            "default_runtime_profile_id": profiles[0]["id"],
             "provider_state_projected": False,
         }
     provider = _new_provider_record(str(kind))
+    profile = _seed_profile_for_provider(provider)
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": provider["id"],
         "providers": [provider],
+        "runtime_profiles": [profile],
+        "default_runtime_profile_id": profile["id"],
         "provider_state_projected": False,
     }
 
@@ -840,7 +871,6 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "custom_models": list(custom_models),
         "default_model": _default_model_for(mode, base_url),
         "default_reasoning_effort": _clean_default_reasoning_effort("claude", None),
-        "runner": _clean_runner("claude", ""),
         "default_permission": default_permission_for_kind("claude"),
         "suspended": False,
         "allowed_sinks": [],
@@ -848,15 +878,33 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     }
     if provider["mode"] == "api_key":
         _migrate_legacy_api_key(pid)
-    provider = {
-        **_clean_provider_record(provider),
+    authority = {
         "generation": provider["generation"],
         "revision": provider["revision"],
+    }
+    provider = {
+        **_clean_provider_record(provider),
+        **authority,
+    }
+    runner = _clean_runner("claude", "")
+    now = _utc_now_iso()
+    profile = {
+        "id": str(uuid.uuid4()),
+        "provider_id": pid,
+        "runner": runner,
+        "name": _default_runtime_profile_name(provider, runner),
+        "default_model": _default_model_for(mode, base_url),
+        "default_reasoning_effort": _clean_default_reasoning_effort("claude", None),
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
     }
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": pid,
         "providers": [provider],
+        "runtime_profiles": [profile],
+        "default_runtime_profile_id": profile["id"],
         "provider_state_projected": False,
     }
 
@@ -1014,10 +1062,38 @@ def _normalize_loaded_state(raw: dict) -> dict:
     }
 
 
+_SCHEMA_V1_KEYS = frozenset({
+    "schema_version",
+    "default_provider_id",
+    "providers",
+    "delegate_task_policy",
+    "disabled_builtin_tools",
+    "disabled_builtin_extensions",
+    "internal_llm",
+})
+
+
 def _migrate_schema_1_to_2(raw: dict) -> dict:
+    """Adds the provider-state authority. Structural v1 validation only:
+    per-record value canonicality is enforced by the migration chain's tail
+    normalization (after 2→3 has moved the per-record execution fields)."""
     if raw.get("schema_version") != 1:
         raise RuntimeError("unsupported provider config schema")
-    candidate = {
+    if set(raw) != _SCHEMA_V1_KEYS:
+        raise RuntimeError("unsupported provider config schema")
+    if (
+        raw["delegate_task_policy"]
+        != _normalize_delegate_task_policy(raw["delegate_task_policy"])
+        or raw["disabled_builtin_tools"]
+        != _normalize_disabled_builtin_tools(raw["disabled_builtin_tools"])
+        or raw["disabled_builtin_extensions"]
+        != _normalize_disabled_builtin_extensions(raw["disabled_builtin_extensions"])
+        or raw["internal_llm"] != _normalize_internal_llm(raw["internal_llm"])
+    ):
+        raise RuntimeError("unsupported provider config schema")
+    if not isinstance(raw.get("providers"), list):
+        raise RuntimeError("unsupported provider config schema")
+    return {
         **copy.deepcopy(raw),
         "schema_version": 2,
         "provider_state_authority": provider_sync_authority.new_authority(
@@ -1026,22 +1102,87 @@ def _migrate_schema_1_to_2(raw: dict) -> dict:
         ),
         "provider_state_projected": False,
     }
-    normalized = _normalize_loaded_state(candidate)
-    expected_v1 = copy.deepcopy(normalized)
-    expected_v1["schema_version"] = 1
-    expected_v1.pop("provider_state_authority")
-    expected_v1.pop("provider_state_projected")
-    # v1 predates runtime profiles; the keys only exist post-normalization.
-    expected_v1.pop("runtime_profiles")
-    expected_v1.pop("default_runtime_profile_id")
-    expected_v1.pop("deleted_providers")
-    if raw != expected_v1:
+
+
+def _migrate_schema_2_to_3(raw: dict) -> dict:
+    """v3 moves runner/default_model/default_reasoning_effort off provider
+    records onto runtime profiles. Every v2 provider spawns (or reuses) the
+    live profile for its configured (provider, runner) pair; the default
+    provider's profile seeds default_runtime_profile_id."""
+    if raw.get("schema_version") != 2:
         raise RuntimeError("unsupported provider config schema")
-    return normalized
+    state = copy.deepcopy(raw)
+    providers = state.get("providers")
+    if not isinstance(providers, list):
+        raise RuntimeError("unsupported provider config schema")
+    profiles = state.get("runtime_profiles")
+    if profiles is None:
+        profiles = []
+    if not isinstance(profiles, list):
+        raise RuntimeError(
+            "unsupported provider config schema: runtime_profiles must be a list"
+        )
+    now = _utc_now_iso()
+    provider_runners: dict[str, str] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise RuntimeError(
+                "unsupported provider config schema: invalid provider record"
+            )
+        for field in ("runner", "default_model", "default_reasoning_effort"):
+            if not isinstance(provider.get(field), str):
+                raise RuntimeError(
+                    f"unsupported provider config schema: provider {field} is invalid"
+                )
+        kind = str(provider.get("kind") or "claude")
+        runner = _clean_runner(kind, provider.pop("runner"))
+        default_model = provider.pop("default_model")
+        default_effort = provider.pop("default_reasoning_effort")
+        provider_runners[provider.get("id")] = runner
+        existing = next(
+            (
+                p for p in profiles
+                if p.get("provider_id") == provider.get("id")
+                and p.get("runner") == runner
+                and not p.get("deleted_at")
+            ),
+            None,
+        )
+        if existing is None:
+            profiles.append({
+                "id": str(uuid.uuid4()),
+                "provider_id": provider.get("id"),
+                "runner": runner,
+                "name": _default_runtime_profile_name(provider, runner),
+                "default_model": default_model,
+                "default_reasoning_effort": default_effort,
+                "created_at": now,
+                "updated_at": now,
+                "deleted_at": None,
+            })
+    state["runtime_profiles"] = profiles
+    if not state.get("default_runtime_profile_id"):
+        default_provider_id = state.get("default_provider_id")
+        default_runner = provider_runners.get(default_provider_id)
+        default_profile = next(
+            (
+                p for p in profiles
+                if p.get("provider_id") == default_provider_id
+                and p.get("runner") == default_runner
+                and not p.get("deleted_at")
+            ),
+            None,
+        )
+        state["default_runtime_profile_id"] = (
+            default_profile.get("id") if default_profile else None
+        )
+    state["schema_version"] = 3
+    return _normalize_loaded_state(state)
 
 
 _CONFIG_SCHEMA_MIGRATIONS: dict[int, Callable[[dict], dict]] = {
     1: _migrate_schema_1_to_2,
+    2: _migrate_schema_2_to_3,
 }
 
 
@@ -1153,13 +1294,14 @@ def provider_credential_env(provider: dict) -> Optional[tuple[str, str]]:
 
 def _clean_provider_record(provider: dict) -> dict:
     kind = str(provider.get("kind") or "claude").strip() or "claude"
-    runner = _clean_runner(kind, provider.get("runner"))
     mode = provider.get("mode", "subscription")
     if mode not in ("subscription", "api_key"):
         mode = "subscription"
     base_url = str(provider.get("base_url") or "").strip()
-    _reject_unsupported_provider_config(kind, mode, runner)
-    clean = {
+    # Runner-specific combination rules live on runtime-profile creation; the
+    # account-level check here rejects kind/mode combos no runner could fix.
+    _reject_unsupported_provider_config(kind, mode, _clean_runner(kind, ""))
+    return {
         "id": str(provider.get("id") or uuid.uuid4()),
         "name": str(provider.get("name") or "").strip() or "Provider",
         "nickname": str(provider.get("nickname") or "").strip(),
@@ -1177,20 +1319,14 @@ def _clean_provider_record(provider: dict) -> dict:
             for model in (provider.get("custom_models") or [])
             if str(model or "").strip()
         ],
-        "default_model": str(provider.get("default_model") or "").strip(),
-        "runner": runner,
         "default_permission": _clean_default_permission(
-            _runtime_kind_for_config(kind, runner),
+            _runtime_kind_for_config(kind, _clean_runner(kind, "")),
             provider.get("default_permission"),
         ),
         "suspended": provider.get("suspended") is True,
         "allowed_sinks": _clean_allowed_sinks(provider.get("allowed_sinks")),
         "capabilities": _clean_capabilities(provider.get("capabilities")),
     }
-    clean["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
-        clean, provider.get("default_reasoning_effort"),
-    )
-    return clean
 
 
 def _load_state() -> dict:
@@ -1616,16 +1752,42 @@ def resolve_internal_llm(task_key: str) -> dict:
         if provider and not _provider_available_for_state(state, provider):
             provider = None
         provider_id = provider["id"] if provider else None
-    model = assignment.get("model") or (provider.get("default_model") if provider else "")
-    runner = runtime_profile.resolve_runner(provider, assignment.get("runner")) if provider else ""
+    profile = None
+    model = assignment.get("model") or ""
+    runner = ""
     effort = ""
     if provider:
-        options = runtime_profile.reasoning_efforts(provider, runner, model=model)
+        requested_runner = assignment.get("runner") or ""
+        if not requested_runner:
+            preferred = _preferred_live_profile_in_state(state, provider)
+            requested_runner = preferred.get("runner") if preferred else ""
+        runner = runtime_profile.resolve_runner(provider, requested_runner)
+        profile = next(
+            (
+                p for p in state.get("runtime_profiles", [])
+                if p.get("provider_id") == provider.get("id")
+                and p.get("runner") == runner
+                and not runtime_profile_is_deleted(p)
+            ),
+            None,
+        )
+        if not model:
+            model = str(profile.get("default_model") or "") if profile else ""
+        options = runtime_profile.reasoning_efforts(
+            {
+                **provider,
+                "reasoning_effort_options": reasoning_effort_options_for_provider(provider),
+            },
+            runner,
+            model=model,
+        )
         chosen = assignment.get("reasoning_effort")
         if chosen in options:
             effort = chosen
         else:
-            default_effort = provider.get("default_reasoning_effort") or ""
+            default_effort = (
+                str(profile.get("default_reasoning_effort") or "") if profile else ""
+            )
             effort = default_effort if default_effort in options else (options[0] if options else "")
     return {
         "provider_id": provider_id,
@@ -1664,9 +1826,6 @@ def _provider_config(provider: dict) -> dict:
         if caps.get("supports_reasoning_effort")
         else []
     )
-    default_effort = clean_default_reasoning_effort_for_provider(
-        provider, provider.get("default_reasoning_effort")
-    )
     permission_options = _kind_permission_options(runtime_kind)
     default_perm = (
         _clean_default_permission(runtime_kind, provider.get("default_permission"))
@@ -1684,8 +1843,6 @@ def _provider_config(provider: dict) -> dict:
         "base_url": provider.get("base_url", ""),
         "config_dir": provider.get("config_dir", ""),
         "custom_models": provider.get("custom_models", []),
-        "default_model": provider.get("default_model", ""),
-        "runner": runtime_profile.default_runner(provider),
         "runner_options": list(runtime_profile.supported_runners(provider)),
         "runner_profiles": runtime_profile.runner_profiles({
             **provider,
@@ -1693,7 +1850,6 @@ def _provider_config(provider: dict) -> dict:
         }),
         "suspended": _provider_is_suspended(provider),
         "reasoning_effort_options": effort_options,
-        "default_reasoning_effort": default_effort if effort_options else "",
         "permission_options": permission_options,
         "default_permission": default_perm,
         # Credential-broker identity pin: host patterns this provider may
@@ -2381,6 +2537,7 @@ def hydrate_provider_execution(
     *,
     expected_generation: str,
     expected_revision: int,
+    runner: object = None,
 ) -> Optional["ProviderExecutionHydration"]:
     from provider_execution_authority import (
         ProviderExecutionCredential,
@@ -2398,6 +2555,16 @@ def hydrate_provider_execution(
             expected_generation,
             expected_revision,
         )
+        # The execution snapshot carries the resolved runtime view: the
+        # store record plus profile-derived runner/model/effort defaults.
+        # Downstream pinned values (headless requests) still override.
+        defaults = provider_execution_defaults(provider_id, runner)
+        provider = {
+            **provider,
+            "runner": defaults["runner"],
+            "default_model": defaults["default_model"],
+            "default_reasoning_effort": defaults["default_reasoning_effort"],
+        }
         credential = None
         if provider.get("mode") == "api_key":
             api_key = _read_api_key(provider_id)
@@ -2484,11 +2651,10 @@ def add_provider(payload: dict) -> dict:
     if mode not in ("subscription", "api_key"):
         mode = "subscription"
     kind = (payload.get("kind") or "claude").strip()
-    runner = _clean_runner(kind, payload.get("runner"))
     base_url = (payload.get("base_url") or "").strip()
-    _reject_unsupported_provider_config(kind, mode, runner)
+    authority = _new_provider_authority()
     provider = {
-        **_new_provider_authority(),
+        **authority,
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
         "nickname": (payload.get("nickname") or "").strip(),
@@ -2502,23 +2668,18 @@ def add_provider(payload: dict) -> dict:
             value=payload.get("config_dir"),
         ),
         "custom_models": list(payload.get("custom_models") or []),
-        "default_model": (payload.get("default_model") or "").strip(),
-        "runner": runner,
         "default_permission": _clean_default_permission(
-            _runtime_kind_for_config(kind, runner),
+            _runtime_kind_for_config(kind, _clean_runner(kind, "")),
             payload.get("default_permission"),
         ),
         "suspended": payload.get("suspended") is True,
         "allowed_sinks": _clean_allowed_sinks(payload.get("allowed_sinks")),
         "capabilities": _clean_capabilities(payload.get("capabilities")),
     }
-    provider["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
-        provider, payload.get("default_reasoning_effort")
-    )
     provider = {
         **_clean_provider_record(provider),
-        "generation": provider["generation"],
-        "revision": provider["revision"],
+        "generation": authority["generation"],
+        "revision": authority["revision"],
     }
     dependency_plan.assert_provider_supported(provider)
     state["providers"].append(provider)
@@ -2571,37 +2732,33 @@ def update_provider(
             base_url=target.get("base_url", ""),
             value=payload.get("config_dir"),
         )
-    if "default_model" in payload:
-        target["default_model"] = (payload.get("default_model") or "").strip()
-    if "runner" in payload or "kind" in payload:
-        target["runner"] = _clean_runner(
-            target.get("kind", "claude"),
-            payload.get("runner", target.get("runner")),
-        )
     target["config_dir"] = _clean_provider_config_dir(
         kind=target.get("kind", "claude"),
         mode=target.get("mode", "subscription"),
         base_url=target.get("base_url", ""),
         value=target.get("config_dir"),
     )
-    _reject_unsupported_provider_config(
-        target.get("kind", "claude"),
-        target.get("mode", "subscription"),
-        target.get("runner"),
-    )
-    if "default_reasoning_effort" in payload:
-        target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
-            target, payload.get("default_reasoning_effort")
-        )
-    elif "kind" in payload or "base_url" in payload or "runner" in payload:
-        target["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
-            target, target.get("default_reasoning_effort")
-        )
+    if "kind" in payload or "mode" in payload:
+        # A kind/mode change must not invalidate any live profile's runner —
+        # fail closed rather than leave a profile whose identity the account
+        # can no longer execute.
+        for profile in state.get("runtime_profiles", []):
+            if (
+                profile.get("provider_id") != provider_id
+                or runtime_profile_is_deleted(profile)
+            ):
+                continue
+            runtime_profile.resolve_runner(target, profile.get("runner"), strict=True)
+            _reject_unsupported_provider_config(
+                target.get("kind", "claude"),
+                target.get("mode", "subscription"),
+                profile.get("runner"),
+            )
     if "default_permission" in payload:
         target["default_permission"] = _clean_default_permission(
             _runtime_kind_for_provider(target), payload.get("default_permission")
         )
-    elif "kind" in payload or "runner" in payload:
+    elif "kind" in payload:
         target["default_permission"] = _clean_default_permission(
             _runtime_kind_for_provider(target), target.get("default_permission")
         )
@@ -2834,6 +2991,29 @@ def _tombstone_orphaned_runtime_profiles(state: dict) -> None:
             profile["updated_at"] = now
 
 
+def _preferred_live_profile_in_state(state: dict, provider: dict) -> Optional[dict]:
+    """Deterministic live-profile choice for a provider: the default profile
+    when it belongs to this provider, else the manifest-default-runner
+    profile, else the first live profile."""
+    profiles = state.get("runtime_profiles", [])
+    default_id = state.get("default_runtime_profile_id")
+    live = [
+        p for p in profiles
+        if p.get("provider_id") == provider.get("id")
+        and not runtime_profile_is_deleted(p)
+    ]
+    if not live:
+        return None
+    for profile in live:
+        if profile.get("id") == default_id:
+            return profile
+    default_runner = _clean_runner(str(provider.get("kind") or "claude"), "")
+    for profile in live:
+        if profile.get("runner") == default_runner:
+            return profile
+    return live[0]
+
+
 def _reconcile_default_runtime_profile(state: dict) -> None:
     """Re-derive default_runtime_profile_id after a default/provider-set change
     made outside profile activation (installation selection, suspension
@@ -2859,18 +3039,58 @@ def _reconcile_default_runtime_profile(state: dict) -> None:
             None,
         )
         if provider is not None:
-            replacement = next(
-                (
-                    p for p in profiles
-                    if p.get("provider_id") == default_provider_id
-                    and p.get("runner") == provider.get("runner")
-                    and not runtime_profile_is_deleted(p)
-                ),
-                None,
-            )
+            replacement = _preferred_live_profile_in_state(state, provider)
     state["default_runtime_profile_id"] = (
         replacement.get("id") if replacement else None
     )
+
+
+def provider_execution_defaults(provider_id: str, runner: object = None) -> dict:
+    """Profile-derived execution defaults for a provider account.
+
+    `{runtime_profile_id, runner, default_model, default_reasoning_effort}` —
+    resolved from the live profile for (provider, runner) when a runner is
+    given, else from the provider's preferred live profile (default profile
+    first). Falls back to the manifest default runner and empty defaults when
+    the provider has no live profile."""
+    state = _load_state()
+    provider = next(
+        (p for p in state.get("providers", []) if p.get("id") == provider_id),
+        None,
+    )
+    if provider is None:
+        return {
+            "runtime_profile_id": None,
+            "runner": "",
+            "default_model": "",
+            "default_reasoning_effort": "",
+        }
+    requested = str(runner or "").strip()
+    profile = None
+    if requested:
+        profile = next(
+            (
+                p for p in state.get("runtime_profiles", [])
+                if p.get("provider_id") == provider_id
+                and p.get("runner") == requested
+                and not runtime_profile_is_deleted(p)
+            ),
+            None,
+        )
+    else:
+        profile = _preferred_live_profile_in_state(state, provider)
+    resolved_runner = (
+        profile.get("runner") if profile else
+        requested or _clean_runner(str(provider.get("kind") or "claude"), "")
+    )
+    return {
+        "runtime_profile_id": profile.get("id") if profile else None,
+        "runner": resolved_runner,
+        "default_model": str(profile.get("default_model") or "") if profile else "",
+        "default_reasoning_effort": (
+            str(profile.get("default_reasoning_effort") or "") if profile else ""
+        ),
+    }
 
 
 def _normalize_runtime_profiles(raw, providers: list[dict]) -> list[dict]:
