@@ -110,7 +110,27 @@ def _decode_family(raw: Mapping[str, Any]) -> _FrozenContract:
         raise ProviderExecutionContractError(
             "unsupported provider family execution contract",
         )
-    _reject_secrets(raw["payload"])
+    payload = raw["payload"]
+    if "runtime_capabilities" in payload:
+        # The capability manifest is identifier-keyed in places (e.g.
+        # prewarm_status keyed by MCP server name), so the heuristic key
+        # scan would condemn legitimate identifiers. Its own structural
+        # whitelist validator is the secret-safety authority for it.
+        from codex_execution_common import ExecutionContractError
+        from provider_family_runtime_capabilities import (
+            runtime_capability_manifest_from_payload,
+        )
+
+        try:
+            runtime_capability_manifest_from_payload(payload)
+        except ExecutionContractError as exc:
+            raise ProviderExecutionContractError(str(exc)) from exc
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if key != "runtime_capabilities"
+        }
+    _reject_secrets(payload)
     return _FrozenContract(_canonical_json(raw))
 
 

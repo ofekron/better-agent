@@ -28,6 +28,8 @@ from provider_family_runtime_capabilities import (
 )
 from provider_manifest import artifact_family_kinds
 
+import runtime_profile
+
 
 @dataclass(frozen=True)
 class FamilyExecutionRuntime:
@@ -85,10 +87,17 @@ def prepare_family_execution(
         type(provider) is not dict
         or type(start_arguments) is not dict
         or type(runner_input) is not dict
-        or provider.get("kind") != launch.family
+        or runtime_profile.runtime_kind(provider) != launch.family
         or capabilities.manifest["family"] != launch.family
     ):
         raise ExecutionContractError("invalid family execution preparation")
+    # better_agent_runner delegation executes one configured kind through
+    # another family's runtime (e.g. codex/fugu records through the openai
+    # family). The execution artifact's authority kind is the runtime
+    # family: provider._assert_execution_provider requires it to equal the
+    # executing provider class KIND, and every family read-side check
+    # compares against it.
+    provider = {**provider, "kind": launch.family}
     payload = {
         **launch.to_payload(),
         **family_runtime_capability_payload(capabilities),
