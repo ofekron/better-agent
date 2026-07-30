@@ -277,7 +277,6 @@ def verified_active_env(backend_dir: Path) -> Path:
             check=True,
             capture_output=True,
             text=True,
-            timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise DependencyPlanError(

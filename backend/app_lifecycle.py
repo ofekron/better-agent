@@ -333,6 +333,7 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    provider_auth.reopen_status_probes()
     # Kill any OAuth login/logout CLI that outlived a prior backend crash
     # so no `claude auth login` / `codex login` is left holding a callback port.
     _fire_and_forget(asyncio.to_thread(provider_auth.reap_orphaned_logins))
@@ -919,7 +920,12 @@ async def on_shutdown():
     await marketplace_bridge_api.stop()
     # Kill any in-flight OAuth login/logout subprocesses so a `claude auth
     # login` / `codex login` is never orphaned by a backend restart.
-    provider_auth.shutdown_all()
+    try:
+        await provider_auth.shutdown_status_probes()
+    except Exception:
+        logger.exception("provider auth status probes did not quiesce")
+    finally:
+        provider_auth.shutdown_all()
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()

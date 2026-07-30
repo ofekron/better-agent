@@ -69,6 +69,8 @@ _CANCEL_CONFIRM_SECONDS = 2.0
 # How long a cached authoritative auth-status is trusted. Invalidated
 # immediately on login/logout completion.
 _AUTH_CACHE_TTL_SECONDS = 120.0
+_STATUS_GLOBAL_CONCURRENCY = 2
+_STATUS_KIND_CONCURRENCY = 1
 
 # Transient per-process registries. `_states` tracks in-flight progress
 # only; the durable "is this account logged in" truth is the provider's
@@ -79,6 +81,13 @@ _procs: dict[str, asyncio.subprocess.Process] = {}
 _tasks: set = set()
 _auth_cache: dict[str, tuple[float, Optional[bool]]] = {}
 _pending_refresh: set[str] = set()
+_status_global_semaphore: asyncio.Semaphore | None = None
+_status_kind_semaphores: dict[str, asyncio.Semaphore] = {}
+_status_admission_loop: asyncio.AbstractEventLoop | None = None
+_status_tasks: set[asyncio.Task] = set()
+_status_procs: dict[object, asyncio.subprocess.Process] = {}
+_status_cleanup_tasks: dict[object, asyncio.Task] = {}
+_status_shutting_down = False
 
 BroadcastFn = Callable[[], Awaitable[None]]
 
@@ -348,27 +357,206 @@ def _safe_unlink(path: Path) -> None:
         pass
 
 
+def reopen_status_probes() -> None:
+    global _status_shutting_down
+    _status_shutting_down = False
+
+
+def _status_admission(kind: str) -> tuple[asyncio.Semaphore, asyncio.Semaphore]:
+    global _status_admission_loop, _status_global_semaphore
+    loop = asyncio.get_running_loop()
+    if _status_admission_loop is not loop:
+        other_tasks = _status_tasks - {asyncio.current_task()}
+        if other_tasks or _status_procs:
+            raise RuntimeError("provider auth status admission changed event loops while active")
+        _status_admission_loop = loop
+        _status_global_semaphore = asyncio.Semaphore(_STATUS_GLOBAL_CONCURRENCY)
+        _status_kind_semaphores.clear()
+    if _status_global_semaphore is None:
+        _status_global_semaphore = asyncio.Semaphore(_STATUS_GLOBAL_CONCURRENCY)
+    kind_semaphore = _status_kind_semaphores.setdefault(
+        kind,
+        asyncio.Semaphore(_STATUS_KIND_CONCURRENCY),
+    )
+    return kind_semaphore, _status_global_semaphore
+
+
+async def _acquire_status_admission(
+    kind: str,
+) -> tuple[asyncio.Semaphore, asyncio.Semaphore]:
+    kind_semaphore, global_semaphore = _status_admission(kind)
+    await kind_semaphore.acquire()
+    try:
+        await global_semaphore.acquire()
+    except BaseException:
+        kind_semaphore.release()
+        raise
+    return kind_semaphore, global_semaphore
+
+
+async def _kill_and_reap_status_proc(
+    proc: asyncio.subprocess.Process,
+) -> None:
+    if proc.returncode is None:
+        _kill_proc(proc)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_CANCEL_CONFIRM_SECONDS)
+    except ProcessLookupError:
+        if proc.returncode is None:
+            raise
+    except asyncio.TimeoutError as exc:
+        if proc.returncode is None:
+            raise RuntimeError(
+                f"provider auth status process {proc.pid} did not reap"
+            ) from exc
+
+
+async def _reap_owned_status(
+    token: object,
+    proc: asyncio.subprocess.Process,
+) -> None:
+    await _kill_and_reap_status_proc(proc)
+    if proc.returncode is None:
+        raise RuntimeError(
+            f"provider auth status process {proc.pid} remains live after reap"
+        )
+    _status_procs.pop(token, None)
+
+
+def _status_cleanup_task(
+    token: object,
+    proc: asyncio.subprocess.Process,
+) -> asyncio.Task:
+    existing = _status_cleanup_tasks.get(token)
+    if existing is not None and not existing.done():
+        return existing
+    task = asyncio.create_task(
+        _reap_owned_status(token, proc),
+        name=f"provider_auth:status:reap:{proc.pid}",
+    )
+    _status_cleanup_tasks[token] = task
+
+    def _remove_completed(completed: asyncio.Task) -> None:
+        if completed.cancelled() or completed.exception() is not None:
+            return
+        if _status_cleanup_tasks.get(token) is completed:
+            _status_cleanup_tasks.pop(token, None)
+
+    task.add_done_callback(_remove_completed)
+    return task
+
+
+async def _await_status_cleanup(
+    token: object,
+    proc: asyncio.subprocess.Process,
+) -> None:
+    cleanup = _status_cleanup_task(token, proc)
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    await cleanup
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _spawn_owned_status(
+    provider: dict,
+    token: object,
+) -> Optional[asyncio.subprocess.Process]:
+    spawn_task = asyncio.create_task(
+        _spawn(provider, "status"),
+        name="provider_auth:status:spawn",
+    )
+    try:
+        proc = await asyncio.shield(spawn_task)
+    except asyncio.CancelledError:
+        try:
+            proc = await spawn_task
+        except Exception:
+            raise
+        if proc is not None:
+            _status_procs[token] = proc
+            await _await_status_cleanup(token, proc)
+        raise
+    if proc is not None:
+        _status_procs[token] = proc
+    return proc
+
+
 async def _status_authenticated(provider: dict) -> bool:
     """Authoritative logged-in check via the provider's own status
     subcommand. Returns True on a 0-exit (authenticated). Any failure
     (binary missing, non-zero, timeout) is treated as not-logged-in."""
+    if _status_shutting_down:
+        return False
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("provider auth status probe requires an asyncio task")
+    _status_tasks.add(task)
+    kind = provider.get("kind") or "claude"
+    kind_semaphore: asyncio.Semaphore | None = None
+    global_semaphore: asyncio.Semaphore | None = None
+    token = object()
     try:
-        proc = await _spawn(provider, "status")
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-    if proc is None:
-        return False
-    try:
-        await asyncio.wait_for(proc.communicate(), timeout=_STATUS_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
+        kind_semaphore, global_semaphore = await _acquire_status_admission(kind)
+        if _status_shutting_down:
+            return False
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        return False
-    return proc.returncode == 0
+            proc = await _spawn_owned_status(provider, token)
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+        if proc is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_STATUS_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await _kill_and_reap_status_proc(proc)
+            return False
+        return proc.returncode == 0
+    finally:
+        proc = _status_procs.get(token)
+        if proc is not None:
+            if proc.returncode is None:
+                await _await_status_cleanup(token, proc)
+            else:
+                _status_procs.pop(token, None)
+        if global_semaphore is not None:
+            global_semaphore.release()
+        if kind_semaphore is not None:
+            kind_semaphore.release()
+        _status_tasks.discard(task)
+
+
+async def shutdown_status_probes() -> None:
+    global _status_shutting_down
+    _status_shutting_down = True
+    current = asyncio.current_task()
+    tasks = [task for task in tuple(_status_tasks) if task is not current]
+    for task in tasks:
+        task.cancel()
+    cleanup = [
+        _status_cleanup_task(token, proc)
+        for token, proc in tuple(_status_procs.items())
+    ]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    cleanup_results = await asyncio.gather(*cleanup, return_exceptions=True)
+    failures = [
+        result for result in cleanup_results if isinstance(result, BaseException)
+    ]
+    if _status_procs or failures:
+        pids = sorted(proc.pid for proc in _status_procs.values())
+        raise RuntimeError(
+            f"provider auth status shutdown left owned processes: {pids}"
+        )
 
 
 async def refresh_auth_status(provider_id: str, broadcast: BroadcastFn) -> None:
