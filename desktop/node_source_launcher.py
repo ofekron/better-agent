@@ -37,7 +37,7 @@ def run(
         }
     try:
         supervisor.start()
-        if not supervisor.wait_healthy():
+        if not supervisor.wait_healthy(timeout=None):
             raise RuntimeError("worker node failed to become healthy")
         while not stopping.is_set():
             exit_code = supervisor.wait_exit()

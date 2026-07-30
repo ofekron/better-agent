@@ -23,8 +23,8 @@ class FakeSupervisor:
     def start(self) -> None:
         self.calls.append("start")
 
-    def wait_healthy(self) -> bool:
-        self.calls.append("wait_healthy")
+    def wait_healthy(self, timeout: float | None = 30.0) -> bool:
+        self.calls.append(("wait_healthy", timeout))
         return True
 
     def wait_exit(self) -> int:
@@ -103,6 +103,7 @@ def test_default_launcher_injects_node_credential_authority(monkeypatch) -> None
         "port": 8002,
         "broker": broker,
     }
+    assert ("wait_healthy", None) in supervisor.calls
 
 
 def test_requested_restart_uses_fresh_supervised_generation() -> None:
@@ -134,7 +135,7 @@ def test_unhealthy_node_is_closed() -> None:
         restart_results=[],
         recovery_results=[],
     )
-    supervisor.wait_healthy = lambda: False
+    supervisor.wait_healthy = lambda timeout=None: False
 
     try:
         node_source_launcher.run(
