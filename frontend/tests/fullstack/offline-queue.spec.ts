@@ -420,3 +420,68 @@ test("queues a prompt with an image attachment while offline and delivers the im
   // acknowledgement.
   await expect.poll(() => readBacklogPrompts(page)).not.toContain(offlinePrompt);
 });
+
+// Validates that a queued-while-offline prompt survives a REAL page reload
+// that happens while the browser is STILL offline — not just persistence
+// across time within one already-mounted page instance (every other test in
+// this file only exercises that weaker case). `page.context().setOffline`
+// is a browser-context-level network condition (CDP
+// `Network.emulateNetworkConditions`), so it stays in effect across
+// `page.reload()`'s navigation. On a fresh mount, the app has no in-memory
+// React state at all — the pending bubble can only reappear by the offline
+// queue hook re-reading `better_agent_offline_queue` from localStorage on
+// init, so this proves genuine re-hydration, not state merely surviving
+// because the page never actually unloaded.
+test("a prompt queued while offline survives a real page reload that still happens while offline", async ({
+  authedPage: page,
+}) => {
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the single word: FIRST. No punctuation, no other words.",
+  );
+  await expect(page.getByTestId("assistant-message")).toContainText("FIRST", { timeout: 120_000 });
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+  const reloadPrompt = "Reply with exactly the single word: RELOADED. No punctuation, no other words.";
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(reloadPrompt);
+  await textarea.press("Enter");
+
+  const queuedMessage = page.getByTestId("user-message").last();
+  await expect(queuedMessage).toContainText(reloadPrompt);
+  await expect(queuedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(queuedMessage.locator(".status-offline")).toContainText("Queued offline");
+  expect(await readBacklogPrompts(page)).toContain(reloadPrompt);
+
+  // Real reload, still offline: the browser context's network condition
+  // persists across the navigation, so this is a genuine fresh page load
+  // with no network reachable — not a soft client-side re-render.
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+
+  // The durable backlog itself survived the fresh page load untouched.
+  expect(await readBacklogPrompts(page)).toContain(reloadPrompt);
+
+  // The UI re-hydrates the queued prompt's bubble from that backlog on
+  // mount, still correctly marked offline — proof this is real
+  // re-hydration, not leftover in-memory state.
+  const reloadedMessage = page.getByTestId("user-message").last();
+  await expect(reloadedMessage).toContainText(reloadPrompt);
+  await expect(reloadedMessage).toHaveAttribute("data-status", "offline", { timeout: 10_000 });
+  await expect(reloadedMessage.locator(".status-offline")).toContainText("Queued offline");
+
+  await page.context().setOffline(false);
+
+  // Proof the flush actually reached the real backend wire after the
+  // reload, not merely a UI relabel.
+  await expect(reloadedMessage).not.toHaveAttribute("data-status", "offline", { timeout: 30_000 });
+  await expect(page.getByTestId("assistant-message").last()).toContainText("RELOADED", {
+    timeout: 120_000,
+  });
+
+  // The durable backlog entry is cleared only on explicit backend
+  // acknowledgement.
+  await expect.poll(() => readBacklogPrompts(page)).not.toContain(reloadPrompt);
+});

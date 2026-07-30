@@ -246,3 +246,37 @@ test("the approval card displays the real command, not a placeholder", async ({
     { timeout: 60_000 },
   );
 });
+
+// The previous denial test only proves the tool didn't run. It doesn't prove
+// the model actually *saw* the denial as feedback in the same turn, versus
+// the turn just silently stopping/hanging after a blocked call. Ask the
+// model for an explicit fallback if denied, deny the card, and require the
+// fallback text to show up — that only happens if the denial was delivered
+// back into the conversation and the model reacted to it.
+test("a denied tool approval is delivered back to the model, which can course-correct", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+  // Settings is a distinct route from the app shell — createSessionWithPrompt
+  // needs the sidebar's "+ New" button, which only exists on "/".
+  await page.goto(backend.baseURL);
+
+  await createSessionWithPrompt(
+    page,
+    "Use the Bash tool to run: echo FIRST_ATTEMPT — if that's denied, instead just reply with the word FALLBACK_USED with no tool calls",
+  );
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+  await approvalCard.locator(".user-input-card__actions button:not(.primary)").click();
+
+  // Proof the deny path informs the model rather than just silently blocking:
+  // the same turn must produce a real reply containing the requested
+  // fallback text, not hang or end with nothing.
+  await expect(page.getByTestId("assistant-message").last()).toContainText("FALLBACK_USED", {
+    timeout: 60_000,
+  });
+});

@@ -331,4 +331,37 @@ test.describe("extension marketplace catalog", () => {
     const ask = extensions.find((item) => item.manifest.id === NON_MARKETPLACE_EXTENSION_ID);
     expect(ask?.enabled).toBe(true);
   });
+
+  test("install rejects a malformed or missing JSON body cleanly, never a 500", async ({
+    authedPage,
+    backend,
+  }) => {
+    // `MarketplaceInstallRequest` (backend/extension_api.py) requires
+    // `preview_token` as a strict 32-char hex string; `entitlement_token`
+    // defaults to "" but is `strict=True` so a wrong type still fails
+    // pydantic coercion rather than being silently cast. Both cases below
+    // must be rejected by FastAPI's request-validation layer (422) before
+    // `install_marketplace_extension` ever runs — not surfaced as an
+    // unhandled-exception 500.
+    const missingFieldsRes = await authedPage.request.post(
+      `${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/install`,
+      { data: {} },
+    );
+    expect(missingFieldsRes.status()).toBe(422);
+    const missingFieldsBody = await missingFieldsRes.json();
+    expect(Array.isArray(missingFieldsBody.detail)).toBe(true);
+
+    const wrongTypesRes = await authedPage.request.post(
+      `${backend.baseURL}/api/extensions/marketplace/${NON_MARKETPLACE_EXTENSION_ID}/install`,
+      { data: { preview_token: 12345, entitlement_token: "" } },
+    );
+    expect(wrongTypesRes.status()).toBe(422);
+    const wrongTypesBody = await wrongTypesRes.json();
+    expect(Array.isArray(wrongTypesBody.detail)).toBe(true);
+
+    // Neither malformed request had any side effect on the real
+    // installed-extensions projection.
+    const listRes = await authedPage.request.get(`${backend.baseURL}/api/extensions`);
+    expect(listRes.status()).toBe(200);
+  });
 });

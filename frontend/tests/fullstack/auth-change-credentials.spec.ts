@@ -268,4 +268,47 @@ test.describe("change credentials", () => {
     await expect(page.locator(".sidebar-user-name")).toHaveText(newUsername);
     await expect(page.locator('script:has-text("alert(1)")')).toHaveCount(0);
   });
+
+  test("submits via Enter key in the last field, not just the save button", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.locator(".settings-page-nav button", { hasText: "Account" }).click();
+
+    const newPassword = randomTestValue("enter-key-secret");
+
+    // AuthCredentialsSetting.tsx renders a real <form onSubmit=...> with a
+    // <button type="submit">, so pressing Enter in a field triggers the
+    // browser's native form submission (no click on .setup-save-btn here) -
+    // a basic keyboard-accessibility check.
+    const form = page.locator(".auth-credentials-setting");
+    await form.locator('input[autocomplete="username"]').nth(0).fill(backend.username);
+    await form.locator('input[autocomplete="current-password"]').fill(backend.password);
+    await form.locator('input[autocomplete="username"]').nth(1).fill(backend.username);
+    await form.locator('input[autocomplete="new-password"]').fill(newPassword);
+    await form.locator('input[autocomplete="new-password"]').press("Enter");
+
+    await expect(form.locator(".auth-credentials-status")).toBeVisible();
+    await expect(form.locator(".auth-credentials-error")).not.toBeVisible();
+
+    // Log out fully (cookie + localStorage bearer token; see comment above).
+    await page.evaluate(async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+      localStorage.clear();
+    });
+
+    // The new password must work, through the real login form.
+    await page.goto(backend.baseURL);
+    await loginViaUI(page, { ...backend, password: newPassword });
+
+    const me = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(me.status).toBe(200);
+    expect(me.body.username).toBe(backend.username);
+  });
 });

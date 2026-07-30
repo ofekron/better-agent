@@ -224,3 +224,70 @@ test("the create-provider wizard creates a real, usable, additional provider ent
   const afterDeleteProviders = ((await afterDeleteRes.json()) as { providers: Array<{ id: string }> }).providers;
   expect(afterDeleteProviders.map((p) => p.id).sort()).toEqual([...beforeIds].sort());
 });
+
+// Distinct from the `capability_overrides` tests above: this covers the
+// "Default Permission" mode axis (`permission-axis-select-mode`), a
+// provider-native permission vocabulary (backend/permission.py), not a
+// capability flag. It must (a) actually persist server-side across a real
+// reload, and (b) be what a *brand-new* session inherits by default with no
+// per-session override — NewSessionModal.tsx seeds a new profile's
+// `permission` as `{}` (resolvePermission's "no saved override" branch), and
+// its own permission <select> renders the live provider default inline as
+// "Inherit default (<value>)" (fetched fresh via GET /api/providers on every
+// modal open), so that text is a direct, visible readout of what the new
+// session will actually inherit — not just an assumption. The real proof is
+// behavioral: with the default flipped to "Default (prompt)", a Bash-tool
+// call in that brand-new session must show a real approval card without this
+// test ever touching the session's own permission selector.
+test("the default permission mode persists and a new session inherits it without an override", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+
+  // openProviderSettings does a real page.goto (full navigation), so
+  // re-opening here proves the new default survived a real reload, not just
+  // in-memory React state.
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await expect(page.getByTestId("permission-axis-select-mode")).toHaveText(/default \(prompt\)/i);
+
+  // Settings is a distinct route from the app shell — the sidebar's "+ New"
+  // button only exists back on "/".
+  await page.goto(backend.baseURL);
+
+  // Open the real NewSessionModal and read its permission row before
+  // touching anything: with no saved per-session override, its select must
+  // sit on "Inherit default" and display the live new provider default
+  // ("default") inline — the modal's own visible confirmation of what this
+  // new session is about to inherit.
+  await page.locator(".session-new-button").click();
+  const promptBox = page.getByTestId("new-session-prompt-textarea");
+  await promptBox.waitFor({ state: "visible", timeout: 10_000 });
+
+  const permissionRow = page.locator(".ns-modal-row").filter({ hasText: "Permission (Mode)" });
+  await expect(permissionRow.locator("select option[value='']")).toHaveText(
+    /inherit default \(default\)/i,
+  );
+
+  await page.locator(".modal-close").click();
+  await promptBox.waitFor({ state: "hidden", timeout: 10_000 });
+
+  // Now drive a real brand-new session through the normal harness flow
+  // (no permission override set here) and prove the inherited default
+  // actually took effect: a Bash tool call surfaces a real approval card.
+  await createSessionWithPrompt(
+    page,
+    "Use the Bash tool to run exactly this command: echo NEW_SESSION_INHERITED_DEFAULT_MARKER",
+  );
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+  await approvalCard.locator(".user-input-card__actions button.primary").click();
+
+  await expect(page.getByTestId("assistant-message").last()).toContainText(
+    "NEW_SESSION_INHERITED_DEFAULT_MARKER",
+    { timeout: 60_000 },
+  );
+});

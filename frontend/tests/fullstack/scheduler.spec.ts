@@ -231,3 +231,68 @@ test("renders the empty state on a fresh backend with zero schedules", async ({
   // "Clear all" only renders when there's something to clear.
   await expect(page.getByRole("button", { name: "Clear all" })).toHaveCount(0);
 });
+
+// SchedulesPage (frontend/src/components/SchedulesPage.tsx) has no edit
+// affordance — its `.schedules-row-actions` only render a cancel button
+// (`.schedules-danger`, calling deleteScheduleById) and an "open session"
+// link; there's no input or PATCH/PUT call wired to any field. The backend
+// mirrors this: `backend/main.py` only exposes `GET /api/schedules` and
+// `DELETE /api/schedules/{id}` (plus the internal creation route) — no
+// update endpoint. So editing a fire time or prompt today means delete +
+// recreate, not a real in-place edit; this test instead covers a gap in
+// multi-schedule handling: two schedules created from the SAME session must
+// both persist and render as distinct rows, not collide or overwrite.
+test("creates two schedules from the same session and both appear as distinct rows", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Say hello. Keep it short.");
+
+  const draft = page.getByTestId("input-textarea");
+  const scheduleOnce = async (prompt: string, hoursFromNow: number) => {
+    await draft.fill(prompt);
+    await page.locator(".input-overflow-trigger").click();
+    const scheduleBtn = page.getByTestId("schedule-btn");
+    await expect(scheduleBtn).toBeEnabled();
+    await scheduleBtn.click();
+
+    const popover = page.getByTestId("schedule-popover");
+    await expect(popover).toBeVisible();
+
+    const fireAt = toLocalInputValue(new Date(Date.now() + hoursFromNow * 60 * 60 * 1000));
+    await page.getByTestId("schedule-fire-at").fill(fireAt);
+    await page.getByTestId("schedule-repeat").selectOption("once");
+
+    await page.getByTestId("schedule-submit").click();
+    await expect(popover).not.toBeVisible({ timeout: 10_000 });
+    await expect(draft).toHaveValue("");
+  };
+
+  const promptA = `Scheduled multi test A ${Date.now()}`;
+  const promptB = `Scheduled multi test B ${Date.now()}`;
+
+  // Both schedules are created from the same still-open session (no new
+  // session in between), then verified as two independent rows.
+  await scheduleOnce(promptA, 2);
+  await scheduleOnce(promptB, 3);
+
+  await page.goto(`${backend.baseURL}/schedules`);
+  const rowA = page.locator(".schedules-row", { hasText: promptA });
+  const rowB = page.locator(".schedules-row", { hasText: promptB });
+  await expect(rowA).toBeVisible({ timeout: 15_000 });
+  await expect(rowB).toBeVisible({ timeout: 15_000 });
+
+  const res = await page.request.get(`${backend.baseURL}/api/schedules`);
+  expect(res.ok()).toBe(true);
+  const { schedules } = (await res.json()) as {
+    schedules: Array<{ id: string; prompt: string; app_session_id: string }>;
+  };
+  const createdA = schedules.find((s) => s.prompt === promptA);
+  const createdB = schedules.find((s) => s.prompt === promptB);
+  expect(createdA).toBeTruthy();
+  expect(createdB).toBeTruthy();
+  // Distinct records, not the same one overwritten twice.
+  expect(createdA?.id).not.toBe(createdB?.id);
+  // Both trace back to the one session they were scheduled from.
+  expect(createdA?.app_session_id).toBe(createdB?.app_session_id);
+});

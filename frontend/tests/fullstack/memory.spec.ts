@@ -356,3 +356,88 @@ test("a memory's content with unicode, embedded quotes, newlines, and markdown-s
   // unicode bytes anywhere in the propose/approve/persist/re-fetch chain.
   expect(persisted?.content).toBe(specialContent);
 });
+
+// No dedicated "view persisted memories" UI exists in this repo: searching
+// frontend/src/components turns up MemoryProposalCard (Chat.tsx) for the
+// propose/approve flow and nothing else -- no MemoryList/MemoriesPage
+// component, and SettingsPage.tsx's nav `sections` list (providers,
+// language, account, appearance, desktop, recovery, shortcuts, delegation,
+// context, internalLlm, sessions, voice, extensions, capabilities,
+// harnessProfiles, passwords, server, notifications) has no memory/memories
+// entry. `grep -rn "memory/all" frontend/src` finds zero references outside
+// this test file -- nothing in the frontend fetches it. The only consumer of
+// `GET /api/memory/all` (backend/main.py) is this test suite; its docstring
+// even says "for the settings memory browser", but that browser was never
+// built. So instead of a UI assertion, this test exercises the REST
+// contract directly: propose+approve one global-scope and one
+// project-scope memory in the same session, then assert `GET
+// /api/memory/all` buckets each into the correct top-level key (`global`
+// vs `scopes`) without cross-contaminating the other bucket.
+test("GET /api/memory/all correctly buckets a mix of global and project-scoped memories", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const scopePath = "/nonexistent/fake/path/for/fullstack-mix-test";
+
+  // Turn 1: propose and approve a global-scope memory.
+  await triggerMemoryProposal(page, {
+    name: "global-mix-memory",
+    description: "A global-scope memory for the bucketing test.",
+    content: "This memory belongs in the global bucket.",
+  });
+
+  const firstCard = page.getByTestId("memory-proposal-card");
+  await expect(firstCard).toBeVisible({ timeout: 60_000 });
+  await expect(firstCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "global-mix-memory",
+  );
+  await firstCard.locator(".user-input-card__actions button.primary").click();
+  await expect(firstCard).not.toBeVisible({ timeout: 15_000 });
+
+  // Turn 2: same session, propose and approve a project-scope memory.
+  const secondCommand = proposeMemoryCurlCommand({
+    name: "project-mix-memory",
+    description: "A project-scope memory for the bucketing test.",
+    content: "This memory belongs in the scopes bucket.",
+    scope_type: "project",
+    scope_path: scopePath,
+  });
+  const textarea = page.getByTestId("input-textarea");
+  await textarea.fill(
+    `Use the Bash tool to run exactly this single command, unmodified: ${secondCommand}`,
+  );
+  await textarea.press("Enter");
+
+  const secondCard = page.getByTestId("memory-proposal-card");
+  await expect(secondCard).toBeVisible({ timeout: 60_000 });
+  await expect(secondCard.locator(".memory-proposal-card__field input").first()).toHaveValue(
+    "project-mix-memory",
+  );
+  await secondCard.locator(".user-input-card__actions button.primary").click();
+  await expect(secondCard).not.toBeVisible({ timeout: 15_000 });
+
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+
+  // The global memory is bucketed under `global`, not leaked into `scopes`.
+  const globalMemories = memoriesBody.global as Array<{ name: string; content: string }>;
+  const globalEntry = globalMemories.find((m) => m.name === "global-mix-memory");
+  expect(globalEntry).toBeDefined();
+  expect(globalEntry?.content).toContain("global bucket");
+  expect(globalMemories.some((m) => m.name === "project-mix-memory")).toBe(false);
+
+  // The project-scoped memory is bucketed under `scopes`, under its own
+  // scope entry, not leaked into `global`.
+  const scopes = memoriesBody.scopes as Array<{
+    type: string;
+    path: string;
+    memories: Array<{ name: string; content: string }>;
+  }>;
+  const scopeEntry = scopes.find((s) => s.type === "project" && s.path === scopePath);
+  expect(scopeEntry).toBeDefined();
+  const scopedMemory = scopeEntry?.memories.find((m) => m.name === "project-mix-memory");
+  expect(scopedMemory).toBeDefined();
+  expect(scopedMemory?.content).toContain("scopes bucket");
+  expect(scopeEntry?.memories.some((m) => m.name === "global-mix-memory")).toBe(false);
+});

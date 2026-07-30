@@ -444,4 +444,74 @@ test.describe("backend crash-recovery", () => {
       await restarted.stop();
     }
   });
+
+  test("session accepts and completes a brand new real turn immediately after crash + restart", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(180_000);
+
+    // Beyond render-tree consistency: a recovered session must not just
+    // look right, it must still be a fully USABLE session — able to accept
+    // and complete a brand new turn, not left read-only/wedged.
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 40, one number per line, then write a short paragraph " +
+        "explaining why counting is a foundational skill. Do not rush, be thorough.",
+    );
+
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash.length).toBeGreaterThan(0);
+    const sessionId = sessionsBeforeCrash[0].id as string;
+
+    await waitForRunning(page, backend, sessionId, 30_000);
+
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      // Simplified version of the convergence check reused from the first
+      // test in this file: the old (crashed-mid-turn) turn must settle to a
+      // terminal, not-running state before this test drives a new one.
+      await expect
+        .poll(
+          async () => {
+            const sessions = await getSessionsList(page, backend);
+            const match = sessions.find((s) => s.id === sessionId);
+            return match?.is_running === true;
+          },
+          { timeout: 120_000, intervals: [500, 1000, 2000] },
+        )
+        .toBe(false);
+
+      const userMessages = page.getByTestId("user-message");
+      const assistantMessages = page.getByTestId("assistant-message");
+      await expect(userMessages).toHaveCount(1);
+      await expect(assistantMessages).toHaveCount(1);
+
+      // Now prove the session is actually USABLE post-recovery: send a
+      // SECOND real new prompt through the real UI/backend/provider CLI
+      // path (same input the user would use), not just a passive read of
+      // already-settled state.
+      const secondPrompt = "Reply with exactly the single word: RECOVERED. No punctuation, no other words.";
+      await page.getByTestId("input-textarea").fill(secondPrompt);
+      await page.getByTestId("send-btn").click();
+
+      await expect(userMessages).toHaveCount(2, { timeout: 15_000 });
+      await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+
+      // The new turn must get a REAL new reply — content actually derived
+      // from the new prompt — proving the session was left fully usable,
+      // not stuck in some broken/read-only state after recovery.
+      await expect(assistantMessages.nth(1)).toContainText("RECOVERED", { timeout: 120_000 });
+    } finally {
+      await restarted.stop();
+    }
+  });
 });

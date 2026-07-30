@@ -211,4 +211,35 @@ test.describe("git status and history", () => {
       timeout: 20_000,
     });
   });
+
+  // `POST /api/git-commit` (backend/git_api.py -> file_browser.git_commit)
+  // has no frontend UI consumer anywhere in frontend/src, so — same pattern
+  // as the git-diff test above — this drives the real REST surface directly
+  // with `authedPage.request` against the real backend, which shells out to
+  // real `git add -u` + `git commit` subprocesses.
+  test("git-commit endpoint commits real staged changes to a real new commit on disk", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    repo = createRealGitRepo("initial commit");
+    // git_commit() only runs `git add -u` (tracked files), which does not
+    // pick up brand-new untracked files, so the new file must be explicitly
+    // `git add`ed to be staged before the endpoint commits it.
+    addUntrackedFile(repo, "staged.txt", "staged content\n");
+    execFileSync("git", ["add", "staged.txt"], { cwd: repo.dir });
+
+    const res = await page.request.post(`${backend.baseURL}/api/git-commit`, {
+      data: { cwd: repo.dir, message: "fullstack test commit" },
+    });
+    expect(res.ok()).toBe(true);
+
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+
+    const subject = execFileSync("git", ["log", "-1", "--format=%s"], {
+      cwd: repo.dir,
+      encoding: "utf-8",
+    }).trim();
+    expect(subject).toBe("fullstack test commit");
+  });
 });

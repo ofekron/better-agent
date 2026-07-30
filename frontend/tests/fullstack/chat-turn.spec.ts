@@ -219,3 +219,43 @@ test("attaches a real image to a prompt and sends a multimodal turn", async ({ a
   // model vision accuracy, not on whether the image round-tripped.
   await expect(secondAssistantMessage).not.toHaveText("", { timeout: 120_000 });
 });
+
+// Validates real multi-turn history + context retention: a second prompt
+// sent in the same session, after the first turn has completed, must (a)
+// be answered using context from the earlier turn (proving the backend
+// actually replays prior conversation history into the provider CLI, not
+// just the latest message) and (b) render as its own bubble pair appended
+// after the first, in the correct chronological order — not overwriting or
+// reordering existing bubbles.
+test("maintains history and context across multiple turns in one session", async ({ authedPage: page }) => {
+  await createSessionWithPrompt(page, "My favorite number is 42. Just acknowledge.");
+
+  const userMessages = page.getByTestId("user-message");
+  const assistantMessages = page.getByTestId("assistant-message");
+
+  await expect(userMessages).toHaveCount(1);
+  await expect(assistantMessages.first()).toBeVisible({ timeout: 30_000 });
+  await expect(assistantMessages.first()).not.toHaveText("", { timeout: 120_000 });
+
+  const textarea = page.getByTestId("input-textarea");
+  const sendBtn = page.getByTestId("send-btn");
+
+  await textarea.fill("What is my favorite number plus 1? Reply with just the number.");
+  await expect(sendBtn).toBeEnabled();
+  await sendBtn.click();
+
+  await expect(userMessages).toHaveCount(2);
+  await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+  // Proves real context retention across turns (not an isolated single-turn
+  // reply): the model can only answer "43" by recalling the number stated
+  // in the first turn's prompt.
+  await expect(assistantMessages.nth(1)).toContainText("43", { timeout: 120_000 });
+
+  // Bubbles must be visible in strict chronological user/assistant/user/
+  // assistant order, proving history isn't reordered, deduped, or
+  // overwritten as later turns stream in.
+  const bubbleOrder = await page
+    .locator('[data-testid="user-message"], [data-testid="assistant-message"]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid")));
+  expect(bubbleOrder).toEqual(["user-message", "assistant-message", "user-message", "assistant-message"]);
+});

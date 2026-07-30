@@ -218,4 +218,35 @@ test.describe("real login", () => {
     await expect(page.locator(".login-submit")).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId("input-textarea")).not.toBeVisible();
   });
+
+  // Drives the real UI logout control (App.tsx's `handleLogout`, wired to
+  // the sidebar's `.sidebar-logout-btn`) rather than the raw
+  // POST /api/auth/logout used for cleanup elsewhere in this file.
+  // handleLogout POSTs the logout, clears any stored bearer token, and
+  // reloads so the top-level App re-mounts and re-runs its auth check —
+  // this confirms that whole real flow ends both server-side (401 on
+  // /api/auth/me) and client-side (Login screen re-rendered).
+  test("the real UI logout button signs the user out and returns to the login screen", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    const meBeforeLogout = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(meBeforeLogout).toBe(200);
+
+    await page.locator(".sidebar-logout-btn").click();
+
+    await expect(page.locator(".login-submit")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("input-textarea")).not.toBeVisible();
+
+    const meAfterLogout = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(meAfterLogout).toBe(401);
+  });
 });

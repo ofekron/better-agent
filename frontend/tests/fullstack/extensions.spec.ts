@@ -326,4 +326,72 @@ test.describe("extensions settings", () => {
     const restoredRows = await extractRows();
     expect(new Set(restoredRows.map((r) => r.id))).toEqual(new Set(allRows.map((r) => r.id)));
   });
+
+  // Update flow: POST /api/extensions/{id}/update. Real update-availability
+  // data comes exclusively from GET /api/extensions/updates
+  // (row.update_available), which the UI turns into `.extension-ui-settings-
+  // update-badge` / `.extension-ui-settings-update`. extension_store.py's
+  // apply_extension_update only supports source types git/marketplace/
+  // better_agent_signed (_UPDATABLE_SOURCE_TYPES); every bundled extension in
+  // this harness has source.type === "better_agent_bundled", which isn't in
+  // that set. There's no way in this real environment (no mocks, no external
+  // marketplace login, no git-source extension wired into the harness) to
+  // make a bundled extension appear out-of-date, so this is a real, fully
+  // deterministic negative-case: bundled extensions never expose an update
+  // affordance in the UI, and the backend rejects the update call outright.
+  test("a bundled extension has no update available: no update UI affordance, and the update endpoint rejects it server-side", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    await page.goto(`${backend.baseURL}/settings`);
+    await page.getByTestId("settings-nav-extensions").click();
+
+    const rows = page.locator(".extension-ui-settings-row");
+    await expect(rows.first()).toBeVisible();
+    const rowCount = await rows.count();
+
+    // --- UI: not a single bundled row shows an update badge or button ---
+    await expect(page.locator(".extension-ui-settings-update-badge")).toHaveCount(0);
+    await expect(page.locator(".extension-ui-settings-update")).toHaveCount(0);
+
+    const extensionId = await rows.first().locator(".extension-ui-settings-id").innerText();
+
+    // --- confirm this extension is genuinely bundled, not something updatable ---
+    const configBefore = await page.evaluate(async (id) => {
+      const res = await fetch(`/api/extensions/${encodeURIComponent(id)}/config`, {
+        credentials: "include",
+      });
+      return res.json();
+    }, extensionId);
+    expect(configBefore.source?.type).toBe("better_agent_bundled");
+
+    // --- REST: GET /api/extensions/updates reports nothing available ---
+    const updatesReport = await page.evaluate(async () => {
+      const res = await fetch(`/api/extensions/updates`, { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(updatesReport.status).toBe(200);
+    expect(updatesReport.body.available).not.toContain(extensionId);
+
+    // --- REST: calling update directly is rejected, not silently a no-op ---
+    const updateResult = await page.evaluate(async (id) => {
+      const res = await fetch(`/api/extensions/${encodeURIComponent(id)}/update`, {
+        method: "POST",
+        credentials: "include",
+      });
+      return { status: res.status, body: await res.json() };
+    }, extensionId);
+    expect(updateResult.status).toBe(400);
+    expect(String(updateResult.body.detail)).toMatch(/does not support remote updates/i);
+
+    // --- no side effect: row count and enabled state are unchanged ---
+    await expect(rows).toHaveCount(rowCount);
+    const configAfter = await page.evaluate(async (id) => {
+      const res = await fetch(`/api/extensions/${encodeURIComponent(id)}/config`, {
+        credentials: "include",
+      });
+      return res.json();
+    }, extensionId);
+    expect(configAfter.enabled).toBe(configBefore.enabled);
+  });
 });

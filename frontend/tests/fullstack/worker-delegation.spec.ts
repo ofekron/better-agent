@@ -246,3 +246,89 @@ test("fork-btn is disabled with an empty draft even when a valid fork source exi
   await page.getByTestId("input-textarea").fill("");
   await expect(page.getByTestId("fork-btn")).toBeDisabled();
 });
+
+// Validates what the fork pane's "x" close affordance (ForkPane's
+// `fork-pane-close` button, ForkSplitView.tsx ~line 626) actually does.
+// Read from source (not guessed): App.tsx's `handleCloseFork` only POSTs
+// `${API}/api/sessions/${id}/close_fork`, which backend/main.py's
+// `close_fork` route resolves to `session_manager.set_fork_closed(id, true)`
+// — a metadata flip (`fork_closed: true`) on the still-live session record,
+// not a delete. So this is "hide/freeze in place", not "remove": the pane
+// stays mounted in the grid (ForkSplitView never filters `flatPanes` by
+// `fork_closed`) but re-renders with a `fork-pane-closed` class, its
+// focus-radio/expand controls swapped for Reopen + Delete buttons, and the
+// close ("x") button itself gone (JSX gates it on `!isClosed`). The
+// underlying session is NOT deleted server-side: GET /api/sessions/{id}
+// (root or fork id — both resolve to the same root tree, per its own
+// docstring) still returns the fork embedded in the root's `forks` array,
+// now carrying `fork_closed: true`. Note forks are never separate entries
+// in the flat GET /api/sessions LIST endpoint regardless of open/closed
+// state (confirmed in backend/scripts/test_fork_split.py, which asserts
+// fork ids are excluded from that list even while open) — so that endpoint
+// isn't a useful signal here; the tree-detail endpoint is.
+test("closing a fork pane freezes it in place (still visible, session not deleted) rather than removing it from the grid", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Reply with exactly the single word: PARENT.");
+  await expect(page.getByTestId("assistant-message")).toContainText("PARENT", {
+    timeout: 120_000,
+  });
+
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: CHILD.");
+  await page.locator(".input-overflow-trigger").click();
+  await page.getByTestId("fork-btn").click();
+
+  const forkGrid = page.getByTestId("fork-grid");
+  await expect(forkGrid).toBeVisible({ timeout: 20_000 });
+  const forkPane = forkGrid.getByTestId("fork-pane").filter({ hasText: "CHILD" });
+  await expect(forkPane).toBeVisible();
+  await expect(forkPane.getByTestId("assistant-message")).toContainText("CHILD", {
+    timeout: 120_000,
+  });
+
+  const forkSessionId = await forkPane.getAttribute("data-session-id");
+  if (!forkSessionId) throw new Error("fork pane is missing data-session-id");
+
+  // Expand out of the post-fork focused single-pane view so the grid (and
+  // the close button, which only exists in the grid layout) is genuinely
+  // rendered — mirrors the pattern used by the other fork tests above.
+  await page.getByTestId("fork-back-to-split").click();
+
+  await forkPane.locator(".fork-pane-close").click();
+
+  // The pane does NOT disappear from the grid — it stays mounted, just
+  // marked closed. Same locator (by CHILD text) still resolves to exactly
+  // one element, and it now carries the closed styling with Reopen/Delete
+  // controls instead of the close ("x") button.
+  await expect(forkPane).toBeVisible();
+  await expect(forkPane).toHaveClass(/fork-pane-closed/);
+  await expect(forkPane.locator(".fork-pane-close")).toHaveCount(0);
+  await expect(forkPane.locator(".fork-pane-reopen")).toBeVisible();
+  await expect(forkPane.locator(".fork-pane-delete")).toBeVisible();
+
+  // The underlying forked session itself is NOT deleted server-side — the
+  // fork node is still embedded in the root tree, just flagged fork_closed.
+  interface TreeNode {
+    id: string;
+    fork_closed?: boolean;
+    forks?: TreeNode[];
+  }
+  const findNode = (node: TreeNode, id: string): TreeNode | null => {
+    if (node.id === id) return node;
+    for (const f of node.forks ?? []) {
+      const found = findNode(f, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const res = await page.request.get(
+    `${backend.baseURL}/api/sessions/${encodeURIComponent(forkSessionId)}?msg_limit=5`,
+  );
+  expect(res.ok()).toBe(true);
+  const tree = (await res.json()) as TreeNode;
+  const forkNode = findNode(tree, forkSessionId);
+  if (!forkNode) throw new Error(`fork session ${forkSessionId} not found in root tree — was deleted`);
+  expect(forkNode.fork_closed).toBe(true);
+});

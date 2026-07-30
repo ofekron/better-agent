@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, expect } from "./harness/fixtures";
+import { createRealGitRepo } from "./harness/git-repo";
 import { addProjectByPath } from "./harness/projects";
 
 // Validates the real "project" feature — repo-path tabs in the sidebar
@@ -214,5 +216,38 @@ test.describe("projects", () => {
     expect(projectsRes.ok()).toBeTruthy();
     const projectsBody = await projectsRes.json();
     expect(projectsBody.projects).toEqual([]);
+  });
+
+  test("registering a real git repo with a remote captures git_remote from the checkout", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    // project_store.add_project (backend/project_store.py) calls
+    // ensure_git_remote -> probe_git_remote on the real checkout, which
+    // shells out to `git -C <path> remote` / `remote get-url <name>`
+    // (preferring `origin`) and stores the raw URL string verbatim as
+    // `git_remote` on the persisted record.
+    const repo = createRealGitRepo();
+    const remoteUrl = "https://example.com/fake/repo.git";
+    try {
+      execFileSync("git", ["remote", "add", "origin", remoteUrl], { cwd: repo.dir });
+
+      const label = path.basename(repo.dir);
+      await addProjectByPath(page, repo.dir);
+
+      const tab = page.locator(".project-tab", { hasText: label });
+      await expect(tab).toBeVisible();
+
+      const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+      expect(projectsRes.ok()).toBeTruthy();
+      const projectsBody = await projectsRes.json();
+      const project = (
+        projectsBody.projects as Array<{ path: string; git_remote: string | null }>
+      ).find((p) => p.path.endsWith(label));
+      expect(project).toBeDefined();
+      expect(project?.git_remote).toBe(remoteUrl);
+    } finally {
+      repo.cleanup();
+    }
   });
 });
