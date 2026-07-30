@@ -20,6 +20,7 @@ from codex_execution_common import (
 )
 from codex_execution_identity import FileIdentity
 from paths import make_private_directory
+from provider_binary_relocatability import assert_relocatable_executable
 from provider_frozen_bundle import (
     frozen_bundle_destination,
     materialize_frozen_bundle,
@@ -222,6 +223,19 @@ def _copy_descriptor(
         raise
 
 
+def _is_trusted_system_stat(
+    resolved: Path,
+    uid: int,
+    mode: int,
+) -> bool:
+    return (
+        stat.S_ISREG(mode)
+        and uid == 0
+        and not mode & (stat.S_IWGRP | stat.S_IWOTH)
+        and any(resolved.is_relative_to(root) for root in _SYSTEM_INTERPRETER_ROOTS)
+    )
+
+
 def _trusted_system_interpreter(
     descriptor: int,
     identity: FileIdentity,
@@ -232,12 +246,24 @@ def _trusted_system_interpreter(
     except OSError:
         return False
     return (
-        stat.S_ISREG(observed.st_mode)
-        and observed.st_uid == 0
-        and not observed.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-        and any(resolved.is_relative_to(root) for root in _SYSTEM_INTERPRETER_ROOTS)
+        _is_trusted_system_stat(resolved, observed.st_uid, observed.st_mode)
         and _verify_file_handle(descriptor, identity) is None
     )
+
+
+def trusted_system_interpreter_path(path: Path) -> bool:
+    """True if `path` is a root-owned, non-writable file under a trusted
+    system interpreter root (e.g. /bin, /usr/bin) — the same trust basis
+    `open_pinned_launch` already uses to execute a system interpreter in
+    place instead of copying it. Used to admit an out-of-materialization-root
+    file in a hydrated MaterializedSdkLaunch without weakening attestation:
+    the caller still hash-verifies the file via FileIdentity.attest().
+    """
+    try:
+        observed = path.stat()
+    except OSError:
+        return False
+    return _is_trusted_system_stat(path, observed.st_uid, observed.st_mode)
 
 
 @contextmanager
@@ -421,17 +447,44 @@ def materialize_sdk_launch(
             suffix = Path(launch.argv[0]).suffix
             executable = root / f"provider-cli{suffix}"
             _copy_descriptor(handles[0], executable, launch.components[0])
+            try:
+                assert_relocatable_executable(executable)
+            except ExecutionContractError:
+                _unlink_if_present(executable)
+                raise
             files = (FileIdentity.capture(executable),)
             return MaterializedSdkLaunch(str(executable), files)
-        interpreter = root / f"provider-runtime{Path(launch.argv[0]).suffix}"
-        _copy_descriptor(handles[0], interpreter, launch.components[0])
+        interpreter_is_trusted = _trusted_system_interpreter(
+            handles[0], launch.components[0],
+        )
+        if interpreter_is_trusted:
+            # Referenced at its original path, never copied: this is the
+            # same trust basis open_pinned_launch already uses to execute a
+            # system interpreter in place, so it can't inherit the dyld
+            # relocation hazards a copy would (see provider_binary_
+            # relocatability for what those are). Its FileIdentity below
+            # keeps it hash-pinned like every other materialized component.
+            interpreter = Path(launch.components[0].resolved_path)
+        else:
+            interpreter = root / f"provider-runtime{Path(launch.argv[0]).suffix}"
+            _copy_descriptor(handles[0], interpreter, launch.components[0])
+            try:
+                assert_relocatable_executable(interpreter)
+            except ExecutionContractError:
+                _unlink_if_present(interpreter)
+                raise
+
+        def _unlink_interpreter_if_copied() -> None:
+            if not interpreter_is_trusted:
+                _unlink_if_present(interpreter)
+
         script = root / f"provider-cli{Path(launch.argv[-1]).suffix}"
         arguments = launch.argv[1:-1]
         if any(any(character.isspace() for character in value) for value in (
             str(interpreter),
             *arguments,
         )):
-            _unlink_if_present(interpreter)
+            _unlink_interpreter_if_copied()
             raise ExecutionContractError(
                 "materialized shebang path cannot contain whitespace",
             )
@@ -446,10 +499,10 @@ def materialize_sdk_launch(
         try:
             _verify_file_handle(handles[-1], launch.components[-1])
         except ExecutionContractError:
-            _unlink_if_present(interpreter)
+            _unlink_interpreter_if_copied()
             raise
         if hashlib.sha256(source).hexdigest() != launch.components[-1].sha256:
-            _unlink_if_present(interpreter)
+            _unlink_interpreter_if_copied()
             raise ExecutionContractError("SDK launcher identity mismatch")
         newline = source.find(b"\n")
         body = b"" if newline < 0 else source[newline + 1:]
@@ -474,7 +527,7 @@ def materialize_sdk_launch(
         except OSError as exc:
             if created:
                 _unlink_if_present(script)
-            _unlink_if_present(interpreter)
+            _unlink_interpreter_if_copied()
             raise ExecutionContractError(
                 "SDK launcher cannot be materialized",
             ) from exc
@@ -485,6 +538,6 @@ def materialize_sdk_launch(
         )
     except ExecutionContractError:
         _unlink_if_present(script)
-        _unlink_if_present(interpreter)
+        _unlink_interpreter_if_copied()
         raise
     return MaterializedSdkLaunch(str(script), files)

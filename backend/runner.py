@@ -170,7 +170,10 @@ from provider_family_execution_runtime import (
 )
 from provider_runtime_plan_source import hydrate_runner_operation_broker
 from codex_execution_identity import file_identity_from_dict
-from provider_pinned_launch import MaterializedSdkLaunch
+from provider_pinned_launch import (
+    MaterializedSdkLaunch,
+    trusted_system_interpreter_path,
+)
 
 
 CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime"
@@ -3319,6 +3322,9 @@ def _runtime_capabilities(
         )
         or any(
             not Path(identity.resolved_path).is_relative_to(cli_root)
+            and not trusted_system_interpreter_path(
+                Path(identity.resolved_path),
+            )
             for identity in cli.files
         )
         or not cli.attest()

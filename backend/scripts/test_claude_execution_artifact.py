@@ -23,7 +23,7 @@ TEST_HOME = _test_home.TestHome.acquire(
 
 import config_store  # noqa: E402
 import containment as containment_module  # noqa: E402
-from codex_execution_identity import file_identity_to_dict  # noqa: E402
+from codex_execution_identity import FileIdentity, file_identity_to_dict  # noqa: E402
 from execution_artifact_io import (  # noqa: E402
     bind_execution_input,
     load_execution_artifact,
@@ -474,6 +474,60 @@ def test_run_local_payload_rejects_tamper_and_materializes_sdk_cli() -> None:
                 else:
                     raise AssertionError(
                         "tampered Claude hydration was accepted",
+                    )
+
+                # A trusted system interpreter referenced in place (never
+                # copied into cli_root by materialize_sdk_launch) must still
+                # hydrate: its FileIdentity resolves outside cli_root.
+                trusted_interpreter = FileIdentity.capture(
+                    Path("/bin/sh").resolve(),
+                )
+                trusted_hydration = {
+                    **hydration,
+                    "claude_cli": {
+                        "executable_path": hydration["claude_cli"][
+                            "executable_path"
+                        ],
+                        "files": [
+                            *hydration["claude_cli"]["files"],
+                            file_identity_to_dict(trusted_interpreter),
+                        ],
+                    },
+                }
+                trusted_inputs = dict(runtime.inputs)
+                trusted_inputs["_runtime_hydration"] = trusted_hydration
+                runner._runtime_capabilities(run_dir, trusted_inputs, runtime)
+
+                # An out-of-cli_root file that is NOT a trusted system
+                # interpreter must still be rejected.
+                untrusted_path = root / "untrusted-interpreter"
+                untrusted_path.write_bytes(b"not-a-real-interpreter")
+                untrusted_identity = FileIdentity.capture(untrusted_path)
+                untrusted_hydration = {
+                    **hydration,
+                    "claude_cli": {
+                        "executable_path": hydration["claude_cli"][
+                            "executable_path"
+                        ],
+                        "files": [
+                            *hydration["claude_cli"]["files"],
+                            file_identity_to_dict(untrusted_identity),
+                        ],
+                    },
+                }
+                untrusted_inputs = dict(runtime.inputs)
+                untrusted_inputs["_runtime_hydration"] = untrusted_hydration
+                try:
+                    runner._runtime_capabilities(
+                        run_dir,
+                        untrusted_inputs,
+                        runtime,
+                    )
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "out-of-root untrusted interpreter file was accepted",
                     )
             finally:
                 runner.claude_agent_sdk.__file__ = old_sdk_file

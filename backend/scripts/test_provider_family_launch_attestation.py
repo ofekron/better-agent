@@ -39,6 +39,8 @@ from provider_frozen_bundle import frozen_bundle_destination  # noqa: E402
 from provider_pinned_launch import open_pinned_runner_launch  # noqa: E402
 from provider_runner_launch import RunnerLaunch  # noqa: E402
 
+import test_provider_binary_relocatability as _relocatability_fixtures  # noqa: E402
+
 
 def _write_executable(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -507,42 +509,6 @@ def test_payload_round_trip_and_tamper_are_strict() -> None:
             raise AssertionError("tampered launch attestation was accepted")
 
 
-def _compile_self_contained_interpreter(root: Path) -> Path | None:
-    """Build a tiny native binary with no dylib deps beyond libc/libSystem.
-
-    materialize_sdk_launch copies only the interpreter's raw bytes, not its
-    dylib closure, so real interpreters that reference sibling libraries via
-    an @executable_path-relative path (e.g. some uv-managed CPython builds)
-    break, and dyld can wedge the copy in an uninterruptible state instead of
-    failing cleanly. A freshly compiled, unsigned binary with no such
-    references is safe to copy and exec regardless of the host's interpreter
-    layout.
-    """
-    compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-    if compiler is None:
-        return None
-    source = root / "interpreter.c"
-    source.write_text(
-        "int main(void) {\n"
-        "  extern long write(int, const void *, unsigned long);\n"
-        "  write(1, \"materialized\", 12);\n"
-        "  return 0;\n"
-        "}\n",
-        encoding="utf-8",
-    )
-    binary = root / "interpreter"
-    built = subprocess.run(
-        [compiler, "-o", str(binary), str(source)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if built.returncode != 0 or not binary.is_file():
-        return None
-    return binary
-
-
 def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> None:
     if os.name == "nt":
         return
@@ -564,15 +530,12 @@ def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> Non
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        interpreter = _compile_self_contained_interpreter(root)
-        if interpreter is None:
-            return
         launcher = root / "bin" / "claude"
         destination = root / "materialized"
         destination.mkdir()
         _write_executable(
             launcher,
-            f"#!{interpreter.resolve()}\n".encode("utf-8"),
+            b"#!/bin/sh\nprintf materialized\n",
         )
         launch = capture_cli_launch(
             logical_command="claude",
@@ -613,6 +576,81 @@ def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> Non
             pass
         else:
             raise AssertionError("drifted SDK executable was materialized")
+
+
+def test_materialize_sdk_launch_trusts_system_interpreter_in_place() -> None:
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        launcher = root / "bin" / "claude"
+        destination = root / "materialized"
+        destination.mkdir()
+        _write_executable(launcher, b"#!/bin/sh\nprintf original\n")
+        launch = capture_cli_launch(
+            logical_command="claude",
+            launcher_path=launcher,
+            platform="linux",
+        )
+        materialized = materialize_sdk_launch(launch, destination)
+        completed = subprocess.run(
+            [materialized.executable_path],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+        assert completed.returncode == 0
+        assert completed.stdout == "original"
+        assert materialized.attest()
+
+        script_path = str(Path(materialized.executable_path).resolve())
+        interpreter_identity = next(
+            identity for identity in materialized.files
+            if identity.resolved_path != script_path
+        )
+        assert interpreter_identity.resolved_path == str(Path("/bin/sh").resolve())
+        assert not Path(interpreter_identity.resolved_path).is_relative_to(destination)
+
+        script_file = Path(materialized.executable_path)
+        script_file.chmod(0o700)
+        script_file.write_bytes(b"tampered")
+        assert not materialized.attest()
+
+
+def test_materialize_sdk_launch_rejects_non_relocatable_interpreter() -> None:
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        interpreter = root / "runtime"
+        interpreter.write_bytes(
+            _relocatability_fixtures.build_macho_slice(
+                dylib_paths=(
+                    (0xC, "@executable_path/../lib/libpython3.13.dylib"),
+                ),
+            ),
+        )
+        interpreter.chmod(interpreter.stat().st_mode | 0o100)
+        launcher = root / "bin" / "claude"
+        destination = root / "materialized"
+        destination.mkdir()
+        _write_executable(
+            launcher,
+            f"#!{interpreter.resolve()}\n".encode("utf-8"),
+        )
+        launch = capture_cli_launch(
+            logical_command="claude",
+            launcher_path=launcher,
+            platform="linux",
+        )
+        try:
+            materialize_sdk_launch(launch, destination)
+        except ExecutionContractError:
+            pass
+        else:
+            raise AssertionError("non-relocatable interpreter was materialized")
+        assert not any(destination.iterdir())
 
 
 def test_shebang_launch_pins_script_and_restricts_interpreter() -> None:
@@ -779,6 +817,8 @@ TESTS = (
     test_source_package_config_resume_and_symlink_drift_fail_attestation,
     test_payload_round_trip_and_tamper_are_strict,
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,
+    test_materialize_sdk_launch_trusts_system_interpreter_in_place,
+    test_materialize_sdk_launch_rejects_non_relocatable_interpreter,
     test_shebang_launch_pins_script_and_restricts_interpreter,
     test_runner_materialization_outlives_spawn_context,
     test_runner_materialization_preserves_python_runtime_closure,
