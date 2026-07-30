@@ -35,6 +35,39 @@ Re-running does a `git pull --ff-only`.
 irm https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.ps1 | iex
 ```
 
+Both one-liners forward installer flags, so they can run unattended:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.sh | bash -s -- --mode default --provider claude --yes
+```
+
+```powershell
+.\scripts\bootstrap.ps1 -Mode default -Provider claude -Yes
+```
+
+**Homebrew (macOS):**
+
+```bash
+brew tap ofekron/better-agent
+brew install better-agent
+better-agent-setup
+better-agent
+```
+
+`brew install` installs only two launchers and provisions nothing. Run
+`better-agent-setup` once: it executes the same `scripts/bootstrap.sh` shown
+above, so a brew install and a curl install run identical code. `better-agent`
+then starts the workspace from `~/.better-agent/checkout`
+(override with `BETTER_AGENT_INSTALL_DIR`).
+
+**Acquisition channel (optional):** both installers accept
+`BETTER_AGENT_FROM`, which records only the acquisition channel string — no
+host, user, or environment data. The Homebrew launcher sets it to `brew`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.sh | BETTER_AGENT_FROM=readme bash
+```
+
 **From source (macOS):** on an empty Mac after cloning the repo, run:
 
 ```bash
@@ -113,8 +146,16 @@ If you are an AI agent installing Better Agent for a user:
 ### 1.2 Clone
 
 ```bash
-git clone git@gitlab.com:better-agent/better-agent.git
+git clone https://github.com/ofekron/better-agent.git
 cd better-agent
+```
+
+Released source tarballs are on the
+[releases page](https://github.com/ofekron/better-agent/releases) alongside
+`SHA256SUMS`; verify a download with:
+
+```bash
+shasum -a 256 -c SHA256SUMS
 ```
 
 Do not publish or zip a working tree that contains local nested repos such as
