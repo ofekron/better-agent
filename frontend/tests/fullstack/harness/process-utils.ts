@@ -55,6 +55,13 @@ export interface BackendEnvOptions {
  * against the same home (harness/recovery.ts). */
 export function buildBackendEnv(options: BackendEnvOptions): NodeJS.ProcessEnv {
   const sdkDir = path.join(REPO_ROOT, "sdk");
+  // Mirrors run.sh's own export of BETTER_{AGENT,CLAUDE}_BACKEND_URL
+  // alongside the port. Self-referential internal calls (e.g. the
+  // marketplace extension's own credential-store lookup via
+  // better_agent_sdk.Client) read this env var and fall back to the
+  // hardcoded `http://localhost:8000` default when it's unset — wrong
+  // on this harness's randomly assigned port.
+  const backendUrl = `http://127.0.0.1:${options.port}`;
   return {
     ...process.env,
     // main.py imports better_agent_sdk, which lives outside the backend
@@ -69,5 +76,8 @@ export function buildBackendEnv(options: BackendEnvOptions): NodeJS.ProcessEnv {
     BETTER_AGENT_PASSWORD_HASH_FILE: options.passwordHashFile,
     BETTER_AGENT_SESSION_SECRET_FILE: options.sessionSecretFile,
     BETTER_AGENT_BACKEND_PORT: String(options.port),
+    BETTER_CLAUDE_BACKEND_PORT: String(options.port),
+    BETTER_AGENT_BACKEND_URL: backendUrl,
+    BETTER_CLAUDE_BACKEND_URL: backendUrl,
   };
 }

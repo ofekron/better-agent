@@ -9,6 +9,7 @@ import extension_store
 import marketplace_auth
 import marketplace_protocol_transport
 import password_manager
+from env_compat import get_env
 from fastapi import HTTPException
 from marketplace_protocol import PROTOCOL_HASH
 
@@ -49,6 +50,13 @@ async def _invoke(
         path,
         method=method,
         body_bytes=body_bytes,
+        # This call has no incoming Request to derive base_url from (unlike
+        # dispatch_extension_backend_request). Without it, the spawned
+        # extension subprocess's own self-referential Client() calls (e.g.
+        # its credential-store lookup) fall back to the hardcoded
+        # http://localhost:8000 default — wrong on any backend not bound to
+        # that exact port. Same fallback session_event_extensions.py uses.
+        base_url=get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
     )
     return _response_json(response)
 

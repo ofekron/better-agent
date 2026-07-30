@@ -261,8 +261,20 @@ test.describe("real login", () => {
     backend,
   }) => {
     await loginViaUI(page, backend);
+    // A fresh isolated home has first_run_wizard_done=false. Opening a
+    // second tab below re-triggers App.tsx's onboarding-redirect effect
+    // (see harness/login.ts's loginAndSkipFirstRunWizard doc comment),
+    // bouncing `page` to /settings and hiding `.sidebar-logout-btn` —
+    // unrelated to what this test verifies (cross-tab logout
+    // propagation), so seed the flag the same way that helper does.
+    await page.request.patch(`${backend.baseURL}/api/user-prefs`, {
+      data: { first_run_wizard_done: true },
+    });
 
     const page2 = await page.context().newPage();
+    // A brand-new tab starts at about:blank — a relative fetch() has no
+    // document base URL to resolve against until it's navigated somewhere.
+    await page2.goto(backend.baseURL);
 
     const me1 = await page.evaluate(async () => {
       const res = await fetch("/api/auth/me", { credentials: "include" });
