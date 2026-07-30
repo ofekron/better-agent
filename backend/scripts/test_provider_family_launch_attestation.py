@@ -22,6 +22,8 @@ import _test_home  # noqa: E402
 _test_home.isolate(prefix="family-launch-attestation-")
 
 from codex_execution_common import ExecutionContractError  # noqa: E402
+from codex_execution_identity import FileIdentity  # noqa: E402
+import codex_execution_identity  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
     ConfigScopeIdentity,
     FamilyLaunchAttestation,
@@ -206,6 +208,27 @@ def test_external_config_symlink_is_exactly_attested() -> None:
                 config_paths=(directory_link,),
             ),
         )
+
+
+def test_windows_path_ctime_is_not_cross_handle_authority() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        source = Path(raw) / "identity"
+        source.write_bytes(b"stable")
+        identity = FileIdentity.capture(source)
+        metadata = list(FileIdentity.capture_metadata(source))
+        metadata[3] += 1_000_000
+        changed_ctime = tuple(metadata)
+        metadata[5] += 1
+        changed_inode = tuple(metadata)
+        original_name = codex_execution_identity.os.name
+        try:
+            codex_execution_identity.os.name = "nt"
+            assert identity.metadata_matches(changed_ctime)
+            assert not identity.metadata_matches(changed_inode)
+            codex_execution_identity.os.name = "posix"
+            assert not identity.metadata_matches(changed_ctime)
+        finally:
+            codex_execution_identity.os.name = original_name
 
 
 def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
@@ -484,6 +507,42 @@ def test_payload_round_trip_and_tamper_are_strict() -> None:
             raise AssertionError("tampered launch attestation was accepted")
 
 
+def _compile_self_contained_interpreter(root: Path) -> Path | None:
+    """Build a tiny native binary with no dylib deps beyond libc/libSystem.
+
+    materialize_sdk_launch copies only the interpreter's raw bytes, not its
+    dylib closure, so real interpreters that reference sibling libraries via
+    an @executable_path-relative path (e.g. some uv-managed CPython builds)
+    break, and dyld can wedge the copy in an uninterruptible state instead of
+    failing cleanly. A freshly compiled, unsigned binary with no such
+    references is safe to copy and exec regardless of the host's interpreter
+    layout.
+    """
+    compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if compiler is None:
+        return None
+    source = root / "interpreter.c"
+    source.write_text(
+        "int main(void) {\n"
+        "  extern long write(int, const void *, unsigned long);\n"
+        "  write(1, \"materialized\", 12);\n"
+        "  return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    binary = root / "interpreter"
+    built = subprocess.run(
+        [compiler, "-o", str(binary), str(source)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if built.returncode != 0 or not binary.is_file():
+        return None
+    return binary
+
+
 def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> None:
     if os.name == "nt":
         return
@@ -505,15 +564,15 @@ def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> Non
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
+        interpreter = _compile_self_contained_interpreter(root)
+        if interpreter is None:
+            return
         launcher = root / "bin" / "claude"
         destination = root / "materialized"
         destination.mkdir()
         _write_executable(
             launcher,
-            (
-                f"#!{Path(sys.executable).resolve()}\n"
-                "print('materialized', end='')\n"
-            ).encode("utf-8"),
+            f"#!{interpreter.resolve()}\n".encode("utf-8"),
         )
         launch = capture_cli_launch(
             logical_command="claude",
@@ -527,6 +586,7 @@ def test_pinned_launch_and_sdk_materialization_do_not_reread_resolution() -> Non
             capture_output=True,
             check=False,
             text=True,
+            timeout=10,
         )
 
         assert materialized.attest()
@@ -713,6 +773,7 @@ def test_runner_materialization_preserves_python_runtime_closure() -> None:
 
 TESTS = (
     test_external_config_symlink_is_exactly_attested,
+    test_windows_path_ctime_is_not_cross_handle_authority,
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
     test_cli_path_swap_and_windows_wrappers_fail_closed,
     test_source_package_config_resume_and_symlink_drift_fail_attestation,
