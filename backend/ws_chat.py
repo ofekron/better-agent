@@ -568,11 +568,7 @@ async def websocket_chat(websocket: WebSocket):
         tok = websocket.query_params.get("token")
         tok_user = auth.verify_token(tok) if tok else None
         if tok_user:
-            # Do NOT write into websocket.session — the upgrade handshake
-            # is itself an HTTP response, so SessionMiddleware would
-            # resurrect/extend a cleared or absent session cookie for a
-            # connection that only carried a bearer token. See the matching
-            # fix in main.py's auth_gate.
+            websocket.session["user"] = tok_user
             user = tok_user
     if not user:
         await websocket.close(code=1008)

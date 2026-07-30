@@ -140,19 +140,6 @@ def create_access_token(username: str) -> str:
     return _access_serializer().dumps({"username": username})
 
 
-def identify_request(request) -> dict | None:
-    """Effective identity for this request: a real session first, else the
-    bearer identity auth_gate resolved onto `request.state.bearer_user`
-    without mutating the session (see auth_gate in main.py). Keeps
-    GET /api/auth/me and other identity reads honest for bearer-only
-    native clients while not silently resurrecting/extending a cleared
-    or absent session cookie."""
-    session_user = request.session.get("user") if "session" in request.scope else None
-    if session_user:
-        return session_user
-    return getattr(request.state, "bearer_user", None)
-
-
 def verify_token(token: str | None) -> dict | None:
     """Decode + return the embedded user dict, or None if the token
     is missing / malformed / expired / signed by a stale secret.
