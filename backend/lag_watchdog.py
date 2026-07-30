@@ -165,6 +165,9 @@ async def _dispatch_lag_watchdog_issue(body: bytes) -> lag_incident_queue.Dispat
         )
     if status < 400:
         return lag_incident_queue.DispatchOutcome(True)
+    if status == 410:
+        perf.record_count("lag_incident.suppressed_disabled")
+        return lag_incident_queue.DispatchOutcome(True)
     detail = _safe_extension_error_detail(status, content)
     category = "timeout" if status == 504 else "rejected" if status < 500 else "backend_error"
     logger.warning(

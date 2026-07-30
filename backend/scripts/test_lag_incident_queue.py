@@ -23,6 +23,7 @@ import lag_incident_queue as queue
 import main
 import lag_watchdog  # noqa: E402
 import paths
+import perf
 
 
 def _reset_spool() -> None:
@@ -576,13 +577,24 @@ async def _non_retryable_dispatch_is_dropped_not_retried_forever() -> None:
         _reset_spool()
 
 
-async def _manually_disabled_destination_drops_spooled_incident() -> None:
+async def _manually_disabled_destination_acknowledges_suppression() -> None:
     import extension_backend_loader
 
     _reset_spool()
     assert queue.enqueue(_payload("e" * 16))
     attempts = 0
     original_invoke = extension_backend_loader.invoke_named_core_destination_sync
+    counters = (
+        "lag_incident.acknowledged",
+        "lag_incident.circuit_open",
+        "lag_incident.dropped_unretryable",
+        "lag_incident.retry",
+        "lag_incident.suppressed_disabled",
+    )
+    before = {
+        name: int(perf._counts.get(name, {}).get("total", 0))
+        for name in counters
+    }
 
     def disabled_destination(*_args, **_kwargs) -> tuple[int, bytes]:
         nonlocal attempts
@@ -598,6 +610,21 @@ async def _manually_disabled_destination_drops_spooled_incident() -> None:
             await asyncio.sleep(0.01)
         assert queue.depth() == 0
         assert attempts == 1
+        after = {
+            name: int(perf._counts.get(name, {}).get("total", 0))
+            for name in counters
+        }
+        assert after["lag_incident.acknowledged"] == (
+            before["lag_incident.acknowledged"] + 1
+        )
+        assert after["lag_incident.suppressed_disabled"] == (
+            before["lag_incident.suppressed_disabled"] + 1
+        )
+        assert after["lag_incident.dropped_unretryable"] == (
+            before["lag_incident.dropped_unretryable"]
+        )
+        assert after["lag_incident.retry"] == before["lag_incident.retry"]
+        assert after["lag_incident.circuit_open"] == before["lag_incident.circuit_open"]
     finally:
         extension_backend_loader.invoke_named_core_destination_sync = original_invoke
         await queue.stop()
@@ -677,7 +704,7 @@ def main_test() -> None:
     asyncio.run(_portable_identity_fallback_roundtrip())
     asyncio.run(_structured_retry_after_and_destination_wake())
     asyncio.run(_non_retryable_dispatch_is_dropped_not_retried_forever())
-    asyncio.run(_manually_disabled_destination_drops_spooled_incident())
+    asyncio.run(_manually_disabled_destination_acknowledges_suppression())
     test_manually_disabled_named_destination_is_nonretryable()
     print("PASS: durable lag incident queue")
 
