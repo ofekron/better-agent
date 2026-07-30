@@ -74,17 +74,19 @@ def test_startup_dispatches_recovery_and_runs_the_scan_off_main() -> None:
         return
 
     import main
+
+    import recovery
     import recovery_manager
     from fastapi.testclient import TestClient
 
     scan_threads: list[str] = []
-    original_scan = main.recover_all_in_flight
+    original_scan = recovery.recover_all_in_flight
 
     def spy(*a, **kw):
         scan_threads.append(threading.current_thread().name)
         return original_scan(*a, **kw)
 
-    main.recover_all_in_flight = spy
+    recovery.recover_all_in_flight = spy
     try:
         with TestClient(main.app):
             deadline = time.time() + 30
@@ -103,7 +105,7 @@ def test_startup_dispatches_recovery_and_runs_the_scan_off_main() -> None:
         ), scan_threads
         assert recovery_manager.manager.running is False
     finally:
-        main.recover_all_in_flight = original_scan
+        recovery.recover_all_in_flight = original_scan
 
 
 if __name__ == "__main__":

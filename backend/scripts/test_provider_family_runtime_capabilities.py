@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -27,6 +30,9 @@ from provider_family_runtime_capabilities import (  # noqa: E402
     snapshot_family_runtime_capabilities,
     stage_family_runtime_capabilities,
 )
+import provider_runtime_payload_store  # noqa: E402
+import provider_runtime_resolver  # noqa: E402
+import provider  # noqa: E402
 
 
 def _write(path: Path, contents: bytes) -> None:
@@ -71,6 +77,10 @@ def _snapshot(
         b"---\nname: planning\ndescription: Plan work\n---\nbody\n",
     )
     _write(skill / "scripts" / "run.sh", b"#!/bin/sh\nexit 0\n")
+    _write(
+        skill / "assets" / "binary.bin",
+        b"lf\ncrlf\r\nsub\x1a\x00non-utf8\xff",
+    )
     agent = root / "sources" / "agents" / "reviewer.md"
     _write(agent, b"Review changes adversarially.\n")
     package_root = root / "sources" / "packages" / "runtime_pkg"
@@ -127,7 +137,7 @@ def test_snapshot_is_immutable_across_every_authority_drift() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "run-a"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         prepared, sources = _snapshot(root)
         original_manifest = json.loads(json.dumps(prepared.manifest))
 
@@ -185,6 +195,9 @@ def test_snapshot_is_immutable_across_every_authority_drift() -> None:
         assert (resolved.skill_dirs["planning"] / "SKILL.md").read_bytes().endswith(
             b"body\n",
         )
+        assert (
+            resolved.skill_dirs["planning"] / "assets" / "binary.bin"
+        ).read_bytes() == b"lf\ncrlf\r\nsub\x1a\x00non-utf8\xff"
         assert resolved.agent_files["reviewer.md"].read_bytes() == (
             b"Review changes adversarially.\n"
         )
@@ -249,7 +262,7 @@ def test_harness_secret_refs_survive_artifact_round_trip() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "secret-ref-run"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         refs = {
             "example.extension": [
                 "extension-setting:example.extension:access_token",
@@ -322,7 +335,7 @@ def test_path_symlink_and_payload_tamper_fail_closed() -> None:
         root = Path(raw)
         state_home = root / "state"
         run_dir = state_home / "runs" / "run-tamper"
-        run_dir.mkdir(parents=True)
+        provider._ensure_execution_run_dir(run_dir)
         prepared, _sources = _snapshot(root)
         previous = os.environ.get("BETTER_AGENT_HOME")
         os.environ["BETTER_AGENT_HOME"] = str(state_home)
@@ -343,6 +356,31 @@ def test_path_symlink_and_payload_tamper_fail_closed() -> None:
             else:
                 raise AssertionError("tampered capability payload was installed")
             cleanup_staged_family_runtime_capabilities("run-tamper")
+
+            stage_family_runtime_capabilities("cleanup-redirect", prepared)
+            staged_dir = provider_runtime_payload_store._stage_dir(
+                "cleanup-redirect",
+            )
+            (
+                staged_dir
+                / provider_runtime_payload_store.CAPABILITY_PAYLOAD_NAME
+            ).unlink()
+            staged_dir.rmdir()
+            outside_dir = root / "outside-cleanup"
+            outside_dir.mkdir()
+            marker = outside_dir / "marker"
+            marker.write_text("preserve")
+            staged_dir.symlink_to(outside_dir, target_is_directory=True)
+            try:
+                cleanup_staged_family_runtime_capabilities(
+                    "cleanup-redirect",
+                )
+            except ExecutionContractError:
+                pass
+            else:
+                raise AssertionError("redirected staged cleanup was accepted")
+            assert marker.read_text() == "preserve"
+            staged_dir.unlink()
         finally:
             if previous is None:
                 os.environ.pop("BETTER_AGENT_HOME", None)
@@ -422,8 +460,8 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
         state_home = root / "state"
         source_run = state_home / "runs" / "source"
         target_run = state_home / "runs" / "target"
-        source_run.mkdir(parents=True)
-        target_run.mkdir(parents=True)
+        provider._ensure_execution_run_dir(source_run)
+        provider._ensure_execution_run_dir(target_run)
         plan = _plan()
         plan["tools"].append("windows-tool.run")
         plan["mcp_servers"].append({
@@ -480,6 +518,187 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
                 os.environ["BETTER_AGENT_HOME"] = previous
 
 
+def test_resolved_executable_is_cleanup_safe() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw) / "runtime-capabilities"
+        root.mkdir(mode=0o700)
+        provider_runtime_resolver.make_private_directory(root)
+        executable = root / "skills" / "planning" / "scripts" / "run.sh"
+        provider_runtime_resolver._write_resolved_file(
+            root,
+            executable,
+            b"#!/bin/sh\nexit 0\n",
+            0o500,
+        )
+
+        provider_runtime_resolver.require_private_file(executable)
+        assert executable.read_bytes() == b"#!/bin/sh\nexit 0\n"
+        observed = executable.stat()
+        if os.name == "nt":
+            assert not (
+                getattr(observed, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_READONLY", 1)
+            )
+        else:
+            assert stat.S_IMODE(observed.st_mode) == 0o500
+
+        shutil.rmtree(root)
+        assert not root.exists()
+
+
+def test_private_root_creation_and_nested_tree_security() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw) / "prepared"
+        original_make_private = provider_runtime_payload_store.make_private_directory
+        original_require_private = (
+            provider_runtime_payload_store.require_private_directory
+        )
+        secured: list[Path] = []
+        provider_runtime_payload_store.make_private_directory = secured.append
+        provider_runtime_payload_store.require_private_directory = lambda _path: None
+        try:
+            resolved = provider_runtime_payload_store._ensure_secure_directory(root)
+            provider_runtime_payload_store._ensure_secure_directory(root)
+        finally:
+            provider_runtime_payload_store.make_private_directory = original_make_private
+            provider_runtime_payload_store.require_private_directory = (
+                original_require_private
+            )
+
+        assert resolved == root.resolve()
+        assert secured == [root, root]
+
+        tree_root = Path(raw) / "tree"
+        tree_root.mkdir()
+        original_make_private = provider_runtime_resolver.make_private_directory
+        original_require_private = provider_runtime_resolver.require_private_directory
+        secured = []
+        verified: list[Path] = []
+        provider_runtime_resolver.make_private_directory = secured.append
+        provider_runtime_resolver.require_private_directory = verified.append
+        nested = tree_root / "skills" / "owner" / "scripts"
+        try:
+            provider_runtime_resolver._ensure_private_parent_tree(
+                tree_root,
+                nested,
+            )
+        finally:
+            provider_runtime_resolver.make_private_directory = original_make_private
+            provider_runtime_resolver.require_private_directory = (
+                original_require_private
+            )
+        expected = [
+            tree_root / "skills",
+            tree_root / "skills" / "owner",
+            nested,
+        ]
+        assert secured == expected
+        assert verified == expected
+
+
+def test_provider_secures_run_directory_before_use() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        run_dir = Path(raw) / "run"
+        original_make_private = provider.make_private_directory
+        original_require_private = provider.require_private_directory
+        events: list[tuple[str, Path]] = []
+        provider.make_private_directory = (
+            lambda path: events.append(("secure", path))
+        )
+        provider.require_private_directory = (
+            lambda path: events.append(("verify", path))
+        )
+        try:
+            assert provider._ensure_execution_run_dir(run_dir)
+            assert not provider._ensure_execution_run_dir(run_dir)
+        finally:
+            provider.make_private_directory = original_make_private
+            provider.require_private_directory = original_require_private
+
+        assert events == [
+            ("secure", run_dir),
+            ("verify", run_dir),
+            ("verify", run_dir),
+        ]
+
+
+def test_legacy_staging_root_migrates_only_on_write() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        state_home = root / "state"
+        prepared_root = state_home / "prepared-execution-payloads"
+        prepared_root.mkdir(parents=True)
+        prepared_root.chmod(0o777)
+        prepared, _sources = _snapshot(root)
+        previous = os.environ.get("BETTER_AGENT_HOME")
+        os.environ["BETTER_AGENT_HOME"] = str(state_home)
+        try:
+            barrier = threading.Barrier(3)
+            failures: list[BaseException] = []
+
+            def stage(run_id: str) -> None:
+                barrier.wait()
+                try:
+                    stage_family_runtime_capabilities(run_id, prepared)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            workers = [
+                threading.Thread(target=stage, args=(run_id,))
+                for run_id in ("legacy-a", "legacy-b")
+            ]
+            for worker in workers:
+                worker.start()
+            barrier.wait()
+            for worker in workers:
+                worker.join()
+
+            assert failures == []
+            provider_runtime_payload_store.require_private_directory(
+                prepared_root,
+            )
+            if os.name != "nt":
+                assert stat.S_IMODE(prepared_root.stat().st_mode) == 0o700
+            cleanup_staged_family_runtime_capabilities("legacy-a")
+            cleanup_staged_family_runtime_capabilities("legacy-b")
+
+            original_make_private = (
+                provider_runtime_payload_store.make_private_directory
+            )
+            original_require_private = (
+                provider_runtime_payload_store.require_private_directory
+            )
+            mutations: list[Path] = []
+
+            def reject_private_directory(_path: Path) -> None:
+                raise PermissionError("unsafe")
+
+            provider_runtime_payload_store.make_private_directory = mutations.append
+            provider_runtime_payload_store.require_private_directory = (
+                reject_private_directory
+            )
+            try:
+                try:
+                    cleanup_staged_family_runtime_capabilities("missing")
+                except ExecutionContractError:
+                    pass
+                else:
+                    raise AssertionError("insecure cleanup root was accepted")
+            finally:
+                provider_runtime_payload_store.make_private_directory = (
+                    original_make_private
+                )
+                provider_runtime_payload_store.require_private_directory = (
+                    original_require_private
+                )
+            assert mutations == []
+        finally:
+            if previous is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous
+
+
 TESTS = (
     test_snapshot_is_immutable_across_every_authority_drift,
     test_artifact_manifest_and_hydration_are_secret_free,
@@ -487,6 +706,10 @@ TESTS = (
     test_path_symlink_and_payload_tamper_fail_closed,
     test_prewarm_success_and_failure_preserve_capability_semantics,
     test_restart_clone_preserves_posix_and_windows_configs,
+    test_resolved_executable_is_cleanup_safe,
+    test_private_root_creation_and_nested_tree_security,
+    test_provider_secures_run_directory_before_use,
+    test_legacy_staging_root_migrates_only_on_write,
 )
 
 

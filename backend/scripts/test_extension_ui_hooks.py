@@ -18,7 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
 import extension_store  # noqa: E402
 import project_update_store  # noqa: E402
 import config_store  # noqa: E402
+import installation_profile  # noqa: E402
 import better_agent_sdk as sdk  # noqa: E402
+
+# Bare test homes have no installation.json, so _record_active() gates every
+# ui_hooks()/is_extension_active() check in this file on integrations_enabled()
+# being false. Force it true for the run, matching the pattern established in
+# test_extension_store.py's test_installed_extension_instructions_are_managed_blocks.
+installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
 
 
 def _configure_project_structure_runtime() -> None:
@@ -106,11 +113,16 @@ def _seed_store_with_marketplace() -> None:
 
 
 def _enable_builtin_ui_extensions() -> None:
+    project_structure_id = (
+        extension_store.extension_id_for_role('project-structure')
+        or "test.project-structure"
+    )
     _install_ui_hook_extension(
-        extension_store.extension_id_for_role('project-structure'),
+        project_structure_id,
         {
             "name": "Project structure",
             "surfaces": ["backend_feature", "frontend_feature"],
+            "core_roles": ["project-structure"],
             "entrypoints": {
                 "page": {
                     "id": "main",
@@ -118,13 +130,13 @@ def _enable_builtin_ui_extensions() -> None:
                     "icon": "clipboard",
                     "open": {
                         "type": "ensure",
-                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure",
+                        "endpoint": f"/api/extensions/{project_structure_id}/backend/project-structure-edit/ensure",
                         "path_template": "/s/{session_id}",
                         "id_field": "session_id",
                         "include_cwd": True,
                     },
                     "badge": {
-                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
+                        "endpoint": f"/api/extensions/{project_structure_id}/backend/project-updates/total"
                     },
                 },
             },
@@ -157,13 +169,18 @@ _ASK_QUICK_BUTTON_ACTION = {
 }
 
 
-def _install_active_assistant() -> None:
+def _install_active_assistant() -> str:
     """Install + enable the Assistant superseder so its quick button replaces
     Ask's. Active (installed+enabled+entitled) is all the supersede gate needs;
     a configured internal-LLM task additionally makes Assistant's own button
-    runtime-ready so it surfaces in ui_hooks()."""
-    if extension_store.extension_id_for_role('assistant') is None:
-        raise AssertionError("private registry missing Assistant id")
+    runtime-ready so it surfaces in ui_hooks(). Returns the installed id:
+    extension_id_for_role() only resolves active (enabled) extensions, so
+    callers that will disable/uninstall it must hold onto this return value
+    rather than re-querying the role afterward."""
+    assistant_id = (
+        extension_store.extension_id_for_role('assistant')
+        or "test.assistant"
+    )
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
     assignments["assistant"] = {
@@ -173,17 +190,18 @@ def _install_active_assistant() -> None:
     }
     config_store.set_internal_llm_assignments(assignments)
     _install_ui_hook_extension(
-        extension_store.extension_id_for_role('assistant'),
+        assistant_id,
         {
             "name": "Assistant",
             "surfaces": ["backend_feature", "frontend_feature"],
+            "core_roles": ["assistant"],
             "entrypoints": {
                 "quick_button": {
                     "label": "Assistant",
                     "icon": "assistant-start",
                     "action": {
                         "type": "ensure",
-                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/backend/assistant/ensure",
+                        "endpoint": f"/api/extensions/{assistant_id}/backend/assistant/ensure",
                         "path_template": "/s/{id}",
                         "id_field": "id",
                     },
@@ -192,6 +210,7 @@ def _install_active_assistant() -> None:
             "permissions": {"session_state": True},
         },
     )
+    return assistant_id
 
 
 def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
@@ -211,6 +230,8 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         "permissions": manifest["permissions"],
         "marketplace": {},
     }
+    if "core_roles" in manifest:
+        full_manifest["core_roles"] = manifest["core_roles"]
     entrypoints = full_manifest["entrypoints"]
     frontend_path = entrypoints.get("frontend")
     if frontend_path:
@@ -237,6 +258,7 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
             "commit_sha": extension_id,
         },
         persist=True,
+        force_enabled=True,
     )
 
 
@@ -566,27 +588,30 @@ def test_ask_quick_button_superseded_by_active_assistant() -> None:
             if q["extension_id"] == extension_store.BUILTIN_ASK_EXTENSION_ID
         ]
 
-    def assistant_buttons() -> list:
+    def assistant_buttons(assistant_id: str) -> list:
         return [
             q for q in extension_store.ui_hooks()["quick_buttons"]
-            if q["extension_id"] == extension_store.extension_id_for_role('assistant')
+            if q["extension_id"] == assistant_id
         ]
 
     # Assistant absent -> Ask button shows.
     assert len(ask_buttons()) == 1
 
     # Assistant installed + enabled -> Ask suppressed, Assistant shows.
-    _install_active_assistant()
+    # extension_id_for_role() only resolves while the extension is active, so
+    # the id is captured once here and reused below across the disable/
+    # re-enable/uninstall transitions rather than re-queried each time.
+    assistant_id = _install_active_assistant()
     assert ask_buttons() == []
-    assert len(assistant_buttons()) == 1
+    assert len(assistant_buttons(assistant_id)) == 1
 
     # Assistant disabled -> Ask returns, Assistant gone.
-    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), False)
+    extension_store.set_enabled(assistant_id, False)
     assert len(ask_buttons()) == 1
-    assert assistant_buttons() == []
+    assert assistant_buttons(assistant_id) == []
 
     # Assistant re-enabled -> Ask suppressed again.
-    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), True)
+    extension_store.set_enabled(assistant_id, True)
     assert ask_buttons() == []
 
     # Assistant uninstalled -> Ask returns.
@@ -596,7 +621,7 @@ def test_ask_quick_button_superseded_by_active_assistant() -> None:
         _stub = _types.ModuleType("assistant_ui")
         _stub.cleanup_singleton = lambda: None  # type: ignore[attr-defined]
         _sys.modules["assistant_ui"] = _stub
-    extension_store.uninstall(extension_store.extension_id_for_role('assistant'))
+    extension_store.uninstall(assistant_id)
     assert len(ask_buttons()) == 1
 
 

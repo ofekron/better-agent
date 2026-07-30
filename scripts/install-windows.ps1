@@ -56,6 +56,9 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw "npm was not found on PATH after installing Node.js. Open a new PowerShell and re-run this script."
 }
 
+# BETTER_AGENT_FROM (acquisition channel) is inherited by install.py through
+# the process environment. It is never validated or interpolated here —
+# scripts/install_channel.py is the only place that inspects it.
 $installerArgs = @("$PSScriptRoot\install.py")
 if ($Mode) { $installerArgs += @("--mode", $Mode) }
 if ($Provider) { $installerArgs += @("--provider", $Provider) }

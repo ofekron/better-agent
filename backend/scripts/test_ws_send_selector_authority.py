@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from auth_test_helpers import authenticate_client  # noqa: E402
 import auth  # noqa: E402
 import main  # noqa: E402
+import session_detail_api  # noqa: E402
 import config_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -131,14 +132,14 @@ def test_ws_send_forwards_disallowed_tools() -> bool:
 
 
 def test_ws_disallowed_tools_validation() -> bool:
-    if main._parse_ws_disallowed_tools(None) is not None:
+    if session_detail_api._parse_ws_disallowed_tools(None) is not None:
         print("  None should stay None")
         return False
-    if main._parse_ws_disallowed_tools([" Bash ", "Edit"]) != ["Bash", "Edit"]:
+    if session_detail_api._parse_ws_disallowed_tools([" Bash ", "Edit"]) != ["Bash", "Edit"]:
         print("  valid entries should be trimmed")
         return False
     try:
-        main._parse_ws_disallowed_tools("Bash")
+        session_detail_api._parse_ws_disallowed_tools("Bash")
     except ValueError as e:
         if str(e) != "disallowed_tools must be an array":
             print(f"  unexpected scalar error: {e}")
@@ -147,7 +148,7 @@ def test_ws_disallowed_tools_validation() -> bool:
         print("  scalar input should be rejected")
         return False
     try:
-        main._parse_ws_disallowed_tools([""])
+        session_detail_api._parse_ws_disallowed_tools([""])
     except ValueError as e:
         if str(e) != "disallowed_tools entries must be non-empty strings":
             print(f"  unexpected entry error: {e}")

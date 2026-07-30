@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = ROOT / "main.py"
+SESSION_DETAIL = ROOT / "session_detail_api.py"
 
 
 def _call_name(node: ast.AST) -> str:
@@ -32,7 +32,7 @@ def _find_create_session(tree: ast.Module) -> ast.AsyncFunctionDef:
 
 
 def test_create_session_route_keeps_disk_work_off_loop() -> None:
-    tree = ast.parse(MAIN.read_text())
+    tree = ast.parse(SESSION_DETAIL.read_text())
     endpoint = _find_create_session(tree)
     parent: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(endpoint):

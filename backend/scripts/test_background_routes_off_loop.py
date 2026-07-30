@@ -7,6 +7,41 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 
+# Every module that registers HTTP/WS routes. main.py is the composition root
+# and declares none of its own, so the route invariants below scan the owners.
+API_MODULES = (
+    "main.py",
+    "ws_chat.py",
+    "providers_api.py",
+    "user_prefs_api.py",
+    "projects_api.py",
+    "hooks_push_api.py",
+    "harness_profiles_api.py",
+    "internal_extension_api.py",
+    "session_listing_api.py",
+    "session_list_cache.py",
+    "session_detail_api.py",
+    "session_panels_api.py",
+    "file_editor_api.py",
+    "offline_actions_api.py",
+    "recovery.py",
+    "internal_orchestration_api.py",
+    "internal_session_state_api.py",
+    "internal_messaging_api.py",
+    "user_input_api.py",
+    "tasks_api.py",
+    "session_bridge_api.py",
+    "schedules_api.py",
+    "coordination_api.py",
+    "mobile_desktop_api.py",
+    "workers_api.py",
+    "worker_pools_api.py",
+    "credential_ui_api.py",
+    "tool_approvals_api.py",
+    "ops_api.py",
+    "misc_api.py",
+)
+
 
 def _offloaded(source: str, call: str) -> bool:
     """True when `call` is handed to asyncio.to_thread, regardless of how the
@@ -29,8 +64,6 @@ def _dotted_name(node: ast.expr) -> str | None:
 
 
 def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
     forbidden = {
         "session_manager.exists",
         "session_manager.get",
@@ -41,7 +74,8 @@ def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> No
     violations: list[str] = []
 
     class Visitor(ast.NodeVisitor):
-        def __init__(self) -> None:
+        def __init__(self, module: str) -> None:
+            self.module = module
             self.async_stack: list[str] = []
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
@@ -58,26 +92,31 @@ def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> No
             if self.async_stack:
                 called = _dotted_name(node.func)
                 if called in forbidden:
-                    violations.append(f"{node.lineno}:{self.async_stack[-1]}:{called}")
+                    violations.append(
+                        f"{self.module}:{node.lineno}:{self.async_stack[-1]}:{called}"
+                    )
             self.generic_visit(node)
 
-    Visitor().visit(tree)
+    for module in API_MODULES:
+        path = ROOT / module
+        assert path.exists(), f"{module} is missing; update API_MODULES"
+        Visitor(module).visit(ast.parse(path.read_text(encoding="utf-8")))
     assert violations == []
 
 
 def test_internal_schedules_checks_session_existence_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "schedules_api.py").read_text(encoding="utf-8")
     route_start = source.index("async def internal_schedules(")
-    route_end = source.index("@app.post(\"/api/internal/ask-propose\")", route_start)
+    route_end = source.index("@router.get(\"/api/schedules\")", route_start)
     route_source = source[route_start:route_end]
     assert "await _session_exists(app_session_id)" in route_source
     assert "if not session_manager.exists(app_session_id):" not in route_source
 
 
 def test_extension_session_field_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "internal_session_state_api.py").read_text(encoding="utf-8")
     route_start = source.index("async def internal_session_field(")
-    route_end = source.index("@app.post(\"/api/internal/mssg\")", route_start)
+    route_end = source.index("def _session_activity_snapshot(", route_start)
     route_source = source[route_start:route_end]
     assert "await _session_exists(session_id)" in route_source
     assert "await _session_lite(session_id)" in route_source
@@ -87,10 +126,7 @@ def test_extension_session_field_routes_stay_off_loop() -> None:
 
 
 def test_project_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("@app.get(\"/api/projects\")")
-    route_end = source.index("# ── Project structure updates", route_start)
-    route_source = source[route_start:route_end]
+    route_source = (ROOT / "projects_api.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(_project_aggregates)" in route_source
     assert "await asyncio.to_thread(project_store.list_projects)" in route_source
     assert "await asyncio.to_thread(\n        project_store.add_project" in route_source
@@ -105,12 +141,12 @@ def test_project_routes_stay_off_loop() -> None:
 
 
 def test_sessions_filter_sort_stays_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "session_listing_api.py").read_text(encoding="utf-8")
     route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
+    route_end = source.index("@router.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
     helper_start = source.index("def _build_local_sessions_page_for_list(")
-    helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
+    helper_end = source.index("@router.get(\"/api/sessions\")", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "page, total = await session_list_path.run(\n            \"sessions.list.local_page_thread\"," in route_source
     assert "_build_local_sessions_page_for_list," in route_source
@@ -128,36 +164,39 @@ def test_sessions_filter_sort_stays_off_loop() -> None:
 def test_delete_and_internal_session_mutations_stay_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     delete_start = source.index("async def _delete_session_tree(")
-    delete_end = source.index("async def _auto_delete_expired_sessions(", delete_start)
-    delete_source = source[delete_start:delete_end]
+    delete_source = source[delete_start:]
     assert "await asyncio.to_thread(session_manager.subtree_ids, session_id)" in delete_source
     assert "await asyncio.to_thread(session_manager.delete, session_id)" in delete_source
     assert "removed_sids = session_manager.subtree_ids(session_id)" not in delete_source
     assert "ok = session_manager.delete(session_id)" not in delete_source
 
-    auto_start = source.index("async def _auto_delete_expired_sessions(")
-    auto_end = source.index("def _session_list_sort_key(", auto_start)
-    auto_source = source[auto_start:auto_end]
+    recovery_source = (ROOT / "recovery.py").read_text(encoding="utf-8")
+    auto_start = recovery_source.index("async def _auto_delete_expired_sessions(")
+    auto_end = recovery_source.index(
+        "async def _reconcile_queued_delivery_attempt(", auto_start,
+    )
+    auto_source = recovery_source[auto_start:auto_end]
     assert "await asyncio.to_thread(user_prefs.get_session_auto_delete_days)" in auto_source
     assert "summaries = await asyncio.to_thread(session_manager.list)" in auto_source
 
-    create_start = source.index("async def internal_create_session(")
-    create_end = source.index("@app.post(\"/api/internal/create-sub-session\")", create_start)
-    create_source = source[create_start:create_end]
+    orchestration = (ROOT / "internal_orchestration_api.py").read_text(encoding="utf-8")
+    create_start = orchestration.index("async def internal_create_session(")
+    create_end = orchestration.index("@router.post(\"/api/internal/create-sub-session\")", create_start)
+    create_source = orchestration[create_start:create_end]
     assert "sess = await asyncio.to_thread(" in create_source
     assert "session_manager.create(" in create_source
     assert "sess = session_manager.create(" not in create_source
 
-    sub_start = source.index("async def internal_create_sub_session(")
-    sub_end = source.index("def _require_extension_session_ownership(", sub_start)
-    sub_source = source[sub_start:sub_end]
+    sub_start = orchestration.index("async def internal_create_sub_session(")
+    sub_source = orchestration[sub_start:]
     assert "sub = await asyncio.to_thread(" in sub_source
     assert "session_manager.create_sub_session(" in sub_source
     assert "sub = session_manager.create_sub_session(" not in sub_source
 
-    msg_start = source.index("async def internal_session_messages_append(")
-    msg_end = source.index("@app.post(\"/api/internal/session-field\")", msg_start)
-    msg_source = source[msg_start:msg_end]
+    session_state = (ROOT / "internal_session_state_api.py").read_text(encoding="utf-8")
+    msg_start = session_state.index("async def internal_session_messages_append(")
+    msg_end = session_state.index("@router.post(\"/api/internal/session-field\")", msg_start)
+    msg_source = session_state[msg_start:msg_end]
     for call in (
         "session_manager.append_user_msg",
         "session_manager.append_assistant_msg",
@@ -169,10 +208,9 @@ def test_delete_and_internal_session_mutations_stay_off_loop() -> None:
 
 
 def test_provider_and_prefs_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("@app.get(\"/api/providers\")")
-    route_end = source.index("# ---- Shortcut responses ----", route_start)
-    route_source = source[route_start:route_end]
+    prefs_source = (ROOT / "user_prefs_api.py").read_text(encoding="utf-8")
+    prefs_source = prefs_source[: prefs_source.index("# ---- Shortcut responses ----")]
+    route_source = (ROOT / "providers_api.py").read_text(encoding="utf-8") + prefs_source
     for call in (
         "config_store.list_providers",
         "user_prefs.get_last_models",
@@ -190,17 +228,14 @@ def test_provider_and_prefs_routes_stay_off_loop() -> None:
 
 
 def test_project_update_and_hooks_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    project_start = source.index("# ── Project structure updates")
-    project_end = source.index("@app.post(\"/api/internal/provisioned-sessions\")", project_start)
-    project_source = source[project_start:project_end]
-    assert "async def _require_project_structure_internal_async" in project_source
-    assert "_require_builtin_runtime_extension(" in project_source
-    assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" not in project_source
-    assert (
-        source.count("await _require_project_structure_internal_async(request, x_internal_token)")
-        + source.count("await _require_project_updates_internal_async(request, x_internal_token)")
-    ) >= 9
+    hooks = (ROOT / "hooks_push_api.py").read_text(encoding="utf-8")
+    project_source = (ROOT / "internal_extension_api.py").read_text(encoding="utf-8")
+    structure_gate = "await _require_project_structure_internal_async(request, x_internal_token)"
+    updates_gate = "await require_project_updates_internal_async(request, x_internal_token)"
+    assert "async def _require_project_structure_internal_async" in hooks
+    assert "internal_guards.require_builtin_runtime_extension(" in hooks
+    assert "asyncio.to_thread(_require_project_structure_internal, x_internal_token)" not in hooks
+    assert hooks.count(structure_gate) + project_source.count(updates_gate) >= 9
     for route in (
         "internal_project_update_count",
         "internal_project_update_total",
@@ -210,13 +245,10 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
         "internal_project_updates_list",
         "internal_project_updates_mark_seen",
     ):
-        route_start = source.index(f"async def {route}(")
-        route_end = source.index("@app.", route_start + 1)
-        route_source = source[route_start:route_end]
-        assert (
-            "await _require_project_structure_internal_async(request, x_internal_token)" in route_source
-            or "await _require_project_updates_internal_async(request, x_internal_token)" in route_source
-        )
+        route_start = project_source.index(f"async def {route}(")
+        route_end = project_source.index("@router.", route_start + 1)
+        route_source = project_source[route_start:route_end]
+        assert updates_gate in route_source
         assert "await asyncio.to_thread(_require_project" not in route_source
     assert "await asyncio.to_thread(project_update_store.unseen_count" in project_source
     assert "project_update_store.peek_total_unseen()" in project_source
@@ -237,29 +269,26 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
             "project_update_store.unseen_count(project_id)",
         ),
     }.items():
-        route_start = source.index(f"async def {route}(")
-        route_end = source.index("@app.", route_start + 1)
-        route_source = source[route_start:route_end]
+        route_start = project_source.index(f"async def {route}(")
+        route_end = project_source.index("@router.", route_start + 1)
+        route_source = project_source[route_start:route_end]
         assert "await asyncio.to_thread(\n        lambda: (" in route_source
         for call in calls:
             assert call in route_source
 
-    hooks_start = source.index("@app.get(\"/api/hooks\")")
-    hooks_end = source.index("def _parse_session_timestamp", hooks_start)
-    hooks_source = source[hooks_start:hooks_end]
     for call in (
         "hook_store.list_hooks",
         "hook_store.replace_hooks",
         "hook_store.upsert_hook",
         "hook_store.delete_hook",
     ):
-        assert _offloaded(hooks_source, call)
+        assert _offloaded(hooks, call)
 
 
 def test_session_ui_mutation_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("@app.post(\"/api/sessions/{session_id}/fork\")")
-    route_end = source.index("@app.post(\"/api/sessions/{session_id}/project-suggestion\")", route_start)
+    source = (ROOT / "session_detail_api.py").read_text(encoding="utf-8")
+    route_start = source.index("@router.post(\"/api/sessions/{session_id}/fork\")")
+    route_end = source.index("@router.post(\"/api/sessions/{session_id}/project-suggestion\")", route_start)
     route_source = source[route_start:route_end]
     for call in (
         "session_manager.fork",
@@ -274,9 +303,8 @@ def test_session_ui_mutation_routes_stay_off_loop() -> None:
         assert _offloaded(route_source, call)
     assert "session_manager.get_ref(session_id)" not in route_source
 
-    panel_start = source.index("@app.post(\"/api/sessions/{session_id}/tags\")")
-    panel_end = source.index("def _require_prompt_engineer_internal", panel_start)
-    panel_source = source[panel_start:panel_end]
+    panels = (ROOT / "session_panels_api.py").read_text(encoding="utf-8")
+    panel_source = panels[panels.index("@router.post(\"/api/sessions/{session_id}/tags\")"):]
     assert "_require_session(session_id)" not in panel_source
     for call in (
         "session_manager.add_tag",
@@ -298,9 +326,9 @@ def test_session_ui_mutation_routes_stay_off_loop() -> None:
 
 
 def test_core_create_session_validation_stays_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "session_detail_api.py").read_text(encoding="utf-8")
     route_start = source.index("async def create_session(")
-    route_end = source.index("@app.post(\"/api/sessions/{session_id}/fork\")", route_start)
+    route_end = source.index("@router.post(\"/api/sessions/{session_id}/fork\")", route_start)
     route_source = source[route_start:route_end]
     assert "await asyncio.to_thread(\n        _provider_for_required_model" in route_source
     assert "await asyncio.to_thread(\n        _provider_reasoning_effort" in route_source

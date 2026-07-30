@@ -134,6 +134,11 @@ async def _on_shutdown() -> None:
     release_backend_instance_lock()
 
 
+@app.get("/readyz")
+async def readyz() -> dict[str, bool]:
+    return {"ok": True}
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
     topology = load_topology()

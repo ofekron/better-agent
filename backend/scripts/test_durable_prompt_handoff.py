@@ -16,6 +16,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import app_lifecycle  # noqa: E402
+import offline_actions_api  # noqa: E402
 
 
 class _SessionManager:
@@ -70,17 +72,17 @@ async def _disconnect_cannot_cancel_handoff() -> None:
     try:
         queued = {"id": "q1", "content": "new session prompt"}
         params = {"_queued_id": "q1", "prompt": "new session prompt"}
-        caller = asyncio.create_task(main._start_prompt_handoff("sid", queued, params))
+        caller = asyncio.create_task(offline_actions_api._start_prompt_handoff("sid", queued, params))
         await sm.persisted.wait()
         caller.cancel()
         try:
             await caller
         except asyncio.CancelledError:
             pass
-        while main._PROMPT_HANDOFF_TASKS:
+        while offline_actions_api._PROMPT_HANDOFF_TASKS:
             await asyncio.sleep(0)
         assert co.submitted == [("sid", params)]
-        assert not main._PROMPT_HANDOFF_TASKS
+        assert not offline_actions_api._PROMPT_HANDOFF_TASKS
     finally:
         main.session_manager, main.coordinator = real_sm, real_co
 
@@ -94,9 +96,9 @@ async def _duplicate_admission_does_not_dispatch_twice() -> None:
     try:
         queued = {"id": "q2", "content": "once"}
         params = {"_queued_id": "q2", "prompt": "once"}
-        first = await main._start_prompt_handoff("sid", queued, params.copy())
-        second = await main._start_prompt_handoff("sid", queued, params.copy())
-        while main._PROMPT_HANDOFF_TASKS:
+        first = await offline_actions_api._start_prompt_handoff("sid", queued, params.copy())
+        second = await offline_actions_api._start_prompt_handoff("sid", queued, params.copy())
+        while offline_actions_api._PROMPT_HANDOFF_TASKS:
             await asyncio.sleep(0)
         assert first["admitted"] is True
         assert second["admitted"] is False
@@ -111,12 +113,12 @@ async def _dispatch_failure_keeps_durable_outbox_item() -> None:
     main.session_manager, main.coordinator = sm, _FailingCoordinator()
     try:
         queued = {"id": "q3", "content": "recover after restart"}
-        admission = await main._start_prompt_handoff(
+        admission = await offline_actions_api._start_prompt_handoff(
             "sid",
             queued,
             {"_queued_id": "q3", "prompt": "recover after restart"},
         )
-        await main._drain_prompt_handoffs()
+        await offline_actions_api._drain_prompt_handoffs()
         assert admission["admitted"] is True
         assert sm.admitted["q3"] == queued
     finally:
@@ -148,7 +150,7 @@ def main_test() -> int:
     asyncio.run(_duplicate_admission_does_not_dispatch_twice())
     asyncio.run(_dispatch_failure_keeps_durable_outbox_item())
     asyncio.run(_real_outbox_id_is_idempotent_without_client_id())
-    startup_source = inspect.getsource(main.on_startup)
+    startup_source = inspect.getsource(app_lifecycle.on_startup)
     processor_source = inspect.getsource(
         type(main.coordinator)._run_session_processor,
     )

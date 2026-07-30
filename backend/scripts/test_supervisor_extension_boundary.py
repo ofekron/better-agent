@@ -19,13 +19,20 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+# The WS command surface lives in ws_chat.py and the supervisor routes in
+# session_detail_api.py; main.py is now only the composition root.
+_SOURCES = ("main.py", "ws_chat.py", "session_detail_api.py")
+
+
 def _main_functions() -> dict[str, ast.AST]:
-    tree = ast.parse((BACKEND / "main.py").read_text(), filename=os.fspath(BACKEND / "main.py"))
-    return {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    found: dict[str, ast.AST] = {}
+    for name in _SOURCES:
+        path = BACKEND / name
+        tree = ast.parse(path.read_text(), filename=os.fspath(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                found.setdefault(node.name, node)
+    return found
 
 
 def _run() -> bool:

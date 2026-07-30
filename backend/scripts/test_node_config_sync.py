@@ -27,6 +27,7 @@ class _Recorder:
         self.nodes = nodes
         self.exports: dict[str, int] = {name: 0 for name in surface_names}
         self.pushes: list[tuple[str, str]] = []  # (surface, node_id)
+        self.ready_nodes: list[str] = []
         self.export_gate: asyncio.Event | None = None
         self.failing_exports: set[str] = set()
         self.surface_names = surface_names
@@ -49,6 +50,9 @@ class _Recorder:
         node_config_sync._push_task = None
         node_config_sync._connect_tasks = {}
         node_config_sync._loop = None
+        node_config_sync._set_runtime_ready = (
+            lambda node_id, *_: self.ready_nodes.append(node_id)
+        )
 
     def _make_export(self, name: str):
         def export() -> dict:
@@ -131,6 +135,8 @@ def test_connect_listener_pushes_every_surface_to_that_worker_only() -> None:
         await _drain()
         if sorted(rec.pushes) != [("extensions", "w1"), ("harness", "w1"), ("providers", "w1")]:
             raise AssertionError(f"connect did not push every surface to w1 only: {rec.pushes}")
+        if rec.ready_nodes != ["w1"]:
+            raise AssertionError(f"worker became runnable before all projections: {rec.ready_nodes}")
         before = list(rec.pushes)
         await node_config_sync.on_node_state("w2", "disconnected")
         await node_config_sync.on_node_state("primary", "connected")
@@ -172,6 +178,8 @@ def test_one_broken_exporter_does_not_block_other_surfaces() -> None:
             raise AssertionError("broken surface was pushed anyway")
         if rec.pushed_nodes("providers") != ["w1"] or rec.pushed_nodes("harness") != ["w1"]:
             raise AssertionError(f"healthy surfaces were skipped: {rec.pushes}")
+        if rec.ready_nodes:
+            raise AssertionError(f"worker became runnable after failed projection: {rec.ready_nodes}")
 
     asyncio.run(scenario())
 

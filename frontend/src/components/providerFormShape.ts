@@ -15,7 +15,18 @@ const PROVIDER_MODES: Record<string, ProviderMode[]> = {
   opencode: ["subscription"],
 };
 
-export function modesForKind(kind: string): ProviderMode[] {
+// Mirrors backend config_store.CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION:
+// Claude's better_agent_runner backend speaks the subscription OAuth wire
+// format only (see runner_better_agent_claude_subscription.py) — there is no
+// api_key backend for it, so hide that mode rather than offer a save the
+// backend will reject.
+export function modesForKind(
+  kind: string,
+  runner?: string | null,
+): ProviderMode[] {
+  if (kind === "claude" && runner === "better_agent_runner") {
+    return ["subscription"];
+  }
   return PROVIDER_MODES[kind] ?? ["subscription", "api_key"];
 }
 
@@ -27,8 +38,9 @@ export function availableModesForForm(
   kind: string,
   formMode: "create" | "edit",
   initialMode: ProviderMode,
+  runner?: string | null,
 ): ProviderMode[] {
-  const base = modesForKind(kind);
+  const base = modesForKind(kind, runner);
   if (formMode === "edit" && !base.includes(initialMode)) {
     return [...base, initialMode];
   }

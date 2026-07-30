@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import functools
 import hashlib
 import json
@@ -121,6 +122,13 @@ def _mobile_requested(profile: dict[str, Any] | None = None) -> bool:
     ]
 
 
+def _node_runtime() -> bool:
+    return bool(
+        os.environ.get("BETTER_AGENT_NODE_ID")
+        or os.environ.get("BETTER_CLAUDE_NODE_ID")
+    )
+
+
 def _provider_kinds(
     state: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
@@ -132,7 +140,7 @@ def _provider_kinds(
             profile is not None or installation_profile.selection_pending()
         ):
             return (str(selected),)
-        if selected_profile.get("status") != "active":
+        if selected_profile.get("status") != "active" and not _node_runtime():
             return ()
         config = _read_object(bc_home() / "config.json")
     else:
@@ -295,23 +303,37 @@ def _module_available(module: str) -> bool:
         return False
 
 
+def _probe_runtime_module(python: Path, module: str) -> None:
+    subprocess.run(
+        [str(python), "-c", f"import {module}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
 def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
-    try:
-        subprocess.run(
-            [
-                str(_python_in(env_dir)),
-                "-c",
-                ";".join(f"import {name}" for name in probes),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DependencyPlanError(
-            "backend dependency environment is missing required runtime modules"
-        ) from exc
+    if not probes:
+        return
+    python = _python_in(env_dir)
+    failures: list[tuple[str, BaseException]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(probes), 8)) as executor:
+        pending = {
+            executor.submit(_probe_runtime_module, python, module): module
+            for module in probes
+        }
+        for future in concurrent.futures.as_completed(pending):
+            try:
+                future.result()
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append((pending[future], exc))
+    if not failures:
+        return
+    modules = ", ".join(sorted(module for module, _ in failures))
+    raise DependencyPlanError(
+        f"backend dependency environment failed runtime module probes: {modules}"
+    ) from failures[0][1]
 
 
 def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:

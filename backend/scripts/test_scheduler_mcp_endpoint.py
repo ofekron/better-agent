@@ -20,6 +20,7 @@ import tempfile
 from datetime import datetime, timedelta
 
 import _test_home
+from _test_routes import walk_routes
 _TMP_HOME = _test_home.isolate_installed("bc-test-schedep-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
@@ -163,9 +164,10 @@ def main_test() -> int:
           "owner delete works")
 
     print("T6 scheduler feature routes are extension-owned")
+
     route_specs = {
         (getattr(route, "path", ""), tuple(sorted(getattr(route, "methods", set()) or [])))
-        for route in main.app.routes
+        for route in walk_routes(main.app.routes)
     }
     check(
         not any(path == "/api/sessions/{app_session_id}/schedules" for path, _ in route_specs),

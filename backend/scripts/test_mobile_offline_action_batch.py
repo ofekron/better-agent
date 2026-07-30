@@ -22,6 +22,7 @@ from starlette.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
 import main  # noqa: E402
+import offline_actions_api  # noqa: E402
 
 
 def teardown_module() -> None:
@@ -236,12 +237,12 @@ def test_attachment_validation_rejects_invalid_base64_and_size_mismatch() -> Non
     import pytest
 
     with pytest.raises(Exception):
-        main._validate_offline_batch_attachments(
+        offline_actions_api._validate_offline_batch_attachments(
             [{"data": "not-base64!", "media_type": "image/png"}],
             [],
         )
     with pytest.raises(Exception):
-        main._validate_offline_batch_attachments(
+        offline_actions_api._validate_offline_batch_attachments(
             [],
             [{"name": "a.txt", "data": "YQ==", "media_type": "text/plain", "size": 2}],
         )

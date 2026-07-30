@@ -358,10 +358,30 @@ class NodeClient:
             )
             incident_replay = self._start_extension_incident_replay()
             try:
-                await asyncio.wait(
+                completed, _ = await asyncio.wait(
                     [sender, receiver],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                for task in completed:
+                    if task.cancelled():
+                        logger.warning(
+                            "node_client: transport task %s cancelled",
+                            task.get_name(),
+                        )
+                        continue
+                    error = task.exception()
+                    if error is None:
+                        logger.warning(
+                            "node_client: transport task %s ended",
+                            task.get_name(),
+                        )
+                    else:
+                        logger.warning(
+                            "node_client: transport task %s failed: %s",
+                            task.get_name(),
+                            error,
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
             finally:
                 await self._cancel_extension_incident_replay(incident_replay)
                 for t in (sender, receiver):

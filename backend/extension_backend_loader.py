@@ -902,6 +902,13 @@ def invoke_named_core_destination_sync(
     if destination is None:
         return 404, b'{"detail":"Unknown core destination"}'
     extension_id, path = destination
+    record = extension_store.get_extension(extension_id)
+    if (
+        record is not None
+        and record.get("enabled") is False
+        and not record.get("quarantine")
+    ):
+        return 410, b'{"detail":"Core destination is disabled"}'
     return invoke_extension_backend_sync(
         extension_id,
         path,

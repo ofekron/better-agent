@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import main  # noqa: E402
+import ws_chat  # noqa: E402
 import auth  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -51,8 +52,8 @@ def main_test() -> bool:
         orchestration_mode="native",
     )
     sid = session["id"]
-    original = main._rewind_latest_user_for_alter
-    main._rewind_latest_user_for_alter = _raise_alter_error
+    original = ws_chat._rewind_latest_user_for_alter
+    ws_chat._rewind_latest_user_for_alter = _raise_alter_error
     token = auth.create_token("alter-ws-test")
     try:
         with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
@@ -74,7 +75,7 @@ def main_test() -> bool:
                 except WebSocketDisconnect:
                     disconnected = True
     finally:
-        main._rewind_latest_user_for_alter = original
+        ws_chat._rewind_latest_user_for_alter = original
 
     ok = (
         first.get("type") == "error"

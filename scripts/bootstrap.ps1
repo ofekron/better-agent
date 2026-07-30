@@ -3,6 +3,14 @@
 # Usage:
 #   irm https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.ps1 | iex
 #   .\scripts\bootstrap.ps1 -Mode default -Provider claude -Yes
+#   $env:BETTER_AGENT_FROM = "readme"; irm .../bootstrap.ps1 | iex
+#
+# Environment:
+#   BETTER_AGENT_FROM  Optional acquisition channel, one of: readme, landing,
+#     hn, ph, devto, yt, gh-trending, dmg, brew, unknown. Passed through
+#     untouched; scripts/install_channel.py owns the allowlist and validates
+#     it. Unset or unrecognized is recorded as "unknown". Only the channel
+#     string is recorded — no host, user, or environment data.
 #
 # Behaviour:
 #   - Clones to %USERPROFILE%\.better-agent\checkout if absent, git pulls

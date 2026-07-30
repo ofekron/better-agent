@@ -15,6 +15,8 @@ os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = _TMP_HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import extension_store  # noqa: E402
+import internal_guards  # noqa: E402
+import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
 import team_activation_store  # noqa: E402
 import team_store  # noqa: E402
@@ -55,11 +57,11 @@ def test_team_activation_records_progress_and_team_members() -> None:
         )
         return {"workers": [{"agent_session_id": f"session-{worker['member_id']}"}]}
 
-    original = main._provision_workers_from_body
-    main._provision_workers_from_body = fake_provision
+    original = internal_orchestration_api._provision_workers
+    internal_orchestration_api._provision_workers = fake_provision
     try:
         asyncio.run(
-            main._run_team_definition_activation(
+            internal_orchestration_api._run_team_definition_activation(
                 activation["id"],
                 root_session_id=root["id"],
                 default_cwd="/repo",
@@ -83,7 +85,7 @@ def test_team_activation_records_progress_and_team_members() -> None:
             )
         )
     finally:
-        main._provision_workers_from_body = original
+        internal_orchestration_api._provision_workers = original
 
     updated = team_activation_store.get(activation["id"])
     assert updated["status"] == "complete"
@@ -139,11 +141,11 @@ def test_team_activation_rolls_back_created_workers_and_team_on_failure() -> Non
             return {"workers": [{"agent_session_id": created_worker["id"], "created": True}]}
         raise RuntimeError("provisioning failed for result-auditor")
 
-    original = main._provision_workers_from_body
-    main._provision_workers_from_body = fake_provision
+    original = internal_orchestration_api._provision_workers
+    internal_orchestration_api._provision_workers = fake_provision
     try:
         asyncio.run(
-            main._run_team_definition_activation(
+            internal_orchestration_api._run_team_definition_activation(
                 activation["id"],
                 root_session_id=root["id"],
                 default_cwd="/repo",
@@ -175,7 +177,7 @@ def test_team_activation_rolls_back_created_workers_and_team_on_failure() -> Non
             )
         )
     finally:
-        main._provision_workers_from_body = original
+        internal_orchestration_api._provision_workers = original
 
     updated = team_activation_store.get(activation["id"])
     assert updated["status"] == "failed"
@@ -206,11 +208,11 @@ def test_team_activation_stores_finalize_with_as_pending_members() -> None:
         worker = body["workers"][0]
         return {"workers": [{"agent_session_id": f"session-{worker['member_id']}", "created": True}]}
 
-    original = main._provision_workers_from_body
-    main._provision_workers_from_body = fake_provision
+    original = internal_orchestration_api._provision_workers
+    internal_orchestration_api._provision_workers = fake_provision
     try:
         asyncio.run(
-            main._run_team_definition_activation(
+            internal_orchestration_api._run_team_definition_activation(
                 activation["id"],
                 root_session_id=root["id"],
                 default_cwd="/repo",
@@ -235,7 +237,7 @@ def test_team_activation_stores_finalize_with_as_pending_members() -> None:
             )
         )
     finally:
-        main._provision_workers_from_body = original
+        internal_orchestration_api._provision_workers = original
 
     updated = team_activation_store.get(activation["id"])
     assert updated["status"] == "complete"
@@ -282,21 +284,21 @@ def test_finalize_endpoint_provisions_pending_member_on_demand() -> None:
             )
             return {"workers": [{"agent_session_id": "session-retrospection-worker", "created": True}]}
 
-        original_provision = main._provision_workers_from_body
-        original_auth = main._internal_authority_is_valid
-        original_gate = main._require_builtin_runtime_extension
-        main._provision_workers_from_body = fake_provision
-        main._internal_authority_is_valid = lambda: True
-        main._require_builtin_runtime_extension = lambda _extension_id: None
+        original_provision = internal_orchestration_api._provision_workers
+        original_auth = internal_guards.authority_is_valid
+        original_gate = internal_guards.require_builtin_runtime_extension
+        internal_orchestration_api._provision_workers = fake_provision
+        internal_guards.authority_is_valid = lambda: True
+        internal_guards.require_builtin_runtime_extension = lambda _extension_id: None
         try:
-            response = await main.internal_finalize_team_definition_member(
+            response = await internal_orchestration_api.internal_finalize_team_definition_member(
                 {"team_instance_id": "team-finalize-ep", "member_id": "retrospection-worker"},
                 x_internal_token="test",
             )
         finally:
-            main._provision_workers_from_body = original_provision
-            main._internal_authority_is_valid = original_auth
-            main._require_builtin_runtime_extension = original_gate
+            internal_orchestration_api._provision_workers = original_provision
+            internal_guards.authority_is_valid = original_auth
+            internal_guards.require_builtin_runtime_extension = original_gate
 
         assert response["success"] is True
         assert response["workers"][0]["agent_session_id"] == "session-retrospection-worker"

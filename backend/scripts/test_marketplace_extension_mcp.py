@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parent / "sdk"))
 
+from fastapi import HTTPException
+
 import _test_home
 
 _test_home.isolate("ba-test-")
@@ -38,6 +40,33 @@ def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
     print(f"PASS {message}")
+
+
+def _load_marketplace_routes_module():
+    routes_path = ROOT.parent / "extensions" / "marketplace" / "backend" / "routes.py"
+    spec = importlib.util.spec_from_file_location(
+        "marketplace_backend_routes", routes_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+def _marketplace_router(module, source: dict[str, object]):
+    context = type(
+        "Context",
+        (),
+        {
+            "source": source,
+            "extension_id": extension_store.MARKETPLACE_EXTENSION_ID,
+        },
+    )()
+    return module.create_router(context)
+
+
+def _catalog_endpoint(router):
+    return next(route.endpoint for route in router.routes if route.path == "/catalog")
 
 
 def test_marketplace_extension_is_seeded_without_agent_mutation_surface() -> None:
@@ -69,6 +98,83 @@ def test_marketplace_extension_is_seeded_without_agent_mutation_surface() -> Non
     )
 
 
+def test_marketplace_catalog_lists_bundled_extensions_via_real_route() -> None:
+    # Reconcile like app startup does, then drive the real catalog() HTTP
+    # route through the marketplace extension's actual persisted `source`
+    # dict — not a hand-rolled fake — to prove the local-dev catalog branch
+    # a normal bundled install falls into is reachable, not dead code.
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+    check(record is not None, "marketplace extension record exists for catalog test")
+    source = record["source"]
+    check(
+        source["type"] == "better_agent_bundled",
+        "marketplace extension is a bundled install",
+    )
+    check(
+        bool(source.get("repo_url")),
+        "bundled install records a non-empty source.repo_url",
+    )
+    repo_root = Path(source["repo_url"])
+    check(
+        (repo_root / "extensions").is_dir(),
+        f"source.repo_url points at a repo checkout with an extensions dir: {repo_root}",
+    )
+
+    module = _load_marketplace_routes_module()
+    router = _marketplace_router(module, source)
+    catalog = asyncio.run(_catalog_endpoint(router)(q=""))
+    rows = catalog["extensions"]
+    check(len(rows) > 0, "real catalog route lists bundled extensions on a fresh install")
+    check(all(row.get("id") for row in rows), "every listed catalog row has an extension id")
+    check(
+        extension_store.MARKETPLACE_EXTENSION_ID in {row["id"] for row in rows},
+        "marketplace lists itself in the local-dev catalog",
+    )
+
+
+def test_marketplace_catalog_self_heals_missing_repo_url_on_reconcile() -> None:
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    with extension_store._store_lock():
+        data = extension_store._read_store_unlocked()
+        data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]["source"][
+            "repo_url"
+        ] = ""
+        extension_store._write_store_unlocked(data)
+
+    corrupted = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+    check(
+        corrupted["source"]["repo_url"] == "",
+        "test setup reproduces a pre-fix install with an empty source.repo_url",
+    )
+
+    module = _load_marketplace_routes_module()
+    router = _marketplace_router(module, corrupted["source"])
+    try:
+        asyncio.run(_catalog_endpoint(router)(q=""))
+    except HTTPException as exc:
+        check(
+            exc.status_code == 500,
+            "empty source.repo_url reproduces the reported catalog 500",
+        )
+    else:
+        raise AssertionError("catalog should fail with an empty source.repo_url")
+
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    healed = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
+    check(
+        bool(healed["source"]["repo_url"]),
+        "next reconcile self-heals a bundled install missing source.repo_url",
+    )
+
+    router = _marketplace_router(module, healed["source"])
+    catalog = asyncio.run(_catalog_endpoint(router)(q=""))
+    check(
+        len(catalog["extensions"]) > 0,
+        "catalog route succeeds again after self-heal",
+    )
+
+
 def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
     import extension_backend_loader
 
@@ -84,13 +190,7 @@ def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
 
 
 def test_marketplace_backend_auth_readiness_never_exposes_token() -> None:
-    routes_path = ROOT.parent / "extensions" / "marketplace" / "backend" / "routes.py"
-    spec = importlib.util.spec_from_file_location(
-        "marketplace_backend_routes", routes_path
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
+    module = _load_marketplace_routes_module()
 
     catalog_tokens: list[str] = []
     module._access_token = lambda: "core-owned-access"
@@ -99,18 +199,8 @@ def test_marketplace_backend_auth_readiness_never_exposes_token() -> None:
         "default-v1:1:" + "a" * 64,
     )
 
-    context = type(
-        "Context",
-        (),
-        {
-            "source": {"type": "marketplace"},
-            "extension_id": extension_store.MARKETPLACE_EXTENSION_ID,
-        },
-    )()
-    router = module.create_router(context)
-    catalog_endpoint = next(
-        route.endpoint for route in router.routes if route.path == "/catalog"
-    )
+    router = _marketplace_router(module, {"type": "marketplace"})
+    catalog_endpoint = _catalog_endpoint(router)
     catalog = asyncio.run(catalog_endpoint(q=""))
     check(
         catalog["extensions"] == [{"id": "ofek.adv"}],
@@ -452,6 +542,8 @@ def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_
 def main() -> int:
     try:
         test_marketplace_extension_is_seeded_without_agent_mutation_surface()
+        test_marketplace_catalog_lists_bundled_extensions_via_real_route()
+        test_marketplace_catalog_self_heals_missing_repo_url_on_reconcile()
         test_marketplace_backend_loads_inside_isolated_extension_host()
         test_marketplace_backend_auth_readiness_never_exposes_token()
         test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()

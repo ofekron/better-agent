@@ -13,6 +13,7 @@ import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-ask-search-rows-")
 
 import main  # noqa: E402
+import ask_ui_api  # noqa: E402
 import assistant_ui  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_search  # noqa: E402
@@ -28,18 +29,18 @@ def test_search_endpoint_returns_rows_for_matches() -> None:
         return {"session_ids": [s["id"]], "reasoning": "r", "error": None}
 
     orig_search = session_search.run_search_sessions_session
-    orig_require = main._require_ask_internal
+    orig_require = ask_ui_api._require_ask_internal
     session_search.run_search_sessions_session = fake_search
-    main._require_ask_internal = lambda token: None
+    ask_ui_api._require_ask_internal = lambda token: None
     try:
         result = asyncio.run(
-            main.internal_ask_ui_search_sessions(
+            ask_ui_api.internal_ask_ui_search_sessions(
                 body={"query": "gamma"}, x_internal_token="t",
             )
         )
     finally:
         session_search.run_search_sessions_session = orig_search
-        main._require_ask_internal = orig_require
+        ask_ui_api._require_ask_internal = orig_require
 
     assert set(result) == {"results", "reasoning"}
     assert [r["id"] for r in result["results"]] == [s["id"]]
@@ -55,12 +56,12 @@ def test_search_endpoint_maps_folder_and_tags_to_search_filters() -> None:
         return {"session_ids": [], "reasoning": "", "error": None}
 
     orig_search = session_search.run_search_sessions_session
-    orig_require = main._require_ask_internal
+    orig_require = ask_ui_api._require_ask_internal
     session_search.run_search_sessions_session = fake_search
-    main._require_ask_internal = lambda token: None
+    ask_ui_api._require_ask_internal = lambda token: None
     try:
         result = asyncio.run(
-            main.internal_ask_ui_search_sessions(
+            ask_ui_api.internal_ask_ui_search_sessions(
                 body={
                     "query": "gamma",
                     "folder": "folder-a",
@@ -71,7 +72,7 @@ def test_search_endpoint_maps_folder_and_tags_to_search_filters() -> None:
         )
     finally:
         session_search.run_search_sessions_session = orig_search
-        main._require_ask_internal = orig_require
+        ask_ui_api._require_ask_internal = orig_require
 
     assert result == {"results": []}
     assert captured["query"] == "gamma"

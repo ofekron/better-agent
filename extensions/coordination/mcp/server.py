@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from better_agent_sdk import Client
@@ -58,7 +59,12 @@ def build_server():
 
 
 def main() -> int:
-    return run_mcp_or_cli("better-agent-coordination", _specs())
+    # An ambient (session-less) launch has no per-run operation broker to
+    # route through -- lock_ops_response already authenticates itself
+    # directly via the SDK Client, so dispatch locally instead of through
+    # the broker that will never exist for this process.
+    ambient = os.environ.get("BETTER_CLAUDE_AMBIENT_LAUNCH") == "1"
+    return run_mcp_or_cli("better-agent-coordination", _specs(), local=ambient)
 
 
 if __name__ == "__main__":

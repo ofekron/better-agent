@@ -74,7 +74,7 @@ def test_auth_status_resolution_invalidates_catalog_authority() -> None:
 
 
 def test_backend_lifecycle_owns_catalog_refresh_tasks() -> None:
-    source = (BACKEND / "main.py").read_text(encoding="utf-8")
+    source = (BACKEND / "app_lifecycle.py").read_text(encoding="utf-8")
     startup = source.split("async def on_startup():", 1)[1].split(
         "async def on_shutdown():",
         1,
@@ -88,7 +88,7 @@ def test_backend_lifecycle_owns_catalog_refresh_tasks() -> None:
 
 
 def test_codex_and_fugu_manual_refresh_use_catalog_authority_owner() -> None:
-    source = (BACKEND / "main.py").read_text(encoding="utf-8")
+    source = (BACKEND / "app_lifecycle.py").read_text(encoding="utf-8")
     helper = source.split(
         "async def _refresh_provider_models(",
         1,

@@ -40,10 +40,14 @@ def is_pending() -> bool:
     return _pending
 
 
+def is_session_pending(app_session_id: str) -> bool:
+    return app_session_id in _session_ready
+
+
 def mark_recovery_done() -> None:
     global _pending
     _pending = False
-    _release_all()
+    _ready.set()
 
 
 def mark_recovery_failed(error: str) -> None:

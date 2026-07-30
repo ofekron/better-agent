@@ -7,6 +7,7 @@ import shutil
 import sys
 
 import _test_home
+from _test_routes import walk_routes
 
 _TMP_HOME = _test_home.isolate("bc-test-removed-feature-legacy-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
@@ -17,6 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import app_lifecycle  # noqa: E402
 import config_store  # noqa: E402
 import session_store  # noqa: E402
 
@@ -29,10 +31,10 @@ def main_test() -> int:
     })
     config_store.set_default_provider(provider["id"])
 
-    route_paths = {route.path for route in main.app.routes}
+    route_paths = {route.path for route in walk_routes(main.app.routes)}
     assert not any("/adv_sync" in path for path in route_paths)
 
-    startup_source = inspect.getsource(main.on_startup)
+    startup_source = inspect.getsource(app_lifecycle.on_startup)
     assert "adv_sync_overlay_recovery" not in startup_source
 
     manager = main.session_manager

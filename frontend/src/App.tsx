@@ -825,6 +825,7 @@ function AppMain({
   // its bus subscriptions once on mount and bootstraps from REST.
   useEffect(() => {
     sessionRegistry.bind();
+    return () => sessionRegistry.unbind();
   }, []);
 
   const focusedForkId: string | null = currentTree

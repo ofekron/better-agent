@@ -5,6 +5,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.sh | bash
 #   curl -fsSL .../bootstrap.sh | bash -s -- --mode default --provider claude --yes
 #   ./scripts/bootstrap.sh                       # direct invocation after git clone
+#   curl -fsSL .../bootstrap.sh | BETTER_AGENT_FROM=readme bash
+#
+# Environment:
+#   BETTER_AGENT_FROM  Optional acquisition channel, one of: readme, landing,
+#     hn, ph, devto, yt, gh-trending, dmg, brew, unknown. Passed through
+#     untouched; scripts/install_channel.py owns the allowlist and validates
+#     it. Unset or unrecognized is recorded as "unknown". Only the channel
+#     string is recorded — no host, user, or environment data.
 #
 # Behaviour:
 #   - macOS only. Windows users run scripts/bootstrap.ps1 instead.

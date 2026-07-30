@@ -379,7 +379,13 @@ def kill_port_listeners(port: int, *, timeout: float = 5.0) -> bool:
 class BackendSupervisor:
     """Spawns and supervises the backend child process."""
 
-    def __init__(self, role: BackendRole = "primary", port: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        role: BackendRole = "primary",
+        port: Optional[int] = None,
+        *,
+        credential_broker: ProviderCredentialBroker | None = None,
+    ) -> None:
         self.role = role
         self.port = port or (NODE_PORT if role == "node" else BACKEND_PORT)
         self.health_url = self._health_url()
@@ -387,7 +393,7 @@ class BackendSupervisor:
         self._backend_logger: Optional[logging.Logger] = None
         self._daemon_host = None
         self._daemon_host_thread: Optional[threading.Thread] = None
-        self._credential_broker = ProviderCredentialBroker()
+        self._credential_broker = credential_broker or ProviderCredentialBroker()
         self._credential_session: ProviderCredentialSession | None = None
         self._active_checkout = _REPO_ROOT.resolve()
         self._generation_started_at: float | None = None
@@ -711,13 +717,14 @@ class BackendSupervisor:
             "BETTER_CLAUDE_ACTIVE_CHECKOUT": str(checkout),
             "BETTER_CLAUDE_RUN_SH_SUPERVISOR": "1",
         }))
+        command = backend_argv(self.role, checkout)
         self._close_credential_session()
         session = self._credential_broker.open_session()
         session.start()
         child_env = {**backend_child_env(self._env, checkout), **session.backend_env()}
         try:
             proc = subprocess.Popen(
-                backend_argv(self.role, checkout), env=child_env, cwd=checkout / "backend",
+                command, env=child_env, cwd=checkout / "backend",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,  # line-buffered text stream
                 **session.backend_popen_kwargs(),

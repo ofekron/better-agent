@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing.connection as mp_connection
 import os
 import secrets
 import threading
 import time
-from multiprocessing.connection import Connection
 from typing import Literal, TypedDict
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
@@ -19,11 +19,24 @@ class CredentialResponse(TypedDict, total=False):
 
 
 _FD_TEXT = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FD", "")
+
+
+def _connection_from_handle(
+    handle: int,
+    *,
+    platform_name: str | None = None,
+) -> mp_connection.Connection:
+    platform_name = os.name if platform_name is None else platform_name
+    if platform_name == "nt":
+        return mp_connection.PipeConnection(handle)
+    return mp_connection.Connection(handle)
+
+
 try:
     _FD = int(_FD_TEXT) if _FD_TEXT else -1
     if _FD >= 0 and os.name != "nt":
         os.fstat(_FD)
-    _CONNECTION = Connection(_FD) if _FD >= 0 else None
+    _CONNECTION = _connection_from_handle(_FD) if _FD >= 0 else None
     if _FD >= 0:
         if os.name == "nt":
             os.set_handle_inheritable(_FD, False)

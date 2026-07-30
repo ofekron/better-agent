@@ -15,10 +15,39 @@ class RuntimeProfile:
     runner: str
 
 
+# Kinds whose subscription-mode credentials better_agent_runner knows how to
+# speak natively (a provider-owned OAuth/session protocol) rather than a
+# plain OpenAI-compatible API key. Each such kind still resolves to the
+# "openai" runtime kind at spawn time (see `runtime_kind` below) — BA owns
+# the same in-process agent loop either way; only the HTTP wire protocol
+# inside runner_better_agent.py differs, selected at runtime from the
+# provider's own mode/credentials. A sibling kind (e.g. a future Claude
+# ChatGPT-equivalent) adds its own entry here without touching this one.
+SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS: frozenset[str] = frozenset({"codex"})
+
+
 def supported_runners(provider_record: dict | None) -> tuple[str, ...]:
     record = provider_record or {}
-    choices = provider_manifest.runner_choices_for(record.get("kind"))
-    if record.get("mode") == "api_key":
+    kind = record.get("kind")
+    choices = provider_manifest.runner_choices_for(kind)
+    mode = record.get("mode")
+    if kind in SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS:
+        # This kind's better_agent_runner choice speaks its own subscription
+        # OAuth protocol (e.g. codex's ResponsesAPI), never the generic
+        # OpenAI-compatible API-key path — only offer it in subscription mode.
+        if mode == "subscription":
+            return choices
+        return tuple(choice for choice in choices if choice != "better_agent_runner")
+    if kind == "claude":
+        # better_agent_runner for Claude exists only to speak the
+        # subscription OAuth wire format (see
+        # runner_better_agent_claude_subscription.py); there is no
+        # api_key-mode backend for it, so exclude it there rather than
+        # leave a dead-end runner choice.
+        if mode != "subscription":
+            return tuple(choice for choice in choices if choice != "better_agent_runner")
+        return choices
+    if mode == "api_key":
         return choices
     return tuple(choice for choice in choices if choice != "better_agent_runner")
 
@@ -59,9 +88,15 @@ def resolve_runner(
 
 def runtime_kind(provider_record: dict, runner: object = None) -> str:
     selected = str(runner or provider_record.get("runner") or "").strip()
-    if selected == "better_agent_runner":
+    kind = str(provider_record.get("kind") or "claude")
+    # Claude's better_agent_runner backend still speaks Claude's own wire
+    # format (Anthropic Messages API over the subscription OAuth token), so
+    # it must resolve to the real Claude provider class, not collapse into
+    # the generic OpenAI Chat-Completions provider like every other kind's
+    # better_agent_runner choice does.
+    if selected == "better_agent_runner" and kind != "claude":
         return "openai"
-    return str(provider_record.get("kind") or "claude")
+    return kind
 
 
 def provider_record_for_runner(provider_record: dict, runner: object = None) -> dict:

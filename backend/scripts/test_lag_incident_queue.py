@@ -21,6 +21,7 @@ atexit.register(lambda: shutil.rmtree(_TMP_HOME, ignore_errors=True))
 
 import lag_incident_queue as queue
 import main
+import lag_watchdog  # noqa: E402
 import paths
 
 
@@ -56,7 +57,7 @@ async def _blocked_loop_eventual_exactly_once() -> None:
     def enqueue_during_stall() -> None:
         time.sleep(0.05)
         for _ in range(2):
-            main._report_lag_watchdog_issue(
+            lag_watchdog._report_lag_watchdog_issue(
                 label="blocking stack candidate",
                 heartbeat_age=3.0,
                 dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
@@ -129,7 +130,7 @@ async def _corruption_fails_closed() -> None:
 
 def test_redaction_bounds_and_dedup() -> None:
     _reset_spool()
-    main._report_lag_watchdog_issue(
+    lag_watchdog._report_lag_watchdog_issue(
         label="blocking stack candidate",
         heartbeat_age=2.0,
         dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
@@ -139,7 +140,7 @@ def test_redaction_bounds_and_dedup() -> None:
     files = list((paths.ba_home() / "lag-incidents").glob("*.json"))
     assert len(files) == 1
     raw = files[0].read_bytes()
-    assert len(raw) <= main._LAG_REPORT_BODY_LIMIT_BYTES
+    assert len(raw) <= lag_watchdog._LAG_REPORT_BODY_LIMIT_BYTES
     assert b"private-value" not in raw
     assert not queue.enqueue(raw)
     assert len(list((paths.ba_home() / "lag-incidents").glob("*.json"))) == 1
@@ -575,6 +576,87 @@ async def _non_retryable_dispatch_is_dropped_not_retried_forever() -> None:
         _reset_spool()
 
 
+async def _manually_disabled_destination_drops_spooled_incident() -> None:
+    import extension_backend_loader
+
+    _reset_spool()
+    assert queue.enqueue(_payload("e" * 16))
+    attempts = 0
+    original_invoke = extension_backend_loader.invoke_named_core_destination_sync
+
+    def disabled_destination(*_args, **_kwargs) -> tuple[int, bytes]:
+        nonlocal attempts
+        attempts += 1
+        return 410, b'{"detail":"Core destination is disabled"}'
+
+    extension_backend_loader.invoke_named_core_destination_sync = disabled_destination
+    try:
+        queue.start(lag_watchdog._dispatch_lag_watchdog_issue)
+        for _ in range(50):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert queue.depth() == 0
+        assert attempts == 1
+    finally:
+        extension_backend_loader.invoke_named_core_destination_sync = original_invoke
+        await queue.stop()
+        _reset_spool()
+
+
+def test_manually_disabled_named_destination_is_nonretryable() -> None:
+    import extension_backend_loader
+    import extension_store
+
+    original_destination = extension_backend_loader._NAMED_CORE_DESTINATIONS.get(  # type: ignore[attr-defined]
+        "test.disabled",
+    )
+    original_get_extension = extension_store.get_extension
+    original_invoke = extension_backend_loader.invoke_extension_backend_sync
+    record = {"enabled": False, "quarantine": None}
+    backend_calls = 0
+    extension_backend_loader._NAMED_CORE_DESTINATIONS["test.disabled"] = (  # type: ignore[attr-defined]
+        "ofek.disabled",
+        "report",
+    )
+    extension_store.get_extension = lambda _extension_id: record
+
+    def invoke_backend(*_args, **_kwargs) -> tuple[int, bytes]:
+        nonlocal backend_calls
+        backend_calls += 1
+        return 503, b'{"detail":"Extension backend is unavailable","retry_after":60}'
+
+    extension_backend_loader.invoke_extension_backend_sync = invoke_backend
+    try:
+        status, body = extension_backend_loader.invoke_named_core_destination_sync(
+            "test.disabled",
+            body_bytes=b"{}",
+        )
+        assert status == 410
+        assert b"disabled" in body
+        assert backend_calls == 0
+
+        record["quarantine"] = {"reason": "smoke_failed"}
+        status, _ = extension_backend_loader.invoke_named_core_destination_sync(
+            "test.disabled",
+            body_bytes=b"{}",
+        )
+        assert status == 503
+        assert backend_calls == 1
+    finally:
+        if original_destination is None:
+            extension_backend_loader._NAMED_CORE_DESTINATIONS.pop(  # type: ignore[attr-defined]
+                "test.disabled",
+                None,
+            )
+        else:
+            extension_backend_loader._NAMED_CORE_DESTINATIONS["test.disabled"] = (  # type: ignore[attr-defined]
+                original_destination
+            )
+        extension_store.get_extension = original_get_extension
+        extension_backend_loader.invoke_extension_backend_sync = original_invoke
+
+
 def main_test() -> None:
     asyncio.run(_cached_depth_is_io_free_and_registered_for_perf_gauge())
     asyncio.run(_blocked_loop_eventual_exactly_once())
@@ -595,6 +677,8 @@ def main_test() -> None:
     asyncio.run(_portable_identity_fallback_roundtrip())
     asyncio.run(_structured_retry_after_and_destination_wake())
     asyncio.run(_non_retryable_dispatch_is_dropped_not_retried_forever())
+    asyncio.run(_manually_disabled_destination_drops_spooled_incident())
+    test_manually_disabled_named_destination_is_nonretryable()
     print("PASS: durable lag incident queue")
 
 

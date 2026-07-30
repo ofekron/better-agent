@@ -24,8 +24,14 @@ export function sessionSortNumeric(session: Session, sortField: string): number 
 }
 
 /** True when a session has no messages yet (a brand-new, empty session). */
-function isEmptySession(session: Session): boolean {
+export function isEmptySession(session: Session): boolean {
   return (session.message_count ?? 0) === 0;
+}
+
+/** True for sessions belonging in the sidebar "New sessions" group:
+ * brand-new (no messages), not pinned, and not filed into a folder. */
+export function isNewSession(session: Session): boolean {
+  return isEmptySession(session) && !session.pinned && !session.folder_id;
 }
 
 /** Order sessions for the sidebar. Mirrors the backend sort key
@@ -72,20 +78,20 @@ export function sortSessionsForList(
     .map(({ session }) => session);
 }
 
-/** Split sidebar sessions into the pinned group and the rest, preserving
- * the incoming order within each side. Pinned sessions are hoisted out of
- * their folders so they render once, in the top-level Pinned group. */
-export function partitionPinnedSessions(sessions: Session[]): {
-  pinned: Session[];
-  unpinned: Session[];
-} {
-  const pinned: Session[] = [];
-  const unpinned: Session[] = [];
+/** Split sessions by predicate, preserving the incoming order within each
+ * side. Used to hoist sidebar groups (Pinned, New) out of the main list so
+ * each session renders exactly once. */
+export function partitionSessions(
+  sessions: Session[],
+  isMatch: (session: Session) => boolean,
+): { matched: Session[]; rest: Session[] } {
+  const matched: Session[] = [];
+  const rest: Session[] = [];
   for (const session of sessions) {
-    if (session.pinned) pinned.push(session);
-    else unpinned.push(session);
+    if (isMatch(session)) matched.push(session);
+    else rest.push(session);
   }
-  return { pinned, unpinned };
+  return { matched, rest };
 }
 
 /** Compact relative time ("3m ago", "2d ago", or a date for older). */

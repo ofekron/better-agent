@@ -13,8 +13,10 @@ TEST_HOME = tempfile.mkdtemp(prefix="ba-test-model-catalog-api-")
 os.environ["BETTER_AGENT_HOME"] = TEST_HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _test_routes import walk_routes  # noqa: E402
 import config_store  # noqa: E402
 import main  # noqa: E402
+import providers_api  # noqa: E402
 import model_catalog_read_projection  # noqa: E402
 import model_catalog_refresh  # noqa: E402
 from model_catalog_cache import RetiredModel  # noqa: E402
@@ -62,7 +64,7 @@ def _codex_provider() -> dict:
 def test_provider_projection_contract() -> None:
     provider = _provider()
     _project(provider)
-    payload = main._provider_models_catalog(provider["id"])
+    payload = providers_api.provider_models_catalog(provider["id"])
 
     assert payload["provider_id"] == provider["id"]
     assert payload["provider_generation"] == provider["generation"]
@@ -84,16 +86,18 @@ def test_projection_fact_broadcasts_authority_and_invalidates() -> None:
     provider = _codex_provider()
     projection = _project(provider, status="refreshing")
     captured: list[tuple[str, dict]] = []
-    original = main.coordinator.broadcast_global
+    # providers_api captures the broadcaster at wire time, so intercept the
+    # injected callable rather than the coordinator attribute.
+    original = providers_api._broadcast_global
 
     async def capture(event_type: str, data: dict) -> None:
         captured.append((event_type, data))
 
-    main.coordinator.broadcast_global = capture
+    providers_api._broadcast_global = capture
     try:
-        asyncio.run(main._broadcast_model_catalog_fact(changed_fact(projection)))
+        asyncio.run(providers_api.broadcast_model_catalog_fact(changed_fact(projection)))
     finally:
-        main.coordinator.broadcast_global = original
+        providers_api._broadcast_global = original
 
     assert captured == [
         (
@@ -120,7 +124,7 @@ def test_refresh_endpoint_acknowledges_without_waiting_for_discovery() -> None:
     model_catalog_refresh.request_refresh_background = schedule
     try:
         response = asyncio.run(
-            main.refresh_provider_models_endpoint(provider["id"]),
+            providers_api.refresh_provider_models_endpoint(provider["id"]),
         )
     finally:
         model_catalog_refresh.request_refresh_background = original
@@ -140,7 +144,7 @@ def test_refresh_endpoint_acknowledges_without_waiting_for_discovery() -> None:
     }
     route = next(
         route
-        for route in main.app.routes
+        for route in walk_routes(main.app.routes)
         if getattr(route, "path", "")
         == "/api/providers/{provider_id}/models/refresh"
     )
@@ -149,8 +153,8 @@ def test_refresh_endpoint_acknowledges_without_waiting_for_discovery() -> None:
 
 def test_catalog_list_is_backend_owned() -> None:
     provider = _codex_provider()
-    payload = asyncio.run(main.get_provider_model_catalogs())
-    assert main._provider_models_catalog(provider["id"]) in payload["catalogs"]
+    payload = asyncio.run(providers_api.get_provider_model_catalogs())
+    assert providers_api.provider_models_catalog(provider["id"]) in payload["catalogs"]
     assert all(
         catalog["authoritative"] is True
         for catalog in payload["catalogs"]

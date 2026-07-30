@@ -462,7 +462,7 @@ function isLivePlaceholder(msg: ChatMessage): boolean {
   );
 }
 
-function mergeEventsByUuid(
+export function mergeEventsByUuid(
   placeholderEvents: WSEvent[] | undefined,
   canonicalEvents: WSEvent[] | undefined,
 ): WSEvent[] | undefined {

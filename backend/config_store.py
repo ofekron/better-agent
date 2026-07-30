@@ -561,15 +561,20 @@ OPENAI_SUBSCRIPTION_UNSUPPORTED = (
 
 
 def _runtime_kind_for_provider(provider: dict) -> str:
-    if str(provider.get("runner") or "").strip() == "better_agent_runner":
-        return "openai"
-    return provider.get("kind", "claude")
+    return _runtime_kind_for_config(provider.get("kind", "claude"), provider.get("runner"))
 
 
 def _runtime_kind_for_config(kind: str, runner: object) -> str:
-    if str(runner or "").strip() == "better_agent_runner":
-        return "openai"
-    return kind
+    if str(runner or "").strip() != "better_agent_runner":
+        return kind
+    # Claude's better_agent_runner backend speaks Claude's own wire format
+    # (Anthropic Messages API over the subscription OAuth token), so it is
+    # a real, fully-supported Claude runtime — unlike every other kind's
+    # better_agent_runner choice, which collapses to the generic OpenAI
+    # Chat-Completions runtime.
+    if kind == "claude":
+        return kind
+    return "openai"
 
 
 def _provider_is_suspended(provider: dict | None) -> bool:
@@ -591,10 +596,34 @@ def assert_provider_not_suspended(provider_id: str | None, *, action: str = "sta
         raise RuntimeError(f"provider {provider_id} is suspended; cannot {action}")
 
 
+CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION = (
+    "Claude's Better Agent runner speaks the subscription OAuth wire "
+    "format only; there is no api_key backend for it. Use the native "
+    "runner for api_key mode, or switch to subscription mode."
+)
+
+
 def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
+    # A subscription-mode provider whose kind owns a native OAuth protocol
+    # (currently just codex — see runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS)
+    # is allowed to run on better_agent_runner: it speaks that kind's own
+    # ResponsesAPI-equivalent wire protocol, not the generic OpenAI-compatible
+    # API-key path the check below guards against.
+    if (
+        mode == "subscription"
+        and kind in runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS
+        and str(runner or "").strip() == "better_agent_runner"
+    ):
+        return
     runtime_kind = _runtime_kind_for_config(kind, runner)
     if runtime_kind == "openai" and mode == "subscription":
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
+    if (
+        kind == "claude"
+        and str(runner or "").strip() == "better_agent_runner"
+        and mode != "subscription"
+    ):
+        raise ValueError(CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION)
 
 
 def _runner_choices_for_kind(kind: str) -> list[str]:
@@ -822,7 +851,10 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
         if not isinstance(provider, dict):
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         canonical = _clean_provider_record(provider)
-        if provider != canonical:
+        accepted = dict(canonical)
+        if "nickname" not in provider and canonical["nickname"] == "":
+            accepted.pop("nickname")
+        if provider != accepted:
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         provider_id = provider.get("id")
         if (
@@ -2039,6 +2071,7 @@ def _provider_sync_credential_changes(
     *,
     current_providers: list[dict] | None,
     incoming_providers: list[dict],
+    authoritative_projection: bool = False,
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
     current_by_id = {
         provider["id"]: provider
@@ -2059,9 +2092,12 @@ def _provider_sync_credential_changes(
             current = current_by_id.get(provider_id)
             incoming = incoming_by_id[provider_id]
             rotation_authorized = bool(
-                current is not None
-                and incoming["generation"] == current["generation"]
-                and incoming["revision"] > current["revision"]
+                authoritative_projection
+                or (
+                    current is not None
+                    and incoming["generation"] == current["generation"]
+                    and incoming["revision"] > current["revision"]
+                )
             )
             if not rotation_authorized:
                 raise ProviderCredentialConflict(provider_id)
@@ -2069,8 +2105,11 @@ def _provider_sync_credential_changes(
     return changes, observed
 
 
-@_serialized_provider_mutation
-def import_provider_sync_state(payload: dict) -> dict:
+def _import_provider_sync_state(
+    payload: dict,
+    *,
+    authoritative_projection: bool,
+) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
     providers, default_provider_id, incoming_authority = (
@@ -2083,7 +2122,14 @@ def import_provider_sync_state(payload: dict) -> dict:
         if state is not None
         else None
     )
-    if current_authority is not None:
+    if (
+        current_authority is not None
+        and (
+            not authoritative_projection
+            or current_authority.get("generation")
+            == incoming_authority.get("generation")
+        )
+    ):
         provider_sync_authority.assert_importable(
             current_authority,
             incoming_authority,
@@ -2100,6 +2146,7 @@ def import_provider_sync_state(payload: dict) -> dict:
         requested_credentials,
         current_providers=state["providers"] if state is not None else None,
         incoming_providers=providers,
+        authoritative_projection=authoritative_projection,
     )
     next_state = dict(state if state is not None else _seed_default_state())
     next_state["providers"] = copy.deepcopy(providers)
@@ -2126,6 +2173,22 @@ def import_provider_sync_state(payload: dict) -> dict:
     else:
         result["sync_status"] = "unchanged"
     return result
+
+
+@_serialized_provider_mutation
+def import_provider_sync_state(payload: dict) -> dict:
+    return _import_provider_sync_state(
+        payload,
+        authoritative_projection=False,
+    )
+
+
+@_serialized_provider_mutation
+def apply_provider_sync_projection(payload: dict) -> dict:
+    return _import_provider_sync_state(
+        payload,
+        authoritative_projection=True,
+    )
 
 
 @_serialized_provider_mutation

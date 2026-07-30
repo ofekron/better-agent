@@ -20,4 +20,14 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // Playwright fixtures conventionally name their callback parameter
+    // `use`, which the react-hooks plugin misreads as the `use` hook —
+    // this directory is Playwright test/harness code, not React.
+    files: ['tests/fullstack/**/*.ts'],
+    rules: {
+      'react-hooks/rules-of-hooks': 'off',
+      'no-empty-pattern': 'off',
+    },
+  },
 ])

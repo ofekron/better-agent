@@ -486,13 +486,47 @@ def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
     )
 
 
+def _require_non_redirecting_path(path: Path, *, directory: bool) -> None:
+    try:
+        observed = path.lstat()
+        junction = bool(
+            getattr(path, "is_junction", lambda: False)(),
+        )
+    except OSError as exc:
+        raise PermissionError("private path is unavailable") from exc
+    expected_type = (
+        stat.S_ISDIR(observed.st_mode)
+        if directory
+        else stat.S_ISREG(observed.st_mode)
+    )
+    if not expected_type or stat.S_ISLNK(observed.st_mode) or junction:
+        raise PermissionError("private path must not redirect")
+
+
 def make_private_file(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=False)
     if os.name == "nt":
+        if windows_path_has_private_acl(path):
+            return
         _set_windows_private_acl(path, directory=False)
         if not windows_path_has_private_acl(path):
             raise PermissionError("private file ACL verification failed")
         return
     path.chmod(0o600)
+
+
+def require_private_file(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=False)
+    if os.name == "nt":
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private file ACL verification failed")
+        return
+    observed = path.lstat()
+    if (
+        stat.S_IMODE(observed.st_mode) & 0o077
+        or (_pwd is not None and observed.st_uid != os.getuid())
+    ):
+        raise PermissionError("private file permissions are unsafe")
 
 
 def windows_path_has_private_acl(path: Path) -> bool:
@@ -513,22 +547,10 @@ def windows_path_has_private_acl(path: Path) -> bool:
 
 
 def make_private_directory(path: Path) -> None:
-    try:
-        observed = path.lstat()
-        junction = bool(
-            getattr(path, "is_junction", lambda: False)(),
-        )
-    except OSError as exc:
-        raise PermissionError(
-            "private directory is unavailable",
-        ) from exc
-    if (
-        not stat.S_ISDIR(observed.st_mode)
-        or stat.S_ISLNK(observed.st_mode)
-        or junction
-    ):
-        raise PermissionError("private directory must not redirect")
+    _require_non_redirecting_path(path, directory=True)
     if os.name == "nt":
+        if windows_path_has_private_acl(path):
+            return
         try:
             _set_windows_private_acl(path, directory=True)
         except (AttributeError, OSError, RuntimeError, ValueError) as exc:
@@ -538,7 +560,26 @@ def make_private_directory(path: Path) -> None:
         if not windows_path_has_private_acl(path):
             raise PermissionError("private directory ACL verification failed")
         return
+    observed = path.lstat()
+    if _pwd is not None and observed.st_uid != os.getuid():
+        raise PermissionError("private directory owner is unsafe")
+    if stat.S_IMODE(observed.st_mode) == _PRIVATE_DIR_MODE:
+        return
     path.chmod(_PRIVATE_DIR_MODE)
+
+
+def require_private_directory(path: Path) -> None:
+    _require_non_redirecting_path(path, directory=True)
+    if os.name == "nt":
+        if not windows_path_has_private_acl(path):
+            raise PermissionError("private directory ACL verification failed")
+        return
+    observed = path.lstat()
+    if (
+        stat.S_IMODE(observed.st_mode) & 0o077
+        or (_pwd is not None and observed.st_uid != os.getuid())
+    ):
+        raise PermissionError("private directory permissions are unsafe")
 
 
 _install_private_umask()

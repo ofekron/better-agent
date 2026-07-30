@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -51,12 +53,142 @@ def _unlink_if_present(path: Path) -> None:
         pass
 
 
+def _record_materialization_strategy(strategy: str) -> None:
+    try:
+        import perf
+        perf.record_count(
+            f"provider.launch.materialization.{strategy}",
+            1,
+        )
+    except Exception:
+        pass
+
+
+def _finish_cloned_file(target: Path, mode: int) -> None:
+    flags = binary_open_flags(os.O_RDONLY)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _clone_descriptor_macos(descriptor: int, target: Path, mode: int) -> None:
+    import ctypes
+
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(target.parent, directory_flags)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        clone = getattr(libc, "fclonefileat", None)
+        if clone is None:
+            raise OSError(errno.ENOSYS, "fclonefileat is unavailable")
+        clone.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+        ]
+        clone.restype = ctypes.c_int
+        if clone(
+            descriptor,
+            directory,
+            os.fsencode(target.name),
+            0,
+        ) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+    finally:
+        os.close(directory)
+    _finish_cloned_file(target, mode)
+
+
+def _clone_descriptor_linux(descriptor: int, target: Path, mode: int) -> None:
+    import fcntl
+
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    output = os.open(target, flags, mode)
+    try:
+        fcntl.ioctl(output, 0x40049409, descriptor)
+        os.fchmod(output, mode)
+        os.fsync(output)
+    finally:
+        os.close(output)
+
+
+def _try_clone_descriptor(
+    descriptor: int,
+    target: Path,
+    mode: int,
+) -> bool:
+    fallback_errnos = {
+        errno.EXDEV,
+        errno.ENOSYS,
+        errno.ENOTSUP,
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    }
+    try:
+        if sys.platform == "darwin":
+            _clone_descriptor_macos(descriptor, target, mode)
+        elif sys.platform.startswith("linux"):
+            fallback_errnos.update({errno.EINVAL, errno.ENOTTY})
+            _clone_descriptor_linux(descriptor, target, mode)
+        else:
+            _record_materialization_strategy("copy")
+            return False
+    except OSError as exc:
+        _unlink_if_present(target)
+        if exc.errno in fallback_errnos:
+            _record_materialization_strategy("copy")
+            return False
+        raise ExecutionContractError(
+            "execution component cannot be materialized",
+        ) from exc
+    _record_materialization_strategy("cow_clone")
+    return True
+
+
+def _verify_materialized_descriptor(
+    descriptor: int,
+    target: Path,
+    identity: FileIdentity,
+) -> None:
+    _verify_file_handle(descriptor, identity)
+    copied = FileIdentity.capture(target)
+    if (
+        (copied.device, copied.inode) == (identity.device, identity.inode)
+        or copied.sha256 != identity.sha256
+        or copied.size != identity.size
+    ):
+        raise ExecutionContractError(
+            "materialized execution component identity mismatch",
+        )
+
+
 def _copy_descriptor(
     descriptor: int,
     target: Path,
     identity: FileIdentity,
 ) -> None:
     mode = 0o500
+    if _try_clone_descriptor(descriptor, target, mode):
+        try:
+            _verify_materialized_descriptor(
+                descriptor,
+                target,
+                identity,
+            )
+        except ExecutionContractError:
+            _unlink_if_present(target)
+            raise
+        return
     flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     created = False
@@ -77,12 +209,7 @@ def _copy_descriptor(
             os.fsync(output)
         finally:
             os.close(output)
-        _verify_file_handle(descriptor, identity)
-        copied = FileIdentity.capture(target)
-        if copied.sha256 != identity.sha256 or copied.size != identity.size:
-            raise ExecutionContractError(
-                "materialized execution component identity mismatch",
-            )
+        _verify_materialized_descriptor(descriptor, target, identity)
     except OSError as exc:
         if created:
             _unlink_if_present(target)

@@ -657,7 +657,7 @@ async def test_run_state_full_backfill_coalesces_concurrent_marker_writes() -> N
 
 
 async def test_run_state_backfill_is_scheduled_at_startup() -> None:
-    source = (nfm_mod.Path(__file__).resolve().parents[1] / "main.py").read_text(
+    source = (nfm_mod.Path(__file__).resolve().parents[1] / "app_lifecycle.py").read_text(
         encoding="utf-8"
     )
     startup_start = source.index("async def on_startup()")

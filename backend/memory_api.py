@@ -1,9 +1,10 @@
-"""Memory proposal validation and the internal memory HTTP surface.
+"""Memory proposal validation and the whole memory HTTP surface — the
+internal agent-facing routes and the user-facing browse/edit routes.
 
-This module owns the memory-proposal shape. The approval flow and the
-public PUT route in `main` validate through `validate_memory_proposal`
-here rather than keeping their own copy — one validator, so a rule
-tightened for one caller tightens for all of them.
+This module owns the memory-proposal shape. Agent proposals, the
+user-input approval flow and the public PUT route all validate through
+`validate_memory_proposal` rather than keeping their own copy — one
+validator, so a rule tightened for one caller tightens for all of them.
 """
 
 from __future__ import annotations
@@ -87,6 +88,88 @@ def validate_memory_proposal(raw: Any) -> dict[str, Any]:
             )
         proposal["target_slug"] = target_slug[:80]
     return proposal
+
+
+@router.get("/api/memory/all")
+async def get_all_memory_scopes():
+    """Every known scope (for the settings memory browser -- unlike
+    `/api/memory/scopes`, not filtered to ancestors of a given cwd)."""
+    global_memories = await asyncio.to_thread(
+        memory_store.list_memories, scope_type="global", scope_path="",
+    )
+    known_scopes = await asyncio.to_thread(memory_store.list_scopes)
+    scoped = []
+    for scope in known_scopes:
+        memories = await asyncio.to_thread(
+            memory_store.list_memories,
+            scope_type=scope["type"],
+            scope_path=scope["path"],
+        )
+        scoped.append({"type": scope["type"], "path": scope["path"], "memories": memories})
+    return {"global": global_memories, "scopes": scoped}
+
+
+@router.get("/api/memory/scopes")
+async def get_memory_scopes(cwd: str | None = None):
+    """User-facing browse surface: every memory visible from `cwd` (global
+    plus ancestor project/folder scopes), for the settings memory editor.
+    Direct user edits/deletes below never require agent approval -- only
+    agent-initiated additions/edits go through the user-input approval gate."""
+    resolved_cwd = str(cwd or "").strip()
+    if not resolved_cwd:
+        return {"scopes": {"global": await asyncio.to_thread(
+            memory_store.list_memories, scope_type="global", scope_path="",
+        )}}
+    scopes = await asyncio.to_thread(memory_store.memories_for_cwd, resolved_cwd)
+    return {"scopes": scopes}
+
+
+@router.put("/api/memory/{scope_type}/{slug}")
+async def put_memory(scope_type: str, slug: str, body: dict):
+    # Reuses the exact same validator (and its length caps) as agent-proposed
+    # writes, so a direct user edit can't write unbounded content that an
+    # agent proposal couldn't.
+    try:
+        proposal = validate_memory_proposal({
+            "action": "add",
+            "name": slug,
+            "description": body.get("description"),
+            "type": body.get("type"),
+            "content": body.get("content"),
+            "scope_type": scope_type,
+            "scope_path": body.get("scope_path"),
+        })
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail=str(exc.detail))
+    try:
+        memory = await asyncio.to_thread(
+            memory_store.write_memory,
+            scope_type=proposal["scope_type"],
+            scope_path=proposal["scope_path"],
+            slug=proposal["name"],
+            description=proposal["description"],
+            mem_type=proposal["type"],
+            content=proposal["content"],
+        )
+    except memory_store.MemoryStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "memory": memory}
+
+
+@router.delete("/api/memory/{scope_type}/{slug}")
+async def delete_memory_route(scope_type: str, slug: str, scope_path: str = ""):
+    try:
+        deleted = await asyncio.to_thread(
+            memory_store.delete_memory,
+            scope_type=scope_type,
+            scope_path=scope_path,
+            slug=slug,
+        )
+    except memory_store.MemoryStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"success": True}
 
 
 @router.post("/api/internal/memory/write")

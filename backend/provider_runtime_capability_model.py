@@ -29,7 +29,7 @@ _FAMILIES = artifact_family_kinds()
 _TRANSPORTS = frozenset({"http", "sdk", "sse", "stdio"})
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,256}$")
 _SECRET_KEY_RE = re.compile(
-    r"(^|_)(api_?key|auth|authorization|credential|password|secret|token)($|_)",
+    r"(^|_)(api_?key|authorization|credential|password|secret|token)($|_)",
 )
 _SECRET_ERROR_RE = re.compile(
     r"(?i)\b(api[_ -]?key|authorization|credential|password|secret|token)\b",

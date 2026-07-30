@@ -16,6 +16,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import recovery  # noqa: E402
 import lifecycle_command_store  # noqa: E402
 import session_queue_projection  # noqa: E402
 
@@ -109,15 +110,21 @@ class _Coordinator:
 
 
 def main_test() -> int:
-    real_session_manager = main.session_manager
-    real_coordinator = main.coordinator
+    real_session_manager = recovery.session_manager
+    real_coordinator = recovery._coordinator_ref
     real_projection_list = session_queue_projection.list_queued_records
     real_projection_ensure = session_queue_projection.ensure_current_or_rebuild
     real_transition_for = lifecycle_command_store.transition_for
+    real_pending_terminal_render = (
+        lifecycle_command_store.pending_terminal_render
+    )
+    real_reconcile_pending_terminal = (
+        recovery.reconcile_pending_terminal_renders
+    )
     fake_session_manager = _SessionManager()
     fake_coordinator = _Coordinator()
-    main.session_manager = fake_session_manager
-    main.coordinator = fake_coordinator
+    recovery.session_manager = fake_session_manager
+    recovery._coordinator_ref = fake_coordinator
     session_queue_projection.list_queued_records = (
         lambda **_kwargs: [fake_session_manager.session]
     )
@@ -125,7 +132,7 @@ def main_test() -> int:
     no_transition = lambda *_args: None
     lifecycle_command_store.transition_for = no_transition
     try:
-        rehydrated_session_ids = asyncio.run(main._re_enqueue_queued_prompts())
+        rehydrated_session_ids = asyncio.run(recovery._re_enqueue_queued_prompts())
         assert rehydrated_session_ids == {"sid"}
         assert fake_coordinator.start_processor_values == [False]
         assert len(fake_session_manager.updated) == 1
@@ -143,7 +150,7 @@ def main_test() -> int:
         lifecycle_command_store.transition_for = lambda *_args: {"status": "done"}
         try:
             retired_attempt = asyncio.run(
-                main._reconcile_queued_delivery_attempt(
+                recovery._reconcile_queued_delivery_attempt(
                     "sid", "q1", lifecycle_msg_id, 1,
                 )
             )
@@ -158,32 +165,71 @@ def main_test() -> int:
             lifecycle_message_id=lifecycle_msg_id,
         )
         finished: list[str] = []
+        reconciled: list[dict] = []
+        terminal_request_id = (
+            f"startup-reconcile:{lifecycle_msg_id}:2:finish"
+        )
 
-        async def finish_turn(**_kwargs) -> None:
+        async def finish_turn(**_kwargs):
             finished.append("finished")
+            return SimpleNamespace(request_id=terminal_request_id)
+
+        lifecycle_command_store.pending_terminal_render = lambda _sid: {
+            "session_id": "sid",
+            "request_id": terminal_request_id,
+            "lifecycle_message_id": lifecycle_msg_id,
+            "execution_turn_id": "execution-recovered",
+            "assistant_message_id": "assistant-recovered",
+            "outcome": "failed",
+        }
+
+        async def reconcile_pending_terminal(
+            _coordinator,
+            *,
+            recovered,
+            ownership_documents,
+            pending_terminal_renders,
+        ) -> int:
+            assert recovered == []
+            assert ownership_documents == []
+            reconciled.extend(pending_terminal_renders)
+            return 1
+
+        recovery.reconcile_pending_terminal_renders = (
+            reconcile_pending_terminal
+        )
 
         fake_coordinator.lifecycle_commands = SimpleNamespace(
             snapshot=lambda _sid: SimpleNamespace(
                 identity=active_identity,
-                execution=None,
+                execution=SimpleNamespace(phase="complete"),
             ),
             finish_turn=finish_turn,
         )
         active_attempt = asyncio.run(
-            main._reconcile_queued_delivery_attempt(
+            recovery._reconcile_queued_delivery_attempt(
                 "sid", "q1", lifecycle_msg_id, 2,
             )
         )
         assert active_attempt == 2
         assert finished == ["finished"]
+        assert [item["request_id"] for item in reconciled] == [
+            terminal_request_id,
+        ]
         print("PASS re-enqueue persists missing queued prompt lifecycle id")
         return 0
     finally:
         session_queue_projection.ensure_current_or_rebuild = real_projection_ensure
         session_queue_projection.list_queued_records = real_projection_list
         lifecycle_command_store.transition_for = real_transition_for
-        main.coordinator = real_coordinator
-        main.session_manager = real_session_manager
+        lifecycle_command_store.pending_terminal_render = (
+            real_pending_terminal_render
+        )
+        recovery.reconcile_pending_terminal_renders = (
+            real_reconcile_pending_terminal
+        )
+        recovery._coordinator_ref = real_coordinator
+        recovery.session_manager = real_session_manager
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

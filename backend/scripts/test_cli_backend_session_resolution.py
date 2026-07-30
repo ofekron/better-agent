@@ -36,7 +36,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/sessions/backend-session":
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps({"id": "backend-session", "bare_config": True}).encode())
+            self.wfile.write(json.dumps({
+                "id": "backend-session",
+                "cwd": r"C:\Users\Lenovo\better-agent",
+                "node_id": "lenovo",
+                "provider_id": "provider-1",
+                "bare_config": True,
+            }).encode())
             return
         self.send_response(404)
         self.end_headers()
@@ -57,6 +63,7 @@ class Handler(BaseHTTPRequestHandler):
             "model": Handler.created_body.get("model"),
             "orchestration_mode": Handler.created_body.get("orchestration_mode"),
             "provider_id": Handler.created_body.get("provider_id"),
+            "node_id": Handler.created_body.get("node_id"),
             "bare_config": Handler.created_body.get("bare_config"),
         }
         self.wfile.write(json.dumps(payload).encode())
@@ -143,13 +150,37 @@ def main() -> int:
         assert cli._probe_backend(port, retries=1), "backend probe should accept /api/sessions when /api/config is absent"
         session = cli._fetch_backend_session(port, "backend-session")
         assert session and session["id"] == "backend-session", "backend-created session should be fetchable"
+        resumed = cli.resolve_backend_session(
+            port=port,
+            session_id="backend-session",
+            cwd=None,
+            model="glm-5.2",
+            mode=None,
+            provider_id=None,
+        )
+        assert resumed["cwd"] == r"C:\Users\Lenovo\better-agent"
+        assert resumed["node_id"] == "lenovo"
+        try:
+            cli.resolve_backend_session(
+                port=port,
+                session_id="backend-session",
+                cwd="/Users/ofekron/better-claude",
+                model="glm-5.2",
+                mode=None,
+                provider_id=None,
+            )
+        except SystemExit as exc:
+            assert "--cwd does not match" in str(exc)
+        else:
+            raise AssertionError("mismatched resumed cwd was accepted")
         created = cli.resolve_backend_session(
             port=port,
             session_id=None,
-            cwd="/tmp/bc-cli",
+            cwd=r"C:\Users\Lenovo\better-agent",
             model="glm-5.2",
             mode="manager",
             provider_id="provider-1",
+            node_id="lenovo",
             worker_creation_policy="approve",
             bare_config=True,
         )
@@ -157,13 +188,30 @@ def main() -> int:
         assert Handler.created_body == {
             "name": "cli-default",
             "model": "glm-5.2",
-            "cwd": "/tmp/bc-cli",
+            "cwd": r"C:\Users\Lenovo\better-agent",
             "orchestration_mode": "manager",
             "source": "cli",
             "provider_id": "provider-1",
+            "node_id": "lenovo",
             "worker_creation_policy": "approve",
             "bare_config": True,
         }
+        assert cli._resolve_cli_cwd(
+            r"C:\Users\Lenovo\better-agent",
+            "lenovo",
+        ) == r"C:\Users\Lenovo\better-agent"
+        try:
+            cli._resolve_cli_cwd("relative/path", "lenovo")
+        except SystemExit as exc:
+            assert "invalid --cwd for node 'lenovo'" in str(exc)
+        else:
+            raise AssertionError("relative remote cwd was accepted")
+        try:
+            cli._resolve_cli_cwd(None, "lenovo")
+        except SystemExit as exc:
+            assert "--cwd is required" in str(exc)
+        else:
+            raise AssertionError("remote session creation accepted an omitted cwd")
         asyncio.run(assert_client_backend_sends_loopback_backend_url())
         asyncio.run(assert_client_backend_allows_large_ws_frames())
     finally:

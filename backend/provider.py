@@ -30,7 +30,9 @@ import concurrent.futures
 import inspect
 import json
 import logging
+import ntpath
 import os
+import posixpath
 import re
 import signal
 import shutil
@@ -43,7 +45,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Iterable, Optional
+from typing import Any, Callable, ClassVar, Iterable, Literal, Optional
 
 import config_store
 import perf
@@ -54,7 +56,11 @@ from execution_template import (
     prepare_execution,
 )
 from env_compat import dual_env_many
-from paths import ba_home
+from paths import (
+    ba_home,
+    make_private_directory,
+    require_private_directory,
+)
 from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
@@ -74,6 +80,24 @@ _PROVIDER_TASKS_ACCEPTING = True
 _DEFAULT_RECOVERY_SCAN_PARALLELISM = 4
 _MAX_RECOVERY_SCAN_PARALLELISM = 16
 _RECOVERY_SCAN_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_SCAN_PARALLELISM"
+
+
+def _ensure_execution_run_dir(run_dir: Path) -> bool:
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        require_private_directory(run_dir)
+        return False
+    try:
+        make_private_directory(run_dir)
+        require_private_directory(run_dir)
+    except BaseException:
+        try:
+            run_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def _run_was_likely_running_before_restart(runs_root: Path, run_id: str) -> bool:
@@ -129,6 +153,189 @@ def _live_runner_run_ids(runs_root: Path) -> set[str]:
         if run_dir.parent == root:
             run_ids.add(run_dir.name)
     return run_ids
+
+
+BoundRunAuthorityState = Literal["owned", "absent", "unknown"]
+
+
+@dataclass(frozen=True)
+class BoundRunAuthority:
+    state: BoundRunAuthorityState
+    reason: str
+
+
+def _argv_path_belongs_to_run(
+    value: str,
+    *,
+    runs_root: str,
+    run_id: str,
+    windows: bool,
+) -> bool:
+    path_module = ntpath if windows else posixpath
+    if not value or not path_module.isabs(value):
+        return False
+    normalized_root = path_module.normcase(path_module.normpath(runs_root))
+    normalized_value = path_module.normcase(path_module.normpath(value))
+    exact_run_root = path_module.normcase(
+        path_module.normpath(path_module.join(normalized_root, run_id))
+    )
+    try:
+        return path_module.commonpath(
+            (exact_run_root, normalized_value),
+        ) == exact_run_root
+    except ValueError:
+        return False
+
+
+def _command_belongs_to_run(
+    command: list[str],
+    *,
+    runs_root: str,
+    run_id: str,
+    windows: bool,
+) -> bool:
+    for index, argument in enumerate(command):
+        if (
+            argument == "--run-dir"
+            and index + 1 < len(command)
+            and _argv_path_belongs_to_run(
+                command[index + 1],
+                runs_root=runs_root,
+                run_id=run_id,
+                windows=windows,
+            )
+        ):
+            return True
+        if _argv_path_belongs_to_run(
+            argument,
+            runs_root=runs_root,
+            run_id=run_id,
+            windows=windows,
+        ):
+            return True
+    return False
+
+
+def _process_argv_authority(
+    runs_root: Path,
+    run_id: str,
+    *,
+    started_after: float | None = None,
+    process_name_prefixes: tuple[str, ...] = (),
+) -> BoundRunAuthority:
+    import psutil
+
+    normalized_prefixes = tuple(
+        prefix.casefold()
+        for prefix in process_name_prefixes
+        if prefix
+    )
+    incomplete = False
+    try:
+        for process in psutil.process_iter():
+            try:
+                if (
+                    started_after is not None
+                    and process.create_time() < started_after
+                ):
+                    continue
+                command = process.cmdline()
+            except psutil.ZombieProcess:
+                continue
+            except psutil.AccessDenied:
+                try:
+                    process_name = process.name().casefold()
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+                except (psutil.AccessDenied, psutil.Error):
+                    incomplete = True
+                    continue
+                if (
+                    not normalized_prefixes
+                    or process_name.startswith(normalized_prefixes)
+                ):
+                    incomplete = True
+                continue
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                incomplete = True
+                continue
+            if not isinstance(command, list) or any(
+                not isinstance(argument, str)
+                for argument in command
+            ):
+                incomplete = True
+                continue
+            if _command_belongs_to_run(
+                command,
+                runs_root=str(runs_root),
+                run_id=run_id,
+                windows=os.name == "nt",
+            ):
+                return BoundRunAuthority("owned", "process argv owns run")
+    except (psutil.AccessDenied, psutil.ZombieProcess, psutil.Error, OSError):
+        return BoundRunAuthority("unknown", "process enumeration incomplete")
+    if incomplete:
+        return BoundRunAuthority("unknown", "process inspection incomplete")
+    return BoundRunAuthority("absent", "no process argv owns run")
+
+
+def classify_bound_run_authority(
+    provider_id: str,
+    run_id: str,
+    *,
+    started_after: float | None = None,
+) -> BoundRunAuthority:
+    from containment import containment
+    from runs_dir import runs_root
+
+    if (
+        not provider_id
+        or provider_id.startswith("remote:")
+        or not run_id
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id)
+        or run_id in {".", ".."}
+        or Path(run_id).name != run_id
+    ):
+        return BoundRunAuthority("unknown", "invalid or remote authority")
+    record = config_store.get_provider(provider_id)
+    if record is None or record.get("suspended") is True:
+        return BoundRunAuthority("unknown", "historical provider unavailable")
+    try:
+        owner = get_provider(provider_id)
+    except (KeyError, ProviderSuspendedError):
+        return BoundRunAuthority("unknown", "historical provider unavailable")
+    if owner.defunct or owner.suspended:
+        return BoundRunAuthority("unknown", "historical provider unavailable")
+    if not owner.supports_bound_run_argv_authority:
+        return BoundRunAuthority("unknown", "provider argv authority undeclared")
+    root = runs_root().resolve(strict=False)
+    run_dir = (root / run_id).resolve(strict=False)
+    if run_dir.parent != root:
+        return BoundRunAuthority("unknown", "run path escaped root")
+    if run_dir.exists():
+        return BoundRunAuthority("owned", "run directory exists")
+    if owner.has_admitted_run(run_id):
+        return BoundRunAuthority("owned", "provider admits run")
+    try:
+        if containment().enumerate(run_id):
+            return BoundRunAuthority("owned", "containment owns run")
+    except Exception:
+        return BoundRunAuthority("unknown", "containment inspection failed")
+    process_authority = _process_argv_authority(
+        root,
+        run_id,
+        started_after=started_after,
+        process_name_prefixes=owner.bound_run_process_name_prefixes,
+    )
+    if process_authority.state != "absent":
+        return process_authority
+    if run_dir.exists():
+        return BoundRunAuthority("owned", "run directory reappeared")
+    if owner.has_admitted_run(run_id):
+        return BoundRunAuthority("owned", "provider admitted run during census")
+    return BoundRunAuthority("absent", "no local run authority")
 
 
 async def path_exists_off_loop(path: Path) -> bool:
@@ -563,6 +770,8 @@ class ParkedRun:
 class Provider(ABC):
     KIND: ClassVar[str]
     uses_managed_api_key: ClassVar[bool] = False
+    supports_bound_run_argv_authority: ClassVar[bool] = False
+    bound_run_process_name_prefixes: ClassVar[tuple[str, ...]] = ()
 
     # ------------------------------------------------------------------
     # Capabilities — overridden per-provider. INVARIANT: every CLI-level
@@ -584,6 +793,10 @@ class Provider(ABC):
     # If you add a new capability flag, gate it at all three.
     # ------------------------------------------------------------------
     supports_fork: ClassVar[bool] = True
+
+    def has_admitted_run(self, run_id: str) -> bool:
+        return run_id in self._runs or run_id in self._parked_runs
+
     # Whether this provider can run as the persistent "manager" session
     # in manager mode (i.e. supports MCP tool registration + resumable
     # sessions so the BOOTSTRAP_PROMPT can be re-applied across turns).
@@ -835,7 +1048,7 @@ class Provider(ABC):
         run_id = arguments["run_id"]
         run_dir = runs_root() / run_id
         artifact_path = run_dir / "execution.json"
-        if run_dir.exists():
+        if not _ensure_execution_run_dir(run_dir):
             existing = tuple(run_dir.iterdir())
             if existing != (artifact_path,):
                 raise RuntimeError(f"run directory already exists: {run_id}")
@@ -848,7 +1061,6 @@ class Provider(ABC):
             if persisted != execution.artifact.to_dict():
                 raise RuntimeError(f"run execution authority conflicts: {run_id}")
         else:
-            run_dir.mkdir(parents=True)
             atomic_write_json(artifact_path, execution.artifact.to_dict())
         try:
             self._install_execution_payloads(execution, run_dir)

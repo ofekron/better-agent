@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Mapping
 
-from codex_execution_common import ExecutionContractError
+from codex_execution_common import ExecutionContractError, binary_open_flags
 from provider_runtime_capability_model import (
     CAPABILITY_PAYLOAD_NAME,
     PreparedRuntimeCapabilities,
@@ -15,6 +15,12 @@ from provider_runtime_capability_model import (
 from provider_runtime_payload_codec import (
     decode_runtime_capability_payload,
     validate_runtime_capability_manifest,
+)
+from paths import (
+    make_private_directory,
+    make_private_file,
+    require_private_directory,
+    require_private_file,
 )
 
 
@@ -34,6 +40,10 @@ def _stage_dir(run_id: str) -> Path:
     return _prepared_root() / key
 
 
+def _uses_windows_acl() -> bool:
+    return os.name == "nt"
+
+
 def _secure_directory(path: Path, *, create: bool) -> Path:
     try:
         if create:
@@ -44,17 +54,44 @@ def _secure_directory(path: Path, *, create: bool) -> Path:
         raise ExecutionContractError(
             "runtime capability directory is unavailable",
         ) from exc
-    if (
-        path.is_symlink()
-        or not stat.S_ISDIR(observed.st_mode)
-        or stat.S_IMODE(observed.st_mode) & 0o077
-        or (
-            hasattr(os, "getuid")
-            and observed.st_uid != os.getuid()
-        )
-    ):
+    if path.is_symlink() or not stat.S_ISDIR(observed.st_mode):
         raise ExecutionContractError("runtime capability directory is unsafe")
+    try:
+        if create:
+            make_private_directory(path)
+        require_private_directory(path)
+    except PermissionError as exc:
+        raise ExecutionContractError(
+            "runtime capability directory is unsafe",
+        ) from exc
     return resolved
+
+
+def _ensure_secure_directory(path: Path) -> Path:
+    try:
+        path.mkdir(mode=0o700, exist_ok=False)
+    except FileExistsError:
+        try:
+            require_private_directory(path.parent)
+            make_private_directory(path)
+        except PermissionError as exc:
+            raise ExecutionContractError(
+                "runtime capability directory is unsafe",
+            ) from exc
+        return _secure_directory(path, create=False)
+    except OSError as exc:
+        raise ExecutionContractError(
+            "runtime capability directory is unavailable",
+        ) from exc
+    try:
+        make_private_directory(path)
+        return _secure_directory(path, create=False)
+    except BaseException:
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def _read_private_payload(
@@ -62,9 +99,17 @@ def _read_private_payload(
     manifest: Mapping[str, Any],
 ) -> bytes:
     expected = validate_runtime_capability_manifest(manifest)
+    try:
+        require_private_file(path)
+    except PermissionError as exc:
+        raise ExecutionContractError(
+            "runtime capability payload is unsafe",
+        ) from exc
     if path.is_symlink():
         raise ExecutionContractError("runtime capability payload is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags = binary_open_flags(
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -72,11 +117,6 @@ def _read_private_payload(
             observed = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(observed.st_mode)
-                or stat.S_IMODE(observed.st_mode) & 0o077
-                or (
-                    hasattr(os, "getuid")
-                    and observed.st_uid != os.getuid()
-                )
                 or observed.st_size != expected["size"]
             ):
                 raise ExecutionContractError(
@@ -98,13 +138,14 @@ def _read_private_payload(
 
 def _write_private_payload(path: Path, payload: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     try:
         descriptor = os.open(temporary, flags, 0o600)
-        os.fchmod(descriptor, 0o600)
+        if not _uses_windows_acl():
+            os.fchmod(descriptor, 0o600)
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -114,6 +155,13 @@ def _write_private_payload(path: Path, payload: bytes) -> None:
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
+        if _uses_windows_acl():
+            try:
+                make_private_file(temporary)
+            except PermissionError as exc:
+                raise ExecutionContractError(
+                    "runtime capability payload is unsafe",
+                ) from exc
         if path.exists() or path.is_symlink():
             raise ExecutionContractError(
                 "runtime capability payload already exists",
@@ -137,9 +185,7 @@ def _stage_payload(
 ) -> None:
     manifest = validate_runtime_capability_manifest(manifest)
     decode_runtime_capability_payload(payload, manifest)
-    root = _prepared_root()
-    root.mkdir(parents=True, mode=0o700, exist_ok=True)
-    _secure_directory(root, create=False)
+    root = _ensure_secure_directory(_prepared_root())
     directory = _secure_directory(_stage_dir(run_id), create=True)
     try:
         _write_private_payload(
@@ -168,11 +214,27 @@ def stage_family_runtime_capabilities(
 
 
 def cleanup_staged_family_runtime_capabilities(run_id: str) -> None:
+    root = _prepared_root()
+    try:
+        _secure_directory(root, create=False)
+    except ExecutionContractError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            return
+        raise
     directory = _stage_dir(run_id)
     try:
-        (directory / CAPABILITY_PAYLOAD_NAME).unlink()
+        _secure_directory(directory, create=False)
+    except ExecutionContractError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            return
+        raise
+    payload = directory / CAPABILITY_PAYLOAD_NAME
+    try:
+        require_private_file(payload)
     except FileNotFoundError:
         pass
+    else:
+        payload.unlink()
     try:
         directory.rmdir()
     except FileNotFoundError:
@@ -192,15 +254,14 @@ def _validated_run_dir(run_dir: Path) -> Path:
         raise ExecutionContractError(
             "runtime capability run directory is unavailable",
         ) from exc
-    if (
-        not resolved.is_relative_to(state_root)
-        or not stat.S_ISDIR(observed.st_mode)
-        or (
-            hasattr(os, "getuid")
-            and observed.st_uid != os.getuid()
-        )
-    ):
+    if not resolved.is_relative_to(state_root) or not stat.S_ISDIR(observed.st_mode):
         raise ExecutionContractError("runtime capability run directory escapes state")
+    try:
+        require_private_directory(run_dir)
+    except PermissionError as exc:
+        raise ExecutionContractError(
+            "runtime capability run directory is unsafe",
+        ) from exc
     return resolved
 
 

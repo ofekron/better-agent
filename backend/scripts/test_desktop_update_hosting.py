@@ -16,6 +16,7 @@ if str(BACKEND) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 from paths import ba_home  # noqa: E402
 import main  # noqa: E402
+import mobile_desktop_api  # noqa: E402
 
 
 def test_desktop_status_downloads_and_update_repo_are_hosted_from_ba_home():
@@ -57,7 +58,7 @@ def test_desktop_update_repo_rejects_path_traversal():
     res = client.get("/api/desktop/updates/missing")
     assert res.status_code == 404
     try:
-        main._desktop_update_file("../outside")
+        mobile_desktop_api._desktop_update_file("../outside")
     except main.HTTPException as exc:
         assert exc.status_code == 404
     else:

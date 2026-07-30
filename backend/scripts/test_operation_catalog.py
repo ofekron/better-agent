@@ -69,8 +69,33 @@ def _assert_generated_runtime_files_excluded() -> None:
         assert operation_catalog._artifact_digest(root) == first
 
 
+def _assert_nested_worktrees_excluded() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "AGENTS.md").touch()
+        backend = root / "backend"
+        backend.mkdir()
+        (backend / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (backend / "requirements.txt").write_text("", encoding="utf-8")
+
+        worktree_backend = backend / ".claude" / "worktrees" / "some-worktree" / "backend"
+        worktree_backend.mkdir(parents=True)
+        (worktree_backend / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+        files = operation_catalog._artifact_files(root)
+        assert not any(".claude" in path.parts for path in files)
+
+        first = operation_catalog._artifact_digest(root)
+        nested = worktree_backend / "source.py"
+        nested.write_text("VALUE = 2\n", encoding="utf-8")
+        nested.unlink()
+
+        assert operation_catalog._artifact_digest(root) == first
+
+
 def main() -> None:
     _assert_generated_runtime_files_excluded()
+    _assert_nested_worktrees_excluded()
     state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
     with tempfile.TemporaryDirectory() as raw:
         os.environ["BETTER_AGENT_HOME"] = str(state_root)

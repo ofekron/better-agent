@@ -3888,6 +3888,7 @@ def _install_public_package_snapshot(
     extension_id: str,
     package_dir: Path,
     package_sha: str,
+    repo_root: Path,
 ) -> dict[str, Any]:
     manifest_path = package_dir / "better-agent-extension.json"
     if not manifest_path.exists():
@@ -3913,7 +3914,7 @@ def _install_public_package_snapshot(
         "updated_at": now,
         "source": {
             "type": "better_agent_bundled",
-            "repo_url": "",
+            "repo_url": str(repo_root),
             "extension_path": _PUBLIC_EXTENSION_PATHS[extension_id],
             "ref": "",
             "commit_sha": package_sha,
@@ -4113,11 +4114,14 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
             and source.get("commit_sha") == package_sha
             and install_path_text
             and Path(install_path_text).exists()
+            and source.get("repo_url")
         ):
             continue
         install_error = False
         try:
-            installed = _install_public_package_snapshot(extension_id, package_dir, package_sha)
+            installed = _install_public_package_snapshot(
+                extension_id, package_dir, package_sha, repo_root
+            )
         except Exception as exc:
             # Isolate the failure to this extension. An exception escaping here
             # aborts the reconcile before it writes the store, leaving every
@@ -6641,6 +6645,11 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
+    if _is_ambient_launch(item, inputs):
+        # No per-run operation broker exists for a session-less launch --
+        # tell the server to dispatch tool calls locally instead of through
+        # a broker that will never be there (see run_mcp_or_cli's `local`).
+        base_env.update(dual_env_many({"BETTER_CLAUDE_AMBIENT_LAUNCH": "1"}))
     # An ambient launch that opted into launcher-mediated auth still mints a
     # token -- an extension-scoped one, never the core private token, so the
     # backend principal stays the extension and owner-based lock ops remain
@@ -6648,7 +6657,10 @@ def _runtime_mcp_server_config_for_item(
     if (
         needs_identity_token(record)
         and (not _is_ambient_launch(item, inputs) or _ambient_launcher_auth(item))
-        and manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
+        and (
+            manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
+            or _is_ambient_launch(item, inputs)
+        )
     ):
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from

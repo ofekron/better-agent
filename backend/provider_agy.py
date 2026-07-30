@@ -102,7 +102,7 @@ class AgyProvider(SessionEventsProvider):
     KIND: ClassVar[str] = "agy"
 
     supports_fork: ClassVar[bool] = False
-    supports_manager_mode: ClassVar[bool] = False
+    supports_manager_mode: ClassVar[bool] = True
     supports_rewind: ClassVar[bool] = False
     rewind_requires_agent_identity: ClassVar[bool] = True
     supports_semantic_alter: ClassVar[bool] = True
@@ -218,7 +218,7 @@ class AgyProvider(SessionEventsProvider):
             raise NotImplementedError(
                 "agy provider does not support reasoning effort.",
             )
-        if mode == "team":
+        if mode == "team" and not self.supports_manager_mode:
             raise NotImplementedError("agy provider does not support team mode.")
         if start_arguments.get("fork"):
             raise NotImplementedError("agy provider does not support fork.")
@@ -275,6 +275,10 @@ class AgyProvider(SessionEventsProvider):
             or get_env("BETTER_CLAUDE_BACKEND_URL")
             or "http://localhost:8000"
         )
+        import extension_store
+        import installation_profile
+
+        integrations_enabled = installation_profile.integrations_enabled()
         payload = {
             key: value
             for key, value in start_arguments.items()
@@ -298,6 +302,18 @@ class AgyProvider(SessionEventsProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": worker_record.get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
+            "team_orchestration_enabled": (
+                integrations_enabled
+                and extension_store.is_extension_runtime_ready(
+                    extension_store.extension_id_for_role("team-orchestration"),
+                )
+            ),
+            "coordination_enabled": (
+                integrations_enabled
+                and extension_store.is_extension_runtime_ready(
+                    extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
+                )
+            ),
         })
         payload.update(run_policy)
         return payload

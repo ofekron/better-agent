@@ -96,14 +96,37 @@ class FileIdentity:
             current = FileIdentity.capture_metadata(self.requested_path)
         except ExecutionContractError:
             return False
-        return current == (
-            self.resolved_path,
-            self.size,
-            self.mtime_ns,
-            self.ctime_ns,
-            self.device,
-            self.inode,
-            self.symlink_chain,
+        return self.metadata_matches(current)
+
+    def metadata_matches(
+        self,
+        current: tuple[
+            str,
+            int,
+            int,
+            int,
+            int,
+            int,
+            tuple[tuple[str, str], ...],
+        ],
+    ) -> bool:
+        (
+            resolved_path,
+            size,
+            mtime_ns,
+            ctime_ns,
+            device,
+            inode,
+            symlink_chain,
+        ) = current
+        return (
+            resolved_path == self.resolved_path
+            and size == self.size
+            and mtime_ns == self.mtime_ns
+            and (os.name == "nt" or ctime_ns == self.ctime_ns)
+            and device == self.device
+            and inode == self.inode
+            and symlink_chain == self.symlink_chain
         )
 
     @classmethod

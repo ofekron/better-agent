@@ -1113,7 +1113,7 @@ def test_lifecycle_lock_budget_stays_on_provision_timeout() -> bool:
 def test_startup_wires_requirements_processor_prewarm() -> bool:
     import requirement_prewarm
 
-    main_src = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
+    main_src = (Path(_BACKEND) / "app_lifecycle.py").read_text(encoding="utf-8")
     if "requirements-processor-prewarm" not in main_src:
         print(f"{FAIL} startup wiring: prewarm task not created in main.py")
         return False

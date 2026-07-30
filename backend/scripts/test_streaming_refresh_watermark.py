@@ -47,6 +47,7 @@ from session_manager import manager as session_manager  # noqa: E402
 import event_ingester as ei_mod  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
 import main as main_mod  # noqa: E402
+import session_detail_api  # noqa: E402
 from _test_request import http_request  # noqa: E402
 
 event_ingester = ei_mod.event_ingester
@@ -102,7 +103,7 @@ def test_projection_heads_diverge() -> bool:
 
 def test_get_session_watermark_is_render_head() -> bool:
     sid, render_head = _fresh_streaming_session()
-    tree = asyncio.run(main_mod.get_session(
+    tree = asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         ))
@@ -121,7 +122,7 @@ def test_get_session_watermark_is_render_head() -> bool:
 
 def test_floor_events_from_seq_is_render_head() -> bool:
     sid, render_head = _fresh_streaming_session()
-    floor = main_mod._floor_events_from_seq(
+    floor = session_detail_api._floor_events_from_seq(
         sid, 0, cursor_known=False,
     )
     if floor != render_head:

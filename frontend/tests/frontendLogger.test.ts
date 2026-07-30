@@ -146,6 +146,22 @@ describe("frontend logger", () => {
     expect(payload.message).not.toContain("SessionStatusBadge");
   });
 
+  it("preserves stacks from structured console errors", async () => {
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    console.error({
+      message: "TypeError: cannot read property 'value' of null",
+      stack: "TypeError: cannot read property 'value' of null\n    at flushQueue (InputArea.tsx:625:24)",
+    });
+    await flushLoggerTransport();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const payload = JSON.parse(call[1].body);
+    expect(payload.stack).toContain("at flushQueue");
+  });
+
   it("does not forward benign mobile no-intent console errors", async () => {
     const { installFrontendLogger } = await import("../src/lib/frontendLogger");
 
@@ -270,12 +286,12 @@ describe("frontend logger", () => {
     // before any handler runs. The heartbeat is the only sample source that
     // survives that case.
     capacitorMocks.isNativePlatform.mockReturnValue(true);
-    Object.defineProperty(performance, "memory", {
-      value: { usedJSHeapSize: 111, totalJSHeapSize: 222, jsHeapSizeLimit: 333 },
-      configurable: true,
-    });
     vi.useFakeTimers();
     try {
+      Object.defineProperty(performance, "memory", {
+        value: { usedJSHeapSize: 111, totalJSHeapSize: 222, jsHeapSizeLimit: 333 },
+        configurable: true,
+      });
       const { installFrontendLogger } = await import("../src/lib/frontendLogger");
       installFrontendLogger();
 
@@ -299,12 +315,12 @@ describe("frontend logger", () => {
     // beacon that could itself perturb the memory pressure under
     // investigation — it must stop on its own after a bounded window.
     capacitorMocks.isNativePlatform.mockReturnValue(true);
-    Object.defineProperty(performance, "memory", {
-      value: { usedJSHeapSize: 1, totalJSHeapSize: 2, jsHeapSizeLimit: 3 },
-      configurable: true,
-    });
     vi.useFakeTimers();
     try {
+      Object.defineProperty(performance, "memory", {
+        value: { usedJSHeapSize: 1, totalJSHeapSize: 2, jsHeapSizeLimit: 3 },
+        configurable: true,
+      });
       const { installFrontendLogger } = await import("../src/lib/frontendLogger");
       installFrontendLogger();
 

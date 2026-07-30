@@ -76,6 +76,13 @@ SPECS: dict[str, ProviderSpec] = {
         transport_default_base_url="https://api.anthropic.com",
         runtime_requirements=("requirements-claude.txt",),
         runtime_probe_imports=("claude_agent_sdk",),
+        # better_agent_runner speaks Anthropic's Messages API directly over
+        # the subscription OAuth token (see
+        # runner_better_agent_claude_subscription.py) instead of spawning
+        # the native claude CLI. `runner_module` above stays "runner" (the
+        # native default); the better_agent_runner branch is dispatched at
+        # runtime by `runner_module_for(kind, runner=...)`.
+        runner_choices=("native", "better_agent_runner"),
     ),
     "codex": ProviderSpec(
         kind="codex", module="provider_codex", cls="CodexProvider",
@@ -85,6 +92,14 @@ SPECS: dict[str, ProviderSpec] = {
         credential_config_env="CODEX_HOME",
         transport_gateway_env="OPENAI_BASE_URL",
         transport_default_base_url="https://api.openai.com/v1",
+        # better_agent_runner speaks OpenAI's internal Codex ResponsesAPI
+        # directly over the ChatGPT-subscription OAuth credential in
+        # CODEX_HOME/auth.json (see runner_better_agent_codex_subscription.py).
+        # It resolves to the "openai" runtime kind at spawn time — same
+        # in-process agent host as every other better_agent_runner provider —
+        # so it is NOT a separate manifest entry/class; only subscription mode
+        # exposes it (see runtime_profile.supported_runners).
+        runner_choices=("native", "better_agent_runner"),
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",
@@ -175,9 +190,21 @@ def runner_kinds() -> list[str]:
     return [k for k, s in SPECS.items() if not s.virtual]
 
 
-def runner_module_for(kind: str) -> str:
+def runner_module_for(kind: str, runner: str | None = None) -> str:
     """Runner module name for a kind; 'runner' (default Claude runner) when
-    the spec leaves it unset."""
+    the spec leaves it unset.
+
+    `runner` overrides the per-kind default when it names the Better Agent
+    in-process runner: every kind that selects `better_agent_runner`
+    dispatches to `runner_better_agent.py`, regardless of what its manifest
+    entry's own default `runner_module` is (most kinds already have
+    `runner_module="runner_better_agent"` set directly since they have no
+    other runner choice; `claude` is the first kind with two, so its
+    default stays the native "runner" and this override selects the
+    Better Agent path only when actually configured).
+    """
+    if str(runner or "").strip() == "better_agent_runner":
+        return "runner_better_agent"
     s = SPECS.get(kind)
     return (s.runner_module if s and s.runner_module else "runner")
 

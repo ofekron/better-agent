@@ -25,6 +25,7 @@ from fastapi import FastAPI, WebSocket  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import ws_chat  # noqa: E402
 import auth  # noqa: E402
 from auth_test_helpers import authenticate_client  # noqa: E402
 from ws_snapshot_binary import SNAPSHOT_BINARY_SUBPROTOCOL  # noqa: E402
@@ -52,13 +53,13 @@ class _FakeWebSocket:
 
 def test_accept_skips_already_connected_ws() -> None:
     ws = _FakeWebSocket(WebSocketState.CONNECTED)
-    asyncio.run(main._accept_ws_if_needed(ws))  # type: ignore[arg-type]
+    asyncio.run(ws_chat._accept_ws_if_needed(ws))  # type: ignore[arg-type]
     assert ws.accept_calls == 0
 
 
 def test_accept_connecting_ws() -> None:
     ws = _FakeWebSocket(WebSocketState.CONNECTING)
-    asyncio.run(main._accept_ws_if_needed(ws))  # type: ignore[arg-type]
+    asyncio.run(ws_chat._accept_ws_if_needed(ws))  # type: ignore[arg-type]
     assert ws.accept_calls == 1
     assert ws.application_state == WebSocketState.CONNECTED
 
@@ -68,14 +69,14 @@ def test_accept_negotiates_only_the_supported_binary_protocol() -> None:
         WebSocketState.CONNECTING,
         "unrelated, better-agent.snapshot.binary-v1",
     )
-    asyncio.run(main._accept_ws_if_needed(ws))  # type: ignore[arg-type]
+    asyncio.run(ws_chat._accept_ws_if_needed(ws))  # type: ignore[arg-type]
     assert ws.accepted_subprotocol == "better-agent.snapshot.binary-v1"
-    assert main._snapshot_binary_enabled(ws) is True
+    assert ws_chat._snapshot_binary_enabled(ws) is True
 
     legacy = _FakeWebSocket(WebSocketState.CONNECTING, "unrelated")
-    asyncio.run(main._accept_ws_if_needed(legacy))  # type: ignore[arg-type]
+    asyncio.run(ws_chat._accept_ws_if_needed(legacy))  # type: ignore[arg-type]
     assert legacy.accepted_subprotocol is None
-    assert main._snapshot_binary_enabled(legacy) is False
+    assert ws_chat._snapshot_binary_enabled(legacy) is False
 
 
 def test_real_websocket_handshake_negotiates_binary_and_allows_legacy() -> None:
@@ -83,8 +84,8 @@ def test_real_websocket_handshake_negotiates_binary_and_allows_legacy() -> None:
 
     @app.websocket("/ws")
     async def endpoint(websocket: WebSocket) -> None:
-        await main._accept_ws_if_needed(websocket)
-        await websocket.send_json({"binary": main._snapshot_binary_enabled(websocket)})
+        await ws_chat._accept_ws_if_needed(websocket)
+        await websocket.send_json({"binary": ws_chat._snapshot_binary_enabled(websocket)})
         await websocket.close()
 
     with TestClient(app) as client:

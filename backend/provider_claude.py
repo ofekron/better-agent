@@ -60,6 +60,7 @@ from provider import (
     schedule_loop_task,
     runner_argv,
 )
+from provider_watch_helpers import emit_early_failure, wait_for_complete_or_process_death
 import config_store
 from process_identity import process_identity_to_dict
 from extension_run_policy import (
@@ -71,6 +72,10 @@ from provider_claude_execution import (
     capture_claude_sdk_package,
     capture_embedded_claude_sdk,
     materialize_claude_sdk_package,
+)
+from provider_claude_better_agent_runner import (
+    ClaudeBetterAgentRunnerProvider,
+    prepare_better_agent_runner_run,
 )
 from provider_family_execution_runtime import (
     cleanup_failed_family_execution,
@@ -305,6 +310,8 @@ class RunState:
 # ============================================================================
 class ClaudeProvider(Provider):
     uses_managed_api_key = True
+    supports_bound_run_argv_authority = True
+    bound_run_process_name_prefixes = ("python", "node", "claude")
     """Spawns detached `runner.py` subprocesses (which use the
     `claude_agent_sdk` in-process), one-shot `claude -p` invocations,
     and `claude --rewind-files` invocations — all with env threaded
@@ -323,8 +330,26 @@ class ClaudeProvider(Provider):
     supports_headless_no_tools: ClassVar[bool] = True
 
     def __init__(self, record: dict) -> None:
+        # Constructed before super().__init__() so _apply_capability_
+        # overrides (called from within Provider.__init__) can safely
+        # reference it when this record's runner selects
+        # better_agent_runner. See ClaudeBetterAgentRunnerProvider's
+        # docstring for why this delegate is a real, separately-
+        # instantiated SessionEventsProvider subclass rather than a mixin.
+        self._ba_delegate = ClaudeBetterAgentRunnerProvider(record)
         super().__init__(record)
-        self._runs: dict[str, RunState] = {}
+        if record.get("runner") == "better_agent_runner":
+            # Share the delegate's run registry outright: every base
+            # `Provider` bookkeeping method (active_runs, cancel_run,
+            # is_running, cancel_all, runs_for_session, _cleanup_run) is
+            # already generic over `self._runs` and duck-types RunState
+            # fields both classes share (popen/mode/app_session_id/
+            # session_id/cancelled/run_dir/queue) — aliasing the dict
+            # means those inherited methods correctly see/control
+            # better_agent_runner runs with no per-method override.
+            self._runs: dict[str, Any] = self._ba_delegate._runs
+        else:
+            self._runs: dict[str, RunState] = {}
         # Wind-down gate mutexes, one per native session id.
         self._session_start_locks: dict[str, threading.Lock] = {}
         self._session_start_locks_guard = threading.Lock()
@@ -346,7 +371,87 @@ class ClaudeProvider(Provider):
             lambda: sum(rs.queue.qsize() for rs in self._runs.values()),
         )
 
+    # ------------------------------------------------------------------
+    # record — kept in sync on the delegate on every reassignment
+    # (config edits, provider-cache refresh) so its build_env/runtime_
+    # record/capability resolution never reads a stale snapshot. Updates
+    # the delegate FIRST so _apply_capability_overrides below (triggered
+    # by the base setter) mirrors freshly-resolved delegate flags, not
+    # last-round's.
+    # ------------------------------------------------------------------
+    @property
+    def record(self) -> dict:
+        return self._record
+
+    @record.setter
+    def record(self, value: dict) -> None:
+        ba_delegate = getattr(self, "_ba_delegate", None)
+        if ba_delegate is not None:
+            ba_delegate.record = value
+        Provider.record.fset(self, value)
+
+    def _apply_capability_overrides(self) -> None:
+        super()._apply_capability_overrides()
+        if self._record.get("runner") != "better_agent_runner":
+            return
+        # better_agent_runner claude sessions run through the SAME
+        # in-process BA agent loop as openai/fugu-ba-runner (see
+        # ClaudeBetterAgentRunnerProvider) — mirror its capability set
+        # verbatim rather than native claude's conservative class
+        # defaults. The delegate already resolved any record-level
+        # `capabilities` override (its record is the same content,
+        # synced above), so no separate override-precedence logic is
+        # needed here.
+        delegate = self._ba_delegate
+        for key in (
+            "supports_fork",
+            "supports_manager_mode",
+            "supports_rewind",
+            # Native default is True (needs the real claude session id +
+            # message uuid); the delegate's simulated rewind (clear the
+            # stored agent sid) takes the plain app_session_id instead —
+            # orchestrator.py's rewind call site branches its argument on
+            # this flag, so leaving it at the native default would pass
+            # a claude-shaped agent_session_id into a call that expects
+            # app_session_id.
+            "rewind_requires_agent_identity",
+            "supports_steering",
+            "supports_native_subagents",
+            "supports_reasoning_effort",
+        ):
+            object.__setattr__(self, key, getattr(delegate, key))
+        object.__setattr__(
+            self, "reasoning_effort_options", delegate.reasoning_effort_options,
+        )
+        object.__setattr__(
+            self, "default_reasoning_effort", delegate.default_reasoning_effort,
+        )
+
+    @contextmanager
+    def _execution_authority_context(self, execution, start_arguments):
+        with super()._execution_authority_context(
+            execution, start_arguments,
+        ) as authority:
+            if self.record.get("runner") != "better_agent_runner":
+                yield authority
+                return
+            # Mirror the frozen per-execution runtime snapshot onto the
+            # delegate for the duration of this admitted execution, so
+            # delegate.build_env()/finalize_run_env() (called from
+            # _start_run, deeper in the same call stack, same thread)
+            # see the exact hydrated record `_start_authorized_execution`
+            # just admitted rather than a possibly-stale `self.record`.
+            self._ba_delegate._execution_record.value = (
+                self._execution_record.value
+            )
+            try:
+                yield authority
+            finally:
+                del self._ba_delegate._execution_record.value
+
     def prepare_run(self, **start_arguments: Any):
+        if self.record.get("runner") == "better_agent_runner":
+            return prepare_better_agent_runner_run(self, start_arguments)
         runner_input = self._build_prepared_runner_input(start_arguments)
         run_id = start_arguments["run_id"]
         run_dir = _runs_root() / run_id
@@ -466,6 +571,8 @@ class ClaudeProvider(Provider):
         Uses the start-admitted runtime snapshot when a run is active and the
         current provider record for non-run operations.
         """
+        if self.record.get("runner") == "better_agent_runner":
+            return self._ba_delegate.build_env()
         self.require_runtime_credential()
         env = os.environ.copy()
         home = user_home()
@@ -522,6 +629,15 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     @contextmanager
     def _execution_admission(self, execution, *, loop, queue):
+        if self.record.get("runner") == "better_agent_runner":
+            # No wind-down gate: that serialization exists solely to keep
+            # two native CLI processes from resuming the same claude
+            # session jsonl concurrently. The in-process BA runner has no
+            # such shared-file hazard (same as openai/fugu-ba-runner,
+            # neither of which override this hook either) — admit
+            # unconditionally.
+            yield True
+            return
         arguments = execution.start_arguments()
         run_id = arguments["run_id"]
         session_id = arguments["session_id"]
@@ -615,6 +731,14 @@ class ClaudeProvider(Provider):
         serialized this call behind any previous run on the same native
         session before authority persistence.
         """
+        if self.record.get("runner") == "better_agent_runner":
+            return self._ba_delegate._start_run(
+                loop=loop,
+                queue=queue,
+                internal_token=internal_token,
+                extra_env=extra_env,
+                _execution=_execution,
+            )
         del (
             run_id,
             prompt,
@@ -1494,22 +1618,14 @@ class ClaudeProvider(Provider):
         complete_path = rs.run_dir / "complete.json"
         cleanup = True
         try:
-            while True:
-                if await path_exists_off_loop(complete_path):
-                    break
-                # No heartbeat-based stuck detection — a live process is
-                # assumed to be doing useful work (long tool calls, model
-                # thinking, network waits). The user can stop via the UI.
-                if not await popen_is_running_off_loop(rs.popen):
-                    loop = asyncio.get_event_loop()
-                    grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
-                    while (
-                        not await path_exists_off_loop(complete_path)
-                        and loop.time() < grace_end
-                    ):
-                        await asyncio.sleep(_TAIL_POLL_INTERVAL)
-                    break
-                await asyncio.sleep(_TAIL_POLL_INTERVAL)
+            # No heartbeat-based stuck detection — a live process is
+            # assumed to be doing useful work (long tool calls, model
+            # thinking, network waits). The user can stop via the UI.
+            await wait_for_complete_or_process_death(
+                complete_path=complete_path,
+                popen=rs.popen,
+                poll_interval=_TAIL_POLL_INTERVAL,
+            )
 
             # Drain the tailer to the current end of the jsonl before
             # firing `complete` — deterministic, not a fixed sleep, so a
@@ -1685,19 +1801,15 @@ class ClaudeProvider(Provider):
     # _emit_early_failure — synthesize error + complete on startup failure
     # ------------------------------------------------------------------
     async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
-        logger.warning("start_run bootstrap failure for %s: %s", rs.run_id, msg)
-        rs.turn_finalized = True
-        try:
-            rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
-            rs.queue.put_nowait(StreamEvent("complete", {
-                "success": False,
-                "error": msg,
-                "session_id": None,
-                "token_usage": None,
-            }))
-        except Exception:
-            logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        await emit_early_failure(
+            logger=logger,
+            log_prefix="start_run",
+            run_id=rs.run_id,
+            msg=msg,
+            queue=rs.queue,
+            cleanup=lambda: self._cleanup_run(rs.run_id),
+            before_enqueue=lambda: setattr(rs, "turn_finalized", True),
+        )
 
     # ------------------------------------------------------------------
     # _on_tailer_progress — called from FileTailer after each line dispatched
@@ -1806,6 +1918,14 @@ class ClaudeProvider(Provider):
 
     def _write_backend_state(self, rs: RunState) -> None:
         """Provider-specific backend_state.json contents."""
+        if self.record.get("runner") == "better_agent_runner":
+            # `rs` here is actually a provider_session_events.RunState
+            # (the shared `self._runs` dict — see __init__): it has no
+            # jsonl_path/cli_identity/processed_byte/root_id/cwd fields
+            # this native writer reads below. Delegate to the writer that
+            # matches the shape actually stored.
+            self._ba_delegate._write_backend_state(rs)
+            return
         jsonl_inode = None
         if rs.jsonl_path and rs.jsonl_path.exists():
             try:
@@ -1845,6 +1965,32 @@ class ClaudeProvider(Provider):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
 
+    def _post_cancel_hook(self, rs: Any) -> None:
+        """Native claude: no-op (unchanged — base `Provider` default,
+        matching behavior before this method existed on this class).
+        better_agent_runner: wake the session-events tailer's stop_event
+        so it exits its poll-sleep promptly, mirroring
+        SessionEventsProvider._post_cancel_hook."""
+        if self.record.get("runner") != "better_agent_runner":
+            return
+        if rs.tailer is not None:
+            try:
+                rs.tailer.stop()
+            except Exception:
+                pass
+
+    def steer_run(
+        self, run_id: str, prompt: str, images: Optional[list] = None,
+    ) -> bool:
+        """Native claude has no mid-turn steering primitive (unchanged —
+        base `Provider.steer_run` always returned False here).
+        better_agent_runner claude sessions steer the same way
+        openai/fugu-ba-runner do (see
+        ClaudeBetterAgentRunnerProvider.steer_run)."""
+        if self.record.get("runner") == "better_agent_runner":
+            return self._ba_delegate.steer_run(run_id, prompt, images)
+        return False
+
     def attach_recovered_run(
         self,
         *,
@@ -1861,6 +2007,10 @@ class ClaudeProvider(Provider):
         provider-stream events flowing immediately instead of waiting for a
         later cold replay after complete.json appears.
         """
+        if desc.get("runner") == "better_agent_runner":
+            return self._ba_delegate.attach_recovered_run(
+                desc=desc, queue=queue, loop=loop,
+            )
         run_id = str(desc.get("run_id") or "")
         pid = desc.get("pid")
         if not run_id or not pid or run_id in self._runs:
@@ -1939,7 +2089,29 @@ class ClaudeProvider(Provider):
         if config_store.provider_suspended(self.id):
             return recovered
 
+        # Runs prepared via ClaudeBetterAgentRunnerProvider write
+        # backend_state.json in the session-events shape (session_events.
+        # jsonl, no cli_pid/jsonl_inode/cli_identity) — the native scan
+        # below would either KeyError-shaped misread those fields or
+        # silently misclassify them. Peek each candidate dir's persisted
+        # "runner" once and route better_agent_runner dirs to the
+        # delegate's own scan instead, which stamps the "runner" field
+        # `run_recovery._recovery_family` needs to pick the session-
+        # events replay reader over the claude-native one.
+        native_ids: set[str] = set()
+        ba_runner_ids: set[str] = set()
         for child in iter_run_dirs(run_id_filter):
+            bs_path = child / "backend_state.json"
+            try:
+                bs_peek = json.loads(bs_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                bs_peek = {}
+            if str(bs_peek.get("runner") or "").strip() == "better_agent_runner":
+                ba_runner_ids.add(child.name)
+            else:
+                native_ids.add(child.name)
+
+        for child in iter_run_dirs(native_ids):
             if marker_matches_current(child / "reconciled.marker", self.KIND):
                 continue
             complete_path = child / "complete.json"
@@ -2036,6 +2208,7 @@ class ClaudeProvider(Provider):
                 "turn_run_id": bs.get("turn_run_id"),
                 "cli_pid": cli_pid,
                 "orphaned_cli": bool(orphaned_cli),
+                "runner": bs.get("runner"),
             }
 
             if has_complete_json:
@@ -2089,6 +2262,13 @@ class ClaudeProvider(Provider):
 
             recovered.append(descriptor)
 
+        if ba_runner_ids:
+            recovered.extend(
+                self._ba_delegate.recover_in_flight(
+                    loop=None, run_id_filter=ba_runner_ids,
+                ),
+            )
+
         return recovered
 
     # ------------------------------------------------------------------
@@ -2124,6 +2304,11 @@ class ClaudeProvider(Provider):
         filesystem or shell. Used for pure-generation callers (composer
         fill) that must not side-effect the user's workspace.
         """
+        if self.record.get("runner") == "better_agent_runner":
+            return await self._ba_delegate.run_headless(
+                prompt=prompt, session_id=session_id, resume_sid=resume_sid,
+                fork=fork, cwd=cwd, timeout=timeout, no_tools=no_tools,
+            )
         self.assert_not_suspended(action="run headless work")
         from cli_paths import resolve_cli_binary
 
@@ -2241,6 +2426,13 @@ class ClaudeProvider(Provider):
         self, error: Optional[str], events: list[dict],
     ) -> Optional[datetime]:
         """Parse Claude rate-limit reset time from error / event text."""
+        if self.record.get("runner") == "better_agent_runner":
+            # The rate-limit signal for this path is an HTTP error from
+            # runner_better_agent_claude_subscription.py, not native CLI
+            # stderr/jsonl text — reuse the generic session-events keyword
+            # matcher (same one openai/fugu-ba-runner use for their own
+            # HTTP-sourced errors) instead of the CLI-specific one below.
+            return self._ba_delegate.parse_rate_limit(error, events)
         # Gather the text corpus to search
         texts: list[str] = []
         if error:
@@ -2309,6 +2501,16 @@ class ClaudeProvider(Provider):
         `RuntimeError` on non-zero exit so the caller can surface the
         exact stderr to the UI.
         """
+        if self.record.get("runner") == "better_agent_runner":
+            # No file-checkpoint primitive in the in-process BA loop —
+            # simulate rewind the same way openai/fugu-ba-runner do (see
+            # ClaudeBetterAgentRunnerProvider/SessionEventsProvider.rewind):
+            # clear the stored agent sid so the next turn starts fresh.
+            # `claude_sid` here is actually `app_session_id`, because
+            # rewind_requires_agent_identity is mirrored False for this
+            # instance (see _apply_capability_overrides above).
+            await self._ba_delegate.rewind(claude_sid, message_uuid)
+            return
         from cli_paths import resolve_cli_binary
 
         claude_bin = resolve_cli_binary("claude")

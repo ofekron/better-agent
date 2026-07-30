@@ -77,6 +77,8 @@ class LifecycleState(ABC):
             "next_phase": next_phase,
             "identity": command.identity.to_dict(),
         }
+        if snapshot.execution is not None:
+            payload["execution_identity"] = snapshot.execution.identity.to_dict()
         if outcome is not None:
             payload["outcome"] = outcome
         effect = LifecycleEffect(

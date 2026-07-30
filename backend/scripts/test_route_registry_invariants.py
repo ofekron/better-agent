@@ -13,6 +13,7 @@ import shutil
 import sys
 
 import _test_home
+from _test_routes import walk_routes
 _TMP_HOME = _test_home.isolate("bc-test-route-registry-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,36 +28,55 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 # entry maps a router module to the path prefixes it now owns; main.py
 # must not declare those paths again.
 EXTRACTED_DOMAINS = {
+    "misc_api": ("/api/version", "/api/analytics"),
+    "ws_chat": ("/ws/chat", "/{_unknown_ws_path:path}"),
     "git_api": ("/api/git-",),
     "pending_approvals_api": ("/api/internal/pending-approvals/",),
+    "internal_messaging_api": (
+        "/api/internal/mssg",
+        "/api/internal/stop-turn",
+        "/api/internal/testape/",
+        "/api/internal/test/force-context-overflow",
+        "/api/internal/credential/",
+    ),
+    "user_input_api": (
+        "/api/user-input/",
+        "/api/internal/user-input/",
+        "/api/internal/open-file-panel",
+        "/api/internal/open-config-panel",
+    ),
+    "memory_api": ("/api/memory/", "/api/internal/memory/"),
+    "schedules_api": ("/api/schedules", "/api/internal/schedules"),
+    "tasks_api": (
+        "/api/internal/tasks",
+        "/api/internal/task-outputs",
+        "/api/task-outputs/",
+        "/api/task-output/",
+    ),
+    "session_bridge_api": (
+        "/api/internal/session-bridge/",
+        "/api/internal/ask-propose",
+        "/api/internal/agent-board/",
+    ),
+    "coordination_api": ("/api/internal/coordination/",),
+    "mobile_desktop_api": (
+        "/api/installation-profile",
+        "/api/download/",
+        "/api/mobile/status",
+        "/api/desktop/",
+    ),
+    "workers_api": ("/api/internal/workers/",),
+    "worker_pools_api": ("/api/internal/worker-pools/",),
+    "credential_ui_api": ("/api/internal/credential-ui/",),
+    "tool_approvals_api": ("/api/internal/tool-approvals/",),
 }
 
 
 def _app_routes(app) -> list[tuple[str, frozenset[str]]]:
-    """Flatten the app's routes.
-
-    FastAPI keeps an included router as a single lazy entry with an
-    empty path, exposing the router it wrapped as `original_router`,
-    so a router's own routes live one level down and must be walked.
-    """
-    out: list[tuple[str, frozenset[str]]] = []
-
-    def _walk(routes) -> None:
-        for route in routes:
-            path = getattr(route, "path", None)
-            nested = getattr(route, "original_router", None) or (
-                getattr(route, "routes", None) if not path else None
-            )
-            if not path and nested is not None:
-                _walk(getattr(nested, "routes", nested))
-                continue
-            if not path:
-                continue
-            methods = getattr(route, "methods", None)
-            out.append((path, frozenset(methods or {"WEBSOCKET"}) - {"HEAD"}))
-
-    _walk(app.routes)
-    return out
+    return [
+        (route.path, frozenset(getattr(route, "methods", None) or {"WEBSOCKET"}) - {"HEAD"})
+        for route in walk_routes(app.routes)
+    ]
 
 
 def _served_paths(app) -> set[tuple[str, str]]:

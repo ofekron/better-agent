@@ -105,13 +105,13 @@ async def test_writer_reopens_without_losing_prior_rows() -> None:
 
 
 def test_production_shutdown_order_is_fail_closed() -> None:
-    main_source = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
+    main_source = (Path(_BACKEND) / "app_lifecycle.py").read_text(encoding="utf-8")
     shutdown = main_source[main_source.index("async def on_shutdown():"):]
-    assert shutdown.index("await coordinator.quiesce_prompt_processors()") < shutdown.index(
+    assert shutdown.index("await _coordinator_ref.quiesce_prompt_processors()") < shutdown.index(
         "event_journal_writer.close",
     )
     between = shutdown[
-        shutdown.index("await coordinator.quiesce_prompt_processors()"):
+        shutdown.index("await _coordinator_ref.quiesce_prompt_processors()"):
         shutdown.index("event_journal_writer.close")
     ]
     assert "except Exception" not in between[:120]

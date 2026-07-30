@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
+import mcp_stdio_bridge
 from mcp_tool_discovery import tool_discovery
 
 from communication_modes import (
@@ -85,7 +86,6 @@ from provider_session_events_runner import (
     effective_mcp_servers,
     restore_session_events_runner,
 )
-from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_better_agent")
@@ -1174,15 +1174,6 @@ def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) 
     return candidate
 
 
-def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONIOENCODING": "utf-8",
-    }
-    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
-    return env
-
-
 async def _mcp_json_request(
     config: dict[str, Any],
     method: str,
@@ -1190,77 +1181,9 @@ async def _mcp_json_request(
     *,
     timeout: float | None,
 ) -> dict[str, Any]:
-    command = str(config.get("command") or "").strip()
-    if not command:
-        raise RuntimeError("MCP server config missing command")
-    args = [str(arg) for arg in config.get("args") or []]
-    proc = await asyncio.create_subprocess_exec(
-        command,
-        *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_mcp_subprocess_env(config),
-        limit=SUBPROCESS_LINE_LIMIT_BYTES,
+    return await mcp_stdio_bridge.mcp_json_request(
+        config, method, params, timeout=timeout,
     )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    stderr_tail = bytearray()
-
-    async def _drain_stderr() -> None:
-        while chunk := await proc.stderr.read(4096):
-            stderr_tail.extend(chunk)
-            if len(stderr_tail) > 16 * 1024:
-                del stderr_tail[:-16 * 1024]
-
-    stderr_task = asyncio.create_task(_drain_stderr())
-
-    async def _send(payload: dict[str, Any]) -> None:
-        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        await proc.stdin.drain()
-
-    async def _read_response() -> dict[str, Any]:
-        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-        if not line:
-            try:
-                await asyncio.wait_for(asyncio.shield(stderr_task), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-            detail = stderr_tail.decode("utf-8", "replace").strip()
-            raise RuntimeError(
-                "MCP server closed stdout"
-                + (f": {detail}" if detail else "")
-            )
-        response = json.loads(line.decode("utf-8", "replace"))
-        if response.get("error"):
-            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
-        return response.get("result") or {}
-
-    try:
-        await _send({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "better-agent-runner", "version": "1"},
-            },
-        })
-        await _read_response()
-        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
-        return await _read_response()
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-        await stderr_task
 
 
 async def _mcp_list_tools_with_timeout(
@@ -2339,6 +2262,49 @@ async def _stream_chat(
 
 
 # --------------------------------------------------------------------------
+# per-round backend dispatch — kind/mode-keyed
+# --------------------------------------------------------------------------
+
+BACKEND_OPENAI = "openai"
+BACKEND_CODEX_SUBSCRIPTION = "codex_subscription"
+BACKEND_CLAUDE_SUBSCRIPTION = "claude_subscription"
+
+
+def _round_backend_for(inputs: dict) -> str:
+    """Classify which per-round HTTP+wire-translation backend this run uses.
+
+    Every kind that runs through `runner_better_agent` defaults to
+    `BACKEND_OPENAI` (the generic Chat Completions backend, `_one_round`
+    with api-key auth). Two kinds instead speak their own subscription
+    OAuth wire protocol:
+    - `kind=="claude"` in `mode=="subscription"` speaks Anthropic's native
+      Messages API (see runner_better_agent_claude_subscription.py).
+    - Any OTHER kind in `mode=="subscription"` (today only codex, reached
+      via the generic `OpenAIProvider` whose `KIND` is the fixed string
+      "openai" — see config_store._reject_unsupported_provider_config /
+      runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS) speaks that
+      kind's own ResponsesAPI-equivalent instead (see
+      runner_better_agent_codex_subscription.py) — `_one_round` still
+      drives that loop, swapping only `_model_stream`'s wire backend via
+      `codex_home`.
+
+    `inputs["provider_kind"]` is stamped "claude" by
+    `ClaudeBetterAgentRunnerProvider`'s runner-input builder
+    (provider_claude_better_agent_runner.py) and "openai" by the generic
+    `provider_session_events_execution.prepare_session_events_execution`
+    (used by codex/fugu/openai kind records), so this dispatch sees each
+    record's real backend, not a collapsed runtime kind.
+    """
+    kind = str(inputs.get("provider_kind") or "").strip()
+    mode = str(inputs.get("provider_mode") or "").strip()
+    if mode != "subscription":
+        return BACKEND_OPENAI
+    if kind == "claude":
+        return BACKEND_CLAUDE_SUBSCRIPTION
+    return BACKEND_CODEX_SUBSCRIPTION
+
+
+# --------------------------------------------------------------------------
 # main loop
 # --------------------------------------------------------------------------
 
@@ -2356,12 +2322,48 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         _fail(run_dir, f"cwd does not exist: {cwd}")
         return 1
 
-    api_key = os.environ.get("OPENAI_API_KEY") or ""
-    base_url = os.environ.get("OPENAI_BASE_URL") or ""
+    # provider_mode/provider_kind discriminate the wire protocol: a genuine
+    # OpenAI-compatible provider is always mode "api_key" (enforced by
+    # config_store._reject_unsupported_provider_config). "subscription"
+    # means the record's kind owns its own OAuth protocol and drives this
+    # in-process agent loop over ITS OWN wire format instead of Chat
+    # Completions — see `_round_backend_for`. All three backends still
+    # write the SAME session_events.jsonl shape.
     model = inputs.get("model") or ""
-    if not api_key or not base_url or not model:
-        _fail(run_dir, "OPENAI_API_KEY / OPENAI_BASE_URL / model not configured")
-        return 1
+    backend = _round_backend_for(inputs)
+    api_key = ""
+    base_url = ""
+    codex_home: Optional[Path] = None
+    if backend == BACKEND_CLAUDE_SUBSCRIPTION:
+        # Claude subscription backend: auth is a bearer token read fresh
+        # from the Keychain per round (see
+        # runner_better_agent_claude_subscription), not a static API key,
+        # and base_url never honors a record override (matches the native
+        # claude runner's subscription-mode ANTHROPIC_BASE_URL lockdown).
+        from runner_better_agent_claude_subscription import (
+            DEFAULT_BASE_URL,
+            one_round_claude_subscription,
+        )
+
+        round_fn = one_round_claude_subscription
+        base_url = DEFAULT_BASE_URL
+        if not model:
+            _fail(run_dir, "model not configured")
+            return 1
+    elif backend == BACKEND_CODEX_SUBSCRIPTION:
+        round_fn = _one_round
+        codex_home_str = os.environ.get("CODEX_HOME") or ""
+        if not codex_home_str or not model:
+            _fail(run_dir, "CODEX_HOME / model not configured for codex subscription")
+            return 1
+        codex_home = Path(codex_home_str)
+    else:
+        round_fn = _one_round
+        api_key = os.environ.get("OPENAI_API_KEY") or ""
+        base_url = os.environ.get("OPENAI_BASE_URL") or ""
+        if not api_key or not base_url or not model:
+            _fail(run_dir, "OPENAI_API_KEY / OPENAI_BASE_URL / model not configured")
+            return 1
 
     prompt = inputs.get("prompt") or ""
     app_session_id = inputs.get("app_session_id") or _new_uuid()
@@ -2492,9 +2494,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             steer_offset, steered = _drain_steer_messages(run_dir, steer_offset, messages)
             if steered:
                 _persist_history()
-            finish_reason, tool_calls, asst_text, asst_reasoning, chunk_usage = await _one_round(
+            finish_reason, tool_calls, asst_text, asst_reasoning, chunk_usage = await round_fn(
                 base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
                 reasoning_effort=reasoning_effort,
+                codex_home=codex_home, app_session_id=app_session_id,
             )
             if (run_dir / "cancel").exists():
                 # `_one_round` breaks promptly on the cancel sentinel without
@@ -2600,19 +2603,43 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     return 0 if error is None else 1
 
 
+def _model_stream(
+    base_url: str, api_key: str, model: str, messages: list[dict],
+    tool_schemas: list[dict], reasoning_effort: Optional[str],
+    codex_home: Optional[Path], app_session_id: str,
+) -> AsyncIterator[dict]:
+    """Select the wire backend for one streaming round. `codex_home` set
+    means this run is a codex ChatGPT-subscription turn (see `_run`'s
+    `provider_mode` check) — speak the Codex ResponsesAPI instead of Chat
+    Completions. Both yield the SAME Chat-Completions-shaped chunk dict, so
+    `_one_round` below consumes either identically."""
+    if codex_home is not None:
+        import runner_better_agent_codex_subscription as _codex_subscription
+        return _codex_subscription.stream_chat(
+            codex_home=codex_home, model=model, messages=messages,
+            tools=tool_schemas, reasoning_effort=reasoning_effort,
+            session_id=app_session_id,
+        )
+    return _stream_chat(
+        base_url, api_key, model, messages, tool_schemas,
+        reasoning_effort=reasoning_effort,
+    )
+
+
 async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
     emitter: EventEmitter, run_dir: Path, tool_schemas: list[dict] = TOOL_SCHEMAS,
     reasoning_effort: Optional[str] = None,
+    codex_home: Optional[Path] = None, app_session_id: str = "",
 ) -> tuple[Optional[str], list[dict], Optional[str], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
     Returns (finish_reason, finalized_tool_calls, assistant_text,
     reasoning_content, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for chunk in _stream_chat(
-        base_url, api_key, model, messages, tool_schemas,
-        reasoning_effort=reasoning_effort,
+    async for chunk in _model_stream(
+        base_url, api_key, model, messages, tool_schemas, reasoning_effort,
+        codex_home, app_session_id,
     ):
         if (run_dir / "cancel").exists():
             break

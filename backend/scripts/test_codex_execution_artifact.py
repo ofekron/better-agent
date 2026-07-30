@@ -485,6 +485,47 @@ def test_recovery_consumes_execution_artifact_authority() -> None:
         ) == []
 
 
+def test_completed_recovery_does_not_require_current_spawn_authority() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        config_dir = root / "config"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text("", encoding="utf-8")
+        codex_binary = root / "bin" / "codex"
+        _write_executable(codex_binary, b"native-codex")
+        provider = CodexProvider(
+            _record(kind="codex", config_dir=config_dir),
+        )
+        prepared = _prepare(provider, root, model="gpt-5.5")
+        arguments = prepared.artifact.template.arguments()
+        run_dir = runs_root() / arguments["run_id"]
+        run_dir.mkdir(parents=True)
+        (run_dir / "execution.json").write_text(
+            json.dumps(prepared.artifact.to_dict()),
+            encoding="utf-8",
+        )
+        (run_dir / "state.json").write_text(
+            json.dumps({"session_id": "native-thread"}),
+            encoding="utf-8",
+        )
+        (run_dir / "complete.json").write_text(
+            json.dumps({"success": True, "session_id": "native-thread"}),
+            encoding="utf-8",
+        )
+
+        codex_binary.write_bytes(b"updated-native-codex")
+        recovered = provider.recover_in_flight(
+            run_id_filter={arguments["run_id"]},
+        )
+        assert len(recovered) == 1
+        assert recovered[0]["has_complete_json"] is True
+
+        (run_dir / "complete.json").unlink()
+        assert provider.recover_in_flight(
+            run_id_filter={arguments["run_id"]},
+        ) == []
+
+
 def test_prepare_to_spawn_provider_mutation_fails_closed() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -881,6 +922,7 @@ TESTS = (
     test_runner_restores_artifact_authority_not_poisoned_input,
     test_fugu_isolation_and_invalid_model_fail_closed,
     test_recovery_consumes_execution_artifact_authority,
+    test_completed_recovery_does_not_require_current_spawn_authority,
     test_prepare_to_spawn_provider_mutation_fails_closed,
     test_runtime_agent_payload_is_immutable_confined_and_secret_free,
     test_runtime_agent_payload_rejects_tamper_symlink_and_atomic_failure,

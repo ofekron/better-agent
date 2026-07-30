@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -35,10 +36,32 @@ export function absolutizeLocalReferences(value, sourceDirectory) {
 // The retired copy lives inside the caller's own stage directory: concurrent
 // installs never share a swap slot, and the stage cleanup reclaims it.
 export function retiredNodeModulesPath(stage) {
-  return join(stage, "node_modules.retired");
+  return join(stage, "retired", "node_modules");
 }
 
-function install(profile) {
+export function cleanupInstallStage(stage, remove = rmSync) {
+  remove(stage, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+}
+
+export function prepareInstallManifest(manifest, profileDependencies) {
+  const scripts = { ...(manifest.scripts || {}) };
+  delete scripts.postinstall;
+  return {
+    ...manifest,
+    scripts,
+    dependencies: {
+      ...manifest.dependencies,
+      ...profileDependencies,
+    },
+  };
+}
+
+export function installFrontendDependencies(profile) {
   if (profile !== "desktop" && profile !== "mobile") {
     throw new Error(`Unknown frontend dependency profile: ${profile}`);
   }
@@ -48,15 +71,13 @@ function install(profile) {
   const previous = retiredNodeModulesPath(stage);
 
   try {
-    const manifest = JSON.parse(
+    const sourceManifest = JSON.parse(
       readFileSync(join(frontend, "package.json"), "utf8"),
     );
-    if (profile === "mobile") {
-      manifest.dependencies = {
-        ...manifest.dependencies,
-        ...readMobileDependencies(frontend),
-      };
-    }
+    const manifest = prepareInstallManifest(
+      sourceManifest,
+      profile === "mobile" ? readMobileDependencies(frontend) : {},
+    );
     const lock = JSON.parse(
       readFileSync(
         join(
@@ -76,7 +97,12 @@ function install(profile) {
     );
     cpSync(join(frontend, "scripts"), join(stage, "scripts"), { recursive: true });
     execFileSync("npm", ["ci"], { cwd: stage, stdio: "inherit" });
+    execFileSync(process.execPath, [join(frontend, "scripts", "detect-ips.mjs")], {
+      cwd: frontend,
+      stdio: "inherit",
+    });
     if (existsSync(current)) {
+      mkdirSync(dirname(previous), { recursive: true });
       renameSync(current, previous);
     }
     try {
@@ -88,7 +114,7 @@ function install(profile) {
       throw error;
     }
   } finally {
-    rmSync(stage, { recursive: true, force: true });
+    cleanupInstallStage(stage);
   }
 }
 
@@ -96,5 +122,5 @@ const invokedDirectly =
   process.argv[1] &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (invokedDirectly) {
-  install(process.argv[2]);
+  installFrontendDependencies(process.argv[2]);
 }

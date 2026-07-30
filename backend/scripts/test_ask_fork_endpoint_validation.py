@@ -19,6 +19,7 @@ if str(BACKEND) not in sys.path:
 from fastapi import HTTPException  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
 
 
@@ -54,6 +55,7 @@ def _install_team_orchestration_extension() -> None:
             "commit_sha": extension_id,
         },
         persist=True,
+        force_enabled=True,
     )
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
@@ -80,7 +82,7 @@ def test_ask_fork_missing_target_session_fails_before_delegation():
     )
     try:
         try:
-            asyncio.run(main.internal_ask_fork(
+            asyncio.run(internal_orchestration_api.internal_ask_fork(
                 {
                     "app_session_id": "caller-session",
                     "instructions": "check this",
@@ -138,7 +140,7 @@ def test_ask_fork_existing_target_enters_delegation():
         "ask_mode": "wait_and_grab_last_assistant_mssg_in_turn",
     }
     try:
-        result = asyncio.run(main.internal_ask_fork(
+        result = asyncio.run(internal_orchestration_api.internal_ask_fork(
             body,
             x_internal_token=main.coordinator.internal_token,
         ))
@@ -170,7 +172,7 @@ def test_ask_fork_rejects_asynchronous_mode_before_delegation():
     main.coordinator.run_delegation = fail_run_delegation
     try:
         try:
-            asyncio.run(main.internal_ask_fork(
+            asyncio.run(internal_orchestration_api.internal_ask_fork(
                 {
                     "app_session_id": "caller-session",
                     "instructions": "check this",
@@ -203,7 +205,7 @@ def test_ask_fork_rejects_reserved_requirements_processor_profile_from_general_c
         source="test",
     )
     try:
-        asyncio.run(main.internal_ask_fork(
+        asyncio.run(internal_orchestration_api.internal_ask_fork(
             {
                 "app_session_id": "caller-session",
                 "instructions": "check this",
@@ -251,7 +253,7 @@ def test_ask_fork_accepts_requirements_processor_profile_for_provisioned_dispatc
     client_delegation_id = "get_requirements_processor_abc123"
     authorize_tool_profile_dispatch(client_delegation_id, "requirements_processor")
     try:
-        result = asyncio.run(main.internal_ask_fork(
+        result = asyncio.run(internal_orchestration_api.internal_ask_fork(
             {
                 "app_session_id": "caller-session",
                 "instructions": "check this",
@@ -294,7 +296,7 @@ def test_ask_fork_include_events_is_explicit():
     original = main.coordinator.run_delegation
     main.coordinator.run_delegation = fake_run_delegation
     try:
-        result = asyncio.run(main.internal_ask_fork(
+        result = asyncio.run(internal_orchestration_api.internal_ask_fork(
             {
                 "app_session_id": "caller-session",
                 "instructions": "check this",
@@ -324,7 +326,7 @@ def test_ask_fork_rejects_unknown_provisioned_tool_profile():
         source="test",
     )
     try:
-        asyncio.run(main.internal_ask_fork(
+        asyncio.run(internal_orchestration_api.internal_ask_fork(
             {
                 "app_session_id": "caller-session",
                 "instructions": "check this",

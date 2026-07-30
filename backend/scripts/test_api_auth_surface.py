@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import _test_home
+from _test_routes import walk_routes
 _TMP_HOME = _test_home.isolate("bc-test-api-auth-surface-")
 os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
 
@@ -55,7 +56,7 @@ def _is_public(path: str) -> bool:
 
 def _api_routes() -> list[tuple[str, str]]:
     routes: list[tuple[str, str]] = []
-    for route in main.app.routes:
+    for route in walk_routes(main.app.routes):
         if not isinstance(route, Route):
             continue
         path = getattr(route, "path", "")
@@ -69,7 +70,7 @@ def _api_routes() -> list[tuple[str, str]]:
 def _websocket_routes() -> set[str]:
     return {
         getattr(route, "path", "")
-        for route in main.app.routes
+        for route in walk_routes(main.app.routes)
         if isinstance(route, WebSocketRoute)
     }
 

@@ -66,6 +66,8 @@ class NodeConnection:
     last_seen: float
     app_commit_sha: str = ""
     app_dirty: bool = False
+    runtime_ready: bool = False
+    runtime_error: str = ""
     # Inflight RPC futures keyed by request_id.
     pending_rpcs: dict[str, asyncio.Future] = field(default_factory=dict)
     # Inflight runs keyed by run_id — proxies a RemoteRunState held by
@@ -89,6 +91,7 @@ _snapshot_static_cache_key: tuple[Any, ...] | None = None
 _snapshot_static_cache: dict[str, NodeSpec] | None = None
 # Subscribers fire on every transition. List of async callables.
 _listeners: list[Callable[[str, str], Awaitable[None]]] = []
+_runtime_ready_waiters: dict[str, set[asyncio.Future[NodeConnection]]] = {}
 
 # ============================================================================
 # last_acked_offset persistence
@@ -493,6 +496,67 @@ def get_connection(node_id: str) -> Optional[NodeConnection]:
     return _conns.get(node_id)
 
 
+async def wait_for_runtime_ready(node_id: str) -> NodeConnection:
+    """Wait for a connected node's required runtime projection.
+
+    A waiter survives transient disconnect/reconnect transitions and resolves
+    only against the current connection. New requests still reject a node that
+    is already offline instead of silently waiting for an operator action.
+    """
+    if get_connection(node_id) is None:
+        raise RuntimeError(f"node {node_id!r} is not connected")
+    while True:
+        conn = get_connection(node_id)
+        if conn is not None and conn.runtime_ready:
+            return conn
+        if conn is not None and conn.runtime_error:
+            raise RuntimeError(conn.runtime_error)
+        waiter = asyncio.get_running_loop().create_future()
+        waiters = _runtime_ready_waiters.setdefault(node_id, set())
+        waiters.add(waiter)
+        try:
+            await waiter
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                _runtime_ready_waiters.pop(node_id, None)
+
+
+def mark_runtime_ready(
+    node_id: str,
+    expected_connection: NodeConnection,
+) -> bool:
+    """Publish readiness only for the connection that was projected."""
+    conn = get_connection(node_id)
+    if conn is not expected_connection or conn.runtime_ready:
+        return False
+    conn.runtime_ready = True
+    global _state_version
+    _state_version += 1
+    for waiter in tuple(_runtime_ready_waiters.get(node_id, ())):
+        if not waiter.done():
+            waiter.set_result(conn)
+    return True
+
+
+def mark_runtime_failed(
+    node_id: str,
+    expected_connection: NodeConnection,
+    error: str,
+) -> bool:
+    """Publish a projection failure for the current connection."""
+    conn = get_connection(node_id)
+    if conn is not expected_connection or conn.runtime_ready:
+        return False
+    conn.runtime_error = error
+    global _state_version
+    _state_version += 1
+    for waiter in tuple(_runtime_ready_waiters.get(node_id, ())):
+        if not waiter.done():
+            waiter.set_exception(RuntimeError(error))
+    return True
+
+
 async def forget(node_id: str) -> None:
     """Remove all in-memory state for a node and broadcast disconnected.
     Used after a node is deleted from the registry/topology so snapshot()
@@ -511,6 +575,11 @@ async def forget(node_id: str) -> None:
         except Exception:
             logger.exception("failed to expire forgotten node admissions")
     _state.pop(node_id, None)
+    for waiter in tuple(_runtime_ready_waiters.pop(node_id, ())):
+        if not waiter.done():
+            waiter.set_exception(
+                RuntimeError(f"node {node_id!r} connection authority expired")
+            )
     if had_state:
         _state_version += 1
     await _fire(node_id, "disconnected")
@@ -651,6 +720,8 @@ def snapshot() -> list[dict]:
             "primary_commit_sha": primary_commit_sha,
             "primary_dirty": primary_dirty,
             "version_status": _version_status(node_commit_sha, primary_commit_sha),
+            "runtime_ready": is_primary or bool(conn and conn.runtime_ready),
+            "runtime_error": "" if is_primary else (conn.runtime_error if conn else ""),
         })
     return out
 

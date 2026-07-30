@@ -7,14 +7,18 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 import installation_profile
 import dependency_plan
 import provider_setup
+import install_channel
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -115,7 +119,9 @@ async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
             environment, profile, make_default=not adopt,
         )
 
+    channel = install_channel.record_install_channel(mode)
     print(f"Better Agent installation mode: {mode}")
+    print(f"Acquisition channel: {channel}")
     print("Restart Better Agent if it is currently running so all integration projections reconcile.")
 
 

@@ -17,6 +17,48 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
+
+# The request-route source used to live entirely in main.py. It is now split
+# across the extracted API routers, so the textual invariants below scan the
+# concatenation and normalize `@router.` markers back to `@app.` so route
+# boundary markers stay module-agnostic.
+_API_MODULES = (
+    "main.py",
+    "ws_chat.py",
+    "machine_nodes_api.py",
+    "user_prefs_api.py",
+    "projects_api.py",
+    "providers_api.py",
+    "harness_profiles_api.py",
+    "internal_extension_api.py",
+    "internal_messaging_api.py",
+    "internal_orchestration_api.py",
+    "internal_session_state_api.py",
+    "workers_api.py",
+    "worker_pools_api.py",
+    "credential_ui_api.py",
+    "tool_approvals_api.py",
+    "mobile_desktop_api.py",
+    "user_input_api.py",
+    "hooks_push_api.py",
+    "session_helpers.py",
+    "session_list_cache.py",
+    "session_listing_api.py",
+    "session_detail_api.py",
+    "session_panels_api.py",
+    "file_editor_api.py",
+    "offline_actions_api.py",
+    "ops_api.py",
+    "queued_logging.py",
+    "lag_watchdog.py",
+    "recovery.py",
+    "app_lifecycle.py",
+)
+
+
+def _api_source() -> str:
+    parts = [(ROOT / name).read_text(encoding="utf-8") for name in _API_MODULES]
+    return "\n".join(parts).replace("@router.", "@app.")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -92,24 +134,24 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     # per-call-site executor workaround is gone because the root cause
     # (the calling thread blocking on the FileHandler's write lock) no
     # longer exists for any call site, hot-path or not.
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_LOG_WRITE_EXECUTOR" not in source
     assert "_warning_off_loop" not in source
     assert "_frontend_log_off_loop" not in source
-    assert "def _install_queued_logging(" in source
+    assert "def install_queued_logging(" in source
     assert "def stop_queued_logging(" in source
 
     root_setup_start = source.index("_root_stream_handler = logging.StreamHandler()")
     root_setup_end = source.index("logger = logging.getLogger(__name__)")
     root_setup_source = source[root_setup_start:root_setup_end]
     assert "logging.handlers.RotatingFileHandler(" in root_setup_source
-    assert "_install_queued_logging(logging.getLogger(), _root_stream_handler, _root_file_handler)" in root_setup_source
+    assert "install_queued_logging(logging.getLogger(), _root_stream_handler, _root_file_handler)" in root_setup_source
 
     frontend_setup_start = source.index('frontend_logger = logging.getLogger("frontend")')
-    frontend_setup_end = source.index("frontend_logger.log(log_level, line)")
+    frontend_setup_end = source.index("async def app_lifespan(", frontend_setup_start)
     frontend_setup_source = source[frontend_setup_start:frontend_setup_end]
     assert "logging.handlers.RotatingFileHandler(" in frontend_setup_source
-    assert "_install_queued_logging(frontend_logger, _frontend_file_handler)" in frontend_setup_source
+    assert "install_queued_logging(frontend_logger, _frontend_file_handler)" in frontend_setup_source
 
     monitor_start = source.index("async def _event_loop_lag_monitor()")
     monitor_end = source.index("asyncio.create_task(", monitor_start)
@@ -122,14 +164,13 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     assert "logger.warning(" in outbox_source
     assert '"slow WebSocket send type=%s elapsed_ms=%.1f"' in outbox_source
 
-    frontend_start = source.index("async def frontend_log(")
-    frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
-    frontend_source = source[frontend_start:frontend_end]
+    ops_source = (ROOT / "ops_api.py").read_text(encoding="utf-8")
+    frontend_start = ops_source.index("async def frontend_log(")
+    frontend_end = ops_source.index("@router.get(\"/api/mobile/bundle/manifest\")", frontend_start)
+    frontend_source = ops_source[frontend_start:frontend_end]
     assert "frontend_logger.log(log_level, line)" in frontend_source
 
-    shutdown_start = source.index("async def on_shutdown():")
-    shutdown_end = source.index("@app.post(\"/api/internal/ask-fork\")", shutdown_start)
-    shutdown_source = source[shutdown_start:shutdown_end]
+    shutdown_source = source[source.index("async def on_shutdown():"):]
     assert "await asyncio.to_thread(stop_queued_logging)" in shutdown_source
 
 
@@ -153,7 +194,7 @@ def test_queued_logging_does_not_block_caller_on_slow_handler() -> None:
     # including this one — is collected. `main.py`'s `ba_home()` call at
     # its own import time therefore already resolves to an isolated
     # tempdir, not the real `~/.better-claude`.
-    import main
+    import queued_logging
 
     release = threading.Event()
     entered = threading.Event()
@@ -166,7 +207,7 @@ def test_queued_logging_does_not_block_caller_on_slow_handler() -> None:
     test_logger = logging.getLogger(f"test.queued_logging.{id(release)}")
     test_logger.setLevel(logging.INFO)
     test_logger.propagate = False
-    main._install_queued_logging(test_logger, SlowHandler())
+    queued_logging.install_queued_logging(test_logger, SlowHandler())
 
     try:
         started = time.monotonic()
@@ -186,15 +227,15 @@ def test_queued_logging_does_not_block_caller_on_slow_handler() -> None:
         assert entered.wait(timeout=1), "listener thread never reached the slow handler"
     finally:
         release.set()
-        for listener in list(main._LOG_QUEUE_LISTENERS):
+        for listener in list(queued_logging._LOG_QUEUE_LISTENERS):
             if listener.queue is test_logger.handlers[0].queue:  # type: ignore[attr-defined]
                 listener.stop()
-                main._LOG_QUEUE_LISTENERS.remove(listener)
+                queued_logging._LOG_QUEUE_LISTENERS.remove(listener)
                 break
 
 
 def test_websocket_json_serializes_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     outbox_start = source.index("class _WebSocketOutbox:")
     outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
     outbox_source = source[outbox_start:outbox_end]
@@ -335,7 +376,7 @@ def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
 
 
 def test_ui_selection_routes_use_hot_path_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     get_start = source.index("async def get_ui_selection(")
     get_end = source.index("@app.patch(\"/api/ui-selection\")", get_start)
     get_source = source[get_start:get_end]
@@ -360,7 +401,7 @@ def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
 
 
 def test_session_opened_avoids_full_session_copy() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     route_start = main_source.index("async def mark_session_opened(")
     route_end = main_source.index("@app.", route_start)
     route_source = main_source[route_start:route_end]
@@ -506,7 +547,7 @@ def test_provisioning_run_lifecycle_runs_off_loop() -> None:
 
 
 def test_requirements_internal_routes_use_dedicated_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
     assert "_run_requirements_query" not in source
     assert "run_requirements_processor_query(\n            \"requirements.processed.processor\"," in source
@@ -617,7 +658,7 @@ def test_async_provider_resolution_runs_off_loop() -> None:
     assert "coordinator.provider_for_run(worker_agent_session_id, provider_id)" not in locked_source
     assert "coordinator.provider_for_run,\n        worker_agent_session_id" in locked_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")
     route_end = main_source.index("@app.post(\"/api/internal/headless-run\")", route_start)
     route_source = main_source[route_start:route_end]
@@ -1130,7 +1171,7 @@ def test_jsonl_line_count_singleflights_concurrent_cold_reads() -> None:
 
 
 def test_internal_workers_list_runs_projection_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     route_start = source.index("async def internal_list_workers_for_cwd(")
     route_end = source.index("@app.", route_start)
     route_source = source[route_start:route_end]
@@ -1208,7 +1249,7 @@ def test_event_summary_sidecar_load_populates_memory_cache() -> None:
 
 
 def test_connected_session_fallback_sorts_only_requested_page() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _filter_sort_page_for_list(" in source
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
@@ -1291,7 +1332,7 @@ def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
     node_source = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
     assert '"node_rpc.provider_start_run.provider_call"' in node_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     assert 'perf.LaggedQueue(' in main_source
     assert '_perf_name="ws.outbox"' in main_source
 
@@ -1415,7 +1456,7 @@ def test_projection_preserving_summary_reuses_existing_projection() -> None:
 
 
 def test_connected_session_list_pages_virtual_candidates() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     connected_start = source.index("    if connected:")
     connected_source = source[connected_start:source.index("@app.post(\"/api/sessions/search-content\")", connected_start)]
     virtual_start = connected_source.index("if may_include_virtual:")
@@ -1427,7 +1468,7 @@ def test_connected_session_list_pages_virtual_candidates() -> None:
 
 
 def test_connected_session_list_skips_full_sort_without_remote_merge() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     start = source.index("async def get_sessions(")
     end = source.index("@app.post(\"/api/sessions/search-content\")", start)
     route_source = source[start:end]
@@ -1845,7 +1886,7 @@ def test_extension_projection_routes_cache_json_bytes() -> None:
 
 
 def test_startup_reenqueue_reads_sessions_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
 
 
@@ -2200,7 +2241,7 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
     writes: list[str] = []
     original_write = manager_module.session_store.write_session_full
     original_fingerprint = session_queue_projection._session_files_fingerprint
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     startup_source = main_source[
         main_source.index("async def on_startup()") :
         main_source.index("async def on_shutdown()")
@@ -2394,13 +2435,13 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
 
 
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "startup-unread-warm" not in source
     assert "_warm_unread_counts" not in source
 
 
 def test_startup_does_not_shadow_extension_store_import() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     module_symbols = symtable.symtable(source, str(ROOT / "main.py"), "exec")
     startup_symbols = next(
         child for child in module_symbols.get_children() if child.get_name() == "on_startup"
@@ -2412,7 +2453,7 @@ def test_startup_does_not_shadow_extension_store_import() -> None:
 
 
 def test_startup_defers_requirement_and_project_match_warmers() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -2437,7 +2478,7 @@ def test_requirement_unprocessed_fallback_reuses_freshness_projection() -> None:
 
 
 def test_startup_defers_shortcut_http_prewarm() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -2447,7 +2488,7 @@ def test_startup_defers_shortcut_http_prewarm() -> None:
 
 
 def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     local_start = source.index("def _local_session_summaries_for_sidebar()")
     local_end = source.index("def _root_session_file_path(", local_start)
     local_source = source[local_start:local_end]
@@ -2472,7 +2513,7 @@ def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
 
 
 def test_session_organization_facets_are_version_cached() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_session_org_facets_cache" in source
     start = source.index("def _session_organization_snapshot_with_facets(")
     end = source.index("@app.get(\"/api/session-organization\")", start)
@@ -2494,13 +2535,13 @@ def test_session_organization_query_builds_tag_sets_only_for_tag_filter() -> Non
 
 
 def test_sidebar_decoration_uses_bulk_cached_state() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     assert "def _sidebar_state_snapshot()" in main_source
     assert "_sidebar_state_snapshot_cache" in main_source
     snapshot_start = main_source.index("def _sidebar_state_snapshot()")
     snapshot_end = main_source.index("def _decorate_local_sidebar_sessions(", snapshot_start)
     snapshot_source = main_source[snapshot_start:snapshot_end]
-    assert "version = _sessions_list_transient_state_version()" in snapshot_source
+    assert "version = session_list_cache._sessions_list_transient_state_version()" in snapshot_source
     assert "cached is not None and cached[0] == version" in snapshot_source
     assert "pending_input_by_sid = user_input_store.pending_counts_by_session()" in snapshot_source
     payload_start = main_source.index("def _sidebar_session_payload(")
@@ -2535,9 +2576,9 @@ def test_session_discovery_reads_mode_without_deepcopy() -> None:
 
 
 def test_project_aggregates_use_bulk_cached_state() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     start = source.index("def _project_aggregates(")
-    end = source.index("def _invalidate_project_aggregates(", start)
+    end = source.index("def invalidate_project_aggregates(", start)
     aggregate_source = source[start:end]
     assert "cached_state_snapshot()" in aggregate_source
     assert "unread_counts_snapshot()" in aggregate_source
@@ -2546,7 +2587,7 @@ def test_project_aggregates_use_bulk_cached_state() -> None:
 
 
 def test_sidebar_file_paths_use_cached_sessions_dir() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _root_sessions_dir_path(" in source
     start = source.index("def _decorate_local_sidebar_sessions(")
     end = source.index("def _local_sessions_for_sidebar(", start)
@@ -2581,7 +2622,7 @@ def test_session_list_uses_sorted_summary_cache() -> None:
 
 
 def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     helper_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     helper_end = source.index("def _root_session_file_path(", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -2615,7 +2656,7 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
 
 
 def test_visible_order_cache_uses_order_version_not_summary_version() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     cache_decl_start = source.index("_local_visible_order_cache: dict[")
     cache_decl_end = source.index("_session_detail_response_cache", cache_decl_start)
     cache_decl_source = source[cache_decl_start:cache_decl_end]
@@ -2639,7 +2680,7 @@ def test_visible_order_cache_uses_order_version_not_summary_version() -> None:
 
 
 def test_session_list_skips_impossible_virtual_filters() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     helper_start = source.index("def _session_filters_may_include_virtual(")
     helper_end = source.index("def _build_local_sessions_page_for_list(", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -2665,7 +2706,7 @@ def test_session_list_skips_impossible_virtual_filters() -> None:
 
 
 def test_session_list_preserves_summary_order_when_no_virtual_rows() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     helper_start = source.index("def _can_preserve_summary_order(")
     helper_end = source.index("def _session_filters_may_include_virtual(", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -2706,7 +2747,7 @@ def test_session_tag_filter_uses_summary_projection() -> None:
     assert '"tag_filter_ids": _tag_filter_ids(' in store_source
     assert 'summary["tag_filter_ids"] = _tag_filter_ids(' in store_source
     assert '"tag_filter_ids": tag_filter_ids' in store_source
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     match_start = main_source.index("def _session_matches_list_filters(")
     match_end = main_source.index("def _session_filtered_sort_key(", match_start)
     match_source = main_source[match_start:match_end]
@@ -2727,7 +2768,7 @@ def test_session_timestamp_sort_value_is_cached() -> None:
 
 
 def test_user_input_file_store_calls_are_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     state_start = source.index("async def _broadcast_user_input_state(")
     state_end = source.index("@app.get(\"/api/user-input/pending\")", state_start)
     state_source = source[state_start:state_end]
@@ -2807,7 +2848,7 @@ def test_tree_stub_cache_key_reads_render_seq_once() -> None:
 
 
 def test_session_event_meta_uses_combined_ingester_read() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     roots_start = source.index("def _session_event_meta_roots_for_page(")
     roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
     roots_source = source[roots_start:roots_end]
@@ -2940,7 +2981,7 @@ def test_search_summary_lookup_uses_maintained_projection() -> None:
 
 
 def test_sessions_response_cache_stores_serialized_bytes() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     cache_start = source.index("def _sessions_list_cache_get(")
     cache_end = source.index("def _shutdown_kill_runners_flag()", cache_start)
     cache_source = source[cache_start:cache_end]
@@ -2951,14 +2992,17 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
     assert "def _sessions_list_transient_fingerprint(" not in source
     assert "def _sessions_list_transient_state_version()" in source
-    assert "coordinator.turn_manager.cached_state_version()" in source
+    # The turn-state version reaches session_list_cache as an injected
+    # callable, so the composition root is where the owner is named.
+    composition = (ROOT / "app_composition.py").read_text(encoding="utf-8")
+    assert "session_list_cache.configure(coordinator.turn_manager.cached_state_version)" in composition
     assert "session_manager.unread_counts_version()" in source
     assert "user_input_store.pending_counts_version_loaded()" in source
     assert "cached[2] != _sessions_list_transient_state_version()" in cache_source
 
 
 def test_sidebar_payload_reuses_summary_projection_cache() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_sidebar_payload_cache" in source
     assert "_SIDEBAR_PAYLOAD_CACHE_MAX" in source
     assert "_sidebar_decorated_cache" in source
@@ -2982,7 +3026,7 @@ def test_sidebar_payload_reuses_summary_projection_cache() -> None:
 
 
 def test_search_sessions_response_cache_uses_metadata_version() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     helper_start = main_source.index("def _sessions_list_cache_version(")
     helper_end = main_source.index("def _shutdown_kill_runners_flag()", helper_start)
     helper_source = main_source[helper_start:helper_end]
@@ -2999,7 +3043,7 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
-    assert "cached_response = _sessions_list_cache_get(cache_key, accept_encoding)" in route_source
+    assert "cached_response = session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
     assert "cache_response = not (" not in route_source
     assert "search_query" in cache_source
     assert "\n        search,\n" not in cache_source
@@ -3011,11 +3055,11 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
 
 
 def test_session_summaries_response_cache_precedes_lookup() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     route_start = source.index("@app.get(\"/api/sessions/summaries\")")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/stats\")", route_start)
     route_source = source[route_start:route_end]
-    cache_call = "cached_response = _session_summaries_cache_get(cache_key, accept_encoding)"
+    cache_call = "cached_response = session_list_cache._session_summaries_cache_get(cache_key, accept_encoding)"
     assert cache_call in route_source
     assert route_source.index(cache_call) < route_source.index(
         "_local_session_summaries_by_ids"
@@ -3030,7 +3074,7 @@ def test_session_summaries_response_cache_precedes_lookup() -> None:
 
 
 def test_session_list_waits_briefly_for_partial_summary_warm() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     assert "_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08" in main_source
     assert "_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50" in main_source
     local_start = main_source.index("def _local_session_summaries_for_sidebar()")
@@ -3066,7 +3110,7 @@ def test_session_search_projection_enqueue_stays_on_event_loop() -> None:
 
 
 def test_sidebar_session_search_bounds_content_scoring() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
     helper_start = main_source.index("async def _sidebar_search_scores(")
     helper_end = main_source.index("@app.get(\"/api/sessions\")", helper_start)
@@ -3094,7 +3138,7 @@ def test_sidebar_session_search_bounds_content_scoring() -> None:
 
 
 def test_pending_node_polling_uses_public_projection_cache() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     route_start = main_source.index("async def internal_list_pending_nodes(")
     route_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", route_start)
     route_source = main_source[route_start:route_end]
@@ -3111,7 +3155,7 @@ def test_pending_node_polling_uses_public_projection_cache() -> None:
 
 
 def test_machine_node_snapshot_reads_are_off_loop() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     list_start = main_source.index("async def internal_get_nodes(")
     list_end = main_source.index("@app.get(\"/api/providers\")", list_start)
     list_source = main_source[list_start:list_end]
@@ -3207,7 +3251,7 @@ def test_credential_consent_listing_uses_cached_projection_off_loop() -> None:
     assert "_dir().glob" not in list_source
     assert "path.read_text" not in list_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     route_start = main_source.index("async def internal_list_pending_credentials(")
     route_end = main_source.index("@app.post(\"/api/internal/credential-ui/approve\")", route_start)
     route_source = main_source[route_start:route_end]
@@ -3220,7 +3264,7 @@ def test_project_update_counts_batch_uses_single_store_call() -> None:
     assert "def unseen_counts(project_ids: list[str])" in store_source
     assert "def peek_unseen_counts(project_ids: list[str])" in store_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     route_start = main_source.index("async def internal_project_update_counts_batch(")
     route_end = main_source.index("@app.post(\"/api/internal/project-updates/unseen\")", route_start)
     route_source = main_source[route_start:route_end]
@@ -3231,7 +3275,7 @@ def test_project_update_counts_batch_uses_single_store_call() -> None:
 
 
 def test_session_list_does_not_prewarm_snapshots() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_schedule_session_snapshot_prewarm" not in source
     assert "sessions.snapshot_prewarm" not in source
     route_start = source.index("async def get_sessions(")
@@ -3242,7 +3286,7 @@ def test_session_list_does_not_prewarm_snapshots() -> None:
 
 
 def test_session_list_warms_event_meta_off_path() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _schedule_session_event_meta_warm(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
     assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
@@ -3275,12 +3319,12 @@ def test_session_list_warms_event_meta_off_path() -> None:
 
 
 def test_session_list_reads_user_prefs_once() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _session_list_user_prefs(" in source
     assert "_session_list_user_prefs_cache" in source
     assert "_SESSION_LIST_USER_PREFS_TTL_SECONDS" in source
     prefs_start = source.index("def _session_list_user_prefs(")
-    prefs_end = source.index("def _shutdown_kill_runners_flag()", prefs_start)
+    prefs_end = source.index("def _invalidate_session_list_user_prefs_cache()", prefs_start)
     prefs_source = source[prefs_start:prefs_end]
     assert "time.monotonic()" in prefs_source
     assert "user_prefs.get_all()" in prefs_source
@@ -3295,7 +3339,7 @@ def test_session_list_reads_user_prefs_once() -> None:
 
 
 def test_session_detail_has_split_perf_timers() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
@@ -3315,7 +3359,7 @@ def test_session_detail_has_split_perf_timers() -> None:
     assert "_session_event_file_fingerprint(" not in miss_cache_source
     assert "content = await _session_detail_cache_put_async(cache_key, tree)" in route_source
     assert "content = (await asyncio.to_thread(\n            json.dumps" in route_source
-    assert "return await asyncio.to_thread(\n        _json_response_maybe_gzip" in route_source
+    assert "return await asyncio.to_thread(\n        session_list_cache._json_response_maybe_gzip" in route_source
     cache_start = source.index("async def _session_detail_cache_put_async(")
     cache_end = source.index("def _session_detail_simple_cache_key_from_full(", cache_start)
     cache_source = source[cache_start:cache_end]
@@ -3335,7 +3379,7 @@ def test_session_detail_has_split_perf_timers() -> None:
 
 
 def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     executor_source = (ROOT / "hot_path_executor.py").read_text(encoding="utf-8")
     helper_start = executor_source.index("async def run(self")
     helper_end = executor_source.index("def shutdown(self)", helper_start)
@@ -3365,9 +3409,9 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
 
 
 def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     start = source.index("def _decorate_local_sidebar_sessions(")
-    end = source.index("def _sidebar_stats_payload(", start)
+    end = source.index("def sidebar_stats_payload(", start)
     decorate_source = source[start:end]
     assert "summary_version = session_store.summary_index_version()" in decorate_source
     assert "id(s)," not in decorate_source
@@ -3585,7 +3629,7 @@ def test_run_state_emit_debug_logging_is_gated() -> None:
 
 
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -3677,15 +3721,15 @@ def test_session_search_index_file_rows_are_consumed_incrementally() -> None:
 
 
 def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _session_event_projection_warm_roots(" not in source
     assert "def _warm_session_detail_projection_roots_sync(" not in source
     assert "async def _warm_session_event_projections()" not in source
     assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
     assert "async def _run_session_detail_warm_path(" not in source
-    shutdown_start = source.index("async def on_shutdown()")
-    shutdown_end = source.index("# Internal Endpoints", shutdown_start)
-    shutdown_source = source[shutdown_start:shutdown_end]
+    # on_shutdown is the last definition in app_lifecycle, which is the last
+    # module in the concatenation, so the rest of the source is its body.
+    shutdown_source = source[source.index("async def on_shutdown()"):]
     assert "hot_path_executor.shutdown_all()" in shutdown_source
     assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" not in shutdown_source
     startup_start = source.index("async def on_startup()")
@@ -3712,7 +3756,7 @@ def test_render_hydrate_worker_fingerprint_is_batched() -> None:
 
 
 def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     helper_start = source.index("def _session_detail_cached_key_still_current(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
@@ -3749,7 +3793,7 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
 
 
 def test_project_match_rebuild_skips_unchanged_session_state() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     warm_start = main_source.index("async def _project_match_warm_loop()")
     warm_end = main_source.index("def _ensure_project_match_warm_task()", warm_start)
     warm_source = main_source[warm_start:warm_end]
@@ -3828,7 +3872,7 @@ def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
 
 
 def test_startup_recovery_defers_cold_runs() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     recover_start = source.index("async def _recover_in_flight_task()")
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
@@ -3838,21 +3882,26 @@ def test_startup_recovery_defers_cold_runs() -> None:
 
 
 def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     recover_start = source.index("async def _recover_in_flight_task()")
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
-    reenqueue = recover_source.index("reenqueue_task = asyncio.create_task(")
     scan = recover_source.index("candidate_task = asyncio.create_task(")
     register = recover_source.index("startup_recovery_gate.register_session_recovery")
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
-    integrate = recover_source.index("await integrate_recovered_runs(coordinator, batch)")
-    await_reenqueue = recover_source.index("rehydrated_session_ids = await reenqueue_task")
-    start_processors = recover_source.index(
-        "await coordinator.start_session_processor_async(sid)",
+    integrate = recover_source.index(
+        "await integrate_recovered_runs(_coordinator_ref, batch)",
     )
-    assert reenqueue < scan < register < opened
-    assert opened < integrate < await_reenqueue < start_processors
+    # Re-enqueue is awaited inline once live integration is done, so no
+    # rehydrated prompt starts before its run is registered on the gate.
+    reenqueue = recover_source.index(
+        "rehydrated_session_ids = await _re_enqueue_queued_prompts()",
+    )
+    start_processors = recover_source.index(
+        "await _coordinator_ref.start_session_processor_async(sid)",
+    )
+    assert scan < register < opened
+    assert opened < integrate < reenqueue < start_processors
     assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
 
 
@@ -3901,7 +3950,7 @@ def test_requirement_tag_refresh_is_off_startup_loop() -> None:
     assert "await asyncio.to_thread(_refresh_requirement_tags_sync)" in refresh_source
     assert "ModuleNotFoundError" in refresh_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     startup_start = main_source.index("async def on_startup()")
     startup_end = main_source.index("async def on_shutdown()", startup_start)
     startup_source = main_source[startup_start:startup_end]
@@ -3912,7 +3961,7 @@ def test_requirement_tag_refresh_is_off_startup_loop() -> None:
 
 
 def test_machine_nodes_readiness_check_is_off_startup_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -3922,25 +3971,24 @@ def test_machine_nodes_readiness_check_is_off_startup_loop() -> None:
 
 
 def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     route_start = source.index('@app.get("/api/sessions")')
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
     assert "connected_worker_node_ids_snapshot()" in route_source
     assert "_ns.snapshot()" not in route_source
     assert "sessions.list.node_snapshot" not in route_source
-    assert "_builtin_extension_runtime_ready_fast" not in route_source
-    assert "_builtin_extension_runtime_ready(" not in route_source
+    assert "extension_store.is_extension_runtime_ready(" not in route_source
     helper_start = source.index("def _machine_nodes_enabled_cached(")
     helper_end = source.index("def _json_response_maybe_gzip(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "asyncio.create_task(_refresh())" in helper_source
-    assert "await asyncio.to_thread(\n                        _builtin_extension_runtime_ready" in helper_source
+    assert "await asyncio.to_thread(\n                        extension_store.is_extension_runtime_ready" in helper_source
     assert "return cached[1]" in helper_source
 
 
 def test_sessions_route_uses_cached_remote_node_sessions() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     cache_source = (ROOT / "remote_sessions_cache.py").read_text(encoding="utf-8")
     helper_start = cache_source.index("async def for_sidebar(self")
     helper_end = cache_source.index("def for_sidebar_cached(", helper_start)
@@ -3963,7 +4011,7 @@ def test_sessions_route_uses_cached_remote_node_sessions() -> None:
 
 
 def test_connected_session_list_defers_cold_sidebar_projections() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     route_start = source.index('@app.get("/api/sessions")')
     route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
     route_source = source[route_start:route_end]
@@ -3991,7 +4039,7 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
 
 
 def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     build_start = source.index("def _build_local_sessions_page_for_list(")
     build_end = source.index("async def _sidebar_search_scores(", build_start)
     build_source = source[build_start:build_end]
@@ -4019,7 +4067,7 @@ def test_submit_team_message_sync_store_work_off_loop() -> None:
 
 
 def test_default_session_page_uses_visible_order_cache() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     helper_start = source.index("def _local_visible_order_page_ids(")
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -4045,7 +4093,7 @@ def test_default_session_page_uses_visible_order_cache() -> None:
 
 
 def test_session_search_uses_bounded_candidate_window() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     helper_start = source.index("def _session_search_candidate_limit(")
     helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = source[helper_start:helper_end]
@@ -4067,7 +4115,7 @@ def test_session_search_uses_bounded_candidate_window() -> None:
 
 
 def test_session_list_filter_sort_keeps_only_page_candidates() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     start = source.index("def _filter_sort_page_for_list(")
     end = source.index("def _filter_sessions_for_list_preserving_order(", start)
     helper_source = source[start:end]
@@ -4079,7 +4127,7 @@ def test_session_list_filter_sort_keeps_only_page_candidates() -> None:
 
 
 def test_startup_warms_virtual_session_summaries_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -4090,7 +4138,7 @@ def test_startup_warms_virtual_session_summaries_off_loop() -> None:
 
 
 def test_startup_warms_recent_git_statuses_off_hot_path() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     cache_source = (ROOT / "git_status_cache.py").read_text(encoding="utf-8")
     helper_start = cache_source.index("async def warm_recent(self)")
     helper_end = cache_source.index("def _start_fetch(", helper_start)
@@ -4111,9 +4159,9 @@ def test_startup_warms_recent_git_statuses_off_hot_path() -> None:
 
 
 def test_session_organization_refresh_is_coalesced_background_work() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _broadcast_session_organization_changed(")
-    helper_end = source.index("async def _apply_initial_session_folder(", helper_start)
+    source = _api_source()
+    helper_start = source.index("async def broadcast_session_organization_changed(")
+    helper_end = source.index("async def apply_initial_session_folder(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "_session_organization_refresh_pending = True" in helper_source
     assert "asyncio.create_task(_refresh_loop())" in helper_source
@@ -4122,7 +4170,7 @@ def test_session_organization_refresh_is_coalesced_background_work() -> None:
 
 
 def test_get_session_strips_synthetic_events_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "def _tree_has_loaded_events(" in source
     route_start = source.index("async def get_session(")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
@@ -4137,7 +4185,7 @@ def test_get_session_strips_synthetic_events_off_loop() -> None:
 
 
 def test_session_detail_response_bytes_are_cached() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     assert "_session_detail_response_cache" in source
     assert "_SESSION_DETAIL_RESPONSE_CACHE_MAX = 64" in source
     assert "def _session_detail_cache_get(" in source
@@ -4372,7 +4420,7 @@ def test_project_update_total_is_maintained_projection() -> None:
     assert "return _total_unseen_count" in total_source
     assert "sum(_unseen_counts.values())" not in total_source
 
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    main_source = _api_source()
     startup_start = main_source.index("async def on_startup()")
     startup_end = main_source.index("async def on_shutdown()", startup_start)
     startup_source = main_source[startup_start:startup_end]
@@ -4439,7 +4487,7 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
     # for why: mssg/ask were timing out client-side while the target session
     # still received and processed the message, because these lookups queued
     # behind unrelated slow work sharing the default pool.
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     resolver_start = source.index("async def _resolve_communication_target(")
     resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
     resolver_source = source[resolver_start:resolver_end]
@@ -4457,12 +4505,12 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
 
 
 def test_communication_run_selector_validation_is_off_default_pool() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("async def _validate_optional_run_selector(")
-    end = source.index("def _validate_provider_default_reasoning_effort(", start)
+    source = (ROOT / "provider_validation.py").read_text(encoding="utf-8")
+    start = source.index("async def validate_optional_run_selector(")
+    end = source.index("def validate_provider_default_reasoning_effort(", start)
     validator_source = source[start:end]
     assert 'await hot_path.run(\n            "communication.validate_run_selector.get_provider",\n            config_store.get_provider' in validator_source
-    assert 'await hot_path.run(\n        "communication.validate_run_selector.validate_provider_model",\n        _validate_provider_model' in validator_source
+    assert 'await hot_path.run(\n        "communication.validate_run_selector.validate_provider_model",\n        validate_provider_model' in validator_source
     assert "asyncio.to_thread(" not in validator_source
 
 
@@ -4585,7 +4633,7 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
 
 
 def test_startup_extension_package_resolution_stays_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = _api_source()
     startup_start = source.index("async def on_startup()")
     start = source.index("import extension_package_loader", startup_start)
     end = source.index("extension_store.extension_id_for_role(\"requirements\")", start)

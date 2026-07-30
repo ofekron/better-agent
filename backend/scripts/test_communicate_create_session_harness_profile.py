@@ -77,10 +77,10 @@ def test_create_sub_session_forwards_harness_profile():
 
 
 def test_internal_create_session_route_reads_harness_profile():
-    source = (_BACKEND / "main.py").read_text(encoding="utf-8")
-    marker = '@app.post("/api/internal/create-session")'
+    source = (_BACKEND / "internal_orchestration_api.py").read_text(encoding="utf-8")
+    marker = '@router.post("/api/internal/create-session")'
     start = source.index(marker)
-    end = source.index('@app.post("/api/internal/create-sub-session")', start)
+    end = source.index('@router.post("/api/internal/create-sub-session")', start)
     handler = source[start:end]
     assert "_harness_profile_selection(body)" in handler
     assert "harness_profile_id=harness_profile_id," in handler

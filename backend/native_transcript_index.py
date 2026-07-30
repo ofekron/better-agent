@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+import transcript_text_collapse
 from paths import ba_home, encode_cwd, is_test_mode
 from proc_control import process_control
 from process_identity import (
@@ -1050,47 +1051,13 @@ def _timestamp_utc(ts: str) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _hash_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
-
-
-def _normalize_repeated_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _raw_index_after_normalized_prefix_checked(text: str, prefix_len: int) -> tuple[int, bool]:
-    normalized_len = 0
-    emitted_any = False
-    in_whitespace = False
-    for index, char in enumerate(text):
-        if char.isspace():
-            if emitted_any and not in_whitespace:
-                if normalized_len >= prefix_len:
-                    return index, True
-                normalized_len += 1
-                in_whitespace = True
-            continue
-        emitted_any = True
-        in_whitespace = False
-        if normalized_len >= prefix_len:
-            return index, True
-        normalized_len += 1
-        if normalized_len >= prefix_len:
-            return index + 1, True
-    return len(text), normalized_len >= prefix_len
-
-
-def _raw_index_after_normalized_prefix(text: str, prefix_len: int) -> int:
-    raw_index, _reached = _raw_index_after_normalized_prefix_checked(text, prefix_len)
-    return raw_index
-
-
-def _common_prefix_len(left: str, right: str) -> int:
-    limit = min(len(left), len(right))
-    for index in range(limit):
-        if left[index] != right[index]:
-            return index
-    return limit
+_hash_text = transcript_text_collapse.hash_text
+_normalize_repeated_text = transcript_text_collapse.normalize_repeated_text
+_raw_index_after_normalized_prefix_checked = (
+    transcript_text_collapse.raw_index_after_normalized_prefix_checked
+)
+_raw_index_after_normalized_prefix = transcript_text_collapse.raw_index_after_normalized_prefix
+_common_prefix_len = transcript_text_collapse.common_prefix_len
 
 
 def _shared_prefix_len(left: str, right: str, minimum: int) -> int:

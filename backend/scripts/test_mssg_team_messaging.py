@@ -17,6 +17,7 @@ from orchs.manager import bootstrap
 from session_manager import manager as session_manager
 import config_store
 import inbox_store
+import internal_session_state_api
 import team_messaging
 
 
@@ -644,6 +645,7 @@ def test_promotion_requeue_preserves_team_message_collapse_metadata():
 
 def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch):
     import main
+    import recovery
 
     assistant = session_manager.create(
         name="Assistant startup collapse",
@@ -675,9 +677,9 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
             captured.append((sid, params))
             return params["_queued_id"]
 
-    monkeypatch.setattr(main, "coordinator", FakeCoordinator())
+    monkeypatch.setattr(recovery, "_coordinator_ref", FakeCoordinator())
 
-    asyncio.run(main._re_enqueue_queued_prompts())
+    asyncio.run(recovery._re_enqueue_queued_prompts())
 
     matching = [
         (sid, params)
@@ -697,6 +699,7 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
 
 def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
     import main
+    import recovery
 
     assistant = session_manager.create(
         name="Assistant activity",
@@ -711,7 +714,7 @@ def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
     coordinator.turn_manager._cached_monitoring[sid] = "active"
     monkeypatch.setattr(main, "coordinator", coordinator)
 
-    snapshot = main._session_activity_snapshot(sid, assistant)
+    snapshot = internal_session_state_api._session_activity_snapshot(sid, assistant)
 
     assert snapshot == {
         "session_id": sid,

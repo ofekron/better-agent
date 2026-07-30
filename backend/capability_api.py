@@ -1064,18 +1064,72 @@ def _register_requirements() -> None:
         register("requirements", action, schema, handler(function_name))
 
 
+# Route handlers that have been extracted out of main.py into their own
+# router module. Anything absent is still owned by main.
+_HANDLER_MODULES = {
+    "internal_assistant_ui_ensure": "assistant_ui_api",
+    "internal_assistant_ui_ensure_monitor": "assistant_ui_api",
+    "internal_assistant_ui_search": "assistant_ui_api",
+    "internal_assistant_ui_resolve_ba_session": "assistant_ui_api",
+    "internal_assistant_ui_adopt_native_session": "assistant_ui_api",
+    "internal_assistant_ui_delegate": "assistant_ui_api",
+    "internal_assistant_ui_last_turn": "assistant_ui_api",
+    "internal_headless_generate": "internal_orchestration_api",
+    "internal_get_delegate_task_policy_endpoint": "internal_orchestration_api",
+    "internal_set_delegate_task_policy_endpoint": "internal_orchestration_api",
+    "internal_list_extension_team_definitions": "internal_orchestration_api",
+    "internal_plan_team_definition": "internal_orchestration_api",
+    "internal_session_activity": "internal_session_state_api",
+    # `internal_create_worker` is also the name of internal_orchestration_api's
+    # /api/internal/create-worker handler; `workers.create` binds
+    # `_WorkerCreatePayload` (cwd/role_key), which is workers_api's shape.
+    "internal_list_workers_for_cwd": "workers_api",
+    "internal_create_worker": "workers_api",
+    "internal_provision_workers_ui": "workers_api",
+    "internal_register_existing_session_as_worker": "workers_api",
+    "internal_unregister_worker": "workers_api",
+    "internal_reset_worker_forks": "workers_api",
+    "internal_enqueue_worker_pool_prompt": "worker_pools_api",
+    "internal_mssg": "internal_messaging_api",
+    "internal_ask": "internal_messaging_api",
+    "internal_credential_request": "internal_messaging_api",
+    "internal_credential_execute": "internal_messaging_api",
+    "internal_schedules": "schedules_api",
+    "internal_tasks": "tasks_api",
+    "internal_task_outputs": "tasks_api",
+    "internal_ask_propose": "session_bridge_api",
+    "internal_session_bridge_search": "session_bridge_api",
+    "internal_session_bridge_delegate": "session_bridge_api",
+    "internal_session_bridge_delegate_resolve": "session_bridge_api",
+    "internal_agent_board_run_prompt": "session_bridge_api",
+    "internal_marketplace": "internal_extension_api",
+}
+for _credential_ui_action in (
+    "internal_list_pending_credentials",
+    "internal_approve_credential_consent",
+    "internal_deny_credential_consent",
+    "internal_revoke_credential_consent",
+    "internal_list_password_manager_secrets",
+    "internal_store_password_manager_secret",
+    "internal_delete_password_manager_secret",
+):
+    _HANDLER_MODULES[_credential_ui_action] = "credential_ui_api"
+del _credential_ui_action
+
+
 def _main_action(
     function_name: str,
     *,
     extension_role: str = "",
-    module_name: str = "main",
+    module_name: str = "",
 ) -> Callable[[BaseModel], Awaitable[Any]]:
     """Bind a capability action to a route handler.
 
-    `module_name` names the module that owns the handler; it is still
-    `main` for everything that has not been extracted into its own
-    router yet.
+    `module_name` names the module that owns the handler; when omitted it
+    is resolved from `_HANDLER_MODULES`, defaulting to `main` for
+    everything that has not been extracted into its own router yet.
     """
+    module_name = module_name or _HANDLER_MODULES.get(function_name, "main")
     async def invoke(payload: BaseModel) -> Any:
         import importlib
 
@@ -1168,31 +1222,12 @@ def _register_private_workflows() -> None:
         "headless-generate": (_AssistantHeadlessPayload, "internal_headless_generate"),
         "ask": (_AssistantAskPayload, "internal_ask"),
     }
-    # The assistant-ui handlers moved to their own router; the rest of
-    # this group is still owned by main.
-    assistant_ui_owned = {
-        "internal_assistant_ui_ensure",
-        "internal_assistant_ui_ensure_monitor",
-        "internal_assistant_ui_search",
-        "internal_assistant_ui_resolve_ba_session",
-        "internal_assistant_ui_adopt_native_session",
-        "internal_assistant_ui_delegate",
-        "internal_assistant_ui_last_turn",
-    }
     for action, (schema, function_name) in assistant_actions.items():
         register(
             "assistant",
             action,
             schema,
-            _main_action(
-                function_name,
-                extension_role="assistant",
-                module_name=(
-                    "assistant_ui_api"
-                    if function_name in assistant_ui_owned
-                    else "main"
-                ),
-            ),
+            _main_action(function_name, extension_role="assistant"),
         )
     register(
         "composer-fill",
@@ -1417,7 +1452,11 @@ def _register_machine_nodes() -> None:
             "machine-nodes",
             action,
             schema,
-            _main_action(function_name, extension_role="machine-nodes"),
+            _main_action(
+                function_name,
+                extension_role="machine-nodes",
+                module_name="machine_nodes_api",
+            ),
         )
 
 
@@ -1474,11 +1513,13 @@ def _register_session_events() -> None:
     # Scoped WS broadcast for capability-token extensions: identity comes from
     # the request-bound principal inside the shared broadcast service.
     async def broadcast(payload: BaseModel) -> Any:
-        import main
+        import internal_extension_api
 
         values = payload.model_dump()
         session_id = values.pop("session_id")
-        return await main._broadcast_session_for_internal_authority(session_id, values)
+        return await internal_extension_api.broadcast_session_for_internal_authority(
+            session_id, values,
+        )
 
     register(
         "session-events",

@@ -13,7 +13,7 @@ import _test_home  # noqa: E402
 
 _TMP_HOME = _test_home.isolate("bc-test-right-panel-")
 
-from main import _right_panel_patch_from_body  # noqa: E402
+from session_panels_api import _right_panel_patch_from_body  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 

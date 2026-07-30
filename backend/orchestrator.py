@@ -77,6 +77,21 @@ from model_execution_admission import ModelAdmissionError
 logger = logging.getLogger(__name__)
 
 
+async def _await_cancellation_safe(operation: Awaitable[None]) -> None:
+    task = asyncio.ensure_future(operation)
+    cancellation_requested = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancellation_requested = True
+    await task
+    if cancellation_requested:
+        raise asyncio.CancelledError
+
+
 class _AskCallGate:
     __slots__ = ("lock", "users")
 
@@ -2882,7 +2897,7 @@ class Coordinator:
         result: dict
         try:
             if not reattach:
-                await _dispatch_prompt()
+                await _await_cancellation_safe(_dispatch_prompt())
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
             # normally writes a durable user_message_done/failed terminal; older
@@ -2930,7 +2945,7 @@ class Coordinator:
                                     "dispatch never durably landed; redispatching",
                                     ask_id or lifecycle_msg_id,
                                 )
-                                await _dispatch_prompt()
+                                await _await_cancellation_safe(_dispatch_prompt())
                     finally:
                         self._ask_reattach_locks.pop(lifecycle_msg_id, None)
                     result = await asyncio.wait_for(done, timeout=timeout_s)
@@ -3727,6 +3742,9 @@ class Coordinator:
                     logical_turn_outcome = "stopped"
                     continue
                 if logical_turn_identity and logical_request_prefix:
+                    await self.lifecycle_commands.wait_for_phase(
+                        app_session_id, {"idle"},
+                    )
                     lifecycle_session = session_manager.get_fields(
                         app_session_id,
                         ("supervisor_enabled",),
@@ -3850,6 +3868,8 @@ class Coordinator:
                     and logical_turn_identity
                     and logical_request_prefix
                 ):
+                    terminal_result = None
+                    execution = None
                     if self._session_cancelled.get(app_session_id):
                         logical_turn_outcome = "stopped"
                     lifecycle_snapshot = self.lifecycle_commands.snapshot(
@@ -3869,7 +3889,7 @@ class Coordinator:
                             and execution is not None
                             and execution.provider_run_id is not None
                         ):
-                            await asyncio.shield(
+                            terminal_result = await asyncio.shield(
                                 self.lifecycle_commands.finish_execution_and_turn(
                                     app_session_id,
                                     execution_identity=execution.identity,
@@ -3878,7 +3898,7 @@ class Coordinator:
                                 )
                             )
                         else:
-                            await asyncio.shield(
+                            terminal_result = await asyncio.shield(
                                 self.lifecycle_commands.finish_turn(
                                     request_id=f"{logical_request_prefix}:finish",
                                     session_id=app_session_id,
@@ -3886,6 +3906,20 @@ class Coordinator:
                                     outcome=logical_turn_outcome,
                                 )
                             )
+                    if terminal_result is not None and execution is not None:
+                        async def persist_and_acknowledge_terminal_render() -> None:
+                            await asyncio.to_thread(
+                                session_manager.flush_root_persist,
+                                app_session_id,
+                            )
+                            await self.lifecycle_commands.acknowledge_terminal_render(
+                                app_session_id,
+                                terminal_result.request_id,
+                            )
+
+                        await _await_cancellation_safe(
+                            persist_and_acknowledge_terminal_render(),
+                        )
                 if retry_params is not None:
                     reserved_attempt = await asyncio.to_thread(
                         session_manager.reserve_queued_prompt_delivery_attempt,
@@ -3929,6 +3963,8 @@ class Coordinator:
     def _startup_recovery_can_overlap_session(self, app_session_id: str) -> bool:
         import startup_recovery_gate
 
+        if startup_recovery_gate.is_session_pending(app_session_id):
+            return True
         if not startup_recovery_gate.is_pending():
             return False
         session = session_manager.get(app_session_id)

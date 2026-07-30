@@ -37,6 +37,7 @@ import session_store  # noqa: E402
 import session_manager as session_manager_module  # noqa: E402
 import messages_delta_compaction  # noqa: E402
 import main as backend_main  # noqa: E402
+import session_detail_api  # noqa: E402
 from grouped_durability_writer import DurabilityReceipt  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -424,7 +425,7 @@ def _run() -> bool:
         session_manager.set_pinned(sid, True)
         session_manager.flush_root_persist(sid)
         t0 = time.perf_counter()
-        tree = backend_main._session_detail_snapshot_sync(
+        tree = session_detail_api._session_detail_snapshot_sync(
             sid,
             msg_limit=50,
             exchange_count=None,

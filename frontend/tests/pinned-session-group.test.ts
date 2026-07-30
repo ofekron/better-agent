@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { partitionPinnedSessions } from "../src/lib/sessionSort";
+import { partitionSessions } from "../src/lib/sessionSort";
 import type { Session } from "../src/types";
 
 function session(id: string, extra: Partial<Session> = {}): Session {
   return { id, name: id, ...extra } as Session;
 }
 
+const byPinned = (s: Session) => Boolean(s.pinned);
+
 describe("pinned session grouping", () => {
   it("hoists pinned sessions out of their folders into one group", () => {
-    const { pinned, unpinned } = partitionPinnedSessions([
-      session("a", { folder_id: "f1", pinned: true }),
-      session("b", { folder_id: "f1" }),
-      session("c", { pinned: true }),
-      session("d"),
-    ]);
+    const { matched: pinned, rest: unpinned } = partitionSessions(
+      [
+        session("a", { folder_id: "f1", pinned: true }),
+        session("b", { folder_id: "f1" }),
+        session("c", { pinned: true }),
+        session("d"),
+      ],
+      byPinned,
+    );
 
     expect(pinned.map((s) => s.id)).toEqual(["a", "c"]);
     expect(unpinned.map((s) => s.id)).toEqual(["b", "d"]);
@@ -26,7 +31,7 @@ describe("pinned session grouping", () => {
       session("3", { pinned: true }),
       session("4"),
     ];
-    const { pinned, unpinned } = partitionPinnedSessions(input);
+    const { matched: pinned, rest: unpinned } = partitionSessions(input, byPinned);
 
     expect(pinned.map((s) => s.id)).toEqual(["2", "3"]);
     expect(unpinned.map((s) => s.id)).toEqual(["1", "4"]);
@@ -34,7 +39,10 @@ describe("pinned session grouping", () => {
   });
 
   it("returns an empty pinned group when nothing is pinned", () => {
-    const { pinned, unpinned } = partitionPinnedSessions([session("x"), session("y")]);
+    const { matched: pinned, rest: unpinned } = partitionSessions(
+      [session("x"), session("y")],
+      byPinned,
+    );
     expect(pinned).toEqual([]);
     expect(unpinned).toHaveLength(2);
   });

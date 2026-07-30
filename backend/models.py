@@ -38,7 +38,6 @@ import asyncio
 import copy
 import json
 import logging
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -212,51 +211,14 @@ def _merge_retired(
 def _read_claude_subscription_token() -> Optional[str]:
     """Read the Claude CLI's OAuth access_token from macOS Keychain.
 
-    Claude Code stores subscription creds in a Keychain item named
-    `Claude Code-credentials` as JSON:
-        {"claudeAiOauth": {"accessToken": "...", ...}}
-    Returns the bearer token, or None if missing / malformed / not on
-    macOS. The CLI refreshes the token internally; we just read whatever
-    it most recently wrote.
-
-    NOTE: macOS prompts (GUI dialog) the first time a non-owner process
-    reads the item. uvicorn has no UI — the dialog blocks until the
-    user (a) clicks "Always Allow" in the prompt OR (b) the 5s
-    subprocess timeout fires (caught below). Workaround for a CI / dev
-    box: `security add-generic-password -T <uvicorn_path>` to pre-add
-    ACL access, OR open the Claude CLI once and click Allow on the
-    first dialog. After that, the read is silent.
+    Thin re-export of the shared reader in `claude_subscription_credential`
+    (kept as a module-level name here since callers/tests reference
+    `models._read_claude_subscription_token`). The implementation lives in
+    a dependency-light module so `runner_better_agent_claude_subscription.py`
+    (a bare subprocess) can import it without pulling in all of `models.py`.
     """
-    try:
-        proc = subprocess.run(
-            ["security", "find-generic-password",
-             "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except subprocess.TimeoutExpired:
-        # Likely a first-run Keychain dialog. Surface it so the user
-        # knows why their subscription provider isn't refreshing.
-        logger.warning(
-            "keychain read for Claude subscription timed out (5s) — "
-            "macOS may be showing a permission dialog; click Always "
-            "Allow once to make subsequent reads silent",
-        )
-        return None
-    except (FileNotFoundError, subprocess.SubprocessError) as e:
-        logger.debug("keychain read unavailable (not macOS?): %s", e)
-        return None
-    if proc.returncode != 0:
-        logger.debug(
-            "Claude subscription keychain entry missing "
-            "(security exit=%d)", proc.returncode,
-        )
-        return None
-    try:
-        data = json.loads(proc.stdout)
-        return data["claudeAiOauth"]["accessToken"]
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning("Claude keychain entry shape unexpected: %s", e)
-        return None
+    from claude_subscription_credential import read_claude_subscription_token
+    return read_claude_subscription_token()
 
 
 def _fetch_api_models(
@@ -346,9 +308,16 @@ def fetch_openai_models(base_url: str, api_key: str) -> list[str]:
 
 
 def _runtime_kind_for_provider(provider: dict) -> str:
-    if str(provider.get("runner") or "").strip() == "better_agent_runner":
-        return "openai"
-    return provider.get("kind", "claude")
+    kind = provider.get("kind", "claude")
+    if str(provider.get("runner") or "").strip() != "better_agent_runner":
+        return kind
+    # Claude's Better Agent runner backend still speaks Claude's own wire
+    # format (Anthropic Messages API), so refresh must stay on the
+    # Claude api_key/subscription branches below rather than falling
+    # into the generic OpenAI Chat-Completions fetch.
+    if kind == "claude":
+        return kind
+    return "openai"
 
 
 def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:

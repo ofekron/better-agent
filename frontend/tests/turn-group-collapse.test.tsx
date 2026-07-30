@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { act, fireEvent, render, cleanup, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import "../src/i18n";
@@ -7,6 +7,24 @@ import { TurnGroup as ProductionTurnGroup } from "../src/components/MessageBubbl
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { renderApp } from "./harness";
 import { sessionLinkMarker } from "../src/utils/linkifyFilePaths";
+
+// `<Chat>`/`<App>` mount an `ExtensionSlots` catalog fetch per UI slot
+// (~20 of them) on mount. A test here that doesn't explicitly mock every
+// URL leaves `globalThis.fetch` at whatever the PREVIOUS test restored —
+// if that's the bare native fetch, one of those calls can escape to the
+// real network. A real failure there gets logged via frontendLogger's
+// global `window.setTimeout(send, 0)` — a real timer with no unmount
+// hook, that can fire during a LATER, unrelated test in this file and
+// inflate ITS OWN fetch-spy call count (see the flaky
+// `toHaveBeenCalledTimes(1)` assertions below). Defaulting to a harmless
+// 200 stub closes that leak at its source for every test in this file;
+// tests that care about fetch still override it locally as before.
+const SAFE_FETCH_STUB: typeof fetch = async () =>
+  new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+
+beforeEach(() => {
+  globalThis.fetch = SAFE_FETCH_STUB;
+});
 
 afterEach(cleanup);
 

@@ -131,6 +131,28 @@ def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
     check("ran after recovery scan/integration completed", ran)
 
 
+def test_session_recovery_gate_survives_global_classification() -> None:
+    print("T1b1 session gate survives global recovery classification")
+
+    async def _go() -> tuple[bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        startup_recovery_gate.register_session_recovery({"live-session"})
+        startup_recovery_gate.mark_recovery_done()
+        task = asyncio.create_task(
+            startup_recovery_gate.wait_for_session_recovery_ready("live-session")
+        )
+        await asyncio.sleep(0)
+        blocked = not task.done()
+        startup_recovery_gate.mark_session_recovery_done("live-session")
+        await task
+        return blocked, task.done()
+
+    blocked, released = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("session remained blocked after global classification", blocked)
+    check("session released after its integration completed", released)
+
+
 def test_startup_recovery_gate_does_not_block_never_ran_session() -> None:
     print("T1b2 startup recovery gate does not block never-ran sessions")
     c = _coord()
@@ -530,6 +552,7 @@ def test_blocked_queued_prompt_can_be_cancelled_before_start() -> None:
 def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
+    test_session_recovery_gate_survives_global_classification()
     test_startup_recovery_gate_does_not_block_never_ran_session()
     test_startup_recovery_gate_does_not_block_agent_session_without_run_dir()
     test_startup_recovery_failure_fails_closed()

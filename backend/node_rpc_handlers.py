@@ -28,8 +28,8 @@ from typing import Optional
 
 from orchs.jsonl_helpers import compute_jsonl_path
 from env_compat import get_env
-from execution_template import ExecutionArtifact, restore_prepared_execution
-from provider import StreamEvent, get_provider, start_prepared_run
+from execution_template import ExecutionArtifact, PreparedExecution
+from provider import Provider, StreamEvent, get_provider, start_prepared_run
 from session_manager import manager as session_manager
 import perf
 
@@ -43,6 +43,11 @@ class _RemoteRunCtx:
     root_id: str
     worker_agent_session_id: str
     cwd: str
+    provider_id: str = ""
+    provider: Provider | None = None
+    phase: str = "preparing"
+    cancel_requested: bool = False
+    cancel_dispatched: bool = False
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     drain_task: Optional[asyncio.Task] = None
     jsonl_path: Optional[Path] = None
@@ -52,6 +57,63 @@ class _RemoteRunCtx:
 
 
 _ctx_by_run: dict[str, _RemoteRunCtx] = {}
+
+
+def _local_node_backend_url() -> str:
+    configured = get_env("BETTER_CLAUDE_BACKEND_URL")
+    if configured:
+        return configured
+    raw_port = get_env("BETTER_CLAUDE_NODE_PORT", "8002")
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BETTER_CLAUDE_NODE_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("BETTER_CLAUDE_NODE_PORT must be between 1 and 65535")
+    return f"http://localhost:{port}"
+
+
+def _prepare_node_execution(
+    artifact: ExecutionArtifact,
+    provider: Provider,
+    *,
+    internal_token: str,
+    extra_env: dict[str, str] | None,
+    backend_url: str,
+) -> PreparedExecution:
+    arguments = artifact.template.arguments()
+    artifact.require_authority(provider.execution_authority_record(arguments))
+    execution = provider.prepare_run(
+        **arguments,
+        internal_token=internal_token,
+        extra_env=extra_env,
+        backend_url=backend_url,
+    )
+    node_artifact = execution.artifact
+    if (
+        node_artifact.template.arguments() != arguments
+        or node_artifact.provider_id != artifact.provider_id
+        or node_artifact.provider_kind != artifact.provider_kind
+        or node_artifact.provider_generation != artifact.provider_generation
+        or node_artifact.provider_revision != artifact.provider_revision
+    ):
+        run_id = arguments["run_id"]
+        from runs_dir import runs_root
+
+        provider._cleanup_failed_execution_payloads(
+            execution,
+            runs_root() / run_id,
+        )
+        raise ValueError("node-local execution preparation changed remote authority")
+    return execution
+
+
+async def _dispatch_ctx_cancel(ctx: _RemoteRunCtx) -> None:
+    if ctx.cancel_dispatched:
+        return
+    ctx.cancel_dispatched = True
+    provider = ctx.provider or get_provider(ctx.provider_id)
+    await asyncio.to_thread(provider.cancel_run, ctx.run_id)
 
 
 # ============================================================================
@@ -84,46 +146,6 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
                 },
             )
         return
-    try:
-        artifact = ExecutionArtifact.from_dict(msg["execution_artifact"])
-        artifact_arguments = artifact.template.arguments()
-        if (
-            artifact_arguments["run_id"] != run_id
-            or artifact_arguments["cwd"] != cwd
-            or artifact_arguments["app_session_id"] != worker_agent_session_id
-        ):
-            raise ValueError("remote execution envelope does not match artifact")
-        provider = get_provider(artifact.provider_id)
-        execution = restore_prepared_execution(
-            artifact,
-            internal_token=__import__("node_runtime_auth").token(),
-            extra_env=msg.get("extra_env"),
-            backend_url=get_env(
-                "BETTER_CLAUDE_BACKEND_URL",
-                "http://localhost:8000",
-            ),
-        )
-    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
-        logger.error("node_rpc: invalid execution artifact: %s", exc)
-        await node_client.send_run_control(
-            run_id=str(run_id or ""),
-            control_type="error",
-            data={
-                "error": f"invalid execution artifact: {exc}",
-                "lease_token": lease_token,
-            },
-        )
-        return
-
-    ctx = _RemoteRunCtx(
-        run_id=run_id,
-        root_id=root_id,
-        worker_agent_session_id=worker_agent_session_id,
-        cwd=cwd,
-    )
-    _ctx_by_run[run_id] = ctx
-
-    loop = asyncio.get_running_loop()
     lease_terminal = asyncio.Event()
 
     async def renew_lease() -> None:
@@ -149,6 +171,82 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         lease_terminal.set()
         renewal_task.cancel()
         await asyncio.gather(renewal_task, return_exceptions=True)
+
+    try:
+        artifact = ExecutionArtifact.from_dict(msg["execution_artifact"])
+        artifact_arguments = artifact.template.arguments()
+        if (
+            artifact_arguments["run_id"] != run_id
+            or artifact_arguments["cwd"] != cwd
+            or artifact_arguments["app_session_id"] != worker_agent_session_id
+        ):
+            raise ValueError("remote execution envelope does not match artifact")
+        provider = get_provider(artifact.provider_id)
+        ctx = _RemoteRunCtx(
+            run_id=run_id,
+            root_id=root_id,
+            worker_agent_session_id=worker_agent_session_id,
+            cwd=cwd,
+            provider_id=artifact.provider_id,
+            provider=provider,
+        )
+        _ctx_by_run[run_id] = ctx
+        execution = await asyncio.to_thread(
+            _prepare_node_execution,
+            artifact,
+            provider,
+            internal_token=__import__("node_runtime_auth").token(),
+            extra_env=msg.get("extra_env"),
+            backend_url=_local_node_backend_url(),
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        _ctx_by_run.pop(str(run_id or ""), None)
+        await stop_renewal()
+        logger.error("node_rpc: invalid execution artifact: %s", exc)
+        await node_client.send_run_control(
+            run_id=str(run_id or ""),
+            control_type="error",
+            data={
+                "error": f"invalid execution artifact: {exc}",
+                "lease_token": lease_token,
+            },
+        )
+        return
+
+    async def finish_prelaunch_cancel(error: str) -> bool:
+        if not ctx.cancel_requested:
+            return False
+        cleanup_error = ""
+        try:
+            await asyncio.to_thread(
+                provider._release_execution_authority,
+                execution,
+            )
+        except Exception as exc:
+            cleanup_error = f"; cleanup failed: {type(exc).__name__}: {exc}"
+            logger.exception(
+                "node_rpc: prelaunch cleanup failed run=%s",
+                run_id,
+            )
+        await stop_renewal()
+        _ctx_by_run.pop(run_id, None)
+        await node_client.send_run_control(
+            run_id=run_id,
+            control_type="error",
+            data={
+                "error": f"{error}{cleanup_error}",
+                "lease_token": lease_token,
+            },
+        )
+        return True
+
+    if await finish_prelaunch_cancel(
+        "remote run was cancelled during preparation",
+    ):
+        return
+
+    loop = asyncio.get_running_loop()
+    ctx.phase = "prelaunch"
     try:
         import startup_recovery_gate
         with perf.timed("node_rpc.provider_start_run.recovery_gate"):
@@ -158,6 +256,11 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         # session-manager reads in _build_input_payload freeze the loop.
         with perf.timed("node_rpc.provider_start_run.flush_pending_persists"):
             await asyncio.to_thread(session_manager.flush_pending_persists)
+        if await finish_prelaunch_cancel(
+            "remote run was cancelled before launch",
+        ):
+            return
+        ctx.phase = "launching"
         with perf.timed("node_rpc.provider_start_run.provider_call"):
             started = await asyncio.to_thread(
                 start_prepared_run,
@@ -166,6 +269,20 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
                 loop=loop,
                 queue=ctx.queue,
             )
+        ctx.phase = "admitting"
+        if ctx.cancel_requested:
+            await _dispatch_ctx_cancel(ctx)
+            await stop_renewal()
+            await node_client.send_run_control(
+                run_id=run_id,
+                control_type="error",
+                data={
+                    "error": "remote run was cancelled during launch",
+                    "lease_token": lease_token,
+                },
+            )
+            _ctx_by_run.pop(run_id, None)
+            return
         if not started:
             admitted = await asyncio.to_thread(execution.wait_for_admission)
             if not admitted:
@@ -180,11 +297,24 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
                 )
                 _ctx_by_run.pop(run_id, None)
                 return
+        if ctx.cancel_requested:
+            await _dispatch_ctx_cancel(ctx)
+            await stop_renewal()
+            await node_client.send_run_control(
+                run_id=run_id,
+                control_type="error",
+                data={
+                    "error": "remote run was cancelled during admission",
+                    "lease_token": lease_token,
+                },
+            )
+            _ctx_by_run.pop(run_id, None)
+            return
     except BaseException as e:
         await stop_renewal()
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
         try:
-            provider.cancel_run(run_id)
+            await asyncio.to_thread(provider.cancel_run, run_id)
         except Exception:
             logger.exception("node_rpc: provider cancel after start failure failed")
         try:
@@ -215,21 +345,26 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             "root_id": root_id,
             "worker_agent_session_id": worker_agent_session_id,
             "cwd": cwd,
+            "provider_id": artifact.provider_id,
         })
         ctx.drain_task = asyncio.create_task(
             _drain_queue(node_client, ctx), name=f"drain-{run_id[:8]}",
         )
+        ctx.phase = "admitting_control"
         await stop_renewal()
         await node_client.send_run_control(
             run_id=run_id,
             control_type="admitted",
             data={"lease_token": lease_token},
         )
+        ctx.phase = "running"
+        if ctx.cancel_requested:
+            await _dispatch_ctx_cancel(ctx)
     except BaseException as e:
         await stop_renewal()
         logger.exception("node_rpc: failed to establish recovery ownership for %s", run_id)
         try:
-            provider.cancel_run(run_id)
+            await asyncio.to_thread(provider.cancel_run, run_id)
         except Exception:
             logger.exception("node_rpc: provider cancel after ownership failure failed")
         if ctx.drain_task is not None:
@@ -423,6 +558,8 @@ async def handle_rehook_run(node_client, msg: dict) -> None:
         root_id=meta.get("root_id") or "",
         worker_agent_session_id=meta.get("worker_agent_session_id") or "",
         cwd=meta.get("cwd") or "",
+        provider_id=meta.get("provider_id") or "",
+        phase="running",
     )
     if not all([ctx.root_id, ctx.worker_agent_session_id, ctx.cwd]):
         logger.warning("node_rpc: rehook_run %s — incomplete remote_ctx", run_id)
@@ -521,9 +658,19 @@ async def handle_cancel_run(node_client, msg: dict) -> None:
     run_id = msg.get("run_id")
     if not run_id:
         return
-    provider = default_provider()
+    ctx = _ctx_by_run.get(run_id)
+    if ctx is None or not ctx.provider_id:
+        return
+    ctx.cancel_requested = True
+    if ctx.phase in {
+        "preparing",
+        "prelaunch",
+        "launching",
+        "admitting_control",
+    }:
+        return
     try:
-        provider.cancel_run(run_id)
+        await _dispatch_ctx_cancel(ctx)
     except Exception:
         logger.exception("node_rpc: cancel_run failed run=%s", run_id)
 
@@ -947,7 +1094,7 @@ def _rpc_sync_provider_config(params: dict) -> dict:
     if not isinstance(provider_state, dict):
         raise ValueError("provider_state must be an object")
     import config_store
-    synced = config_store.import_provider_sync_state(provider_state)
+    synced = config_store.apply_provider_sync_projection(provider_state)
     return {
         "ok": True,
         "default_provider_id": synced.get("default_provider_id"),

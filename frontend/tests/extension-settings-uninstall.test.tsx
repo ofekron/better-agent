@@ -25,6 +25,7 @@ function jsonResponse(body: unknown) {
 describe("ExtensionUiSettingsSection uninstall", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("shows installed extensions with no configurable surfaces and uninstalls them", async () => {
@@ -63,7 +64,7 @@ describe("ExtensionUiSettingsSection uninstall", () => {
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.stubGlobal("confirm", vi.fn(() => true));
 
     render(<ExtensionUiSettingsSection />);
 

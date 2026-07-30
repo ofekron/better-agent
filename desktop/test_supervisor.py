@@ -697,6 +697,51 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
         supervisor_module.subprocess.Popen = real_popen
 
 
+def test_backend_contract_resolves_before_credential_session_opens() -> bool:
+    calls: list[str] = []
+    real_backend_argv = supervisor_module.backend_argv
+    real_popen = supervisor_module.subprocess.Popen
+    sup = BackendSupervisor(role="node")
+    checkout, _ = _source_checkout("node-launch-order")
+    sup._resolved_checkout = lambda: checkout
+    sup._ensure_backend_logger = lambda: None
+
+    class FakeSession:
+        def start(self):
+            calls.append("session-start")
+
+        def backend_env(self):
+            return {}
+
+        def backend_popen_kwargs(self):
+            return {}
+
+        def revoke_backend_inheritance(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class FakeProcess:
+        stdout: list[str] = []
+
+    supervisor_module.backend_argv = (
+        lambda *_args, **_kwargs: calls.append("backend-argv") or ["backend"]
+    )
+    sup._credential_broker.open_session = (
+        lambda: calls.append("open-session") or FakeSession()
+    )
+    supervisor_module.subprocess.Popen = lambda *_args, **_kwargs: FakeProcess()
+    try:
+        sup._spawn_backend()
+        assert calls[:3] == ["backend-argv", "open-session", "session-start"]
+        return True
+    finally:
+        sup._close_credential_session()
+        supervisor_module.backend_argv = real_backend_argv
+        supervisor_module.subprocess.Popen = real_popen
+
+
 def test_source_switch_rejects_missing_frontend() -> bool:
     from daemonhost import pointer
 
@@ -759,6 +804,8 @@ TESTS = [
      test_source_switch_rejects_missing_frontend),
     ("packaged restart preserves denial and rotates credential channel",
      test_packaged_restart_preserves_denial_and_rotates_channel),
+    ("node resolves dependency contract before credential session opens",
+     test_backend_contract_resolves_before_credential_session_opens),
 ]
 
 

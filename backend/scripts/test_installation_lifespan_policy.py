@@ -67,6 +67,8 @@ def _child(mode: str, home: Path) -> None:
 
     import extension_store
     import main
+    import app_lifecycle
+    import recovery
     import requirement_prewarm
     import startup_recovery_gate
 
@@ -75,7 +77,9 @@ def _child(mode: str, home: Path) -> None:
 
     import installation_admission
 
-    for route in main.app.routes:
+    from _test_routes import walk_routes
+
+    for route in walk_routes(main.app.routes):
         path = str(getattr(route, "path", "") or "")
         scope_type = (
             "websocket"
@@ -121,7 +125,7 @@ def _child(mode: str, home: Path) -> None:
 
     async def run() -> None:
         with (
-            patch.object(main, "_recover_in_flight_task", side_effect=recover),
+            patch.object(recovery, "_recover_in_flight_task", side_effect=recover),
             patch.object(
                 extension_store,
                 "refresh_runtime_readiness_projection",
@@ -173,10 +177,10 @@ def _child(mode: str, home: Path) -> None:
                 side_effect=requirements_processor,
             ),
         ):
-            await main.on_startup()
-            assert main._STARTUP_ORCHESTRATOR_TASK is not None
-            await main._STARTUP_ORCHESTRATOR_TASK
-            await main.on_shutdown()
+            await app_lifecycle.on_startup()
+            assert app_lifecycle._STARTUP_ORCHESTRATOR_TASK is not None
+            await app_lifecycle._STARTUP_ORCHESTRATOR_TASK
+            await app_lifecycle.on_shutdown()
 
     asyncio.run(run())
 

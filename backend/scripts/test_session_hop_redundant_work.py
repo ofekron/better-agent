@@ -338,7 +338,7 @@ def test_ws_replay_cap_at_msg_limit() -> bool:
             "events": [], "isStreaming": False,
         })
 
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     delta = _build_messages_replay_delta(sid, 0, limit=50)
     if delta is None:
@@ -352,7 +352,7 @@ def test_ws_replay_cap_at_msg_limit() -> bool:
 
 
 def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
         name="turn-boundary", model="glm-5.1", cwd="/tmp",
@@ -380,7 +380,7 @@ def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
 
 
 def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
         name="orphan-boundary", model="glm-5.1", cwd="/tmp",
@@ -411,7 +411,7 @@ def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
 
 
 def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
         name="incremental-boundary", model="glm-5.1", cwd="/tmp",
@@ -446,7 +446,7 @@ def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
 
 
 def test_incremental_ws_replay_reuses_identical_window() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
         name="incremental-window-cache", model="glm-5.1", cwd="/tmp",
@@ -543,7 +543,7 @@ def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, s
 
 
 def test_ws_replay_survives_stale_historical_projection() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     projection = types.ModuleType("historical_children_projection")
     projection.ProjectionUnavailable = type("ProjectionUnavailable", (RuntimeError,), {})
@@ -574,7 +574,7 @@ def test_ws_replay_survives_stale_historical_projection() -> bool:
 
 
 def test_ws_replay_excludes_completed_seen_message() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sid, msg_id, seen_seq = _session_with_completed_replay_target()
     delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
@@ -593,7 +593,7 @@ def test_ws_replay_excludes_completed_seen_message() -> bool:
 
 
 def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
     from turn_manager import TurnManager  # noqa: E402
 
     sid, msg_id, seen_seq = _session_with_completed_replay_target(event_count=1)
@@ -629,7 +629,7 @@ def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
 
 
 def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
+    from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sid = "sid-race"
     msg_id = "msg-race"
@@ -692,7 +692,7 @@ def test_ws_event_cursor_uses_server_floor() -> bool:
     if floor <= 0:
         print(f"  expected positive event floor, got {floor}")
         return False
-    from main import _floor_events_from_seq  # noqa: E402
+    from session_detail_api import _floor_events_from_seq  # noqa: E402
 
     cold_open = _floor_events_from_seq(sid, 0, cursor_known=False)
     if cold_open != floor:

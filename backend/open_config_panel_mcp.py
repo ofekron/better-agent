@@ -83,7 +83,13 @@ def build_server():
 
 
 def main() -> int:
-    return run_mcp_or_cli("open-config-panel", _specs(), instructions=_INSTRUCTIONS)
+    # Always attaches to THIS turn's in-flight assistant message, so it can
+    # never do real work for an ambient (session-less) caller -- but it
+    # should still fail closed with "app session id is required" rather
+    # than an unrelated "runtime broker unavailable" crash, so dispatch
+    # locally instead of through a broker that will never exist here.
+    ambient = get_env_stripped("BETTER_CLAUDE_AMBIENT_LAUNCH") == "1"
+    return run_mcp_or_cli("open-config-panel", _specs(), instructions=_INSTRUCTIONS, local=ambient)
 
 
 if __name__ == "__main__":

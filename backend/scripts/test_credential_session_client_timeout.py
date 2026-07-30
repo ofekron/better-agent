@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing.connection as mp_connection
 import sys
 from pathlib import Path
 
@@ -25,6 +26,25 @@ class SilentConnection:
     def recv_bytes(self, *, maxlength: int) -> bytes:
         self.received = True
         raise AssertionError("silent authority must not be read")
+
+
+def test_windows_inherited_endpoint_uses_pipe_connection(monkeypatch) -> None:
+    observed: list[int] = []
+    endpoint = object()
+
+    def pipe_connection(handle: int):
+        observed.append(handle)
+        return endpoint
+
+    monkeypatch.setattr(
+        mp_connection,
+        "PipeConnection",
+        pipe_connection,
+        raising=False,
+    )
+
+    assert client._connection_from_handle(42, platform_name="nt") is endpoint
+    assert observed == [42]
 
 
 def test_silent_credential_authority_times_out(monkeypatch) -> None:

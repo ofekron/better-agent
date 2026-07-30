@@ -40,13 +40,16 @@ _UNKNOWN_CREDENTIAL_STATE = _ProviderCredentialState("unknown")
 
 
 class ProviderCredentialBroker:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        credential_store: ProviderCredentialStore | None = None,
+    ) -> None:
         oskeychain.disable_native_user_interaction()
         self._states: dict[str, _ProviderCredentialState] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._keychain_lock = threading.Lock()
-        self._credential_store = ProviderCredentialStore()
+        self._credential_store = credential_store or ProviderCredentialStore()
 
     def open_session(self) -> "ProviderCredentialSession":
         return ProviderCredentialSession(self)
@@ -214,7 +217,7 @@ class ProviderCredentialBroker:
     ) -> dict[str, str | bool]:
         try:
             with self._keychain_lock:
-                current = self._credential_store.read(provider_id)
+                current = self._credential_store.read(provider_id) or ""
                 if current != expected_value:
                     status = "available" if current else "missing"
                     self._remember(

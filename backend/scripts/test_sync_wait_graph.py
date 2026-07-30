@@ -17,7 +17,9 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ask_status_store  # noqa: E402
+import internal_messaging_api  # noqa: E402
 import main  # noqa: E402
+import worker_pools_api  # noqa: E402
 import session_bridge  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 from orchs.manager._delegation import (  # noqa: E402
@@ -397,9 +399,10 @@ def test_pool_ask_binds_worker_after_waiting_for_availability(
         coordinator._ask_team_message_wait = fake_wait  # type: ignore[method-assign]
         coordinator.broadcast_workers_changed = no_broadcast  # type: ignore[method-assign]
         monkeypatch.setattr(main, "coordinator", coordinator)
+        monkeypatch.setattr(worker_pools_api, "_coordinator_ref", coordinator)
         monkeypatch.setattr(worker_store, "peek_pool_task", lambda _tag: next(queued_items))
         monkeypatch.setattr(
-            main,
+            worker_pools_api,
             "_pick_pool_worker_for_sender",
             lambda *_args: next(targets),
         )
@@ -408,9 +411,9 @@ def test_pool_ask_binds_worker_after_waiting_for_availability(
             "pop_pool_task",
             lambda tag, item_id: popped.append((tag, item_id)),
         )
-        monkeypatch.setattr(main.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(worker_pools_api.asyncio, "sleep", no_wait)
 
-        await main._process_worker_pool_queue("review")
+        await worker_pools_api._process_worker_pool_queue("review")
 
         status = ask_status_store.read_status(ask_id)
         assert status["route_kind"] == "pool"
@@ -440,11 +443,11 @@ def test_pool_ask_queues_when_no_worker_is_idle(
             assert queued["item"]["id"] == "queued-pool-item"
             return {"success": True, "queued": True}
 
-        monkeypatch.setattr(main, "_pick_pool_worker_for_sender", lambda *_args: None)
-        monkeypatch.setattr(main, "_enqueue_worker_pool_message", enqueue)
-        monkeypatch.setattr(main, "_wait_for_pool_ask_result", wait_for_result)
+        monkeypatch.setattr(worker_pools_api, "_pick_pool_worker_for_sender", lambda *_args: None)
+        monkeypatch.setattr(worker_pools_api, "_enqueue_worker_pool_message", enqueue)
+        monkeypatch.setattr(worker_pools_api, "_wait_for_pool_ask_result", wait_for_result)
 
-        result = await main._ask_wait_and_grab_last_assistant_mssg_in_turn(
+        result = await internal_messaging_api._ask_wait_and_grab_last_assistant_mssg_in_turn(
             {
                 "target_worker_pool": "review",
                 "pool_affinity_key": "project",

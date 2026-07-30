@@ -53,8 +53,7 @@ def _reset_home() -> None:
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    session_store._fork_index.clear()
-    session_store._index_loaded = False
+    session_store._reset_home_scoped_caches()
     session_manager._roots.clear()
     session_manager._node_root_id.clear()
     session_manager._root_locks.clear()
@@ -96,6 +95,7 @@ def _install_team_gate_extension() -> None:
             "commit_sha": "team-test",
         },
         persist=True,
+        force_enabled=True,
     )
 
 

@@ -1,0 +1,1109 @@
+{
+  "assistantMsgId": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+  "managerWorkerScenario": {
+    "delegationId": "contract-delegation-1",
+    "ownerMsgId": "48511037-2f10-4842-90de-cf5168e30edb",
+    "restOwnerFullFetch": {
+      "_content_dirty": false,
+      "_events_seq_floor": 0,
+      "_panel_anchor_cache": {
+        "anchors": {},
+        "key": [
+          0,
+          [
+            [
+              "contract-delegation-1",
+              "worker",
+              null
+            ]
+          ]
+        ]
+      },
+      "agent_session_id": null,
+      "content": "worker reply text",
+      "events": [],
+      "id": "48511037-2f10-4842-90de-cf5168e30edb",
+      "isStreaming": false,
+      "role": "assistant",
+      "seq": 1,
+      "timestamp": "2026-07-30T06:26:25.680827",
+      "workers": [
+        {
+          "_uid_idx": {
+            "contract-worker-uuid": 0
+          },
+          "delegation_id": "contract-delegation-1",
+          "events": [
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "worker reply text",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-worker-uuid"
+              },
+              "type": "agent_message"
+            }
+          ],
+          "fork_agent_sid": null,
+          "insert_at": 0,
+          "instructions_preview": "do the thing",
+          "is_new": true,
+          "jsonl_path": null,
+          "new_byte_offset": null,
+          "orchestration_mode": null,
+          "panel_kind": "worker",
+          "run_mode": null,
+          "started_at": null,
+          "success": true,
+          "token_usage": null,
+          "worker_description": "contract test worker",
+          "worker_session_id": "contract-worker-session"
+        }
+      ]
+    },
+    "restSnapshot": {
+      "_owner_incarnation": "810d52f755fb4032a05bc14e4fbe9b2e",
+      "_schema_version": 11,
+      "_unread_migrated": true,
+      "agent_session_id": null,
+      "archived": false,
+      "bare_config": false,
+      "browser_harness_enabled": true,
+      "browser_harness_headless": true,
+      "caller_agent_session_id": null,
+      "capability_contexts": [],
+      "continuation_chain": [],
+      "created_at": "2026-07-30T06:26:25.639189",
+      "current_tasks": [],
+      "current_todos": [],
+      "cwd": "/tmp",
+      "cwd_explicit": true,
+      "disallowed_tools": [],
+      "draft_images": [],
+      "draft_input": "",
+      "draft_input_seq": 0,
+      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/a3fddb82-6874-469b-b475-767ab1e3040b.json",
+      "fork_closed": false,
+      "fork_point_seq": null,
+      "forked_from_agent_sid": null,
+      "forked_from_supervisor_agent_sid": null,
+      "forks": [],
+      "harness_profile_id": "",
+      "harness_profile_snapshot": null,
+      "id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+      "inline_tags": [],
+      "kind": "user",
+      "last_active_model": null,
+      "last_active_provider_id": null,
+      "last_active_runner": null,
+      "last_active_supervisor_model": null,
+      "last_active_supervisor_provider_id": null,
+      "last_active_supervisor_runner": null,
+      "last_seen_event_uid": null,
+      "max_seq_by_sid": {
+        "a3fddb82-6874-469b-b475-767ab1e3040b": 2
+      },
+      "messages": [
+        {
+          "content": "delegate this to a worker",
+          "events": [],
+          "id": "u1",
+          "role": "user",
+          "seq": 0
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 0,
+          "_panel_anchor_cache": {
+            "anchors": {},
+            "key": [
+              0,
+              [
+                [
+                  "contract-delegation-1",
+                  "worker",
+                  null
+                ]
+              ]
+            ]
+          },
+          "agent_session_id": null,
+          "content": "worker reply text",
+          "event_ref": {
+            "byte_end": 1095,
+            "byte_start": 0,
+            "msg_id": "48511037-2f10-4842-90de-cf5168e30edb",
+            "root_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+            "seq_end": 3,
+            "seq_start": 1,
+            "sid": "a3fddb82-6874-469b-b475-767ab1e3040b"
+          },
+          "events": [],
+          "id": "48511037-2f10-4842-90de-cf5168e30edb",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 1,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "delegation_id": "contract-delegation-1",
+                  "event": {
+                    "data": {
+                      "message": {
+                        "content": [
+                          {
+                            "text": "worker reply text",
+                            "type": "text"
+                          }
+                        ]
+                      },
+                      "type": "assistant",
+                      "uuid": "contract-worker-uuid"
+                    },
+                    "type": "agent_message"
+                  }
+                },
+                "seq": 2,
+                "type": "worker_event"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:25.680827",
+          "workers": [
+            {
+              "delegation_id": "contract-delegation-1",
+              "events": [],
+              "fork_agent_sid": null,
+              "insert_at": 0,
+              "instructions_preview": "do the thing",
+              "is_new": true,
+              "jsonl_path": null,
+              "new_byte_offset": null,
+              "orchestration_mode": null,
+              "panel_kind": "worker",
+              "run_mode": null,
+              "started_at": null,
+              "success": true,
+              "token_usage": null,
+              "worker_description": "contract test worker",
+              "worker_session_id": "contract-worker-session"
+            }
+          ]
+        }
+      ],
+      "model": "sonnet",
+      "name": "chat-contract-manager-capture",
+      "next_seq": 2,
+      "node_id": "primary",
+      "notes": [],
+      "open_config_panels": [],
+      "open_file_panels": [],
+      "orchestration_mode": "team",
+      "pagination": {
+        "has_older": false,
+        "oldest_loaded_seq": 0,
+        "total_messages": 2
+      },
+      "parent_line_count_at_fork": null,
+      "parent_session_id": null,
+      "pending_supervisor_verdict": null,
+      "permission": {},
+      "pinned": false,
+      "processed_line_by_sid": {},
+      "provider_id": "claude-id",
+      "queued_prompts": [],
+      "reasoning_effort": "medium",
+      "right_panel_active_tab": null,
+      "right_panel_auto_opened_by": [],
+      "right_panel_mobile_height": null,
+      "right_panel_open": false,
+      "right_panel_todos_dismissed": false,
+      "right_panel_width": null,
+      "runner": "native",
+      "sidebar_minimized": false,
+      "source": "cli",
+      "supervisor_agent_session_id": null,
+      "supervisor_bootstrap_received": false,
+      "supervisor_custom_prompt": "",
+      "supervisor_enabled": false,
+      "token_usage_last": null,
+      "token_usage_total": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "topbar_pinned": false,
+      "topbar_pinned_at": null,
+      "turn_harness_profile_snapshot": null,
+      "updated_at": "2026-07-30T06:26:25.696906",
+      "user_initiated": false,
+      "worker_creation_policy": "ask",
+      "worker_eligible": false
+    },
+    "sessionId": "a3fddb82-6874-469b-b475-767ab1e3040b",
+    "wsMessagesReplay": {
+      "data": {
+        "app_session_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+        "messages": [
+          {
+            "content": "delegate this to a worker",
+            "events": [],
+            "id": "u1",
+            "role": "user",
+            "seq": 0
+          },
+          {
+            "_content_dirty": false,
+            "_events_seq_floor": 0,
+            "_panel_anchor_cache": {
+              "anchors": {},
+              "key": [
+                0,
+                [
+                  [
+                    "contract-delegation-1",
+                    "worker",
+                    null
+                  ]
+                ]
+              ]
+            },
+            "agent_session_id": null,
+            "content": "worker reply text",
+            "event_ref": {
+              "byte_end": 1095,
+              "byte_start": 0,
+              "msg_id": "48511037-2f10-4842-90de-cf5168e30edb",
+              "root_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+              "seq_end": 3,
+              "seq_start": 1,
+              "sid": "a3fddb82-6874-469b-b475-767ab1e3040b"
+            },
+            "events": [],
+            "id": "48511037-2f10-4842-90de-cf5168e30edb",
+            "isStreaming": false,
+            "role": "assistant",
+            "seq": 1,
+            "stub": {
+              "event_count": 1,
+              "last_events": [
+                {
+                  "data": {
+                    "delegation_id": "contract-delegation-1",
+                    "event": {
+                      "data": {
+                        "message": {
+                          "content": [
+                            {
+                              "text": "worker reply text",
+                              "type": "text"
+                            }
+                          ]
+                        },
+                        "type": "assistant",
+                        "uuid": "contract-worker-uuid"
+                      },
+                      "type": "agent_message"
+                    }
+                  },
+                  "seq": 2,
+                  "type": "worker_event"
+                }
+              ]
+            },
+            "timestamp": "2026-07-30T06:26:25.680827",
+            "workers": [
+              {
+                "delegation_id": "contract-delegation-1",
+                "events": [],
+                "fork_agent_sid": null,
+                "insert_at": 0,
+                "instructions_preview": "do the thing",
+                "is_new": true,
+                "jsonl_path": null,
+                "new_byte_offset": null,
+                "orchestration_mode": null,
+                "panel_kind": "worker",
+                "run_mode": null,
+                "started_at": null,
+                "success": true,
+                "token_usage": null,
+                "worker_description": "contract test worker",
+                "worker_session_id": "contract-worker-session"
+              }
+            ]
+          }
+        ],
+        "next_seq": 2,
+        "since_seq": 0
+      },
+      "type": "messages_replay"
+    }
+  },
+  "paginationScenario": {
+    "firstPage": {
+      "_owner_incarnation": "85b250d57e134e4bba383b1ebc0e2d17",
+      "_schema_version": 11,
+      "_unread_migrated": true,
+      "agent_session_id": null,
+      "archived": false,
+      "bare_config": false,
+      "browser_harness_enabled": true,
+      "browser_harness_headless": true,
+      "caller_agent_session_id": null,
+      "capability_contexts": [],
+      "continuation_chain": [],
+      "created_at": "2026-07-30T06:26:26.014821",
+      "current_tasks": [],
+      "current_todos": [],
+      "cwd": "/tmp",
+      "cwd_explicit": true,
+      "disallowed_tools": [],
+      "draft_images": [],
+      "draft_input": "",
+      "draft_input_seq": 0,
+      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/d8122971-cb49-4458-bc58-2f621777c9c4.json",
+      "fork_closed": false,
+      "fork_point_seq": null,
+      "forked_from_agent_sid": null,
+      "forked_from_supervisor_agent_sid": null,
+      "forks": [],
+      "harness_profile_id": "",
+      "harness_profile_snapshot": null,
+      "id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+      "inline_tags": [],
+      "kind": "user",
+      "last_active_model": null,
+      "last_active_provider_id": null,
+      "last_active_runner": null,
+      "last_active_supervisor_model": null,
+      "last_active_supervisor_provider_id": null,
+      "last_active_supervisor_runner": null,
+      "last_seen_event_uid": null,
+      "max_seq_by_sid": {
+        "d8122971-cb49-4458-bc58-2f621777c9c4": 4
+      },
+      "messages": [
+        {
+          "content": "turn 3 question",
+          "events": [],
+          "id": "pu3",
+          "role": "user",
+          "seq": 6
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 3,
+          "agent_session_id": null,
+          "content": "turn 3 answer",
+          "event_ref": {
+            "byte_end": 1316,
+            "byte_start": 987,
+            "msg_id": "917d92bc-be94-49cd-860c-37bf26b39e8f",
+            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "seq_end": 4,
+            "seq_start": 4,
+            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+          },
+          "events": [],
+          "id": "917d92bc-be94-49cd-860c-37bf26b39e8f",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 7,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "turn 3 answer",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "pagination-uuid-3"
+                },
+                "seq": 4,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:26.258991",
+          "workers": []
+        }
+      ],
+      "model": "sonnet",
+      "name": "chat-contract-pagination-capture",
+      "next_seq": 8,
+      "node_id": "primary",
+      "notes": [],
+      "open_config_panels": [],
+      "open_file_panels": [],
+      "orchestration_mode": "native",
+      "pagination": {
+        "has_older": true,
+        "oldest_loaded_seq": 6,
+        "total_messages": 8
+      },
+      "parent_line_count_at_fork": null,
+      "parent_session_id": null,
+      "pending_supervisor_verdict": null,
+      "permission": {},
+      "pinned": false,
+      "processed_line_by_sid": {},
+      "provider_id": "claude-id",
+      "queued_prompts": [],
+      "reasoning_effort": "medium",
+      "right_panel_active_tab": null,
+      "right_panel_auto_opened_by": [],
+      "right_panel_mobile_height": null,
+      "right_panel_open": false,
+      "right_panel_todos_dismissed": false,
+      "right_panel_width": null,
+      "runner": "native",
+      "sidebar_minimized": false,
+      "source": "cli",
+      "supervisor_agent_session_id": null,
+      "supervisor_bootstrap_received": false,
+      "supervisor_custom_prompt": "",
+      "supervisor_enabled": false,
+      "token_usage_last": null,
+      "token_usage_total": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "topbar_pinned": false,
+      "topbar_pinned_at": null,
+      "turn_harness_profile_snapshot": null,
+      "updated_at": "2026-07-30T06:26:26.265308",
+      "user_initiated": false,
+      "worker_creation_policy": "ask",
+      "worker_eligible": false
+    },
+    "olderPage": {
+      "has_older": false,
+      "messages": [
+        {
+          "content": "turn 0 question",
+          "events": [],
+          "id": "pu0",
+          "role": "user",
+          "seq": 0
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 0,
+          "_has_final": false,
+          "_uid_idx": {
+            "pagination-uuid-0": 0
+          },
+          "agent_session_id": null,
+          "content": "turn 0 answer",
+          "event_ref": {
+            "byte_end": 329,
+            "byte_start": 0,
+            "msg_id": "7ef3eb50-53ff-4723-84ff-275d58eb2423",
+            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "seq_end": 1,
+            "seq_start": 1,
+            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+          },
+          "events": [],
+          "id": "7ef3eb50-53ff-4723-84ff-275d58eb2423",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 1,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "turn 0 answer",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "pagination-uuid-0"
+                },
+                "seq": 1,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:26.232313",
+          "workers": []
+        },
+        {
+          "content": "turn 1 question",
+          "events": [],
+          "id": "pu1",
+          "role": "user",
+          "seq": 2
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 1,
+          "_has_final": false,
+          "_uid_idx": {
+            "pagination-uuid-1": 0
+          },
+          "agent_session_id": null,
+          "content": "turn 1 answer",
+          "event_ref": {
+            "byte_end": 658,
+            "byte_start": 329,
+            "msg_id": "188dad1b-deb7-454d-98d3-c490c7a57d92",
+            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "seq_end": 2,
+            "seq_start": 2,
+            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+          },
+          "events": [],
+          "id": "188dad1b-deb7-454d-98d3-c490c7a57d92",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 3,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "turn 1 answer",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "pagination-uuid-1"
+                },
+                "seq": 2,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:26.242927",
+          "workers": []
+        },
+        {
+          "content": "turn 2 question",
+          "events": [],
+          "id": "pu2",
+          "role": "user",
+          "seq": 4
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 2,
+          "_has_final": false,
+          "_uid_idx": {
+            "pagination-uuid-2": 0
+          },
+          "agent_session_id": null,
+          "content": "turn 2 answer",
+          "event_ref": {
+            "byte_end": 987,
+            "byte_start": 658,
+            "msg_id": "f9817e7b-1f16-44a7-b28e-b9c0b0ab07ea",
+            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "seq_end": 3,
+            "seq_start": 3,
+            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+          },
+          "events": [],
+          "id": "f9817e7b-1f16-44a7-b28e-b9c0b0ab07ea",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 5,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "turn 2 answer",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "pagination-uuid-2"
+                },
+                "seq": 3,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:26.248354",
+          "workers": []
+        }
+      ],
+      "oldest_loaded_seq": 0,
+      "total_messages": 8
+    },
+    "sessionId": "d8122971-cb49-4458-bc58-2f621777c9c4"
+  },
+  "restAfterLivePush": {
+    "_owner_incarnation": "9892a5e431a64e0aadd1f677df4a551a",
+    "_schema_version": 11,
+    "_unread_migrated": true,
+    "agent_session_id": null,
+    "archived": false,
+    "bare_config": false,
+    "browser_harness_enabled": true,
+    "browser_harness_headless": true,
+    "caller_agent_session_id": null,
+    "capability_contexts": [],
+    "continuation_chain": [],
+    "created_at": "2026-07-30T06:26:04.218169",
+    "current_tasks": [],
+    "current_todos": [],
+    "cwd": "/tmp",
+    "cwd_explicit": true,
+    "disallowed_tools": [],
+    "draft_images": [],
+    "draft_input": "",
+    "draft_input_seq": 0,
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/fb3ef789-c5c0-4bd3-93a2-712a1ae6611e.json",
+    "fork_closed": false,
+    "fork_point_seq": null,
+    "forked_from_agent_sid": null,
+    "forked_from_supervisor_agent_sid": null,
+    "forks": [],
+    "harness_profile_id": "",
+    "harness_profile_snapshot": null,
+    "id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+    "inline_tags": [],
+    "kind": "user",
+    "last_active_model": null,
+    "last_active_provider_id": null,
+    "last_active_runner": null,
+    "last_active_supervisor_model": null,
+    "last_active_supervisor_provider_id": null,
+    "last_active_supervisor_runner": null,
+    "last_applied_seq": 1,
+    "last_seen_event_uid": null,
+    "max_seq_by_sid": {
+      "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e": 2
+    },
+    "messages": [
+      {
+        "content": "hello from contract test",
+        "events": [],
+        "id": "u1",
+        "role": "user",
+        "seq": 0
+      },
+      {
+        "_content_dirty": false,
+        "_events_seq_floor": 0,
+        "agent_session_id": null,
+        "content": "live pushed assistant reply",
+        "event_ref": {
+          "byte_end": 685,
+          "byte_start": 0,
+          "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+          "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+          "seq_end": 2,
+          "seq_start": 1,
+          "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+        },
+        "events": [],
+        "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+        "isStreaming": false,
+        "role": "assistant",
+        "seq": 1,
+        "stub": {
+          "event_count": 2,
+          "last_events": [
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "seeded assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-seed-uuid"
+              },
+              "seq": 1,
+              "type": "agent_message"
+            },
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "live pushed assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-live-uuid"
+              },
+              "seq": 2,
+              "type": "agent_message"
+            }
+          ]
+        },
+        "timestamp": "2026-07-30T06:26:12.881856",
+        "workers": []
+      }
+    ],
+    "model": "sonnet",
+    "name": "chat-contract-capture",
+    "next_seq": 2,
+    "node_id": "primary",
+    "notes": [],
+    "open_config_panels": [],
+    "open_file_panels": [],
+    "orchestration_mode": "native",
+    "pagination": {
+      "has_older": false,
+      "oldest_loaded_seq": 0,
+      "total_messages": 2
+    },
+    "parent_line_count_at_fork": null,
+    "parent_session_id": null,
+    "pending_supervisor_verdict": null,
+    "permission": {},
+    "pinned": false,
+    "processed_line_by_sid": {},
+    "provider_id": "claude-id",
+    "queued_prompts": [],
+    "reasoning_effort": "medium",
+    "right_panel_active_tab": null,
+    "right_panel_auto_opened_by": [],
+    "right_panel_mobile_height": null,
+    "right_panel_open": false,
+    "right_panel_todos_dismissed": false,
+    "right_panel_width": null,
+    "runner": "native",
+    "sidebar_minimized": false,
+    "source": "cli",
+    "supervisor_agent_session_id": null,
+    "supervisor_bootstrap_received": false,
+    "supervisor_custom_prompt": "",
+    "supervisor_enabled": false,
+    "token_usage_last": null,
+    "token_usage_total": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "topbar_pinned": false,
+    "topbar_pinned_at": null,
+    "turn_harness_profile_snapshot": null,
+    "updated_at": "2026-07-30T06:26:19.659799",
+    "user_initiated": false,
+    "worker_creation_policy": "ask",
+    "worker_eligible": false
+  },
+  "restInitial": {
+    "_owner_incarnation": "9892a5e431a64e0aadd1f677df4a551a",
+    "_schema_version": 11,
+    "_unread_migrated": true,
+    "agent_session_id": null,
+    "archived": false,
+    "bare_config": false,
+    "browser_harness_enabled": true,
+    "browser_harness_headless": true,
+    "caller_agent_session_id": null,
+    "capability_contexts": [],
+    "continuation_chain": [],
+    "created_at": "2026-07-30T06:26:04.218169",
+    "current_tasks": [],
+    "current_todos": [],
+    "cwd": "/tmp",
+    "cwd_explicit": true,
+    "disallowed_tools": [],
+    "draft_images": [],
+    "draft_input": "",
+    "draft_input_seq": 0,
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/fb3ef789-c5c0-4bd3-93a2-712a1ae6611e.json",
+    "fork_closed": false,
+    "fork_point_seq": null,
+    "forked_from_agent_sid": null,
+    "forked_from_supervisor_agent_sid": null,
+    "forks": [],
+    "harness_profile_id": "",
+    "harness_profile_snapshot": null,
+    "id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+    "inline_tags": [],
+    "kind": "user",
+    "last_active_model": null,
+    "last_active_provider_id": null,
+    "last_active_runner": null,
+    "last_active_supervisor_model": null,
+    "last_active_supervisor_provider_id": null,
+    "last_active_supervisor_runner": null,
+    "last_seen_event_uid": null,
+    "max_seq_by_sid": {
+      "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e": 1
+    },
+    "messages": [
+      {
+        "content": "hello from contract test",
+        "events": [],
+        "id": "u1",
+        "role": "user",
+        "seq": 0
+      },
+      {
+        "_content_dirty": false,
+        "_events_seq_floor": 0,
+        "agent_session_id": null,
+        "content": "seeded assistant reply",
+        "event_ref": {
+          "byte_end": 339,
+          "byte_start": 0,
+          "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+          "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+          "seq_end": 1,
+          "seq_start": 1,
+          "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+        },
+        "events": [],
+        "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+        "isStreaming": false,
+        "role": "assistant",
+        "seq": 1,
+        "stub": {
+          "event_count": 1,
+          "last_events": [
+            {
+              "data": {
+                "message": {
+                  "content": [
+                    {
+                      "text": "seeded assistant reply",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "type": "assistant",
+                "uuid": "contract-seed-uuid"
+              },
+              "seq": 1,
+              "type": "agent_message"
+            }
+          ]
+        },
+        "timestamp": "2026-07-30T06:26:12.881856",
+        "workers": []
+      }
+    ],
+    "model": "sonnet",
+    "name": "chat-contract-capture",
+    "next_seq": 2,
+    "node_id": "primary",
+    "notes": [],
+    "open_config_panels": [],
+    "open_file_panels": [],
+    "orchestration_mode": "native",
+    "pagination": {
+      "has_older": false,
+      "oldest_loaded_seq": 0,
+      "total_messages": 2
+    },
+    "parent_line_count_at_fork": null,
+    "parent_session_id": null,
+    "pending_supervisor_verdict": null,
+    "permission": {},
+    "pinned": false,
+    "processed_line_by_sid": {},
+    "provider_id": "claude-id",
+    "queued_prompts": [],
+    "reasoning_effort": "medium",
+    "right_panel_active_tab": null,
+    "right_panel_auto_opened_by": [],
+    "right_panel_mobile_height": null,
+    "right_panel_open": false,
+    "right_panel_todos_dismissed": false,
+    "right_panel_width": null,
+    "runner": "native",
+    "sidebar_minimized": false,
+    "source": "cli",
+    "supervisor_agent_session_id": null,
+    "supervisor_bootstrap_received": false,
+    "supervisor_custom_prompt": "",
+    "supervisor_enabled": false,
+    "token_usage_last": null,
+    "token_usage_total": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "topbar_pinned": false,
+    "topbar_pinned_at": null,
+    "turn_harness_profile_snapshot": null,
+    "updated_at": "2026-07-30T06:26:19.659799",
+    "user_initiated": false,
+    "worker_creation_policy": "ask",
+    "worker_eligible": false
+  },
+  "restMessageEventsFull": {
+    "_content_dirty": false,
+    "_events_seq_floor": 0,
+    "_uid_idx": {
+      "contract-live-uuid": 1,
+      "contract-seed-uuid": 0
+    },
+    "agent_session_id": null,
+    "content": "live pushed assistant reply",
+    "event_ref": {
+      "byte_end": 685,
+      "byte_start": 0,
+      "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+      "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "seq_end": 2,
+      "seq_start": 1,
+      "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+    },
+    "events": [
+      {
+        "data": {
+          "message": {
+            "content": [
+              {
+                "text": "seeded assistant reply",
+                "type": "text"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "contract-seed-uuid"
+        },
+        "type": "agent_message"
+      },
+      {
+        "data": {
+          "message": {
+            "content": [
+              {
+                "text": "live pushed assistant reply",
+                "type": "text"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "contract-live-uuid"
+        },
+        "type": "agent_message"
+      }
+    ],
+    "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+    "isStreaming": false,
+    "role": "assistant",
+    "seq": 1,
+    "timestamp": "2026-07-30T06:26:12.881856",
+    "workers": []
+  },
+  "sessionId": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+  "wsLivePush": {
+    "data": {
+      "app_session_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "message": {
+        "content": [
+          {
+            "text": "live pushed assistant reply",
+            "type": "text"
+          }
+        ]
+      },
+      "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+      "type": "assistant",
+      "uuid": "contract-live-uuid"
+    },
+    "seq": 2,
+    "type": "agent_message"
+  },
+  "wsMessagesReplay": {
+    "data": {
+      "app_session_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "messages": [
+        {
+          "content": "hello from contract test",
+          "events": [],
+          "id": "u1",
+          "role": "user",
+          "seq": 0
+        },
+        {
+          "_content_dirty": false,
+          "_events_seq_floor": 0,
+          "agent_session_id": null,
+          "content": "seeded assistant reply",
+          "event_ref": {
+            "byte_end": 339,
+            "byte_start": 0,
+            "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+            "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+            "seq_end": 1,
+            "seq_start": 1,
+            "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+          },
+          "events": [],
+          "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+          "isStreaming": false,
+          "role": "assistant",
+          "seq": 1,
+          "stub": {
+            "event_count": 1,
+            "last_events": [
+              {
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "text": "seeded assistant reply",
+                        "type": "text"
+                      }
+                    ]
+                  },
+                  "type": "assistant",
+                  "uuid": "contract-seed-uuid"
+                },
+                "seq": 1,
+                "type": "agent_message"
+              }
+            ]
+          },
+          "timestamp": "2026-07-30T06:26:12.881856",
+          "workers": []
+        }
+      ],
+      "next_seq": 2,
+      "since_seq": 0
+    },
+    "type": "messages_replay"
+  }
+}

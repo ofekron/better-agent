@@ -40,7 +40,8 @@ import { markSessionUnread, type SessionStatusKey } from "../lib/sessionRegistry
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import {
   SESSION_SORT_LABEL,
-  partitionPinnedSessions,
+  isNewSession,
+  partitionSessions,
   sessionSortValue,
   timeAgo,
 } from "../lib/sessionSort";
@@ -2557,34 +2558,47 @@ function SessionListImpl({
     "better-agent-pinned-group-collapsed",
     false,
   );
-  const { pinned: pinnedSessions, unpinned: unpinnedRoots } = useMemo(
-    () => partitionPinnedSessions(roots),
+  const { matched: pinnedSessions, rest: unpinnedRoots } = useMemo(
+    () => partitionSessions(roots, (s) => Boolean(s.pinned)),
     [roots],
   );
   const visiblePinned = pinnedCollapsed ? EMPTY_SESSIONS : pinnedSessions;
-  // The unpinned/unfiled sessions form their own collapsible "New sessions"
-  // group, mirroring the Pinned group above.
+  // Brand-new sessions (no messages, unpinned, unfiled) form the collapsible
+  // "New sessions" group right under Pinned; everything else stays in the
+  // folder tree / remainder group below.
   const [newSessionsCollapsed, setNewSessionsCollapsed] = useLocalStorage<boolean>(
     "better-agent-new-sessions-group-collapsed",
     false,
   );
-  const { folderRoots, unfiledSessions } = useMemo(
-    () => buildFolderRenderTree(folders, unpinnedRoots),
-    [folders, unpinnedRoots],
+  const { matched: newSessions, rest: restRoots } = useMemo(
+    () => partitionSessions(unpinnedRoots, isNewSession),
+    [unpinnedRoots],
   );
-  const visibleUnfiled = newSessionsCollapsed ? EMPTY_SESSIONS : unfiledSessions;
-  const visibleUnpinnedFlat = newSessionsCollapsed ? EMPTY_SESSIONS : unpinnedRoots;
+  const visibleNew = newSessionsCollapsed ? EMPTY_SESSIONS : newSessions;
+  // The non-new, unpinned remainder keeps its own collapsible group so the
+  // whole sidebar stays collapsible section by section.
+  const [restCollapsed, setRestCollapsed] = useLocalStorage<boolean>(
+    "better-agent-unfiled-group-collapsed",
+    false,
+  );
+  const { folderRoots, unfiledSessions } = useMemo(
+    () => buildFolderRenderTree(folders, restRoots),
+    [folders, restRoots],
+  );
+  const visibleUnfiled = restCollapsed ? EMPTY_SESSIONS : unfiledSessions;
+  const visibleRestFlat = restCollapsed ? EMPTY_SESSIONS : restRoots;
   const sortedRoots = useMemo(
     () => [
       ...visiblePinned,
+      ...visibleNew,
       ...flattenFolderSessions(folderRoots, collapsedFolderIds),
       ...visibleUnfiled,
     ],
-    [visiblePinned, folderRoots, collapsedFolderIds, visibleUnfiled],
+    [visiblePinned, visibleNew, folderRoots, collapsedFolderIds, visibleUnfiled],
   );
   const flatRoots = useMemo(
-    () => [...visiblePinned, ...visibleUnpinnedFlat],
-    [visiblePinned, visibleUnpinnedFlat],
+    () => [...visiblePinned, ...visibleNew, ...visibleRestFlat],
+    [visiblePinned, visibleNew, visibleRestFlat],
   );
   // Folders render unless explicitly disabled. `undefined` (pref not yet
   // loaded) defaults to showing folders, matching the backend pref default.
@@ -3506,6 +3520,28 @@ function SessionListImpl({
             {visiblePinned.map((s) => renderNode(s, 0, showFolders))}
           </div>
         )}
+        {newSessions.length > 0 && (
+          <div
+            className="session-folder-section session-new-section"
+            data-testid="session-new-section"
+          >
+            <button
+              type="button"
+              className="session-folder-heading"
+              onClick={() => setNewSessionsCollapsed((v) => !v)}
+              aria-expanded={!newSessionsCollapsed}
+            >
+              <Icon
+                name={newSessionsCollapsed ? "chevron-right" : "chevron-down"}
+                size={12}
+                className="session-folder-chevron"
+              />
+              <span>{t("session.newSessionsGroup")}</span>
+              <span className="session-group-count">{newSessions.length}</span>
+            </button>
+            {visibleNew.map((s) => renderNode(s, 0, showFolders))}
+          </div>
+        )}
         {showFolders && folderRoots.map((node) => (
           <FolderSection
             key={node.folder.id}
@@ -3551,16 +3587,18 @@ function SessionListImpl({
             onStartBulkSelect={startBulkSelect}
           />
         ))}
-        {(showFolders ? unfiledSessions.length > 0 : unpinnedRoots.length > 0) && (
+        {(showFolders
+          ? unfiledSessions.length > 0 || folderRoots.length > 0
+          : restRoots.length > 0) && (
           <div
-            className="session-folder-section session-new-section"
-            data-testid="session-new-section"
+            className="session-folder-section session-unfiled-section"
+            data-testid="session-unfiled-section"
           >
             <button
               type="button"
               className={`session-folder-heading ${showFolders && unfiledDragOver ? "drag-over" : ""}`}
-              onClick={() => setNewSessionsCollapsed((v) => !v)}
-              aria-expanded={!newSessionsCollapsed}
+              onClick={() => setRestCollapsed((v) => !v)}
+              aria-expanded={!restCollapsed}
               onDragOver={
                 showFolders
                   ? (e) => {
@@ -3585,16 +3623,20 @@ function SessionListImpl({
               }
             >
               <Icon
-                name={newSessionsCollapsed ? "chevron-right" : "chevron-down"}
+                name={restCollapsed ? "chevron-right" : "chevron-down"}
                 size={12}
                 className="session-folder-chevron"
               />
-              <span>{t("session.newSessionsGroup")}</span>
+              <span>
+                {showFolders && folderRoots.length > 0
+                  ? t("session.unfiled")
+                  : t("session.sessionsGroup")}
+              </span>
               <span className="session-group-count">
-                {showFolders ? unfiledSessions.length : unpinnedRoots.length}
+                {showFolders ? unfiledSessions.length : restRoots.length}
               </span>
             </button>
-            {(showFolders ? visibleUnfiled : visibleUnpinnedFlat).map((s) =>
+            {(showFolders ? visibleUnfiled : visibleRestFlat).map((s) =>
               renderNode(s, 0, showFolders),
             )}
           </div>

@@ -68,6 +68,17 @@ def test_run_sh_does_not_prompt_for_an_unserved_frontend_port() -> None:
     assert 'resolve_port_conflict "$BACKEND_PORT" "backend"' in source
 
 
+def test_run_sh_waits_for_backend_liveness_instead_of_a_fixed_deadline() -> None:
+    source = _run_sh()
+    start = source.index("wait_for_backend()")
+    end = source.index("wait_for_backend_exit()", start)
+    wait = source[start:end]
+
+    assert 'while kill -0 "$BACKEND_PID"' in wait
+    assert "attempts" not in wait
+    assert "within 60 seconds" not in wait
+
+
 def test_run_sh_checks_base_prereqs_before_startup_work() -> None:
     source = _run_sh()
 
@@ -101,5 +112,6 @@ if __name__ == "__main__":
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
     test_run_sh_does_not_prompt_for_an_unserved_frontend_port()
+    test_run_sh_waits_for_backend_liveness_instead_of_a_fixed_deadline()
     test_run_sh_checks_base_prereqs_before_startup_work()
     test_windows_installer_installs_base_prereqs_and_runs_shared_flow()

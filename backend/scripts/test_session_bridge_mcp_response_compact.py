@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import extension_store  # noqa: E402
 import config_store  # noqa: E402
+import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
+import session_bridge_api  # noqa: E402
+import session_search  # noqa: E402
 import session_organization_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -52,19 +55,19 @@ def test_internal_session_bridge_search_omits_empty_fields() -> None:
         captured["provider_id"] = kwargs.get("provider_id")
         return {"session_ids": [], "reasoning": "", "error": None}
 
-    original_search = main.session_search.run_search_sessions_session
-    original_stubs = main.session_search.index_stub_map
-    main.session_search.run_search_sessions_session = fake_search
-    main.session_search.index_stub_map = lambda: {}
+    original_search = session_search.run_search_sessions_session
+    original_stubs = session_search.index_stub_map
+    session_search.run_search_sessions_session = fake_search
+    session_search.index_stub_map = lambda: {}
     try:
         response = asyncio.run(
-            main._handle_internal_session_bridge_search(
+            session_bridge_api._handle_internal_session_bridge_search(
                 {"query": "needle", "app_session_id": caller["id"]}
             )
         )
     finally:
-        main.session_search.run_search_sessions_session = original_search
-        main.session_search.index_stub_map = original_stubs
+        session_search.run_search_sessions_session = original_search
+        session_search.index_stub_map = original_stubs
 
     assert response == {"results": []}
     assert captured["provider_id"] == provider["id"]
@@ -85,13 +88,13 @@ def test_internal_session_bridge_search_any_disables_provider_filter() -> None:
         captured["provider_id"] = kwargs.get("provider_id")
         return {"session_ids": [], "reasoning": "", "error": None}
 
-    original_search = main.session_search.run_search_sessions_session
-    original_stubs = main.session_search.index_stub_map
-    main.session_search.run_search_sessions_session = fake_search
-    main.session_search.index_stub_map = lambda: {}
+    original_search = session_search.run_search_sessions_session
+    original_stubs = session_search.index_stub_map
+    session_search.run_search_sessions_session = fake_search
+    session_search.index_stub_map = lambda: {}
     try:
         response = asyncio.run(
-            main._handle_internal_session_bridge_search(
+            session_bridge_api._handle_internal_session_bridge_search(
                 {
                     "query": "needle",
                     "app_session_id": caller["id"],
@@ -100,8 +103,8 @@ def test_internal_session_bridge_search_any_disables_provider_filter() -> None:
             )
         )
     finally:
-        main.session_search.run_search_sessions_session = original_search
-        main.session_search.index_stub_map = original_stubs
+        session_search.run_search_sessions_session = original_search
+        session_search.index_stub_map = original_stubs
 
     assert response == {"results": []}
     assert captured["provider_id"] is None
@@ -125,7 +128,7 @@ def test_internal_session_bridge_search_uses_real_search_signature() -> None:
     )
 
     response = asyncio.run(
-        main._handle_internal_session_bridge_search(
+        session_bridge_api._handle_internal_session_bridge_search(
             {
                 "query": "definitely-unmatched-search-needle",
                 "app_session_id": caller["id"],
@@ -156,7 +159,7 @@ def test_internal_delegate_task_auto_route_omits_provider_filter_by_default() ->
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
         response = asyncio.run(
-            main._handle_internal_delegate_task(
+            internal_orchestration_api._handle_internal_delegate_task(
                 {"sender_session_id": sender["id"], "task": "find target"}
             )
         )
@@ -186,7 +189,7 @@ def test_internal_delegate_task_any_keeps_global_auto_route() -> None:
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
         response = asyncio.run(
-            main._handle_internal_delegate_task(
+            internal_orchestration_api._handle_internal_delegate_task(
                 {
                     "sender_session_id": sender["id"],
                     "task": "find global target",
@@ -220,7 +223,7 @@ def test_internal_delegate_task_explicit_provider_constrains_auto_route() -> Non
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
         response = asyncio.run(
-            main._handle_internal_delegate_task(
+            internal_orchestration_api._handle_internal_delegate_task(
                 {
                     "sender_session_id": sender["id"],
                     "task": "find constrained target",
@@ -254,7 +257,7 @@ def test_internal_delegate_task_target_bypass_does_not_default_provider() -> Non
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
         response = asyncio.run(
-            main._handle_internal_delegate_task(
+            internal_orchestration_api._handle_internal_delegate_task(
                 {
                     "sender_session_id": sender["id"],
                     "task": "direct target",

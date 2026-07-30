@@ -25,7 +25,7 @@ def check(name: str, got: str, expected: str) -> bool:
 
 def main() -> int:
     try:
-        import main as backend_main
+        import session_detail_api as backend_main
 
         ok = True
         ok &= check(

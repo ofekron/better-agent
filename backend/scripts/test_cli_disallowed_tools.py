@@ -110,6 +110,16 @@ def test_parse_repeated_disabled_builtin_extension() -> bool:
         sys.argv = old_argv
 
 
+def test_parse_node_target() -> bool:
+    old_argv = sys.argv[:]
+    try:
+        sys.argv = ["cli.py", "--node", "lenovo", "--cwd", r"C:\Users\Lenovo\repo"]
+        args = cli._parse_args()
+        return args.node_id == "lenovo" and args.cwd == r"C:\Users\Lenovo\repo"
+    finally:
+        sys.argv = old_argv
+
+
 def test_tool_success_result_accepts_payload_without_success() -> bool:
     result = runner._tool_success_result({
         "session_id": "worker-1",
@@ -125,6 +135,7 @@ def main() -> int:
         ("drive_turn_passes_disabled_builtin_extensions", test_drive_turn_passes_disabled_builtin_extensions),
         ("parse_repeated_disallowed_tool", test_parse_repeated_disallowed_tool),
         ("parse_repeated_disabled_builtin_extension", test_parse_repeated_disabled_builtin_extension),
+        ("parse_node_target", test_parse_node_target),
         ("tool_success_result_accepts_payload_without_success", test_tool_success_result_accepts_payload_without_success),
     ]
     failed = 0

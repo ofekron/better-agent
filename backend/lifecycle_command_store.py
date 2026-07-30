@@ -20,7 +20,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -164,16 +164,31 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 pid INTEGER NOT NULL CHECK (pid > 0),
                 create_time REAL NOT NULL
             ) STRICT;
+            CREATE TABLE pending_terminal_renders (
+                session_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                lifecycle_message_id TEXT NOT NULL,
+                execution_turn_id TEXT NOT NULL,
+                assistant_message_id TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('complete', 'stopped', 'failed')
+                ),
+                FOREIGN KEY (session_id, request_id)
+                    REFERENCES transitions(session_id, request_id)
+            ) STRICT;
             """
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 4")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
         if version == 2:
             _migrate_v2_to_v3(connection)
+            version = 3
+        if version == 3:
+            _migrate_v3_to_v4(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -317,6 +332,26 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 3")
 
 
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE pending_terminal_renders (
+            session_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            lifecycle_message_id TEXT NOT NULL,
+            execution_turn_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (
+                outcome IN ('complete', 'stopped', 'failed')
+            ),
+            FOREIGN KEY (session_id, request_id)
+                REFERENCES transitions(session_id, request_id)
+        ) STRICT
+        """
+    )
+    connection.execute("PRAGMA user_version = 4")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -343,6 +378,67 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
             (session_id,),
         ).fetchone()
     return _snapshot_from_row(row) if row is not None else LifecycleSnapshot()
+
+
+def active_session_snapshots() -> list[tuple[str, LifecycleSnapshot]]:
+    with connection() as database:
+        rows = database.execute(
+            """
+            SELECT session_id, phase, identity_json, revision,
+                   execution_json, execution_policy, completed_execution_count
+            FROM sessions
+            WHERE phase != 'idle'
+            ORDER BY session_id
+            """
+        ).fetchall()
+    return [
+        (str(row["session_id"]), _snapshot_from_row(row))
+        for row in rows
+    ]
+
+
+def pending_terminal_renders() -> list[dict[str, str]]:
+    with connection() as database:
+        rows = database.execute(
+            """
+            SELECT session_id, request_id, lifecycle_message_id,
+                   execution_turn_id, assistant_message_id, outcome
+            FROM pending_terminal_renders
+            ORDER BY session_id
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def pending_terminal_render(session_id: str) -> dict[str, str] | None:
+    validate_identifier(session_id, "session_id")
+    with connection() as database:
+        row = database.execute(
+            """
+            SELECT session_id, request_id, lifecycle_message_id,
+                   execution_turn_id, assistant_message_id, outcome
+            FROM pending_terminal_renders
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def acknowledge_terminal_render(session_id: str, request_id: str) -> bool:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(request_id, "request_id")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        cursor = database.execute(
+            """
+            DELETE FROM pending_terminal_renders
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (session_id, request_id),
+        )
+        database.commit()
+    return cursor.rowcount == 1
 
 
 def acquire_authority(
@@ -698,6 +794,50 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
             """,
             (session_id, request_id),
         )
+        if next_snapshot.phase == "idle":
+            effect_row = database.execute(
+                """
+                SELECT payload_json
+                FROM effects
+                WHERE session_id = ? AND request_id = ? AND ordinal = 0
+                """,
+                (session_id, request_id),
+            ).fetchone()
+            payload = (
+                _load_object(effect_row["payload_json"], "effect payload")
+                if effect_row is not None
+                else {}
+            )
+            identity = payload.get("identity")
+            execution_identity = payload.get("execution_identity")
+            outcome = payload.get("outcome")
+            if (
+                isinstance(identity, dict)
+                and isinstance(execution_identity, dict)
+                and outcome in {"complete", "stopped", "failed"}
+            ):
+                database.execute(
+                    """
+                    INSERT INTO pending_terminal_renders(
+                        session_id, request_id, lifecycle_message_id,
+                        execution_turn_id, assistant_message_id, outcome
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        request_id = excluded.request_id,
+                        lifecycle_message_id = excluded.lifecycle_message_id,
+                        execution_turn_id = excluded.execution_turn_id,
+                        assistant_message_id = excluded.assistant_message_id,
+                        outcome = excluded.outcome
+                    """,
+                    (
+                        session_id,
+                        request_id,
+                        identity["lifecycle_message_id"],
+                        execution_identity["execution_turn_id"],
+                        execution_identity["assistant_message_id"],
+                        outcome,
+                    ),
+                )
         database.commit()
     return next_snapshot
 
@@ -723,7 +863,12 @@ def table_counts() -> dict[str, int]:
             table: database.execute(
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()[0]
-            for table in ("sessions", "transitions", "effects")
+            for table in (
+                "sessions",
+                "transitions",
+                "effects",
+                "pending_terminal_renders",
+            )
         }
 
 

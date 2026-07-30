@@ -531,9 +531,42 @@ def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> N
         )
 
 
+def test_reject_secrets_does_not_flag_non_secret_auth_mode_settings() -> None:
+    """Regression: an extension setting overlay literally named "auth_mode"
+    (e.g. a GTM extension's oauth-vs-api-key selector) is a mode choice, not
+    a credential — it must not trip the secret-free check. Found live: this
+    false positive blocked every new session, on every provider, because
+    `_SECRET_KEY_RE` matched the bare "auth" component of "auth_mode". Real
+    secret-shaped keys (including ones containing "auth", like
+    "auth_token") must still be rejected."""
+    reject_secrets(
+        {
+            "extension_setting_overlays": {
+                "ofek-dev.gtm": {
+                    "auth_mode": {"value": "oauth", "schema_hash": "x"},
+                },
+            },
+        },
+        label="harness plan",
+        allow_reference_keys=False,
+    )
+    for bad_key in (
+        "api_key", "authorization", "credential", "password", "secret",
+        "token", "auth_token",
+    ):
+        _assert_contract_rejected(
+            lambda bad_key=bad_key: reject_secrets(
+                {bad_key: "raw-value"},
+                label="t",
+                allow_reference_keys=False,
+            ),
+        )
+
+
 if __name__ == "__main__":
     test_harness_secret_refs_are_narrow_and_authoritative()
     test_selected_sources_are_exact_and_respect_gates()
     test_structural_plan_freezes_drift_and_references_secrets()
     test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration()
+    test_reject_secrets_does_not_flag_non_secret_auth_mode_settings()
     print("PASS provider runtime plan source")

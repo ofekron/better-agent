@@ -33,6 +33,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import session_detail_api  # noqa: E402
 import session_manager as _sm_mod  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -93,7 +94,7 @@ def test_retry_reenqueues_durably_without_ws() -> bool:
     try:
         # NO WS subscriber is attached anywhere in this test — the endpoint
         # alone must guarantee the prompt survives.
-        body = asyncio.run(main.rewind_and_retry(sid, {
+        body = asyncio.run(session_detail_api.rewind_and_retry(sid, {
             "assistant_message_id": "a1",
             "client_id": "pending-retry-1",
         }))
