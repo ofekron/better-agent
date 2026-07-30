@@ -26,6 +26,9 @@ fi
 brew update
 brew install git python uv node
 
+# BETTER_AGENT_FROM (acquisition channel) is inherited by install.py through
+# the process environment. It is never validated or interpolated here —
+# scripts/install_channel.py is the only place that inspects it.
 python3 "$(dirname "$0")/install.py" "$@"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ACTIVE_ENV="$(python3 "$REPO/backend/dependency_plan.py" active)"

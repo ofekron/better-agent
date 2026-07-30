@@ -7,15 +7,32 @@
     "@capacitor/app": "^8.1.0",
     "framer-motion": "^12.40.0"
   },
-  "name": "better-claude",
-  "version": "1.0.0",
-  "description": "<p align=\"center\">   <img src=\"docs/assets/readme-hero.png\" alt=\"Better Agent — every coding agent in one durable workspace\" width=\"100%\" /> </p>",
-  "main": "index.js",
+  "name": "better-agent",
+  "version": "0.1.0",
+  "description": "Local web workspace for coding agents — Claude, Codex, Gemini, and more in one inspectable, LAN-ready hub.",
+  "homepage": "https://ofek-dev.com/better-agent/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofekron/better-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ofekron/better-agent/issues"
+  },
+  "//private": "The npm name `better-agent` belongs to an unrelated package and this repo is not an npm distribution; `private` blocks an accidental `npm publish`.",
+  "private": true,
   "directories": {
     "doc": "docs"
   },
   "devDependencies": {},
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "ai-agents",
+    "developer-tools",
+    "self-hosted"
+  ],
+  "author": "ofekron",
   "type": "commonjs"
 }
