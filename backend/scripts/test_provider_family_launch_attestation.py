@@ -319,6 +319,8 @@ def test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows() -> None:
             str(run_dir),
             "--runner-kind",
             "agy",
+            "--runner-module",
+            "runner_agy",
         )
         assert frozen_claude.launch.argv == (
             str(python.resolve()),
