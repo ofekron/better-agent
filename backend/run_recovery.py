@@ -968,7 +968,13 @@ def pre_provider_orphan_candidates() -> list[tuple[str, str, str]]:
 
 def _started_turns_for_candidates(
     candidates: list[tuple[str, str, str]],
-) -> dict[tuple[str, str], str]:
+    *,
+    include_reconciled_pre_provider: bool = False,
+    include_seen_keys: bool = False,
+) -> (
+    dict[tuple[str, str], str]
+    | tuple[dict[tuple[str, str], str], set[tuple[str, str]]]
+):
     """Map exact candidate targets to their durable turn ids."""
     from event_journal import event_journal_reader
 
@@ -979,6 +985,7 @@ def _started_turns_for_candidates(
     started: dict[tuple[str, str], str] = {}
     terminal: set[tuple[str, str]] = set()
     non_scaffold_facts: set[tuple[str, str]] = set()
+    seen_keys: set[tuple[str, str]] = set()
     for root_id, wanted in wanted_by_root.items():
         after_seq = 0
         while True:
@@ -999,23 +1006,34 @@ def _started_turns_for_candidates(
                 key = (sid, msg_id)
                 if key not in wanted:
                     continue
+                seen_keys.add(key)
                 event_type = str(row.get("type") or "")
                 if event_type == "turn_started":
                     turn_id = str(data.get("turn_id") or row.get("run_id") or "")
                     if turn_id:
                         started[key] = turn_id
                 elif event_type in {"turn_complete", "turn_stopped"}:
+                    if (
+                        include_reconciled_pre_provider
+                        and event_type == "turn_stopped"
+                        and row.get("source") == "run_recovery.pre_provider"
+                        and data.get("reason") == "orphaned_before_provider"
+                        and str(data.get("turn_id") or row.get("run_id") or "")
+                        == started.get(key)
+                    ):
+                        continue
                     terminal.add(key)
                 elif event_type != "turn_start":
                     non_scaffold_facts.add(key)
             if not has_more or not rows:
                 break
             after_seq = int(rows[-1].get("seq") or after_seq)
-    return {
+    accepted = {
         key: turn_id
         for key, turn_id in started.items()
         if key not in terminal and key not in non_scaffold_facts
     }
+    return (accepted, seen_keys) if include_seen_keys else accepted
 
 
 def _finalize_pre_provider_orphan(
@@ -1190,26 +1208,46 @@ def _matches_unbound_lifecycle_candidate(
     session_id: str,
     assistant_id: str,
     lifecycle_message_id: str,
-) -> bool:
-    with session_manager.batch(session_id):
-        session = session_manager.get_ref(session_id)
-        if session is None:
-            return False
-        messages = session.get("messages") or []
-        if not messages:
-            return False
-        assistant = messages[-1]
-        if (
-            not isinstance(assistant, dict)
-            or assistant.get("id") != assistant_id
-            or not _is_empty_assistant_scaffold(assistant)
-        ):
-            return False
-        user_msg = _last_user_before(session, assistant)
-        return bool(
-            user_msg
-            and user_msg.get("lifecycle_msg_id") == lifecycle_message_id
-        )
+) -> str | None:
+    try:
+        with session_manager.batch(session_id):
+            session = session_manager.get_ref(session_id)
+            if session is None:
+                return None
+            messages = session.get("messages") or []
+            if not messages:
+                return None
+            assistant = messages[-1]
+            shape = "empty_assistant"
+            if (
+                isinstance(assistant, dict)
+                and assistant.get("id") == assistant_id
+                and _is_empty_assistant_scaffold(assistant)
+            ):
+                user_msg = _last_user_before(session, assistant)
+            else:
+                if any(
+                    isinstance(message, dict)
+                    and message.get("id") == assistant_id
+                    for message in messages
+                ):
+                    return None
+                user_msg = assistant
+                if (
+                    not isinstance(user_msg, dict)
+                    or user_msg.get("role") != "user"
+                    or user_msg.get("status") != "error"
+                ):
+                    return None
+                shape = "legacy_error_tail"
+            if (
+                user_msg
+                and user_msg.get("lifecycle_msg_id") == lifecycle_message_id
+            ):
+                return shape
+    except KeyError:
+        return None
+    return None
 
 
 async def reconcile_unbound_lifecycle_orphans(
@@ -1227,9 +1265,24 @@ async def reconcile_unbound_lifecycle_orphans(
         return 0
     if candidates is None:
         candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+    snapshots = await coordinator.lifecycle_commands.active_snapshots()
+    candidate_list = list(candidates)
+    known_candidates = {
+        (session_id, assistant_id)
+        for _, session_id, assistant_id in candidate_list
+    }
+    for session_id, snapshot in snapshots:
+        execution = snapshot.execution
+        if execution is None:
+            continue
+        key = (session_id, execution.identity.assistant_message_id)
+        root_id = session_manager._root_id_for(session_id)
+        if key not in known_candidates and root_id:
+            candidate_list.append((root_id, *key))
+            known_candidates.add(key)
     candidate_keys = {
         (session_id, assistant_id)
-        for _, session_id, assistant_id in candidates
+        for _, session_id, assistant_id in candidate_list
     }
     protected_targets, protected_sessions = _descriptor_ownership(recovered)
     document_targets, document_sessions = _descriptor_ownership(
@@ -1237,16 +1290,20 @@ async def reconcile_unbound_lifecycle_orphans(
     )
     protected_targets.update(document_targets)
     protected_sessions.update(document_sessions)
-    for _, session_id, _ in candidates:
+    for _, session_id, _ in candidate_list:
         for run in coordinator.turn_manager.get_run_state(session_id):
             target_id = str(run.get("target_message_id") or "")
             if target_id:
                 protected_targets.add((session_id, target_id))
             else:
                 protected_sessions.add(session_id)
-    started = await asyncio.to_thread(_started_turns_for_candidates, candidates)
+    started, journal_keys = await asyncio.to_thread(
+        _started_turns_for_candidates,
+        candidate_list,
+        include_reconciled_pre_provider=True,
+        include_seen_keys=True,
+    )
     reconciled = 0
-    snapshots = await coordinator.lifecycle_commands.active_snapshots()
     for session_id, snapshot in snapshots:
         execution = snapshot.execution
         identity = snapshot.identity
@@ -1256,6 +1313,12 @@ async def reconcile_unbound_lifecycle_orphans(
             else ""
         )
         key = (session_id, assistant_id)
+        render_shape = await asyncio.to_thread(
+            _matches_unbound_lifecycle_candidate,
+            session_id,
+            assistant_id,
+            identity.lifecycle_message_id,
+        )
         if (
             snapshot.phase != "starting"
             or identity is None
@@ -1265,13 +1328,14 @@ async def reconcile_unbound_lifecycle_orphans(
             or session_id in protected_sessions
             or key in protected_targets
             or key not in candidate_keys
-            or started.get(key) != execution.identity.execution_turn_id
-            or not await asyncio.to_thread(
-                _matches_unbound_lifecycle_candidate,
-                session_id,
-                assistant_id,
-                identity.lifecycle_message_id,
+            or (
+                started.get(key) != execution.identity.execution_turn_id
+                and not (
+                    render_shape == "legacy_error_tail"
+                    and key not in journal_keys
+                )
             )
+            or render_shape is None
         ):
             continue
 

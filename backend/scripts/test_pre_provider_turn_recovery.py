@@ -175,6 +175,7 @@ async def _seed_unbound_lifecycle(
     engine: LifecycleCommandEngine,
     *,
     policy: str = "single",
+    publish_started: bool = True,
 ) -> tuple[str, UserTurnIdentity, ExecutionTurnIdentity]:
     session_id, user_id, assistant_id, turn_id = _seed_tail()
     identity = UserTurnIdentity(
@@ -206,7 +207,8 @@ async def _seed_unbound_lifecycle(
         session_id,
         execution_identity=execution_identity,
     )
-    await _publish_started(session_id, assistant_id, turn_id)
+    if publish_started:
+        await _publish_started(session_id, assistant_id, turn_id)
     return session_id, identity, execution_identity
 
 
@@ -243,6 +245,138 @@ async def _test_unbound_lifecycle_recovery() -> None:
         assert terminal is not None
         assert terminal["type"] == "user_message_failed"
         assert await reconcile_unbound_lifecycle_orphans(coordinator, []) == 0
+
+        legacy_sid, legacy_identity, legacy_execution = (
+            await _seed_unbound_lifecycle(engine)
+        )
+        legacy_session = session_manager.get(legacy_sid) or {}
+        legacy_user = next(
+            message
+            for message in legacy_session["messages"]
+            if message.get("lifecycle_msg_id")
+            == legacy_identity.lifecycle_message_id
+        )
+        session_manager.mark_user_error(
+            legacy_sid,
+            legacy_user["id"],
+            "legacy recovery failure",
+        )
+        session_manager.remove_assistant_msg(
+            legacy_sid,
+            legacy_execution.assistant_message_id,
+        )
+        await publish_event(
+            session_id=legacy_sid,
+            context_id=legacy_sid,
+            event_type="turn_stopped",
+            data={
+                "app_session_id": legacy_sid,
+                "message_id": legacy_execution.assistant_message_id,
+                "turn_id": legacy_execution.execution_turn_id,
+                "reason": "orphaned_before_provider",
+            },
+            source="run_recovery.pre_provider",
+            message_id=legacy_execution.assistant_message_id,
+            turn_id=legacy_execution.execution_turn_id,
+            run_id=legacy_execution.execution_turn_id,
+        )
+        with patch.object(
+            user_msg_lifecycle,
+            "emit_failed",
+            durable_failed,
+        ):
+            assert await reconcile_unbound_lifecycle_orphans(
+                coordinator,
+                [],
+            ) == 1
+        assert engine.snapshot(legacy_sid).phase == "idle"
+
+        no_rows_sid, no_rows_identity, no_rows_execution = (
+            await _seed_unbound_lifecycle(engine, publish_started=False)
+        )
+        no_rows_session = session_manager.get(no_rows_sid) or {}
+        no_rows_user = next(
+            message
+            for message in no_rows_session["messages"]
+            if message.get("lifecycle_msg_id")
+            == no_rows_identity.lifecycle_message_id
+        )
+        session_manager.mark_user_error(
+            no_rows_sid,
+            no_rows_user["id"],
+            "legacy recovery failure",
+        )
+        session_manager.remove_assistant_msg(
+            no_rows_sid,
+            no_rows_execution.assistant_message_id,
+        )
+        with patch.object(
+            user_msg_lifecycle,
+            "emit_failed",
+            durable_failed,
+        ):
+            assert await reconcile_unbound_lifecycle_orphans(
+                coordinator,
+                [],
+            ) == 1
+        assert engine.snapshot(no_rows_sid).phase == "idle"
+
+        for event_type, source, reason, turn_suffix in (
+            ("agent_message", "provider_stream", None, ""),
+            (
+                "turn_stopped",
+                "run_recovery.pre_provider",
+                "different_reason",
+                "",
+            ),
+            ("turn_complete", "run_recovery.pre_provider", None, ""),
+        ):
+            rejected_sid, rejected_identity, rejected_execution = (
+                await _seed_unbound_lifecycle(engine)
+            )
+            rejected_session = session_manager.get(rejected_sid) or {}
+            rejected_user = next(
+                message
+                for message in rejected_session["messages"]
+                if message.get("lifecycle_msg_id")
+                == rejected_identity.lifecycle_message_id
+            )
+            session_manager.mark_user_error(
+                rejected_sid,
+                rejected_user["id"],
+                "legacy recovery failure",
+            )
+            session_manager.remove_assistant_msg(
+                rejected_sid,
+                rejected_execution.assistant_message_id,
+            )
+            await publish_event(
+                session_id=rejected_sid,
+                context_id=rejected_sid,
+                event_type=event_type,
+                data={
+                    "app_session_id": rejected_sid,
+                    "message_id": rejected_execution.assistant_message_id,
+                    "turn_id": (
+                        rejected_execution.execution_turn_id + turn_suffix
+                    ),
+                    **({"reason": reason} if reason else {}),
+                },
+                source=source,
+                message_id=rejected_execution.assistant_message_id,
+                turn_id=rejected_execution.execution_turn_id,
+                run_id=rejected_execution.execution_turn_id,
+            )
+            assert await reconcile_unbound_lifecycle_orphans(
+                coordinator,
+                [],
+            ) == 0
+            rejected_snapshot = engine.snapshot(rejected_sid)
+            assert await engine.recover_unbound_execution(
+                rejected_sid,
+                expected_snapshot=rejected_snapshot,
+                resolve_outcome=lambda: asyncio.sleep(0, result="failed"),
+            )
 
         done_sid, done_identity, done_execution = await _seed_unbound_lifecycle(
             engine,
@@ -677,6 +811,25 @@ def _test_ownership_scan_is_single_pass_and_marker_first() -> None:
     assert "if inspect_input and input_path.exists()" in discovery_source
 
 
+def _test_lifecycle_candidate_requires_render_correlation() -> None:
+    assert run_recovery._matches_unbound_lifecycle_candidate(
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+    ) is None
+    empty = session_manager.create(
+        name="empty lifecycle candidate",
+        model="test-model",
+        cwd=str(_TMP_HOME),
+        orchestration_mode="native",
+    )
+    assert run_recovery._matches_unbound_lifecycle_candidate(
+        empty["id"],
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+    ) is None
+
+
 def _test_noncandidate_backend_runs_do_not_touch_inputs() -> None:
     shutil.rmtree(runs_root(), ignore_errors=True)
     runs_root().mkdir(parents=True, exist_ok=True)
@@ -806,6 +959,7 @@ async def _main() -> None:
     await _test_malformed_run_document_aborts_sweep()
     await _test_symlink_marker_is_not_read_and_aborts_sweep()
     _test_ownership_scan_is_single_pass_and_marker_first()
+    _test_lifecycle_candidate_requires_render_correlation()
     _test_noncandidate_backend_runs_do_not_touch_inputs()
     await _test_unbound_lifecycle_recovery()
 
