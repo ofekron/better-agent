@@ -180,15 +180,6 @@ def register_for_task(task: dict) -> list[dict]:
     return [dict(c) for c in created]
 
 
-def get(trigger_id: str) -> Optional[dict]:
-    with _lock:
-        data = _read()
-    for t in data["triggers"]:
-        if t.get("id") == trigger_id:
-            return dict(t)
-    return None
-
-
 def due(now: Optional[datetime] = None) -> list[dict]:
     """Triggers whose fire_at is in the past, oldest first."""
     now = now or datetime.now()
@@ -293,11 +284,6 @@ def enqueue_turn_end(
             data["triggers"].extend(receipts)
             _write(data)
         return len(receipts)
-
-
-def receipt_is_current(trigger_id: str) -> bool:
-    current, _task = receipt_task_snapshot(trigger_id)
-    return current
 
 
 def receipt_task_snapshot(trigger_id: str) -> tuple[bool, Optional[dict]]:
@@ -413,7 +399,3 @@ def list_for_task(task_id: str) -> list[dict]:
     with _lock:
         data = _read()
     return [dict(t) for t in data["triggers"] if t.get("task_id") == task_id]
-
-
-def drop_task_references(task_id: str) -> None:
-    unregister_task(task_id)
