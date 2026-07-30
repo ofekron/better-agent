@@ -15,5 +15,5 @@ test("sends a prompt and receives a real assistant response", async ({ authedPag
 
   const assistantMessage = page.getByTestId("assistant-message");
   await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
-  await expect(assistantMessage).toContainText("PONG", { timeout: 90_000 });
+  await expect(assistantMessage).toContainText("PONG", { timeout: 120_000 });
 });

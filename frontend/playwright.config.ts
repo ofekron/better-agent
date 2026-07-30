@@ -8,11 +8,16 @@ import { defineConfig, devices } from "@playwright/test";
 // leave headroom for the provider subprocesses each worker's backend spawns.
 export default defineConfig({
   testDir: "./tests/fullstack",
-  timeout: 180_000,
+  timeout: 240_000,
   expect: { timeout: 15_000 },
   fullyParallel: true,
-  workers: 4,
-  retries: 0,
+  workers: 3,
+  // This machine runs other concurrent agent sessions outside this suite's
+  // control, so a single flaky-looking failure can be real contention
+  // (backend health-check timeout) rather than a logic bug — one retry
+  // absorbs that without masking a genuinely deterministic failure (which
+  // will fail the retry too).
+  retries: 1,
   reporter: [["list"]],
   use: {
     trace: "retain-on-failure",

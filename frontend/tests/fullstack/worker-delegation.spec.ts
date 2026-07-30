@@ -7,7 +7,7 @@ import { createSessionWithPrompt } from "./harness/session";
 test("forks from an existing turn into a real child session", async ({ authedPage: page }) => {
   await createSessionWithPrompt(page, "Reply with exactly the single word: PARENT.");
   await expect(page.getByTestId("assistant-message")).toContainText("PARENT", {
-    timeout: 90_000,
+    timeout: 120_000,
   });
 
   await page.getByTestId("input-textarea").fill("Reply with exactly the single word: CHILD.");
@@ -19,6 +19,6 @@ test("forks from an existing turn into a real child session", async ({ authedPag
   const forkPane = page.getByTestId("fork-pane");
   await expect(forkPane).toBeVisible();
   await expect(forkPane.getByTestId("assistant-message")).toContainText("CHILD", {
-    timeout: 90_000,
+    timeout: 120_000,
   });
 });

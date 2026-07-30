@@ -1600,6 +1600,7 @@ function ProvidersList({
                   <button
                     key={item.id}
                     type="button"
+                    data-testid={`settings-nav-${item.id}`}
                     className={item.id === section ? "active" : ""}
                     aria-current={item.id === section ? "page" : undefined}
                     onClick={() => handleSectionSelect(item.id)}
@@ -1820,7 +1821,7 @@ function ProvidersSettingsSection({
             loginEnabled && p.mode === "subscription" && (p.kind === "claude" || p.kind === "codex");
           const loginErrorMessage = loginError?.id === p.id ? loginError.message : null;
           return (
-            <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
+            <div key={p.id} data-testid={`provider-row-${p.kind}`} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
               <div className="provider-row-main" onClick={() => onEdit(p)}>
                 <div className="provider-row-name">
                   {p.name}
@@ -2762,6 +2763,7 @@ function ProviderForm({
             {Object.entries(permissionOptions).map(([axis, allowed]) => (
               <Select
                 key={axis}
+                data-testid={`permission-axis-select-${axis}`}
                 className="permission-axis-select"
                 value={defaultPermission[axis] ?? allowed[0]}
                 onChange={(v) =>
@@ -2794,6 +2796,7 @@ function ProviderForm({
               <label key={key} className="context-strategy-row">
                 <span>{t(`setup.capability.${key}`)}</span>
                 <Select
+                  data-testid={`capability-override-select-${key}`}
                   value={capStates[key] || "inherit"}
                   onChange={(v) =>
                     setCapStates((prev) => ({ ...prev, [key]: v as CapState }))

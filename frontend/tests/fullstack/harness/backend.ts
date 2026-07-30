@@ -6,6 +6,7 @@ import path from "node:path";
 import { BACKEND_DIR, FRONTEND_DIST_DIR, REPO_ROOT } from "./paths";
 import { provisionHeadlessCredentials } from "./credentials";
 import { resolveVenvPython } from "./venv";
+import { buildBackendEnv, makeGroupKiller, waitUntilHealthyOrExit } from "./process-utils";
 
 export interface FullStackBackend {
   baseURL: string;
@@ -69,28 +70,6 @@ function freePort(): Promise<number> {
   });
 }
 
-async function waitUntilHealthyOrExit(
-  baseURL: string,
-  isExited: () => string | null,
-  timeoutMs: number,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const exitDescription = isExited();
-    if (exitDescription) {
-      throw new Error(`backend process exited before becoming healthy: ${exitDescription}`);
-    }
-    try {
-      const res = await fetch(`${baseURL}/api/auth/needs_setup`);
-      if (res.ok) return;
-    } catch {
-      // backend not accepting connections yet
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`backend did not become healthy within ${timeoutMs}ms at ${baseURL}`);
-}
-
 /**
  * Spawns a REAL Better Agent backend as a subprocess (uvicorn, no --reload,
  * matching run.sh's production topology) with:
@@ -130,22 +109,13 @@ export async function startFullStackBackend(
     throw err;
   }
 
-  const sdkDir = path.join(REPO_ROOT, "sdk");
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    // main.py imports better_agent_sdk, which lives outside the backend
-    // venv's site-packages (it's the repo's own sdk/ package, not a
-    // installed dependency).
-    PYTHONPATH: process.env.PYTHONPATH ? `${sdkDir}:${process.env.PYTHONPATH}` : sdkDir,
-    BETTER_AGENT_HOME: homeDir,
-    BETTER_CLAUDE_HOME: homeDir,
-    BETTER_AGENT_TEST_MODE: "1",
-    BETTER_AGENT_HEADLESS_AUTH: "1",
-    BETTER_AGENT_USERNAME: credentials.username,
-    BETTER_AGENT_PASSWORD_HASH_FILE: credentials.passwordHashFile,
-    BETTER_AGENT_SESSION_SECRET_FILE: credentials.sessionSecretFile,
-    BETTER_AGENT_BACKEND_PORT: String(port),
-  };
+  const env = buildBackendEnv({
+    homeDir,
+    port,
+    username: credentials.username,
+    passwordHashFile: credentials.passwordHashFile,
+    sessionSecretFile: credentials.sessionSecretFile,
+  });
 
   const install = spawnSync(
     python,
@@ -187,20 +157,25 @@ export async function startFullStackBackend(
 
   const baseURL = `http://127.0.0.1:${port}`;
 
-  function killGroup(signal: NodeJS.Signals): void {
-    try {
-      process.kill(-proc.pid!, signal);
-    } catch {
-      // group already gone, or this platform doesn't support negative-PID
-      // group kill (non-POSIX) — fall back to the direct child.
-      proc.kill(signal);
-    }
+  const killGroup = makeGroupKiller(proc);
+
+  // Real provider CLI turns are deliberately spawned with
+  // start_new_session=True (see backend/runner.py) — their own process
+  // group, detached from uvicorn's, specifically so an in-flight turn
+  // survives a backend crash/restart (the recovery invariant this repo's
+  // CLAUDE.md documents). That means killGroup() above can never reach
+  // them. homeDir is threaded into their argv (embedded in the
+  // --mcp-config JSON's env block for the ambient MCP servers), so
+  // pkill -f against it is the only way to reap them on teardown.
+  function killDescendantsByHomeDir(): void {
+    spawnSync("pkill", ["-9", "-f", homeDir]);
   }
 
   try {
-    await waitUntilHealthyOrExit(baseURL, () => exitDescription, 30_000);
+    await waitUntilHealthyOrExit(baseURL, () => exitDescription, 60_000);
   } catch (err) {
     killGroup("SIGKILL");
+    killDescendantsByHomeDir();
     removeHomeDir(homeDir);
     throw err;
   }
@@ -221,6 +196,7 @@ export async function startFullStackBackend(
         ),
       ]);
     }
+    killDescendantsByHomeDir();
     removeHomeDir(homeDir);
   }
 
