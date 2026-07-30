@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """E2e proof that ambient_native MCPs are actually served and callable.
 
-Two layers against ONE self-booted real backend in an isolated test home,
-with the real shipped `extensions/coordination` extension installed and
-granted globally:
+Three layers against ONE self-booted real backend in an isolated test home.
+Every shipped extension declaring an ambient_native MCP entrypoint is
+discovered from `extensions/*/better-agent-extension.json`, installed, and
+granted globally — a newly shipped ambient-eligible extension is covered
+automatically, with no test change.
 
-1. Ambient (session-less) serving — always runs, no LLM cost. Resolves the
-   launcher stub through the production `native_mcp_launcher_server_configs`
-   funnel with ambient inputs (empty app_session_id), spawns it as a real
-   MCP subprocess, and completes a real `tools/call lock_ops(op=list_owned)`
-   against the live backend. Unlike test_ambient_mcp_local_dispatch.py this
-   never skips for lack of a backend — it boots its own.
+1. Ambient (session-less) serving for ALL shipped eligibles — always runs,
+   no LLM cost. Each eligible must resolve through the production
+   `native_mcp_launcher_server_configs` funnel with ambient inputs (empty
+   app_session_id) and answer a real `initialize` + `tools/list` as a
+   spawned MCP subprocess. The coordination server additionally completes a
+   real `tools/call` lock_ops acquire+release round trip. Unlike
+   test_ambient_mcp_local_dispatch.py this never skips for lack of a
+   backend — it boots its own.
 
-2. Real agent turns — opt-in via RUN_LLM_TESTS=1 (cheap models only). For
+2. Core ambient servers (`capabilities`, `ui`) via
+   `core_ambient_mcp_launcher.py` — always runs. capabilities completes a
+   real `tools/call list_capabilities` against a real session; ui's ambient
+   tool list must stay narrowed to open_file_panel.
+
+3. Real agent turns — opt-in via RUN_LLM_TESTS=1 (cheap models only). For
    each installed provider CLI (claude / codex / agy) a real orchestrated
    turn is run through `prepare_and_start_run`; the model is instructed to
-   call `lock_ops` and the session render tree is asserted to contain the
-   successful mcp tool call. Providers whose CLI is absent are skipped.
+   call `lock_ops` and the acquired key is asserted in the coordination
+   lock store. Providers whose CLI is absent are skipped.
 
 Run with:
     cd backend && .venv/bin/python scripts/integration_test_ambient_mcp_agent_e2e.py
@@ -53,12 +62,14 @@ OK = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
 SKIP = "\033[93mSKIP\033[0m"
 
-EXTENSION_ID = "ofek-dev.coordination"
-SERVER_ID = "better-agent-coordination"
+COORDINATION_SERVER_ID = "better-agent-coordination"
 
-import _live_turn_harness  # noqa: E402
+CHEAP_MODELS = {
+    "claude": os.environ.get("BA_AMBIENT_E2E_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
+    "codex": os.environ.get("BA_AMBIENT_E2E_CODEX_MODEL", "gpt-5.4-mini"),
+    "agy": os.environ.get("BA_AMBIENT_E2E_AGY_MODEL", "Gemini 3.5 Flash (Low)"),
+}
 
-CHEAP_MODELS = _live_turn_harness.cheap_models("BA_AMBIENT_E2E")
 
 def _agent_prompt(lock_key: str) -> str:
     return (
@@ -90,24 +101,108 @@ def _wait_for_server(url: str, timeout: float = 30.0) -> None:
     raise RuntimeError(f"backend did not become ready: {last_error}")
 
 
-def _install_and_grant_coordination() -> None:
+# ---------------------------------------------------------------------------
+# Eligible discovery + install
+# ---------------------------------------------------------------------------
+
+def _shipped_ambient_entrypoints() -> list[dict]:
+    """Every mcp entrypoint declaring ambient_native across shipped extensions."""
+    found: list[dict] = []
+    for manifest_path in sorted((_REPO / "extensions").glob("*/better-agent-extension.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
+            if not item.get("ambient_native"):
+                continue
+            found.append({
+                "package_dir": manifest_path.parent,
+                "extension_id": manifest["id"],
+                "server_name": item["name"],
+                "server_id": item.get("replaces_builtin") or item["name"],
+            })
+    return found
+
+
+def _install_and_grant(eligibles: list[dict]) -> None:
     import extension_store
 
-    package_dir = _REPO / "extensions" / "coordination"
-    extension_store._install_from_package_dir(
-        package_dir=package_dir,
-        source={"kind": "path", "path": str(package_dir)},
-        force_enabled=True,
-        persist=True,
-    )
-    extension_store.grant_native_mcp_server(EXTENSION_ID, SERVER_ID, "global")
+    for entry in {e["extension_id"]: e for e in eligibles}.values():
+        extension_store._install_from_package_dir(
+            package_dir=entry["package_dir"],
+            source={"kind": "path", "path": str(entry["package_dir"])},
+            force_enabled=True,
+            persist=True,
+        )
+    for entry in eligibles:
+        extension_store.grant_native_mcp_server(
+            entry["extension_id"], entry["server_id"], "global"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Layer 1: ambient (session-less) serving via the production launcher funnel
+# MCP stdio session helper
 # ---------------------------------------------------------------------------
 
-def _ambient_launcher_item(backend_url: str) -> dict:
+class _McpSession:
+    def __init__(self, command: list[str], env: dict[str, str]) -> None:
+        self._proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True, bufsize=1,
+        )
+        self._next_id = 1
+        self._request({
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "ambient-e2e", "version": "0"},
+            },
+        })
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _send(self, msg: dict) -> None:
+        self._proc.stdin.write(json.dumps(msg) + "\n")
+        self._proc.stdin.flush()
+
+    def _request(self, msg: dict) -> dict | None:
+        self._send({"jsonrpc": "2.0", "id": self._next_id, **msg})
+        self._next_id += 1
+        ready, _, _ = select.select([self._proc.stdout], [], [], 30)
+        line = self._proc.stdout.readline() if ready else None
+        return json.loads(line) if line else None
+
+    def list_tools(self) -> list[str]:
+        response = self._request({"method": "tools/list", "params": {}})
+        tools = ((response or {}).get("result") or {}).get("tools") or []
+        return sorted(str(tool.get("name") or "") for tool in tools)
+
+    def call(self, name: str, arguments: dict) -> tuple[bool, str]:
+        """Returns (succeeded, content text of the first result item)."""
+        response = self._request({
+            "method": "tools/call", "params": {"name": name, "arguments": arguments},
+        })
+        result = (response or {}).get("result") or {}
+        text = str((result.get("content") or [{}])[0].get("text", ""))
+        return bool(response) and not result.get("isError"), text
+
+    def close(self) -> None:
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=5)
+        except Exception:
+            self._proc.kill()
+
+
+def _launcher_command_env(item: dict, backend_url: str) -> tuple[list[str], dict[str, str]]:
+    command = [item["command"], *item.get("args", [])]
+    env = {**os.environ, **(item.get("env") or {}), "BETTER_CLAUDE_BACKEND_URL": backend_url}
+    return command, env
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: ambient (session-less) serving of ALL shipped eligibles
+# ---------------------------------------------------------------------------
+
+def _ambient_launcher_configs(backend_url: str) -> dict:
     import extension_store
 
     inputs = {
@@ -119,96 +214,101 @@ def _ambient_launcher_item(backend_url: str) -> dict:
         "bare_config": False,
         "extension_mcp_launcher_context": True,
     }
-    configs = extension_store.native_mcp_launcher_server_configs(
+    return extension_store.native_mcp_launcher_server_configs(
         inputs, user_facing=False, bare=False
     )
-    for name, item in configs.items():
-        if "coordination" in name:
-            return item
-    raise AssertionError(
-        f"ambient resolution did not admit the coordination server; got {sorted(configs)}"
-    )
 
 
-def _mcp_rpc_calls(command: list[str], env: dict[str, str], calls: list[dict]) -> list[dict]:
-    """One MCP subprocess session: initialize, then run each tools/call in order.
-
-    Returns the parsed tool-result payload (the JSON body of content[0].text)
-    per call; a failed round trip yields {}.
-    """
-    proc = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, text=True, bufsize=1,
-    )
-    try:
-        def send(msg: dict) -> None:
-            proc.stdin.write(json.dumps(msg) + "\n")
-            proc.stdin.flush()
-
-        def request(msg: dict) -> dict | None:
-            send(msg)
-            ready, _, _ = select.select([proc.stdout], [], [], 30)
-            line = proc.stdout.readline() if ready else None
-            return json.loads(line) if line else None
-
-        request({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "ambient-e2e", "version": "0"},
-            },
-        })
-        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        payloads: list[dict] = []
-        for index, call in enumerate(calls):
-            response = request({
-                "jsonrpc": "2.0", "id": 2 + index, "method": "tools/call", "params": call,
-            })
-            result = (response or {}).get("result") or {}
-            text = str((result.get("content") or [{}])[0].get("text", ""))
-            try:
-                payloads.append(json.loads(text) if not result.get("isError") else {})
-            except ValueError:
-                payloads.append({})
-        return payloads
-    finally:
-        proc.terminate()
+def test_all_shipped_eligibles_serve_ambiently(backend_url: str, eligibles: list[dict]) -> bool:
+    configs = _ambient_launcher_configs(backend_url)
+    all_ok = True
+    for entry in eligibles:
+        server_id = entry["server_id"]
+        item = configs.get(server_id)
+        if item is None:
+            print(f"{FAIL} {server_id}: declared ambient_native but ambient resolution "
+                  f"did not admit it (got {sorted(configs)})")
+            all_ok = False
+            continue
+        command, env = _launcher_command_env(item, backend_url)
+        session = _McpSession(command, env)
         try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+            tools = session.list_tools()
+        finally:
+            session.close()
+        ok = bool(tools)
+        print(f"{OK if ok else FAIL} {server_id}: ambient launcher stub serves "
+              f"tools/list session-less (tools={tools})")
+        all_ok = all_ok and ok
+    return all_ok
 
 
-def test_ambient_sessionless_tools_call(backend_url: str) -> bool:
-    """Acquire + release a lock through the ambient launcher stub — key-based
-    lock ops are the coordination ops that legitimately work session-less
-    (owner-based ops like list_owned require a trusted runner identity)."""
-    item = _ambient_launcher_item(backend_url)
-    command = [item["command"], *item.get("args", [])]
-    env = {**os.environ, **(item.get("env") or {}), "BETTER_CLAUDE_BACKEND_URL": backend_url}
+def test_coordination_ambient_lock_roundtrip(backend_url: str) -> bool:
+    """Key-based lock ops are the coordination ops that legitimately work
+    session-less (owner-based ops like list_owned require a trusted runner
+    identity) — prove a real tools/call acquire+release round trip."""
+    item = _ambient_launcher_configs(backend_url).get(COORDINATION_SERVER_ID)
+    if item is None:
+        print(f"{FAIL} coordination server missing from ambient resolution")
+        return False
+    command, env = _launcher_command_env(item, backend_url)
     key = f"ambient-e2e-sessionless-{uuid.uuid4().hex[:8]}"
-    acquired = _mcp_rpc_calls(
-        command, env,
-        [{"name": "lock_ops", "arguments": {"key": key, "lease_seconds": 120}}],
-    )[0]
-    holder_token = str(acquired.get("holder_token") or "")
-    released: dict = {}
-    if holder_token:
-        released = _mcp_rpc_calls(
-            command, env,
-            [{"name": "lock_ops", "arguments": {
-                "key": key, "release": True, "holder_token": holder_token,
-            }}],
-        )[0]
+    session = _McpSession(command, env)
+    try:
+        acquired_ok, acquired_text = session.call(
+            "lock_ops", {"key": key, "lease_seconds": 120}
+        )
+        acquired = json.loads(acquired_text) if acquired_ok else {}
+        holder_token = str(acquired.get("holder_token") or "")
+        released: dict = {}
+        if holder_token:
+            released_ok, released_text = session.call(
+                "lock_ops", {"key": key, "release": True, "holder_token": holder_token}
+            )
+            released = json.loads(released_text) if released_ok else {}
+    finally:
+        session.close()
     ok = bool(acquired.get("success")) and bool(released.get("success"))
-    print(f"{OK if ok else FAIL} ambient session-less lock_ops acquire+release round trip "
-          f"succeeds via launcher stub (acquired={acquired} released={released})")
+    print(f"{OK if ok else FAIL} coordination: ambient lock_ops acquire+release round "
+          f"trip succeeds (acquired={acquired} released={released})")
     return ok
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: real agent turn per provider (opt-in, cheap models)
+# Layer 2: core ambient servers via core_ambient_mcp_launcher.py
+# ---------------------------------------------------------------------------
+
+def _core_ambient_session(server_name: str, backend_url: str) -> _McpSession:
+    command = [sys.executable, str(_BACKEND / "core_ambient_mcp_launcher.py"), server_name]
+    env = {**os.environ, "BETTER_CLAUDE_BACKEND_URL": backend_url}
+    return _McpSession(command, env)
+
+
+def test_core_capabilities_ambient_call(backend_url: str, session_id: str) -> bool:
+    session = _core_ambient_session("capabilities", backend_url)
+    try:
+        ok, text = session.call("list_capabilities", {"session_id": session_id})
+    finally:
+        session.close()
+    print(f"{OK if ok else FAIL} core capabilities: ambient list_capabilities tools/call "
+          f"succeeds (response={text[:200]})")
+    return ok
+
+
+def test_core_ui_ambient_tool_list_narrowed(backend_url: str) -> bool:
+    session = _core_ambient_session("ui", backend_url)
+    try:
+        tools = session.list_tools()
+    finally:
+        session.close()
+    ok = tools == ["open_file_panel"]
+    print(f"{OK if ok else FAIL} core ui: ambient tool list stays narrowed to "
+          f"open_file_panel (got {tools})")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: real agent turn per provider (opt-in, cheap models)
 # ---------------------------------------------------------------------------
 
 def _lock_key_held(lock_key: str) -> bool:
@@ -312,6 +412,7 @@ async def _main(home: Path) -> bool:
     import uvicorn
 
     import _test_installation
+    import config_store
     import main
     import session_store
 
@@ -323,7 +424,10 @@ async def _main(home: Path) -> bool:
     _test_installation.activate(
         home, provider=profile_provider, launcher_path=clis[profile_provider]
     )
-    _install_and_grant_coordination()
+    eligibles = _shipped_ambient_entrypoints()
+    if not eligibles:
+        raise RuntimeError("no shipped extension declares an ambient_native MCP entrypoint")
+    _install_and_grant(eligibles)
 
     port = _free_port()
     server = uvicorn.Server(
@@ -335,7 +439,26 @@ async def _main(home: Path) -> bool:
     try:
         backend_url = f"http://127.0.0.1:{port}"
         _wait_for_server(f"{backend_url}/api/auth/needs_setup")
-        results = [test_ambient_sessionless_tools_call(backend_url)]
+
+        provider_record = config_store.get_provider(
+            config_store.add_provider({"name": "ambient e2e core", "kind": profile_provider})["id"]
+        )
+        core_session = session_store.create_session(
+            name="ambient e2e core",
+            model="",
+            cwd="/tmp",
+            orchestration_mode="native",
+            source="cli",
+            provider_id=provider_record["id"],
+            browser_harness_enabled=False,
+        )
+
+        results = [
+            test_all_shipped_eligibles_serve_ambiently(backend_url, eligibles),
+            test_coordination_ambient_lock_roundtrip(backend_url),
+            test_core_capabilities_ambient_call(backend_url, core_session["id"]),
+            test_core_ui_ambient_tool_list_narrowed(backend_url),
+        ]
 
         from live_llm_test_guard import require_live_llm_tests
 
@@ -343,8 +466,6 @@ async def _main(home: Path) -> bool:
             from provider_agy import AgyProvider
             from provider_claude import ClaudeProvider
             from provider_codex import CodexProvider
-
-            import config_store
 
             provider_classes = {
                 "claude": ClaudeProvider,
