@@ -1,4 +1,4 @@
-import { isRetryableOfflineError } from "./offlineRequest";
+import { HttpStatusError, isRetryableOfflineError } from "./offlineRequest";
 import type { OfflineQueueEntry } from "../hooks/useOfflineQueue";
 
 // Policy helpers for draining the durable offline-action backlog on reconnect.
@@ -39,6 +39,24 @@ export type FlushErrorKind = "transient" | "permanent";
  * that later flips to ready recovers without losing the user's action. */
 export function classifyFlushError(error: unknown): FlushErrorKind {
   return isRetryableOfflineError(error) ? "transient" : "permanent";
+}
+
+/** POST /api/sessions rejection detail for a create whose runtime profile no
+ * longer exists — the profile was deleted while the action sat in the
+ * offline backlog. Matched verbatim against the backend's stable API string. */
+const DELETED_PROFILE_DETAIL = "runtime profile is unknown or deleted";
+
+/** True when a create failed because its runtime profile was deleted while
+ * the action was queued offline. The caller surfaces an i18n'd reason on the
+ * failed pending item (instead of the raw API detail) so the user can discard
+ * it or retry with a different profile — the entry itself must stay in the
+ * durable backlog either way, never silently dropped. */
+export function isDeletedProfileCreateError(error: unknown): boolean {
+  return (
+    error instanceof HttpStatusError &&
+    error.status === 400 &&
+    error.message.includes(DELETED_PROFILE_DETAIL)
+  );
 }
 
 /** A queued prompt targets a session. If that session's queued `create_session`

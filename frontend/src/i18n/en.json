@@ -1038,6 +1038,7 @@
   "app.createSessionTimeout": "Session creation timed out. Try again — a retry reuses the same session.",
   "app.offlineQueued_1": "Offline — 1 action queued",
   "app.offlineQueued_other": "Offline — {{count}} actions queued",
+  "app.offlineCreateProfileDeleted": "This queued session couldn't be created because its runtime profile was deleted. Create it again with another profile.",
   "app.offlinePersistFailed": "Storage is full — queued actions can't be saved offline and may be lost if you reload. Free up space or get back online soon.",
   "app.installationSetupRequired": "Installation setup is required — run the installer to enable providers and sessions.",
   "backendUnavailable.title": "Cannot reach Better Agent",

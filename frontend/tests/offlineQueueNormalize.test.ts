@@ -17,7 +17,7 @@ function createEntry(id: string): OfflineQueueEntry {
       permission: undefined,
       cwd: "/tmp",
       orchestration_mode: "native",
-      provider_id: "p",
+      runtime_profile_id: "rp-1",
       node_id: "primary",
       created_at: "t",
       updated_at: "t",
@@ -44,6 +44,33 @@ describe("normalizeQueueEntries", () => {
     const entry = out[0];
     if (entry.type !== "create_session") throw new Error("type changed");
     expect(entry.session.id).toBe(id);
+  });
+
+  it("projects the session snapshot to the profile-based wire shape", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const entry = createEntry(id);
+    if (entry.type !== "create_session") throw new Error("bad fixture");
+    // Stale identity fields from pre-profile persisted entries and local-only
+    // flags: the backend batch validator rejects unknown fields, so normalize
+    // must strip them while keeping the profile-based identity + overrides.
+    entry.session = {
+      ...entry.session,
+      provider_id: "p",
+      runner: "cli",
+      pinned: true,
+      offline_pending: true,
+      last_opened_at: "t",
+    } as unknown as typeof entry.session;
+    const out = normalizeQueueEntries([entry]);
+    const normalized = out[0];
+    if (normalized.type !== "create_session") throw new Error("type changed");
+    expect(normalized.session.runtime_profile_id).toBe("rp-1");
+    expect(normalized.session.model).toBe("m");
+    expect(normalized.session).not.toHaveProperty("provider_id");
+    expect(normalized.session).not.toHaveProperty("runner");
+    expect(normalized.session).not.toHaveProperty("pinned");
+    expect(normalized.session).not.toHaveProperty("offline_pending");
+    expect(normalized.session).not.toHaveProperty("last_opened_at");
   });
 
   it("leaves send_message entries untouched", () => {

@@ -999,6 +999,7 @@
   "app.fileEditOfflineQueue": "文件编辑会话无法离线排队。",
   "app.offlineQueued_1": "离线 — 1 个操作已排队",
   "app.offlineQueued_other": "离线 — {{count}} 个操作已排队",
+  "app.offlineCreateProfileDeleted": "无法创建此排队会话：其运行时配置已被删除。请使用其他配置重新创建。",
   "app.offlinePersistFailed": "存储空间已满 — 排队的操作无法离线保存，重新加载后可能丢失。请释放空间或尽快重新联网。",
   "app.installationSetupRequired": "需要完成安装设置 — 请运行安装程序以启用提供商和会话。",
   "backendUnavailable.title": "无法连接到 Better Agent",

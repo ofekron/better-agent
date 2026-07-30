@@ -995,6 +995,7 @@
   "app.fileEditOfflineQueue": "ファイル編集セッションはオフラインでキューできません。",
   "app.offlineQueued_1": "オフライン — 1件のアクションをキュー中",
   "app.offlineQueued_other": "オフライン — {{count}} 件のアクションをキュー中",
+  "app.offlineCreateProfileDeleted": "キュー中のセッションを作成できませんでした。ランタイムプロファイルが削除されています。別のプロファイルで作成し直してください。",
   "app.offlinePersistFailed": "ストレージが満杯です — キューしたアクションはオフラインで保存できず、再読み込みすると失われる可能性があります。空き容量を確保するか、早めにオンラインに戻ってください。",
   "app.installationSetupRequired": "インストールのセットアップが必要です — インストーラーを実行してプロバイダーとセッションを有効にしてください。",
   "backendUnavailable.title": "Better Agent に接続できません",

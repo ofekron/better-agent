@@ -995,6 +995,7 @@
   "app.fileEditOfflineQueue": "Bestandsbewerkingssessies kunnen niet offline in de wachtrij worden geplaatst.",
   "app.offlineQueued_1": "Offline — 1 actie in de wachtrij",
   "app.offlineQueued_other": "Offline — {{count}} acties in de wachtrij",
+  "app.offlineCreateProfileDeleted": "Deze wachtrijsessie kon niet worden aangemaakt omdat het runtimeprofiel is verwijderd. Maak de sessie opnieuw aan met een ander profiel.",
   "app.offlinePersistFailed": "Opslag is vol — acties in de wachtrij kunnen niet offline worden opgeslagen en gaan mogelijk verloren als je herlaadt. Maak ruimte vrij of ga binnenkort weer online.",
   "app.installationSetupRequired": "Installatie-instelling is vereist — voer het installatieprogramma uit om providers en sessies in te schakelen.",
   "backendUnavailable.title": "Kan Better Agent niet bereiken",

@@ -998,6 +998,7 @@
   "app.fileEditOfflineQueue": "Las sesiones de edición de archivos no se pueden encolar sin conexión.",
   "app.offlineQueued_1": "Sin conexión — 1 acción en cola",
   "app.offlineQueued_other": "Sin conexión — {{count}} acciones en cola",
+  "app.offlineCreateProfileDeleted": "No se pudo crear esta sesión en cola porque su perfil de ejecución fue eliminado. Créala de nuevo con otro perfil.",
   "app.offlinePersistFailed": "El almacenamiento está lleno — las acciones en cola no se pueden guardar sin conexión y podrían perderse si recargas. Libera espacio o vuelve a conectarte pronto.",
   "app.installationSetupRequired": "Se requiere completar la instalación — ejecuta el instalador para habilitar proveedores y sesiones.",
   "backendUnavailable.title": "No se puede acceder a Better Agent",

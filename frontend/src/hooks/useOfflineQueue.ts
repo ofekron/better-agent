@@ -35,32 +35,41 @@ export interface OfflinePromptEntry {
   deferUntilTargetReady?: boolean;
 }
 
+/** Exact wire shape of a queued create's session snapshot. Sessions are
+ * profile-based: identity travels as `runtime_profile_id` plus the
+ * model/effort overrides — never as raw provider/runner. The backend batch
+ * validator rejects unknown fields, so this list is the single source for
+ * both the compile-time type and the runtime projection below. */
+const CREATE_SESSION_PAYLOAD_KEYS = [
+  "id",
+  "name",
+  "model",
+  "reasoning_effort",
+  "permission",
+  "cwd",
+  "orchestration_mode",
+  "runtime_profile_id",
+  "node_id",
+  "created_at",
+  "updated_at",
+  "messages",
+  "capability_contexts",
+  "harness_profile_id",
+  "folder_id",
+  "draft_input",
+  "draft_images",
+] as const;
+
+export type OfflineCreateSessionPayload = Pick<
+  Session,
+  (typeof CREATE_SESSION_PAYLOAD_KEYS)[number]
+>;
+
 export interface OfflineCreateSessionEntry {
   type: "create_session";
   dispatchedBy?: string;
   clientId: string;
-  session: Pick<
-    Session,
-    | "id"
-    | "name"
-    | "model"
-    | "reasoning_effort"
-    | "runner"
-    | "permission"
-    | "cwd"
-    | "orchestration_mode"
-    | "provider_id"
-    | "runtime_profile_id"
-    | "node_id"
-    | "created_at"
-    | "updated_at"
-    | "messages"
-    | "capability_contexts"
-    | "harness_profile_id"
-    | "folder_id"
-    | "draft_input"
-    | "draft_images"
-  >;
+  session: OfflineCreateSessionPayload;
   prompt: string;
   images?: ImagePayload[];
   files?: FilePayload[];
@@ -86,16 +95,36 @@ function entryIdentity(entry: OfflineQueueEntry): string {
   return `${entrySessionId(entry)}\u0000${entry.clientId}`;
 }
 
-/** A `create_session` entry persisted by older code (or minted in a context
- * where UUID generation was broken) can carry a non-canonical `session.id`.
- * The backend rejects it as `client_session_id` (400), so the entry would
- * 400-loop forever on every reconnect flush. Re-mint a canonical UUID,
- * preserving the queued prompt/config — never drop the user's intent. */
+/** Project a queued create's session snapshot down to the exact wire shape.
+ * Callers hand over full `Session` objects; extra fields (local-only flags
+ * like `pinned`/`offline_pending`, stale raw provider/runner identity from
+ * entries persisted before sessions became profile-based) would be rejected
+ * by the backend batch validator, so they are stripped here — at the single
+ * funnel every entry passes through on enqueue AND on read. */
+function projectCreateSessionPayload(
+  session: OfflineCreateSessionPayload,
+): OfflineCreateSessionPayload {
+  const record = session as Record<string, unknown>;
+  const projected: Record<string, unknown> = {};
+  for (const key of CREATE_SESSION_PAYLOAD_KEYS) {
+    if (record[key] !== undefined) projected[key] = record[key];
+  }
+  return projected as unknown as OfflineCreateSessionPayload;
+}
+
+/** Normalize `create_session` entries to the durable wire contract:
+ * - Project the session snapshot to `CREATE_SESSION_PAYLOAD_KEYS`.
+ * - A non-canonical `session.id` (persisted by older code or minted where
+ *   UUID generation was broken) is rejected by the backend as
+ *   `client_session_id` (400), so the entry would 400-loop forever on every
+ *   reconnect flush. Re-mint a canonical UUID, preserving the queued
+ *   prompt/config — never drop the user's intent. */
 export function normalizeQueueEntries(entries: OfflineQueueEntry[]): OfflineQueueEntry[] {
   return entries.map((entry) => {
     if (entry.type !== "create_session") return entry;
-    if (CANONICAL_UUID.test(entry.session.id)) return entry;
-    return { ...entry, session: { ...entry.session, id: uuidv4() } };
+    const session = projectCreateSessionPayload(entry.session);
+    if (!CANONICAL_UUID.test(session.id)) session.id = uuidv4();
+    return { ...entry, session };
   });
 }
 

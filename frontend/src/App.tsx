@@ -156,7 +156,7 @@ import {
 } from "./utils/uiSelection";
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { planSessionCreateFailure } from "src/utils/sessionCreateFailure";
-import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
+import { isDeletedProfileCreateError, outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
@@ -2288,10 +2288,8 @@ function AppMain({
                 cwd: queued.cwd,
                 orchestrationMode: queued.orchestration_mode,
                 runtimeProfileId: queued.runtime_profile_id || undefined,
-                providerId: queued.provider_id,
                 nodeId: queued.node_id,
                 reasoningEffort: queued.reasoning_effort,
-                runner: queued.runner,
                 permission: queued.permission,
                 clientSessionId: queued.id,
                 harnessProfileId: queued.harness_profile_id || undefined,
@@ -2332,15 +2330,17 @@ function AppMain({
               // state (e.g. team-not-ready right after boot) recovers on a
               // later tick.
               failedCreateSessionIds.add(queued.id);
+              // A profile deleted while the action sat in the backlog gets a
+              // clear i18n'd reason; anything else surfaces the API detail.
+              const failureReason = isDeletedProfileCreateError(createErr)
+                ? t("app.offlineCreateProfileDeleted")
+                : createErr instanceof Error
+                  ? createErr.message
+                  : String(createErr);
               setPendingForSession(queued.id, (prev) =>
                 prev.map((m) =>
                   m.id === entry.clientId
-                    ? {
-                        ...m,
-                        status: "error" as const,
-                        errorText:
-                          createErr instanceof Error ? createErr.message : String(createErr),
-                      }
+                    ? { ...m, status: "error" as const, errorText: failureReason }
                     : m
                 ),
               );
@@ -2461,6 +2461,7 @@ function AppMain({
     routeSessionId,
     sendMessage,
     setPendingForSession,
+    t,
     wsTargetSessionId,
   ]);
 

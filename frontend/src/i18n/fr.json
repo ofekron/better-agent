@@ -999,6 +999,7 @@
   "app.fileEditOfflineQueue": "Les sessions d'édition de fichiers ne peuvent pas être mises en file hors ligne.",
   "app.offlineQueued_1": "Hors ligne — 1 action en file d'attente",
   "app.offlineQueued_other": "Hors ligne — {{count}} actions en file d'attente",
+  "app.offlineCreateProfileDeleted": "Impossible de créer cette session en attente : son profil d'exécution a été supprimé. Créez-la à nouveau avec un autre profil.",
   "app.offlinePersistFailed": "Le stockage est plein — les actions en file ne peuvent pas être enregistrées hors ligne et pourraient être perdues si vous rechargez. Libérez de l'espace ou reconnectez-vous bientôt.",
   "app.installationSetupRequired": "La configuration de l'installation est requise — exécutez l'installateur pour activer les fournisseurs et les sessions.",
   "backendUnavailable.title": "Better Agent est inaccessible",

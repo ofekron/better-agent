@@ -291,10 +291,9 @@ async def _admit_offline_batch_create(action: dict) -> dict:
         "model": queued.get("model"),
         "cwd": queued.get("cwd", ""),
         "orchestration_mode": queued.get("orchestration_mode"),
-        "provider_id": queued.get("provider_id"),
+        "runtime_profile_id": queued.get("runtime_profile_id"),
         "node_id": queued.get("node_id"),
         "reasoning_effort": queued.get("reasoning_effort"),
-        "runner": queued.get("runner"),
         "permission": queued.get("permission"),
         "client_session_id": session_id,
         "capability_contexts": (

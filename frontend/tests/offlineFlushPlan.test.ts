@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFlushError,
+  isDeletedProfileCreateError,
   outcomeForCreateError,
   shouldSkipDependentSend,
 } from "../src/utils/offlineFlush";
@@ -38,7 +39,7 @@ const create = (sessionId: string, clientId: string): OfflineCreateSessionEntry 
     permission: undefined,
     cwd: "/tmp/project",
     orchestration_mode: "native",
-    provider_id: "claude",
+    runtime_profile_id: "rp-1",
     node_id: "primary",
     created_at: "t",
     updated_at: "t",
@@ -76,6 +77,34 @@ describe("outcomeForCreateError", () => {
     const outcome = outcomeForCreateError(new HttpStatusError(400, "bad"), "sess-1");
     expect(outcome.stop).toBe(false);
     expect(outcome.permanentFailureSessionId).toBe("sess-1");
+  });
+});
+
+describe("isDeletedProfileCreateError", () => {
+  const DETAIL = "runtime profile is unknown or deleted";
+
+  it("matches the backend's 400 for a profile deleted while the action was queued", () => {
+    expect(isDeletedProfileCreateError(new HttpStatusError(400, DETAIL))).toBe(true);
+  });
+
+  it("does not match other 400s or other statuses", () => {
+    expect(isDeletedProfileCreateError(new HttpStatusError(400, "bad shape"))).toBe(false);
+    expect(isDeletedProfileCreateError(new HttpStatusError(404, DETAIL))).toBe(false);
+    expect(isDeletedProfileCreateError(new TypeError("Failed to fetch"))).toBe(false);
+    expect(isDeletedProfileCreateError(undefined)).toBe(false);
+  });
+
+  it("is a permanent failure: surfaced as failed, never dropped, never blocking", () => {
+    const err = new HttpStatusError(400, DETAIL);
+    // Permanent → the drain continues past it and the caller marks the
+    // optimistic message failed with the i18n'd reason...
+    const outcome = outcomeForCreateError(err, "sess-1");
+    expect(outcome.stop).toBe(false);
+    expect(outcome.permanentFailureSessionId).toBe("sess-1");
+    // ...while the durable backlog entry is KEPT (the flush loop never
+    // removes an entry on failure), so the user can still discard it or
+    // recreate the session with another profile.
+    expect(classifyFlushError(err)).toBe("permanent");
   });
 });
 

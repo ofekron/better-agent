@@ -70,7 +70,7 @@ def test_batch_preserves_order_and_acknowledges_duplicates(monkeypatch) -> None:
         accepted.add(identity)
         return {"duplicate": duplicate, "enqueued": not duplicate}
 
-    monkeypatch.setattr(main, "_admit_offline_batch_message", fake_send)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_message", fake_send)
     response = _client().post(
         "/api/offline-actions/batch",
         json={"actions": [
@@ -118,8 +118,8 @@ def test_batch_preserves_create_before_dependent_send(monkeypatch) -> None:
         calls.append(("send", action["sessionId"]))
         return {"duplicate": False, "enqueued": True}
 
-    monkeypatch.setattr(main, "_admit_offline_batch_create", fake_create)
-    monkeypatch.setattr(main, "_admit_offline_batch_message", fake_send)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_create", fake_create)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_message", fake_send)
     response = _client().post(
         "/api/offline-actions/batch",
         json={"actions": [
@@ -147,6 +147,69 @@ def test_batch_preserves_create_before_dependent_send(monkeypatch) -> None:
     assert [result["accepted"] for result in response.json()["results"]] == [True, True]
 
 
+def test_create_forwards_profile_and_rejects_raw_provider_identity(monkeypatch) -> None:
+    # Queued creates are profile-shaped: runtime_profile_id + model/effort
+    # overrides travel to session creation; raw provider/runner identity is
+    # not part of the wire contract and is rejected as an unknown field.
+    created: list[dict] = []
+
+    async def fake_create_session(body: dict) -> dict:
+        created.append(body)
+        return {"id": body["client_session_id"]}
+
+    monkeypatch.setattr(
+        offline_actions_api.session_detail_api, "create_session", fake_create_session
+    )
+    monkeypatch.setattr(
+        offline_actions_api.session_manager, "get_lite", lambda _sid: None
+    )
+    profile_session_id = str(uuid.uuid4())
+    response = _client().post(
+        "/api/offline-actions/batch",
+        json={"actions": [
+            {
+                "type": "create_session",
+                "clientId": f"offline-create-{profile_session_id}",
+                "session": {
+                    "id": profile_session_id,
+                    "name": "",
+                    "model": "override-model",
+                    "reasoning_effort": "high",
+                    "cwd": str(_TMP_HOME),
+                    "runtime_profile_id": "rp-1",
+                },
+                "prompt": "",
+            },
+            {
+                "type": "create_session",
+                "clientId": "offline-create-raw-identity",
+                "session": {
+                    "id": str(uuid.uuid4()),
+                    "name": "",
+                    "model": "test-model",
+                    "cwd": str(_TMP_HOME),
+                    "provider_id": "claude",
+                    "runner": "cli",
+                },
+                "prompt": "",
+            },
+        ]},
+    )
+
+    assert response.status_code == 200, response.text
+    profile_result, raw_result = response.json()["results"]
+    assert profile_result["accepted"] is True
+    assert raw_result["accepted"] is False
+    assert raw_result["status"] == 400
+    assert "provider_id" in raw_result["error"]
+    assert len(created) == 1
+    assert created[0]["runtime_profile_id"] == "rp-1"
+    assert created[0]["model"] == "override-model"
+    assert created[0]["reasoning_effort"] == "high"
+    assert "provider_id" not in created[0]
+    assert "runner" not in created[0]
+
+
 def test_batch_returns_partial_rejection_and_continues(monkeypatch) -> None:
     session_id = str(uuid.uuid4())
     valid_client_id = str(uuid.uuid4())
@@ -156,7 +219,7 @@ def test_batch_returns_partial_rejection_and_continues(monkeypatch) -> None:
         calls.append(action["clientId"])
         return {"duplicate": False, "enqueued": True}
 
-    monkeypatch.setattr(main, "_admit_offline_batch_message", fake_send)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_message", fake_send)
     response = _client().post(
         "/api/offline-actions/batch",
         json={"actions": [
@@ -190,7 +253,7 @@ def test_existing_non_uuid_client_ids_are_preserved(monkeypatch) -> None:
         calls.append(action["clientId"])
         return {"duplicate": False, "enqueued": True}
 
-    monkeypatch.setattr(main, "_admit_offline_batch_message", fake_send)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_message", fake_send)
     response = _client().post(
         "/api/offline-actions/batch",
         json={"actions": [
@@ -211,7 +274,7 @@ def test_malformed_create_attachment_rejects_before_creation(monkeypatch) -> Non
         created.append(body)
         return {"id": body["client_session_id"]}
 
-    monkeypatch.setattr(main, "create_session", fake_create_session)
+    monkeypatch.setattr(offline_actions_api.session_detail_api, "create_session", fake_create_session)
     response = _client().post(
         "/api/offline-actions/batch",
         json={"actions": [{
@@ -255,7 +318,7 @@ def test_batch_requires_authentication(monkeypatch) -> None:
         calls.append(action)
         return {"duplicate": False, "enqueued": True}
 
-    monkeypatch.setattr(main, "_admit_offline_batch_message", fake_send)
+    monkeypatch.setattr(offline_actions_api, "_admit_offline_batch_message", fake_send)
     response = _client(authenticated=False).post(
         "/api/offline-actions/batch",
         json={"actions": [
