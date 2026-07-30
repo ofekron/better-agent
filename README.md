@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick start</strong></a> ·
+  <a href="#install"><strong>Install</strong></a> ·
   <a href="#why-better-agent"><strong>Why Better Agent</strong></a> ·
   <a href="#how-it-works"><strong>How it works</strong></a> ·
   <a href="INSTALL.md"><strong>Install guide</strong></a> ·
@@ -28,7 +28,34 @@
 > [!NOTE]
 > Better Agent is source-available for non-commercial use. See the [license](#license).
 
-## Quick start
+## Install
+
+**macOS — one command:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.sh | bash
+```
+
+**Windows — one command (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.ps1 | iex
+```
+
+Either one-liner clones into `~/.better-agent/checkout` (`%USERPROFILE%\.better-agent\checkout` on Windows), provisions the toolchain, and runs setup. Re-running updates that checkout with `git pull --ff-only`.
+
+**macOS — Homebrew:**
+
+```bash
+brew tap ofekron/better-agent
+brew install better-agent
+better-agent-setup
+better-agent
+```
+
+`brew install` installs only the two launchers. `better-agent-setup` runs the same `bootstrap.sh` installer and finishes provisioning; `better-agent` starts the workspace afterwards.
+
+**From source (all platforms, including Linux):**
 
 ```bash
 git clone https://github.com/ofekron/better-agent
@@ -36,7 +63,9 @@ cd better-agent
 ./run.sh
 ```
 
-The first run initializes dependencies, builds the UI, and guides you through local authentication and network access. See [Getting started](#getting-started) for prerequisites and platform notes.
+The first run initializes dependencies, builds the UI, and guides you through local authentication and network access. Linux has no one-liner — the bootstrap script accepts macOS only — so clone and follow [INSTALL.md](INSTALL.md). `./run.sh --install-service` still installs the launchd/systemd user service for a checkout.
+
+Non-interactive installs, service mode, LAN, desktop, and mobile flows are all in [INSTALL.md](INSTALL.md). Signed source tarballs and checksums are on the [releases page](https://github.com/ofekron/better-agent/releases).
 
 ## Why Better Agent
 
@@ -91,7 +120,7 @@ See [EXTENSIONS.md](EXTENSIONS.md) to build private or marketplace extensions.
 
 **Supported hosts:** macOS, Linux, and Windows. Authentication uses the native OS credential store. The macOS desktop build is verified; a Windows installer is provided but has not yet been validated on a real Windows host.
 
-On a fresh machine, start with the platform installer:
+On a fresh machine, use the one-liner above. Inside an existing clone, run the platform installer directly:
 
 ```bash
 # macOS
