@@ -420,6 +420,7 @@ def open_pinned_runner_launch(
 class MaterializedSdkLaunch:
     executable_path: str
     files: tuple[FileIdentity, ...]
+    payload_files: tuple[FileIdentity, ...] = ()
 
     def attest(self) -> bool:
         return all(identity.attest() for identity in self.files)
@@ -467,7 +468,7 @@ def materialize_sdk_launch(
                 _unlink_if_present(executable)
                 raise
             files = (FileIdentity.capture(executable),)
-            return MaterializedSdkLaunch(str(executable), files)
+            return MaterializedSdkLaunch(str(executable), files, files)
         interpreter_is_trusted = _trusted_system_interpreter(
             handles[0], launch.components[0],
         )
@@ -554,4 +555,5 @@ def materialize_sdk_launch(
         _unlink_if_present(script)
         _unlink_interpreter_if_copied()
         raise
-    return MaterializedSdkLaunch(str(script), files)
+    payload_files = files if not interpreter_is_trusted else (files[-1],)
+    return MaterializedSdkLaunch(str(script), files, payload_files)
