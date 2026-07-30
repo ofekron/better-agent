@@ -65,7 +65,7 @@ def main() -> int:
             for s in sorted(
                 [folderized_old, unfiled_new],
                 key=lambda s: session_listing_api._session_filtered_sort_key(
-                    s, folder_view=True, search="x", content_scores={}
+                    s, folder_view=True, search="x", content_scores={}, sort_by="updated_at"
                 ),
                 reverse=True,
             )
