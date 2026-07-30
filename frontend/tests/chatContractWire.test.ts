@@ -37,6 +37,10 @@ const paginationScenario = fixture.paginationScenario;
 const firstPage = paginationScenario.firstPage as unknown as Session;
 const olderPage = paginationScenario.olderPage;
 
+const reconnectScenario = fixture.reconnectScenario;
+const reconnectBaselineReplay = reconnectScenario.baselineReplay as unknown as WSEvent;
+const reconnectDeltaReplay = reconnectScenario.deltaReplay as unknown as WSEvent;
+
 /** Layer a real captured JSON response on top of the harness's own
  * mocked fetch for one specific URL, falling through to the harness for
  * everything else. Needed where mockBackend's built-in route derives its
@@ -169,6 +173,34 @@ describe("chat panel wire contract (real captured REST + WS payloads)", () => {
 
     expect(h.raw.container.textContent).toContain("turn 0 question");
     expect(h.raw.container.textContent).toContain("turn 0 answer");
+    h.unmount();
+  });
+
+  it("real WS reconnect delta replay merges new content onto existing state instead of replacing it", async () => {
+    // `useSession.ts`'s getSinceSeq() sends the highest SEEN seq (not
+    // next_seq) on reconnect — the backend's delta query then returns
+    // ONLY the content added since, per session_detail_api's
+    // since_seq+1 semantics when there's no in-flight message. See the
+    // capture script's `_capture_reconnect_scenario` for the full
+    // contract this fixture proves.
+    const cold: Session = { ...restInitial, id: reconnectScenario.sessionId, messages: [] };
+    const h = await renderApp({ seed: { sessions: [cold] } });
+    await h.selectSession(reconnectScenario.sessionId);
+
+    h.emit(reconnectBaselineReplay);
+    await h.flush();
+    expect(h.raw.container.textContent).toContain("reconnect turn1 answer");
+
+    h.emit(reconnectDeltaReplay);
+    await waitFor(h, () =>
+      h.raw.container.textContent?.includes("reconnect turn2 answer") ?? false,
+    );
+
+    // Both turns present — the delta must MERGE onto existing state,
+    // not replace it.
+    expect(h.raw.container.textContent).toContain("reconnect turn1 answer");
+    expect(h.raw.container.textContent).toContain("reconnect turn2 question");
+    expect(h.raw.container.textContent).toContain("reconnect turn2 answer");
     h.unmount();
   });
 });

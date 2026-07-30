@@ -1,8 +1,8 @@
 {
-  "assistantMsgId": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+  "assistantMsgId": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
   "managerWorkerScenario": {
     "delegationId": "contract-delegation-1",
-    "ownerMsgId": "48511037-2f10-4842-90de-cf5168e30edb",
+    "ownerMsgId": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
     "restOwnerFullFetch": {
       "_content_dirty": false,
       "_events_seq_floor": 0,
@@ -22,11 +22,11 @@
       "agent_session_id": null,
       "content": "worker reply text",
       "events": [],
-      "id": "48511037-2f10-4842-90de-cf5168e30edb",
+      "id": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
       "isStreaming": false,
       "role": "assistant",
       "seq": 1,
-      "timestamp": "2026-07-30T06:26:25.680827",
+      "timestamp": "2026-07-30T12:51:07.885422",
       "workers": [
         {
           "_uid_idx": {
@@ -68,7 +68,7 @@
       ]
     },
     "restSnapshot": {
-      "_owner_incarnation": "810d52f755fb4032a05bc14e4fbe9b2e",
+      "_owner_incarnation": "a576f0124a9346c6bb713bd5b2489054",
       "_schema_version": 11,
       "_unread_migrated": true,
       "agent_session_id": null,
@@ -79,7 +79,7 @@
       "caller_agent_session_id": null,
       "capability_contexts": [],
       "continuation_chain": [],
-      "created_at": "2026-07-30T06:26:25.639189",
+      "created_at": "2026-07-30T12:51:07.863175",
       "current_tasks": [],
       "current_todos": [],
       "cwd": "/tmp",
@@ -88,7 +88,7 @@
       "draft_images": [],
       "draft_input": "",
       "draft_input_seq": 0,
-      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/a3fddb82-6874-469b-b475-767ab1e3040b.json",
+      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-ima6tufs/sessions/76397ce3-2ea0-4174-8280-a4c0602befaa.json",
       "fork_closed": false,
       "fork_point_seq": null,
       "forked_from_agent_sid": null,
@@ -96,7 +96,7 @@
       "forks": [],
       "harness_profile_id": "",
       "harness_profile_snapshot": null,
-      "id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+      "id": "76397ce3-2ea0-4174-8280-a4c0602befaa",
       "inline_tags": [],
       "kind": "user",
       "last_active_model": null,
@@ -107,7 +107,7 @@
       "last_active_supervisor_runner": null,
       "last_seen_event_uid": null,
       "max_seq_by_sid": {
-        "a3fddb82-6874-469b-b475-767ab1e3040b": 2
+        "76397ce3-2ea0-4174-8280-a4c0602befaa": 2
       },
       "messages": [
         {
@@ -138,14 +138,14 @@
           "event_ref": {
             "byte_end": 1095,
             "byte_start": 0,
-            "msg_id": "48511037-2f10-4842-90de-cf5168e30edb",
-            "root_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+            "msg_id": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
+            "root_id": "76397ce3-2ea0-4174-8280-a4c0602befaa",
             "seq_end": 3,
             "seq_start": 1,
-            "sid": "a3fddb82-6874-469b-b475-767ab1e3040b"
+            "sid": "76397ce3-2ea0-4174-8280-a4c0602befaa"
           },
           "events": [],
-          "id": "48511037-2f10-4842-90de-cf5168e30edb",
+          "id": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
           "isStreaming": false,
           "role": "assistant",
           "seq": 1,
@@ -176,7 +176,7 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:25.680827",
+          "timestamp": "2026-07-30T12:51:07.885422",
           "workers": [
             {
               "delegation_id": "contract-delegation-1",
@@ -244,15 +244,15 @@
       "topbar_pinned": false,
       "topbar_pinned_at": null,
       "turn_harness_profile_snapshot": null,
-      "updated_at": "2026-07-30T06:26:25.696906",
+      "updated_at": "2026-07-30T12:51:07.917150",
       "user_initiated": false,
       "worker_creation_policy": "ask",
       "worker_eligible": false
     },
-    "sessionId": "a3fddb82-6874-469b-b475-767ab1e3040b",
+    "sessionId": "76397ce3-2ea0-4174-8280-a4c0602befaa",
     "wsMessagesReplay": {
       "data": {
-        "app_session_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+        "app_session_id": "76397ce3-2ea0-4174-8280-a4c0602befaa",
         "messages": [
           {
             "content": "delegate this to a worker",
@@ -282,14 +282,14 @@
             "event_ref": {
               "byte_end": 1095,
               "byte_start": 0,
-              "msg_id": "48511037-2f10-4842-90de-cf5168e30edb",
-              "root_id": "a3fddb82-6874-469b-b475-767ab1e3040b",
+              "msg_id": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
+              "root_id": "76397ce3-2ea0-4174-8280-a4c0602befaa",
               "seq_end": 3,
               "seq_start": 1,
-              "sid": "a3fddb82-6874-469b-b475-767ab1e3040b"
+              "sid": "76397ce3-2ea0-4174-8280-a4c0602befaa"
             },
             "events": [],
-            "id": "48511037-2f10-4842-90de-cf5168e30edb",
+            "id": "4bdbf03e-e97c-4ba6-9b05-a6574b42d1f1",
             "isStreaming": false,
             "role": "assistant",
             "seq": 1,
@@ -320,7 +320,7 @@
                 }
               ]
             },
-            "timestamp": "2026-07-30T06:26:25.680827",
+            "timestamp": "2026-07-30T12:51:07.885422",
             "workers": [
               {
                 "delegation_id": "contract-delegation-1",
@@ -351,7 +351,7 @@
   },
   "paginationScenario": {
     "firstPage": {
-      "_owner_incarnation": "85b250d57e134e4bba383b1ebc0e2d17",
+      "_owner_incarnation": "94db9a7e030c49fd91052638e52a5df0",
       "_schema_version": 11,
       "_unread_migrated": true,
       "agent_session_id": null,
@@ -362,7 +362,7 @@
       "caller_agent_session_id": null,
       "capability_contexts": [],
       "continuation_chain": [],
-      "created_at": "2026-07-30T06:26:26.014821",
+      "created_at": "2026-07-30T12:51:08.099230",
       "current_tasks": [],
       "current_todos": [],
       "cwd": "/tmp",
@@ -371,7 +371,7 @@
       "draft_images": [],
       "draft_input": "",
       "draft_input_seq": 0,
-      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/d8122971-cb49-4458-bc58-2f621777c9c4.json",
+      "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-ima6tufs/sessions/356f0ac2-b752-41d0-b1d0-c286262328b7.json",
       "fork_closed": false,
       "fork_point_seq": null,
       "forked_from_agent_sid": null,
@@ -379,7 +379,7 @@
       "forks": [],
       "harness_profile_id": "",
       "harness_profile_snapshot": null,
-      "id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+      "id": "356f0ac2-b752-41d0-b1d0-c286262328b7",
       "inline_tags": [],
       "kind": "user",
       "last_active_model": null,
@@ -390,7 +390,7 @@
       "last_active_supervisor_runner": null,
       "last_seen_event_uid": null,
       "max_seq_by_sid": {
-        "d8122971-cb49-4458-bc58-2f621777c9c4": 4
+        "356f0ac2-b752-41d0-b1d0-c286262328b7": 4
       },
       "messages": [
         {
@@ -408,14 +408,14 @@
           "event_ref": {
             "byte_end": 1316,
             "byte_start": 987,
-            "msg_id": "917d92bc-be94-49cd-860c-37bf26b39e8f",
-            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "msg_id": "b760a68d-1a82-4bc6-a8a3-3bd794b29463",
+            "root_id": "356f0ac2-b752-41d0-b1d0-c286262328b7",
             "seq_end": 4,
             "seq_start": 4,
-            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+            "sid": "356f0ac2-b752-41d0-b1d0-c286262328b7"
           },
           "events": [],
-          "id": "917d92bc-be94-49cd-860c-37bf26b39e8f",
+          "id": "b760a68d-1a82-4bc6-a8a3-3bd794b29463",
           "isStreaming": false,
           "role": "assistant",
           "seq": 7,
@@ -440,7 +440,7 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:26.258991",
+          "timestamp": "2026-07-30T12:51:08.154196",
           "workers": []
         }
       ],
@@ -489,7 +489,7 @@
       "topbar_pinned": false,
       "topbar_pinned_at": null,
       "turn_harness_profile_snapshot": null,
-      "updated_at": "2026-07-30T06:26:26.265308",
+      "updated_at": "2026-07-30T12:51:08.154969",
       "user_initiated": false,
       "worker_creation_policy": "ask",
       "worker_eligible": false
@@ -516,14 +516,14 @@
           "event_ref": {
             "byte_end": 329,
             "byte_start": 0,
-            "msg_id": "7ef3eb50-53ff-4723-84ff-275d58eb2423",
-            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "msg_id": "3af328e0-a466-405e-9e2a-128de8b2f876",
+            "root_id": "356f0ac2-b752-41d0-b1d0-c286262328b7",
             "seq_end": 1,
             "seq_start": 1,
-            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+            "sid": "356f0ac2-b752-41d0-b1d0-c286262328b7"
           },
           "events": [],
-          "id": "7ef3eb50-53ff-4723-84ff-275d58eb2423",
+          "id": "3af328e0-a466-405e-9e2a-128de8b2f876",
           "isStreaming": false,
           "role": "assistant",
           "seq": 1,
@@ -548,7 +548,7 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:26.232313",
+          "timestamp": "2026-07-30T12:51:08.120447",
           "workers": []
         },
         {
@@ -570,14 +570,14 @@
           "event_ref": {
             "byte_end": 658,
             "byte_start": 329,
-            "msg_id": "188dad1b-deb7-454d-98d3-c490c7a57d92",
-            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "msg_id": "188bf07a-993d-4789-a128-6c6d4c509f25",
+            "root_id": "356f0ac2-b752-41d0-b1d0-c286262328b7",
             "seq_end": 2,
             "seq_start": 2,
-            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+            "sid": "356f0ac2-b752-41d0-b1d0-c286262328b7"
           },
           "events": [],
-          "id": "188dad1b-deb7-454d-98d3-c490c7a57d92",
+          "id": "188bf07a-993d-4789-a128-6c6d4c509f25",
           "isStreaming": false,
           "role": "assistant",
           "seq": 3,
@@ -602,7 +602,7 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:26.242927",
+          "timestamp": "2026-07-30T12:51:08.133904",
           "workers": []
         },
         {
@@ -624,14 +624,14 @@
           "event_ref": {
             "byte_end": 987,
             "byte_start": 658,
-            "msg_id": "f9817e7b-1f16-44a7-b28e-b9c0b0ab07ea",
-            "root_id": "d8122971-cb49-4458-bc58-2f621777c9c4",
+            "msg_id": "c98a5f10-0108-4724-af6e-456fa768ae2c",
+            "root_id": "356f0ac2-b752-41d0-b1d0-c286262328b7",
             "seq_end": 3,
             "seq_start": 3,
-            "sid": "d8122971-cb49-4458-bc58-2f621777c9c4"
+            "sid": "356f0ac2-b752-41d0-b1d0-c286262328b7"
           },
           "events": [],
-          "id": "f9817e7b-1f16-44a7-b28e-b9c0b0ab07ea",
+          "id": "c98a5f10-0108-4724-af6e-456fa768ae2c",
           "isStreaming": false,
           "role": "assistant",
           "seq": 5,
@@ -656,17 +656,142 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:26.248354",
+          "timestamp": "2026-07-30T12:51:08.144935",
           "workers": []
         }
       ],
       "oldest_loaded_seq": 0,
       "total_messages": 8
     },
-    "sessionId": "d8122971-cb49-4458-bc58-2f621777c9c4"
+    "sessionId": "356f0ac2-b752-41d0-b1d0-c286262328b7"
+  },
+  "reconnectScenario": {
+    "baselineReplay": {
+      "data": {
+        "app_session_id": "d2e1d2cf-1b30-4580-8113-203d9248cd76",
+        "messages": [
+          {
+            "content": "reconnect turn1 question",
+            "events": [],
+            "id": "ru1",
+            "role": "user",
+            "seq": 0
+          },
+          {
+            "_content_dirty": false,
+            "_events_seq_floor": 0,
+            "agent_session_id": null,
+            "content": "reconnect turn1 answer",
+            "event_ref": {
+              "byte_end": 350,
+              "byte_start": 0,
+              "msg_id": "27375959-641f-4617-b705-2f148c6df9a4",
+              "root_id": "d2e1d2cf-1b30-4580-8113-203d9248cd76",
+              "seq_end": 1,
+              "seq_start": 1,
+              "sid": "d2e1d2cf-1b30-4580-8113-203d9248cd76"
+            },
+            "events": [],
+            "id": "27375959-641f-4617-b705-2f148c6df9a4",
+            "isStreaming": false,
+            "role": "assistant",
+            "seq": 1,
+            "stub": {
+              "event_count": 1,
+              "last_events": [
+                {
+                  "data": {
+                    "message": {
+                      "content": [
+                        {
+                          "text": "reconnect turn1 answer",
+                          "type": "text"
+                        }
+                      ]
+                    },
+                    "type": "assistant",
+                    "uuid": "contract-reconnect-turn1-uuid"
+                  },
+                  "seq": 1,
+                  "type": "agent_message"
+                }
+              ]
+            },
+            "timestamp": "2026-07-30T12:51:08.206657",
+            "workers": []
+          }
+        ],
+        "next_seq": 2,
+        "since_seq": 0
+      },
+      "type": "messages_replay"
+    },
+    "deltaReplay": {
+      "data": {
+        "app_session_id": "d2e1d2cf-1b30-4580-8113-203d9248cd76",
+        "messages": [
+          {
+            "content": "reconnect turn2 question",
+            "events": [],
+            "id": "ru2",
+            "role": "user",
+            "seq": 2
+          },
+          {
+            "_content_dirty": false,
+            "_events_seq_floor": 1,
+            "agent_session_id": null,
+            "content": "reconnect turn2 answer",
+            "event_ref": {
+              "byte_end": 700,
+              "byte_start": 350,
+              "msg_id": "52cdd445-e6a5-4503-99ba-a8213ed34699",
+              "root_id": "d2e1d2cf-1b30-4580-8113-203d9248cd76",
+              "seq_end": 2,
+              "seq_start": 2,
+              "sid": "d2e1d2cf-1b30-4580-8113-203d9248cd76"
+            },
+            "events": [],
+            "id": "52cdd445-e6a5-4503-99ba-a8213ed34699",
+            "isStreaming": false,
+            "role": "assistant",
+            "seq": 3,
+            "stub": {
+              "event_count": 1,
+              "last_events": [
+                {
+                  "data": {
+                    "message": {
+                      "content": [
+                        {
+                          "text": "reconnect turn2 answer",
+                          "type": "text"
+                        }
+                      ]
+                    },
+                    "type": "assistant",
+                    "uuid": "contract-reconnect-turn2-uuid"
+                  },
+                  "seq": 2,
+                  "type": "agent_message"
+                }
+              ]
+            },
+            "timestamp": "2026-07-30T12:51:08.243398",
+            "workers": []
+          }
+        ],
+        "next_seq": 4,
+        "since_seq": 1
+      },
+      "type": "messages_replay"
+    },
+    "reconnectSinceSeq": 1,
+    "sessionId": "d2e1d2cf-1b30-4580-8113-203d9248cd76",
+    "turn2MsgId": "52cdd445-e6a5-4503-99ba-a8213ed34699"
   },
   "restAfterLivePush": {
-    "_owner_incarnation": "9892a5e431a64e0aadd1f677df4a551a",
+    "_owner_incarnation": "76964596f90144778fb4fa035810c060",
     "_schema_version": 11,
     "_unread_migrated": true,
     "agent_session_id": null,
@@ -677,7 +802,7 @@
     "caller_agent_session_id": null,
     "capability_contexts": [],
     "continuation_chain": [],
-    "created_at": "2026-07-30T06:26:04.218169",
+    "created_at": "2026-07-30T12:51:05.712671",
     "current_tasks": [],
     "current_todos": [],
     "cwd": "/tmp",
@@ -686,7 +811,7 @@
     "draft_images": [],
     "draft_input": "",
     "draft_input_seq": 0,
-    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/fb3ef789-c5c0-4bd3-93a2-712a1ae6611e.json",
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-ima6tufs/sessions/233de26f-cad5-4f6c-8604-ff33f68f5156.json",
     "fork_closed": false,
     "fork_point_seq": null,
     "forked_from_agent_sid": null,
@@ -694,7 +819,7 @@
     "forks": [],
     "harness_profile_id": "",
     "harness_profile_snapshot": null,
-    "id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+    "id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
     "inline_tags": [],
     "kind": "user",
     "last_active_model": null,
@@ -706,7 +831,7 @@
     "last_applied_seq": 1,
     "last_seen_event_uid": null,
     "max_seq_by_sid": {
-      "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e": 2
+      "233de26f-cad5-4f6c-8604-ff33f68f5156": 2
     },
     "messages": [
       {
@@ -724,14 +849,14 @@
         "event_ref": {
           "byte_end": 685,
           "byte_start": 0,
-          "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
-          "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+          "msg_id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
+          "root_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
           "seq_end": 2,
           "seq_start": 1,
-          "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+          "sid": "233de26f-cad5-4f6c-8604-ff33f68f5156"
         },
         "events": [],
-        "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+        "id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
         "isStreaming": false,
         "role": "assistant",
         "seq": 1,
@@ -772,7 +897,7 @@
             }
           ]
         },
-        "timestamp": "2026-07-30T06:26:12.881856",
+        "timestamp": "2026-07-30T12:51:06.315821",
         "workers": []
       }
     ],
@@ -821,13 +946,13 @@
     "topbar_pinned": false,
     "topbar_pinned_at": null,
     "turn_harness_profile_snapshot": null,
-    "updated_at": "2026-07-30T06:26:19.659799",
+    "updated_at": "2026-07-30T12:51:07.072760",
     "user_initiated": false,
     "worker_creation_policy": "ask",
     "worker_eligible": false
   },
   "restInitial": {
-    "_owner_incarnation": "9892a5e431a64e0aadd1f677df4a551a",
+    "_owner_incarnation": "76964596f90144778fb4fa035810c060",
     "_schema_version": 11,
     "_unread_migrated": true,
     "agent_session_id": null,
@@ -838,7 +963,7 @@
     "caller_agent_session_id": null,
     "capability_contexts": [],
     "continuation_chain": [],
-    "created_at": "2026-07-30T06:26:04.218169",
+    "created_at": "2026-07-30T12:51:05.712671",
     "current_tasks": [],
     "current_todos": [],
     "cwd": "/tmp",
@@ -847,7 +972,7 @@
     "draft_images": [],
     "draft_input": "",
     "draft_input_seq": 0,
-    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-tffjvk3g/sessions/fb3ef789-c5c0-4bd3-93a2-712a1ae6611e.json",
+    "file_path": "/private/var/folders/b1/m6wzy3tn33j71c19y6_7sdyc0000gn/T/bc-chat-contract-ima6tufs/sessions/233de26f-cad5-4f6c-8604-ff33f68f5156.json",
     "fork_closed": false,
     "fork_point_seq": null,
     "forked_from_agent_sid": null,
@@ -855,7 +980,7 @@
     "forks": [],
     "harness_profile_id": "",
     "harness_profile_snapshot": null,
-    "id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+    "id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
     "inline_tags": [],
     "kind": "user",
     "last_active_model": null,
@@ -866,7 +991,7 @@
     "last_active_supervisor_runner": null,
     "last_seen_event_uid": null,
     "max_seq_by_sid": {
-      "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e": 1
+      "233de26f-cad5-4f6c-8604-ff33f68f5156": 1
     },
     "messages": [
       {
@@ -884,14 +1009,14 @@
         "event_ref": {
           "byte_end": 339,
           "byte_start": 0,
-          "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
-          "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+          "msg_id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
+          "root_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
           "seq_end": 1,
           "seq_start": 1,
-          "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+          "sid": "233de26f-cad5-4f6c-8604-ff33f68f5156"
         },
         "events": [],
-        "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+        "id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
         "isStreaming": false,
         "role": "assistant",
         "seq": 1,
@@ -916,7 +1041,7 @@
             }
           ]
         },
-        "timestamp": "2026-07-30T06:26:12.881856",
+        "timestamp": "2026-07-30T12:51:06.315821",
         "workers": []
       }
     ],
@@ -965,7 +1090,7 @@
     "topbar_pinned": false,
     "topbar_pinned_at": null,
     "turn_harness_profile_snapshot": null,
-    "updated_at": "2026-07-30T06:26:19.659799",
+    "updated_at": "2026-07-30T12:51:07.072760",
     "user_initiated": false,
     "worker_creation_policy": "ask",
     "worker_eligible": false
@@ -982,11 +1107,11 @@
     "event_ref": {
       "byte_end": 685,
       "byte_start": 0,
-      "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
-      "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "msg_id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
+      "root_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
       "seq_end": 2,
       "seq_start": 1,
-      "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+      "sid": "233de26f-cad5-4f6c-8604-ff33f68f5156"
     },
     "events": [
       {
@@ -1020,17 +1145,17 @@
         "type": "agent_message"
       }
     ],
-    "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+    "id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
     "isStreaming": false,
     "role": "assistant",
     "seq": 1,
-    "timestamp": "2026-07-30T06:26:12.881856",
+    "timestamp": "2026-07-30T12:51:06.315821",
     "workers": []
   },
-  "sessionId": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+  "sessionId": "233de26f-cad5-4f6c-8604-ff33f68f5156",
   "wsLivePush": {
     "data": {
-      "app_session_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "app_session_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
       "message": {
         "content": [
           {
@@ -1039,7 +1164,7 @@
           }
         ]
       },
-      "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+      "msg_id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
       "type": "assistant",
       "uuid": "contract-live-uuid"
     },
@@ -1048,7 +1173,7 @@
   },
   "wsMessagesReplay": {
     "data": {
-      "app_session_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+      "app_session_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
       "messages": [
         {
           "content": "hello from contract test",
@@ -1065,14 +1190,14 @@
           "event_ref": {
             "byte_end": 339,
             "byte_start": 0,
-            "msg_id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
-            "root_id": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e",
+            "msg_id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
+            "root_id": "233de26f-cad5-4f6c-8604-ff33f68f5156",
             "seq_end": 1,
             "seq_start": 1,
-            "sid": "fb3ef789-c5c0-4bd3-93a2-712a1ae6611e"
+            "sid": "233de26f-cad5-4f6c-8604-ff33f68f5156"
           },
           "events": [],
-          "id": "8bbd64e0-fe48-43b0-9cef-ac502f608abf",
+          "id": "bf09cc8c-d119-4042-a2ad-734df4b9d79d",
           "isStreaming": false,
           "role": "assistant",
           "seq": 1,
@@ -1097,7 +1222,7 @@
               }
             ]
           },
-          "timestamp": "2026-07-30T06:26:12.881856",
+          "timestamp": "2026-07-30T12:51:06.315821",
           "workers": []
         }
       ],

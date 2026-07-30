@@ -22,6 +22,12 @@ Claude/Codex/AGY CLI subprocess, no provider network call. Captures:
      `workers` array shape on both REST and `messages_replay`.
   7. The real `GET .../messages?before_seq=N` pagination response for a
      session with several turn pairs.
+  8. A WS reconnect delta replay: subscribe cold to learn the `next_seq`
+     watermark, append more content, then reconnect with the SAME
+     `since_seq` the real frontend sends (`next_seq - 1` — see
+     `useSession.ts`'s `getSinceSeq`, which deliberately sends the
+     highest SEEN seq, not the next-expected one) and capture the real
+     delta-only replay.
 
 Writes all of the above to frontend/tests/__fixtures__/chat_contract_wire.json so
 `frontend/tests/chatContractWire.test.ts` can feed them into the existing
@@ -93,6 +99,11 @@ WORKER_UUID = "contract-worker-uuid"
 WORKER_TEXT = "worker reply text"
 
 PAGINATION_TURNS = 4
+
+RECONNECT_TURN1_UUID = "contract-reconnect-turn1-uuid"
+RECONNECT_TURN1_TEXT = "reconnect turn1 answer"
+RECONNECT_TURN2_UUID = "contract-reconnect-turn2-uuid"
+RECONNECT_TURN2_TEXT = "reconnect turn2 answer"
 
 
 def free_port() -> int:
@@ -312,6 +323,76 @@ def _seed_paginated_session() -> str:
     return sid
 
 
+def _seed_reconnect_base_session() -> str:
+    """Create a session with ONE completed turn. A second turn gets
+    appended AFTER the baseline `since_seq=0` subscribe (via
+    `_append_reconnect_turn2`) to produce a genuine `since_seq>0` delta
+    on reconnect. Returns session_id."""
+    from event_journal import event_journal_writer
+    from orchs import ApplyEventCtx, get_strategy
+    from session_manager import manager as session_manager
+
+    sess = session_manager.create(
+        name="chat-contract-reconnect-capture", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
+
+    user_msg = {"id": "ru1", "role": "user", "content": "reconnect turn1 question", "events": []}
+    session_manager.append_user_msg(sid, user_msg)
+    scaffold = strategy.build_assistant_scaffold()
+    scaffold_id = scaffold["id"]
+    session_manager.append_assistant_msg(sid, scaffold)
+    ev = {
+        "type": "agent_message",
+        "data": {
+            "uuid": RECONNECT_TURN1_UUID, "type": "assistant",
+            "message": {"content": [{"type": "text", "text": RECONNECT_TURN1_TEXT}]},
+        },
+    }
+    strategy.apply_event(
+        app_session_id=sid, msg=scaffold, event=ev, ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    event_journal_writer.barrier_sync(sid)
+    session_manager.set_streaming(sid, scaffold_id, False)
+    return sid
+
+
+def _append_reconnect_turn2(sid: str) -> str:
+    """Append a SECOND turn to an existing session — simulates content
+    that arrived while a client was disconnected. Returns the new
+    assistant msg id."""
+    from event_journal import event_journal_writer
+    from orchs import ApplyEventCtx, get_strategy
+    from session_manager import manager as session_manager
+
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
+
+    user_msg2 = {"id": "ru2", "role": "user", "content": "reconnect turn2 question", "events": []}
+    session_manager.append_user_msg(sid, user_msg2)
+    scaffold2 = strategy.build_assistant_scaffold()
+    scaffold2_id = scaffold2["id"]
+    session_manager.append_assistant_msg(sid, scaffold2)
+    ev2 = {
+        "type": "agent_message",
+        "data": {
+            "uuid": RECONNECT_TURN2_UUID, "type": "assistant",
+            "message": {"content": [{"type": "text", "text": RECONNECT_TURN2_TEXT}]},
+        },
+    }
+    strategy.apply_event(
+        app_session_id=sid, msg=scaffold2, event=ev2, ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    event_journal_writer.barrier_sync(sid)
+    session_manager.set_streaming(sid, scaffold2_id, False)
+    return scaffold2_id
+
+
 def _push_live_event(sid: str, msg_id: str) -> None:
     """Append a new event directly to events.jsonl via the same direct
     ingest primitive `apply_event`'s live path and worker-fanout call
@@ -497,6 +578,87 @@ async def _capture_pagination_scenario(
     }
 
 
+async def _capture_reconnect_scenario(
+    ws_url: str, cookie_header: str, failures: list[str],
+) -> dict | None:
+    """Warm-reconnect delta replay: a client that already applied
+    everything up to `next_seq` reconnects and must receive ONLY the
+    content that arrived since — not the whole history again.
+
+    The `since_seq` to send is NOT `next_seq` itself: `useSession.ts`'s
+    `getSinceSeq()` deliberately returns the highest SEEN seq (next_seq
+    - 1), because the backend's delta query
+    (`session_detail_api._build_messages_replay_delta`) treats
+    `since_seq` as "the last one you already have" and queries
+    `since_seq + 1` onward when there's no in-flight assistant message —
+    sending `next_seq` directly would over-skip by one and silently drop
+    the oldest new message. This is architecturally distinct from the
+    cold `since_seq=0` replay already covered by the native-mode
+    scenario."""
+    sid = _seed_reconnect_base_session()
+
+    async with websockets.connect(
+        ws_url, additional_headers={"Cookie": cookie_header},
+    ) as ws:
+        await ws.send(json.dumps({
+            "type": "subscribe", "app_session_id": sid, "since_seq": 0,
+        }))
+        baseline_replay = await _recv_until(
+            ws, lambda f: f.get("type") == "messages_replay", timeout=10.0,
+        )
+    if baseline_replay is None:
+        _fail("reconnect baseline replay", "no messages_replay frame received", failures)
+        return None
+    next_seq = (baseline_replay.get("data") or {}).get("next_seq")
+    if next_seq is None:
+        _fail("reconnect baseline replay", "no next_seq watermark in baseline replay", failures)
+        return None
+    reconnect_since_seq = next_seq - 1
+    _ok(
+        f"reconnect baseline (since_seq=0) replay yielded next_seq={next_seq} "
+        f"(client resends since_seq={reconnect_since_seq} on reconnect)"
+    )
+
+    # New content arrives while the client is "disconnected".
+    turn2_msg_id = _append_reconnect_turn2(sid)
+
+    async with websockets.connect(
+        ws_url, additional_headers={"Cookie": cookie_header},
+    ) as ws:
+        await ws.send(json.dumps({
+            "type": "subscribe", "app_session_id": sid, "since_seq": reconnect_since_seq,
+        }))
+        delta_replay = await _recv_until(
+            ws, lambda f: f.get("type") == "messages_replay", timeout=10.0,
+        )
+    if delta_replay is None:
+        _fail("reconnect delta replay", "no messages_replay frame received", failures)
+        return None
+    delta_ids = {
+        m.get("id") for m in (delta_replay.get("data") or {}).get("messages", [])
+    }
+    if "ru1" in delta_ids:
+        _fail(
+            "reconnect delta replay",
+            "delta replay unexpectedly re-sent turn1's user message (before the watermark)",
+            failures,
+        )
+    elif "ru2" not in delta_ids:
+        _fail("reconnect delta replay", "delta replay missing turn2's user message", failures)
+    elif turn2_msg_id not in delta_ids:
+        _fail("reconnect delta replay", "delta replay missing turn2's assistant message", failures)
+    else:
+        _ok("WS reconnect delta replay (real since_seq contract) contains exactly the new turn")
+
+    return {
+        "sessionId": sid,
+        "reconnectSinceSeq": reconnect_since_seq,
+        "baselineReplay": baseline_replay,
+        "turn2MsgId": turn2_msg_id,
+        "deltaReplay": delta_replay,
+    }
+
+
 def _boot(timeout: float = 180.0) -> tuple[BackgroundUvicorn, int, "_test_home.TestHome"]:
     """Boot uvicorn once, with a generous timeout.
 
@@ -641,6 +803,11 @@ async def amain() -> int:
             # 7. REST pagination (GET .../messages?before_seq=N).
             pagination_scenario = await _capture_pagination_scenario(client, failures)
 
+            # 8. WS reconnect delta replay (real since_seq contract).
+            reconnect_scenario = await _capture_reconnect_scenario(
+                ws_url, cookie_header, failures,
+            )
+
         if not failures:
             FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
             FIXTURE_PATH.write_text(
@@ -655,6 +822,7 @@ async def amain() -> int:
                         "restMessageEventsFull": message_events_full,
                         "managerWorkerScenario": manager_worker_scenario,
                         "paginationScenario": pagination_scenario,
+                        "reconnectScenario": reconnect_scenario,
                     },
                     indent=2,
                     sort_keys=True,
