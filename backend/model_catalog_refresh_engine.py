@@ -114,7 +114,7 @@ class CatalogRefreshEngine:
             dict(provider)
             for provider in providers
             if type(provider) is dict
-            and provider.get("kind") in {"codex", "fugu"}
+            and provider.get("kind") == "codex"
             and provider.get("suspended") is not True
         ]
 

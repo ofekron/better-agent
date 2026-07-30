@@ -162,17 +162,31 @@ def freeze_provider_contract(
     decoded = contract.value
     expected = (
         provider.get("id"),
-        provider.get("kind"),
         provider.get("generation"),
         provider.get("revision"),
     )
     actual = (
         decoded.get("provider_id"),
-        decoded.get("provider_kind"),
         decoded.get("provider_generation"),
         decoded.get("provider_revision"),
     )
-    if actual != expected:
+    decoded_kind = decoded.get("provider_kind")
+    # The contract carries the runtime FAMILY kind; the provider record
+    # keeps the configured kind. better_agent_runner delegation makes
+    # these legitimately differ (codex/fugu records → openai family), so
+    # the kind binding goes through the canonical record→family mapping.
+    from runtime_profile import family_binds_to_kind
+
+    if actual != expected or (
+        decoded_kind != provider.get("kind")
+        and not (
+            type(decoded_kind) is str
+            and family_binds_to_kind(
+                decoded_kind,
+                str(provider.get("kind") or ""),
+            )
+        )
+    ):
         raise ProviderExecutionContractError(
             "provider execution contract authority mismatch",
         )

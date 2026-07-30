@@ -195,6 +195,24 @@ def test_family_execution_kind_rejects_unrelated_family() -> None:
     raise AssertionError("expected unrelated family rejection")
 
 
+def test_freeze_binds_family_contract_to_delegating_record() -> None:
+    import json as _json
+
+    from provider_execution_contract import freeze_provider_contract
+
+    envelope = provider_family_contract(
+        {**PROVIDER, "kind": "openai"},
+        payload=_broker_payload(),
+    )
+    frozen = freeze_provider_contract({**PROVIDER, "kind": "codex"}, envelope)
+    assert _json.loads(frozen)["contract"]["provider_kind"] == "openai"
+    try:
+        freeze_provider_contract({**PROVIDER, "kind": "claude"}, envelope)
+    except ProviderExecutionContractError:
+        return
+    raise AssertionError("expected authority mismatch for unrelated record")
+
+
 def test_native_record_must_match_family() -> None:
     record = {**PROVIDER, "kind": "codex", "runner": "native"}
     try:
@@ -217,6 +235,7 @@ TESTS = (
     test_ba_runner_delegation_admits_runtime_family,
     test_family_execution_kind_reads_frozen_runner_input,
     test_family_execution_kind_rejects_unrelated_family,
+    test_freeze_binds_family_contract_to_delegating_record,
     test_native_record_must_match_family,
     test_matching_kind_passes_unchanged,
 )

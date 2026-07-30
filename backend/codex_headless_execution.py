@@ -87,6 +87,16 @@ def _authority_tuple(record: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def _require_model(provider: Mapping[str, Any], model: str) -> None:
+    if provider.get("kind") == "fugu":
+        # Fugu has no verifiable CLI catalog; the curated constant is
+        # its catalog authority (see codex_model_discovery).
+        from provider_fugu import FUGU_MODELS
+
+        if model not in FUGU_MODELS:
+            raise ValueError(
+                "headless model is not in the current provider catalog",
+            )
+        return
     import model_catalog_read_projection
 
     projection = model_catalog_read_projection.snapshot(

@@ -56,12 +56,9 @@ def family_execution_kind(artifact: ExecutionArtifact) -> str:
     if (
         type(family) is not str
         or family not in artifact_family_kinds()
-        or (
-            family != artifact.provider_kind
-            and family != runtime_profile.runtime_kind({
-                "kind": artifact.provider_kind,
-                "runner": "better_agent_runner",
-            })
+        or not runtime_profile.family_binds_to_kind(
+            family,
+            artifact.provider_kind,
         )
     ):
         raise ExecutionContractError("family execution kind is unavailable")

@@ -244,10 +244,13 @@ def provider_models_catalog(provider_id: str) -> dict:
 
 
 async def _refresh_provider_models(record: dict) -> dict | None:
-    if record.get("kind") in {"codex", "fugu"}:
+    if record.get("kind") == "codex":
         import model_catalog_refresh
 
         model_catalog_refresh.request_refresh_background(str(record["id"]))
+        return None
+    if record.get("kind") == "fugu":
+        # Curated catalog (FUGU_MODELS) — nothing external to refresh.
         return None
     import models as models_mod
 

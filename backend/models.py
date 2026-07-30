@@ -404,7 +404,8 @@ def _dedupe_preserve_order(seq: list[str]) -> list[str]:
 def _static_cold_start(provider: dict) -> list[str]:
     """Cold-start data when no cache exists. Subscription Claude →
     `_SUBSCRIPTION_ALIASES`; configured legacy providers → their bundled
-    seeds. Codex and Fugu are projected exclusively from D3."""
+    seeds (Fugu's curated `FUGU_MODELS` included). Codex is projected
+    exclusively from D3."""
     kind = _runtime_kind_for_provider(provider)
     if kind == "agy":
         from provider_agy import AGY_MODELS
@@ -430,6 +431,9 @@ def _static_cold_start(provider: dict) -> list[str]:
     if kind == "opencode":
         from provider_opencode import OPENCODE_MODELS
         return list(OPENCODE_MODELS)
+    if kind == "fugu":
+        from provider_fugu import FUGU_MODELS
+        return list(FUGU_MODELS)
     if kind == "claude" and provider.get("mode", "subscription") == "subscription":
         return list(_SUBSCRIPTION_ALIASES)
     return []
@@ -440,14 +444,17 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
     Returns `(active_models, retired_ids, has_cache, cache_record)`.
 
     Semantics:
-    - Codex/Fugu → D3 read projection only. Missing projection is warming;
+    - Codex → D3 read projection only. Missing projection is warming;
       stale projection remains available with `models_current=False`.
+    - Fugu → curated `FUGU_MODELS` catalog (the CLI catalog is
+      unverifiable — see codex_model_discovery), via the generic
+      cache/static path.
     - Cache present → use cache. For subscription Claude, also union
       with `_SUBSCRIPTION_ALIASES` so `[1m]` variants survive.
     - Cache absent → fall back to static cold-start data (subscription
       aliases or a curated per-kind list). api_key Claude returns [].
     """
-    if provider.get("kind") in {"codex", "fugu"}:
+    if provider.get("kind") == "codex":
         import model_catalog_read_projection
 
         projection = model_catalog_read_projection.snapshot(
@@ -521,7 +528,7 @@ def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     if default_model:
         known = set(models + custom + retired_ids)
         kind = _runtime_kind_for_provider(provider)
-        if kind not in {"codex", "fugu"} or (
+        if kind != "codex" or (
             _cached and default_model in known
         ):
             seed = [default_model]
@@ -624,7 +631,7 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
         state = "warming"
         last_refreshed_at = 0.0
 
-    authoritative = rec.get("kind") in {"codex", "fugu"}
+    authoritative = rec.get("kind") == "codex"
     if cached is not None and "catalog_status" in cached:
         status = cached["catalog_status"]
         models_current = bool(cached["models_current"])

@@ -50,8 +50,11 @@ def test_codex_catalog_ignores_legacy_schema2_cache_without_d3_projection():
     assert "gpt-5.6" not in models._models_for(provider)
 
 
-def test_codex_and_fugu_catalogs_read_d3_projection_only():
-    for kind in ("codex", "fugu"):
+def test_codex_catalog_reads_d3_projection_only():
+    # Fugu is NOT here: its CLI catalog is unverifiable, so it serves the
+    # curated FUGU_MODELS constant instead of a D3 projection (locked by
+    # test_fugu_curated_catalog.py).
+    for kind in ("codex",):
         provider = {
             "id": f"{kind}-projected",
             "generation": "generation",
@@ -83,5 +86,5 @@ def test_codex_and_fugu_catalogs_read_d3_projection_only():
 if __name__ == "__main__":
     test_fresh_codex_default_uses_cli_visible_model()
     test_codex_catalog_ignores_legacy_schema2_cache_without_d3_projection()
-    test_codex_and_fugu_catalogs_read_d3_projection_only()
+    test_codex_catalog_reads_d3_projection_only()
     print("ok")

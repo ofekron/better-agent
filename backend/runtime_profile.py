@@ -99,6 +99,15 @@ def runtime_kind(provider_record: dict, runner: object = None) -> str:
     return kind
 
 
+def family_binds_to_kind(family: str, kind: str) -> bool:
+    """Whether a runtime family is a legitimate execution family for a
+    configured record kind: its own family, or the family its
+    better_agent_runner choice delegates to."""
+    return family == kind or family == runtime_kind(
+        {"kind": kind, "runner": "better_agent_runner"},
+    )
+
+
 def provider_record_for_runner(provider_record: dict, runner: object = None) -> dict:
     selected = resolve_runner(provider_record, runner)
     record = copy.deepcopy(provider_record)

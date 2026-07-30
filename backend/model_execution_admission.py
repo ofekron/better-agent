@@ -8,7 +8,10 @@ from codex_execution_common import SHA256_RE, canonical_json
 
 
 MODEL_ADMISSION_SCHEMA = 1
-_CATALOG_KINDS = frozenset({"codex", "fugu"})
+# Fugu's CLI catalog is unverifiable (codex_model_discovery rejects it),
+# so its authority is the curated FUGU_MODELS constant enforced by
+# FuguProvider — only codex has a D3 catalog authority to admit against.
+_CATALOG_KINDS = frozenset({"codex"})
 _DESCRIPTOR_KEYS = frozenset({
     "schema",
     "provider_id",
