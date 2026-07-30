@@ -991,6 +991,144 @@ async def test_execution_subturn_state_matrix() -> None:
         identity=stopping_turn,
         outcome="stopped",
     )
+
+    recovery_turn = identity("execution-recovery")
+    recovery_execution = ExecutionTurnIdentity(
+        "execution-recovery",
+        "assistant-recovery",
+        "native",
+    )
+    await engine.begin_turn(
+        request_id="execution-recovery:begin",
+        session_id="execution-recovery",
+        identity=recovery_turn,
+    )
+    await engine.start_execution(
+        "execution-recovery",
+        execution_identity=recovery_execution,
+    )
+    await engine.bind_execution_run(
+        "execution-recovery",
+        execution_identity=recovery_execution,
+        provider_run_id="provider-recovery",
+    )
+    expected_recovery = engine.snapshot("execution-recovery")
+    resolver_calls = 0
+
+    async def resolve_failed() -> str:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return "failed"
+
+    stale_recovery = LifecycleSnapshot(
+        phase=expected_recovery.phase,
+        identity=expected_recovery.identity,
+        revision=expected_recovery.revision - 1,
+        execution=expected_recovery.execution,
+        execution_policy=expected_recovery.execution_policy,
+        completed_execution_count=expected_recovery.completed_execution_count,
+    )
+    assert not await engine.recover_missing_bound_execution(
+        "execution-recovery",
+        expected_snapshot=stale_recovery,
+        resolve_outcome=resolve_failed,
+    )
+    assert resolver_calls == 0
+    assert await engine.recover_missing_bound_execution(
+        "execution-recovery",
+        expected_snapshot=expected_recovery,
+        resolve_outcome=resolve_failed,
+    )
+    assert resolver_calls == 1
+    recovered = engine.snapshot("execution-recovery")
+    assert recovered.phase == "idle"
+    assert recovered.execution is None
+
+    async def seed_recovery_boundary(
+        suffix: str,
+        phase: str,
+    ) -> tuple[str, LifecycleSnapshot]:
+        session_id = f"execution-recovery-{suffix}"
+        turn = identity(session_id)
+        execution = ExecutionTurnIdentity(
+            f"execution-{suffix}",
+            f"assistant-{suffix}",
+            "native",
+        )
+        await engine.begin_turn(
+            request_id=f"{session_id}:begin",
+            session_id=session_id,
+            identity=turn,
+            execution_policy="sequential",
+        )
+        await engine.start_execution(
+            session_id,
+            execution_identity=execution,
+        )
+        if phase != "unbound":
+            await engine.bind_execution_run(
+                session_id,
+                execution_identity=execution,
+                provider_run_id=f"provider-{suffix}",
+            )
+        if phase in {"running", "detached", "detached_stopping", "stopping"}:
+            await engine.confirm_execution_started(
+                session_id,
+                execution_identity=execution,
+                provider_run_id=f"provider-{suffix}",
+            )
+        if phase in {"stopping", "detached_stopping"}:
+            await engine.request_active_stop(session_id)
+        if phase in {"detached", "detached_stopping"}:
+            await engine.detach_execution(
+                session_id,
+                execution_identity=execution,
+            )
+        if phase == "terminal":
+            await engine.finish_execution(
+                session_id,
+                execution_identity=execution,
+                provider_run_id=f"provider-{suffix}",
+                outcome="complete",
+            )
+        return session_id, engine.snapshot(session_id)
+
+    for boundary in (
+        "unbound",
+        "running",
+        "stopping",
+        "detached",
+        "detached_stopping",
+        "terminal",
+    ):
+        session_id, boundary_snapshot = await seed_recovery_boundary(
+            boundary,
+            boundary,
+        )
+        before_calls = resolver_calls
+        assert not await engine.recover_missing_bound_execution(
+            session_id,
+            expected_snapshot=boundary_snapshot,
+            resolve_outcome=resolve_failed,
+        )
+        assert resolver_calls == before_calls
+        assert engine.snapshot(session_id) == boundary_snapshot
+
+    none_session, none_snapshot = await seed_recovery_boundary(
+        "none",
+        "starting",
+    )
+
+    async def resolve_none() -> None:
+        return None
+
+    assert not await engine.recover_missing_bound_execution(
+        none_session,
+        expected_snapshot=none_snapshot,
+        resolve_outcome=resolve_none,
+    )
+    assert engine.snapshot(none_session) == none_snapshot
+
     await engine.close()
 
 

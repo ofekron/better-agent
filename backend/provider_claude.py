@@ -310,6 +310,8 @@ class RunState:
 # ============================================================================
 class ClaudeProvider(Provider):
     uses_managed_api_key = True
+    supports_bound_run_argv_authority = True
+    bound_run_process_name_prefixes = ("python", "node", "claude")
     """Spawns detached `runner.py` subprocesses (which use the
     `claude_agent_sdk` in-process), one-shot `claude -p` invocations,
     and `claude --rewind-files` invocations — all with env threaded

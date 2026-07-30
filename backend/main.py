@@ -1293,6 +1293,7 @@ from run_recovery import (
     integrate_recovered_runs,
     mark_recovered_runs_terminal,
     pre_provider_orphan_candidates,
+    reconcile_missing_bound_lifecycle_orphans,
     reconcile_pre_provider_orphans,
     shutdown_recovery_lease_executor,
 )
@@ -10002,6 +10003,12 @@ async def _recover_in_flight_task() -> None:
             ownership_documents=ownership_documents,
             ownership_safe=ownership_safe,
             candidates=candidates,
+        )
+        await reconcile_missing_bound_lifecycle_orphans(
+            coordinator,
+            recovered,
+            ownership_documents=ownership_documents,
+            ownership_safe=ownership_safe,
         )
         await reconcile_pre_provider_orphans(
             coordinator,

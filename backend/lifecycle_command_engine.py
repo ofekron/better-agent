@@ -490,6 +490,47 @@ class LifecycleCommandEngine:
                 ))
             return True
 
+    async def recover_missing_bound_execution(
+        self,
+        session_id: str,
+        *,
+        expected_snapshot: LifecycleSnapshot,
+        resolve_outcome: Callable[[], Awaitable[str | None]],
+    ) -> bool:
+        await self.bind()
+        async with self._lock_for(session_id):
+            snapshot = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            if snapshot != expected_snapshot:
+                return False
+            execution = snapshot.execution
+            if (
+                snapshot.phase != "starting"
+                or snapshot.identity is None
+                or execution is None
+                or execution.phase != "starting"
+                or execution.provider_run_id is None
+            ):
+                return False
+            outcome = await resolve_outcome()
+            if outcome is None:
+                return False
+            await self._execute_bound(LifecycleCommand(
+                request_id=(
+                    f"recovery:{snapshot.revision}:"
+                    "finish_execution_and_turn"
+                ),
+                session_id=session_id,
+                kind="finish_execution_and_turn",
+                identity=snapshot.identity,
+                execution_identity=execution.identity,
+                provider_run_id=execution.provider_run_id,
+                outcome=outcome,
+            ))
+            return True
+
     async def _transition_execution(
         self,
         session_id: str,

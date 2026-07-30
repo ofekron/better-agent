@@ -27,7 +27,12 @@ from execution_template import (
     restore_prepared_execution,
     validate_recovery_sessions,
 )
-from provider import RecoveredPopen, live_recovery_pid, start_prepared_run
+from provider import (
+    RecoveredPopen,
+    classify_bound_run_authority,
+    live_recovery_pid,
+    start_prepared_run,
+)
 from provider_watch_helpers import wait_for_complete_or_process_death
 from runs_dir import (
     iter_run_dirs,
@@ -78,6 +83,7 @@ _MARKER_INDEX_BATCH = threading.local()
 _TERMINAL_MARKER_QUANTUM_MAX = 16
 _TERMINAL_MARKER_QUANTUM_MS = 5.0
 _PRE_PROVIDER_ORPHAN_ERROR = "Backend stopped before the provider run started."
+_MISSING_BOUND_RUN_ERROR = "The provider run ended while the backend was offline."
 
 
 def _normalize_recovered_started_at(value: object) -> str:
@@ -1039,6 +1045,10 @@ def _started_turns_for_candidates(
 def _finalize_pre_provider_orphan(
     session_id: str,
     assistant_id: str,
+    *,
+    terminal_event: dict | None = None,
+    terminal_authoritative: bool = False,
+    fallback_error: str = _PRE_PROVIDER_ORPHAN_ERROR,
 ) -> str | None:
     """Project the durable terminal onto an empty pre-provider render tail."""
     import user_msg_lifecycle
@@ -1066,14 +1076,16 @@ def _finalize_pre_provider_orphan(
         if user_msg is None:
             return None
         lifecycle_message_id = str(user_msg.get("lifecycle_msg_id") or "")
-        terminal = (
-            user_msg_lifecycle.terminal_event_for_lifecycle(
-                session_id,
-                lifecycle_message_id,
+        terminal = terminal_event
+        if not terminal_authoritative:
+            terminal = (
+                user_msg_lifecycle.terminal_event_for_lifecycle(
+                    session_id,
+                    lifecycle_message_id,
+                )
+                if lifecycle_message_id
+                else None
             )
-            if lifecycle_message_id
-            else None
-        )
         if terminal is not None:
             outcome = _terminal_outcome(terminal)
             now = datetime.now(timezone.utc).isoformat()
@@ -1091,15 +1103,24 @@ def _finalize_pre_provider_orphan(
                     now,
                 )
                 return outcome
+        terminal_error = fallback_error
+        if terminal is not None:
+            terminal_error = str(
+                user_msg_lifecycle.terminal_result(
+                    str(terminal.get("type") or ""),
+                    terminal.get("data"),
+                ).get("error")
+                or fallback_error
+            )
         session_manager.mark_user_error(
             session_id,
             user_msg["id"],
-            _PRE_PROVIDER_ORPHAN_ERROR,
+            terminal_error,
         )
         session_manager.remove_assistant_msg(session_id, assistant_id)
         session_manager.set_unseen_error(
             session_id,
-            _PRE_PROVIDER_ORPHAN_ERROR,
+            terminal_error,
         )
     return "failed"
 
@@ -1379,6 +1400,343 @@ async def reconcile_unbound_lifecycle_orphans(
             "recovery: released %d abandoned unbound lifecycle execution(s)",
             reconciled,
         )
+    return reconciled
+
+
+def _bound_lifecycle_render_authority(
+    session_id: str,
+    assistant_id: str,
+    lifecycle_message_id: str,
+) -> tuple[str, str] | None:
+    try:
+        with session_manager.batch(session_id):
+            session = session_manager.get_ref(session_id)
+            if session is None:
+                return None
+            messages = session.get("messages") or []
+            if not messages:
+                return None
+            assistant = messages[-1]
+            if (
+                not isinstance(assistant, dict)
+                or assistant.get("id") != assistant_id
+                or assistant.get("role") != "assistant"
+                or not _is_empty_assistant_scaffold(assistant)
+            ):
+                return None
+            user_msg = _last_user_before(session, assistant)
+            if (
+                user_msg is None
+                or user_msg.get("lifecycle_msg_id") != lifecycle_message_id
+            ):
+                return None
+            run_meta = assistant.get("run_meta")
+            provider_id = (
+                str(run_meta.get("provider_id") or "")
+                if isinstance(run_meta, dict)
+                else ""
+            )
+            root_id = session_manager._root_id_for(session_id)
+            if not root_id or not provider_id:
+                return None
+            return root_id, provider_id
+    except KeyError:
+        return None
+
+
+def _bound_provider_start_is_durable(
+    root_id: str,
+    session_id: str,
+    assistant_id: str,
+    execution_turn_id: str,
+) -> float | None:
+    from event_journal import event_journal_reader
+
+    turn_started_at: float | None = None
+    provider_started = False
+    after_seq = 0
+    while True:
+        rows, _, has_more = event_journal_reader.read_events(
+            root_id,
+            after_seq=after_seq,
+            limit=10_000,
+        )
+        for row in rows:
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            context_id = str(
+                data.get("app_session_id")
+                or data.get("context_id")
+                or row.get("sid")
+                or root_id
+            )
+            message_id = str(data.get("message_id") or row.get("msg_id") or "")
+            if context_id != session_id or message_id != assistant_id:
+                continue
+            event_type = str(row.get("type") or "")
+            if (
+                event_type == "turn_started"
+                and str(data.get("turn_id") or row.get("run_id") or "")
+                == execution_turn_id
+            ):
+                timestamp = str(row.get("ts") or data.get("source_ts") or "")
+                try:
+                    turn_started_at = datetime.fromisoformat(timestamp).timestamp()
+                except ValueError:
+                    return None
+            elif (
+                event_type == "turn_start"
+                and row.get("source") == "provider_stream"
+                and str(row.get("run_id") or "") == execution_turn_id
+                and bool(data.get("manager_session_id"))
+            ):
+                provider_started = True
+        if not has_more or not rows:
+            break
+        after_seq = int(rows[-1].get("seq") or after_seq)
+    return turn_started_at if turn_started_at is not None and provider_started else None
+
+
+def _turn_manager_protects_bound_candidate(
+    coordinator,
+    session_id: str,
+    assistant_id: str,
+    provider_run_id: str,
+) -> bool:
+    for run in coordinator.turn_manager.get_run_state(session_id):
+        target_id = str(run.get("target_message_id") or "")
+        run_id = str(run.get("run_id") or "")
+        if not target_id or target_id == assistant_id or run_id == provider_run_id:
+            return True
+    return False
+
+
+async def _reconcile_terminal_empty_assistant_tails(
+    coordinator,
+    *,
+    recovered: list[dict],
+    ownership_documents: Optional[list[dict]],
+) -> int:
+    import user_msg_lifecycle
+
+    protected_targets, protected_sessions = _descriptor_ownership(recovered)
+    document_targets, document_sessions = _descriptor_ownership(
+        ownership_documents or [],
+    )
+    protected_targets.update(document_targets)
+    protected_sessions.update(document_sessions)
+    candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+    reconciled = 0
+    for _, session_id, assistant_id in candidates:
+        def turn_manager_protects() -> bool:
+            return any(
+                not (target_id := str(run.get("target_message_id") or ""))
+                or target_id == assistant_id
+                for run in coordinator.turn_manager.get_run_state(session_id)
+            )
+
+        if (
+            session_id in protected_sessions
+            or (session_id, assistant_id) in protected_targets
+            or turn_manager_protects()
+        ):
+            continue
+        with session_manager.batch(session_id):
+            session = session_manager.get_ref(session_id)
+            if session is None or not session.get("messages"):
+                continue
+            assistant = session["messages"][-1]
+            user_msg = _last_user_before(session, assistant)
+            lifecycle_message_id = (
+                str(user_msg.get("lifecycle_msg_id") or "")
+                if user_msg is not None
+                else ""
+            )
+        if not lifecycle_message_id:
+            continue
+        snapshot = coordinator.lifecycle_commands.snapshot(session_id)
+        if (
+            snapshot.phase != "idle"
+            and snapshot.identity is not None
+            and snapshot.identity.lifecycle_message_id == lifecycle_message_id
+        ):
+            continue
+        terminal = (
+            await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+                session_id,
+                lifecycle_message_id,
+            )
+        )
+        if terminal is None:
+            continue
+        snapshot = coordinator.lifecycle_commands.snapshot(session_id)
+        if (
+            turn_manager_protects()
+            or (
+                snapshot.phase != "idle"
+                and snapshot.identity is not None
+                and snapshot.identity.lifecycle_message_id
+                == lifecycle_message_id
+            )
+        ):
+            continue
+        outcome = await asyncio.to_thread(
+            _finalize_pre_provider_orphan,
+            session_id,
+            assistant_id,
+            terminal_event=terminal,
+            terminal_authoritative=True,
+            fallback_error=_MISSING_BOUND_RUN_ERROR,
+        )
+        if outcome is None:
+            continue
+        await coordinator.turn_manager.emit_run_state(session_id)
+        reconciled += 1
+    if reconciled:
+        logger.warning(
+            "recovery: finalized %d durable terminal render tail(s)",
+            reconciled,
+        )
+    return reconciled
+
+
+async def reconcile_missing_bound_lifecycle_orphans(
+    coordinator,
+    recovered: list[dict],
+    *,
+    ownership_documents: Optional[list[dict]] = None,
+    ownership_safe: bool = True,
+) -> int:
+    import user_msg_lifecycle
+
+    if not ownership_safe:
+        return 0
+    protected_targets, protected_sessions = _descriptor_ownership(recovered)
+    document_targets, document_sessions = _descriptor_ownership(
+        ownership_documents or [],
+    )
+    protected_targets.update(document_targets)
+    protected_sessions.update(document_sessions)
+    snapshots = await coordinator.lifecycle_commands.active_snapshots()
+    reconciled = 0
+    for session_id, snapshot in snapshots:
+        execution = snapshot.execution
+        identity = snapshot.identity
+        if (
+            snapshot.phase != "starting"
+            or identity is None
+            or execution is None
+            or execution.phase != "starting"
+            or execution.provider_run_id is None
+        ):
+            continue
+        assistant_id = execution.identity.assistant_message_id
+        provider_run_id = execution.provider_run_id
+        if (
+            session_id in protected_sessions
+            or (session_id, assistant_id) in protected_targets
+            or _turn_manager_protects_bound_candidate(
+                coordinator,
+                session_id,
+                assistant_id,
+                provider_run_id,
+            )
+        ):
+            continue
+        render_authority = await asyncio.to_thread(
+            _bound_lifecycle_render_authority,
+            session_id,
+            assistant_id,
+            identity.lifecycle_message_id,
+        )
+        if render_authority is None:
+            continue
+        root_id, provider_id = render_authority
+        started_after = await asyncio.to_thread(
+            _bound_provider_start_is_durable,
+            root_id,
+            session_id,
+            assistant_id,
+            execution.identity.execution_turn_id,
+        )
+        if started_after is None:
+            continue
+
+        async def resolve_outcome() -> str | None:
+            if _turn_manager_protects_bound_candidate(
+                coordinator,
+                session_id,
+                assistant_id,
+                provider_run_id,
+            ):
+                return None
+            current_render = await asyncio.to_thread(
+                _bound_lifecycle_render_authority,
+                session_id,
+                assistant_id,
+                identity.lifecycle_message_id,
+            )
+            if current_render != render_authority:
+                return None
+            authority = await asyncio.to_thread(
+                classify_bound_run_authority,
+                provider_id,
+                provider_run_id,
+                started_after=started_after,
+            )
+            if authority.state != "absent":
+                return None
+            terminal = (
+                await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+                    session_id,
+                    identity.lifecycle_message_id,
+                )
+            )
+            emitted_failure = terminal is None
+            if terminal is None:
+                await user_msg_lifecycle.emit_failed(
+                    app_session_id=session_id,
+                    lifecycle_msg_id=identity.lifecycle_message_id,
+                    reason="missing_bound_provider_run",
+                    error=_MISSING_BOUND_RUN_ERROR,
+                )
+                terminal = (
+                    await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+                        session_id,
+                        identity.lifecycle_message_id,
+                    )
+                )
+            if (
+                terminal is None
+                or (
+                    emitted_failure
+                    and terminal.get("type") != "user_message_failed"
+                )
+            ):
+                logger.error(
+                    "recovery: bound lifecycle terminal write was not durable "
+                    "session=%s run=%s",
+                    session_id,
+                    provider_run_id,
+                )
+                return None
+            return _terminal_outcome(terminal)
+
+        if await coordinator.lifecycle_commands.recover_missing_bound_execution(
+            session_id,
+            expected_snapshot=snapshot,
+            resolve_outcome=resolve_outcome,
+        ):
+            reconciled += 1
+    if reconciled:
+        logger.warning(
+            "recovery: released %d missing bound lifecycle execution(s)",
+            reconciled,
+        )
+    await _reconcile_terminal_empty_assistant_tails(
+        coordinator,
+        recovered=recovered,
+        ownership_documents=ownership_documents,
+    )
     return reconciled
 
 
