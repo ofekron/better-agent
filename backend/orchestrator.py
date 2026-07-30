@@ -52,7 +52,6 @@ from communication_modes import (
     append_ask_response_contract,
 )
 from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
-from runs_dir import pid_alive as _pid_alive
 from trace_collector import (
     TraceCollector,
     extract_provider_result_token_usage,
@@ -67,7 +66,7 @@ from sync_wait_graph import SyncWaitGraph
 # `self.user_prompt_manager.emit_user_msg_done/_failed`.
 
 import perf
-from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
+from bounded_async_executor import BoundedAsyncExecutor
 import time as _time
 import virtual_session_prompt_handlers
 from ws_serialization import dumps_ws_json
@@ -396,8 +395,6 @@ _default_coordinator: Optional["Coordinator"] = None
 # Side-effect-free with respect to the persisted user message — only
 # `cli_prompt` is mutated, so the visible history stays clean.
 
-# Open-todo cli_prompt reminder lives in `turn_helpers`.
-from turn_helpers import _append_todo_reminder
 
 
 def build_semantic_alter_prompt(previous_prompt: str, replacement_prompt: str) -> str:

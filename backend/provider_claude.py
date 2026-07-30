@@ -46,7 +46,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-from event_bus import BusEvent, bus
 from env_compat import get_env
 from provider import (
     Provider,
