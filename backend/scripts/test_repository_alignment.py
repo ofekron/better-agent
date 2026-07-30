@@ -48,6 +48,14 @@ def main() -> None:
         public_remote, public_source = _make_remote(root, "public")
         private_remote, private_source = _make_remote(root, "private")
         public_sha = _commit(public_source, "public.txt", "public")
+        (public_source / ".gitignore").write_text(
+            "/backend/.venv\n",
+            encoding="utf-8",
+        )
+        _git(public_source, "add", ".gitignore")
+        _git(public_source, "commit", "-m", "ignore runtime environment")
+        public_sha = _git(public_source, "rev-parse", "HEAD")
+        _git(public_source, "push", "origin", "HEAD:refs/heads/dev")
         private_sha = _commit(private_source, "private.txt", "private")
 
         node_root = root / "node"
@@ -57,6 +65,11 @@ def main() -> None:
             capture_output=True,
         )
         _git(node_root, "checkout", "--detach", public_sha)
+        (node_root / "backend" / ".venv").mkdir(parents=True)
+        assert not alignment.repository_snapshot(
+            alignment.PUBLIC_ROLE,
+            node_root,
+        )["dirty"]
 
         manifest = [
             {
