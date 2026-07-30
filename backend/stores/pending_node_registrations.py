@@ -263,23 +263,6 @@ def deny(node_id: str) -> tuple[Optional[dict], str]:
     return _transition_locked(node_id, "denied")
 
 
-def delete(node_id: str) -> bool:
-    try:
-        path = _path(node_id)
-    except ValueError:
-        return False
-    if not path.exists():
-        return False
-    try:
-        path.unlink()
-        with _cache_lock:
-            if _pending_by_node.pop(node_id, None) is not None:
-                _bump_version_locked()
-        return True
-    except OSError:
-        return False
-
-
 def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
     """Delete records older than `max_age_days` regardless of status.
     Called at backend startup. Returns count deleted."""
