@@ -57,6 +57,25 @@ def frozen_json(value: Any, *, label: str) -> str:
     return _json_encode(value, label=label)
 
 
+def frozen_manifest_json(manifest: Any, *, label: str) -> str:
+    """Freeze a capability manifest: heuristic secret scan on every field
+    except prewarm_status, which is identifier-keyed and validated
+    structurally instead (see validate_prewarm_status_shape)."""
+    if type(manifest) is not dict:
+        raise ExecutionContractError(f"{label} must be JSON-compatible")
+    if "prewarm_status" in manifest:
+        validate_prewarm_status_shape(manifest["prewarm_status"])
+    reject_secrets(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key != "prewarm_status"
+        },
+        label=label,
+    )
+    return _json_encode(manifest, label=label)
+
+
 def reject_secrets(
     value: Any,
     *,
@@ -322,6 +341,57 @@ def normalize_prewarm_status(
     return status
 
 
+def _prewarm_entry_is_invalid(value: Any) -> bool:
+    return (
+        type(value) is not dict
+        or set(value) != {"status", "error", "launch_mode"}
+        or value["status"] not in {
+            "failed",
+            "not_attempted",
+            "not_eligible",
+            "ready",
+        }
+        or value["launch_mode"] not in {"normal", "prewarmed"}
+        or (value["launch_mode"] == "prewarmed") != (value["status"] == "ready")
+        or (
+            value["status"] == "failed"
+            and (
+                type(value["error"]) is not str
+                or not value["error"]
+                or len(value["error"]) > 512
+                or _SECRET_ERROR_RE.search(value["error"])
+            )
+        )
+        or (
+            value["status"] != "failed"
+            and value["error"] is not None
+        )
+    )
+
+
+def validate_prewarm_status_shape(
+    raw_status: Any,
+) -> dict[str, dict[str, Any]]:
+    """Plan-independent structural validation of a prewarm-status map.
+
+    Keys are MCP server names (identifiers, not secret-bearing field
+    labels), so this whitelist — not the heuristic key scan in
+    reject_secrets — is the authority for prewarm-status secret safety.
+    """
+    if type(raw_status) is not dict:
+        raise ExecutionContractError("invalid frozen MCP prewarm status")
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, value in raw_status.items():
+        if (
+            type(name) is not str
+            or not _SAFE_NAME_RE.fullmatch(name)
+            or _prewarm_entry_is_invalid(value)
+        ):
+            raise ExecutionContractError("invalid frozen MCP prewarm status")
+        normalized[name] = dict(value)
+    return normalized
+
+
 def validate_frozen_prewarm_status(
     plan: Mapping[str, Any],
     raw_status: Mapping[str, Any],
@@ -329,46 +399,16 @@ def validate_frozen_prewarm_status(
     servers = {
         server["name"]: server for server in plan["mcp_servers"]
     }
-    if type(raw_status) is not dict or set(raw_status) != set(servers):
+    normalized = validate_prewarm_status_shape(raw_status)
+    if set(normalized) != set(servers):
         raise ExecutionContractError("invalid frozen MCP prewarm status")
-    normalized: dict[str, dict[str, Any]] = {}
-    for name, value in raw_status.items():
+    for name, value in normalized.items():
         policy = servers[name]["prewarm"]
         if (
-            type(value) is not dict
-            or set(value) != {"status", "error", "launch_mode"}
-            or value["status"] not in {
-                "failed",
-                "not_attempted",
-                "not_eligible",
-                "ready",
-            }
-            or value["launch_mode"] not in {"normal", "prewarmed"}
-            or (
-                value["status"] == "ready"
-                and (
-                    value["error"] is not None
-                    or value["launch_mode"] != "prewarmed"
-                    or not policy["eligible"]
-                )
-            )
-            or (
-                value["status"] != "ready"
-                and value["launch_mode"] != "normal"
-            )
+            (value["status"] == "ready" and not policy["eligible"])
             or (
                 value["status"] == "failed"
-                and (
-                    type(value["error"]) is not str
-                    or not value["error"]
-                    or len(value["error"]) > 512
-                    or _SECRET_ERROR_RE.search(value["error"])
-                    or policy["readiness_required"]
-                )
-            )
-            or (
-                value["status"] != "failed"
-                and value["error"] is not None
+                and policy["readiness_required"]
             )
             or (
                 value["status"] == "not_eligible"
@@ -383,7 +423,6 @@ def validate_frozen_prewarm_status(
             )
         ):
             raise ExecutionContractError("invalid frozen MCP prewarm status")
-        normalized[name] = dict(value)
     return normalized
 
 
@@ -458,10 +497,16 @@ class PreparedRuntimeCapabilities:
         prewarm_status: Mapping[str, Any],
     ) -> PreparedRuntimeCapabilities:
         return cls(
-            frozen_json(manifest, label="runtime capability manifest"),
+            frozen_manifest_json(
+                manifest,
+                label="runtime capability manifest",
+            ),
             bytes(payload),
             serialize_runtime_plan(plan),
-            frozen_json(prewarm_status, label="MCP prewarm status"),
+            _json_encode(
+                validate_prewarm_status_shape(prewarm_status),
+                label="MCP prewarm status",
+            ),
         )
 
 

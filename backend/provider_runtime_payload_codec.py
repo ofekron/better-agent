@@ -22,6 +22,7 @@ from provider_runtime_capability_model import (
     MAX_SKILLS,
     MAX_TOTAL_FILE_BYTES,
     frozen_json,
+    frozen_manifest_json,
     normalize_plan,
     semantic_fingerprint,
     validate_frozen_prewarm_status,
@@ -85,7 +86,7 @@ def validate_runtime_capability_manifest(
         or len(set(raw["tool_names"])) != len(raw["tool_names"])
     ):
         raise ExecutionContractError("invalid runtime capability manifest")
-    frozen_json(raw, label="runtime capability manifest")
+    frozen_manifest_json(raw, label="runtime capability manifest")
     return json.loads(json.dumps(raw, sort_keys=True))
 
 
