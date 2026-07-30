@@ -133,14 +133,43 @@ def test_provider_runner_round_trips():
     assert openai["runner"] == "better_agent_runner"
     assert openai["runner_options"] == ["better_agent_runner"]
 
-    claude = config_store.add_provider({
-        "name": "Claude",
+    claude_native = config_store.add_provider({
+        "name": "Claude native",
+        "kind": "claude",
+        "mode": "subscription",
+    })
+    assert claude_native["runner"] == "native"
+    assert claude_native["runner_options"] == ["native", "better_agent_runner"]
+
+    # kind=="claude" is the one kind whose better_agent_runner choice keeps
+    # the real "claude" runtime kind (it speaks Anthropic's own wire format
+    # via the subscription OAuth token) instead of collapsing to "openai"
+    # like every other kind's better_agent_runner choice does.
+    claude_ba = config_store.add_provider({
+        "name": "Claude BA",
         "kind": "claude",
         "mode": "subscription",
         "runner": "better_agent_runner",
     })
-    assert claude["runner"] == "native"
-    assert claude["runner_options"] == ["native"]
+    assert claude_ba["runner"] == "better_agent_runner"
+    assert claude_ba["runner_options"] == ["native", "better_agent_runner"]
+    import provider as _provider
+    assert _provider._provider_runtime_kind({"kind": "claude", "runner": "better_agent_runner"}) == "claude"
+
+    # api_key mode has no better_agent_runner backend for claude — the
+    # config layer rejects it outright (a dead-end configuration) rather
+    # than silently persisting or silently falling back.
+    try:
+        config_store.add_provider({
+            "name": "Claude API key BA",
+            "kind": "claude",
+            "mode": "api_key",
+            "api_key": "sk-test",
+            "runner": "better_agent_runner",
+        })
+        raise AssertionError("claude api_key + better_agent_runner should be rejected")
+    except ValueError:
+        pass
 
     fugu_native = config_store.add_provider({
         "name": "Fugu native",

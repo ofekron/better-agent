@@ -26,15 +26,23 @@ export function runnerForProvider(provider: Provider): Provider["runner"] {
     : provider.runner_options[0] ?? provider.runner;
 }
 
-/** Runtime kind a runner resolves to. `better_agent_runner` always runs the
- *  BA-owned OpenAI-compatible loop (runtime kind `openai`); the relative
- *  `native` runner runs the provider's own engine, so it resolves to the
- *  provider's kind. Mirrors backend `runtime_profile.runtime_kind`. */
+/** Runtime kind a runner resolves to. `better_agent_runner` runs the
+ *  BA-owned in-process loop for every kind EXCEPT claude: claude's
+ *  better_agent_runner backend still speaks Claude's own wire format
+ *  (Anthropic Messages API over the subscription OAuth token — see
+ *  runner_better_agent_claude_subscription.py), so it resolves to the
+ *  real `claude` runtime kind instead of collapsing into `openai` like
+ *  every other kind's better_agent_runner choice does. The relative
+ *  `native` runner always runs the provider's own engine, resolving to
+ *  the provider's kind. Mirrors backend `runtime_profile.runtime_kind`. */
 export function runtimeKindForRunner(
   providerKind: string,
   runner: Provider["runner"] | string | null | undefined,
 ): string {
-  return runner === "better_agent_runner" ? "openai" : (providerKind || "claude");
+  if (runner === "better_agent_runner" && providerKind !== "claude") {
+    return "openai";
+  }
+  return providerKind || "claude";
 }
 
 /** i18n key for a runtime kind's engine display name (e.g. "Claude",

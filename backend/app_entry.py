@@ -37,30 +37,31 @@ def _env_port(name: str, default: int) -> int:
     return port
 
 
-def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
-    """Classify argv. `--run-dir` present → ('runner', kind, run_dir);
-    `--serve-node` present → ('node_server', None, None). The desktop
-    shell launches the primary server with the explicit `--serve` flag,
-    but any non-runner
-    invocation starts the server."""
+def _dispatch(
+    argv: list[str],
+) -> tuple[str, Optional[str], Optional[Path], Optional[str]]:
+    """Classify argv. `--run-dir` present → ('runner', kind, run_dir,
+    runner_module); `--serve-node` present → ('node_server', None, None,
+    None). The desktop shell launches the primary server with the explicit
+    `--serve` flag, but any non-runner invocation starts the server."""
     if "--communicate-mcp" in argv:
-        return ("communicate_mcp", None, None)
+        return ("communicate_mcp", None, None, None)
     if "--capabilities-mcp" in argv:
-        return ("capabilities_mcp", None, None)
+        return ("capabilities_mcp", None, None, None)
     if "--open-file-panel-mcp" in argv:
-        return ("open_file_panel_mcp", None, None)
+        return ("open_file_panel_mcp", None, None, None)
     if "--open-config-panel-mcp" in argv:
-        return ("open_config_panel_mcp", None, None)
+        return ("open_config_panel_mcp", None, None, None)
     if "--extension-mcp" in argv:
-        return ("extension_mcp", None, None)
+        return ("extension_mcp", None, None, None)
     if "--operation-cli" in argv:
-        return ("operation_cli", None, None)
+        return ("operation_cli", None, None, None)
     if "--frozen-artifact-smoke" in argv:
-        return ("frozen_artifact_smoke", None, None)
+        return ("frozen_artifact_smoke", None, None, None)
     if "--serve-node" in argv:
-        return ("node_server", None, None)
+        return ("node_server", None, None, None)
     if "--run-dir" not in argv:
-        return ("server", None, None)
+        return ("server", None, None, None)
     import argparse
     import provider_manifest
     parser = argparse.ArgumentParser()
@@ -69,12 +70,20 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
         "--runner-kind", default="claude",
         choices=provider_manifest.runner_kinds(),
     )
+    # Explicit module override: "claude" maps to two different runner
+    # modules depending on the configured runner ("runner" native,
+    # "runner_better_agent" subscription-via-Better-Agent-runner) — the
+    # launcher (provider_runner_launch.py) already knows which one it
+    # captured and passes it through rather than making this entrypoint
+    # guess from --runner-kind alone. Absent (older/other callers) falls
+    # back to the per-kind manifest default.
+    parser.add_argument("--runner-module", default="")
     args = parser.parse_args(argv)
-    return ("runner", args.runner_kind, args.run_dir)
+    return ("runner", args.runner_kind, args.run_dir, args.runner_module)
 
 
 def _main(argv: Optional[list[str]] = None) -> int:
-    mode, kind, run_dir = _dispatch(sys.argv[1:] if argv is None else argv)
+    mode, kind, run_dir, runner_module = _dispatch(sys.argv[1:] if argv is None else argv)
     if mode in {"server", "node_server"}:
         from resilient_stdio import protect_standard_streams
         protect_standard_streams()
@@ -108,11 +117,13 @@ def _main(argv: Optional[list[str]] = None) -> int:
         # Runner module per kind comes from the canonical manifest; "runner"
         # is the default Claude runner. (codex + fugu both resolve to
         # runner_codex; the launcher binary differs, not the runner.)
+        # `runner_module` (from --runner-module) overrides that lookup when
+        # the launcher passed one explicitly — needed because "claude" maps
+        # to two different modules depending on the configured runner.
         import importlib
         import provider_manifest
-        runner_main = importlib.import_module(
-            provider_manifest.runner_module_for(kind)
-        ).main
+        module = runner_module or provider_manifest.runner_module_for(kind)
+        runner_main = importlib.import_module(module).main
         return runner_main(run_dir)
     import uvicorn
     from server_config import graceful_shutdown_timeout_seconds

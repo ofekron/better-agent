@@ -6,6 +6,7 @@ import {
   apiEnvCopyForKind,
   showConfigDirForKind,
 } from "../src/components/providerFormShape";
+import { runtimeKindForRunner } from "../src/components/modelPicker";
 
 const settingsPageSource = readFileSync("src/components/SettingsPage.tsx", "utf8");
 const modelPickerSource = readFileSync("src/components/modelPicker.ts", "utf8");
@@ -66,14 +67,49 @@ describe("showConfigDirForKind", () => {
 
 describe("Fugu runner selector wiring", () => {
   it("offers both native and Better Agent runners for fugu", () => {
-    expect(settingsPageSource).toContain('if (kind === "fugu") return ["native", "better_agent_runner"]');
+    expect(settingsPageSource).toContain(
+      'if (kind === "fugu" || kind === "codex" || kind === "claude") return ["native", "better_agent_runner"]',
+    );
   });
 
   it("routes Better Agent runner form behavior through openai semantics", () => {
-    expect(modelPickerSource).toContain('runner === "better_agent_runner" ? "openai"');
+    expect(modelPickerSource).toContain('if (runner === "better_agent_runner" && providerKind !== "claude")');
     expect(settingsPageSource).toContain('runtimeKindForRunner(kind, runner)');
     expect(settingsPageSource).toContain('setMode("api_key")');
     expect(settingsPageSource).toContain('SAKANA_FUGU_API_BASE_URL');
+  });
+});
+
+describe("Claude Better Agent runner (subscription-via-runner_better_agent)", () => {
+  it("stays on the real claude runtime kind for both runners", () => {
+    expect(runtimeKindForRunner("claude", "native")).toBe("claude");
+    expect(runtimeKindForRunner("claude", "better_agent_runner")).toBe("claude");
+    // regression: every other kind's better_agent_runner still collapses to openai
+    expect(runtimeKindForRunner("fugu", "better_agent_runner")).toBe("openai");
+    expect(runtimeKindForRunner("openai", "better_agent_runner")).toBe("openai");
+  });
+
+  it("hides api_key mode once better_agent_runner is selected", () => {
+    expect(modesForKind("claude")).toEqual(["subscription", "api_key"]);
+    expect(modesForKind("claude", "native")).toEqual(["subscription", "api_key"]);
+    expect(modesForKind("claude", "better_agent_runner")).toEqual(["subscription"]);
+  });
+
+  it("availableModesForForm locks to subscription for better_agent_runner even on edit", () => {
+    expect(
+      availableModesForForm("claude", "edit", "subscription", "better_agent_runner"),
+    ).toEqual(["subscription"]);
+    // a legacy record somehow persisted as api_key is still surfaced (no
+    // silent rewrite) rather than hidden outright.
+    expect(
+      availableModesForForm("claude", "edit", "api_key", "better_agent_runner"),
+    ).toEqual(["subscription", "api_key"]);
+  });
+
+  it("offers claude's better_agent_runner choice without granting it to unrelated kinds", () => {
+    expect(settingsPageSource).toContain('runnerOptionsForKind');
+    // codex (not in the fugu/claude/openai special cases) stays native-only.
+    expect(settingsPageSource).toContain('return kind === "openai" ? ["better_agent_runner"] : ["native"]');
   });
 });
 

@@ -190,6 +190,19 @@ const REASONING_EFFORT_OPTIONS: Record<string, ReasoningEffort[]> = {
   fugu: ["high", "xhigh"],
 };
 
+// Better Agent runner's own generic 5-level enum (backend
+// reasoning_effort.ALL_REASONING_EFFORTS) — used by claude's
+// better_agent_runner backend instead of the native CLI's 4-level
+// CLAUDE_REASONING_EFFORTS (see ClaudeBetterAgentRunnerProvider).
+const BA_RUNNER_REASONING_EFFORT_OPTIONS: ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+
 const HarnessSettingsEditor = lazyWithRetry(() =>
   import("./HarnessSettingsEditor").then((module) => ({
     default: module.HarnessSettingsEditor,
@@ -197,12 +210,21 @@ const HarnessSettingsEditor = lazyWithRetry(() =>
 );
 const SAKANA_FUGU_API_BASE_URL = "https://api.sakana.ai/v1";
 
-function effortOptionsForKind(kind: string): ReasoningEffort[] {
+function effortOptionsForKind(
+  kind: string,
+  runner?: string | null,
+): ReasoningEffort[] {
+  if (kind === "claude" && runner === "better_agent_runner") {
+    return BA_RUNNER_REASONING_EFFORT_OPTIONS;
+  }
   return REASONING_EFFORT_OPTIONS[kind] ?? [];
 }
 
-function defaultEffortForKind(kind: string): ReasoningEffort | "" {
-  const options = effortOptionsForKind(kind);
+function defaultEffortForKind(
+  kind: string,
+  runner?: string | null,
+): ReasoningEffort | "" {
+  const options = effortOptionsForKind(kind, runner);
   return options.includes("medium") ? "medium" : options[0] ?? "";
 }
 
@@ -2366,10 +2388,11 @@ function permissionOptionsForKind(kind: string): Record<string, string[]> {
 
 function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
   if (saved?.length) return saved;
-  // codex's better_agent_runner choice speaks OpenAI's Codex ResponsesAPI
-  // directly over the ChatGPT-subscription OAuth credential (subscription
-  // mode only — see the mode-forcing effect in ProviderForm below).
-  if (kind === "fugu" || kind === "codex") return ["native", "better_agent_runner"];
+  // codex's and claude's better_agent_runner choices speak their own
+  // subscription OAuth wire protocols (OpenAI's Codex ResponsesAPI and
+  // Anthropic's Messages API, respectively) — see the mode-forcing effect
+  // in ProviderForm below.
+  if (kind === "fugu" || kind === "codex" || kind === "claude") return ["native", "better_agent_runner"];
   return kind === "openai" ? ["better_agent_runner"] : ["native"];
 }
 
@@ -2424,7 +2447,7 @@ function ProviderForm({
     runnerOptions.includes(initialRunner) ? initialRunner : runnerOptions[0],
   );
   const runtimeKind = runtimeKindForRunner(kind, runner);
-  const modes = availableModesForForm(runtimeKind, mode, initial.mode);
+  const modes = availableModesForForm(runtimeKind, mode, initial.mode, runner);
   const [mode_, setMode] = useState<Provider["mode"]>(
     modes.includes(initial.mode) ? initial.mode : modes[0],
   );
@@ -2433,11 +2456,11 @@ function ProviderForm({
   const configDirCopy = configDirCopyForKind(kind);
   const apiEnvCopy = apiEnvCopyForKind(runtimeKind);
   const [defaultModel, setDefaultModel] = useState(initial.default_model);
-  const effortOptions = effortOptionsForKind(kind);
+  const effortOptions = effortOptionsForKind(kind, runner);
   const initialEffort =
     initial.default_reasoning_effort && effortOptions.includes(initial.default_reasoning_effort)
       ? initial.default_reasoning_effort
-      : defaultEffortForKind(kind);
+      : defaultEffortForKind(kind, runner);
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | "">(initialEffort);
   const permissionOptions = permissionOptionsForKind(runtimeKind);
@@ -2488,7 +2511,14 @@ function ProviderForm({
     if (kind === "codex" && runner === "better_agent_runner" && mode_ !== "subscription") {
       setMode("subscription");
     }
-  }, [baseUrl, defaultModel, kind, mode_, modes, runner]);
+    // Claude's better_agent_runner backend defaults/locks to subscription
+    // mode already via `modes` above (api_key is excluded from the
+    // options entirely, matching the backend's rejection) — no forced
+    // mode override needed here, unlike fugu's api_key force above.
+    if (defaultReasoningEffort && !effortOptions.includes(defaultReasoningEffort)) {
+      setDefaultReasoningEffort(defaultEffortForKind(kind, runner));
+    }
+  }, [baseUrl, defaultModel, defaultReasoningEffort, effortOptions, kind, mode_, modes, runner]);
 
   const updateRunner = (next: Provider["runner"]) => {
     setRunner(next);

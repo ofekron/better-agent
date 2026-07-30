@@ -561,15 +561,20 @@ OPENAI_SUBSCRIPTION_UNSUPPORTED = (
 
 
 def _runtime_kind_for_provider(provider: dict) -> str:
-    if str(provider.get("runner") or "").strip() == "better_agent_runner":
-        return "openai"
-    return provider.get("kind", "claude")
+    return _runtime_kind_for_config(provider.get("kind", "claude"), provider.get("runner"))
 
 
 def _runtime_kind_for_config(kind: str, runner: object) -> str:
-    if str(runner or "").strip() == "better_agent_runner":
-        return "openai"
-    return kind
+    if str(runner or "").strip() != "better_agent_runner":
+        return kind
+    # Claude's better_agent_runner backend speaks Claude's own wire format
+    # (Anthropic Messages API over the subscription OAuth token), so it is
+    # a real, fully-supported Claude runtime — unlike every other kind's
+    # better_agent_runner choice, which collapses to the generic OpenAI
+    # Chat-Completions runtime.
+    if kind == "claude":
+        return kind
+    return "openai"
 
 
 def _provider_is_suspended(provider: dict | None) -> bool:
@@ -591,6 +596,13 @@ def assert_provider_not_suspended(provider_id: str | None, *, action: str = "sta
         raise RuntimeError(f"provider {provider_id} is suspended; cannot {action}")
 
 
+CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION = (
+    "Claude's Better Agent runner speaks the subscription OAuth wire "
+    "format only; there is no api_key backend for it. Use the native "
+    "runner for api_key mode, or switch to subscription mode."
+)
+
+
 def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
     # A subscription-mode provider whose kind owns a native OAuth protocol
     # (currently just codex — see runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS)
@@ -606,6 +618,12 @@ def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "
     runtime_kind = _runtime_kind_for_config(kind, runner)
     if runtime_kind == "openai" and mode == "subscription":
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
+    if (
+        kind == "claude"
+        and str(runner or "").strip() == "better_agent_runner"
+        and mode != "subscription"
+    ):
+        raise ValueError(CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION)
 
 
 def _runner_choices_for_kind(kind: str) -> list[str]:

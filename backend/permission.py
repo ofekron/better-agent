@@ -137,7 +137,14 @@ def resolve_for_run(
         except Exception:
             record = None
     kind = (record or {}).get("kind") or fallback_kind
-    if isinstance(record, dict) and str(record.get("runner") or "").strip() == "better_agent_runner":
+    if (
+        isinstance(record, dict)
+        and str(record.get("runner") or "").strip() == "better_agent_runner"
+        and kind != "claude"
+    ):
+        # Claude's better_agent_runner backend speaks Claude's own wire
+        # format, so its permission defaults should match native Claude,
+        # not the generic OpenAI collapse used by every other kind.
         kind = "openai"
     return resolve_permission(
         kind,

@@ -257,6 +257,8 @@ def _validate_runner(value: RunnerLaunch) -> None:
                 argv[2] if len(argv) >= 3 else "",
                 "--runner-kind",
                 value.runner_kind,
+                "--runner-module",
+                value.runner_module,
             )
         )
         if (
@@ -309,7 +311,7 @@ def _validate_runner(value: RunnerLaunch) -> None:
         )
     ):
         raise ExecutionContractError("incoherent runner launch")
-    if value.runner_kind == "claude":
+    if value.runner_kind == "claude" and value.runner_module == "runner":
         expected = (
             value.launch.components[0].resolved_path,
             "-I",
@@ -341,6 +343,7 @@ def _validate_runner(value: RunnerLaunch) -> None:
         or not _is_absolute_path(argv[run_dir_index])
         or (
             value.runner_kind == "claude"
+            and value.runner_module == "runner"
             and (
                 not _is_absolute_path(argv[8])
                 or not _is_absolute_path(argv[10])
@@ -406,7 +409,12 @@ def _capture_runner_launch(
             str(run_path.absolute()),
         ]
         if runner_module != "runner":
-            argv.extend(("--runner-kind", runner_kind))
+            # `--runner-module` is passed explicitly (not re-derived from
+            # `--runner-kind` alone) because "claude" now maps to two
+            # different modules depending on the configured runner
+            # ("runner" native, "runner_better_agent" subscription-via-
+            # Better-Agent-runner) — app_entry.py must not guess.
+            argv.extend(("--runner-kind", runner_kind, "--runner-module", runner_module))
         components = (executable,)
         indexes = (0,)
         mode = "runner-frozen"
@@ -414,7 +422,7 @@ def _capture_runner_launch(
         entry = FileIdentity.capture(runner_entry)
         development_runtime = _development_runtime(executable)
         frozen_bundle = None
-    if not frozen and runner_kind == "claude":
+    if not frozen and runner_kind == "claude" and runner_module == "runner":
         site_packages_root = Path(
             sysconfig.get_path("purelib"),
         ).resolve(strict=True)
@@ -489,7 +497,7 @@ def _retarget_runner_launch(
         2
         if runner.frozen
         else 4
-        if runner.runner_kind == "claude"
+        if runner.runner_kind == "claude" and runner.runner_module == "runner"
         else 3
     )
     argv = list(runner.launch.argv)

@@ -1259,7 +1259,22 @@ def _recovery_family(desc: dict | None) -> str:
     """Recovery replay reader family ("claude"/"codex"/"session_events") for
     a run,
     from the canonical manifest. Unknown kinds fall back to the claude
-    reader, matching the historical else-branch."""
+    reader, matching the historical else-branch.
+
+    Runner-aware ahead of the kind-based lookup: EVERY run whose runner is
+    `better_agent_runner` writes the identical Claude-shaped
+    session_events.jsonl regardless of which provider kind configured it
+    (see runner_better_agent.py's own docstring) — this is what already
+    made fugu's better_agent_runner runs recover correctly via the
+    "openai" kind's recovery_family. Claude's better_agent_runner branch
+    needs the same treatment but keeps `provider_kind=="claude"` (see
+    runtime_profile.runtime_kind), which the manifest's per-kind
+    recovery_family can't express (kind "claude" must keep
+    recovery_family="claude" for its native runner). Checking `runner`
+    directly here decouples the two without touching that manifest entry.
+    """
+    if str((desc or {}).get("runner") or "").strip() == "better_agent_runner":
+        return "session_events"
     spec = _provider_manifest.spec_for(_provider_kind(desc))
     return spec.recovery_family if spec else "claude"
 

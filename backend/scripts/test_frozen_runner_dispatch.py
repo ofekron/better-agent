@@ -82,23 +82,23 @@ def test_runner_argv_frozen() -> bool:
 def test_dispatch() -> bool:
     """`_dispatch` routes --run-dir to a runner (claude default / agy
     explicit) and bare argv to the server."""
-    if _dispatch([]) != ("server", None, None):
+    if _dispatch([]) != ("server", None, None, None):
         print(f"  bare argv: got {_dispatch([])}")
         return False
-    if _dispatch(["--serve"]) != ("server", None, None):
+    if _dispatch(["--serve"]) != ("server", None, None, None):
         print(f"  --serve argv: got {_dispatch(['--serve'])}")
         return False
-    if _dispatch(["--serve-node"]) != ("node_server", None, None):
+    if _dispatch(["--serve-node"]) != ("node_server", None, None, None):
         print(f"  --serve-node argv: got {_dispatch(['--serve-node'])}")
         return False
-    if _dispatch(["--communicate-mcp"]) != ("communicate_mcp", None, None):
+    if _dispatch(["--communicate-mcp"]) != ("communicate_mcp", None, None, None):
         print(f"  --communicate-mcp: got {_dispatch(['--communicate-mcp'])}")
         return False
-    if _dispatch(["--open-file-panel-mcp"]) != ("open_file_panel_mcp", None, None):
+    if _dispatch(["--open-file-panel-mcp"]) != ("open_file_panel_mcp", None, None, None):
         print(f"  --open-file-panel-mcp: got {_dispatch(['--open-file-panel-mcp'])}")
         return False
     if _dispatch(["--frozen-artifact-smoke"]) != (
-        "frozen_artifact_smoke", None, None,
+        "frozen_artifact_smoke", None, None, None,
     ):
         print(
             "  --frozen-artifact-smoke: got "
@@ -106,13 +106,22 @@ def test_dispatch() -> bool:
         )
         return False
     if _dispatch(["--run-dir", "/runs/x"]) != (
-        "runner", "claude", Path("/runs/x"),
+        "runner", "claude", Path("/runs/x"), "",
     ):
         print(f"  --run-dir: got {_dispatch(['--run-dir', '/runs/x'])}")
         return False
     got = _dispatch(["--run-dir", "/runs/y", "--runner-kind", "agy"])
-    if got != ("runner", "agy", Path("/runs/y")):
+    if got != ("runner", "agy", Path("/runs/y"), ""):
         print(f"  --run-dir agy: got {got}")
+        return False
+    got_claude_ba = _dispatch([
+        "--run-dir", "/runs/z", "--runner-kind", "claude",
+        "--runner-module", "runner_better_agent",
+    ])
+    if got_claude_ba != (
+        "runner", "claude", Path("/runs/z"), "runner_better_agent",
+    ):
+        print(f"  --run-dir claude better_agent_runner: got {got_claude_ba}")
         return False
     return True
 

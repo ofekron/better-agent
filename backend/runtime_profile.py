@@ -38,6 +38,15 @@ def supported_runners(provider_record: dict | None) -> tuple[str, ...]:
         if mode == "subscription":
             return choices
         return tuple(choice for choice in choices if choice != "better_agent_runner")
+    if kind == "claude":
+        # better_agent_runner for Claude exists only to speak the
+        # subscription OAuth wire format (see
+        # runner_better_agent_claude_subscription.py); there is no
+        # api_key-mode backend for it, so exclude it there rather than
+        # leave a dead-end runner choice.
+        if mode != "subscription":
+            return tuple(choice for choice in choices if choice != "better_agent_runner")
+        return choices
     if mode == "api_key":
         return choices
     return tuple(choice for choice in choices if choice != "better_agent_runner")
@@ -79,9 +88,15 @@ def resolve_runner(
 
 def runtime_kind(provider_record: dict, runner: object = None) -> str:
     selected = str(runner or provider_record.get("runner") or "").strip()
-    if selected == "better_agent_runner":
+    kind = str(provider_record.get("kind") or "claude")
+    # Claude's better_agent_runner backend still speaks Claude's own wire
+    # format (Anthropic Messages API over the subscription OAuth token), so
+    # it must resolve to the real Claude provider class, not collapse into
+    # the generic OpenAI Chat-Completions provider like every other kind's
+    # better_agent_runner choice does.
+    if selected == "better_agent_runner" and kind != "claude":
         return "openai"
-    return str(provider_record.get("kind") or "claude")
+    return kind
 
 
 def provider_record_for_runner(provider_record: dict, runner: object = None) -> dict:
