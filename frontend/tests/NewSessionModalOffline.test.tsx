@@ -142,13 +142,15 @@ describe("NewSessionModal offline provider cache", () => {
       await waitFor(() => expect(createButton.disabled).toBe(false));
       expect(createButton.dataset.progressInflight).toBeUndefined();
 
-      const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
+      const alert = vi.fn();
+      vi.stubGlobal("alert", alert);
       onCreate.mockRejectedValueOnce(new Error("create failed"));
       fireEvent.click(createButton);
       await waitFor(() => expect(createButton.disabled).toBe(false));
       expect(alert).toHaveBeenCalledWith("create failed");
     } finally {
       act(() => completeOp("session:create"));
+      vi.unstubAllGlobals();
     }
   });
 

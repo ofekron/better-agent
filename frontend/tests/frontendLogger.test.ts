@@ -286,12 +286,12 @@ describe("frontend logger", () => {
     // before any handler runs. The heartbeat is the only sample source that
     // survives that case.
     capacitorMocks.isNativePlatform.mockReturnValue(true);
-    Object.defineProperty(performance, "memory", {
-      value: { usedJSHeapSize: 111, totalJSHeapSize: 222, jsHeapSizeLimit: 333 },
-      configurable: true,
-    });
     vi.useFakeTimers();
     try {
+      Object.defineProperty(performance, "memory", {
+        value: { usedJSHeapSize: 111, totalJSHeapSize: 222, jsHeapSizeLimit: 333 },
+        configurable: true,
+      });
       const { installFrontendLogger } = await import("../src/lib/frontendLogger");
       installFrontendLogger();
 
@@ -315,12 +315,12 @@ describe("frontend logger", () => {
     // beacon that could itself perturb the memory pressure under
     // investigation — it must stop on its own after a bounded window.
     capacitorMocks.isNativePlatform.mockReturnValue(true);
-    Object.defineProperty(performance, "memory", {
-      value: { usedJSHeapSize: 1, totalJSHeapSize: 2, jsHeapSizeLimit: 3 },
-      configurable: true,
-    });
     vi.useFakeTimers();
     try {
+      Object.defineProperty(performance, "memory", {
+        value: { usedJSHeapSize: 1, totalJSHeapSize: 2, jsHeapSizeLimit: 3 },
+        configurable: true,
+      });
       const { installFrontendLogger } = await import("../src/lib/frontendLogger");
       installFrontendLogger();
 

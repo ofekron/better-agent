@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error — build script, no type declarations
 import {
+  cleanupInstallStage,
   prepareInstallManifest,
   retiredNodeModulesPath,
 } from "../scripts/install-frontend-deps.mjs";
@@ -49,5 +50,18 @@ describe("frontend dependency install swap slot", () => {
       dependencies: { react: "^19.0.0" },
     });
     expect(source.scripts.postinstall).toBe("node scripts/detect-ips.mjs");
+  });
+
+  it("retries transient recursive cleanup failures", () => {
+    const remove = vi.fn();
+
+    cleanupInstallStage("/repo/.frontend-install-aaa", remove);
+
+    expect(remove).toHaveBeenCalledWith("/repo/.frontend-install-aaa", {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 });

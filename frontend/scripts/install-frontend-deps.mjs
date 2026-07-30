@@ -39,6 +39,15 @@ export function retiredNodeModulesPath(stage) {
   return join(stage, "retired", "node_modules");
 }
 
+export function cleanupInstallStage(stage, remove = rmSync) {
+  remove(stage, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+}
+
 export function prepareInstallManifest(manifest, profileDependencies) {
   const scripts = { ...(manifest.scripts || {}) };
   delete scripts.postinstall;
@@ -105,7 +114,7 @@ export function installFrontendDependencies(profile) {
       throw error;
     }
   } finally {
-    rmSync(stage, { recursive: true, force: true });
+    cleanupInstallStage(stage);
   }
 }
 
