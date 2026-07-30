@@ -2,7 +2,7 @@ const STATE_KEY = "better_agent_offline_sync_state";
 
 function readState() {
   const stored = CapacitorKV.get(STATE_KEY);
-  if (!stored.value) return null;
+  if (!stored?.value) return null;
   try {
     return JSON.parse(stored.value);
   } catch {

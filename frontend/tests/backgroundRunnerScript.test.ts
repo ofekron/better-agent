@@ -15,7 +15,10 @@ function createRunner(fetchImpl: typeof fetch) {
   const context = vm.createContext({
     addEventListener: (name: string, handler: Handler) => handlers.set(name, handler),
     CapacitorKV: {
-      get: (key: string) => ({ value: values.get(key) ?? null }),
+      get: (key: string) => {
+        const value = values.get(key);
+        return value === undefined ? null : { value };
+      },
       set: (key: string, value: string) => values.set(key, value),
       remove: (key: string) => values.delete(key),
     },
@@ -35,6 +38,18 @@ function createRunner(fetchImpl: typeof fetch) {
 }
 
 describe("offline background runner", () => {
+  it("accepts every empty-state operation when native storage returns null", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const runner = createRunner(fetchMock);
+
+    await expect(runner.dispatch("getOfflineAcknowledgements")).resolves.toEqual({
+      acknowledged: [],
+    });
+    await expect(runner.dispatch("clearOfflineAcknowledgements")).resolves.toBeUndefined();
+    await expect(runner.dispatch("syncOfflineActions")).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("retains rejected actions and durably acknowledges accepted actions", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       results: [
