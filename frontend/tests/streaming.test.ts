@@ -157,7 +157,7 @@ describe("streaming + multi-session behavior", () => {
     h.unmount();
   });
 
-  it("a manager-mode persisted assistant renders the Manager scope chip", async () => {
+  it("a team-mode persisted assistant renders the Manager scope chip", async () => {
     const userMsg = makeUserMsg({ id: "u", content: "hi" });
     const assistantMsg = makeAssistantMsg({
       id: "a",
@@ -165,7 +165,7 @@ describe("streaming + multi-session behavior", () => {
       manager: { session_id: "claude-sid-1", events: [] },
     });
     const session = makeSession({
-      orchestration_mode: "manager",
+      orchestration_mode: "team",
       messages: [userMsg, assistantMsg],
     });
     const h = await renderApp({ seed: { sessions: [session] } });
