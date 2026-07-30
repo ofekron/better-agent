@@ -634,8 +634,13 @@ async def auth_gate(request, call_next):
         if auth_header.lower().startswith("bearer "):
             tok_user = auth.verify_token(auth_header.split(" ", 1)[1].strip())
             if tok_user:
-                if "session" in request.scope:
-                    request.session["user"] = tok_user
+                # Stash on request.state, NOT request.session — writing into
+                # the session here would resurrect/extend a cleared or
+                # absent session cookie for a request that only carried a
+                # bearer token (SessionMiddleware re-issues Set-Cookie for
+                # any non-empty session at response time). Downstream
+                # identity reads use auth.identify_request() to see this.
+                request.state.bearer_user = tok_user
                 user = tok_user
     if not user:
         from fastapi.responses import JSONResponse
