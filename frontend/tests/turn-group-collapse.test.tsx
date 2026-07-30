@@ -28,22 +28,82 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-// Collapsed-state tests must enter that state through the same explicit
-// header interaction available to users.
+// Production now defaults a completed (non-live) turn to COLLAPSED per
+// docs/chat-panel.md's render(turn) algorithm (isLive -> expanded; user
+// manually extended -> expanded; else -> collapsed) — see MessageBubble's
+// `defaultCollapsed`/`userToggled` state. Tests that need a specific
+// starting state (independent of what the natural default happens to be
+// for their fixture) force it here via the same explicit header
+// interaction available to users.
 function TurnGroup({
-  defaultCollapsed = false,
+  initialExpanded,
+  keepExpanded,
   ...props
 }: React.ComponentProps<typeof ProductionTurnGroup> & {
-  defaultCollapsed?: boolean;
+  /** Force the group to this expanded/collapsed state once, via the same
+   * header click a real user would make, the first time the header is
+   * found. Forcing via a real click flips production's `userToggled`
+   * whenever a click is actually needed, so later renders (and the
+   * component's own state) are left alone — a test's own subsequent
+   * `fireEvent.click` is never fought. */
+  initialExpanded?: boolean;
+  /** Keep the top-level group pinned open on every render, overriding the
+   * component's own auto-collapse-when-not-running default. Only needed
+   * when a test's initial state already matches (so no click occurs to
+   * flip `userToggled`) and a later rerender's prop change would otherwise
+   * let the natural default re-collapse the group — e.g. observing a
+   * NESTED worker/sub-agent panel's own collapse once its run finishes. */
+  keepExpanded?: boolean;
 }) {
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const forcedOnceRef = React.useRef(false);
 
-  React.useLayoutEffect(() => {
-    if (!defaultCollapsed) return;
-    rootRef.current
-      ?.querySelector<HTMLButtonElement>(".message-box-header-main")
-      ?.click();
-  }, [defaultCollapsed]);
+  // A plain `useEffect` (post-paint), not `useLayoutEffect`: dispatching a
+  // click synchronously from within a layout effect re-enters React's own
+  // commit phase and the resulting state update is silently dropped (seen
+  // empirically — the click fires but never produces a second render).
+  // Post-paint effects run in their own task, outside the triggering
+  // commit, so the click's state update lands normally.
+  React.useEffect(() => {
+    if (initialExpanded === undefined || forcedOnceRef.current) return;
+    const header = rootRef.current?.querySelector<HTMLButtonElement>(
+      ".message-box-header-main",
+    );
+    if (!header) return;
+    forcedOnceRef.current = true;
+    const isExpanded = header.getAttribute("aria-expanded") === "true";
+    if (isExpanded !== initialExpanded) header.click();
+  });
+
+  // `keepExpanded` can't be a plain effect keyed off the WRAPPER's own
+  // renders: the group's auto-collapse fires from the CHILD's internal
+  // `useEffect` (`setCollapsed`), which re-renders only the child, never
+  // the wrapper — so a wrapper effect with no deps never gets a second
+  // chance to see the flip and correct it (confirmed empirically: the
+  // wrapper's effect ran exactly once per `rerender()` call and missed
+  // the child's own later state transition entirely). A MutationObserver
+  // watches the actual DOM regardless of which component re-rendered it.
+  React.useEffect(() => {
+    if (!keepExpanded) return;
+    const root = rootRef.current;
+    if (!root) return;
+    const enforce = () => {
+      const header = root.querySelector<HTMLButtonElement>(
+        ".message-box-header-main",
+      );
+      if (header && header.getAttribute("aria-expanded") !== "true") {
+        header.click();
+      }
+    };
+    enforce();
+    const observer = new MutationObserver(enforce);
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["aria-expanded"],
+      subtree: true,
+    });
+    return () => observer.disconnect();
+  }, [keepExpanded]);
 
   return (
     <div ref={rootRef} className="turn-group-test-host">
@@ -60,7 +120,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u-marker", content: "open it" })}
         responseMessage={makeAssistantMsg({ id: "a-marker", content: marker })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -70,7 +130,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(summary?.textContent).not.toContain("[[ba-session:");
   });
 
-  it("keeps the latest completed chat group expanded", async () => {
+  it("collapses a completed chat group by default", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify([]), {
@@ -107,16 +167,16 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
       await waitFor(() => {
         expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-        expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
-        expect(container.textContent).toContain("finished reply");
-        expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▼");
+        expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+        expect(container.querySelector(".collapse-summary")?.textContent).toContain("finished reply");
+        expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
       });
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("keeps every completed assistant response expanded when later turns exist", async () => {
+  it("collapses a completed assistant response by default even when later turns exist", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify([]), {
@@ -153,14 +213,14 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
       expect(firstGroup).not.toBeNull();
       expect(firstGroup!.querySelector('.user-message-box > .message-box-body')).not.toBeNull();
-      expect(firstGroup!.querySelector('.assistant-message .message-content')).not.toBeNull();
-      expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▼");
+      expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
+      expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("does not collapse the previous assistant response when a failed turn is appended", () => {
+  it("keeps the previous assistant response collapsed by default when a failed turn is appended", () => {
     const firstTurn = [
       makeUserMsg({ id: "u1", content: "working prompt" }),
       makeAssistantMsg({ id: "a1", content: "working reply", isStreaming: false }),
@@ -181,6 +241,11 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       onPromoteQueued: () => {},
     } satisfies Partial<React.ComponentProps<typeof Chat>>;
     const { container, rerender } = render(<Chat {...props} messages={firstTurn} />);
+
+    const firstGroupBefore = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
+    expect(firstGroupBefore).not.toBeNull();
+    expect(firstGroupBefore!.querySelector('.assistant-message .message-content')).toBeNull();
+    expect(firstGroupBefore!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
 
     rerender(
       <Chat
@@ -199,11 +264,11 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
     expect(firstGroup).not.toBeNull();
-    expect(firstGroup!.querySelector('.assistant-message .message-content')).not.toBeNull();
-    expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▼");
+    expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
+    expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
   });
 
-  it("preserves an explicit manual collapse while later failed and successful turns are appended", () => {
+  it("preserves an explicit manual expand while later failed and successful turns are appended", () => {
     const firstTurn = [
       makeUserMsg({ id: "u1", content: "working prompt" }),
       makeAssistantMsg({ id: "a1", content: "working reply", isStreaming: false }),
@@ -224,8 +289,10 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       onPromoteQueued: () => {},
     } satisfies Partial<React.ComponentProps<typeof Chat>>;
     const { container, rerender } = render(<Chat {...props} messages={firstTurn} />);
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
     const firstHeader = screen.getByRole("button", { name: /User/i });
     fireEvent.click(firstHeader);
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
 
     const failedTurn = makeUserMsg({
       id: "u2",
@@ -234,7 +301,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       errorText: "unsupported provider config schema",
     });
     rerender(<Chat {...props} messages={[...firstTurn, failedTurn]} />);
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
 
     rerender(
       <Chat
@@ -247,7 +314,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         ]}
       />,
     );
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
   });
 
   it("keeps the user prompt body visible when the assistant response is manually collapsed", () => {
@@ -255,7 +322,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="manager"
       />,
     );
@@ -284,7 +351,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
-        defaultCollapsed={false}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -297,7 +364,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });
 
-  it("keeps a live latest group expanded when the turn finishes", async () => {
+  it("auto-collapses a live latest group once the turn finishes", async () => {
     const userMessage = makeUserMsg({ id: "u1", content: "latest prompt" });
     const runningAssistant = makeAssistantMsg({
       id: "a1",
@@ -347,13 +414,13 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     await waitFor(() => {
       expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-      expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
-      expect(container.textContent).toContain("finished reply");
-      expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▼");
+      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+      expect(container.querySelector(".collapse-summary")?.textContent).toContain("finished reply");
+      expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     });
   });
 
-  it("keeps the active group expanded after terminal websocket frames", async () => {
+  it("auto-collapses the active group by default after terminal websocket frames", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -381,32 +448,43 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
 
+    const finalAssistantMessage = {
+      ...assistantMessage,
+      content: "final reply",
+      isStreaming: false,
+      omitted_payloads: { events: { revision: "rev-1", count: 1 } },
+      events: undefined,
+    };
+    // `turn_complete` also fires a background `session_reconciled` REST
+    // refetch (see App.tsx's `onTurnTerminal`). The mock backend's REST
+    // store is separate from what `emitMany` injects over WS, so it must
+    // be kept in sync here or the refetch's canonical (empty) response
+    // wins the reconcile merge and silently drops messages the WS side
+    // already applied.
+    const backendSession = h.backend.state.sessions.find((s) => s.id === session.id)!;
+    backendSession.messages = [userMessage, finalAssistantMessage];
     h.emitMany([
-      {
-        type: "messages_delta",
-        data: {
-          app_session_id: session.id,
-          messages: [{
-            ...assistantMessage,
-            content: "final reply",
-            isStreaming: false,
-            omitted_payloads: { events: { revision: "rev-1", count: 1 } },
-            events: undefined,
-          }],
-        },
-      },
+      { type: "messages_delta", data: { app_session_id: session.id, messages: [finalAssistantMessage] } },
       { type: "turn_complete", data: { app_session_id: session.id, session_id: "agent-1", success: true } },
       { type: "run_state", data: { app_session_id: session.id, runs: [] } },
     ]);
     await h.flush();
 
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
     expect(h.raw.container.textContent).toContain("final reply");
-    expect(h.$(".collapse-arrow")?.textContent).toBe("▼");
+    expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
   });
 
-  it("keeps a completed latest group expanded while session monitoring remains active", async () => {
+  it("keeps a completed latest group expanded while session monitoring marks it running", async () => {
+    // `sessionRunning` (session.is_running, driven by monitoring_state !==
+    // "stopped") is deliberately wired into ONLY the latest turn group's
+    // `isRunning` (see Chat.tsx: `sessionRunning={g.isLatest ? sessionRunning
+    // || showPendingPromptAsRunning : false}`) as a safety net against a race
+    // where the session-level signal arrives before this group's own
+    // `runs`/`isStreaming` catch up. That's a DIFFERENT signal from
+    // chat-panel.md's per-turn `isLive`, and intentionally keeps the latest
+    // group expanded (not collapsed-by-default) while it's live.
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "done", seq: 0 }),
@@ -447,7 +525,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={userMessage}
         responseMessage={assistantMessage}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="manager"
       />,
     );
@@ -470,7 +548,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           error: true,
           errorText: "interrupted",
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -491,7 +569,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           content: "",
           isDetached: true,
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -513,7 +591,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           content: "",
           retrying_until: retryAt,
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -585,7 +663,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             ],
           },
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -608,7 +686,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -631,7 +709,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -654,7 +732,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -676,7 +754,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -692,6 +770,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           id: "a1",
           content: "before\n\\u2022 \\u2022 \\u2022\nafter",
         })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -723,6 +802,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -770,6 +850,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             last_event_at: "2026-07-03T00:00:01Z",
           },
         ]}
+        keepExpanded
         orchestrationMode="manager"
       />,
     );
@@ -785,6 +866,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           workers: [{ ...worker, success: true }],
         })}
         runs={[]}
+        keepExpanded
         orchestrationMode="manager"
       />,
     );
@@ -828,6 +910,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
         responseMessage={makeAssistantMsg({ id: "a1", events })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -859,6 +942,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -887,6 +971,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -923,6 +1008,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
+        initialExpanded={true}
         orchestrationMode="manager"
       />,
     );
@@ -998,7 +1084,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           content: "partial",
           stopped_at: new Date("2024-01-01T10:00:00Z").toISOString(),
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="manager"
       />,
     );
@@ -1014,7 +1100,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1" })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "done" })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="manager"
       />,
     );
@@ -1054,7 +1140,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="native"
       />,
     );
@@ -1096,7 +1182,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           ],
         })}
-        defaultCollapsed
+        initialExpanded={false}
         orchestrationMode="manager"
       />,
     );
@@ -1147,6 +1233,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             },
           })}
           sessionId="s1"
+          initialExpanded={true}
           orchestrationMode="native"
         />,
       );
@@ -1196,6 +1283,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             omitted_payloads: { events: { revision: "rev-1", count: 1 } },
           })}
           sessionId="s1"
+          initialExpanded={true}
           orchestrationMode="native"
         />,
       );
@@ -1228,7 +1316,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             events: [{ type: "output", data: { output: "live tail" } }],
             omitted_payloads: { events: { revision: "rev-1", count: 3 } },
           })}
-          defaultCollapsed={false}
+          initialExpanded={true}
           sessionId="s1"
           orchestrationMode="native"
         />,
@@ -1246,7 +1334,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
               events: [{ type: "output", data: { output: "live tail" } }],
               omitted_payloads: { events: { revision, count: 3 } },
             })}
-            defaultCollapsed={false}
+            initialExpanded={true}
             sessionId="s1"
             orchestrationMode="native"
           />,
@@ -1294,7 +1382,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         <TurnGroup
           initiatorMessage={makeUserMsg({ id: "u1", content: "manual prompt" })}
           responseMessage={baseResponse}
-          defaultCollapsed={false}
+          initialExpanded={true}
           sessionId="s1"
           orchestrationMode="native"
         />,
@@ -1313,7 +1401,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             content: "fresh compact content",
             retrying_until: "2026-07-07T12:00:00.000Z",
           }}
-          defaultCollapsed={false}
+          initialExpanded={true}
           sessionId="s1"
           orchestrationMode="native"
         />,
@@ -1374,7 +1462,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
               }),
             },
           ]}
-          defaultCollapsed={false}
+          initialExpanded={true}
           sessionId="s1"
           orchestrationMode="native"
         />,
@@ -1410,7 +1498,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             reasoning_effort: "high",
           },
         })}
-        defaultCollapsed={false}
+        initialExpanded={true}
         sessionId="s1"
         orchestrationMode="native"
         runs={[{ run_id: "run-1", kind: "manager", target_message_id: "a1", pid: null }]}
@@ -1447,7 +1535,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             reasoning_effort: "high",
           },
         })}
-        defaultCollapsed={false}
+        initialExpanded={true}
         sessionId="s1"
         orchestrationMode="native"
         runs={[]}

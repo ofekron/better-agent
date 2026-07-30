@@ -1937,13 +1937,16 @@ function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, content
   const toolCalls = flat.filter((e) => e.type === "tool_call");
   const outputs = flat.filter((e) => e.type === "output" || e.type === "thinking");
 
+  // Per docs/chat-panel.md's renderCollapsedTurn: the process (tool
+  // calls/actions) collapses behind a count, but the Result text itself
+  // renders in full — never truncated, even when the turn is collapsed.
   let lastOutput = "";
   for (let i = outputs.length - 1; i >= 0; i--) {
     const text = (outputs[i].data.output || outputs[i].data.thought || "") as string;
     const clean = cleanOutput(text);
     const kind = classifyOutput(clean);
     if (kind === "text" && clean.length > 10) {
-      lastOutput = clean.length > 120 ? clean.slice(0, 120) + "..." : clean;
+      lastOutput = clean;
       break;
     }
   }
@@ -1955,7 +1958,7 @@ function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, content
   const joined = parts.join(" — ");
   if (joined) return joined;
   if (contentFallback && contentFallback.length > 10) {
-    return contentFallback.length > 120 ? contentFallback.slice(0, 120) + "..." : contentFallback;
+    return contentFallback;
   }
   return contentFallback ? "Response" : "No output";
 }
@@ -3128,7 +3131,20 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const pendingAnchorRef = useRef<
     { bottom: number; scrollTop: number; scrollEl: HTMLElement } | null
   >(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const hasResponse = !!responseMessage || !!(childTurnGroups?.some(sg => sg.response));
+  const isRunning = sessionRunning || isGroupRunning(responseMessage, runs);
+  // Collapse default per docs/chat-panel.md's render(turn) algorithm: a
+  // live turn always renders expanded; once it stops being live, it
+  // defaults to collapsed unless the user has manually extended it.
+  // `userToggled` freezes `collapsed` at the user's last explicit choice
+  // — once set, later default recomputation (e.g. this turn finishing,
+  // or a new turn changing isRunning) never overrides it.
+  const defaultCollapsed = hasResponse && !isRunning;
+  const [userToggled, setUserToggled] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  useEffect(() => {
+    if (!userToggled) setCollapsed(defaultCollapsed);
+  }, [defaultCollapsed, userToggled]);
   // Two independent collapse surfaces: the group chevron folds the events/
   // response, while the user prompt text has its own chevron. The prompt
   // never auto-collapses — only its own toggle folds it.
@@ -3184,6 +3200,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         scrollEl,
       };
     }
+    setUserToggled(true);
     setCollapsed((v) => !v);
   };
   // After the DOM updates from the toggle (but BEFORE paint), shift
@@ -3213,10 +3230,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   }, [collapsed]);
   useEffect(() => {
     if (expandAllTrigger && expandAllTrigger > 0) {
+      setUserToggled(true);
       setCollapsed(false);
     }
   }, [expandAllTrigger]);
-  const hasResponse = !!responseMessage || !!(childTurnGroups?.some(sg => sg.response));
   // Ask-flow turns are represented entirely by their inline picker footer
   // (reasoning + matches + actions), rendered by Chat's renderTurnFooter.
   // Their assistant message carries no events and its reasoning already
@@ -3336,7 +3353,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     responseCollapsed && effectiveResponse?.error
       ? effectiveResponse.errorText ?? effectiveResponse.content
       : undefined;
-  const isRunning = sessionRunning || isGroupRunning(responseMessage, runs);
   const rawInitiatorContent =
     typeof initiatorMessage.content === "string" ? initiatorMessage.content : "";
   const hiddenPrompt =
