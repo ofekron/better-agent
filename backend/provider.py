@@ -1773,10 +1773,15 @@ class Provider(ABC):
         elif effort:
             raise ValueError("headless provider does not support reasoning effort")
         if self.KIND not in {"claude", "openai"}:
-            configured_model = config_store.provider_execution_defaults(
-                str(record.get("id") or ""), record.get("runner")
-            )["default_model"]
-            if payload["model"] != configured_model:
+            # The pair profile (tombstones included — a deleted profile never
+            # blocks turns on old sessions) declares the configured model; a
+            # pair with no profile history has nothing configured to protect.
+            pair_profile = config_store.find_runtime_profile(
+                str(record.get("id") or ""), str(record.get("runner") or "")
+            )
+            if pair_profile is not None and payload["model"] != str(
+                pair_profile.get("default_model") or ""
+            ):
                 raise ValueError(
                     "headless provider cannot override its configured model"
                 )

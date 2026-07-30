@@ -3265,6 +3265,18 @@ def get_runtime_profile(profile_id: str, *, include_deleted: bool = True) -> Opt
     return None
 
 
+def find_runtime_profile(provider_id: str, runner: str) -> Optional[dict]:
+    """The (provider_id, runner) pair's profile regardless of liveness —
+    tombstones stay display- and turn-resolvable (R1.3c)."""
+    for profile in _load_state().get("runtime_profiles", []):
+        if (
+            profile.get("provider_id") == provider_id
+            and profile.get("runner") == runner
+        ):
+            return copy.deepcopy(profile)
+    return None
+
+
 def find_live_runtime_profile(provider_id: str, runner: str) -> Optional[dict]:
     """The single live profile for a (provider_id, runner) pair, or None."""
     for profile in _load_state().get("runtime_profiles", []):

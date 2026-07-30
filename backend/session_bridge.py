@@ -222,8 +222,9 @@ def _resolve_bridge_run_config(
         )
         runner = runner or str(resolved.get("runner") or "").strip()
     if provider_id and not model:
-        provider = config_store.get_provider(provider_id) or {}
-        model = str(provider.get("default_model") or "").strip()
+        from provider_validation import profile_prefill_model
+
+        model = profile_prefill_model(provider_id, runner)
     target = target or {}
     resolved_provider_id = provider_id or str(target.get("provider_id") or caller.get("provider_id") or "").strip()
     inherited_runner = ""

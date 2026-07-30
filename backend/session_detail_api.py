@@ -1797,7 +1797,9 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         updates["cwd"] = requested_cwd
     if requested_provider_id or "runner" in updates or "model" in updates:
         if "reasoning_effort" not in updates:
-            default_effort = (profile_record or {}).get("default_reasoning_effort") or ""
+            default_effort = config_store.provider_execution_defaults(
+                profile_provider_id, profile_runner
+            )["default_reasoning_effort"]
             allowed_efforts = runtime_profile.reasoning_efforts(
                 profile_record or {}, profile_runner, model=profile_model,
             )

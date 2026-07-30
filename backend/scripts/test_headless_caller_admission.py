@@ -404,6 +404,45 @@ async def test_non_claude_kind_headless_uses_profile_default_model() -> None:
                 assert "model" in str(exc)
             else:
                 raise AssertionError("mismatched model must be rejected")
+
+            # R1.3(c): tombstoning the pair profile must not block turns
+            # whose admitted model matches the (still resolvable) tombstone.
+            profile_id = config_store.provider_execution_defaults(created["id"])[
+                "runtime_profile_id"
+            ]
+            deleted_ok, deleted_reason = config_store.delete_runtime_profile(
+                profile_id
+            )
+            assert deleted_ok, deleted_reason
+            result = await instance.run_admitted_headless(
+                admitted("kimi-headless-model")
+            )
+            assert result == {"result": "kimi-ok"}, (
+                "tombstoned pair profile must not block admitted turns"
+            )
+
+            # A pair with no profile history has no configured model to
+            # protect — the guard is vacuous, not a rejection. Fabricate
+            # zero-history by dropping the provider's profile rows from the
+            # persisted store.
+            import json as _json
+
+            config_path = config_store._config_path()
+            raw = _json.loads(Path(config_path).read_text())
+            raw["runtime_profiles"] = [
+                p
+                for p in raw["runtime_profiles"]
+                if p["provider_id"] != created["id"]
+            ]
+            Path(config_path).write_text(_json.dumps(raw))
+            with config_store._state_cache_lock:
+                config_store._state_cache = None
+            result = await instance.run_admitted_headless(
+                admitted("kimi-headless-model")
+            )
+            assert result == {"result": "kimi-ok"}, (
+                "absent pair profile must not block admitted turns"
+            )
         finally:
             models_mod.models_for_record = original_models
     finally:

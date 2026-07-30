@@ -95,15 +95,16 @@ def available_provider_models_response(
             })
         if effort_query and not has_matched_effort:
             continue
+        profile_defaults = config_store.provider_execution_defaults(provider_id)
         providers.append({
             "provider_id": provider_id,
             "name": record.get("name", ""),
             "kind": record.get("kind", ""),
-            "runner": record.get("runner", ""),
+            "runner": profile_defaults["runner"],
             "runtime_profiles": runtime_profiles,
             "is_default": provider_id == state.get("default_provider_id"),
-            "default_model": record.get("default_model", ""),
-            "default_reasoning_effort": record.get("default_reasoning_effort", ""),
+            "default_model": profile_defaults["default_model"],
+            "default_reasoning_effort": profile_defaults["default_reasoning_effort"],
         })
     return {
         "success": True,

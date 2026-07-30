@@ -49,8 +49,12 @@ def prewarm_http_stack() -> None:
 
 def _pick_model(provider: dict) -> str:
     """Return the cheapest available model for the active provider."""
+    import config_store
+
     available = list(provider.get("custom_models") or [])
-    default = provider.get("default_model") or ""
+    default = config_store.provider_execution_defaults(
+        str(provider.get("id") or "")
+    )["default_model"]
     if default:
         available.append(default)
     for cheap in _CHEAP_MODELS:
