@@ -2534,6 +2534,59 @@ async def _emit_recovered_user_message_terminal(*args, **kwargs):
     )
 
 
+def _current_lifecycle_supersedes_recovered(
+    sess: dict,
+    *,
+    recovered_lifecycle_id: str,
+    current_lifecycle_id: str,
+    current_assistant_id: str | None,
+) -> bool:
+    messages = sess.get("messages")
+    if not isinstance(messages, list):
+        return False
+    recovered_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("lifecycle_msg_id") == recovered_lifecycle_id
+    ]
+    current_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("lifecycle_msg_id") == current_lifecycle_id
+    ]
+    if len(recovered_indexes) != 1 or len(current_indexes) != 1:
+        return False
+    current_index = current_indexes[0]
+    if current_index <= recovered_indexes[0]:
+        return False
+    if current_assistant_id is None:
+        return True
+    assistant_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("id") == current_assistant_id
+    ]
+    if len(assistant_indexes) != 1:
+        return False
+    assistant_index = assistant_indexes[0]
+    next_user_index = next(
+        (
+            index
+            for index in range(current_index + 1, len(messages))
+            if isinstance(messages[index], dict)
+            and messages[index].get("role") == "user"
+        ),
+        len(messages),
+    )
+    return current_index < assistant_index < next_user_index
+
+
 async def _emit_recovered_user_message_terminal_on_main(
     *,
     coordinator,
@@ -2578,9 +2631,24 @@ async def _emit_recovered_user_message_terminal_on_main(
         snapshot = lifecycle_commands.snapshot(app_session_id)
         execution = snapshot.execution
         if snapshot.identity is not None:
-            if (
-                snapshot.identity.lifecycle_message_id != lifecycle_msg_id
-                or execution is None
+            current_lifecycle_id = snapshot.identity.lifecycle_message_id
+            if current_lifecycle_id != lifecycle_msg_id:
+                current_assistant_id = (
+                    execution.identity.assistant_message_id
+                    if execution is not None
+                    else None
+                )
+                if not _current_lifecycle_supersedes_recovered(
+                    sess,
+                    recovered_lifecycle_id=lifecycle_msg_id,
+                    current_lifecycle_id=current_lifecycle_id,
+                    current_assistant_id=current_assistant_id,
+                ):
+                    raise RuntimeError(
+                        "recovered terminal execution identity is ambiguous"
+                    )
+            elif (
+                execution is None
                 or execution.identity.assistant_message_id
                 != str(assistant_msg.get("id") or "")
                 or execution.identity.execution_turn_id
@@ -2590,12 +2658,13 @@ async def _emit_recovered_user_message_terminal_on_main(
                 raise RuntimeError(
                     "recovered terminal execution identity is ambiguous"
                 )
-            await lifecycle_commands.finish_execution_and_turn(
-                app_session_id,
-                execution_identity=execution.identity,
-                provider_run_id=run_id,
-                outcome=command_outcome,
-            )
+            else:
+                await lifecycle_commands.finish_execution_and_turn(
+                    app_session_id,
+                    execution_identity=execution.identity,
+                    provider_run_id=run_id,
+                    outcome=command_outcome,
+                )
     try:
         import user_msg_lifecycle
         from orchs import get_strategy
@@ -2620,22 +2689,27 @@ async def _emit_recovered_user_message_terminal_on_main(
                 reason="recovered_run_failed",
                 error=error or "Run failed during recovery.",
             )
-            return
-        strategy = get_strategy(mode)
-        strategy.record_turn_result(
-            lifecycle_msg_id,
-            role=mode,
-            success=success,
-            token_usage=complete.get("token_usage"),
-            error=error,
-            agent_sid=agent_sid or complete.get("session_id"),
-        )
-        await coordinator.user_prompt_manager.emit_user_msg_done(
+        else:
+            strategy = get_strategy(mode)
+            strategy.record_turn_result(
+                lifecycle_msg_id,
+                role=mode,
+                success=success,
+                token_usage=complete.get("token_usage"),
+                error=error,
+                agent_sid=agent_sid or complete.get("session_id"),
+            )
+            await coordinator.user_prompt_manager.emit_user_msg_done(
+                persist_sid,
+                lifecycle_msg_id,
+                mode,
+                cancelled=cancelled,
+            )
+        if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
             persist_sid,
             lifecycle_msg_id,
-            mode,
-            cancelled=cancelled,
-        )
+        ) is None:
+            raise RuntimeError("recovery lifecycle terminal was not persisted")
     except Exception:
         logger.exception(
             "recovery lifecycle terminal emit failed sid=%s run=%s",

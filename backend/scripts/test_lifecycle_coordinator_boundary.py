@@ -363,6 +363,194 @@ async def prove_recovery_uses_execution_owner(
     )
 
 
+async def prove_recovery_requires_ordered_supersession(
+    coordinator: Coordinator,
+) -> None:
+    app_session_id = create_session("recovery-supersession")
+    recovered_lifecycle_id = "turn-recovery-old"
+    current_lifecycle_id = "turn-recovery-new"
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="recovery-supersession:old",
+        session_id=app_session_id,
+        identity=UserTurnIdentity(
+            recovered_lifecycle_id,
+            recovered_lifecycle_id,
+        ),
+    )
+    await coordinator.lifecycle_commands.finish_active(
+        app_session_id,
+        lifecycle_message_id=recovered_lifecycle_id,
+        outcome="complete",
+    )
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="recovery-supersession:new",
+        session_id=app_session_id,
+        identity=UserTurnIdentity(
+            current_lifecycle_id,
+            current_lifecycle_id,
+        ),
+    )
+    current_execution = ExecutionTurnIdentity(
+        "recovery-new-execution",
+        "recovery-new-assistant",
+        "native",
+    )
+    await coordinator.lifecycle_commands.start_execution(
+        app_session_id,
+        execution_identity=current_execution,
+    )
+    await coordinator.lifecycle_commands.bind_execution_run(
+        app_session_id,
+        execution_identity=current_execution,
+        provider_run_id="recovery-new-run",
+    )
+    before = coordinator.lifecycle_commands.snapshot(app_session_id)
+    ordered_messages = [
+        {
+            "id": "recovery-old-user",
+            "role": "user",
+            "lifecycle_msg_id": recovered_lifecycle_id,
+        },
+        {"id": "recovery-old-assistant", "role": "assistant"},
+        {
+            "id": "recovery-new-user",
+            "role": "user",
+            "lifecycle_msg_id": current_lifecycle_id,
+        },
+        {"id": "recovery-new-assistant", "role": "assistant"},
+    ]
+    original_terminal = user_msg_lifecycle.terminal_event_for_lifecycle_async
+    original_emit_done = coordinator.user_prompt_manager.emit_user_msg_done
+    original_salvage = run_recovery._salvage_complete_payload
+    terminal_checks: list[tuple[str, str]] = []
+    terminal_emits: list[tuple] = []
+
+    async def missing_terminal(
+        persist_sid: str,
+        lifecycle_msg_id: str,
+    ) -> dict | None:
+        terminal_checks.append((persist_sid, lifecycle_msg_id))
+        if len(terminal_checks) == 1:
+            return None
+        return {"type": "user_message_done"}
+
+    async def capture_done(*args, **kwargs) -> None:
+        terminal_emits.append((args, kwargs))
+
+    user_msg_lifecycle.terminal_event_for_lifecycle_async = missing_terminal
+    coordinator.user_prompt_manager.emit_user_msg_done = capture_done
+    run_recovery._salvage_complete_payload = lambda _run_id: {
+        "success": True,
+        "token_usage": None,
+    }
+    try:
+        await run_recovery._emit_recovered_user_message_terminal(
+            coordinator=coordinator,
+            app_session_id=app_session_id,
+            persist_sid=app_session_id,
+            mode="native",
+            agent_sid=None,
+            run_id="recovery-old-run",
+            execution_turn_id="recovery-old-execution",
+            cancelled=True,
+            sess={"messages": ordered_messages},
+            assistant_msg=ordered_messages[1],
+        )
+    finally:
+        user_msg_lifecycle.terminal_event_for_lifecycle_async = original_terminal
+        coordinator.user_prompt_manager.emit_user_msg_done = original_emit_done
+        run_recovery._salvage_complete_payload = original_salvage
+    check(
+        "ordered supersession leaves the newer lifecycle unchanged",
+        coordinator.lifecycle_commands.snapshot(app_session_id) == before,
+    )
+    check(
+        "ordered supersession checks and emits only the recovered terminal",
+        terminal_checks == [
+            (app_session_id, recovered_lifecycle_id),
+            (app_session_id, recovered_lifecycle_id),
+        ]
+        and len(terminal_emits) == 1,
+    )
+
+    later_user = {
+        "id": "recovery-later-user",
+        "role": "user",
+        "lifecycle_msg_id": "turn-recovery-later",
+    }
+    for name, messages, assistant_msg in (
+        (
+            "reverse",
+            [
+                ordered_messages[2],
+                ordered_messages[3],
+                ordered_messages[0],
+                ordered_messages[1],
+            ],
+            ordered_messages[1],
+        ),
+        (
+            "unknown",
+            [
+                ordered_messages[0],
+                ordered_messages[1],
+            ],
+            ordered_messages[1],
+        ),
+        (
+            "duplicate",
+            ordered_messages + [ordered_messages[2]],
+            ordered_messages[1],
+        ),
+        (
+            "assistant-after-later-user",
+            ordered_messages[:3]
+            + [later_user, ordered_messages[3], ordered_messages[1]],
+            ordered_messages[1],
+        ),
+    ):
+        try:
+            await run_recovery._emit_recovered_user_message_terminal(
+                coordinator=coordinator,
+                app_session_id=app_session_id,
+                persist_sid=app_session_id,
+                mode="native",
+                agent_sid=None,
+                run_id="recovery-old-run",
+                execution_turn_id="recovery-old-execution",
+                cancelled=True,
+                sess={"messages": messages},
+                assistant_msg=assistant_msg,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                f"{name} lifecycle correlation did not fail closed"
+            )
+    try:
+        await run_recovery._emit_recovered_user_message_terminal(
+            coordinator=coordinator,
+            app_session_id=app_session_id,
+            persist_sid=app_session_id,
+            mode="native",
+            agent_sid=None,
+            run_id="recovery-wrong-run",
+            execution_turn_id="recovery-wrong-execution",
+            cancelled=True,
+            sess={"messages": ordered_messages},
+            assistant_msg=ordered_messages[3],
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("same-lifecycle execution mismatch was accepted")
+    check(
+        "ambiguous lifecycle ordering and execution remain fail closed",
+        coordinator.lifecycle_commands.snapshot(app_session_id) == before,
+    )
+
+
 async def prove_recovery_terminal_failure_blocks_marker(
     coordinator: Coordinator,
 ) -> None:
@@ -628,6 +816,7 @@ async def run() -> None:
     coordinator = Coordinator()
     await coordinator.lifecycle_commands.bind()
     try:
+        await prove_recovery_requires_ordered_supersession(coordinator)
         await prove_serialized_turns(coordinator)
         await prove_running_stop_transition(coordinator)
         await prove_cancel_before_execution(coordinator)
