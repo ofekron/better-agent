@@ -10,10 +10,10 @@ from codex_execution_common import (
     SHA256_RE,
     ExecutionContractError,
     binary_open_flags,
+    cached_sha256_fd,
     required_integer,
     required_string,
     sha256_and_first_line_fd,
-    sha256_fd,
     stable_stat_identity,
     symlink_chain,
 )
@@ -35,7 +35,7 @@ class FileIdentity:
     def _capture(
         cls,
         raw_path: str | Path,
-        hasher: Callable[[int], tuple[str, bytes]],
+        hasher: Callable[[int, str, "os.stat_result"], tuple[str, bytes]],
     ) -> tuple[FileIdentity, bytes]:
         requested = Path(raw_path)
         if not requested.is_absolute():
@@ -52,7 +52,7 @@ class FileIdentity:
                 stat_before = os.fstat(fd)
                 if not stat.S_ISREG(stat_before.st_mode):
                     raise ExecutionContractError("authority file is unavailable")
-                digest, extra = hasher(fd)
+                digest, extra = hasher(fd, str(resolved_before), stat_before)
                 stat_after = os.fstat(fd)
                 if stable_stat_identity(stat_before) != stable_stat_identity(
                     stat_after,
@@ -93,7 +93,20 @@ class FileIdentity:
 
     @classmethod
     def capture(cls, raw_path: str | Path) -> FileIdentity:
-        identity, _ = cls._capture(raw_path, lambda fd: (sha256_fd(fd), b""))
+        def _hash(
+            fd: int,
+            resolved_path: str,
+            stat_before: "os.stat_result",
+        ) -> tuple[str, bytes]:
+            return (
+                cached_sha256_fd(
+                    fd,
+                    (resolved_path, stable_stat_identity(stat_before)),
+                ),
+                b"",
+            )
+
+        identity, _ = cls._capture(raw_path, _hash)
         return identity
 
     @classmethod
@@ -107,8 +120,17 @@ class FileIdentity:
         `capture_cli_launch`) that need both the attested identity and the
         shebang line — `capture()` + a separate re-read to extract the
         first line would hash the same bytes twice for no added safety.
+        Not cache-backed like `capture()`: it always needs a real read to
+        recover the first line, so there is no cheaper path on a cache hit.
         """
-        return cls._capture(raw_path, sha256_and_first_line_fd)
+        def _hash(
+            fd: int,
+            _resolved_path: str,
+            _stat_before: "os.stat_result",
+        ) -> tuple[str, bytes]:
+            return sha256_and_first_line_fd(fd)
+
+        return cls._capture(raw_path, _hash)
 
     def attest(self) -> bool:
         try:

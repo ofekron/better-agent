@@ -160,12 +160,34 @@ def _try_clone_descriptor(
     return True
 
 
+def _verify_source_unchanged(descriptor: int, identity: FileIdentity) -> None:
+    """Cheap stat-tuple recheck of an already fully-verified source fd.
+
+    The caller (`_open_file_identities`) already ran a full hash-verify
+    of this exact fd when it opened it, moments before the copy. A
+    second full re-hash here would be pure repeat work: instead, confirm
+    the fd's own file didn't mutate underneath us since that verify. Any
+    stat drift fails closed rather than falling back to a re-hash that
+    could paper over a swapped file.
+    """
+    observed = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_dev != identity.device
+        or observed.st_ino != identity.inode
+        or observed.st_size != identity.size
+        or observed.st_mtime_ns != identity.mtime_ns
+        or observed.st_ctime_ns != identity.ctime_ns
+    ):
+        raise ExecutionContractError("execution component identity mismatch")
+
+
 def _verify_materialized_descriptor(
     descriptor: int,
     target: Path,
     identity: FileIdentity,
 ) -> None:
-    _verify_file_handle(descriptor, identity)
+    _verify_source_unchanged(descriptor, identity)
     copied = FileIdentity.capture(target)
     if (
         (copied.device, copied.inode) == (identity.device, identity.inode)

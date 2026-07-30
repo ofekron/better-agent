@@ -9,12 +9,14 @@ import tempfile
 from pathlib import Path
 
 from codex_execution_common import (
+    SHA256_RE,
     ExecutionContractError,
     binary_open_flags,
-    sha256_fd,
+    canonical_json,
 )
 from codex_execution_identity import FileIdentity
-from paths import make_private_directory, windows_path_has_private_acl
+from paths import ba_home, make_private_directory, windows_path_has_private_acl
+from portable_lock import lock_ex, unlock
 from provider_family_launch_attestation import (
     CriticalPackageIdentity,
     capture_critical_package,
@@ -153,6 +155,11 @@ def embedded_claude_sdk_attestation_failure(
 
 
 def _read_attested(identity: FileIdentity) -> bytes:
+    # Single read pass: the pre-read check is stat-only (no hash) because
+    # the content hash is verified once below, against the same bytes
+    # this function reads for the copy - hashing the descriptor twice
+    # (once to pre-verify, once more via `contents`) would read the same
+    # file content twice for no added safety.
     flags = binary_open_flags(
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
     )
@@ -168,8 +175,6 @@ def _read_attested(identity: FileIdentity) -> bytes:
                 or before.st_size != identity.size
                 or before.st_mtime_ns != identity.mtime_ns
                 or before.st_ctime_ns != identity.ctime_ns
-                or sha256_fd(descriptor) != identity.sha256
-                or not identity.attest_metadata()
             ):
                 raise ExecutionContractError(
                     "Claude Agent SDK source identity mismatch",
@@ -372,11 +377,99 @@ def attest_materialized_claude_sdk_package(
     return True
 
 
+_SDK_PACKAGE_CACHE_SEGMENTS = ("cache", "claude-sdk-packages")
+
+
+def _sdk_package_fingerprint(package: CriticalPackageIdentity) -> str:
+    return hashlib.sha256(canonical_json(package.to_dict())).hexdigest()
+
+
+def claude_sdk_package_cache_destination(
+    package: CriticalPackageIdentity,
+) -> Path:
+    """Stable, fingerprint-keyed materialization container under the state
+    home, mirroring `frozen_bundle_destination` / `sdk_launch_cache_destination`:
+    the same attested SDK package always maps to the same destination, so
+    one attested copy is materialized once and reused by every subsequent
+    turn instead of copying the whole `claude_agent_sdk` package fresh into
+    a new per-run directory every time.
+    """
+    if (
+        not isinstance(package, CriticalPackageIdentity)
+        or package.package_name != _SDK_PACKAGE
+    ):
+        raise ExecutionContractError(
+            "invalid Claude Agent SDK package authority",
+        )
+    fingerprint = _sdk_package_fingerprint(package)
+    if not SHA256_RE.fullmatch(fingerprint):
+        raise ExecutionContractError(
+            "invalid Claude Agent SDK cache fingerprint",
+        )
+    try:
+        ancestor = ba_home()
+        for name in (*_SDK_PACKAGE_CACHE_SEGMENTS, fingerprint):
+            ancestor = ancestor / name
+            ancestor.mkdir(mode=0o700, exist_ok=True)
+            make_private_directory(ancestor)
+    except (OSError, PermissionError) as exc:
+        raise ExecutionContractError(
+            "Claude Agent SDK cache is unavailable",
+        ) from exc
+    return ancestor / "root"
+
+
+def materialize_claude_sdk_package_cached(
+    package: CriticalPackageIdentity,
+) -> Path:
+    """Cache-aware wrapper around `materialize_claude_sdk_package`.
+
+    The same attested package always maps to the same fingerprint-keyed
+    destination under the state home, so a turn reuses a prior turn's
+    materialized copy of the `claude_agent_sdk` package instead of
+    copying it fresh every time. Concurrent first-time materializers of
+    the same fingerprint are serialized with a blocking advisory lock
+    (mirrors `materialize_sdk_launch_cached`'s concurrency handling).
+    """
+    destination = claude_sdk_package_cache_destination(package)
+    target = destination / _SDK_PACKAGE
+    if destination.is_dir() and attest_materialized_claude_sdk_package(
+        package, target,
+    ):
+        return target
+    lock_path = destination.parent / ".materializing.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        lock_ex(lock_fd)
+        # Re-check now that we hold the lock: another process may have
+        # materialized this fingerprint while we were waiting for it.
+        if destination.is_dir() and attest_materialized_claude_sdk_package(
+            package, target,
+        ):
+            return target
+        if destination.exists() or destination.is_symlink():
+            # A drifted/corrupted prior attempt: `materialize_claude_sdk_
+            # package` requires its destination container to not already
+            # exist, so a full retry needs it removed first.
+            shutil.rmtree(destination, ignore_errors=True)
+        materialize_claude_sdk_package(package, destination)
+    finally:
+        unlock(lock_fd)
+        os.close(lock_fd)
+    if not attest_materialized_claude_sdk_package(package, target):
+        raise ExecutionContractError(
+            "materialized Claude Agent SDK package mismatch",
+        )
+    return target
+
+
 __all__ = [
     "attest_embedded_claude_sdk",
     "embedded_claude_sdk_attestation_failure",
     "attest_materialized_claude_sdk_package",
     "capture_claude_sdk_package",
     "capture_embedded_claude_sdk",
+    "claude_sdk_package_cache_destination",
     "materialize_claude_sdk_package",
+    "materialize_claude_sdk_package_cached",
 ]

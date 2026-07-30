@@ -15,10 +15,10 @@ from codex_execution_common import (
     ExecutionContractError,
     SECRET_NAMES,
     binary_open_flags,
+    cached_sha256_fd,
     parallel_map,
     required_integer,
     required_string,
-    sha256_fd,
     stable_stat_identity,
     symlink_chain,
 )
@@ -172,7 +172,10 @@ def _verify_file_handle(fd: int, identity: FileIdentity) -> None:
         or observed.st_size != identity.size
         or observed.st_mtime_ns != identity.mtime_ns
         or observed.st_ctime_ns != identity.ctime_ns
-        or sha256_fd(fd) != identity.sha256
+        or cached_sha256_fd(
+            fd,
+            (identity.resolved_path, stable_stat_identity(observed)),
+        ) != identity.sha256
     ):
         raise ExecutionContractError("execution component identity mismatch")
 
@@ -218,6 +221,16 @@ class AttestedLaunch:
         return all(
             parallel_map(
                 FileIdentity.attest,
+                {self.launcher, *self.components},
+            ),
+        )
+
+    def attest_metadata(self) -> bool:
+        """Cheap stat-tuple-only re-check for a launch already fully
+        attested earlier in the same launch/spawn cycle."""
+        return all(
+            parallel_map(
+                FileIdentity.attest_metadata,
                 {self.launcher, *self.components},
             ),
         )

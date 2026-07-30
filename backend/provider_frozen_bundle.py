@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any, Mapping
@@ -18,6 +19,7 @@ from codex_execution_common import (
     parallel_map_processes,
     required_integer,
     required_string,
+    stable_stat_identity,
     timed_contract_step,
 )
 from codex_execution_identity import (
@@ -822,18 +824,71 @@ def _safe_materialization_parent(destination: Path) -> Path:
     return parent
 
 
+# Per-process memo of a destination that has already passed a full,
+# content-hash-verified adoption check: keyed by the destination's
+# resolved path, valued by the stable stat tuple of every one of its
+# file entries at the moment that verify succeeded. A fingerprint-keyed
+# destination's content is immutable once materialized (backend-owned,
+# mode-0500 copies), so an unchanged stat tuple on a later adoption
+# attempt is exactly as strong a guarantee as the codebase's existing
+# `attest_metadata` trust model elsewhere - it lets a warm cache hit
+# skip re-reading and re-hashing potentially hundreds of MB on every
+# single turn. Any stat drift falls straight through to the real,
+# hash-verifying check below rather than being trusted.
+_adopted_bundle_stats_lock = threading.Lock()
+_adopted_bundle_stats: dict[str, tuple[tuple[int, ...], ...]] = {}
+
+
+def _destination_file_stats(
+    bundle: FrozenBundleIdentity,
+    resolved: Path,
+) -> tuple[tuple[int, ...], ...] | None:
+    stats: list[tuple[int, ...]] = []
+    for entry in bundle.entries:
+        if entry.file is None:
+            continue
+        try:
+            observed = (resolved / entry.relative_path).stat()
+        except OSError:
+            return None
+        stats.append(stable_stat_identity(observed))
+    return tuple(stats)
+
+
 def _adopt_materialized_bundle(
     bundle: FrozenBundleIdentity,
     target: Path,
 ) -> Path | None:
     if not target.exists() or target.is_symlink():
         return None
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError:
+        raise ExecutionContractError(
+            "materialized frozen bundle identity mismatch: "
+            "destination is unreadable",
+        )
+    cache_key = str(resolved)
+    with _adopted_bundle_stats_lock:
+        previously_verified = _adopted_bundle_stats.get(cache_key)
+    if previously_verified is not None:
+        current = _destination_file_stats(bundle, resolved)
+        if current == previously_verified:
+            return resolved
+        raise ExecutionContractError(
+            "materialized frozen bundle identity mismatch: "
+            "destination changed since it was last verified",
+        )
     attestation_failure = _materialized_bundle_attestation_failure(
         bundle,
         target,
     )
     if attestation_failure is None:
-        return target.resolve(strict=True)
+        verified_stats = _destination_file_stats(bundle, resolved)
+        if verified_stats is not None:
+            with _adopted_bundle_stats_lock:
+                _adopted_bundle_stats[cache_key] = verified_stats
+        return resolved
     raise ExecutionContractError(
         "materialized frozen bundle identity mismatch: "
         + attestation_failure,

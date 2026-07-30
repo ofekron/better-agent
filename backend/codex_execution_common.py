@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -257,6 +258,73 @@ def stable_stat_identity(stat_result: os.stat_result) -> tuple[int, ...]:
         stat_result.st_dev,
         stat_result.st_ino,
     )
+
+
+# Bounds the process-wide hash-reuse cache below: sized generously above the
+# handful of large components (CLI binary, interpreter, a few dozen config/
+# SDK files) any single launch family touches, so warm reuse never evicts a
+# live entry mid-launch.
+_HASH_CACHE_LIMIT = 512
+_hash_cache: "OrderedDict[tuple[str, tuple[int, ...]], str]" = OrderedDict()
+_hash_cache_lock = threading.Lock()
+
+
+def cached_sha256_fd(fd: int, cache_key: tuple[str, tuple[int, ...]]) -> str:
+    """sha256 of `fd`'s full content, reused across calls for an identical
+    (resolved path, stable stat tuple).
+
+    This is the single hash-verification primitive full-file attestation/
+    capture funnels through. A stat-tuple change is a different cache key
+    by construction, so drift always misses the cache and falls through
+    to a real read - the cache can only short-circuit hashing a file that
+    has provably not changed since the last time it was hashed (same
+    device/inode/size/mtime/ctime), never paper over a mismatch.
+    """
+    with _hash_cache_lock:
+        cached = _hash_cache.get(cache_key)
+        if cached is not None:
+            _hash_cache.move_to_end(cache_key)
+            return cached
+    digest = sha256_fd(fd)
+    with _hash_cache_lock:
+        _hash_cache[cache_key] = digest
+        _hash_cache.move_to_end(cache_key)
+        while len(_hash_cache) > _HASH_CACHE_LIMIT:
+            _hash_cache.popitem(last=False)
+    return digest
+
+
+class AttestOnceCache:
+    """Per-instance cache collapsing repeated full-hash attestation calls.
+
+    The first `resolve()` call runs `full_check` (a real, hash-verifying
+    attest). Once that succeeds, every later call on the same instance
+    runs the cheaper `metadata_check` (stat-tuple only, no re-hash)
+    instead. A failed check never poisons the cache as verified, so a
+    later legitimate capture/attest cycle can still retry the full
+    check from scratch.
+    """
+
+    __slots__ = ("_verified", "_lock")
+
+    def __init__(self) -> None:
+        self._verified = False
+        self._lock = threading.Lock()
+
+    def resolve(
+        self,
+        full_check: Callable[[], bool],
+        metadata_check: Callable[[], bool],
+    ) -> bool:
+        with self._lock:
+            verified = self._verified
+        if verified:
+            return metadata_check()
+        if not full_check():
+            return False
+        with self._lock:
+            self._verified = True
+        return True
 
 
 def sha256_and_first_line_fd(fd: int) -> tuple[str, bytes]:

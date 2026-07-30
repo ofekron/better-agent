@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from codex_execution_common import (
+    AttestOnceCache,
     ExecutionContractError,
     SHA256_RE,
     canonical_json,
@@ -82,6 +83,21 @@ class ConfigScopeIdentity:
                 ),
             )
             and (self.resume is None or self.resume.attest())
+        )
+
+    def attest_metadata(self) -> bool:
+        """Cheap stat-tuple-only re-check for a config scope this same
+        instance already fully hash-attested earlier in the same
+        launch/spawn cycle."""
+        return (
+            self.root.attest()
+            and all(
+                parallel_map(
+                    lambda identity: identity.attest_metadata(),
+                    self.files,
+                ),
+            )
+            and (self.resume is None or self.resume.attest_metadata())
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -193,6 +209,14 @@ class CriticalPackageIdentity:
             parallel_map(FileIdentity.attest, self.files),
         )
 
+    def attest_metadata(self) -> bool:
+        """Cheap stat-tuple-only re-check for a package this same
+        instance already fully hash-attested earlier in the same
+        launch/spawn cycle."""
+        return self.root.attest() and all(
+            parallel_map(FileIdentity.attest_metadata, self.files),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "package_name": self.package_name,
@@ -265,6 +289,12 @@ class FamilyLaunchAttestation:
     critical_packages: tuple[CriticalPackageIdentity, ...]
     fingerprint: str
     schema: int = ATTESTATION_SCHEMA
+    _attest_cache: AttestOnceCache = field(
+        default_factory=AttestOnceCache,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
     @classmethod
     def capture(
@@ -301,15 +331,38 @@ class FamilyLaunchAttestation:
 
     def attest(self) -> bool:
         with timed_contract_step("provider.family_attestation.attest"):
-            return (
-                self.fingerprint == self._computed_fingerprint()
-                and self.runner.attest()
-                and self.downstream.attest()
-                and self.config.attest()
-                and all(
-                    package.attest() for package in self.critical_packages
-                )
+            if self.fingerprint != self._computed_fingerprint():
+                return False
+            return self._attest_cache.resolve(
+                self._full_attest,
+                self.attest_metadata,
             )
+
+    def _full_attest(self) -> bool:
+        return (
+            self.runner.attest()
+            and self.downstream.attest()
+            and self.config.attest()
+            and all(package.attest() for package in self.critical_packages)
+        )
+
+    def attest_metadata(self) -> bool:
+        """Cheap stat-tuple-only re-check used once this attestation has
+        already been fully hash-verified earlier in the same launch/spawn
+        cycle (see `AttestOnceCache`) - collapses the repeated
+        `open_runner`/`open_downstream`/`materialize_sdk` re-checks at
+        each layer boundary into a stat walk instead of a full re-hash
+        of the runner bundle, downstream CLI, config files, and SDK
+        package every single time."""
+        return (
+            self.runner.attest_metadata()
+            and self.downstream.attest_metadata()
+            and self.config.attest_metadata()
+            and all(
+                package.attest_metadata()
+                for package in self.critical_packages
+            )
+        )
 
     def _assert_attested(self) -> None:
         if not self.attest():

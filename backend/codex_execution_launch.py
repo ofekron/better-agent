@@ -16,9 +16,9 @@ from codex_execution_common import (
     SECRET_NAMES,
     ExecutionContractError,
     binary_open_flags,
+    cached_sha256_fd,
     parallel_map,
     sha256_and_first_line_fd,
-    sha256_fd,
     stable_stat_identity,
 )
 from codex_execution_identity import FileIdentity
@@ -66,7 +66,10 @@ class LaunchChain:
                     or stat_result.st_size != component.size
                     or stat_result.st_mtime_ns != component.mtime_ns
                     or stat_result.st_ctime_ns != component.ctime_ns
-                    or sha256_fd(fd) != component.sha256
+                    or cached_sha256_fd(
+                        fd,
+                        (component.resolved_path, stable_stat_identity(stat_result)),
+                    ) != component.sha256
                 ):
                     raise ExecutionContractError(
                         "execution component identity mismatch",
@@ -94,7 +97,10 @@ def _trusted_system_interpreter(fd: int, component: FileIdentity) -> bool:
             resolved.is_relative_to(root)
             for root in (Path("/bin"), Path("/usr/bin"))
         )
-        and sha256_fd(fd) == component.sha256
+        and cached_sha256_fd(
+            fd,
+            (component.resolved_path, stable_stat_identity(observed)),
+        ) == component.sha256
     )
 
 
@@ -106,7 +112,10 @@ def _verify_component_handle(fd: int, component: FileIdentity) -> None:
         or stat_result.st_size != component.size
         or stat_result.st_mtime_ns != component.mtime_ns
         or stat_result.st_ctime_ns != component.ctime_ns
-        or sha256_fd(fd) != component.sha256
+        or cached_sha256_fd(
+            fd,
+            (component.resolved_path, stable_stat_identity(stat_result)),
+        ) != component.sha256
     ):
         raise ExecutionContractError("execution component identity mismatch")
 

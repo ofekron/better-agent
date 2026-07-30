@@ -71,7 +71,7 @@ from provider_claude_execution import (
     attest_embedded_claude_sdk,
     capture_claude_sdk_package,
     capture_embedded_claude_sdk,
-    materialize_claude_sdk_package,
+    materialize_claude_sdk_package_cached,
 )
 from provider_claude_better_agent_runner import (
     ClaudeBetterAgentRunnerProvider,
@@ -1166,10 +1166,20 @@ class ClaudeProvider(Provider):
                 raise RuntimeError(
                     "Claude Agent SDK authority is unavailable",
                 )
-            sdk_root = materialize_claude_sdk_package(
-                sdk_package,
-                run_dir / "claude-sdk",
-            )
+            # Materializes into the shared, fingerprint-keyed SDK package
+            # cache instead of a fresh per-run copy (mirrors the CLI's
+            # `materialize_sdk_launch_cached`): a warm turn reuses a prior
+            # turn's already hash-verified copy instead of re-copying the
+            # whole `claude_agent_sdk` package. `run_dir/claude-sdk/
+            # claude_agent_sdk` is a symlink into that cache rather than a
+            # real copy - `runner.py`'s bootstrap/import checks always
+            # `.resolve(strict=True)` this path before comparing/attesting,
+            # so they transparently see the same physical, hash-verified
+            # cache location either way.
+            sdk_root = materialize_claude_sdk_package_cached(sdk_package)
+            claude_sdk_dir = run_dir / "claude-sdk"
+            claude_sdk_dir.mkdir(mode=0o700)
+            os.symlink(sdk_root, claude_sdk_dir / "claude_agent_sdk")
             sdk_authority = {
                 "kind": "materialized_package",
                 "package_root": str(sdk_root),
