@@ -16,8 +16,14 @@ Claude/Codex/AGY CLI subprocess, no provider network call. Captures:
      would for a real live turn.
   4. The REST snapshot again after that live push, showing the projected
      result (GET /api/sessions/{id} reconciles from events.jsonl on read).
+  5. The real lazy `GET .../messages/{id}/events` full-events fetch for a
+     stubbed message.
+  6. A MANAGER-mode session with a completed worker delegation: the real
+     `workers` array shape on both REST and `messages_replay`.
+  7. The real `GET .../messages?before_seq=N` pagination response for a
+     session with several turn pairs.
 
-Writes all four to frontend/tests/__fixtures__/chat_contract_wire.json so
+Writes all of the above to frontend/tests/__fixtures__/chat_contract_wire.json so
 `frontend/tests/chatContractWire.test.ts` can feed them into the existing
 `renderApp()` / `mockBackend` / `mockWebSocket` harness and assert the
 derived render state — proving the real wire shape and the harness's
@@ -81,6 +87,12 @@ SEED_UUID = "contract-seed-uuid"
 SEED_TEXT = "seeded assistant reply"
 LIVE_UUID = "contract-live-uuid"
 LIVE_TEXT = "live pushed assistant reply"
+
+DELEGATION_ID = "contract-delegation-1"
+WORKER_UUID = "contract-worker-uuid"
+WORKER_TEXT = "worker reply text"
+
+PAGINATION_TURNS = 4
 
 
 def free_port() -> int:
@@ -194,6 +206,112 @@ def _seed_session() -> tuple[str, str]:
     return sid, msg_id
 
 
+def _seed_manager_worker_session() -> tuple[str, str]:
+    """Create a MANAGER-mode session with a completed worker delegation
+    panel on the owning assistant message, via the same `apply_event`
+    primitive a real delegation uses — no orchestrator/provider CLI.
+    Returns (session_id, owner_msg_id)."""
+    from event_journal import event_journal_writer
+    from orchs import ApplyEventCtx, get_strategy
+    from session_manager import manager as session_manager
+
+    sess = session_manager.create(
+        name="chat-contract-manager-capture", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("manager")
+
+    user_msg = {"id": "u1", "role": "user", "content": "delegate this to a worker", "events": []}
+    session_manager.append_user_msg(sid, user_msg)
+
+    owner = strategy.build_assistant_scaffold()
+    owner_id = owner["id"]
+    session_manager.append_assistant_msg(sid, owner)
+
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid, msg=owner,
+        event={
+            "type": "worker_start",
+            "data": {
+                "delegation_id": DELEGATION_ID,
+                "worker_session_id": "contract-worker-session",
+                "worker_description": "contract test worker",
+                "is_new": True,
+                "instructions_preview": "do the thing",
+            },
+        },
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    strategy.apply_event(
+        app_session_id=sid, msg=owner,
+        event={
+            "type": "worker_event",
+            "data": {
+                "delegation_id": DELEGATION_ID,
+                "event": {
+                    "type": "agent_message",
+                    "data": {
+                        "uuid": WORKER_UUID, "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": WORKER_TEXT}]},
+                    },
+                },
+            },
+        },
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    strategy.apply_event(
+        app_session_id=sid, msg=owner,
+        event={
+            "type": "worker_complete",
+            "data": {"delegation_id": DELEGATION_ID, "success": True},
+        },
+        ctx=ctx, source_is_provider_stream=True,
+    )
+    event_journal_writer.barrier_sync(sid)
+    session_manager.set_streaming(sid, owner_id, False)
+    return sid, owner_id
+
+
+def _seed_paginated_session() -> str:
+    """Create a session with several user/assistant turn pairs so the
+    `GET /messages?before_seq=N` pagination endpoint has real older
+    history to page through. Returns session_id."""
+    from event_journal import event_journal_writer
+    from orchs import ApplyEventCtx, get_strategy
+    from session_manager import manager as session_manager
+
+    sess = session_manager.create(
+        name="chat-contract-pagination-capture", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
+
+    for i in range(PAGINATION_TURNS):
+        user_msg = {"id": f"pu{i}", "role": "user", "content": f"turn {i} question", "events": []}
+        session_manager.append_user_msg(sid, user_msg)
+        scaffold = strategy.build_assistant_scaffold()
+        scaffold_id = scaffold["id"]
+        session_manager.append_assistant_msg(sid, scaffold)
+        ev = {
+            "type": "agent_message",
+            "data": {
+                "uuid": f"pagination-uuid-{i}", "type": "assistant",
+                "message": {"content": [{"type": "text", "text": f"turn {i} answer"}]},
+            },
+        }
+        strategy.apply_event(
+            app_session_id=sid, msg=scaffold, event=ev, ctx=ctx,
+            source_is_provider_stream=True,
+        )
+        session_manager.set_streaming(sid, scaffold_id, False)
+    event_journal_writer.barrier_sync(sid)
+    return sid
+
+
 def _push_live_event(sid: str, msg_id: str) -> None:
     """Append a new event directly to events.jsonl via the same direct
     ingest primitive `apply_event`'s live path and worker-fanout call
@@ -231,6 +349,152 @@ async def _recv_until(
         if predicate(frame):
             return frame
     return None
+
+
+async def _capture_replay(
+    ws_url: str, cookie_header: str, sid: str, timeout: float = 10.0,
+) -> dict | None:
+    """Open a fresh WS connection, subscribe cold (since_seq=0), and
+    return the real `messages_replay` frame."""
+    async with websockets.connect(
+        ws_url, additional_headers={"Cookie": cookie_header},
+    ) as ws:
+        await ws.send(json.dumps({
+            "type": "subscribe", "app_session_id": sid, "since_seq": 0,
+        }))
+        return await _recv_until(
+            ws, lambda f: f.get("type") == "messages_replay", timeout=timeout,
+        )
+
+
+async def _capture_manager_worker_scenario(
+    client: httpx.AsyncClient, ws_url: str, cookie_header: str, failures: list[str],
+) -> dict | None:
+    """Manager-mode session with a completed worker delegation: capture
+    the real REST shape (the `workers` array on the owning message) and
+    the real `messages_replay` WS frame carrying the same panel."""
+    sid, owner_id = _seed_manager_worker_session()
+
+    r = await client.get(f"/api/sessions/{sid}")
+    if r.status_code != 200:
+        _fail("manager/worker REST snapshot", f"status={r.status_code} body={r.text[:300]}", failures)
+        return None
+    rest_snapshot = r.json()
+    owner_msg = next(
+        (m for m in rest_snapshot.get("messages", []) if m.get("id") == owner_id), None,
+    )
+    panel = next(
+        (w for w in (owner_msg or {}).get("workers", []) if w.get("delegation_id") == DELEGATION_ID),
+        None,
+    )
+    if panel is None:
+        _fail("manager/worker REST snapshot", "delegation panel missing from workers array", failures)
+    elif panel.get("success") is not True:
+        _fail("manager/worker REST snapshot", f"panel.success expected True, got {panel.get('success')!r}", failures)
+    elif panel.get("events"):
+        # `GET /api/sessions/{id}` never inlines worker-panel events (no
+        # stub/preview either, unlike top-level messages) — the panel
+        # metadata (delegation_id, success, description) is real, but
+        # `events` is always empty here by design. A non-empty list
+        # would mean that contract changed.
+        _fail(
+            "manager/worker REST snapshot",
+            f"expected panel.events empty on plain GET, got {len(panel['events'])} entries",
+            failures,
+        )
+    else:
+        _ok("REST GET /api/sessions/{id} returns the worker delegation panel (metadata only, events empty by design)")
+
+    # Worker panel events are only available via the SAME lazy
+    # full-events fetch used to un-stub the owning message's own events
+    # (MessageBubble.tsx's `needsFetch` merges `hydrated.workers` too).
+    r_full = await client.get(f"/api/sessions/{sid}/messages/{owner_id}/events")
+    owner_full: dict | None = None
+    if r_full.status_code != 200:
+        _fail("manager/worker lazy events fetch", f"status={r_full.status_code} body={r_full.text[:300]}", failures)
+    else:
+        owner_full = r_full.json()
+        full_panel = next(
+            (w for w in (owner_full or {}).get("workers", []) if w.get("delegation_id") == DELEGATION_ID),
+            None,
+        )
+        if full_panel is None:
+            _fail("manager/worker lazy events fetch", "delegation panel missing from full-fetch response", failures)
+        elif not any(
+            (e.get("data") or {}).get("uuid") == WORKER_UUID for e in full_panel.get("events", [])
+        ):
+            _fail("manager/worker lazy events fetch", "worker reply event missing from full-fetch panel", failures)
+        else:
+            _ok("REST lazy /messages/{id}/events fetch returns the full worker panel events")
+
+    replay_frame = await _capture_replay(ws_url, cookie_header, sid)
+    if replay_frame is None:
+        _fail("manager/worker WS messages_replay", "no messages_replay frame received", failures)
+    else:
+        replay_owner = next(
+            (m for m in (replay_frame.get("data") or {}).get("messages", [])
+             if m.get("id") == owner_id),
+            None,
+        )
+        replay_panel = next(
+            (w for w in (replay_owner or {}).get("workers", [])
+             if w.get("delegation_id") == DELEGATION_ID),
+            None,
+        )
+        if replay_panel is None:
+            _fail("manager/worker WS messages_replay", "delegation panel missing from replay", failures)
+        else:
+            _ok("WS messages_replay carries the worker delegation panel")
+
+    return {
+        "sessionId": sid,
+        "ownerMsgId": owner_id,
+        "delegationId": DELEGATION_ID,
+        "restSnapshot": rest_snapshot,
+        "wsMessagesReplay": replay_frame,
+        "restOwnerFullFetch": owner_full,
+    }
+
+
+async def _capture_pagination_scenario(
+    client: httpx.AsyncClient, failures: list[str],
+) -> dict | None:
+    """Session with several turn pairs: capture a small first page (REST
+    GET with msg_limit) and the real `GET .../messages?before_seq=N`
+    response for the older page."""
+    sid = _seed_paginated_session()
+
+    r = await client.get(f"/api/sessions/{sid}", params={"msg_limit": 2})
+    if r.status_code != 200:
+        _fail("pagination first page", f"status={r.status_code} body={r.text[:300]}", failures)
+        return None
+    first_page = r.json()
+    pagination = first_page.get("pagination") or {}
+    if not pagination.get("has_older"):
+        _fail("pagination first page", f"expected has_older=True, got pagination={pagination!r}", failures)
+        return None
+    _ok("REST GET /api/sessions/{id}?msg_limit=2 reports has_older=True")
+
+    oldest = pagination.get("oldest_loaded_seq")
+    r2 = await client.get(f"/api/sessions/{sid}/messages", params={"before_seq": oldest})
+    if r2.status_code != 200:
+        _fail("pagination older page", f"status={r2.status_code} body={r2.text[:300]}", failures)
+        return None
+    older_page = r2.json()
+    first_page_ids = {m.get("id") for m in first_page.get("messages", [])}
+    older_ids = {m.get("id") for m in older_page.get("messages", [])}
+    if not older_ids:
+        _fail("pagination older page", "GET .../messages?before_seq returned no messages", failures)
+    elif older_ids & first_page_ids:
+        _fail("pagination older page", "older page overlaps with the first page", failures)
+    else:
+        _ok("REST GET /api/sessions/{id}/messages?before_seq returns distinct older messages")
+
+    return {
+        "sessionId": sid,
+        "firstPage": first_page,
+        "olderPage": older_page,
+    }
 
 
 def _boot(timeout: float = 180.0) -> tuple[BackgroundUvicorn, int, "_test_home.TestHome"]:
@@ -369,6 +633,14 @@ async def amain() -> int:
                 else:
                     _ok("REST lazy message-events fetch returns the full (unstubbed) events")
 
+            # 6. Manager-mode session with a completed worker delegation.
+            manager_worker_scenario = await _capture_manager_worker_scenario(
+                client, ws_url, cookie_header, failures,
+            )
+
+            # 7. REST pagination (GET .../messages?before_seq=N).
+            pagination_scenario = await _capture_pagination_scenario(client, failures)
+
         if not failures:
             FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
             FIXTURE_PATH.write_text(
@@ -381,6 +653,8 @@ async def amain() -> int:
                         "wsLivePush": live_frame,
                         "restAfterLivePush": rest_after_live,
                         "restMessageEventsFull": message_events_full,
+                        "managerWorkerScenario": manager_worker_scenario,
+                        "paginationScenario": pagination_scenario,
                     },
                     indent=2,
                     sort_keys=True,
