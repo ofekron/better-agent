@@ -297,11 +297,28 @@ class SessionRegistry {
   private _bootstrapInFlight: Promise<void> | null = null;
   private _deltaBuffer: BufferedDelta[] = [];
 
+  /** Detach the bus subscriptions + DOM listeners wired by `bind()`.
+   * Without this, a `bind()` caller that itself unmounts (e.g. React's
+   * `<App>` in a test that mounts/unmounts many times per process)
+   * leaves `onResume` permanently bound to `document`/`window` — a
+   * later, unrelated `focus`/`visibilitychange` event then fires a
+   * stray `bootstrap()` REST call against whatever `fetch` happens to
+   * be mocked at that moment. */
+  unbind() {
+    if (this.busUnsub) {
+      this.busUnsub();
+      this.busUnsub = null;
+    }
+    if (this.domUnsub) {
+      this.domUnsub();
+      this.domUnsub = null;
+    }
+  }
+
   /** Wire bus subscriptions + DOM lifecycle. Idempotent — calling
    * twice detaches the prior wire-up first. */
   bind() {
-    if (this.busUnsub) this.busUnsub();
-    if (this.domUnsub) this.domUnsub();
+    this.unbind();
 
     this.busUnsub = subscribeMany([
       ["session_running_changed", (p) => {
