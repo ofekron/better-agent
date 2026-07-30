@@ -612,14 +612,14 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
         assert additions[("mcp", "session-control")]["native_eligible"] is False
         assert additions[("mcp", "session-control")]["native_exposed"] is False
 
-        # kind="mcp" is no longer settable through this flag at all -- native
-        # MCP exposure is managed exclusively via
-        # grant_native_mcp_server()/revoke_native_mcp_server() now, regardless
-        # of eligibility, ambient-safe or not.
+        # kind="mcp" routes through grant_native_mcp_server(), which fails
+        # closed here for both entrypoints: neither declares
+        # permissions.native_mcp (and this record has no resolvable
+        # install_path fingerprint), so no grant is ever created.
         for name in ("local-search", "session-control"):
             try:
                 extension_store.set_native_harness_exposed("ofek.demo", "mcp", name, True)
-                raise AssertionError(f"kind='mcp' exposure flag should be rejected outright ({name})")
+                raise AssertionError(f"kind='mcp' exposure must fail closed for undeclared servers ({name})")
             except extension_store.ExtensionError:
                 pass
         try:

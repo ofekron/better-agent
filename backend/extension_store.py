@@ -8004,16 +8004,39 @@ def native_harness_exposed(
     return key in set(entry["native_harness"])
 
 
+def set_native_mcp_exposed(extension_id: str, name: str, enabled: bool) -> bool:
+    """Toggle global native exposure for one MCP entrypoint by entrypoint
+    name — the grant-backed analog of set_native_harness_exposed for
+    kind='mcp'. Resolves the entrypoint to its canonical server_id and
+    creates/revokes the global grant; grant creation re-validates
+    eligibility and the declared scopes (fail-closed in
+    grant_native_mcp_server)."""
+    if not isinstance(enabled, bool):
+        raise ExtensionError("native exposure enabled must be a boolean")
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    item = next(
+        (
+            candidate
+            for candidate in _stored_mcp_entrypoints(record)
+            if str(candidate.get("name") or "") == name
+        ),
+        None,
+    )
+    if item is None:
+        raise ExtensionError("Unknown harness addition")
+    server_id = _native_mcp_server_id(item)
+    if enabled:
+        grant_native_mcp_server(extension_id, server_id, "global")
+    else:
+        revoke_native_mcp_server(extension_id, server_id, "global")
+    return enabled
+
+
 def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled: bool) -> bool:
     if kind == "mcp":
-        # Native MCP exposure is managed via grant_native_mcp_server()/
-        # revoke_native_mcp_server(). Reject rather than silently
-        # accept-and-do-nothing, which would tell a caller
-        # {"native_exposed": true} while nothing actually changed.
-        raise ExtensionError(
-            "native exposure for kind='mcp' is managed via "
-            "grant_native_mcp_server()/revoke_native_mcp_server(), not this flag"
-        )
+        return set_native_mcp_exposed(extension_id, name, enabled)
     if not isinstance(enabled, bool):
         raise ExtensionError("native exposure enabled must be a boolean")
     key = _native_harness_key(kind, name)

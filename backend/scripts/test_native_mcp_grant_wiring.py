@@ -63,7 +63,7 @@ def _record(*, args=("mcp/server.py",), scopes=("global", "project")) -> Path:
                 }
             ],
         },
-        "permissions": {"native_mcp": {SERVER_ID: list(scopes)}},
+        "permissions": {"native_mcp": {SERVER_ID: list(scopes)}} if scopes else {},
         "marketplace": {},
     })
     (package / "better-agent-extension.json").write_text(
@@ -475,14 +475,31 @@ def test_grant_rejects_session_and_turn_scope_in_pr1() -> bool:
     return ok
 
 
-def test_set_native_harness_exposed_rejects_mcp_kind() -> bool:
+def test_set_native_harness_exposed_routes_mcp_kind_through_grants() -> bool:
     _record()
+    assert f"{EXT_ID}:{SERVER_ID}" not in extension_store.resolve_native_mcp_servers_for_context()
+    granted = extension_store.set_native_harness_exposed(EXT_ID, "mcp", SERVER_ID, True)
+    after_grant = f"{EXT_ID}:{SERVER_ID}" in extension_store.resolve_native_mcp_servers_for_context()
+    revoked = extension_store.set_native_harness_exposed(EXT_ID, "mcp", SERVER_ID, False)
+    after_revoke = f"{EXT_ID}:{SERVER_ID}" in extension_store.resolve_native_mcp_servers_for_context()
+    ok = granted is True and after_grant and revoked is False and not after_revoke
+    print(f"{OK if ok else FAIL} set_native_harness_exposed(kind='mcp') creates/revokes the global grant "
+          f"(granted={after_grant}, revoked={not after_revoke})")
+    _cleanup()
+    return ok
+
+
+def test_set_native_harness_exposed_mcp_fails_closed_for_undeclared_server() -> bool:
+    # An entrypoint without a permissions.native_mcp declaration must not be
+    # grantable through the exposure flag either -- same fail-closed gate as
+    # grant_native_mcp_server itself.
+    _record(scopes=())
     try:
         extension_store.set_native_harness_exposed(EXT_ID, "mcp", SERVER_ID, True)
         ok = False
     except extension_store.ExtensionError:
         ok = True
-    print(f"{OK if ok else FAIL} set_native_harness_exposed(kind='mcp') is rejected, not silently a no-op")
+    print(f"{OK if ok else FAIL} set_native_harness_exposed(kind='mcp') fails closed for an undeclared server")
     _cleanup()
     return ok
 
@@ -544,7 +561,8 @@ def main_run() -> int:
         test_revoke_removes_only_the_targeted_grant_leaving_siblings_intact,
         test_revoke_raises_on_unresolvable_project_path_instead_of_silently_coercing,
         test_grant_rejects_session_and_turn_scope_in_pr1,
-        test_set_native_harness_exposed_rejects_mcp_kind,
+        test_set_native_harness_exposed_routes_mcp_kind_through_grants,
+        test_set_native_harness_exposed_mcp_fails_closed_for_undeclared_server,
         test_extension_harness_additions_reports_grant_state,
         test_resolve_native_mcp_server_config_matches_grant_state,
     ]
