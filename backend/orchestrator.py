@@ -51,9 +51,7 @@ from communication_modes import (
 )
 from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
 from trace_collector import (
-    TraceCollector,
     extract_provider_result_token_usage,
-    extract_token_usage,
     merge_token_usages,
 )
 import loop_affinity
@@ -309,9 +307,6 @@ def _load_or_create_internal_token() -> str:
 # under the old private names so internal call sites don't need
 # updating. New code should import from `event_shape`.
 from event_shape import (
-    extract_output_text as _extract_output_text,
-    extract_subagent_types as _extract_subagent_types,
-    is_synthetic_event as _is_synthetic_event,
     project_content_snapshot as _project_content_snapshot,
     strip_synthetic_events as _strip_synthetic_events,
 )
@@ -326,17 +321,6 @@ class _Cancelled(Exception):
     """Raised when a turn is cancelled by the user."""
     pass
 
-
-# Error classifiers + retry caps live in `turn_helpers` so both
-# `orchestrator.py` and `turn_manager.py` import from a neutral module.
-from turn_helpers import (
-    _TRANSIENT_MAX_ATTEMPTS,
-    _TRANSIENT_BASE_WAIT_S,
-    _TRANSIENT_MAX_WAIT_S,
-    _is_stale_session_error,
-    _is_rate_limit_attempt,
-    _is_transient_error,
-)
 
 
 # Per-task handle to the running coordinator instance. Set by
