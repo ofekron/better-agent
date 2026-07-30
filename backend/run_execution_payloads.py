@@ -6,13 +6,14 @@ import stat
 import uuid
 from pathlib import Path
 
-from codex_execution_common import ExecutionContractError
+from codex_execution_common import ExecutionContractError, SHA256_RE
 from codex_execution_identity import FileIdentity
 from paths import (
     make_private_file,
     require_private_directory,
     require_private_file,
 )
+from provider_pinned_launch import sdk_launch_cache_root
 from run_execution_payload_manifest import (
     ExecutionPayloadManifest,
     MANIFEST_NAME,
@@ -92,14 +93,50 @@ def _validate_run_directory(run_dir: Path) -> os.stat_result:
     return _private_directory(run_dir, "run directory")
 
 
+def _sdk_cache_payload_root(
+    identities: tuple[FileIdentity, ...],
+) -> tuple[Path, str]:
+    """The single closed root every payload file must live in: the shared,
+    fingerprint-keyed SDK launch cache entry the CLI was materialized into
+    (`sdk_launch_cache_root()/<sha256 fingerprint>/root`). The root is
+    reconstructed from the trusted cache prefix plus the regex-validated
+    fingerprint segment — never taken as a free-form path — so a manifest
+    can only ever bind to a directory inside the private state-home cache.
+    """
+    requested_roots = {
+        Path(identity.requested_path).parent for identity in identities
+    }
+    resolved_roots = {
+        Path(identity.resolved_path).parent for identity in identities
+    }
+    if len(requested_roots) != 1 or len(resolved_roots) != 1:
+        _fail("payload files do not share a single payload root")
+    payload_root = requested_roots.pop()
+    resolved_root = resolved_roots.pop()
+    fingerprint = resolved_root.parent.name
+    try:
+        cache_root = sdk_launch_cache_root().resolve(strict=True)
+        payload_root_resolved = payload_root.resolve(strict=True)
+    except OSError as exc:
+        _fail("payload root is unavailable", exc)
+    if (
+        payload_root.name != "root"
+        or resolved_root.name != "root"
+        or payload_root_resolved != resolved_root
+        or payload_root.parent.name != fingerprint
+        or not SHA256_RE.fullmatch(fingerprint)
+        or resolved_root.parent.parent != cache_root
+    ):
+        _fail("payload root escapes the SDK launch cache")
+    return payload_root, fingerprint
+
+
 def _payload_file(
     payload_root: Path,
     identity: FileIdentity,
     *,
     hash_payload: bool,
 ) -> PayloadFile:
-    if type(identity) is not FileIdentity:
-        _fail("payload identity is invalid")
     requested = Path(identity.requested_path)
     resolved = Path(identity.resolved_path)
     try:
@@ -157,10 +194,12 @@ def _build_manifest(
     run_stat = _validate_run_directory(run_dir)
     if payload_root_name not in PAYLOAD_ROOTS:
         _fail("payload root is invalid")
-    payload_root = run_dir / payload_root_name
-    _private_directory(payload_root, "payload root")
     if not identities:
         _fail("payload manifest must contain files")
+    if any(type(identity) is not FileIdentity for identity in identities):
+        _fail("payload identity is invalid")
+    payload_root, fingerprint = _sdk_cache_payload_root(identities)
+    _private_directory(payload_root, "payload root")
     files = tuple(
         _payload_file(
             payload_root,
@@ -176,6 +215,7 @@ def _build_manifest(
         run_directory_device=run_stat.st_dev,
         run_directory_inode=run_stat.st_ino,
         payload_root=payload_root_name,
+        payload_root_fingerprint=fingerprint,
         files=tuple(sorted(files, key=lambda item: item.name)),
     )
 
@@ -252,7 +292,11 @@ def _attest_manifest_binding(
         or manifest.run_directory_inode != run_stat.st_ino
     ):
         _fail("payload manifest does not own this run directory")
-    payload_root = run_dir / manifest.payload_root
+    payload_root = (
+        sdk_launch_cache_root()
+        / manifest.payload_root_fingerprint
+        / "root"
+    )
     _private_directory(payload_root, "payload root")
     return payload_root
 

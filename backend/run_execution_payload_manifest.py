@@ -10,7 +10,7 @@ from codex_execution_common import ExecutionContractError, SHA256_RE
 
 
 MANIFEST_NAME = "execution_payload_manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 PAYLOAD_ROOTS = frozenset({"claude-cli", "provider-cli"})
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -51,12 +51,14 @@ class ExecutionPayloadManifest:
     run_directory_device: int
     run_directory_inode: int
     payload_root: str
+    payload_root_fingerprint: str
     files: tuple[PayloadFile, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "files": [item.as_dict() for item in self.files],
             "payload_root": self.payload_root,
+            "payload_root_fingerprint": self.payload_root_fingerprint,
             "run_directory": {
                 "device": self.run_directory_device,
                 "inode": self.run_directory_inode,
@@ -110,6 +112,7 @@ def parse_manifest(encoded: bytes) -> ExecutionPayloadManifest:
     if type(raw) is not dict or set(raw) != {
         "files",
         "payload_root",
+        "payload_root_fingerprint",
         "run_directory",
         "run_id",
         "version",
@@ -125,12 +128,15 @@ def parse_manifest(encoded: bytes) -> ExecutionPayloadManifest:
         _fail("payload manifest run directory is invalid")
     run_id = raw["run_id"]
     payload_root = raw["payload_root"]
+    fingerprint = raw["payload_root_fingerprint"]
     files_raw = raw["files"]
     if (
         type(run_id) is not str
         or not SAFE_NAME.fullmatch(run_id)
         or type(payload_root) is not str
         or payload_root not in PAYLOAD_ROOTS
+        or type(fingerprint) is not str
+        or not SHA256_RE.fullmatch(fingerprint)
         or type(files_raw) is not list
         or not files_raw
     ):
@@ -145,6 +151,7 @@ def parse_manifest(encoded: bytes) -> ExecutionPayloadManifest:
         run_directory_device=_required_int(run_directory["device"]),
         run_directory_inode=_required_int(run_directory["inode"]),
         payload_root=payload_root,
+        payload_root_fingerprint=fingerprint,
         files=files,
     )
     if canonical_bytes(manifest) != encoded:

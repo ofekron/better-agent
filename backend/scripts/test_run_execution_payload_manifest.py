@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -18,7 +19,10 @@ from codex_execution_common import ExecutionContractError  # noqa: E402
 from codex_execution_identity import FileIdentity  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
     capture_cli_launch,
-    materialize_sdk_launch,
+)
+from provider_pinned_launch import (  # noqa: E402
+    materialize_sdk_launch_cached,
+    sdk_launch_cache_root,
 )
 import run_execution_payloads  # noqa: E402
 from paths import make_private_directory, make_private_file  # noqa: E402
@@ -51,16 +55,30 @@ def _unlink_readonly(path: Path) -> None:
     path.unlink()
 
 
-def _run(root: Path, run_id: str, payload_root: str):
+def _cache_payload(tag: str) -> Path:
+    fingerprint = hashlib.sha256(tag.encode("utf-8")).hexdigest()
+    entry = sdk_launch_cache_root() / fingerprint
+    entry.mkdir(mode=0o700, exist_ok=True)
+    make_private_directory(entry)
+    payload = entry / "root"
+    payload.mkdir(mode=0o700, exist_ok=True)
+    make_private_directory(payload)
+    return payload
+
+
+def _run_dir(root: Path, run_id: str) -> Path:
     runs = root / "runs"
     runs.mkdir(mode=0o700, parents=True, exist_ok=True)
     make_private_directory(runs)
     run_dir = runs / run_id
-    run_dir.mkdir(mode=0o700)
+    run_dir.mkdir(mode=0o700, exist_ok=True)
     make_private_directory(run_dir)
-    payload = run_dir / payload_root
-    payload.mkdir(mode=0o700)
-    make_private_directory(payload)
+    return run_dir
+
+
+def _run(root: Path, run_id: str):
+    run_dir = _run_dir(root, run_id)
+    payload = _cache_payload(run_id)
     executable = payload / (
         "provider-cli.exe" if os.name == "nt" else "provider-cli"
     )
@@ -79,27 +97,20 @@ def _canonical_write(path: Path, data: dict) -> None:
 
 def _round_trip_and_idempotency(root: Path) -> None:
     for index, payload_root in enumerate(("claude-cli", "provider-cli")):
-        runs = root / "runs"
-        runs.mkdir(mode=0o700, parents=True, exist_ok=True)
-        make_private_directory(runs)
-        run_dir = runs / f"round-trip-{index}"
-        run_dir.mkdir(mode=0o700)
-        make_private_directory(run_dir)
+        run_dir = _run_dir(root, f"round-trip-{index}")
         source = Path(sys.executable)
         if os.name != "nt":
             source = root / f"source-{index}"
             source.write_bytes(b"#!/bin/sh\nexit 0\n")
             source.chmod(0o700)
-        destination = run_dir / payload_root
-        destination.mkdir(mode=0o700)
-        make_private_directory(destination)
         launch = capture_cli_launch(
             logical_command="provider",
             launcher_path=source,
             platform=sys.platform,
         )
-        materialized = materialize_sdk_launch(launch, destination)
+        materialized = materialize_sdk_launch_cached(launch)
         executable = Path(materialized.executable_path)
+        assert executable.is_relative_to(sdk_launch_cache_root())
         written = publish_execution_payload_manifest(
             run_dir,
             payload_root,
@@ -122,12 +133,15 @@ def _round_trip_and_idempotency(root: Path) -> None:
             pass
         else:
             raise AssertionError("published payload manifest remained writable")
+        assert written.payload_root_fingerprint == (
+            executable.parent.parent.name
+        )
         assert written.files[0].name == executable.name
         assert "/" not in written.files[0].name
 
 
 def _concurrent_publication(root: Path) -> None:
-    run_dir, _, _, identity = _run(root, "concurrent", "provider-cli")
+    run_dir, _, _, identity = _run(root, "concurrent")
     results: list[object] = []
 
     def publish() -> None:
@@ -156,11 +170,7 @@ def _concurrent_publication(root: Path) -> None:
 
 
 def _closed_root_and_identity_rejections(root: Path) -> None:
-    run_dir, payload, executable, identity = _run(
-        root,
-        "closed-root",
-        "provider-cli",
-    )
+    run_dir, payload, executable, identity = _run(root, "closed-root")
     outside = run_dir / ("outside.exe" if os.name == "nt" else "outside")
     _write_payload(outside, executable.read_bytes())
     _expect_rejected(
@@ -168,6 +178,58 @@ def _closed_root_and_identity_rejections(root: Path) -> None:
             run_dir,
             "provider-cli",
             (FileIdentity.capture(outside),),
+        )
+    )
+    run_local_root = run_dir / "provider-cli"
+    run_local_root.mkdir(mode=0o700)
+    make_private_directory(run_local_root)
+    run_local = run_local_root / (
+        "provider-cli.exe" if os.name == "nt" else "provider-cli"
+    )
+    _write_payload(run_local, executable.read_bytes())
+    _expect_rejected(
+        lambda: publish_execution_payload_manifest(
+            run_dir,
+            "provider-cli",
+            (FileIdentity.capture(run_local),),
+        )
+    )
+    fingerprint_level = payload.parent / (
+        "fingerprint-level.exe" if os.name == "nt" else "fingerprint-level"
+    )
+    _write_payload(fingerprint_level, executable.read_bytes())
+    _expect_rejected(
+        lambda: publish_execution_payload_manifest(
+            run_dir,
+            "provider-cli",
+            (FileIdentity.capture(fingerprint_level),),
+        )
+    )
+    non_hex_root = sdk_launch_cache_root() / "not-a-fingerprint" / "root"
+    non_hex_root.mkdir(mode=0o700, parents=True)
+    make_private_directory(non_hex_root.parent)
+    make_private_directory(non_hex_root)
+    non_hex = non_hex_root / (
+        "provider-cli.exe" if os.name == "nt" else "provider-cli"
+    )
+    _write_payload(non_hex, executable.read_bytes())
+    _expect_rejected(
+        lambda: publish_execution_payload_manifest(
+            run_dir,
+            "provider-cli",
+            (FileIdentity.capture(non_hex),),
+        )
+    )
+    other_entry = _cache_payload("closed-root-second-entry")
+    other_file = other_entry / (
+        "provider-runtime.exe" if os.name == "nt" else "provider-runtime"
+    )
+    _write_payload(other_file, executable.read_bytes())
+    _expect_rejected(
+        lambda: publish_execution_payload_manifest(
+            run_dir,
+            "provider-cli",
+            (identity, FileIdentity.capture(other_file)),
         )
     )
     _expect_rejected(
@@ -201,11 +263,7 @@ def _closed_root_and_identity_rejections(root: Path) -> None:
 
 
 def _different_publication_rejected(root: Path) -> None:
-    run_dir, payload, _, identity = _run(
-        root,
-        "different-publication",
-        "provider-cli",
-    )
+    run_dir, payload, _, identity = _run(root, "different-publication")
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
@@ -222,10 +280,8 @@ def _different_publication_rejected(root: Path) -> None:
             (FileIdentity.capture(alternative),),
         )
     )
-    claude_root = run_dir / "claude-cli"
-    claude_root.mkdir(mode=0o700)
-    make_private_directory(claude_root)
-    claude_file = claude_root / (
+    claude_payload = _cache_payload("different-publication-claude")
+    claude_file = claude_payload / (
         "provider-cli.exe" if os.name == "nt" else "provider-cli"
     )
     _write_payload(claude_file, b"other")
@@ -239,11 +295,7 @@ def _different_publication_rejected(root: Path) -> None:
 
 
 def _immutable_and_strict_reader(root: Path) -> None:
-    run_dir, _, executable, identity = _run(
-        root,
-        "immutable",
-        "provider-cli",
-    )
+    run_dir, _, executable, identity = _run(root, "immutable")
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
@@ -252,11 +304,7 @@ def _immutable_and_strict_reader(root: Path) -> None:
     _write_payload(executable, b"tampered")
     _expect_rejected(lambda: read_execution_payload_manifest(run_dir))
 
-    strict_dir, _, _, strict_identity = _run(
-        root,
-        "strict-reader",
-        "provider-cli",
-    )
+    strict_dir, _, _, strict_identity = _run(root, "strict-reader")
     manifest = publish_execution_payload_manifest(
         strict_dir,
         "provider-cli",
@@ -266,8 +314,9 @@ def _immutable_and_strict_reader(root: Path) -> None:
     _unlink_readonly(manifest_path)
     duplicate = (
         '{"files":[],"files":[],"payload_root":"provider-cli",'
+        '"payload_root_fingerprint":"' + "0" * 64 + '",'
         '"run_directory":{"device":1,"inode":1},'
-        '"run_id":"strict-reader","version":1}\n'
+        '"run_id":"strict-reader","version":2}\n'
     )
     manifest_path.write_text(duplicate, encoding="utf-8")
     make_private_file(manifest_path)
@@ -280,7 +329,7 @@ def _immutable_and_strict_reader(root: Path) -> None:
 
 
 def _manifest_path_swap_rejected(root: Path) -> None:
-    run_dir, _, _, identity = _run(root, "swap-race", "provider-cli")
+    run_dir, _, _, identity = _run(root, "swap-race")
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
@@ -318,11 +367,7 @@ def _manifest_path_swap_rejected(root: Path) -> None:
 
 
 def _payload_path_swap_rejected(root: Path) -> None:
-    run_dir, payload, executable, identity = _run(
-        root,
-        "payload-swap-race",
-        "provider-cli",
-    )
+    run_dir, payload, executable, identity = _run(root, "payload-swap-race")
     publish_execution_payload_manifest(
         run_dir,
         "provider-cli",
@@ -352,15 +397,8 @@ def _payload_path_swap_rejected(root: Path) -> None:
 
 
 def _retry_hashes_large_payload_once(root: Path) -> None:
-    runs = root / "runs"
-    runs.mkdir(mode=0o700, parents=True, exist_ok=True)
-    make_private_directory(runs)
-    run_dir = runs / "large-retry"
-    run_dir.mkdir(mode=0o700)
-    make_private_directory(run_dir)
-    payload = run_dir / "provider-cli"
-    payload.mkdir(mode=0o700)
-    make_private_directory(payload)
+    run_dir = _run_dir(root, "large-retry")
+    payload = _cache_payload("large-retry")
     executable = payload / (
         "provider-cli.exe" if os.name == "nt" else "provider-cli"
     )
@@ -389,11 +427,7 @@ def _retry_hashes_large_payload_once(root: Path) -> None:
 
 
 def _windows_directory_flush_failure_rejected(root: Path) -> None:
-    run_dir, _, _, identity = _run(
-        root,
-        "windows-flush-failure",
-        "provider-cli",
-    )
+    run_dir, _, _, identity = _run(root, "windows-flush-failure")
     with (
         patch.object(run_execution_payloads, "_is_windows", return_value=True),
         patch.object(
@@ -421,11 +455,7 @@ def _windows_acl_and_reparse_integration(root: Path) -> None:
     if os.name != "nt":
         return
 
-    run_dir, _, _, identity = _run(
-        root,
-        "insecure-acl",
-        "provider-cli",
-    )
+    run_dir, _, _, identity = _run(root, "insecure-acl")
     subprocess.run(
         [
             "icacls",
@@ -448,9 +478,7 @@ def _windows_acl_and_reparse_integration(root: Path) -> None:
     target = runs / "junction-target"
     target.mkdir()
     make_private_directory(target)
-    target_payload = target / "provider-cli"
-    target_payload.mkdir()
-    make_private_directory(target_payload)
+    target_payload = _cache_payload("junction-target")
     target_executable = target_payload / (
         "provider-cli.exe" if os.name == "nt" else "provider-cli"
     )
@@ -472,7 +500,7 @@ def _windows_acl_and_reparse_integration(root: Path) -> None:
 
 
 def _replacement_run_rejected(root: Path) -> None:
-    original, _, _, identity = _run(root, "replacement", "provider-cli")
+    original, _, _, identity = _run(root, "replacement")
     publish_execution_payload_manifest(
         original,
         "provider-cli",
@@ -481,11 +509,7 @@ def _replacement_run_rejected(root: Path) -> None:
     manifest_bytes = (original / MANIFEST_NAME).read_bytes()
     displaced = root / "displaced"
     original.rename(displaced)
-    replacement, _, executable, _ = _run(
-        root,
-        "replacement",
-        "provider-cli",
-    )
+    replacement, _, executable, _ = _run(root, "replacement")
     (replacement / MANIFEST_NAME).write_bytes(manifest_bytes)
     make_private_file(replacement / MANIFEST_NAME)
     (replacement / MANIFEST_NAME).chmod(
@@ -496,7 +520,7 @@ def _replacement_run_rejected(root: Path) -> None:
 
 
 def _missing_manifest_rejected(root: Path) -> None:
-    run_dir, _, _, _ = _run(root, "missing", "provider-cli")
+    run_dir, _, _, _ = _run(root, "missing")
     _expect_rejected(lambda: read_execution_payload_manifest(run_dir))
 
 
