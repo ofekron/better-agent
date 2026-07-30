@@ -175,9 +175,3 @@ def mark_seen(project_id: str, entry_ids: list[str]) -> int:
         if count:
             _set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)
     return count
-
-
-def list_all(project_id: str) -> list[dict]:
-    """Return all entries (seen + unseen) for a project."""
-    with _lock:
-        return _read_entries_locked(project_id)
