@@ -5,6 +5,7 @@ import type { Provider, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { ModelPickerModal } from "./ModelPickerModal";
 import { runnerLabelKey, type SelectorUpdates } from "./modelPicker";
+import { providerDisplayName } from "../utils/providerDisplayName";
 
 interface Props {
   session: Session;
@@ -66,7 +67,7 @@ export function SessionSelectorControls({
   const runnerLabel = selectedProvider && selectedProvider.runner_options.length > 1
     ? t(runnerLabelKey(selectedProvider.kind, session.runner || selectedProvider.runner), session.runner || selectedProvider.runner)
     : "";
-  const selectorSummary = [selectedProvider?.name, session.model, runnerLabel].filter(Boolean).join(" / ");
+  const selectorSummary = [providerDisplayName(selectedProvider), session.model, runnerLabel].filter(Boolean).join(" / ");
 
   if (!providers.length) return null;
 
