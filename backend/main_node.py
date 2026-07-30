@@ -42,6 +42,7 @@ from backend_instance_lock import (
 )
 from paths import ba_home
 import config_store
+import runs_dir
 
 config_store.apply_provider_config_env_vars()
 
@@ -119,7 +120,7 @@ async def _on_startup() -> None:
                 me, topology.primary.address)
 
     try:
-        default_provider().prune_old_runs()
+        runs_dir.prune_old_completed_runs()
     except Exception:
         logger.exception("main_node: prune_old_runs failed")
 

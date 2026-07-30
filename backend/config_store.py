@@ -2717,8 +2717,15 @@ def add_custom_model_to_default(name: str) -> Optional[dict]:
 def apply_provider_config_env_vars() -> None:
     """Apply non-secret active-provider environment during startup/config edits."""
     state = _load_state()
-    active_id = _runtime_default_provider_id(state)
-    active = get_provider(active_id) if active_id else None
+    active_id = state.get("default_provider_id")
+    active = next(
+        (
+            provider
+            for provider in state.get("providers", [])
+            if provider.get("id") == active_id
+        ),
+        None,
+    )
     os.environ.pop("ANTHROPIC_API_KEY", None)
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
     if not active or _provider_is_suspended(active):
