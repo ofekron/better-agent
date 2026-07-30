@@ -765,6 +765,133 @@ test.describe("backend crash-recovery", () => {
       await restarted.stop();
     }
   });
+
+  test("WS client auto-reconnects and resyncs after a backend crash + restart WITHOUT a page reload", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(180_000);
+
+    // No `page.reload()` anywhere in this test. The point is to prove the
+    // frontend's OWN WebSocket client (useWebSocket.ts) notices the socket
+    // died and the backend came back, all on its own:
+    //   - `ws.onclose` (useWebSocket.ts) always schedules `setTimeout(connect,
+    //     2000)` unless the close was an auth failure (code 1008) — a bare
+    //     TCP RST from a SIGKILLed backend hits this path.
+    //   - on the reconnecting `ws.onopen`, `hasOpenedRef.current` is already
+    //     true, so it calls `prepareSessionSubscriptions` (wired in App.tsx to
+    //     `selectSession(currentSession.id)`), which REST-refetches the
+    //     session before re-subscribing over the new socket with the right
+    //     `since_seq`/`events_from_seq` cursors — the actual resync logic.
+    // The connection-status dot (`.brand-connection-dot`, App.tsx ~L6712)
+    // toggles the `connected` class off `ws.onclose` / on `ws.onopen`, so
+    // polling its class is a direct read of that same WS lifecycle — not an
+    // inferred proxy.
+    const connectionDot = page.locator(".brand-connection-dot");
+    await expect(connectionDot).toHaveClass(/connected/, { timeout: 20_000 });
+
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 40, one number per line, then write a short paragraph " +
+        "explaining why counting is a foundational skill. Do not rush, be thorough.",
+    );
+
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash.length).toBeGreaterThan(0);
+    const sessionId = sessionsBeforeCrash[0].id as string;
+
+    // Same event-driven proxy for "the real provider CLI turn is actually
+    // in flight" as the other tests in this file, so the crash genuinely
+    // lands mid-turn.
+    await waitForRunning(page, backend, sessionId, 30_000);
+
+    const crashedAt = Date.now();
+    await killBackendProcessOnly(backend);
+
+    // Confirm the open page's own socket actually observed the drop (a
+    // real TCP RST closing the connection), not just that the backend
+    // process is gone from the harness's point of view.
+    await expect(connectionDot).not.toHaveClass(/connected/, { timeout: 15_000 });
+
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      // THE assertion this test exists for: leave the page exactly as it
+      // is — no reload, no navigation — and wait (bounded poll, not a
+      // sleep) for the frontend's own retry timer to notice the backend
+      // is accepting connections again and flip the dot back to
+      // connected. If this were only a manual-reload recovery, the dot
+      // would never flip without `page.reload()`.
+      await expect(connectionDot).toHaveClass(/connected/, { timeout: 60_000 });
+      const reconnectedAt = Date.now();
+      const reconnectMs = reconnectedAt - crashedAt;
+      console.log(`[ws-auto-reconnect] socket reconnected ${reconnectMs}ms after backend crash (no page reload)`);
+
+      // Same convergence window as the other mid-turn-crash tests: the
+      // orphaned real provider CLI process either finished on its own or
+      // the backend finalized it as stopped. Never stuck "running"
+      // forever. This is read via REST against the harness's own poll —
+      // independent of whatever the reconnected WS has pushed — so it
+      // proves the backend side converged, not just that the socket is
+      // open.
+      await expect
+        .poll(
+          async () => {
+            const sessions = await getSessionsList(page, backend);
+            const match = sessions.find((s) => s.id === sessionId);
+            return match?.is_running === true;
+          },
+          { timeout: 120_000, intervals: [500, 1000, 2000] },
+        )
+        .toBe(false);
+
+      // Re-fetch the render tree from the NEW backend process directly,
+      // same invariant as the other tests: no duplicate message ids,
+      // exactly one user + one assistant message.
+      const detailRes = await page.request.get(
+        `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+      );
+      expect(detailRes.ok()).toBe(true);
+      const tree = await detailRes.json();
+      const messages = (tree.messages ?? []) as Array<{ id: string; role: string }>;
+      const ids = messages.map((m) => m.id);
+      expect(new Set(ids).size, `duplicate message ids in render tree: ${ids.join(",")}`).toBe(
+        ids.length,
+      );
+      expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+      // Now the crucial cross-check: WITHOUT ever reloading the page,
+      // the render tree already open in the DOM must converge to the
+      // same state on its own, driven purely by the resynced WS
+      // subscription (messages_replay/messages_delta/run_state frames
+      // from `prepareSessionSubscriptions`'s post-reconnect
+      // `selectSession` + resubscribe). Playwright's built-in
+      // auto-retrying `expect` polls the DOM here — no manual sleep.
+      const userMessages = page.getByTestId("user-message");
+      const assistantMessages = page.getByTestId("assistant-message");
+      await expect(userMessages).toHaveCount(1, { timeout: 30_000 });
+      await expect(assistantMessages).toHaveCount(1, { timeout: 30_000 });
+
+      const assistantMessage = assistantMessages.first();
+      const text = (await assistantMessage.textContent()) ?? "";
+      const hasRealContent = text.trim().length > 0;
+      const hasStoppedIndicator = (await assistantMessage.locator(".stopped-indicator").count()) > 0;
+
+      // The bubble must show SOME recognizable terminal signal, same
+      // invariant as the other recovery tests — reached here purely via
+      // the live WS resync, never a reload-triggered REST refetch.
+      expect(
+        hasRealContent || hasStoppedIndicator,
+        `assistant bubble has neither content nor a stopped indicator after WS-only recovery: ${JSON.stringify(text)}`,
+      ).toBe(true);
+    } finally {
+      await restarted.stop();
+    }
+  });
 });
 
 test.describe("backend graceful-restart (POST /api/admin/restart)", () => {

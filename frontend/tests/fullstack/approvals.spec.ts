@@ -345,3 +345,66 @@ test("a non-Bash tool (Write) also triggers a real approval card", async ({
     "HELLO",
   );
 });
+
+// Approval state must be owned by the backend's pending-approval registry
+// (tool_approval.py), not by any per-view/mounted-component state in
+// Chat.tsx. Prove that by opening a pending approval in session A, fully
+// navigating away to a distinct session B (via the sidebar's real "+ New"
+// flow, not a same-session no-op) and back, and asserting the exact same
+// `data-approval-id` card reappears and is still decidable — it wasn't
+// lost, replaced, or silently auto-denied by the navigation.
+test("a pending approval in one session survives navigating away to another session and back", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await openProviderSettings(page, backend.baseURL, "claude");
+  await pickCustomSelectOption(page, "permission-axis-select-mode", "Default (prompt)");
+  await saveProviderSettings(page);
+  // Settings is a distinct route from the app shell — createSessionWithPrompt
+  // needs the sidebar's "+ New" button, which only exists on "/".
+  await page.goto(backend.baseURL);
+
+  await createSessionWithPrompt(
+    page,
+    "Use the Bash tool to run exactly this command: echo NAV_AWAY_MARKER",
+  );
+  const sessionAId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+  expect(sessionAId).toBeTruthy();
+
+  const approvalCard = page.getByTestId("tool-approval-card");
+  await expect(approvalCard).toBeVisible({ timeout: 60_000 });
+  const approvalId = await approvalCard.getAttribute("data-approval-id");
+  expect(approvalId).toBeTruthy();
+
+  // Create a second, unrelated session and let its own turn complete —
+  // proof this is a real navigation to a distinct live session, not just a
+  // UI no-op — while session A's approval is left undecided.
+  await createSessionWithPrompt(
+    page,
+    "Reply with exactly the word SESSION_B_READY. Do not use any tools.",
+  );
+  const sessionBId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+  expect(sessionBId).toBeTruthy();
+  expect(sessionBId).not.toBe(sessionAId);
+  await expect(page.getByTestId("assistant-message").last()).toContainText("SESSION_B_READY", {
+    timeout: 60_000,
+  });
+
+  // Navigate back to session A via the sidebar (not a page reload/goto),
+  // exercising the same in-app view switch a real user would perform.
+  await page
+    .locator(`[data-testid="session-item"][data-session-id="${sessionAId}"]`)
+    .click();
+  await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+  // The SAME pending approval must still be showing, not lost/replaced.
+  await expect(approvalCard).toBeVisible({ timeout: 20_000 });
+  await expect(approvalCard).toHaveAttribute("data-approval-id", approvalId!);
+
+  // ...and it must still be decidable: approving it now completes the turn
+  // exactly as if navigation had never happened.
+  await approvalCard.locator(".user-input-card__actions button.primary").click();
+  await expect(page.getByTestId("assistant-message").last()).toContainText("NAV_AWAY_MARKER", {
+    timeout: 60_000,
+  });
+});

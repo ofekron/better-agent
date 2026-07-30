@@ -249,4 +249,45 @@ test.describe("real login", () => {
     });
     expect(meAfterLogout).toBe(401);
   });
+
+  // Unlike the dual-CONTEXT isolation test above, two tabs in the SAME
+  // context share one cookie jar, so they share the very same
+  // `better_agent_session` cookie. Logging out through the real UI in tab 1
+  // clears that one shared cookie server-side, so tab 2 must also see
+  // itself as unauthenticated on its next check — no independent session to
+  // protect it.
+  test("two tabs in the same browser context both lose auth after a real logout in one", async ({
+    page,
+    backend,
+  }) => {
+    await loginViaUI(page, backend);
+
+    const page2 = await page.context().newPage();
+
+    const me1 = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    const me2 = await page2.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(me1).toBe(200);
+    expect(me2).toBe(200);
+
+    await page.locator(".sidebar-logout-btn").click();
+    await expect(page.locator(".login-submit")).toBeVisible({ timeout: 15_000 });
+
+    await page2.reload();
+    await expect(page2.locator(".login-submit")).toBeVisible({ timeout: 15_000 });
+    await expect(page2.getByTestId("input-textarea")).not.toBeVisible();
+
+    const me2AfterLogout = await page2.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.status;
+    });
+    expect(me2AfterLogout).toBe(401);
+
+    await page2.close();
+  });
 });

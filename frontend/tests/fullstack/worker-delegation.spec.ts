@@ -421,3 +421,102 @@ test("reopening a closed fork pane via the Reopen button restores it to normal, 
   if (!reopenedNode) throw new Error(`fork session ${forkSessionId} not found in root tree`);
   expect(reopenedNode.fork_closed).toBe(false);
 });
+
+// Validates fork/session identity: a fork gets its own real session record
+// distinct from its parent, reachable via the tree-detail endpoint, but is
+// NOT a separate top-level entry in the flat list endpoint.
+//
+// Read from source, not guessed:
+//   - `backend/session_store.py` `list_sessions()` (~line 5598) docstrings
+//     this explicitly: "Forks are NOT included as top-level entries —
+//     they're embedded in each root's `forks` array." `GET /api/sessions`
+//     (backend/main.py) wraps that function directly, and
+//     `backend/scripts/test_fork_split.py` asserts the same invariant
+//     (`list_sessions hides forks; fork_count = 2`). So a fork's id must
+//     never appear in that endpoint's response — this is by design, not an
+//     oversight, and this test locks that in rather than just checking the
+//     positive "fork exists" case.
+//   - `session_store.fork_session` (~line 5828) gives the new fork its own
+//     `id` (a fresh uuid4) always, and its own `name`: by default
+//     `parent_name + " (fork)"` (or `"(fork N)"` for repeat forks) — a
+//     deterministically different string from the parent's, even though
+//     it's derived from the PARENT's name rather than the fork's own
+//     prompt (the first-prompt auto-rename in `orchestrator.py` ~line 5019
+//     only fires when the session has zero messages, and a fork always
+//     starts with the parent's copied messages, so that path never
+//     triggers for forks).
+//   - The tree endpoint `GET /api/sessions/{id}` embeds the fork inside the
+//     parent's `forks` array with its own `id`, matching the id returned
+//     by `fork_and_send` and rendered on the pane's `data-session-id`.
+test("a fork gets its own distinct session id/name in the tree endpoint, but is excluded from the flat sessions list", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Reply with exactly the single word: PARENT.");
+  await expect(page.getByTestId("assistant-message")).toContainText("PARENT", {
+    timeout: 120_000,
+  });
+  const parentId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+
+  await page.getByTestId("input-textarea").fill("Reply with exactly the single word: CHILD.");
+  await page.locator(".input-overflow-trigger").click();
+  await page.getByTestId("fork-btn").click();
+
+  const forkGrid = page.getByTestId("fork-grid");
+  await expect(forkGrid).toBeVisible({ timeout: 20_000 });
+  const forkPane = forkGrid.getByTestId("fork-pane").filter({ hasText: "CHILD" });
+  await expect(forkPane).toBeVisible();
+  await expect(forkPane.getByTestId("assistant-message")).toContainText("CHILD", {
+    timeout: 120_000,
+  });
+
+  const forkSessionId = await forkPane.getAttribute("data-session-id");
+  if (!forkSessionId) throw new Error("fork pane is missing data-session-id");
+  expect(forkSessionId).not.toBe(parentId);
+
+  // Tree-detail endpoint: the fork is embedded in the parent's tree as its
+  // own node, with its own id and a name distinct from the parent's.
+  interface TreeNode {
+    id: string;
+    name?: string;
+    forks?: TreeNode[];
+  }
+  const findNode = (node: TreeNode, id: string): TreeNode | null => {
+    if (node.id === id) return node;
+    for (const f of node.forks ?? []) {
+      const found = findNode(f, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const treeRes = await page.request.get(
+    `${backend.baseURL}/api/sessions/${encodeURIComponent(parentId)}?msg_limit=5`,
+  );
+  expect(treeRes.ok()).toBe(true);
+  const tree = (await treeRes.json()) as TreeNode;
+  expect(tree.id).toBe(parentId);
+
+  const forkNode = findNode(tree, forkSessionId);
+  if (!forkNode) throw new Error(`fork session ${forkSessionId} not found in parent's tree`);
+  expect(forkNode.id).not.toBe(tree.id);
+  expect(forkNode.name).toBeTruthy();
+  expect(forkNode.name).not.toBe(tree.name);
+
+  // Cross-check: the fork also shows up directly in the parent's own
+  // `forks` array (not just reachable via tree-walk).
+  expect((tree.forks ?? []).some((f) => f.id === forkSessionId)).toBe(true);
+
+  // Flat list endpoint: the parent (a root) is a top-level entry, but the
+  // fork is deliberately excluded — it's not a bug, `list_sessions()` says
+  // so explicitly.
+  interface SessionListItem {
+    id: string;
+  }
+  const listRes = await page.request.get(`${backend.baseURL}/api/sessions?limit=20`);
+  expect(listRes.ok()).toBe(true);
+  const listBody = (await listRes.json()) as { sessions?: SessionListItem[] } | SessionListItem[];
+  const items = Array.isArray(listBody) ? listBody : listBody.sessions ?? [];
+  expect(items.some((s) => s.id === parentId)).toBe(true);
+  expect(items.some((s) => s.id === forkSessionId)).toBe(false);
+});

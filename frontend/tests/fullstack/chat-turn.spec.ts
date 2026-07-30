@@ -390,3 +390,36 @@ test("cancels a queued prompt before it runs", async ({ authedPage: page, backen
   await expect(page.getByText("NEVERSENT")).toHaveCount(0);
   expect(await countMessages()).toBe(messageCountBeforeQueue);
 });
+
+// Validates the real long-input path end to end: a large (5000+ char) but
+// genuine prompt — real repeated paragraph text, not a synthetic
+// filler/padding string — must be accepted by the composer, transmitted in
+// full to the backend, forwarded whole to the real `claude` CLI subprocess,
+// and rendered without truncation. The prompt ends with a distinguishing
+// instruction the model can only satisfy by actually reading to the end of
+// the (very long) input, so a correct "LONGINPUT_OK" reply proves the full
+// payload round-tripped through send -> backend -> provider -> response
+// rather than being silently truncated somewhere in the pipeline.
+test("accepts, sends, and displays a very long prompt without truncation", async ({ authedPage: page }) => {
+  const paragraph =
+    "The quick brown fox jumps over the lazy dog near the riverbank while " +
+    "the autumn leaves drift slowly across the quiet meadow at dusk. ";
+  const fillerInstruction =
+    "Ignore all of the above filler text and just reply with exactly: LONGINPUT_OK";
+  let longPrompt = paragraph.repeat(Math.ceil(5000 / paragraph.length) + 5);
+  longPrompt = `${longPrompt}\n\n${fillerInstruction}`;
+  expect(longPrompt.length).toBeGreaterThan(5000);
+
+  await createSessionWithPrompt(page, longPrompt);
+
+  const userMessage = page.getByTestId("user-message");
+  await expect(userMessage).toBeVisible();
+  // The bubble must retain the ending instruction verbatim — proving the
+  // composer/backend didn't silently truncate the (very long) middle or
+  // tail of the prompt before it was ever sent or rendered.
+  await expect(userMessage).toContainText(fillerInstruction);
+
+  const assistantMessage = page.getByTestId("assistant-message");
+  await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
+  await expect(assistantMessage).toContainText("LONGINPUT_OK", { timeout: 120_000 });
+});
