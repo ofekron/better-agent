@@ -134,6 +134,18 @@ export function installBearerAuthInterceptor(): void {
   const withAuth = (init?: RequestInit, src?: Request): RequestInit | undefined => {
     const token = getStoredToken();
     if (!token) return init;
+    // The QR/refresh-token flow (setTokens, from /qr_redeem or /refresh)
+    // never receives a session cookie — see auth_routes.qr_redeem's "No
+    // cookie is set" — so bearer is that session's ONLY credential and
+    // must always be sent. The password login/setup/change-credentials
+    // flows (setStoredToken alone, no refresh token) always ALSO set a
+    // session cookie, so a top-level same-origin browser should keep
+    // riding that cookie and only fall back to the bearer header in a
+    // context where the cookie can't travel (native / cross-site embed).
+    // Without this gate, a top-level browser's own logout or a tampered
+    // session cookie is silently overridden by the still-valid bearer
+    // token on every subsequent fetch — logout doesn't actually log out.
+    if (!getStoredRefreshToken() && !isCookieBlockedContext()) return init;
     const headers = new Headers(init?.headers || src?.headers || {});
     // Respect a caller-set Authorization header (rare — we don't currently).
     if (!headers.has("authorization")) {

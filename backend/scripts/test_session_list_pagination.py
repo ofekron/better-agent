@@ -44,17 +44,12 @@ def _reset_home() -> None:
                 if attempt == 4:
                     raise
                 time.sleep(0.05)
-    session_store._fork_index.clear()
-    session_store._index_loaded = False
-    session_store._summary_index.clear()
-    session_store._summary_index_loaded = False
+    session_store._reset_home_scoped_caches()
     session_store._metadata_search_cache.clear()
     session_store._metadata_text_cache = ()
     session_store._metadata_text_cache_version = -1
     session_store._metadata_text_by_id_cache = {}
     session_store._metadata_text_by_id_cache_version = -1
-    session_store._metadata_trigram_index = {}
-    session_store._metadata_trigram_index_version = -1
     session_list_cache._sessions_list_response_cache.clear()
     session_list_cache._session_summaries_response_cache.clear()
     remote_sessions_cache.cache.clear()
@@ -608,6 +603,9 @@ def test_repeated_session_summaries_uses_response_cache(client: TestClient) -> b
     session_listing_api._local_session_summaries_by_ids = fail_lookup
     try:
         second = client.get("/api/sessions/summaries?ids=open-a", headers=HEADERS)
+    except AssertionError:
+        print(f"{FAIL} /api/sessions/summaries repeated request recomputed instead of using cache")
+        return False
     finally:
         session_listing_api._decorate_local_sidebar_sessions = original
         session_listing_api._local_session_summaries_by_ids = original_lookup

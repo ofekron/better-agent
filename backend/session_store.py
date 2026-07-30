@@ -442,6 +442,13 @@ def _publish_dir_fingerprint_cache(
 _summary_index: dict[str, dict] = {}
 _summary_index_lock = threading.Lock()
 _summary_index_loaded = False
+# Bumped by `_reset_home_scoped_caches` under `_summary_index_lock`. A
+# `_do_build_summary_index_unsafe` run started before a reset captures this
+# value and re-checks it at every publish point — if it no longer matches,
+# the build's `_session_storage_dirs()` snapshot predates the reset and is
+# discarded instead of resurrecting stale/partial summaries into the fresh
+# generation (e.g. a build spanning a home swap or, in tests, `_reset_home`).
+_summary_index_reset_epoch = 0
 _summary_index_version = 0
 _summary_order_version = 0
 _summary_metadata_version = 0
@@ -903,7 +910,7 @@ def _reset_home_scoped_caches() -> None:
     global _index_loaded, _index_fingerprint, _dir_fingerprint_cache
     global _summary_index_loaded, _summary_index_version, _summary_order_version
     global _summary_metadata_version, _summary_sorted_cache_version
-    global _metadata_trigram_index_version
+    global _metadata_trigram_index_version, _summary_index_reset_epoch
 
     with _index_lock:
         _fork_index.clear()
@@ -926,6 +933,7 @@ def _reset_home_scoped_caches() -> None:
         _summary_sorted_cache_version = -1
         _summary_sorted_id_cache.clear()
         _summary_sorted_id_caches.clear()
+        _summary_index_reset_epoch += 1
     with _requirement_tags_lock:
         _requirement_tags_by_session.clear()
     global _markers_loaded
@@ -2444,6 +2452,8 @@ def _do_build_summary_index_unsafe() -> None:
     """
     global _summary_index_loaded, _summary_index_version
     global _summary_order_version, _summary_metadata_version
+    with _summary_index_lock:
+        build_epoch = _summary_index_reset_epoch
     _ensure_dir()
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
@@ -2475,11 +2485,20 @@ def _do_build_summary_index_unsafe() -> None:
     cached_summaries = _load_summary_index_cache(summary_cache_fingerprint)
     if cached_summaries is not None:
         with _summary_index_lock:
-            _summary_index.clear()
-            _summary_index.update(cached_summaries)
-            _summary_index_version += 1
-            _summary_order_version += 1
-            _summary_metadata_version += 1
+            if _summary_index_reset_epoch != build_epoch:
+                return
+            # Fill gaps only — never clobber a sid a live writer has already
+            # published (see the Pass 1/Pass 2 comment above).
+            changed = False
+            for sid, summary in cached_summaries.items():
+                if sid in _summary_index:
+                    continue
+                _summary_index[sid] = summary
+                changed = True
+            if changed:
+                _summary_index_version += 1
+                _summary_order_version += 1
+                _summary_metadata_version += 1
             _summary_index_loaded = True
         _start_summary_projection_repair()
         _start_metadata_search_index_warm()
@@ -2536,14 +2555,26 @@ def _do_build_summary_index_unsafe() -> None:
                         needs_fork_backfill = "all_fork_ids" not in summary
                         if not needs_fork_backfill:
                             with _summary_index_lock:
-                                existing = _summary_index.get(sid)
-                                _summary_index[sid] = summary
-                                _summary_index_version += 1
-                                if _summary_order_changed(existing, summary):
-                                    _summary_order_version += 1
-                                if _summary_metadata_changed(existing, summary):
-                                    _summary_metadata_version += 1
-                            if cleaned:
+                                if _summary_index_reset_epoch != build_epoch:
+                                    return
+                                # A concurrent live writer (e.g. `_upsert_summary`
+                                # from a request handler) may have already
+                                # published a fresher in-memory summary for
+                                # this sid than the on-disk snapshot this cold
+                                # scan captured — the on-disk root file can lag
+                                # an in-memory mutation by up to
+                                # `PERSIST_DEBOUNCE_S` (see `_upsert_summary`).
+                                # Trust the live entry; don't clobber it with a
+                                # stale disk read.
+                                already_live = sid in _summary_index
+                                if not already_live:
+                                    _summary_index[sid] = summary
+                                    _summary_index_version += 1
+                                    if _summary_order_changed(None, summary):
+                                        _summary_order_version += 1
+                                    if _summary_metadata_changed(None, summary):
+                                        _summary_metadata_version += 1
+                            if not already_live and cleaned:
                                 stale_summaries.append(
                                     (sid, summary, published_signature),
                                 )
@@ -2578,14 +2609,20 @@ def _do_build_summary_index_unsafe() -> None:
                 organization_projection,
             )
             with _summary_index_lock:
-                existing = _summary_index.get(data["id"])
-                _summary_index[data["id"]] = summary
-                _summary_index_version += 1
-                if _summary_order_changed(existing, summary):
-                    _summary_order_version += 1
-                if _summary_metadata_changed(existing, summary):
-                    _summary_metadata_version += 1
-            stale_summaries.append((data["id"], summary, root_signature))
+                if _summary_index_reset_epoch != build_epoch:
+                    return
+                # See the matching comment in Pass 1: don't let a stale
+                # disk read clobber a fresher live in-memory summary.
+                already_live = data["id"] in _summary_index
+                if not already_live:
+                    _summary_index[data["id"]] = summary
+                    _summary_index_version += 1
+                    if _summary_order_changed(None, summary):
+                        _summary_order_version += 1
+                    if _summary_metadata_changed(None, summary):
+                        _summary_metadata_version += 1
+            if not already_live:
+                stale_summaries.append((data["id"], summary, root_signature))
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             continue
         if provider_ctx["dirty"][0]:
@@ -2601,6 +2638,8 @@ def _do_build_summary_index_unsafe() -> None:
     # lock so `/api/sessions` does not wait behind per-summary projection
     # comparison work during warm completion.
     with _summary_index_lock:
+        if _summary_index_reset_epoch != build_epoch:
+            return
         for pid, eng_sid in eng_by_parent.items():
             if pid in _summary_index:
                 _summary_index[pid] = {

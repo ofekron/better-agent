@@ -203,7 +203,7 @@ async def login(body: LoginBody, request: Request) -> dict:
 
 @router.post("/change_credentials")
 async def change_credentials(body: ChangeCredentialsBody, request: Request) -> dict:
-    if not request.session.get("user"):
+    if not auth.identify_request(request):
         raise HTTPException(status_code=401, detail="unauthenticated")
     ip = request.client.host if request.client else "unknown"
     if not auth.rate_limit_check(ip):
@@ -238,7 +238,7 @@ async def logout(request: Request) -> None:
 async def me(request: Request) -> dict:
     """Returns the logged-in user or 401. Used by the frontend at
     mount time to decide whether to render <Login /> or <AppMain />."""
-    user = request.session.get("user")
+    user = auth.identify_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="unauthenticated")
     return user

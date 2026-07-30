@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
+import auth
 import shortcut_picker
 import ui_selection
 import user_prefs
@@ -43,14 +44,14 @@ def _require_configured() -> tuple[Callable[[str, dict], Any], Callable[[], None
 
 @router.get("/api/user-prefs")
 async def get_user_prefs(request: Request):
-    login_username = (request.session.get("user") or {}).get("username")
+    login_username = (auth.identify_request(request) or {}).get("username")
     return await asyncio.to_thread(user_prefs.get_all, login_username)
 
 
 @router.patch("/api/user-prefs")
 async def patch_user_prefs(request: Request, body: dict = Body(...)):
     broadcast_global, invalidate_session_list_cache = _require_configured()
-    login_username = (request.session.get("user") or {}).get("username")
+    login_username = (auth.identify_request(request) or {}).get("username")
 
     def _patch_user_prefs_sync() -> dict:
         if "auto_restart_on_idle" in body:
