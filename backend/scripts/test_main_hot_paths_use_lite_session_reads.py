@@ -28,6 +28,7 @@ SOURCES = [
     BACKEND / "offline_actions_api.py",
     BACKEND / "ops_api.py",
     BACKEND / "recovery.py",
+    BACKEND / "internal_extension_api.py",
 ]
 
 PASS = "\x1b[32mPASS\x1b[0m"
