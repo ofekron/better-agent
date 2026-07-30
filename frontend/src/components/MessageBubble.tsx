@@ -330,6 +330,19 @@ function RetryingPill({ retryAt }: { retryAt: string }) {
   );
 }
 
+/** Shown while a turn's provider run has detached from this backend
+ * process (survives a backend restart) and is still executing —
+ * reused in both the expanded and collapsed turn views so there's one
+ * place that decides what "detached" looks like. */
+function DetachedPill() {
+  return (
+    <div className="detached-pill" role="status" aria-live="polite">
+      <span className="detached-spinner" aria-hidden="true" />
+      <span>Reconnecting — agent still running…</span>
+    </div>
+  );
+}
+
 /** Inline banner shown while the backend starts a fresh subprocess for a
  * context-window continuation. Displays once and disappears when the
  * new subprocess begins producing output. */
@@ -2701,12 +2714,7 @@ const AssistantMessage = memo(function AssistantMessage({
             onRetry={onRetryStopped}
           />
         )}
-        {message.isDetached && (
-          <div className="detached-pill" role="status" aria-live="polite">
-            <span className="detached-spinner" aria-hidden="true" />
-            <span>Reconnecting — agent still running…</span>
-          </div>
-        )}
+        {message.isDetached && <DetachedPill />}
         {message.isRecovering && !runs.some((run) => run.startup_phase === "stalled") && (
           <div
             className="recovering-pill"
@@ -3247,6 +3255,12 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     // below. Never reduce it to the generic "No output" summary — that
     // hides the failure and is exactly the confusing state users hit.
     if (src?.error) return null;
+    // Same reasoning for a detached (survived-a-backend-restart) or
+    // rate-limit-retrying turn: both render their own dedicated pill
+    // below, and reducing a content-less one to "No output" hides an
+    // actionable in-progress state behind a message that reads as
+    // "the agent produced nothing."
+    if (src?.isDetached || src?.retrying_until) return null;
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
@@ -3601,7 +3615,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         })()}
       </div>
       )}
-      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at) && (
+      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at || effectiveResponse?.isDetached || effectiveResponse?.retrying_until) && (
         <div
           className="turn-group-children"
           data-message-id={effectiveResponse?.id ?? initiatorMessage.id}
@@ -3647,6 +3661,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                 onRetryStopped ? () => onRetryStopped(effectiveResponse) : undefined
               }
             />
+          )}
+          {effectiveResponse?.isDetached && <DetachedPill />}
+          {effectiveResponse?.retrying_until && (
+            <RetryingPill retryAt={effectiveResponse.retrying_until} />
           )}
           {initiatorErrorRendersWithResponse && (
             <MessageStatus

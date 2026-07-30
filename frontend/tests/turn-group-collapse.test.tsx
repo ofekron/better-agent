@@ -482,6 +482,48 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(status!.textContent).toContain("interrupted");
   });
 
+  it("shows the Reconnecting pill (not nothing, not 'No output') for a collapsed detached turn with no content", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "",
+          isDetached: true,
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    const pill = container.querySelector(".detached-pill");
+    expect(pill).not.toBeNull();
+    expect(pill!.textContent).toContain("Reconnecting");
+    expect(container.querySelector(".collapse-summary")).toBeNull();
+  });
+
+  it("shows the Retrying pill (not nothing, not 'No output') for a collapsed rate-limited turn with no content", () => {
+    const retryAt = new Date(Date.now() + 30_000).toISOString();
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "",
+          retrying_until: retryAt,
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    const pill = container.querySelector(".retrying-pill");
+    expect(pill).not.toBeNull();
+    expect(container.querySelector(".collapse-summary")).toBeNull();
+  });
+
   it("prefers finalized assistant content over Bash event tails in collapsed preview", () => {
     const { container } = render(
       <TurnGroup
