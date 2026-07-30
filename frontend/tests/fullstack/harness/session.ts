@@ -36,14 +36,14 @@ async function selectOptionMatching(page: Page, testId: string, pattern: RegExp)
  * prompt through a real provider CLI turn, landing on that session's chat
  * view.
  *
- * NewSessionModal.tsx fetches GET /api/providers once when it opens and
- * silently swallows a failed/timed-out attempt (no retry, no visible
- * error — see the follow-up filed against that component) — this leaves
- * `.ns-create-primary` disabled forever with nothing to wait out. Rather
- * than let a single bad fetch wedge every test that creates a session,
- * this closes and reopens the modal (which re-triggers the fetch) a
- * bounded number of times if the button hasn't enabled within a
- * generous window.
+ * NewSessionModal.tsx fetches GET /api/providers when it opens; the fetch
+ * itself retries transient failures with backoff and a persistent failure
+ * surfaces a visible error with its own in-app retry button, but this
+ * harness intentionally does not depend on that UI path. Rather than let
+ * any stall on `.ns-create-primary` wedge every test that creates a
+ * session, this closes and reopens the modal (which re-triggers the
+ * fetch) a bounded number of times if the button hasn't enabled within a
+ * generous window — an independent safety net for test reliability.
  */
 export async function createSessionWithPrompt(
   page: Page,

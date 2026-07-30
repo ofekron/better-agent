@@ -13,7 +13,7 @@ import type {
   ReasoningEffort,
   Permission,
 } from "../types";
-import { trackedFetch } from "../progress/store";
+import { trackedFetch, useOpProgress } from "../progress/store";
 import { PUBLIC_EXTENSION_IDS } from "../extensionIds";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
@@ -652,6 +652,26 @@ export function NewSessionModal({
   );
   const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
+  // Fetches the provider catalog. `trackedFetch` already retries transient
+  // failures internally (fetchWithRetry — 3 attempts, exponential backoff)
+  // and records a persistent failure under the "providers:list" op via
+  // `useOpProgress` below, so a manual retry (see `ns-providers-error`
+  // below) just re-runs this same call.
+  const loadProviders = useCallback(() => {
+    const defaults = loadDefaults();
+    trackedFetch("providers:list", `${API}/api/providers`)
+      .then((r) => r.json())
+      .then((d) => {
+        const list: Provider[] = d.providers || [];
+        const activeId: string | null = d.default_provider_id;
+        cacheProviders(list, activeId);
+        setProviders(list);
+        setMain(resolveRuntimeProfile(defaults.main, list, activeId, "main"));
+        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, "worker"));
+      })
+      .catch(() => {});
+  }, []);
+  const providersOp = useOpProgress("providers:list");
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [...extensionOptions],
     [extensionOptions],
@@ -724,18 +744,8 @@ export function NewSessionModal({
       setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, "main"));
       setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, "worker"));
     }
-    trackedFetch("providers:list", `${API}/api/providers`)
-      .then((r) => r.json())
-      .then((d) => {
-        const list: Provider[] = d.providers || [];
-        const activeId: string | null = d.default_provider_id;
-        cacheProviders(list, activeId);
-        setProviders(list);
-        setMain(resolveRuntimeProfile(defaults.main, list, activeId, "main"));
-        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, "worker"));
-      })
-      .catch(() => {});
-  }, [open, sessionExtensionOptions]);
+    loadProviders();
+  }, [open, sessionExtensionOptions, loadProviders]);
 
   // Backfill `cwd` when `projects` arrives AFTER the modal opened. The
   // App-level projects list is fetched async on mount; if the user
@@ -1107,6 +1117,19 @@ export function NewSessionModal({
               />
             </div>
           </div>
+          {providersOp.error && (
+            <div className="ns-providers-error" data-testid="new-session-providers-error">
+              <span>{t("newSession.providersLoadError")}</span>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={providersOp.inflight}
+                onClick={loadProviders}
+              >
+                {providersOp.inflight ? t("newSession.providersRetrying") : t("newSession.providersRetry")}
+              </button>
+            </div>
+          )}
           {effectiveOrchestrationMode === "native" && (
             <RuntimeProfilePicker
               label={t("newSession.sessionRuntimeProfile")}

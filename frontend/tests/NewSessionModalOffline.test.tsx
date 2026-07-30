@@ -444,3 +444,48 @@ describe("NewSessionModal offline provider cache", () => {
     );
   });
 });
+
+describe("NewSessionModal providers load failure", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("surfaces a retry affordance when the providers fetch fails, and recovers on retry", async () => {
+    let providersShouldFail = true;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/providers") && !providersShouldFail) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ providers: [provider], default_provider_id: provider.id }),
+        } as Response);
+      }
+      return Promise.reject(new TypeError("offline"));
+    });
+
+    const modal = await renderSettled(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={vi.fn()}
+        defaultCwd="/tmp/project"
+        projects={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(modal.getByTestId("new-session-providers-error")).toBeTruthy();
+    });
+    expect(modal.container.querySelector(`option[value="${provider.id}"]`)).toBeNull();
+
+    providersShouldFail = false;
+    await clickSettled(
+      modal.getByRole("button", { name: "newSession.providersRetry" }),
+    );
+
+    await waitFor(() => {
+      expect(modal.queryByTestId("new-session-providers-error")).toBeNull();
+    });
+    expect(modal.container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
+  });
+});
