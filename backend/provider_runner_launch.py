@@ -197,24 +197,10 @@ def _development_runtime(
     if prefix_root == base_root:
         return None
     stdlib_root = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
-    # The venv's own prefix directory doesn't always contain the resolved
-    # interpreter and its stdlib/shared-library dependencies: tools like
-    # `uv venv` make bin/python a symlink out to a centrally-managed
-    # interpreter store rooted at base_prefix instead of copying the
-    # interpreter into the venv. Bundle from whichever resolved root
-    # actually contains both, so the pinned copy brings its dylib along.
     if current.is_relative_to(prefix_root) and stdlib_root.is_relative_to(
         prefix_root,
     ):
         runtime_root = prefix_root
-    elif current.is_relative_to(base_root) and stdlib_root.is_relative_to(
-        base_root,
-    ):
-        if current.is_relative_to(Path("/bin")) or current.is_relative_to(
-            Path("/usr/bin"),
-        ):
-            return None
-        runtime_root = base_root
     else:
         return None
     site_packages = stdlib_root / "site-packages"

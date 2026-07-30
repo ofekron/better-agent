@@ -47,6 +47,57 @@ def test_base_python_installation_is_not_a_runtime_bundle() -> None:
     assert runner.development_runtime is None
 
 
+def test_external_venv_base_interpreter_is_not_a_runtime_bundle() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        prefix_root = root / "venv"
+        prefix_root.mkdir()
+        base_root = root / "shared-base"
+        executable = base_root / "bin" / "python"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"python")
+        stdlib_root = base_root / "lib" / "python"
+        stdlib_root.mkdir(parents=True)
+
+        with (
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "executable",
+                str(executable),
+            ),
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "prefix",
+                str(prefix_root),
+            ),
+            mock.patch.object(
+                provider_runner_launch.sys,
+                "base_prefix",
+                str(base_root),
+            ),
+            mock.patch.object(
+                provider_runner_launch.sysconfig,
+                "get_path",
+                return_value=str(stdlib_root),
+            ),
+            mock.patch.object(
+                provider_runner_launch.FrozenBundleIdentity,
+                "capture",
+                side_effect=AssertionError("shared base installation was scanned"),
+            ),
+        ):
+            runner = capture_runner_launch(
+                run_dir=root,
+                executable_path=executable,
+                runner_entry=Path(__file__),
+                runner_kind="openai",
+                runner_module="test_provider_runner_runtime_classification",
+                frozen=False,
+            )
+
+    assert runner.development_runtime is None
+
+
 def test_self_contained_python_runtime_is_materialized_and_attested() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -179,6 +230,7 @@ def test_system_interpreter_is_not_bundled_from_external_venv() -> None:
 
 if __name__ == "__main__":
     test_base_python_installation_is_not_a_runtime_bundle()
+    test_external_venv_base_interpreter_is_not_a_runtime_bundle()
     test_self_contained_python_runtime_is_materialized_and_attested()
     test_system_interpreter_is_not_bundled_from_external_venv()
     print("PASS provider runner runtime classification")
