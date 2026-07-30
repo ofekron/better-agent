@@ -488,11 +488,11 @@ class BackendSupervisor:
         if thread is not None and thread.is_alive():
             thread.join(timeout=35)
 
-    def wait_healthy(self, timeout: float = 30.0) -> bool:
+    def wait_healthy(self, timeout: float | None = 30.0) -> bool:
         """Poll `/readyz` until the backend answers, the process dies, or
-        `timeout` elapses."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        an optional timeout elapses."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while deadline is None or time.monotonic() < deadline:
             if self._stopping.is_set():
                 return False
             if self._proc is None or self._proc.poll() is not None:
