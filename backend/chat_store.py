@@ -170,6 +170,13 @@ def _coerce(record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
     return messages, cursors
 
 
+def _require_current_schema(record: dict[str, Any]) -> None:
+    if record.get("schema_version") != SCHEMA_VERSION:
+        raise ChatStoreError(
+            "Unsupported chat store schema; wipe chats/*.json to start fresh"
+        )
+
+
 def create_chat(
     *,
     chat_id: str,
@@ -242,8 +249,7 @@ def set_sender_policy(
         if not path.exists():
             raise ChatStoreError("chat_id does not exist; create it first")
         record = read_json(path, {})
-        if record.get("schema_version") != SCHEMA_VERSION:
-            raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
+        _require_current_schema(record)
         if str(record.get("created_by") or "").strip() != owner_id:
             raise ChatStoreError("only the chat owner can change sender policy")
         record["sender_policy"] = sender_policy
@@ -327,8 +333,7 @@ def post_and_read(
         if not path.exists():
             raise ChatStoreError("chat_id does not exist; create it first")
         record = read_json(path, {})
-        if record.get("schema_version") != SCHEMA_VERSION:
-            raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
+        _require_current_schema(record)
         messages, cursors = _coerce(record)
         current_head = _head(messages)
         if text:
@@ -372,8 +377,7 @@ def read_history(
         if not path.exists():
             raise ChatStoreError("chat_id does not exist; create it first")
         record = read_json(path, {})
-        if record.get("schema_version") != SCHEMA_VERSION:
-            raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
+        _require_current_schema(record)
         messages, _cursors = _coerce(record)
         bounded = [
             m for m in messages
