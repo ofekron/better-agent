@@ -726,7 +726,8 @@ _SEED_DEFAULT_MODELS = {"claude": "opus", "codex": "gpt-5.5"}
 
 def _seed_profile_for_provider(provider: dict) -> dict:
     """Canonical runtime profile seeded for a freshly created provider record
-    (fresh installs, installation selection, legacy flat migration)."""
+    (fresh installs, installation selection, legacy flat migration, and
+    user-created providers via `add_provider`)."""
     kind = str(provider.get("kind") or "claude")
     runner = _clean_runner(kind, "")
     now = _utc_now_iso()
@@ -2780,6 +2781,13 @@ def add_provider(payload: dict) -> dict:
     }
     dependency_plan.assert_provider_supported(provider)
     state["providers"].append(provider)
+    profile = _seed_profile_for_provider(provider)
+    profile["default_model"], profile["default_reasoning_effort"] = (
+        _clean_runtime_profile_defaults(
+            provider, profile["runner"], payload, profile
+        )
+    )
+    state.setdefault("runtime_profiles", []).append(profile)
     credential_changes: list[tuple[str, str]] = []
     if mode == "api_key":
         api_key = payload.get("api_key", "")

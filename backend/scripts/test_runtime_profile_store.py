@@ -490,6 +490,39 @@ def test_v2_internal_llm_assignment_migrates_to_profile_ref() -> None:
         _reset_cache()
 
 
+def test_add_provider_seeds_profile() -> None:
+    created = config_store.add_provider(
+        {
+            "kind": "openai",
+            "name": "Token Router",
+            "mode": "api_key",
+            "base_url": "https://api.tokenrouter.com/v1",
+            "default_model": "kimi-k3",
+        }
+    )
+    live = [
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == created["id"]
+    ]
+    assert len(live) == 1, "a user-created provider gets exactly one live profile"
+    assert live[0]["runner"] == "better_agent_runner"
+    assert live[0]["default_model"] == "kimi-k3", "payload default_model reaches profile"
+
+    defaults = config_store.provider_execution_defaults(created["id"])
+    assert defaults["runtime_profile_id"] == live[0]["id"]
+    assert defaults["runner"] == "better_agent_runner"
+    assert defaults["default_model"] == "kimi-k3"
+
+    _reset_cache()
+    persisted = [
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == created["id"]
+    ]
+    assert len(persisted) == 1, "seeded profile survives a reload"
+
+
 def main() -> int:
     tests = [
         test_seeded_state_has_profiles,
@@ -505,6 +538,7 @@ def main() -> int:
         test_suspending_default_provider_reconciles_default_profile,
         test_deleting_deleted_tombstone_activation_fails,
         test_provider_deletion_cascade_and_graveyard,
+        test_add_provider_seeds_profile,
         test_installation_selection_seeds_profile,
         test_v2_internal_llm_assignment_migrates_to_profile_ref,
     ]
