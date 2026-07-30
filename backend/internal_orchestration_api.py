@@ -845,6 +845,18 @@ async def internal_create_session(
     sender_session = await _session_lite(sender_session_id) if sender_session_id else None
     if sender_session_id and not sender_session:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
+    if (
+        requested_profile_id is None
+        and profile_selectors.get("runtime_profile_id")
+        and not str(body.get("provider_id") or "").strip()
+        and not str(body.get("runner") or "").strip()
+    ):
+        requested_profile_id = profile_selectors["runtime_profile_id"]
+        pinned = await asyncio.to_thread(
+            config_store.get_runtime_profile, requested_profile_id
+        )
+        if pinned is not None:
+            body = {**body, "runner": pinned["runner"]}
     requested_provider_id = await _resolve_provider_id_ref(
         str(profile_selectors["provider_id"] or "").strip(),
     )
@@ -903,6 +915,7 @@ async def internal_create_session(
             model=model,
             provider_id=provider_id,
             runner=runner,
+            runtime_profile_id=requested_profile_id,
             reasoning_effort=reasoning_effort,
             node_id=node_id,
             source="cli",

@@ -142,7 +142,7 @@ def _with_profile_meta(response: dict[str, Any], stored: dict[str, Any] | None) 
     stored = stored or {}
     response["base_profile_id"] = stored.get("base_profile_id")
     response["base_profile_revision"] = stored.get("base_profile_revision")
-    response["default_provider_id"] = stored.get("default_provider_id")
+    response["default_runtime_profile_id"] = stored.get("default_runtime_profile_id")
     response["default_model"] = stored.get("default_model")
     response["default_reasoning_effort"] = stored.get("default_reasoning_effort")
     response["provisioning_prompt"] = stored.get("provisioning_prompt")
@@ -166,7 +166,7 @@ def _profile_summary_response(profile: dict[str, Any] | None = None) -> dict[str
             "revision": "",
             "base_profile_id": None,
             "base_profile_revision": None,
-            "default_provider_id": None,
+            "default_runtime_profile_id": None,
             "default_model": None,
             "default_reasoning_effort": None,
             "provisioning_prompt": None,

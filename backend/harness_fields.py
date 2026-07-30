@@ -65,7 +65,7 @@ GROUP_DISABLED_RUNTIME_SKILLS = "disabled_runtime_skills"
 # set_profile_meta.
 GROUP_PROFILE_META = "profile_meta"
 BASE_PROFILE_FIELD = "base_profile_id"
-PIN_FIELDS = ("default_provider_id", "default_model", "default_reasoning_effort")
+PIN_FIELDS = ("default_runtime_profile_id", "default_model", "default_reasoning_effort")
 PROVISIONING_PROMPT_FIELD = "provisioning_prompt"
 PROFILE_META_FIELDS = (BASE_PROFILE_FIELD, *PIN_FIELDS, PROVISIONING_PROMPT_FIELD)
 
@@ -372,7 +372,7 @@ def _profile_meta_descriptor() -> dict[str, Any]:
         "scope": SCOPE_PROFILE,
         "fields": [
             {"name": BASE_PROFILE_FIELD, "kind": "profile_ref"},
-            {"name": "default_provider_id", "kind": "provider"},
+            {"name": "default_runtime_profile_id", "kind": "runtime_profile"},
             {"name": "default_model", "kind": "model"},
             {"name": "default_reasoning_effort", "kind": "reasoning_effort"},
             {"name": PROVISIONING_PROMPT_FIELD, "kind": "textarea"},

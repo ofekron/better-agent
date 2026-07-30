@@ -25,10 +25,13 @@ from paths import ba_home
 # session-creation fallback.
 # v4 adds disabled_runtime_skills so harness profiles cover the full
 # capability-narrowing surface. v5 adds an optional provisioning_prompt used
-# as the default worker-provisioning prompt. Schema migrations are not
-# supported: a store on an older version is refused at load (wipe
-# harness_profiles.json to reset).
-SCHEMA_VERSION = 5
+# as the default worker-provisioning prompt. v6 re-expresses the provider pin
+# as a runtime-profile pin (default_runtime_profile_id).
+# This store migrates: contiguous N->N+1 migrations upgrade any version in
+# [MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION) at connect time; only stores
+# below the minimum (or from a newer Better Agent) are refused.
+SCHEMA_VERSION = 6
+MIN_SUPPORTED_SCHEMA_VERSION = 5
 MAX_NAME_CHARS = 120
 MAX_DESCRIPTION_CHARS = 1_000
 MAX_INLINE_INSTRUCTION_CHARS = 80_000
@@ -80,10 +83,82 @@ def _connect() -> sqlite3.Connection:
             conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('store_version', '0')"
             )
-    elif int(row[0]) != SCHEMA_VERSION:
-        conn.close()
-        raise HarnessProfileError("Harness profiles are incompatible with this Better Agent version")
+    else:
+        stored_version = int(row[0])
+        if (
+            stored_version < MIN_SUPPORTED_SCHEMA_VERSION
+            or stored_version > SCHEMA_VERSION
+        ):
+            conn.close()
+            raise HarnessProfileError(
+                "Harness profiles are incompatible with this Better Agent version"
+            )
+        if stored_version < SCHEMA_VERSION:
+            try:
+                _migrate_store(conn, stored_version)
+            except Exception:
+                conn.close()
+                raise
     return conn
+
+
+def _migrate_5_to_6(profile: dict) -> dict:
+    """v6: the provider pin becomes a runtime-profile pin. The pinned
+    provider maps to its preferred live profile; a provider with no live
+    profile (or gone entirely) drops the pin."""
+    import config_store
+
+    migrated = dict(profile)
+    pinned_provider = migrated.pop("default_provider_id", None)
+    pinned_profile_id = None
+    if pinned_provider:
+        pinned_profile_id = config_store.provider_execution_defaults(
+            str(pinned_provider)
+        )["runtime_profile_id"]
+    migrated["default_runtime_profile_id"] = pinned_profile_id
+    migrated["schema_version"] = 6
+    return migrated
+
+
+_SCHEMA_MIGRATIONS: dict[int, Any] = {
+    5: _migrate_5_to_6,
+}
+
+
+def _validate_schema_migrations() -> None:
+    expected = set(range(MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION))
+    if set(_SCHEMA_MIGRATIONS) != expected:
+        raise HarnessProfileError(
+            "harness profile schema migration chain is incomplete"
+        )
+
+
+def _migrate_store(conn: sqlite3.Connection, stored_version: int) -> None:
+    """Upgrade every profile row through the contiguous migration chain and
+    stamp the new store schema version in the same transaction."""
+    _validate_schema_migrations()
+    with conn:
+        rows = conn.execute("SELECT id, data FROM profiles").fetchall()
+        version = stored_version
+        while version < SCHEMA_VERSION:
+            step = _SCHEMA_MIGRATIONS[version]
+            migrated_rows = []
+            for profile_id, data in rows:
+                profile = json.loads(data)
+                profile = step(profile)
+                migrated_rows.append((profile_id, json.dumps(profile)))
+            rows = migrated_rows
+            version += 1
+        for profile_id, data in rows:
+            conn.execute(
+                "UPDATE profiles SET data = ?, schema_version = ? WHERE id = ?",
+                (data, SCHEMA_VERSION, profile_id),
+            )
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        _bump_version(conn)
 
 
 def _bump_version(conn: sqlite3.Connection) -> None:
@@ -372,7 +447,7 @@ def _normalized_payload(profile_id: str, payload: dict[str, Any], *, existing: d
         ),
         "base_profile_id": _clean_id(payload.get("base_profile_id"), required=False) or None,
         "base_profile_revision": _clean_text(payload.get("base_profile_revision"), "base_profile_revision", 64) or None,
-        "default_provider_id": _clean_text(payload.get("default_provider_id"), "default_provider_id", MAX_SELECTOR_CHARS) or None,
+        "default_runtime_profile_id": _clean_text(payload.get("default_runtime_profile_id"), "default_runtime_profile_id", MAX_SELECTOR_CHARS) or None,
         "default_model": _clean_text(payload.get("default_model"), "default_model", MAX_SELECTOR_CHARS) or None,
         "default_reasoning_effort": _clean_text(payload.get("default_reasoning_effort"), "default_reasoning_effort", 40) or None,
         "provisioning_prompt": _clean_text(
@@ -417,7 +492,7 @@ def _input_payload_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "secret_refs": profile.get("secret_refs"),
         "base_profile_id": profile.get("base_profile_id"),
         "base_profile_revision": profile.get("base_profile_revision"),
-        "default_provider_id": profile.get("default_provider_id"),
+        "default_runtime_profile_id": profile.get("default_runtime_profile_id"),
         "default_model": profile.get("default_model"),
         "default_reasoning_effort": profile.get("default_reasoning_effort"),
         "provisioning_prompt": profile.get("provisioning_prompt"),
@@ -491,7 +566,7 @@ def _extension_profile(profile_id: str, revision: str | None = None) -> dict[str
 _META_FIELDS = (
     "base_profile_id",
     "base_profile_revision",
-    "default_provider_id",
+    "default_runtime_profile_id",
     "default_model",
     "default_reasoning_effort",
     "provisioning_prompt",

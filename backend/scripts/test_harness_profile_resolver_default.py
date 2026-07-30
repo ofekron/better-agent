@@ -558,47 +558,84 @@ def test_resolve_time_cycle_detected() -> None:
         raise AssertionError("resolve_profile did not detect the base cycle")
 
 
+def _pin_profile_id() -> str:
+    import config_store
+
+    provider = config_store.list_provider_ui_state()["providers"][0]
+    profile_id = config_store.provider_execution_defaults(provider["id"])[
+        "runtime_profile_id"
+    ]
+    assert profile_id, "fixture provider needs a live runtime profile"
+    return profile_id
+
+
+def _pin_provider_id() -> str:
+    import config_store
+
+    return config_store.get_runtime_profile(_pin_profile_id())["provider_id"]
+
+
 def test_pin_inherited_from_grandparent_when_child_pins_none() -> None:
     for pid, name in (("pin.g", "G"), ("pin.p", "P"), ("pin.c", "C")):
         harness_profile_store.create_profile({"id": pid, "name": name})
     harness_profile_store.set_profile_meta(
-        "pin.g", {"default_provider_id": "codex", "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
+        "pin.g", {"default_runtime_profile_id": _pin_profile_id(), "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
     )
     harness_profile_store.set_profile_meta("pin.p", {"base_profile_id": "pin.g"})
     harness_profile_store.set_profile_meta("pin.c", {"base_profile_id": "pin.p"})
     pins = harness_profile_resolver.profile_selector_defaults("pin.c")
-    assert pins == {"provider_id": "codex", "model": "gpt-5.5", "reasoning_effort": "high"}
+    assert pins == {
+        "provider_id": _pin_provider_id(),
+        "model": "gpt-5.5",
+        "reasoning_effort": "high",
+        "runtime_profile_id": _pin_profile_id(),
+    }
 
 
 def test_own_pin_overrides_inherited_pin() -> None:
     harness_profile_store.create_profile({"id": "pin.base2", "name": "Base2"})
     harness_profile_store.create_profile({"id": "pin.own", "name": "Own"})
     harness_profile_store.set_profile_meta(
-        "pin.base2", {"default_provider_id": "codex", "default_model": "gpt-5.5"}
+        "pin.base2", {"default_runtime_profile_id": _pin_profile_id(), "default_model": "gpt-5.5"}
     )
     harness_profile_store.set_profile_meta(
         "pin.own", {"base_profile_id": "pin.base2", "default_model": "gpt-5.5-mini"}
     )
     pins = harness_profile_resolver.profile_selector_defaults("pin.own")
-    # provider inherited from base; model is the child's own pin.
-    assert pins == {"provider_id": "codex", "model": "gpt-5.5-mini", "reasoning_effort": None}
+    # profile pin inherited from base; model is the child's own pin.
+    assert pins == {
+        "provider_id": _pin_provider_id(),
+        "model": "gpt-5.5-mini",
+        "reasoning_effort": None,
+        "runtime_profile_id": _pin_profile_id(),
+    }
 
 
 def test_merge_selector_defaults_explicit_wins_only_where_present() -> None:
     harness_profile_store.create_profile({"id": "merge.p", "name": "Merge"})
     harness_profile_store.set_profile_meta(
-        "merge.p", {"default_provider_id": "codex", "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
+        "merge.p", {"default_runtime_profile_id": _pin_profile_id(), "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
     )
     # Caller supplies model explicitly; omits provider/effort -> pins fill those only.
     merged = harness_profile_resolver.merge_selector_defaults(
         {"provider_id": None, "model": "claude-opus-4-8", "reasoning_effort": None}, "merge.p"
     )
-    assert merged == {"provider_id": "codex", "model": "claude-opus-4-8", "reasoning_effort": "high"}
+    assert merged == {
+        "provider_id": _pin_provider_id(),
+        "model": "claude-opus-4-8",
+        "reasoning_effort": "high",
+        "runtime_profile_id": _pin_profile_id(),
+    }
     # No profile -> identity, pins never consulted.
     none_merged = harness_profile_resolver.merge_selector_defaults(
         {"provider_id": None, "model": None, "reasoning_effort": None}, ""
     )
-    assert none_merged == {"provider_id": None, "model": None, "reasoning_effort": None}
+    assert none_merged == {
+        "provider_id": None,
+        "model": None,
+        "reasoning_effort": None,
+        "runtime_profile_id": None,
+    }
 
 
 def main() -> int:

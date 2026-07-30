@@ -957,6 +957,20 @@ async def create_session(body: Any = Body(default=None)):
         },
         harness_profile_id,
     )
+    if (
+        requested_profile_id is None
+        and profile_selectors.get("runtime_profile_id")
+        and not body.get("provider_id")
+        and not body.get("runner")
+    ):
+        # Harness pin: behaves like selecting that profile when the caller
+        # pinned nothing themselves.
+        requested_profile_id = profile_selectors["runtime_profile_id"]
+        pinned = await asyncio.to_thread(
+            config_store.get_runtime_profile, requested_profile_id
+        )
+        if pinned is not None:
+            body = {**body, "runner": pinned["runner"]}
     requested_provider_id = profile_selectors["provider_id"]
     provider_record = await asyncio.to_thread(
         _provider_for_required_model,

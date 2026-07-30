@@ -419,7 +419,7 @@ def resolve_profile(
             "harness profile base chain cycle: " + " -> ".join(_chain + (profile_id,))
         )
     base_pins = {
-        "default_provider_id": None,
+        "default_runtime_profile_id": None,
         "default_model": None,
         "default_reasoning_effort": None,
         "provisioning_prompt": None,
@@ -500,7 +500,7 @@ def resolve_profile(
         "base_profile_id": (stored or {}).get("base_profile_id"),
         "base_profile_revision": (stored or {}).get("base_profile_revision"),
         # Effective pins: this profile's own pin wins, else the base chain's.
-        "default_provider_id": (stored or {}).get("default_provider_id") or base_pins["default_provider_id"],
+        "default_runtime_profile_id": (stored or {}).get("default_runtime_profile_id") or base_pins["default_runtime_profile_id"],
         "default_model": (stored or {}).get("default_model") or base_pins["default_model"],
         "default_reasoning_effort": (stored or {}).get("default_reasoning_effort") or base_pins["default_reasoning_effort"],
         "provisioning_prompt": (stored or {}).get("provisioning_prompt") or base_pins["provisioning_prompt"],
@@ -527,15 +527,33 @@ def profile_selector_defaults(profile_id: str | None, revision: str | None = Non
     """The effective provider/model/reasoning-effort pins for a profile
     (inherited from its base chain when the profile itself pins none). Returns
     all-None for the Default profile or no profile — Default carries no pin."""
-    empty = {"provider_id": None, "model": None, "reasoning_effort": None}
+    empty = {
+        "provider_id": None,
+        "model": None,
+        "reasoning_effort": None,
+        "runtime_profile_id": None,
+    }
     selected = str(profile_id or "").strip()
     if not selected or selected == harness_profile_store.DEFAULT_PROFILE_ID:
         return empty
     resolved = resolve_profile(selected, str(revision or "").strip() or None)
+    pinned_profile_id = resolved.get("default_runtime_profile_id")
+    provider_id = None
+    if pinned_profile_id:
+        import config_store
+
+        pinned = config_store.get_runtime_profile(pinned_profile_id)
+        if pinned is None or pinned.get("deleted_at"):
+            # A deleted/unknown pinned profile drops the pin entirely —
+            # sessions fall back to their normal defaults.
+            pinned_profile_id = None
+        else:
+            provider_id = pinned["provider_id"]
     return {
-        "provider_id": resolved.get("default_provider_id"),
+        "provider_id": provider_id,
         "model": resolved.get("default_model"),
         "reasoning_effort": resolved.get("default_reasoning_effort"),
+        "runtime_profile_id": pinned_profile_id,
     }
 
 
