@@ -18,7 +18,6 @@ from codex_execution_common import (
     parallel_map,
     required_integer,
     required_string,
-    sha256_and_first_line_fd,
     sha256_fd,
     stable_stat_identity,
     symlink_chain,
@@ -329,29 +328,7 @@ def _validate_launch(launch: AttestedLaunch) -> None:
         raise ExecutionContractError("incoherent runner launcher")
 
 
-def _read_attested_shebang(identity: FileIdentity) -> str:
-    flags = binary_open_flags(
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
-    )
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(identity.resolved_path, flags)
-        try:
-            observed = os.fstat(descriptor)
-            digest, first_line = sha256_and_first_line_fd(descriptor)
-        finally:
-            os.close(descriptor)
-    except OSError as exc:
-        raise ExecutionContractError("provider launcher is unreadable") from exc
-    if (
-        observed.st_dev != identity.device
-        or observed.st_ino != identity.inode
-        or observed.st_size != identity.size
-        or observed.st_mtime_ns != identity.mtime_ns
-        or observed.st_ctime_ns != identity.ctime_ns
-        or digest != identity.sha256
-    ):
-        raise ExecutionContractError("provider launcher identity mismatch")
+def _shebang_line_from_first_line(first_line: bytes) -> str:
     if not first_line.startswith(b"#!"):
         return ""
     try:
@@ -397,7 +374,7 @@ def capture_cli_launch(
         raise ExecutionContractError(
             "Windows command wrappers require complete chain authority",
         )
-    launcher = FileIdentity.capture(launcher_path)
+    launcher, first_line = FileIdentity.capture_with_first_line(launcher_path)
     target = Path(launcher.resolved_path)
     if effective_platform.lower().startswith("win") and (
         target.suffix.lower() in {".cmd", ".bat"}
@@ -405,7 +382,7 @@ def capture_cli_launch(
         raise ExecutionContractError(
             "Windows command wrappers require complete chain authority",
         )
-    shebang_line = _read_attested_shebang(launcher)
+    shebang_line = _shebang_line_from_first_line(first_line)
     if not shebang_line:
         launch = AttestedLaunch(
             logical_command=logical_command,

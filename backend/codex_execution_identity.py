@@ -4,7 +4,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from codex_execution_common import (
     SHA256_RE,
@@ -12,6 +12,7 @@ from codex_execution_common import (
     binary_open_flags,
     required_integer,
     required_string,
+    sha256_and_first_line_fd,
     sha256_fd,
     stable_stat_identity,
     symlink_chain,
@@ -31,7 +32,11 @@ class FileIdentity:
     symlink_chain: tuple[tuple[str, str], ...] = ()
 
     @classmethod
-    def capture(cls, raw_path: str | Path) -> FileIdentity:
+    def _capture(
+        cls,
+        raw_path: str | Path,
+        hasher: Callable[[int], tuple[str, bytes]],
+    ) -> tuple[FileIdentity, bytes]:
         requested = Path(raw_path)
         if not requested.is_absolute():
             raise ExecutionContractError("authority file path must be absolute")
@@ -47,7 +52,7 @@ class FileIdentity:
                 stat_before = os.fstat(fd)
                 if not stat.S_ISREG(stat_before.st_mode):
                     raise ExecutionContractError("authority file is unavailable")
-                digest = sha256_fd(fd)
+                digest, extra = hasher(fd)
                 stat_after = os.fstat(fd)
                 if stable_stat_identity(stat_before) != stable_stat_identity(
                     stat_after,
@@ -69,7 +74,7 @@ class FileIdentity:
                     )
             finally:
                 os.close(fd)
-            return cls(
+            identity = cls(
                 requested_path=str(requested.absolute()),
                 resolved_path=str(resolved_after),
                 sha256=digest,
@@ -80,10 +85,30 @@ class FileIdentity:
                 inode=stat_after.st_ino,
                 symlink_chain=chain_after,
             )
+            return identity, extra
         except ExecutionContractError:
             raise
         except OSError as exc:
             raise ExecutionContractError("authority file is unavailable") from exc
+
+    @classmethod
+    def capture(cls, raw_path: str | Path) -> FileIdentity:
+        identity, _ = cls._capture(raw_path, lambda fd: (sha256_fd(fd), b""))
+        return identity
+
+    @classmethod
+    def capture_with_first_line(
+        cls,
+        raw_path: str | Path,
+    ) -> tuple[FileIdentity, bytes]:
+        """Capture identity and the file's first line in one read pass.
+
+        Saves a second full open+hash of the same file for callers (like
+        `capture_cli_launch`) that need both the attested identity and the
+        shebang line — `capture()` + a separate re-read to extract the
+        first line would hash the same bytes twice for no added safety.
+        """
+        return cls._capture(raw_path, sha256_and_first_line_fd)
 
     def attest(self) -> bool:
         try:
