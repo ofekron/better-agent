@@ -38,6 +38,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import oskeychain
+import paths
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, auth_services, service_names
 
 _SERVICE = PRIMARY_SERVICE
@@ -248,7 +249,14 @@ def make_password_hash(password: str) -> str:
 
 
 def _reject_headless_write() -> None:
-    if headless_mode_enabled():
+    """Real headless containers are read-only: credentials come from
+    operator-supplied env vars / mounted files, and there's no runtime
+    path to rewrite a mounted file's *source* (only its current
+    contents). `paths.is_test_mode()` is the one carve-out — it's never
+    set in a real container, only by test harnesses that provision their
+    own writable stand-in files for `BETTER_AGENT_PASSWORD_HASH_FILE` /
+    `BETTER_AGENT_SESSION_SECRET_FILE`."""
+    if headless_mode_enabled() and not paths.is_test_mode():
         raise RuntimeError(
             f"{_HEADLESS_ENV_VAR}=1: credentials are supplied by the container's "
             f"env vars / mounted secret files and cannot be changed at runtime. "
@@ -257,15 +265,44 @@ def _reject_headless_write() -> None:
         )
 
 
+def _headless_write_credentials(username: str, password_hash: str, session_secret: str) -> None:
+    """Test-mode-only headless write path: rewrites the harness's own
+    stand-in files/env var in place instead of a real keychain. Only
+    reachable once `_reject_headless_write` has already confirmed
+    `paths.is_test_mode()`."""
+    global _headless_ephemeral_session_secret
+    os.environ[_HEADLESS_USERNAME_VAR] = username
+    hash_path = os.environ.get(_HEADLESS_PASSWORD_HASH_FILE_VAR, "")
+    if not hash_path:
+        raise RuntimeError(f"{_HEADLESS_PASSWORD_HASH_FILE_VAR} is unset.")
+    with open(hash_path, "w", encoding="utf-8") as handle:
+        handle.write(password_hash)
+    secret_path = os.environ.get(_HEADLESS_SESSION_SECRET_FILE_VAR, "")
+    if secret_path:
+        with open(secret_path, "w", encoding="utf-8") as handle:
+            handle.write(session_secret)
+    else:
+        _headless_ephemeral_session_secret = session_secret
+
+
+def _persist_credentials(username: str, password: str) -> None:
+    if not username or not password:
+        raise ValueError("username and password must both be non-empty")
+    password_hash = make_password_hash(password)
+    session_secret = secrets.token_hex(32)
+    if headless_mode_enabled():
+        _headless_write_credentials(username, password_hash, session_secret)
+        return
+    _kc_set("username", username)
+    _kc_set("password_hash", password_hash)
+    _kc_set("session_secret", session_secret)
+
+
 def write_credentials(username: str, password: str) -> None:
     """First-run bootstrap: store username, the argon2 password hash, and
     a freshly minted 32-byte session secret in the keychain."""
     _reject_headless_write()
-    if not username or not password:
-        raise ValueError("username and password must both be non-empty")
-    _kc_set("username", username)
-    _kc_set("password_hash", make_password_hash(password))
-    _kc_set("session_secret", secrets.token_hex(32))
+    _persist_credentials(username, password)
 
 
 def write_login_credentials(username: str, password: str) -> None:
@@ -275,8 +312,4 @@ def write_login_credentials(username: str, password: str) -> None:
     compromised token can't outlive the password change that was meant to
     kill it."""
     _reject_headless_write()
-    if not username or not password:
-        raise ValueError("username and password must both be non-empty")
-    _kc_set("username", username)
-    _kc_set("password_hash", make_password_hash(password))
-    _kc_set("session_secret", secrets.token_hex(32))
+    _persist_credentials(username, password)

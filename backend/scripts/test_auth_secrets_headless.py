@@ -32,6 +32,7 @@ _ENV_VARS = (
     "BETTER_AGENT_USERNAME",
     "BETTER_AGENT_PASSWORD_HASH_FILE",
     "BETTER_AGENT_SESSION_SECRET_FILE",
+    "BETTER_AGENT_TEST_MODE",
 )
 
 
@@ -161,6 +162,55 @@ def test_write_credentials_rejected_in_headless_mode() -> bool:
         return True
 
 
+def test_write_login_credentials_allowed_in_headless_test_mode() -> bool:
+    """The fullstack Playwright harness runs the backend with
+    BETTER_AGENT_HEADLESS_AUTH=1 AND BETTER_AGENT_TEST_MODE=1, and
+    provisions its own writable password-hash/session-secret files.
+    write_login_credentials() must rewrite those files + the username
+    env var in place, not raise — this is what change_credentials()
+    (auth_routes.py) relies on."""
+    with _clean_env(), tempfile.TemporaryDirectory() as tmp:
+        hash_path = os.path.join(tmp, "password.hash")
+        secret_path = os.path.join(tmp, "session.secret")
+        with open(hash_path, "w", encoding="utf-8") as handle:
+            handle.write(auth_secrets.make_password_hash("old-pw"))
+        with open(secret_path, "w", encoding="utf-8") as handle:
+            handle.write("a" * 64)
+
+        os.environ["BETTER_AGENT_HEADLESS_AUTH"] = "1"
+        os.environ["BETTER_AGENT_TEST_MODE"] = "1"
+        os.environ["BETTER_AGENT_USERNAME"] = "alice"
+        os.environ["BETTER_AGENT_PASSWORD_HASH_FILE"] = hash_path
+        os.environ["BETTER_AGENT_SESSION_SECRET_FILE"] = secret_path
+
+        old_secret = auth_secrets.get_session_secret()
+        try:
+            auth_secrets.write_login_credentials("bob", "new-pw")
+        except RuntimeError as e:
+            print(f"  write_login_credentials raised in headless test mode: {e}")
+            return False
+
+        if auth_secrets.get_username() != "bob":
+            print(f"  username was not rewritten: {auth_secrets.get_username()!r}")
+            return False
+
+        import argon2
+        try:
+            argon2.PasswordHasher().verify(auth_secrets.get_password_hash(), "new-pw")
+        except Exception as e:
+            print(f"  rewritten password hash did not verify: {e}")
+            return False
+
+        new_secret = auth_secrets.get_session_secret()
+        if new_secret == old_secret:
+            print("  session secret was not rotated")
+            return False
+        if len(new_secret) != 64:
+            print(f"  rotated session secret is not 64 hex chars: {new_secret!r}")
+            return False
+        return True
+
+
 TESTS = [
     ("headless mode is off by default", test_disabled_by_default),
     ("missing BETTER_AGENT_USERNAME raises", test_missing_username_raises),
@@ -170,6 +220,7 @@ TESTS = [
     ("session secret falls back to a stable per-process ephemeral value", test_session_secret_ephemeral_when_unset),
     ("needs_bootstrap() is False in headless mode", test_needs_bootstrap_false_in_headless_mode),
     ("write_credentials/write_login_credentials rejected in headless mode", test_write_credentials_rejected_in_headless_mode),
+    ("write_login_credentials allowed + round-trips in headless test mode", test_write_login_credentials_allowed_in_headless_test_mode),
 ]
 
 
