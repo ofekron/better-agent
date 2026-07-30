@@ -1124,6 +1124,13 @@ class ClaudeProvider(Provider):
         cli_root = run_dir / "claude-cli"
         cli_root.mkdir(mode=0o700)
         materialized_cli = launch.materialize_sdk(cli_root)
+        from run_execution_payloads import publish_execution_payload_manifest
+
+        publish_execution_payload_manifest(
+            run_dir,
+            "claude-cli",
+            materialized_cli.files,
+        )
         sdk_root = None
         if launch.runner.frozen:
             embedded_sdk = next(

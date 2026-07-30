@@ -11,6 +11,7 @@ from provider_family_execution_runtime import (
     restore_family_runner_runtime,
 )
 from provider_runtime_plan_source import hydrate_runner_operation_broker
+from run_execution_payloads import publish_execution_payload_manifest
 
 
 @dataclass(frozen=True)
@@ -57,10 +58,11 @@ def _materialize_provider(
     root = run_dir / "provider-cli"
     root.mkdir(mode=0o700)
     materialized = runtime.launch.materialize_sdk(root)
-    if not materialized.attest():
-        raise ExecutionContractError(
-            "materialized provider executable identity mismatch",
-        )
+    publish_execution_payload_manifest(
+        run_dir,
+        "provider-cli",
+        materialized.files,
+    )
     return materialized.executable_path
 
 

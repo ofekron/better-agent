@@ -18,6 +18,7 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 - `backend/lifecycle_state_machines.py`: event-loop-owned session hierarchy that projects user-prompt, turn, and provider-admission facts from the backend event bus; blocking provider adapters report facts and never mutate this lifecycle tree.
 - `backend/model_catalog_refresh.py` and `backend/model_catalog_read_projection.py`: Codex/Fugu catalog authority owner and disposable production read projection; `backend/models.py` consumes the projection without request-path provider or disk I/O.
 - `backend/headless_admission.py`: single authority boundary for session-owned headless work; freezes provider/model/runtime/routing/cwd/provider-session identity before local or node execution.
+- `backend/run_execution_payloads.py`: write-once, run-inode-bound authority for exact transient provider payload files; reclamation must consume this closed manifest rather than infer paths.
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.
 - `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.

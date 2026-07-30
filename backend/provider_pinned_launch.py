@@ -19,7 +19,7 @@ from codex_execution_common import (
     record_step_since,
 )
 from codex_execution_identity import FileIdentity
-from paths import make_private_directory
+from paths import make_private_directory, make_private_file
 from provider_binary_relocatability import assert_relocatable_executable
 from provider_frozen_bundle import (
     frozen_bundle_destination,
@@ -173,6 +173,18 @@ def _verify_materialized_descriptor(
         )
 
 
+def _secure_materialized_file(target: Path) -> None:
+    if os.name != "nt":
+        return
+    try:
+        make_private_file(target)
+        os.chmod(target, stat.S_IREAD)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ExecutionContractError(
+            "materialized execution component cannot be secured",
+        ) from exc
+
+
 def _copy_descriptor(
     descriptor: int,
     target: Path,
@@ -181,6 +193,7 @@ def _copy_descriptor(
     mode = 0o500
     if _try_clone_descriptor(descriptor, target, mode):
         try:
+            _secure_materialized_file(target)
             _verify_materialized_descriptor(
                 descriptor,
                 target,
@@ -210,6 +223,7 @@ def _copy_descriptor(
             os.fsync(output)
         finally:
             os.close(output)
+        _secure_materialized_file(target)
         _verify_materialized_descriptor(descriptor, target, identity)
     except OSError as exc:
         if created:
