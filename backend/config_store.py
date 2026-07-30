@@ -747,6 +747,33 @@ def _seed_profile_for_provider(provider: dict) -> dict:
     }
 
 
+def _ensure_runtime_profiles_for_providers(state: dict) -> None:
+    """Guarantee every provider in `state` owns a live runtime profile.
+
+    Paths that build or replace the provider set wholesale (catalog
+    provisioning, provider-sync import) converge here so a provider can never
+    land without an execution identity. Resurrects the pair's tombstone under
+    its original id, matching `add_runtime_profile`."""
+    profiles = state.setdefault("runtime_profiles", [])
+    now = _utc_now_iso()
+    for provider in state.get("providers", []):
+        runner = _clean_runner(str(provider.get("kind") or "claude"), "")
+        existing = next(
+            (
+                p
+                for p in profiles
+                if p.get("provider_id") == provider.get("id")
+                and p.get("runner") == runner
+            ),
+            None,
+        )
+        if existing is None:
+            profiles.append(_seed_profile_for_provider(provider))
+        elif runtime_profile_is_deleted(existing):
+            existing["deleted_at"] = None
+            existing["updated_at"] = now
+
+
 def _seed_default_state() -> dict:
     """Seed the installer selection, or the legacy defaults without a profile."""
     import installation_profile
@@ -2487,8 +2514,9 @@ def _import_provider_sync_state(
     next_state["provider_state_authority"] = copy.deepcopy(incoming_authority)
     next_state["provider_state_projected"] = True
     # Profiles are local-only state layered on the synced provider set: bury
-    # providers the sync withdrew, tombstone their live profiles, then
-    # re-derive the default profile for the incoming default provider.
+    # providers the sync withdrew, tombstone their live profiles, seed one for
+    # every provider the sync introduced, then re-derive the default profile
+    # for the incoming default provider.
     incoming_ids = {p.get("id") for p in providers}
     withdrawn = [
         p
@@ -2497,6 +2525,7 @@ def _import_provider_sync_state(
     ]
     _bury_providers(next_state, withdrawn)
     _tombstone_orphaned_runtime_profiles(next_state)
+    _ensure_runtime_profiles_for_providers(next_state)
     _reconcile_default_runtime_profile(next_state)
     _validate_state_for_save(next_state)
     config_changed = not same_authority
@@ -2567,10 +2596,16 @@ def provision_provider_catalog(payload: dict) -> dict:
         **_seed_default_state(),
         "default_provider_id": default_provider_id,
         "providers": providers,
+        # The seed's profiles belong to the seed's providers, which this
+        # catalog replaces; re-seed against the catalog's own provider set.
+        "runtime_profiles": [],
+        "default_runtime_profile_id": None,
         "provider_state_authority": authority,
         "provider_state_projected": True,
         "internal_llm": _normalize_internal_llm(payload.get("internal_llm")),
     }
+    _ensure_runtime_profiles_for_providers(next_state)
+    _reconcile_default_runtime_profile(next_state)
     _validate_state_for_save(next_state)
     _save_state(next_state, provider_state_authority=authority)
     return list_providers()

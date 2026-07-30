@@ -522,6 +522,98 @@ def test_add_provider_seeds_profile() -> None:
     ]
     assert len(persisted) == 1, "seeded profile survives a reload"
 
+    # No default_model in the payload must fall back to the kind's seed, not "".
+    seeded = config_store.add_provider({"kind": "claude", "mode": "subscription"})
+    seeded_profile = next(
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == seeded["id"]
+    )
+    assert seeded_profile["default_model"] == "opus", "absent key falls back to seed"
+    assert seeded_profile["default_reasoning_effort"], "effort is populated"
+
+
+def test_provision_catalog_seeds_profiles() -> None:
+    import uuid as _uuid
+
+    state_path = config_store._config_path()
+    backup = state_path.read_bytes() if state_path.exists() else None
+    state_path.unlink(missing_ok=True)
+    _reset_cache()
+    try:
+        pid = str(_uuid.uuid4())
+        result = config_store.provision_provider_catalog(
+            {
+                "providers": [
+                    {"id": pid, "name": "C", "kind": "claude", "mode": "subscription"}
+                ],
+                "default_provider_id": pid,
+            }
+        )
+        assert result, "catalog provisioning returns the provider set"
+        live = [p for p in config_store.list_runtime_profiles() if p["provider_id"] == pid]
+        assert len(live) == 1, "each catalog provider gets exactly one live profile"
+        orphans = [
+            p
+            for p in config_store.list_runtime_profiles()
+            if p["provider_id"] != pid
+        ]
+        assert not orphans, "seed-state profiles must not survive catalog replacement"
+        default_profile = config_store.get_default_runtime_profile()
+        assert default_profile is not None
+        assert default_profile["provider_id"] == pid, "lockstep default is re-derived"
+    finally:
+        if backup is not None:
+            state_path.write_bytes(backup)
+        else:
+            state_path.unlink(missing_ok=True)
+        _reset_cache()
+
+
+def test_sync_import_seeds_profiles() -> None:
+    import uuid as _uuid
+
+    import provider_sync_authority
+
+    state_path = config_store._config_path()
+    backup = state_path.read_bytes() if state_path.exists() else None
+    try:
+        pid = str(_uuid.uuid4())
+        providers = [
+            {
+                **config_store._clean_provider_record(
+                    {
+                        "id": pid,
+                        "name": "Synced",
+                        "kind": "claude",
+                        "mode": "subscription",
+                    }
+                ),
+                **config_store._new_provider_authority(),
+            }
+        ]
+        authority = provider_sync_authority.new_authority(pid, providers)
+        config_store.apply_provider_sync_projection(
+            {
+                "providers": providers,
+                "default_provider_id": pid,
+                "provider_state_authority": authority,
+            }
+        )
+        live = [
+            p for p in config_store.list_runtime_profiles() if p["provider_id"] == pid
+        ]
+        assert len(live) == 1, "a synced-in provider gets exactly one live profile"
+        default_profile = config_store.get_default_runtime_profile()
+        assert default_profile is not None, "lockstep default must not go null"
+        assert default_profile["provider_id"] == pid
+    finally:
+        if backup is not None:
+            state_path.write_bytes(backup)
+        else:
+            state_path.unlink(missing_ok=True)
+        _reset_cache()
+
 
 def main() -> int:
     tests = [
@@ -539,6 +631,8 @@ def main() -> int:
         test_deleting_deleted_tombstone_activation_fails,
         test_provider_deletion_cascade_and_graveyard,
         test_add_provider_seeds_profile,
+        test_provision_catalog_seeds_profiles,
+        test_sync_import_seeds_profiles,
         test_installation_selection_seeds_profile,
         test_v2_internal_llm_assignment_migrates_to_profile_ref,
     ]
