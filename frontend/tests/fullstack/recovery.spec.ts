@@ -604,6 +604,167 @@ test.describe("backend crash-recovery", () => {
       await restarted.stop();
     }
   });
+
+  test("a QUEUED prompt waiting behind an in-flight turn survives a mid-turn backend crash without corruption or a duplicate send", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    test.setTimeout(240_000);
+
+    await createSessionWithPrompt(
+      page,
+      "Count from 1 to 100 slowly, one number per line, explaining each number's factors.",
+    );
+
+    const sessionsBeforeCrash = await getSessionsList(page, backend);
+    expect(sessionsBeforeCrash.length).toBeGreaterThan(0);
+    const sessionId = sessionsBeforeCrash[0].id as string;
+
+    // Same event-driven proxy for "the first turn is actually running" as
+    // chat-turn.spec.ts's queuing test.
+    const stopBtn = page.getByTestId("stop-btn");
+    await expect(stopBtn).toBeVisible({ timeout: 30_000 });
+
+    // Queue a SECOND prompt behind the still-running first turn, via the
+    // same same-session queue-while-running path as chat-turn.spec.ts's
+    // "queues a second prompt while a turn is running" test (not the
+    // offline queue) — the single primary send-btn submits it as queued
+    // rather than interrupting, since the default native `claude` CLI
+    // provider doesn't set `supports_steering`.
+    const queuedPromptText =
+      "Reply with exactly the single word: QUEUEDCRASH. No punctuation, no other words.";
+    await page.getByTestId("input-textarea").fill(queuedPromptText);
+    await page.getByTestId("send-btn").click();
+
+    const queuedBanner = page.getByTestId("queued-prompt-banner");
+    await expect(queuedBanner).toBeVisible({ timeout: 15_000 });
+    await expect(queuedBanner).toContainText("QUEUEDCRASH");
+
+    // Crash the backend while BOTH the running first turn AND the queued
+    // second prompt are pending — the window this test targets, distinct
+    // from every other test in this file which only ever has one in-flight
+    // turn and nothing queued behind it.
+    await killBackendProcessOnly(backend);
+    const restarted = await spawnBackendAgainstExistingHome(backend);
+
+    try {
+      const health = await page.request.get(`${backend.baseURL}/api/auth/needs_setup`);
+      expect(health.ok()).toBe(true);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      const fetchTree = async (): Promise<{
+        messages: Array<{ id: string; role: string }>;
+        queued_prompts?: Array<{ kind?: string }>;
+      }> => {
+        const detailRes = await page.request.get(
+          `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+        );
+        expect(detailRes.ok()).toBe(true);
+        return detailRes.json();
+      };
+
+      // Converge to one of exactly two acceptable terminal states — never a
+      // third "stuck forever" state:
+      //  - "ran": the queued prompt was dequeued and actually executed as a
+      //    real second turn (userCount reaches 2, matched by an equal
+      //    assistantCount once that second turn also finishes).
+      //  - "dropped": the queued prompt was cleanly discarded — it no
+      //    longer appears in `queued_prompts` and no second user message
+      //    was ever created for it.
+      // Checking `is_running` on every poll (not just once up front) is
+      // required because recovery may flip it false->true->false again if
+      // it dequeues and runs the held prompt as a fresh turn.
+      const pollOutcome = async (): Promise<"ran" | "dropped" | "pending"> => {
+        const sessions = await getSessionsList(page, backend);
+        const match = sessions.find((s) => s.id === sessionId);
+        if (match?.is_running) return "pending";
+
+        const tree = await fetchTree();
+        const messages = tree.messages ?? [];
+        const userCount = messages.filter((m) => m.role === "user").length;
+        const assistantCount = messages.filter((m) => m.role === "assistant").length;
+        const queuedPrompts = tree.queued_prompts ?? [];
+        const stillQueued = queuedPrompts.some(
+          (p) => p.kind === "queued_behind" || p.kind === "interrupt",
+        );
+
+        // Still reported as queued, or a turn's user message landed without
+        // its matching assistant reply yet (settling mid-turn) — keep
+        // polling rather than judging a half-written state.
+        if (stillQueued || userCount !== assistantCount) return "pending";
+        return userCount >= 2 ? "ran" : "dropped";
+      };
+
+      await expect
+        .poll(pollOutcome, { timeout: 150_000, intervals: [500, 1000, 2000] })
+        .not.toBe("pending");
+
+      const finalTree = await fetchTree();
+      const finalMessages = finalTree.messages ?? [];
+      const ids = finalMessages.map((m) => m.id);
+      expect(new Set(ids).size, `duplicate message ids in render tree: ${ids.join(",")}`).toBe(
+        ids.length,
+      );
+
+      const userCount = finalMessages.filter((m) => m.role === "user").length;
+      const assistantCount = finalMessages.filter((m) => m.role === "assistant").length;
+      // Never a corrupted or duplicated send: at most the two prompts that
+      // were actually submitted (the original + the queued one) can ever
+      // appear as user messages.
+      expect(userCount).toBeLessThanOrEqual(2);
+      expect(assistantCount).toBeLessThanOrEqual(2);
+
+      const finalQueuedPrompts = finalTree.queued_prompts ?? [];
+      const stillQueuedFinal = finalQueuedPrompts.some(
+        (p) => p.kind === "queued_behind" || p.kind === "interrupt",
+      );
+      expect(
+        stillQueuedFinal,
+        "queued prompt must not remain stuck reporting as queued after recovery",
+      ).toBe(false);
+
+      await page.reload();
+      await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+
+      // The queued-prompt banner is driven by `queued_prompts` from this
+      // same session-detail payload (queuedPrompts.ts), so it must never
+      // still show the crashed prompt as pending after reload.
+      await expect(queuedBanner).toBeHidden();
+
+      const userMessages = page.getByTestId("user-message");
+      const assistantMessages = page.getByTestId("assistant-message");
+
+      if (userCount >= 2) {
+        // Outcome: the queued prompt got a real reply eventually — a
+        // genuine second turn, not a duplicate of the first.
+        await expect(userMessages).toHaveCount(2);
+        await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
+        await expect(assistantMessages.nth(1)).toContainText("QUEUEDCRASH", { timeout: 120_000 });
+      } else {
+        // Outcome: the queued prompt was cleanly dropped — exactly the
+        // original turn remains, with no phantom second bubble.
+        await expect(userMessages).toHaveCount(1);
+        await expect(assistantMessages).toHaveCount(1);
+      }
+
+      // Whichever outcome occurred, the FIRST turn's bubble must show a
+      // real terminal signal too (real content or a stopped indicator),
+      // same invariant as the other mid-turn-crash tests in this file.
+      const firstAssistantMessage = assistantMessages.first();
+      const firstText = (await firstAssistantMessage.textContent()) ?? "";
+      const firstHasRealContent = firstText.trim().length > 0;
+      const firstHasStoppedIndicator =
+        (await firstAssistantMessage.locator(".stopped-indicator").count()) > 0;
+      expect(
+        firstHasRealContent || firstHasStoppedIndicator,
+        `first assistant bubble has neither content nor a stopped indicator after recovery: ${JSON.stringify(firstText)}`,
+      ).toBe(true);
+    } finally {
+      await restarted.stop();
+    }
+  });
 });
 
 test.describe("backend graceful-restart (POST /api/admin/restart)", () => {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, expect } from "./harness/fixtures";
@@ -302,6 +302,56 @@ test.describe("projects", () => {
     } finally {
       rmSync(dirA, { recursive: true, force: true });
       rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory with spaces and unicode characters in its name is added, displayed, and browsed without path-escaping bugs", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    // mkdtempSync's prefix is used verbatim (only the random suffix is
+    // appended), so this exercises a real on-disk path containing spaces,
+    // parentheses, and non-ASCII characters end to end — through the
+    // DirPickerModal's address bar, POST /api/projects, and GET
+    // /api/browse — rather than a sanitized/ASCII-only stand-in.
+    const unicodeDir = mkdtempSync(path.join(tmpdir(), "ba-fullstack-my proj (2024) café "));
+    try {
+      const fileName = "réunion notes (draft).txt";
+      writeFileSync(path.join(unicodeDir, fileName), "hello");
+
+      const label = path.basename(unicodeDir);
+
+      await addProjectByPath(page, unicodeDir);
+
+      // The tab must render the exact directory name, not a mangled,
+      // percent-encoded, or double-encoded variant of it.
+      const tab = page.locator(".project-tab", { hasText: label });
+      await expect(tab).toBeVisible();
+      await expect(tab.locator(".project-tab-label")).toHaveText(label);
+
+      // realpathSync resolves any symlink aliasing in the OS temp dir (e.g.
+      // macOS's /var -> /private/var), so this compares against the true
+      // canonical path rather than risking a false mismatch unrelated to
+      // escaping.
+      const projectsRes = await page.request.get(`${backend.baseURL}/api/projects`);
+      expect(projectsRes.ok()).toBeTruthy();
+      const projectsBody = await projectsRes.json();
+      const persisted = (projectsBody.projects as Array<{ path: string }>).find((p) =>
+        p.path.endsWith(label),
+      );
+      expect(persisted).toBeDefined();
+      expect(persisted?.path).toBe(realpathSync(unicodeDir));
+
+      // The real project-scoped file browser (GET /api/browse) must list
+      // the unicode/space-containing file with its exact name too.
+      await page.getByTitle("Browse project files").click();
+      const chooser = page.locator(".file-chooser-content");
+      await expect(chooser).toBeVisible();
+      await expect(chooser.locator(".tree-node.tree-file", { hasText: fileName })).toBeVisible();
+      await chooser.locator(".modal-close").click();
+      await expect(chooser).toBeHidden();
+    } finally {
+      rmSync(unicodeDir, { recursive: true, force: true });
     }
   });
 });

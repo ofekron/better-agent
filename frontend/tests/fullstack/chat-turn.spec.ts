@@ -300,3 +300,93 @@ test("composer is immediately usable for a new prompt after interrupting a turn"
   await expect(assistantMessages).toHaveCount(2, { timeout: 30_000 });
   await expect(assistantMessages.nth(1)).toContainText("RESUMED", { timeout: 120_000 });
 });
+
+// Validates the real online (same-session) queue cancel path, distinct from
+// the offline queue: a prompt queued via the send-btn while a turn is
+// running (same mechanism as the "queues a second prompt" test above) can be
+// discarded via the real QueuedPromptBanner cancel control BEFORE the
+// in-flight turn finishes and the backend's per-session queue would
+// otherwise auto-dequeue it. Cancelling routes through App.tsx's
+// `handleCancelQueued` -> a real `ConfirmModal` confirmation (cancelling a
+// queued prompt permanently discards user-authored text, so it is gated
+// behind an explicit confirm) -> `confirmCancelQueued`, which is the real
+// production guard, not a test shortcut.
+test("cancels a queued prompt before it runs", async ({ authedPage: page, backend }) => {
+  await createSessionWithPrompt(
+    page,
+    "Count from 1 to 50 slowly, one number per line, explaining each number's factors.",
+  );
+
+  await expect(page.getByTestId("user-message")).toBeVisible();
+
+  const sessionId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+  const countMessages = async (): Promise<number> => {
+    const res = await page.request.get(
+      `${backend.baseURL}/api/sessions/${encodeURIComponent(sessionId)}?msg_limit=50`,
+    );
+    expect(res.ok()).toBe(true);
+    const tree = await res.json();
+    return ((tree.messages ?? []) as Array<{ id: string }>).length;
+  };
+
+  // Same event-driven proxy for "the turn is actually running" as the
+  // interrupt/queue tests above.
+  const stopBtn = page.getByTestId("stop-btn");
+  await expect(stopBtn).toBeVisible({ timeout: 30_000 });
+
+  // Baseline captured while the first turn is in flight but before the
+  // second prompt is ever queued. The backend (turn_manager.py's
+  // Coordinator.run_turn) eagerly persists an assistant placeholder row
+  // BEFORE driving the CLI subprocess — the same eager-persist that makes
+  // `stop-btn`'s visibility a reliable "turn running" signal also means
+  // this count already reflects its final level (user1 + assistant1): the
+  // provider only fills in that existing row in place as it streams, it
+  // never appends a new one on completion.
+  const messageCountBeforeQueue = await countMessages();
+
+  const queuedPromptText = "Reply with exactly the single word: NEVERSENT. No punctuation, no other words.";
+  await page.getByTestId("input-textarea").fill(queuedPromptText);
+  await page.getByTestId("send-btn").click();
+
+  const queuedBanner = page.getByTestId("queued-prompt-banner");
+  await expect(queuedBanner).toBeVisible({ timeout: 15_000 });
+  await expect(queuedBanner).toContainText("NEVERSENT");
+
+  // The real cancel control on the (non-minimized, single-item) banner —
+  // InputArea.tsx renders it as a plain `.queued-cancel-btn` button (no
+  // dedicated data-testid; that's reserved for the bulk `queued-bulk-cancel`
+  // variant used when 2+ prompts are queued) that fires `onCancel` ->
+  // App.tsx's `handleCancelQueued`.
+  await queuedBanner.locator(".queued-cancel-btn").click();
+
+  // Cancelling a queued prompt is gated behind a real ConfirmModal
+  // ("Discard queued prompt?") since it permanently discards user-authored
+  // text — click its real confirm action, not a bypass. ConfirmModal.tsx
+  // has no data-testid/role="dialog" of its own, so scope by its
+  // `.modal-content` class and the exact translated confirm label
+  // (`queued.cancelConfirmAction_one` = "Discard prompt").
+  const confirmDialog = page.locator(".modal-content", { hasText: "Discard queued prompt?" });
+  await expect(confirmDialog).toBeVisible({ timeout: 10_000 });
+  await confirmDialog.getByRole("button", { name: "Discard prompt" }).click();
+
+  // The queued banner is gone and the never-sent text never became its own
+  // user bubble, all BEFORE the first turn has been allowed to finish.
+  await expect(queuedBanner).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("user-message")).toHaveCount(1);
+  await expect(page.getByText("NEVERSENT")).toHaveCount(0);
+
+  // Now let the first (still in-flight) turn complete.
+  await expect(stopBtn).toBeHidden({ timeout: 180_000 });
+  const assistantMessages = page.getByTestId("assistant-message");
+  await expect(assistantMessages.first()).not.toHaveText("", { timeout: 15_000 });
+
+  // Final state proves the cancelled prompt was never sent or replied to:
+  // exactly one user/assistant pair, and the backend's message count is
+  // unchanged from the pre-queue baseline — the eagerly-persisted
+  // assistant row was only filled in place, and the cancelled prompt never
+  // became a second turn (which would append two more rows).
+  await expect(page.getByTestId("user-message")).toHaveCount(1);
+  await expect(assistantMessages).toHaveCount(1);
+  await expect(page.getByText("NEVERSENT")).toHaveCount(0);
+  expect(await countMessages()).toBe(messageCountBeforeQueue);
+});

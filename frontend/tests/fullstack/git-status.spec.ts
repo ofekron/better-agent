@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { test, expect } from "./harness/fixtures";
 import {
   addUntrackedFile,
@@ -300,5 +300,82 @@ test.describe("git status and history", () => {
     expect(renderedHashes).toEqual(expectedHashesNewestFirst);
     // No duplicate rows hiding behind a correct count.
     expect(new Set(renderedHashes).size).toBe(commitCount);
+  });
+
+  // A real unresolved merge conflict: two real branches change the same
+  // real file, `git merge` is run and exits non-zero (real, expected
+  // outcome), leaving real "<<<<<<<" conflict markers on disk and a real
+  // "UU README.md" line in `git status --porcelain`. Registering this as a
+  // project must not crash the real backend's git RPCs.
+  test("a real git merge conflict does not crash git-status and reports a sensible real state", async ({
+    authedPage: page,
+    backend,
+  }) => {
+    repo = createRealGitRepo("initial commit");
+
+    execFileSync("git", ["checkout", "-b", "feature-conflict"], { cwd: repo.dir });
+    addUntrackedFile(repo, "README.md", "# fullstack git test repo - feature branch\n");
+    execFileSync("git", ["commit", "-am", "feature branch change"], { cwd: repo.dir });
+
+    execFileSync("git", ["checkout", "main"], { cwd: repo.dir });
+    addUntrackedFile(repo, "README.md", "# fullstack git test repo - main branch\n");
+    execFileSync("git", ["commit", "-am", "main branch change"], { cwd: repo.dir });
+
+    // `git merge` exits 1 here because of the real conflict it just
+    // produced -- that is the correct, expected outcome of this fixture,
+    // not a broken command, so use spawnSync (no throw-on-nonzero) instead
+    // of execFileSync.
+    const merge = spawnSync("git", ["merge", "feature-conflict", "--no-edit"], { cwd: repo.dir });
+    expect(merge.status).not.toBe(0);
+
+    const porcelain = execFileSync("git", ["status", "--porcelain"], {
+      cwd: repo.dir,
+      encoding: "utf-8",
+    });
+    // Confirms the fixture really is in conflict before asserting anything
+    // about how the backend/UI represent it.
+    expect(porcelain).toContain("UU README.md");
+
+    await addProjectByPath(page, repo.dir);
+
+    // Must not crash: the panel renders and the real backend still answers
+    // with is_git: true for a repo that is mid-conflict.
+    const gitStatus = page.locator(".project-git-status");
+    await expect(gitStatus).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".project-git-branch")).toContainText("main");
+
+    const res = await page.request.get(`${backend.baseURL}/api/git-status`, {
+      params: { cwd: repo.dir },
+    });
+    expect(res.ok()).toBe(true);
+    const body = await res.json();
+    expect(body.is_git).toBe(true);
+
+    // backend/file_browser.py's get_git_status buckets each 2-char XY
+    // porcelain status by substring match against a fixed priority order:
+    // "M" in status -> modified, elif "A" -> added, elif "D" -> deleted,
+    // elif "?" -> untracked. A real both-modified conflict reports XY
+    // status "UU", which contains NONE of "M"/"A"/"D"/"?" -- unlike other
+    // conflict codes (e.g. "AA", "DD", "AU", "UA", "DU", "UD") that happen
+    // to contain one of those letters and fall into a bucket by accident.
+    // So README.md here matches no bucket at all and is silently dropped:
+    // it appears in none of modified/added/deleted/untracked, and
+    // dirty_count (which just sums those four buckets, both here and in
+    // ProjectGitStatus.tsx's `dirty` array) is 0 for this repo, even though
+    // `git status --porcelain` itself reports a real, unresolved "UU
+    // README.md" line above. This asserts that real, verified (if
+    // surprising) backend behavior precisely, rather than assuming the
+    // conflicted file lands in "modified".
+    expect(body.modified).not.toContain("README.md");
+    expect(body.added).not.toContain("README.md");
+    expect(body.deleted).not.toContain("README.md");
+    expect(body.untracked).not.toContain("README.md");
+    const dirtyCount =
+      (body.modified?.length || 0) +
+      (body.added?.length || 0) +
+      (body.deleted?.length || 0) +
+      (body.untracked?.length || 0);
+    expect(dirtyCount).toBe(0);
+    await expect(page.locator(".project-git-dirty")).toContainText("clean");
   });
 });

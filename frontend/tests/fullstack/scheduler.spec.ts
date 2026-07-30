@@ -369,3 +369,78 @@ test("a schedule survives its owning session being deleted, and the Schedules pa
   await row.locator(".schedules-row-actions .schedules-danger").click();
   await expect(row).toHaveCount(0, { timeout: 10_000 });
 });
+
+// Validates SchedulesPage's "Clear all" header action (`.schedules-header-actions`,
+// only rendered when schedules.length > 0): clicking it arms an in-page confirm
+// step (no native confirm() dialog — `confirmClearAll` swaps the button for a
+// "Confirm clear all" / "Cancel" pair), and confirming calls clearAll(), which
+// fires DELETE /api/schedules/{id} for every schedule in parallel. This must
+// remove ALL rows in one action and leave GET /api/schedules empty, not just
+// clear the client-side list.
+test("Clear all button deletes every schedule in one action", async ({
+  authedPage: page,
+  backend,
+}) => {
+  await createSessionWithPrompt(page, "Say hello. Keep it short.");
+
+  const draft = page.getByTestId("input-textarea");
+  const scheduleOnce = async (prompt: string, hoursFromNow: number) => {
+    await draft.fill(prompt);
+    await page.locator(".input-overflow-trigger").click();
+    const scheduleBtn = page.getByTestId("schedule-btn");
+    await expect(scheduleBtn).toBeEnabled();
+    await scheduleBtn.click();
+
+    const popover = page.getByTestId("schedule-popover");
+    await expect(popover).toBeVisible();
+
+    const fireAt = toLocalInputValue(new Date(Date.now() + hoursFromNow * 60 * 60 * 1000));
+    await page.getByTestId("schedule-fire-at").fill(fireAt);
+    await page.getByTestId("schedule-repeat").selectOption("once");
+
+    await page.getByTestId("schedule-submit").click();
+    await expect(popover).not.toBeVisible({ timeout: 10_000 });
+    await expect(draft).toHaveValue("");
+  };
+
+  const promptA = `Scheduled clear-all test A ${Date.now()}`;
+  const promptB = `Scheduled clear-all test B ${Date.now()}`;
+  const promptC = `Scheduled clear-all test C ${Date.now()}`;
+
+  await scheduleOnce(promptA, 2);
+  await scheduleOnce(promptB, 3);
+  await scheduleOnce(promptC, 4);
+
+  await page.goto(`${backend.baseURL}/schedules`);
+  const rowA = page.locator(".schedules-row", { hasText: promptA });
+  const rowB = page.locator(".schedules-row", { hasText: promptB });
+  const rowC = page.locator(".schedules-row", { hasText: promptC });
+  await expect(rowA).toBeVisible({ timeout: 15_000 });
+  await expect(rowB).toBeVisible({ timeout: 15_000 });
+  await expect(rowC).toBeVisible({ timeout: 15_000 });
+
+  // First click only arms the in-page confirm step — nothing is deleted yet.
+  await page.getByRole("button", { name: "Clear all", exact: true }).click();
+  const confirmBtn = page.getByRole("button", { name: "Confirm clear all" });
+  await expect(confirmBtn).toBeVisible();
+  await expect(rowA).toBeVisible();
+
+  // Real click on the real confirm button.
+  await confirmBtn.click();
+
+  await expect(page.locator(".schedules-row")).toHaveCount(0, { timeout: 15_000 });
+  const empty = page.locator(".schedules-empty");
+  await expect(empty).toBeVisible({ timeout: 15_000 });
+  // "Clear all" itself disappears once the list is empty again.
+  await expect(page.getByRole("button", { name: "Clear all", exact: true })).toHaveCount(0);
+
+  // A real reload must not resurrect any of the three from stale client state.
+  await page.reload();
+  await expect(page.locator(".schedules-row")).toHaveCount(0, { timeout: 15_000 });
+
+  // The backend itself must list zero schedules.
+  const res = await page.request.get(`${backend.baseURL}/api/schedules`);
+  expect(res.ok()).toBe(true);
+  const { schedules } = (await res.json()) as { schedules: Array<{ prompt: string }> };
+  expect(schedules.length).toBe(0);
+});

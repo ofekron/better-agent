@@ -328,3 +328,47 @@ test("a provider nickname persists, displays in the list, and can be cleared", a
   await page.goto(`${backend.baseURL}/settings`);
   await expect(providerRow.locator(".provider-nickname")).toHaveCount(0);
 });
+
+// The default provider is protected from deletion both in the UI (edit
+// view's `.provider-edit-actions` renders no `.btn-danger` delete button for
+// the active/default provider — SettingsPage.tsx's `isActive` branch — and
+// instead shows a `.setup-field-hint` explaining why) and, independently, on
+// the backend: DELETE /api/providers/{id} for the current default rejects
+// with 409 and `error.cannot_delete_default_provider`
+// (backend/providers_api.py's `reason == "default"` branch), proving this
+// isn't just a UI-only restriction that a direct API call could bypass.
+test("the default provider cannot be deleted, in the UI or via a direct API call", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const providersRes = await page.request.get(`${backend.baseURL}/api/providers`);
+  const providersJson = (await providersRes.json()) as {
+    default_provider_id: string;
+    providers: Array<{ id: string; kind: string; generation: string; revision: number }>;
+  };
+  const defaultProvider = providersJson.providers.find((p) => p.id === providersJson.default_provider_id);
+  expect(defaultProvider?.kind).toBe("claude");
+
+  await openProviderSettings(page, backend.baseURL, "claude");
+
+  const editActions = page.locator(".provider-edit-actions");
+  await expect(editActions.locator(".btn-danger")).toHaveCount(0);
+  await expect(editActions.locator(".setup-field-hint")).toBeVisible();
+  await expect(editActions.locator(".setup-field-hint")).toContainText(
+    /default provider can.t be deleted/i,
+  );
+
+  const deleteRes = await page.request.delete(`${backend.baseURL}/api/providers/${defaultProvider!.id}`, {
+    data: {
+      expected_generation: defaultProvider!.generation,
+      expected_revision: defaultProvider!.revision,
+    },
+  });
+  expect(deleteRes.status()).toBe(409);
+  const deleteBody = (await deleteRes.json()) as { detail?: string };
+  expect(deleteBody.detail).toMatch(/cannot delete the default provider/i);
+
+  const afterRes = await page.request.get(`${backend.baseURL}/api/providers`);
+  const afterProviders = ((await afterRes.json()) as { providers: Array<{ id: string }> }).providers;
+  expect(afterProviders.some((p) => p.id === defaultProvider!.id)).toBe(true);
+});

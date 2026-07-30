@@ -1,4 +1,6 @@
+import type { Page } from "@playwright/test";
 import { test, expect } from "./harness/fixtures";
+import type { FullStackBackend } from "./harness/backend";
 import { createSessionWithPrompt } from "./harness/session";
 
 // Validates the real agent-proposed memory feature: MemoryProposalCard
@@ -44,7 +46,11 @@ function proposeMemoryCurlCommand(memory: {
   name: string;
   description: string;
   content: string;
-  scope_type?: "global" | "project" | "folder";
+  // Widened to `string` (rather than the "global" | "project" | "folder"
+  // literal union backend/memory_api.py's MEMORY_SCOPE_TYPES actually
+  // accepts) so this one curl-building helper also covers the invalid-value
+  // rejection test below, instead of forking a parallel builder.
+  scope_type?: string;
   scope_path?: string;
 }): string {
   // `$BETTER_CLAUDE_APP_SESSION_ID` stays inside its JSON string quotes --
@@ -80,7 +86,7 @@ async function triggerMemoryProposal(
     name: string;
     description: string;
     content: string;
-    scope_type?: "global" | "project" | "folder";
+    scope_type?: string;
     scope_path?: string;
   },
 ): Promise<void> {
@@ -540,4 +546,97 @@ test("expanding a memory proposal reveals the full-content modal without resolvi
   const persisted = globalMemories.find((m) => m.name === "expand-test-memory");
   expect(persisted).toBeDefined();
   expect(persisted?.content).toBe(multilineContent);
+});
+
+interface SessionRunState {
+  id: string;
+  is_running?: boolean;
+}
+
+// Event-driven wait for the real turn (a single, non-approval-gated Bash
+// call) to finish -- polls the real `is_running` flag on GET /api/sessions
+// until it flips false, rather than sleeping a fixed duration. Mirrors
+// recovery.spec.ts's waitForRunning/waitForNotRunning.
+async function waitForSessionIdle(
+  page: Page,
+  backend: FullStackBackend,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await page.request.get(`${backend.baseURL}/api/sessions?limit=5`);
+    if (res.ok()) {
+      const body = (await res.json()) as { sessions?: SessionRunState[] };
+      const match = body.sessions?.find((s) => s.id === sessionId);
+      if (match && match.is_running === false) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error(`session ${sessionId} never went idle within ${timeoutMs}ms`);
+}
+
+// backend/memory_api.py's `validate_memory_proposal` (MEMORY_SCOPE_TYPES =
+// ("global", "project", "folder")) is the single validator shared by both
+// the propose-request route and the write route. `POST
+// /api/internal/user-input/request` (backend/main.py's
+// `internal_request_user_input`, kind == "memory") calls it *before*
+// `create_or_get_pending_request` ever runs, inside a try/except that turns
+// the resulting `HTTPException(400, ...)` into a plain `{"success": false,
+// "error": "memory_proposal.scope_type must be one of global, project,
+// folder"}` JSON body (HTTP 200, not a raw 400/500) -- the shape the curl
+// caller (and the future MCP tool wrapper) would see and can react to. So an
+// invalid scope_type is rejected at the request boundary: no pending
+// request is ever created, no WS-pushed card ever appears, and
+// memory_store is never touched -- not silently normalized/defaulted to
+// "global" and not reaching persistence. This test proves exactly that,
+// rather than assuming it.
+test("proposing a memory with an invalid scope_type is rejected before any card or store write", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const command = proposeMemoryCurlCommand({
+    name: "invalid-scope-type-memory",
+    description: "A memory proposed with a scope_type the backend does not accept.",
+    content: "This proposal should be rejected before it ever reaches the memory store.",
+    scope_type: "bogus_scope",
+  });
+
+  await createSessionWithPrompt(
+    page,
+    `Use the Bash tool to run exactly this single command, unmodified: ${command}`,
+  );
+
+  const sessionId = new URL(page.url()).pathname.replace(/^\/s\//, "");
+  expect(sessionId).toBeTruthy();
+
+  await waitForSessionIdle(page, backend, sessionId, 60_000);
+
+  // No card was ever created for this rejected proposal.
+  await expect(page.getByTestId("memory-proposal-card")).not.toBeVisible();
+
+  // The pending-request store itself was never touched -- confirms
+  // rejection happened before `create_or_get_pending_request`, not merely
+  // that the UI failed to render an already-created pending request.
+  const pendingRes = await page.request.get(
+    `${backend.baseURL}/api/user-input/pending?app_session_id=${encodeURIComponent(sessionId)}`,
+  );
+  expect(pendingRes.ok()).toBeTruthy();
+  const pendingBody = await pendingRes.json();
+  const pendingRequests = pendingBody.requests as Array<{ kind: string }>;
+  expect(pendingRequests.some((r) => r.kind === "memory")).toBe(false);
+
+  // The memory store is untouched -- not corrupted, and not silently
+  // accepted into any scope (global or otherwise) under a normalized/default
+  // scope_type. The backend also still serves this real, non-internal route
+  // afterward, proof the invalid input didn't crash it.
+  const memoriesRes = await page.request.get(`${backend.baseURL}/api/memory/all`);
+  expect(memoriesRes.ok()).toBeTruthy();
+  const memoriesBody = await memoriesRes.json();
+  const globalMemories = memoriesBody.global as Array<{ name: string }>;
+  expect(globalMemories.some((m) => m.name === "invalid-scope-type-memory")).toBe(false);
+  const scopes = memoriesBody.scopes as Array<{ memories: Array<{ name: string }> }>;
+  expect(
+    scopes.every((s) => !s.memories.some((m) => m.name === "invalid-scope-type-memory")),
+  ).toBe(true);
 });

@@ -566,3 +566,40 @@ test("goes offline while a turn is actively running, queues the next prompt thro
   // Durable backlog fully drained — no leftover trace of the queued action.
   await expect.poll(() => readBacklogPrompts(page)).not.toContain(secondPrompt);
 });
+
+// There is NO real cancel/remove affordance for a prompt queued while
+// OFFLINE, so this test is intentionally skipped rather than exercising a UI
+// control that does not exist. Confirmed by reading the source, not guessed:
+//
+// - The ONLINE per-session queue case (backend-acked "queued" prompts) does
+//   have a real cancel path: InputArea.tsx's `onCancelQueued` prop renders a
+//   `.queued-cancel-btn` (~InputArea.tsx:792-808, 846, 1542-1543) inside the
+//   `queued-prompt-banner` UI, wired through to a bulk/single cancel action.
+// - The OFFLINE case (a prompt sitting in the localStorage backlog before
+//   the socket ever reconnects) renders through `MessageStatus` in
+//   MessageBubble.tsx. Its `offline` status
+//   (~MessageBubble.tsx:2864, `{ label: "Queued offline", className:
+//   "status-offline" }`) falls through to the generic branch
+//   (~MessageBubble.tsx:2946-2951): a plain `<div className="message-status
+//   status-offline">` with a status dot and label text — no button, no
+//   `onClick`, no `onCancel`/`onRemove` prop passed in at all. Only the
+//   `error` status branch (~MessageBubble.tsx:2867-2944) gets an
+//   interactive control, and that's "Retry", not "Cancel".
+// - `useOfflineQueue.ts` does export `remove(clientId)` and
+//   `removeBySessionAndClient(sessionId, clientId)` (~lines 229-234,
+//   297-306), so the primitive to remove a backlog entry exists at the hook
+//   level. But grepping every call site in App.tsx
+//   (`offlineQueue.remove`/`removeBySessionAndClient`) shows they are only
+//   invoked internally — `removeAckedOfflineAction` on explicit backend
+//   acknowledgement/permanent-rejection (~App.tsx:1546, 2374) — never from a
+//   user-initiated click. No component wires a cancel handler to those
+//   functions for a still-offline entry.
+//
+// If a real cancel affordance is later added for offline-queued bubbles,
+// replace this skip with an actual test: queue a prompt offline, cancel it
+// via the new UI, assert it's removed from `readBacklogPrompts`, and assert
+// no assistant reply for it ever appears even after reconnecting.
+test.skip(
+  "no cancel affordance exists yet for a prompt queued while offline (documented gap, not tested)",
+  async () => {},
+);
