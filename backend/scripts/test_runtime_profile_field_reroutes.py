@@ -52,10 +52,13 @@ def test_no_new_dropped_field_readers() -> None:
         r"""(?:provider|record|rec|selected_provider)\s*(?:or\s*\{\})?\s*\)?\.get\(\s*['"](?:default_model|default_reasoning_effort)['"]"""
     )
     offenders: list[str] = []
-    for path in sorted(BACKEND.glob("*.py")):
-        if path.name in allowed:
+    skip_dirs = {".venvs", "scripts", "node_modules", "__pycache__"}
+    for path in sorted(BACKEND.rglob("*.py")):
+        if path.name in allowed or skip_dirs & set(path.relative_to(BACKEND).parts[:-1]):
             continue
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        for lineno, line in enumerate(
+            path.read_text(errors="replace").splitlines(), 1
+        ):
             if pattern.search(line):
                 offenders.append(f"{path.name}:{lineno}: {line.strip()}")
     assert not offenders, (
