@@ -49,7 +49,8 @@ def _write_resolved_file(
     flags = binary_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, mode)
+    creation_mode = 0o600 if os.name == "nt" else mode
+    descriptor = os.open(path, flags, creation_mode)
     try:
         if os.name != "nt":
             os.fchmod(descriptor, mode)

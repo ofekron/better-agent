@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -517,6 +518,34 @@ def test_restart_clone_preserves_posix_and_windows_configs() -> None:
                 os.environ["BETTER_AGENT_HOME"] = previous
 
 
+def test_resolved_executable_is_cleanup_safe() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw) / "runtime-capabilities"
+        root.mkdir(mode=0o700)
+        provider_runtime_resolver.make_private_directory(root)
+        executable = root / "skills" / "planning" / "scripts" / "run.sh"
+        provider_runtime_resolver._write_resolved_file(
+            root,
+            executable,
+            b"#!/bin/sh\nexit 0\n",
+            0o500,
+        )
+
+        provider_runtime_resolver.require_private_file(executable)
+        assert executable.read_bytes() == b"#!/bin/sh\nexit 0\n"
+        observed = executable.stat()
+        if os.name == "nt":
+            assert not (
+                getattr(observed, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_READONLY", 1)
+            )
+        else:
+            assert stat.S_IMODE(observed.st_mode) == 0o500
+
+        shutil.rmtree(root)
+        assert not root.exists()
+
+
 def test_private_root_creation_and_nested_tree_security() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw) / "prepared"
@@ -661,6 +690,7 @@ TESTS = (
     test_path_symlink_and_payload_tamper_fail_closed,
     test_prewarm_success_and_failure_preserve_capability_semantics,
     test_restart_clone_preserves_posix_and_windows_configs,
+    test_resolved_executable_is_cleanup_safe,
     test_private_root_creation_and_nested_tree_security,
     test_provider_secures_run_directory_before_use,
     test_legacy_staging_root_migrates_only_on_write,
