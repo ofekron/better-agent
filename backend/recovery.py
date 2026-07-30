@@ -306,26 +306,65 @@ async def _re_enqueue_queued_prompts() -> set[str]:
     return rehydrated_session_ids
 
 
-async def _reconcile_missing_session_runs(cold: list[dict]) -> list[dict]:
+async def _reconcile_missing_session_runs(
+    cold: list[dict],
+    *,
+    ownership_documents: list[dict] | None = None,
+    ownership_safe: bool = True,
+) -> list[dict]:
+    ownership_by_run: dict[str, set[str]] = {}
+    for document in ownership_documents or []:
+        run_id = str(document.get("run_id") or "")
+        persist_to = str(document.get("persist_to") or "")
+        if run_id and persist_to:
+            ownership_by_run.setdefault(run_id, set()).add(persist_to)
+
     candidate_sids = {
         sid
         for descriptor in cold
         if (sid := _recovered_run_session_id(descriptor))
     }
+    candidate_sids.update(
+        sid
+        for owners in ownership_by_run.values()
+        for sid in owners
+    )
     existing_sids = await _existing_session_ids_async(candidate_sids)
-    missing_terminal = [
-        descriptor
-        for descriptor in cold
-        if (
-            (sid := _recovered_run_session_id(descriptor))
-            and sid not in existing_sids
+    missing_terminal: list[dict] = []
+    for descriptor in cold:
+        sid = _recovered_run_session_id(descriptor)
+        run_owners = ownership_by_run.get(
+            str(descriptor.get("run_id") or ""),
+        )
+        claimed_sid = next(iter(run_owners)) if run_owners and len(run_owners) == 1 else ""
+        claims_match = not run_owners or run_owners == {sid}
+        missing_session = (
+            ownership_safe
             and (
-                bool(descriptor.get("has_complete_json"))
-                or bool(descriptor.get("cancelled"))
-                or bool(descriptor.get("turn_cancelled"))
+                (
+                    bool(sid)
+                    and claims_match
+                    and sid not in existing_sids
+                )
+                or (
+                    not sid
+                    and (
+                        not run_owners
+                        or (
+                            bool(claimed_sid)
+                            and claimed_sid not in existing_sids
+                        )
+                    )
+                )
             )
         )
-    ]
+        terminal = (
+            bool(descriptor.get("has_complete_json"))
+            or bool(descriptor.get("cancelled"))
+            or bool(descriptor.get("turn_cancelled"))
+        )
+        if terminal and missing_session:
+            missing_terminal.append(descriptor)
     if not missing_terminal:
         return cold
     missing_ids = {id(descriptor) for descriptor in missing_terminal}
@@ -335,7 +374,7 @@ async def _reconcile_missing_session_runs(cold: list[dict]) -> list[dict]:
     )
     logger.info(
         "recover_all_in_flight: bulk-reconciled %d/%d terminal run(s) "
-        "for deleted sessions",
+        "without recoverable sessions",
         marked,
         len(missing_terminal),
     )
@@ -441,7 +480,11 @@ async def _recover_in_flight_task() -> None:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]
             cold = [r for r in recovered if not bool(r.get("alive"))]
-            cold = await _reconcile_missing_session_runs(cold)
+            cold = await _reconcile_missing_session_runs(
+                cold,
+                ownership_documents=ownership_documents,
+                ownership_safe=ownership_safe,
+            )
             if live:
                 live = _sort_recovered_runs_by_session_priority(live)
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
@@ -468,6 +511,9 @@ async def _recover_in_flight_task() -> None:
             candidate_targets=None,
             exclude_live=True,
         )
+        background_ownership, background_ownership_safe = (
+            take_recovery_scan_ownership()
+        )
         background_cold = [
             descriptor
             for descriptor in background_recovered
@@ -476,6 +522,8 @@ async def _recover_in_flight_task() -> None:
         if background_cold:
             background_cold = await _reconcile_missing_session_runs(
                 background_cold,
+                ownership_documents=background_ownership,
+                ownership_safe=background_ownership_safe,
             )
             if background_cold:
                 _enqueue_recovered_cold_runs(background_cold)
@@ -575,14 +623,18 @@ def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     """
     if not recovered:
         return
-    for sid, batch in _recovered_run_session_groups(recovered).items():
+    groups = _recovered_run_session_groups(recovered)
+    for sid, batch in groups.items():
         _RECOVERED_COLD_PENDING.setdefault(sid, []).extend(batch)
+    queued = sum(len(batch) for batch in groups.values())
+    if not queued:
+        return
     _RECOVERED_COLD_READY.set()
     _ensure_recovered_cold_run_worker()
     logger.info(
         "recover_all_in_flight: queued %d completed/stale run(s) for "
         "low-priority integration",
-        len(recovered),
+        queued,
     )
 
 

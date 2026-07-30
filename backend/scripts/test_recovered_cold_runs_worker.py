@@ -6,8 +6,10 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent
@@ -18,6 +20,9 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc-test-cold-recovery-worker-")
 
 import recovery  # noqa: E402
+import provider  # noqa: E402
+import runs_dir  # noqa: E402
+from ingestion_versions import current_ingestion_version  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -138,10 +143,131 @@ async def test_promote_recovered_session_claims_pending_batch() -> bool:
     return ok
 
 
+async def test_sessionless_terminal_runs_are_reconciled_before_enqueue() -> bool:
+    original_existing = recovery._existing_session_ids_async
+    original_mark = recovery.mark_recovered_runs_terminal
+    marked: list[dict] = []
+
+    async def fake_existing(session_ids: set[str]) -> set[str]:
+        return {
+            session_id
+            for session_id in session_ids
+            if not session_id.startswith("missing-")
+        }
+
+    async def fake_mark(descriptors: list[dict], reason: str) -> int:
+        assert reason == "missing session"
+        marked.extend(descriptors)
+        return len(descriptors)
+
+    recovery._existing_session_ids_async = fake_existing
+    recovery.mark_recovered_runs_terminal = fake_mark
+    terminal = {"run_id": "terminal", "has_complete_json": True}
+    cancelled = {"run_id": "cancelled", "cancelled": True}
+    claimed = {"run_id": "claimed", "has_complete_json": True}
+    missing_claimed = {"run_id": "missing-claimed", "has_complete_json": True}
+    ambiguous = {"run_id": "ambiguous", "has_complete_json": True}
+    conflicting = {
+        "run_id": "conflicting",
+        "persist_to": "missing-deleted",
+        "has_complete_json": True,
+    }
+    unknown = {"run_id": "unknown"}
+    routable = {
+        "run_id": "routable",
+        "app_session_id": "sid-a",
+        "has_complete_json": True,
+    }
+    try:
+        remaining = await recovery._reconcile_missing_session_runs(
+            [
+                terminal,
+                cancelled,
+                claimed,
+                missing_claimed,
+                ambiguous,
+                conflicting,
+                unknown,
+                routable,
+            ],
+            ownership_documents=[
+                {"run_id": "claimed", "persist_to": "sid-a"},
+                {
+                    "run_id": "missing-claimed",
+                    "persist_to": "missing-session",
+                },
+                {"run_id": "ambiguous", "persist_to": "sid-a"},
+                {"run_id": "ambiguous", "persist_to": "sid-b"},
+                {"run_id": "conflicting", "persist_to": "sid-a"},
+            ],
+        )
+        unsafe = {
+            "run_id": "unsafe",
+            "persist_to": "missing-unsafe",
+            "has_complete_json": True,
+        }
+        unsafe_remaining = await recovery._reconcile_missing_session_runs(
+            [unsafe],
+            ownership_safe=False,
+        )
+    finally:
+        recovery._existing_session_ids_async = original_existing
+        recovery.mark_recovered_runs_terminal = original_mark
+
+    ok = (
+        marked == [terminal, cancelled, missing_claimed]
+        and remaining == [claimed, ambiguous, conflicting, unknown, routable]
+        and unsafe_remaining == [unsafe]
+    )
+    print(
+        f"{PASS if ok else FAIL} sessionless terminal runs reconcile before "
+        f"cold enqueue -- marked={[item['run_id'] for item in marked]!r} "
+        f"remaining={[item['run_id'] for item in remaining]!r}",
+    )
+    return ok
+
+
+async def test_sessionless_terminal_run_writes_marker_and_index() -> bool:
+    root = runs_dir.runs_root()
+    run_id = "terminal-marker"
+    run_dir = root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "complete.json").write_text("{}", encoding="utf-8")
+    descriptor = {
+        "run_id": run_id,
+        "provider_kind": "claude",
+        "has_complete_json": True,
+        "ingestion_version": current_ingestion_version("claude"),
+    }
+
+    remaining = await recovery._reconcile_missing_session_runs([descriptor])
+    marker = json.loads(
+        (run_dir / "reconciled.marker").read_text(encoding="utf-8"),
+    )
+    indexed = runs_dir.load_reconciled_marker_index(root)
+    with mock.patch.object(provider, "default_provider", side_effect=AssertionError):
+        second_scan = provider.recover_all_in_flight()
+    ok = (
+        remaining == []
+        and marker["provider_kind"] == "claude"
+        and indexed[run_id]["ingestion_version"]
+        == current_ingestion_version("claude")
+        and second_scan == []
+    )
+    print(
+        f"{PASS if ok else FAIL} sessionless terminal run writes marker and "
+        f"index -- remaining={remaining!r} indexed={run_id in indexed} "
+        f"second_scan={second_scan!r}",
+    )
+    return ok
+
+
 async def main_test() -> int:
     results = [
         await test_cold_runs_integrate_immediately_in_serial_session_batches(),
         await test_promote_recovered_session_claims_pending_batch(),
+        await test_sessionless_terminal_runs_are_reconciled_before_enqueue(),
+        await test_sessionless_terminal_run_writes_marker_and_index(),
     ]
     return 0 if all(results) else 1
 
