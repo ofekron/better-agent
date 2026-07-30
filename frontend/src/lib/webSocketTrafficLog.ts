@@ -53,6 +53,7 @@ export const KNOWN_WEB_SOCKET_EVENT_TYPES = new Set([
   "supervisor_event", "user_message_queued", "user_message_sent",
   "user_message_received", "user_message_done", "user_message_failed",
   "message_recovering_changed", "message_retrying_changed", "message_auto_retry_changed",
+  "message_error_changed",
   "message_content_updated", "message_continuation_changed", "message_run_meta_changed",
   "message_ask_result_changed", "message_ask_choice_changed", "session_reconciled",
   "session_running_changed",

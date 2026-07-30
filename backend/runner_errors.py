@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from continuation import normalize_context_overflow_error
@@ -20,6 +21,39 @@ CATEGORY_QUOTA_RATE_LIMIT = "quota_rate_limit"
 CATEGORY_NETWORK = "network"
 CATEGORY_SESSION_LOST = "session_lost"
 CATEGORY_UNKNOWN = "unknown"
+
+ERROR_KIND_BOOTSTRAP_UNAVAILABLE = "runtime_bootstrap_unavailable"
+
+
+class RuntimeBootstrapUnavailable(RuntimeError):
+    """The one-shot runtime-bootstrap broker could not deliver the runner's
+    secret/hydration (socket gone: backend shutdown, lease expiry, or the
+    env var was never issued). Always a pre-provider failure — the provider
+    turn provably never started."""
+
+
+def fail_payload(
+    error: str,
+    *,
+    error_kind: Optional[str] = None,
+    pre_provider: bool = False,
+) -> dict:
+    """complete.json payload for a runner that died without a successful
+    finish. `pre_provider=True` marks failures raised before the provider
+    turn started — recovery uses run-dir artifacts as the authority but
+    this stamp keeps the payload self-describing."""
+    payload: dict = {
+        "success": False,
+        "session_id": None,
+        "error": error,
+        "token_usage": None,
+        "finished_at": datetime.now().isoformat(),
+    }
+    if error_kind:
+        payload["error_kind"] = error_kind
+    if pre_provider:
+        payload["pre_provider"] = True
+    return payload
 
 
 @dataclass(frozen=True)

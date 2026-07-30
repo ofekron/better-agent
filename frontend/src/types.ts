@@ -205,6 +205,7 @@ export type WSEventType =
   // so the bubble can render a 'Retrying in Ns…' pill that ticks down
   // locally.
   | "message_retrying_changed"
+  | "message_error_changed"
   // A turn succeeded after backend automatic retry attempts.
   | "message_auto_retry_changed"
   // Backend projected final/recovered assistant text for a message.

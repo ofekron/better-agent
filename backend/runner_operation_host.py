@@ -114,20 +114,30 @@ def internal_token_lease(bootstrap_token: str) -> InternalTokenLease:
 
 
 def hydrate_runner_inputs(inputs: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    from runner_errors import RuntimeBootstrapUnavailable
+
     bootstrap = (
         os.environ.pop("BETTER_AGENT_RUNTIME_BOOTSTRAP", "")
         or os.environ.pop("BETTER_CLAUDE_RUNTIME_BOOTSTRAP", "")
     ).strip()
     if not bootstrap:
-        raise RuntimeError("runner runtime bootstrap is unavailable")
+        raise RuntimeBootstrapUnavailable("runner runtime bootstrap is unavailable")
     from better_agent_sdk.runtime_transport import RuntimeTransport
 
-    response = RuntimeTransport(bootstrap).request(
-        {"version": 1, "kind": "catalog"}
-    )
+    try:
+        response = RuntimeTransport(bootstrap).request(
+            {"version": 1, "kind": "catalog"}
+        )
+    except OSError as e:
+        # Broker socket gone — the one-shot lease was retired (backend
+        # shutdown or 30s expiry) before the handshake. Provider turn
+        # never started.
+        raise RuntimeBootstrapUnavailable(str(e)) from e
     secret = str(response.get("secret") or "")
     if not secret:
-        raise RuntimeError("runner runtime bootstrap returned no secret")
+        raise RuntimeBootstrapUnavailable(
+            "runner runtime bootstrap returned no secret"
+        )
     inputs["internal_token"] = secret
     hydration = response.get("runtime_hydration")
     if hydration is not None:

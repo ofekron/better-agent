@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, NoReturn, Optional, Sequence
 
 from i18n import t
+import runner_errors
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 import harness_run_projection
@@ -4034,16 +4035,21 @@ def _exit_runner(code: int) -> NoReturn:
     hard_exit(code)
 
 
-def _fail(run_dir: Path, error: str) -> None:
+def _fail(
+    run_dir: Path,
+    error: str,
+    *,
+    error_kind: str | None = None,
+    pre_provider: bool = False,
+) -> None:
     logger.error("runner_codex fatal: %s", error)
+    payload = runner_errors.fail_payload(
+        error, error_kind=error_kind, pre_provider=pre_provider,
+    )
     try:
-        (run_dir / "complete.json").write_text(json.dumps({
-            "success": False,
-            "session_id": None,
-            "error": error,
-            "token_usage": None,
-            "finished_at": datetime.now().isoformat(),
-        }, indent=2), encoding="utf-8")
+        (run_dir / "complete.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8",
+        )
     except Exception:
         logger.exception("failed to write error complete.json")
 
@@ -4068,8 +4074,16 @@ def main(run_dir: Path) -> NoReturn:
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
         inputs = harness_run_projection.apply_to_inputs(inputs)
+    except runner_errors.RuntimeBootstrapUnavailable as e:
+        _fail(
+            run_dir,
+            t("runner.bootstrap_unavailable", e=str(e)),
+            error_kind=runner_errors.ERROR_KIND_BOOTSTRAP_UNAVAILABLE,
+            pre_provider=True,
+        )
+        _exit_runner(1)
     except Exception as e:
-        _fail(run_dir, f"failed to read input.json: {e}")
+        _fail(run_dir, t("runner.failed_read_input", e=str(e)), pre_provider=True)
         _exit_runner(1)
 
     # Deliberately NOT `asyncio.run`: its close() joins the default

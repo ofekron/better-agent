@@ -158,6 +158,7 @@ from user_interaction_tool_contracts import (
 
 from i18n import t
 from continuation import normalize_context_overflow_error
+import runner_errors
 from provider_run_config import write_skill_tree
 from reasoning_effort import claude_sdk_effort
 from runner_guard import apply_ghost_completion_guard
@@ -4173,16 +4174,18 @@ def _exit_runner(run_dir: Path, code: int) -> NoReturn:
     hard_exit(code)
 
 
-def _fail(run_dir: Path, error: str) -> None:
-    """Write an error complete.json for fatal pre-run failures."""
+def _fail(
+    run_dir: Path,
+    error: str,
+    *,
+    error_kind: str | None = None,
+    pre_provider: bool = False,
+) -> None:
+    """Write an error complete.json for fatal runner failures."""
     logger.error("runner fatal: %s", error)
-    payload = {
-        "success": False,
-        "session_id": None,
-        "error": error,
-        "token_usage": None,
-        "finished_at": datetime.now().isoformat(),
-    }
+    payload = runner_errors.fail_payload(
+        error, error_kind=error_kind, pre_provider=pre_provider,
+    )
     try:
         from runs_dir import atomic_write_json as _awj
         _awj(run_dir / "complete.json", payload)
@@ -4209,8 +4212,16 @@ def main(run_dir: Path) -> NoReturn:
         inputs = dict(runtime.inputs)
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
+    except runner_errors.RuntimeBootstrapUnavailable as e:
+        _fail(
+            run_dir,
+            t("runner.bootstrap_unavailable", e=str(e)),
+            error_kind=runner_errors.ERROR_KIND_BOOTSTRAP_UNAVAILABLE,
+            pre_provider=True,
+        )
+        _exit_runner(run_dir, 1)
     except Exception as e:
-        _fail(run_dir, t("runner.failed_read_input", e=str(e)))
+        _fail(run_dir, t("runner.failed_read_input", e=str(e)), pre_provider=True)
         _exit_runner(run_dir, 1)
 
     # Deliberately NOT `asyncio.run`: its close() joins the default

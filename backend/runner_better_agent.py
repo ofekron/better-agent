@@ -81,8 +81,10 @@ from user_interaction_tool_contracts import (
     REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
     REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
 )
+from i18n import t
 from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
+import runner_errors
 from runner_operation_host import internal_token_lease
 from provider_session_events_runner import (
     effective_mcp_servers,
@@ -183,15 +185,17 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         logging.getLogger(__name__).exception("failed to append run-state ledger")
 
 
-def _fail(run_dir: Path, error: str) -> None:
+def _fail(
+    run_dir: Path,
+    error: str,
+    *,
+    error_kind: str | None = None,
+    pre_provider: bool = False,
+) -> None:
     """Write a failure complete.json so the provider's _watch_complete finalizes."""
-    complete = {
-        "success": False,
-        "session_id": None,
-        "error": error,
-        "token_usage": None,
-        "finished_at": _now_iso(),
-    }
+    complete = runner_errors.fail_payload(
+        error, error_kind=error_kind, pre_provider=pre_provider,
+    )
     try:
         (run_dir / "complete.json").write_text(
             json.dumps(complete, indent=2), encoding="utf-8"
@@ -3077,8 +3081,16 @@ def main(run_dir: Path) -> int:
             materialize_provider=False,
         )
         inputs = execution.inputs
+    except runner_errors.RuntimeBootstrapUnavailable as e:
+        _fail(
+            run_dir,
+            t("runner.bootstrap_unavailable", e=str(e)),
+            error_kind=runner_errors.ERROR_KIND_BOOTSTRAP_UNAVAILABLE,
+            pre_provider=True,
+        )
+        return 1
     except Exception as e:
-        _fail(run_dir, f"failed to read input.json: {e}")
+        _fail(run_dir, t("runner.failed_read_input", e=str(e)), pre_provider=True)
         return 1
     try:
         return asyncio.run(_run(run_dir, inputs))

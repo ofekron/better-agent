@@ -3165,6 +3165,57 @@ async def _integrate_one_locked(
                     "for retry on next startup", run_id,
                 )
                 return
+            # --- Auto-retry for cold-recovered failed runs ---
+            # A run that completed with a retryable failure while the
+            # backend was down or restarting (e.g. the runner's one-shot
+            # bootstrap broker vanished mid-restart, so the provider turn
+            # provably never started) gets the same bounded retry budget
+            # the live finalizer applies. Without this, the cold path
+            # only stamps the error and the user's prompt dies silently.
+            if (
+                has_complete
+                and not alive
+                and not cancelled
+                and target_is_latest
+            ):
+                cold_run_dir = _runs_root() / run_id
+                _, cold_last_asst, cold_msg_id = await asyncio.to_thread(
+                    _recovery_target_snapshot,
+                    persist_sid,
+                    recovering_msg_id,
+                )
+                cold_should_retry = bool(cold_msg_id) and (
+                    await asyncio.to_thread(
+                        _should_retry_rate_limit, cold_run_dir,
+                    )
+                    or await asyncio.to_thread(
+                        _should_retry_transient, cold_run_dir, cold_last_asst,
+                    )
+                )
+                if cold_should_retry:
+                    logger.info(
+                        "cold-run auto-retry for recovered run %s", run_id,
+                    )
+                    await _retry_recovered_run(
+                        coordinator=coordinator,
+                        provider=provider,
+                        desc=desc,
+                        run_dir=cold_run_dir,
+                        app_sid=app_sid,
+                        persist_sid=persist_sid,
+                        msg_id=cold_msg_id,
+                        recovering_msg_id=recovering_msg_id,
+                    )
+                    await _to_thread_joined(_barrier_journal, persist_sid)
+                    await _mark_reconciled_terminal_async(
+                        run_id,
+                        desc,
+                        "cold-run auto-retry started",
+                        summary=summary,
+                    )
+                    if redigest_backup is not None:
+                        await _to_thread_joined(redigest_backup.commit)
+                    return
             if not (alive and not has_complete):
                 live_sess, terminal_asst, _ = await asyncio.to_thread(
                     _recovery_target_snapshot,

@@ -2369,6 +2369,43 @@ export function useSession(authStatus?: string) {
     [],
   );
 
+  /** Stamp a terminal `error`/`errorText` on an assistant message in
+   * response to backend `message_error_changed` WS frames — fired when
+   * run recovery finalizes a failed turn outside live turn framing, so
+   * the failed bubble + Retry appear without a reload. */
+  const applyMessageError = useCallback(
+    (sessionId: string, msgId: string, errorText: string | null) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          let idx = -1;
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].id === msgId) {
+              idx = i;
+              break;
+            }
+          }
+          if (idx === -1) return node;
+          const current = msgs[idx];
+          if (current.error && (current.errorText ?? null) === errorText) {
+            return node;
+          }
+          const next: ChatMessage = {
+            ...current,
+            error: true,
+            errorText: errorText ?? undefined,
+          };
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    [],
+  );
+
   /** Stamp the per-turn picker payload (`ask_result`) on an assistant
    * message in response to `message_ask_result_changed` WS frames. */
   const applyMessageAskResult = useCallback(
@@ -3050,6 +3087,7 @@ export function useSession(authStatus?: string) {
     markTurnDetached,
     applyMessageRecovering,
     applyMessageRetrying,
+    applyMessageError,
     applyMessageAutoRetry,
     applyMessageContent,
     applyMessageContinuation,

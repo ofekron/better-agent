@@ -109,7 +109,6 @@ _INTERNAL_KINDS = {
     "recovered_flag_cleared",
     "sub_session_created",
     "interrupted_by_set",
-    "assistant_error_set",
     "supervisor_bootstrap_received_set",
     "messages_truncated",
     "agent_sid_on_msg_set",
@@ -331,6 +330,20 @@ class SessionWSBroadcaster:
                         "messages": [compact_message_delta_payload(msg)],
                     },
                 })
+            return
+        if kind == "assistant_error_set":
+            # Terminal error stamped on an assistant message outside live
+            # turn framing (run-recovery finalize). Pushed so an already-
+            # open client renders the failed bubble + Retry affordance
+            # without a reload.
+            self._dispatch({
+                "type": "message_error_changed",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "error_text": change.get("text"),
+                },
+            })
             return
         if kind == "msg_retrying_set":
             # Per-message marker the orchestrator stamps while it sleeps

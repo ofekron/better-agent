@@ -24,6 +24,7 @@ from provider_family_execution_runtime import (
 )
 from provider_runtime_plan_source import hydrate_runner_operation_broker
 from runs_dir import atomic_write_json
+from i18n import t
 import runner_errors
 
 logger = logging.getLogger(__name__)
@@ -1200,17 +1201,19 @@ def _agy_worker_events(
     return events
 
 
-def _fail(run_dir: Path, error: str) -> None:
+def _fail(
+    run_dir: Path,
+    error: str,
+    *,
+    error_kind: str | None = None,
+    pre_provider: bool = False,
+) -> None:
     logger.error("runner_agy fatal: %s", error)
     _write_json(
         run_dir / "complete.json",
-        {
-            "success": False,
-            "session_id": None,
-            "error": error,
-            "token_usage": None,
-            "finished_at": datetime.now().isoformat(),
-        },
+        runner_errors.fail_payload(
+            error, error_kind=error_kind, pre_provider=pre_provider,
+        ),
     )
 
 
@@ -1536,8 +1539,16 @@ def main(run_dir: Path) -> int:
         inputs = runtime.inputs
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
+    except runner_errors.RuntimeBootstrapUnavailable as exc:
+        _fail(
+            run_dir,
+            t("runner.bootstrap_unavailable", e=str(exc)),
+            error_kind=runner_errors.ERROR_KIND_BOOTSTRAP_UNAVAILABLE,
+            pre_provider=True,
+        )
+        return 1
     except Exception as exc:
-        _fail(run_dir, f"failed to read input.json: {exc}")
+        _fail(run_dir, t("runner.failed_read_input", e=str(exc)), pre_provider=True)
         return 1
     try:
         return asyncio.run(_run(run_dir, inputs, runtime))

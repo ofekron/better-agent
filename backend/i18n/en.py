@@ -112,6 +112,7 @@ TRANSLATIONS: dict[str, str] = {
     "runner.cancelled": "cancelled",
     "runner.codex_credits_exhausted": "the Codex account has no credits left (balance 0), so the turn was rejected before it ran",
     "runner.failed_read_input": "failed to read input.json: {e}",
+    "runner.bootstrap_unavailable": "runtime bootstrap unavailable before the turn started (backend was restarting or the one-shot lease expired): {e}",
 
     # --- Orchestrator ---
     "orchestrator.session_not_found": "Session not found",

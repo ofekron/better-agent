@@ -320,6 +320,14 @@ interface UseWebSocketOptions {
     retryAt: string | null,
     errorText: string | null
   ) => void;
+  /** Terminal error stamped on an assistant message outside live turn
+   * framing (run-recovery finalize) — renders the failed bubble + Retry
+   * without a reload. */
+  onMessageErrorChanged?: (
+    appSessionId: string,
+    msgId: string,
+    errorText: string | null
+  ) => void;
   /** A turn that succeeded only after >=1 automatic retry — durable
    * badge so the recovery is distinguishable from a clean first-try run. */
   onMessageAutoRetryChanged?: (
@@ -453,6 +461,9 @@ export function useWebSocket(
   const onMessageRetryingChangedRef = useRef(
     options.onMessageRetryingChanged
   );
+  const onMessageErrorChangedRef = useRef(
+    options.onMessageErrorChanged
+  );
   const onMessageAutoRetryChangedRef = useRef(
     options.onMessageAutoRetryChanged
   );
@@ -508,6 +519,7 @@ export function useWebSocket(
     onAnyEventRef.current = options.onAnyEvent;
     onMessageRecoveringChangedRef.current = options.onMessageRecoveringChanged;
     onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
+    onMessageErrorChangedRef.current = options.onMessageErrorChanged;
     onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
     onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
     onMessageContinuationChangedRef.current = options.onMessageContinuationChanged;
@@ -549,6 +561,7 @@ export function useWebSocket(
     options.onAnyEvent,
     options.onMessageRecoveringChanged,
     options.onMessageRetryingChanged,
+    options.onMessageErrorChanged,
     options.onMessageAutoRetryChanged,
     options.onMessageContentUpdated,
     options.onMessageContinuationChanged,
@@ -1154,6 +1167,20 @@ export function useWebSocket(
               d.session_id,
               d.msg_id,
               d.retry_at ?? null,
+              d.error_text ?? null
+            );
+          }
+        }
+        if (event.type === "message_error_changed") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            error_text: string | null;
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageErrorChangedRef.current?.(
+              d.session_id,
+              d.msg_id,
               d.error_text ?? null
             );
           }
