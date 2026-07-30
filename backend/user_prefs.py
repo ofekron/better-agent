@@ -454,9 +454,9 @@ def set_voice_close_on_background(enabled: bool) -> bool:
 
 
 def get_last_models() -> dict:
-    """Map of provider_id -> last model the user chose for it."""
+    """Map of runtime_profile_id -> last model the user chose for it."""
     prefs = _load()
-    val = prefs.get("last_model_by_provider", {})
+    val = prefs.get("last_model_by_runtime_profile", {})
     if not isinstance(val, dict):
         return {}
     return {
@@ -466,26 +466,28 @@ def get_last_models() -> dict:
     }
 
 
-def set_last_model(provider_id: str, model: str) -> bool:
-    """Record the last model chosen for a provider. Returns True if the
-    stored value changed."""
-    if not isinstance(provider_id, str) or not provider_id.strip():
-        raise ValueError(f"Invalid provider_id: {provider_id!r}")
+def set_last_model(runtime_profile_id: str, model: str) -> bool:
+    """Record the last model chosen for a runtime profile. Returns True if
+    the stored value changed."""
+    if not isinstance(runtime_profile_id, str) or not runtime_profile_id.strip():
+        raise ValueError(f"Invalid runtime_profile_id: {runtime_profile_id!r}")
     if not isinstance(model, str) or not model.strip():
         raise ValueError(f"Invalid model: {model!r}")
     prefs = _load()
     current = get_last_models()
-    if current.get(provider_id) == model:
+    if current.get(runtime_profile_id) == model:
         return False
-    current[provider_id] = model
-    prefs["last_model_by_provider"] = current
+    current[runtime_profile_id] = model
+    prefs["last_model_by_runtime_profile"] = current
+    # Pre-profile per-provider entries are dropped, not migrated.
+    prefs.pop("last_model_by_provider", None)
     _save(prefs)
     return True
 
 
 def get_last_reasoning_efforts() -> dict:
     prefs = _load()
-    val = prefs.get("last_reasoning_effort_by_provider", {})
+    val = prefs.get("last_reasoning_effort_by_runtime_profile", {})
     if not isinstance(val, dict):
         return {}
     return {
@@ -495,17 +497,18 @@ def get_last_reasoning_efforts() -> dict:
     }
 
 
-def set_last_reasoning_effort(provider_id: str, reasoning_effort: str) -> bool:
-    if not isinstance(provider_id, str) or not provider_id.strip():
-        raise ValueError(f"Invalid provider_id: {provider_id!r}")
+def set_last_reasoning_effort(runtime_profile_id: str, reasoning_effort: str) -> bool:
+    if not isinstance(runtime_profile_id, str) or not runtime_profile_id.strip():
+        raise ValueError(f"Invalid runtime_profile_id: {runtime_profile_id!r}")
     if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
         raise ValueError(f"Invalid reasoning_effort: {reasoning_effort!r}")
     prefs = _load()
     current = get_last_reasoning_efforts()
-    if current.get(provider_id) == reasoning_effort:
+    if current.get(runtime_profile_id) == reasoning_effort:
         return False
-    current[provider_id] = reasoning_effort
-    prefs["last_reasoning_effort_by_provider"] = current
+    current[runtime_profile_id] = reasoning_effort
+    prefs["last_reasoning_effort_by_runtime_profile"] = current
+    prefs.pop("last_reasoning_effort_by_provider", None)
     _save(prefs)
     return True
 

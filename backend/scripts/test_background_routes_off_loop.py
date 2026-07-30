@@ -217,8 +217,8 @@ def test_provider_and_prefs_routes_stay_off_loop() -> None:
     )
     for call in (
         "config_store.list_providers",
-        "user_prefs.get_last_models",
-        "user_prefs.get_last_reasoning_efforts",
+        "user_prefs.set_last_model",
+        "user_prefs.set_last_reasoning_effort",
         "config_store.add_provider",
         "config_store.get_provider",
         "config_store.update_provider",

@@ -26,6 +26,36 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+def _profiles_snapshot(client: TestClient) -> dict:
+    r = client.get("/api/runtime-profiles")
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _live_profile_for(client: TestClient, provider: dict) -> dict:
+    snap = _profiles_snapshot(client)
+    return next(
+        p
+        for p in snap["runtime_profiles"]
+        if p["provider_id"] == provider["id"] and not p["deleted_at"]
+    )
+
+
+def _last_model_for(client: TestClient, provider: dict) -> str | None:
+    snap = _profiles_snapshot(client)
+    profile = next(
+        (
+            p
+            for p in snap["runtime_profiles"]
+            if p["provider_id"] == provider["id"] and not p["deleted_at"]
+        ),
+        None,
+    )
+    if profile is None:
+        return None
+    return snap["last_models"].get(profile["id"])
+
+
 def _providers(client: TestClient) -> dict:
     r = client.get("/api/providers")
     assert r.status_code == 200, r.text
@@ -63,8 +93,9 @@ def test_create_session_records_last_model(client: TestClient) -> bool:
         print(f"  create failed: {r.status_code} {r.text}")
         return False
     claude = _provider_by_name(client, "Claude")
-    if claude.get("last_model") != "claude-sonnet-4-6":
-        print(f"  last_model mismatch: {claude.get('last_model')!r}")
+    recorded = _last_model_for(client, claude)
+    if recorded != "claude-sonnet-4-6":
+        print(f"  last_model mismatch: {recorded!r}")
         return False
     return True
 
@@ -79,8 +110,9 @@ def test_create_without_explicit_model_does_not_record(client: TestClient) -> bo
         print(f"  create failed: {r.status_code} {r.text}")
         return False
     codex = _provider_by_name(client, "Codex")
-    if "last_model" in codex:
-        print(f"  default fallback was recorded: {codex.get('last_model')!r}")
+    recorded = _last_model_for(client, codex)
+    if recorded is not None:
+        print(f"  default fallback was recorded: {recorded!r}")
         return False
     return True
 
@@ -100,8 +132,9 @@ def test_selectors_model_patch_updates_last_model(client: TestClient) -> bool:
         print(f"  patch failed: {r.status_code} {r.text}")
         return False
     claude = _provider_by_name(client, "Claude")
-    if claude.get("last_model") != model:
-        print(f"  last_model mismatch: {claude.get('last_model')!r}")
+    recorded = _last_model_for(client, claude)
+    if recorded != model:
+        print(f"  last_model mismatch: {recorded!r}")
         return False
     return True
 
@@ -130,12 +163,12 @@ def test_combined_provider_and_model_patch_records_under_new_provider(
         print(f"  patch failed: {r.status_code} {r.text}")
         return False
     refreshed_other = next(p for p in _providers(client)["providers"] if p["id"] == other["id"])
-    if refreshed_other.get("last_model") != other_model:
-        print(f"  new provider last_model mismatch: {refreshed_other.get('last_model')!r}")
+    if _last_model_for(client, refreshed_other) != other_model:
+        print(f"  new profile last_model mismatch: {_last_model_for(client, refreshed_other)!r}")
         return False
     claude = _provider_by_name(client, "Claude")
-    if claude.get("last_model") == other_model:
-        print("  recorded under OLD provider")
+    if _last_model_for(client, claude) == other_model:
+        print("  recorded under OLD profile")
         return False
     return True
 
@@ -201,9 +234,9 @@ def test_selectors_patch_rejects_unknown_provider(client: TestClient) -> bool:
 def test_provider_patch_without_model_uses_new_provider_default(client: TestClient) -> bool:
     claude = _provider_by_name(client, "Claude")
     other = _other_provider(client, claude["id"])
-    other_default = other.get("default_model")
+    other_default = _live_profile_for(client, other)["default_model"]
     if not other_default:
-        print("  fixture provider has no default_model")
+        print("  fixture profile has no default_model")
         return False
     r = client.post(
         "/api/sessions",
@@ -239,7 +272,7 @@ def test_provider_patch_without_model_prefers_last_model(client: TestClient) -> 
     target = None
     remembered = ""
     for provider in candidates:
-        default = provider.get("default_model")
+        default = _live_profile_for(client, provider)["default_model"]
         alternate = next((m for m in _provider_models(client, provider) if m != default), "")
         if alternate:
             target = provider
@@ -248,7 +281,8 @@ def test_provider_patch_without_model_prefers_last_model(client: TestClient) -> 
     if not target:
         print("  no provider exposes an alternate valid model")
         return False
-    if not user_prefs.set_last_model(target["id"], remembered):
+    target_profile = _live_profile_for(client, target)
+    if not user_prefs.set_last_model(target_profile["id"], remembered):
         print("  failed to seed last_model")
         return False
     r = client.post(
@@ -278,12 +312,12 @@ def test_provider_patch_without_model_prefers_last_model(client: TestClient) -> 
 def test_junk_prefs_shape_is_ignored(client: TestClient) -> bool:
     prefs_path = ba_home() / "user_prefs.json"
     prefs = json.loads(prefs_path.read_text()) if prefs_path.exists() else {}
-    prefs["last_model_by_provider"] = ["not", "a", "dict"]
+    prefs["last_model_by_runtime_profile"] = ["not", "a", "dict"]
     prefs_path.write_text(json.dumps(prefs))
     if user_prefs.get_last_models() != {}:
         print("  junk list not ignored")
         return False
-    prefs["last_model_by_provider"] = {"pid": 42, "": "x", "ok": "model-1"}
+    prefs["last_model_by_runtime_profile"] = {"pid": 42, "": "x", "ok": "model-1"}
     prefs_path.write_text(json.dumps(prefs))
     if user_prefs.get_last_models() != {"ok": "model-1"}:
         print(f"  junk entries not filtered: {user_prefs.get_last_models()}")

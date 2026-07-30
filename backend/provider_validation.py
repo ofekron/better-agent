@@ -242,6 +242,23 @@ def provider_for_required_model(provider_id: str | None) -> dict:
     return provider
 
 
+def profile_prefill_model(provider_id: str | None, runner: object = None) -> str:
+    """Model prefill chain when a caller supplies no explicit model:
+    the (provider, runner) profile's last-used model, then its default
+    model. "" when the provider has no live profile."""
+    import user_prefs
+
+    if not provider_id:
+        return ""
+    defaults = config_store.provider_execution_defaults(provider_id, runner)
+    profile_id = defaults["runtime_profile_id"]
+    if profile_id:
+        last = str(user_prefs.get_last_models().get(profile_id) or "").strip()
+        if last:
+            return last
+    return str(defaults["default_model"] or "").strip()
+
+
 def required_model_from_body_or_provider(body: dict, provider: dict) -> str:
     import models as models_mod
 
@@ -251,7 +268,7 @@ def required_model_from_body_or_provider(body: dict, provider: dict) -> str:
         return model
     provider_id = str(provider.get("id") or "").strip() or None
     available = models_mod.available_models(provider_id)
-    default_model = str(provider.get("default_model") or "").strip()
+    default_model = profile_prefill_model(provider_id, body.get("runner"))
     name = provider.get("name") or provider.get("id") or "provider"
     if not default_model:
         raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
@@ -336,13 +353,17 @@ async def validate_optional_run_selector(
     )
     resolved_model = model
     if not resolved_model and provider_id:
-        provider = await hot_path.run(
-            "communication.validate_run_selector.get_provider",
-            config_store.get_provider,
+        resolved_model = await hot_path.run(
+            "communication.validate_run_selector.profile_prefill_model",
+            profile_prefill_model,
             provider_id,
-        ) or {}
-        resolved_model = str(provider.get("default_model") or "").strip()
+        )
         if not resolved_model:
+            provider = await hot_path.run(
+                "communication.validate_run_selector.get_provider",
+                config_store.get_provider,
+                provider_id,
+            ) or {}
             name = provider.get("name") or provider_id
             raise HTTPException(
                 status_code=400,

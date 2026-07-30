@@ -228,11 +228,16 @@ async def internal_session_control_selectors(
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     _configured(_record_model_switched_event, "record_model_switched_event")(sid, before or {}, session, updates)
+    import runtime_profiles_api
+
+    session_profile_id = runtime_profiles_api.runtime_profile_id_for_session(session)
     if "model" in updates:
-        await _configured(_record_last_model, "record_last_model")(session.get("provider_id"), updates["model"])
+        await _configured(_record_last_model, "record_last_model")(
+            session_profile_id, updates["model"]
+        )
     if updates.get("reasoning_effort"):
         await _configured(_record_last_reasoning_effort, "record_last_reasoning_effort")(
-            session.get("provider_id"), updates["reasoning_effort"],
+            session_profile_id, updates["reasoning_effort"],
         )
     return {"id": sid, "updates": updates}
 

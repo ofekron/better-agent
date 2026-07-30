@@ -34,7 +34,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     "provider": (
         "provider_changed", "provider_install_progress",
         "provider_install_finished", "models_catalog_changed",
-        "internal_llm_changed",
+        "internal_llm_changed", "runtime_profiles_changed",
     ),
     "project": (
         "projects_changed", "project_mappings_changed", "workers_changed",

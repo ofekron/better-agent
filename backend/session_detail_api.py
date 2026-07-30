@@ -26,6 +26,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 import config_store
+import runtime_profiles_api
 import extension_store
 import file_delivery
 import file_editor
@@ -67,11 +68,7 @@ from provider_validation import (
     required_model_from_body_or_provider as _required_model_from_body_or_provider,
     validate_provider_model as _validate_provider_model,
 )
-from providers_api import (
-    model_for_provider_switch as _model_for_provider_switch,
-    record_last_model as _record_last_model,
-    record_last_reasoning_effort as _record_last_reasoning_effort,
-)
+
 from session_helpers import session_exists as _session_exists, session_lite as _session_lite
 from session_manager import manager as session_manager, strip_link_marker_syntax
 from session_store import _session_path
@@ -1116,11 +1113,14 @@ async def create_session(body: Any = Body(default=None)):
             await _broadcast_projects_changed()
         except Exception as e:
             logger.warning("auto add_project failed: %s", e)
+    session_profile_id = runtime_profiles_api.runtime_profile_id_for_session(session)
     if body.get("model"):
-        await _record_last_model(session.get("provider_id"), session.get("model"))
+        await runtime_profiles_api.record_last_model(
+            session_profile_id, session.get("model")
+        )
     if requested_effort:
-        await _record_last_reasoning_effort(
-            session.get("provider_id"), session.get("reasoning_effort"),
+        await runtime_profiles_api.record_last_reasoning_effort(
+            session_profile_id, session.get("reasoning_effort"),
         )
     logger.info("create_session %s mode=%s", session["id"][:8], session.get("orchestration_mode"))
     await session_listing_api.apply_initial_session_folder(session.get("id"), requested_folder_id)
@@ -1647,9 +1647,10 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         )
         updates["model"] = requested_model
     elif "provider_id" in updates:
-        updates["model"] = await _model_for_provider_switch(
+        updates["model"] = await runtime_profiles_api.model_for_profile_switch(
             requested_provider_id,
             provider_record or {},
+            body.get("runner"),
         )
     profile_provider_id = requested_provider_id or session_snapshot.get("provider_id")
     if "runner" in body:
@@ -1746,11 +1747,14 @@ async def update_session_selectors(session_id: str, body: dict):
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     _record_model_switched_event(session_id, before or {}, session, updates)
+    session_profile_id = runtime_profiles_api.runtime_profile_id_for_session(session)
     if "model" in updates:
-        await _record_last_model(session.get("provider_id"), updates["model"])
+        await runtime_profiles_api.record_last_model(
+            session_profile_id, updates["model"]
+        )
     if "reasoning_effort" in updates and updates["reasoning_effort"]:
-        await _record_last_reasoning_effort(
-            session.get("provider_id"), updates["reasoning_effort"],
+        await runtime_profiles_api.record_last_reasoning_effort(
+            session_profile_id, updates["reasoning_effort"],
         )
     return {"id": session_id, "updates": updates}
 
@@ -2351,11 +2355,14 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     _record_model_switched_event(session_id, before or {}, session, updates)
+    session_profile_id = runtime_profiles_api.runtime_profile_id_for_session(session)
     if "model" in updates:
-        await _record_last_model(session.get("provider_id"), updates["model"])
+        await runtime_profiles_api.record_last_model(
+            session_profile_id, updates["model"]
+        )
     if updates.get("reasoning_effort"):
-        await _record_last_reasoning_effort(
-            session.get("provider_id"), updates["reasoning_effort"],
+        await runtime_profiles_api.record_last_reasoning_effort(
+            session_profile_id, updates["reasoning_effort"],
         )
 
     prompt = msgs[user_idx].get("content") or ""

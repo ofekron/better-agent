@@ -154,7 +154,7 @@ from browser_cors import BrowserTrustCORSMiddleware
 import config_store
 import user_prefs
 import ui_selection
-from providers_api import (
+from runtime_profiles_api import (
     record_last_model as _record_last_model,
     record_last_reasoning_effort as _record_last_reasoning_effort,
 )

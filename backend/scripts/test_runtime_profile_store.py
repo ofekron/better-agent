@@ -615,6 +615,32 @@ def test_sync_import_seeds_profiles() -> None:
         _reset_cache()
 
 
+def test_profile_prefill_chain() -> None:
+    import user_prefs
+    from provider_validation import profile_prefill_model
+
+    provider = next(
+        p
+        for p in config_store.list_provider_ui_state()["providers"]
+        if config_store.provider_execution_defaults(p["id"])["runtime_profile_id"]
+    )
+    defaults = config_store.provider_execution_defaults(provider["id"])
+    profile_id = defaults["runtime_profile_id"]
+    updated = config_store.update_runtime_profile(
+        profile_id, {"default_model": "chain-default"}
+    )
+    assert updated is not None
+    assert (
+        profile_prefill_model(provider["id"], updated["runner"]) == "chain-default"
+    ), "profile default must prefill when nothing was used yet"
+    assert user_prefs.set_last_model(profile_id, "chain-last")
+    assert (
+        profile_prefill_model(provider["id"], updated["runner"]) == "chain-last"
+    ), "last-used must win over the profile default"
+    assert profile_prefill_model("ghost-provider") == ""
+    assert profile_prefill_model(None) == ""
+
+
 def main() -> int:
     tests = [
         test_seeded_state_has_profiles,
@@ -635,6 +661,7 @@ def main() -> int:
         test_sync_import_seeds_profiles,
         test_installation_selection_seeds_profile,
         test_v2_internal_llm_assignment_migrates_to_profile_ref,
+        test_profile_prefill_chain,
     ]
     try:
         for test in tests:

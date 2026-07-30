@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import config_store
+import user_prefs
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -37,12 +38,25 @@ def _require_configured() -> Callable[[str, dict], Any]:
 
 def _snapshot() -> dict:
     """Non-secret frontend projection: every profile (tombstones included, for
-    old-session display), the default profile id, and the provider graveyard
-    tombstoned profiles resolve their display names through."""
+    old-session display), the default profile id, the provider graveyard
+    tombstoned profiles resolve their display names through, and the
+    per-profile last-used prefill maps."""
+    profiles = config_store.list_runtime_profiles(include_deleted=True)
+    known = {p["id"] for p in profiles}
+    last_models = {
+        k: v for k, v in user_prefs.get_last_models().items() if k in known
+    }
+    last_efforts = {
+        k: v
+        for k, v in user_prefs.get_last_reasoning_efforts().items()
+        if k in known
+    }
     return {
-        "runtime_profiles": config_store.list_runtime_profiles(include_deleted=True),
+        "runtime_profiles": profiles,
         "default_runtime_profile_id": config_store.get_default_runtime_profile_id(),
         "deleted_providers": config_store.list_deleted_providers(),
+        "last_models": last_models,
+        "last_reasoning_efforts": last_efforts,
     }
 
 
@@ -50,6 +64,95 @@ async def _broadcast_changed() -> None:
     broadcast_global = _require_configured()
     payload = await asyncio.to_thread(_snapshot)
     await broadcast_global("runtime_profiles_changed", payload)
+
+
+def runtime_profile_id_for_session(session: dict) -> Optional[str]:
+    """Resolve the live profile behind a session's stamped fields.
+
+    Pre-B1 sessions carry no runtime_profile_id; the (provider, runner)
+    identity pins the profile when one exists."""
+    provider_id = str(session.get("provider_id") or "")
+    if not provider_id:
+        return None
+    return config_store.provider_execution_defaults(
+        provider_id, session.get("runner")
+    )["runtime_profile_id"]
+
+
+async def record_last_model(
+    runtime_profile_id: str | None, model: str | None
+) -> None:
+    """Remember the model last used with a runtime profile so pickers can
+    pre-choose it. Broadcasts only on an actual change so the prefs write
+    doesn't spam refetches."""
+    if not runtime_profile_id or not model:
+        return
+    changed = await asyncio.to_thread(
+        user_prefs.set_last_model, runtime_profile_id, model
+    )
+    if changed:
+        await _broadcast_changed()
+
+
+async def record_last_reasoning_effort(
+    runtime_profile_id: str | None, reasoning_effort: str | None
+) -> None:
+    if not runtime_profile_id or not reasoning_effort:
+        return
+    changed = await asyncio.to_thread(
+        user_prefs.set_last_reasoning_effort,
+        runtime_profile_id,
+        reasoning_effort,
+    )
+    if changed:
+        await _broadcast_changed()
+
+
+async def model_for_profile_switch(
+    provider_id: str, provider_record: dict, runner: object = None
+) -> str:
+    """Prefill chain when switching without an explicit model: the profile's
+    last-used model, then its default model, then the first cached active
+    model that validates. Never leaves the old selection attached."""
+    from fastapi import HTTPException as _HTTPException
+
+    import models as models_mod
+    from provider_validation import validate_provider_model
+
+    defaults = await asyncio.to_thread(
+        config_store.provider_execution_defaults, provider_id, runner
+    )
+    last_models = await asyncio.to_thread(user_prefs.get_last_models)
+    candidates: list[str] = []
+    profile_id = defaults["runtime_profile_id"]
+    for value in (
+        last_models.get(profile_id) if profile_id else None,
+        defaults["default_model"],
+    ):
+        model = str(value or "").strip()
+        if model and model not in candidates:
+            candidates.append(model)
+    try:
+        available = await asyncio.to_thread(models_mod.available_models, provider_id)
+    except Exception:
+        available = []
+    for value in available:
+        model = str(value or "").strip()
+        if model and model not in candidates:
+            candidates.append(model)
+
+    for model in candidates:
+        try:
+            await asyncio.to_thread(validate_provider_model, provider_id, model, True)
+            return model
+        except _HTTPException:
+            continue
+
+    name = provider_record.get("name") or provider_id
+    raise HTTPException(
+        status_code=400,
+        detail=f"{name} has no known models; cannot switch without a model",
+    )
 
 
 class RuntimeProfileCreate(BaseModel):

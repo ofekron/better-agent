@@ -516,22 +516,29 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
 
 def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     """Cache-only read. Never makes an HTTP call. See `_read_catalog_models`
-    for per-kind semantics. The configured `default_model` is always unioned
-    in so the selector is never empty before/without a successful fetch (e.g.
-    a fresh openai provider whose first /models fetch hasn't run yet)."""
+    for per-kind semantics. The default models of the provider's live runtime
+    profiles are always unioned in so the selector is never empty
+    before/without a successful fetch (e.g. a fresh openai provider whose
+    first /models fetch hasn't run yet)."""
+    import config_store
+
     custom = list(provider.get("custom_models") or [])
     models, retired_ids, _has_cache, _cached = _read_catalog_models(provider)
     if include_retired:
         models = models + retired_ids
-    default_model = provider.get("default_model") or ""
+    profile_defaults = [
+        str(profile.get("default_model") or "").strip()
+        for profile in config_store.list_runtime_profiles()
+        if profile.get("provider_id") == provider.get("id")
+    ]
+    known = set(models + custom + retired_ids)
+    kind = _runtime_kind_for_provider(provider)
     seed = []
-    if default_model:
-        known = set(models + custom + retired_ids)
-        kind = _runtime_kind_for_provider(provider)
-        if kind != "codex" or (
-            _cached and default_model in known
-        ):
-            seed = [default_model]
+    for default_model in profile_defaults:
+        if not default_model:
+            continue
+        if kind != "codex" or (_cached and default_model in known):
+            seed.append(default_model)
     return _dedupe_preserve_order(models + custom + seed)
 
 

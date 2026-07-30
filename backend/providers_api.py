@@ -16,7 +16,6 @@ import config_store
 import provider_auth
 import provider_setup
 import runtime_profile
-import user_prefs
 from i18n import t
 from provider_validation import (
     is_loopback_request,
@@ -122,70 +121,6 @@ async def _broadcast_install(event_type: str, data: dict) -> None:
     await broadcast_global(event_type, data)
 
 
-async def record_last_model(provider_id: str | None, model: str | None) -> None:
-    """Remember the model the user chose for a provider so pickers can
-    pre-choose it on the next provider switch. Broadcasts only on an
-    actual change so the prefs write doesn't spam refetches."""
-    if not provider_id or not model:
-        return
-    changed = await asyncio.to_thread(user_prefs.set_last_model, provider_id, model)
-    if changed:
-        await _broadcast_provider_changed()
-
-
-async def record_last_reasoning_effort(
-    provider_id: str | None, reasoning_effort: str | None,
-) -> None:
-    if not provider_id or not reasoning_effort:
-        return
-    changed = await asyncio.to_thread(
-        user_prefs.set_last_reasoning_effort,
-        provider_id,
-        reasoning_effort,
-    )
-    if changed:
-        await _broadcast_provider_changed()
-
-
-async def model_for_provider_switch(provider_id: str, provider_record: dict) -> str:
-    """Pick a valid model when the user switches provider without an
-    explicit model. Prefer the user's remembered model for that provider,
-    then the provider default, then the first cached active model. Never
-    leave the old provider's model attached to the session."""
-    import models as models_mod
-
-    last_models = await asyncio.to_thread(user_prefs.get_last_models)
-    candidates: list[str] = []
-    for value in (
-        last_models.get(provider_id),
-        provider_record.get("default_model"),
-    ):
-        model = str(value or "").strip()
-        if model and model not in candidates:
-            candidates.append(model)
-    try:
-        available = await asyncio.to_thread(models_mod.available_models, provider_id)
-    except Exception:
-        available = []
-    for value in available:
-        model = str(value or "").strip()
-        if model and model not in candidates:
-            candidates.append(model)
-
-    for model in candidates:
-        try:
-            await asyncio.to_thread(validate_provider_model, provider_id, model, True)
-            return model
-        except HTTPException:
-            continue
-
-    name = provider_record.get("name") or provider_id
-    raise HTTPException(
-        status_code=400,
-        detail=f"{name} has no known models; cannot switch provider without a model",
-    )
-
-
 async def broadcast_model_catalog_fact(fact) -> None:
     broadcast_global = _require_configured()
     await broadcast_global(
@@ -264,19 +199,9 @@ async def get_startup_tasks():
 
 @router.get("/api/providers")
 async def get_providers():
-    state, last_models, last_efforts = await asyncio.gather(
-        asyncio.to_thread(config_store.list_provider_ui_state),
-        asyncio.to_thread(user_prefs.get_last_models),
-        asyncio.to_thread(user_prefs.get_last_reasoning_efforts),
-    )
+    state = await asyncio.to_thread(config_store.list_provider_ui_state)
     state = _with_login_states(state)
     for record in state.get("providers", []):
-        last = last_models.get(record.get("id"))
-        if last:
-            record["last_model"] = last
-        last_effort = last_efforts.get(record.get("id"))
-        if last_effort and last_effort in (record.get("reasoning_effort_options") or []):
-            record["last_reasoning_effort"] = last_effort
         # Lazily resolve the durable auth-status for subscription providers
         # whose cached value is missing (e.g. right after a restart) so the
         # UI can show Log out for an account signed in via the CLI.
