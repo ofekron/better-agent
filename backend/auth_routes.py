@@ -220,6 +220,7 @@ async def change_credentials(body: ChangeCredentialsBody, request: Request) -> d
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"could not save credentials: {exc}") from exc
     auth.reload_credentials()
+    qr_auth.revoke_all_sessions()
     auth.rate_limit_reset(ip)
     request.session["user"] = {"username": new_username}
     return {"username": new_username, "token": auth.create_token(new_username)}

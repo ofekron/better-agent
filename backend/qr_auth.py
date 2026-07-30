@@ -127,6 +127,19 @@ def consume_grant(candidate: str | None) -> bool:
         return ok
 
 
+def revoke_all_sessions() -> None:
+    """Wipe every outstanding grant and refresh-token family. Called on
+    password change (see auth_routes.change_credentials): the family/jti
+    pairs here are opaque server-side state, independent of `session_secret`,
+    so rotating that secret alone wouldn't stop a stolen refresh token from
+    minting itself fresh access tokens forever."""
+    with _lock:
+        state = _read()
+        state["grants"] = {}
+        state["families"] = {}
+        _write(state)
+
+
 # --- rotating refresh tokens ----------------------------------------
 
 def issue_session(sub: str) -> tuple[str, str]:

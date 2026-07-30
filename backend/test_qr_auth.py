@@ -65,6 +65,16 @@ def test_rotate_unknown_family_does_not_rewrite_state():
     assert path.stat().st_mtime_ns == before, "rotate unknown-family rewrote state"
 
 
+def test_revoke_all_sessions_kills_outstanding_grants_and_refresh_tokens():
+    grant = qr_auth.mint_grant()
+    _, refresh = qr_auth.issue_session("alice")
+
+    qr_auth.revoke_all_sessions()
+
+    assert qr_auth.consume_grant(grant) is False
+    assert qr_auth.rotate(refresh) is None
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

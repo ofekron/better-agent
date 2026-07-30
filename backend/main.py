@@ -428,7 +428,7 @@ session_manager.bind_pin_predicate(coordinator.is_root_in_use)
 
 import auth                                                       # noqa: E402
 import auth_routes                                                # noqa: E402
-from starlette.middleware.sessions import SessionMiddleware       # noqa: E402
+from dynamic_session_middleware import DynamicSecretSessionMiddleware  # noqa: E402
 
 import app_composition  # noqa: E402
 app_composition.wire(
@@ -644,8 +644,7 @@ async def auth_gate(request, call_next):
 
 
 app.add_middleware(
-    SessionMiddleware,
-    secret_key=auth.get_session_secret(),
+    DynamicSecretSessionMiddleware,
     max_age=30 * 86400,  # 30 days; matches the documented cookie lifetime
     same_site="lax",
     https_only=False,    # LAN HTTP for now; flip when fronted by TLS

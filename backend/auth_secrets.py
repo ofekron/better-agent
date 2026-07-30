@@ -269,8 +269,14 @@ def write_credentials(username: str, password: str) -> None:
 
 
 def write_login_credentials(username: str, password: str) -> None:
+    """Change username/password AND rotate the session secret, so every
+    bearer token and session cookie signed under the old secret (see
+    `DynamicSecretSessionMiddleware`) stops verifying immediately — a
+    compromised token can't outlive the password change that was meant to
+    kill it."""
     _reject_headless_write()
     if not username or not password:
         raise ValueError("username and password must both be non-empty")
     _kc_set("username", username)
     _kc_set("password_hash", make_password_hash(password))
+    _kc_set("session_secret", secrets.token_hex(32))
