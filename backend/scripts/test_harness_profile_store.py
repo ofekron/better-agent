@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -129,18 +129,33 @@ def test_create_default_rejected() -> None:
 
 
 def test_schema_version_2_mismatch_raises() -> None:
-    path = harness_profile_store._path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema_version": 1, "profiles": {}}), encoding="utf-8")
+    # Force-touch the store first so the sqlite file + meta row exist, then
+    # corrupt the recorded schema_version directly to simulate an
+    # older-version store on disk.
+    harness_profile_store._load()
+    conn = harness_profile_store._connect()
+    try:
+        with conn:
+            conn.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+    finally:
+        conn.close()
     try:
         harness_profile_store.list_profiles()
     except harness_profile_store.HarnessProfileError:
         pass
     else:
-        raise AssertionError("v1-shaped file should have raised on load")
+        raise AssertionError("v1-shaped store should have raised on load")
     finally:
-        # Reset to a fresh blank store for any tests that run after this one.
-        path.write_text(json.dumps(harness_profile_store._blank()), encoding="utf-8")
+        # Reset to the current schema version for any tests that run after this one.
+        conn = sqlite3.connect(str(harness_profile_store._db_path()))
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                    (str(harness_profile_store.SCHEMA_VERSION),),
+                )
+        finally:
+            conn.close()
 
 
 def test_empty_set_delta_stays_overridden_unlike_clear() -> None:
@@ -323,6 +338,49 @@ def test_extension_owned_profile_is_read_only() -> None:
         harness_profile_store._extension_profiles = original
 
 
+def test_store_fingerprint_bumps_on_write_and_delete() -> None:
+    before = harness_profile_store.store_fingerprint()
+    created = harness_profile_store.create_profile({"id": "fp.one", "name": "FP One"})
+    after_create = harness_profile_store.store_fingerprint()
+    assert after_create != before
+    harness_profile_store.apply_override_patch(
+        "fp.one",
+        [{"path": ["disabled_builtin_tools"], "op": "set", "value": {"add": ["mssg"], "remove": []}}],
+        revision=created["revision"],
+    )
+    after_update = harness_profile_store.store_fingerprint()
+    assert after_update != after_create
+    harness_profile_store.delete_profile("fp.one")
+    after_delete = harness_profile_store.store_fingerprint()
+    assert after_delete != after_update
+
+
+def test_write_touches_only_its_own_row() -> None:
+    # A write to one profile must not rewrite unrelated rows: their
+    # `updated_at` should be untouched by a sibling's write.
+    harness_profile_store.create_profile({"id": "row.a", "name": "Row A"})
+    untouched = harness_profile_store.create_profile({"id": "row.b", "name": "Row B"})
+    harness_profile_store.set_profile_meta("row.a", {"default_model": "gpt-5.5"})
+    reloaded_b = harness_profile_store.get_profile("row.b")
+    assert reloaded_b["updated_at"] == untouched["updated_at"]
+    assert reloaded_b["revision"] == untouched["revision"]
+
+
+def test_concurrent_reads_see_committed_writes_under_wal() -> None:
+    # WAL mode: a second connection opened after a committed write must
+    # observe it (this exercises the actual on-disk WAL/commit path, not
+    # just the in-process dict).
+    harness_profile_store.create_profile({"id": "wal.one", "name": "WAL One"})
+    conn = sqlite3.connect(str(harness_profile_store._db_path()))
+    try:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+        row = conn.execute("SELECT id FROM profiles WHERE id = 'wal.one'").fetchone()
+        assert row is not None
+    finally:
+        conn.close()
+
+
 def main() -> int:
     try:
         test_create_profile_has_empty_overrides()
@@ -345,6 +403,9 @@ def main() -> int:
         test_base_missing_profile_rejected()
         test_base_bad_revision_rejected()
         test_extension_owned_profile_is_read_only()
+        test_store_fingerprint_bumps_on_write_and_delete()
+        test_write_touches_only_its_own_row()
+        test_concurrent_reads_see_committed_writes_under_wal()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     print("PASS harness profile store")

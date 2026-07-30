@@ -549,7 +549,7 @@ def test_resolve_time_cycle_detected() -> None:
     # prove resolve_profile also fails closed on a cyclic chain.
     data = harness_profile_store._load()  # type: ignore[attr-defined]
     data["profiles"]["rcyc.a"]["base_profile_id"] = "rcyc.b"
-    harness_profile_store._save(data)  # type: ignore[attr-defined]
+    harness_profile_store._write_profile_row(data["profiles"]["rcyc.a"])  # type: ignore[attr-defined]
     try:
         harness_profile_resolver.resolve_profile("rcyc.a")
     except harness_profile_resolver.HarnessProfileResolutionError as exc:

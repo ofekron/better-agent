@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import re
+import sqlite3
 import threading
 from datetime import datetime
 from typing import Any
@@ -12,7 +13,6 @@ from harness_secret_refs import (
     HarnessSecretRefError,
     normalize_harness_secret_refs,
 )
-from json_store import read_json, write_json
 from paths import ba_home
 
 
@@ -49,16 +49,60 @@ class HarnessProfileNotFoundError(HarnessProfileError):
     its "selection was deleted" recovery on that status."""
 
 
-def _path():
-    return ba_home() / "harness_profiles.json"
+# Document-per-row SQLite substrate (ADR-0001): one row per profile id,
+# validated/normalized JSON in `data`, WAL mode so readers never block behind
+# a writer. `meta.store_version` is a monotonic counter bumped inside the
+# same transaction as every write, giving `store_fingerprint()` an O(1)
+# change-detection signal instead of stat()-ing a whole-file mtime/size.
+_DB_LOCK = threading.RLock()
+
+
+def _db_path():
+    return ba_home() / "harness_profiles.db"
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_db_path()), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS profiles ("
+        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+        "revision TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL)"
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if row is None:
+        with conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('store_version', '0')"
+            )
+    elif int(row[0]) != SCHEMA_VERSION:
+        conn.close()
+        raise HarnessProfileError("Harness profiles are incompatible with this Better Agent version")
+    return conn
+
+
+def _bump_version(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('store_version', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)"
+    )
 
 
 def store_fingerprint() -> tuple[int, int]:
-    try:
-        stat = _path().stat()
-    except FileNotFoundError:
+    if not _db_path().exists():
         return (0, 0)
-    return (stat.st_mtime_ns, stat.st_size)
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'store_version'").fetchone()
+        finally:
+            conn.close()
+    return (int(row[0]) if row else 0, 0)
 
 
 def _blank() -> dict[str, Any]:
@@ -70,17 +114,69 @@ def _now() -> str:
 
 
 def _load() -> dict[str, Any]:
-    data = read_json(_path(), _blank())
-    if data.get("schema_version") != SCHEMA_VERSION:
-        raise HarnessProfileError("Harness profiles are incompatible with this Better Agent version")
-    profiles = data.get("profiles")
-    if not isinstance(profiles, dict):
-        raise HarnessProfileError("Malformed harness profiles: profiles must be an object")
-    return data
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT id, data FROM profiles").fetchall()
+        finally:
+            conn.close()
+    profiles = {row[0]: json.loads(row[1]) for row in rows}
+    return {"schema_version": SCHEMA_VERSION, "profiles": profiles}
 
 
-def _save(data: dict[str, Any]) -> None:
-    write_json(_path(), data)
+def _upsert_profile_row(conn: sqlite3.Connection, profile: dict[str, Any]) -> None:
+    conn.execute(
+        "INSERT INTO profiles(id, schema_version, revision, updated_at, data) VALUES (?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET schema_version=excluded.schema_version, "
+        "revision=excluded.revision, updated_at=excluded.updated_at, data=excluded.data",
+        (
+            profile["id"],
+            profile.get("schema_version", SCHEMA_VERSION),
+            profile["revision"],
+            profile["updated_at"],
+            json.dumps(profile, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def _write_profile_row(profile: dict[str, Any]) -> None:
+    """Row-level write choke point: touches exactly the one changed record,
+    not the whole store — the O(1)-write property ADR-0001 is for."""
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            with conn:
+                _upsert_profile_row(conn, profile)
+                _bump_version(conn)
+        finally:
+            conn.close()
+
+
+def _delete_profile_row(profile_id: str) -> None:
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+                _bump_version(conn)
+        finally:
+            conn.close()
+
+
+def _replace_all_profiles(profiles: dict[str, Any]) -> None:
+    """Full-store replace for `import_harness_sync_state`: the operation's
+    contract is "replace this host's store", so an O(n) rewrite here is
+    inherent to the operation, not a regression from the JSON-file era."""
+    with _DB_LOCK:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM profiles")
+                for profile in profiles.values():
+                    _upsert_profile_row(conn, profile)
+                _bump_version(conn)
+        finally:
+            conn.close()
 
 
 def _clean_id(value: object, *, required: bool = True) -> str:
@@ -362,8 +458,7 @@ def _commit_profile(data: dict[str, Any], profile_id: str, profile: dict[str, An
     """Single write choke point: validate the base chain against current
     store state, persist, and return a copy."""
     _assert_base_chain_ok(profile_id, profile, data["profiles"])
-    data["profiles"][profile_id] = profile
-    _save(data)
+    _write_profile_row(profile)
     return copy.deepcopy(profile)
 
 
@@ -625,7 +720,7 @@ def import_harness_sync_state(state: object) -> dict[str, Any]:
     if not isinstance(profiles, dict):
         raise HarnessProfileError("harness sync state profiles must be an object")
     with _LOCK:
-        _save({"schema_version": SCHEMA_VERSION, "profiles": copy.deepcopy(profiles)})
+        _replace_all_profiles(copy.deepcopy(profiles))
     return {"profiles": len(profiles)}
 
 
@@ -640,6 +735,5 @@ def delete_profile(profile_id: str, revision: str | None = None) -> bool:
             return False
         if revision and profile.get("revision") != revision:
             raise HarnessProfileError("Harness profile changed; reload before deleting")
-        data["profiles"].pop(clean_id, None)
-        _save(data)
+        _delete_profile_row(clean_id)
         return True
