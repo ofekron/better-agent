@@ -31,6 +31,13 @@ def test_windows_runtime_module_probes_run_serially() -> None:
     assert dependency_plan._runtime_probe_workers(8, platform="nt") == 1
 
 
+def test_runtime_module_probe_waits_for_process_completion() -> None:
+    with patch.object(dependency_plan.subprocess, "run") as run:
+        dependency_plan._probe_runtime_module(Path("python"), "slow_module")
+
+    assert "timeout" not in run.call_args.kwargs
+
+
 def test_runtime_module_probe_failure_names_the_module() -> None:
     def probe(_python: Path, module: str) -> None:
         if module == "broken":
@@ -51,5 +58,6 @@ def test_runtime_module_probe_failure_names_the_module() -> None:
 if __name__ == "__main__":
     test_runtime_module_probes_run_in_parallel()
     test_windows_runtime_module_probes_run_serially()
+    test_runtime_module_probe_waits_for_process_completion()
     test_runtime_module_probe_failure_names_the_module()
     print("dependency probe parallel tests passed")
