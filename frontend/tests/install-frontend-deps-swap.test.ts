@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — build script, no type declarations
@@ -24,6 +24,12 @@ describe("frontend dependency install swap slot", () => {
   it("keeps the retired slot inside the stage the run cleans up", () => {
     const stage = "/repo/.frontend-desktop-install-aaa";
     expect(retiredNodeModulesPath(stage).startsWith(stage + sep)).toBe(true);
+  });
+
+  it("keeps the node_modules basename so file watchers continue to ignore it", () => {
+    expect(basename(retiredNodeModulesPath("/repo/.frontend-install-aaa"))).toBe(
+      "node_modules",
+    );
   });
 
   it("never parks the retired copy at a shared fixed path", () => {

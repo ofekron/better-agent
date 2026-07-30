@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -35,7 +36,7 @@ export function absolutizeLocalReferences(value, sourceDirectory) {
 // The retired copy lives inside the caller's own stage directory: concurrent
 // installs never share a swap slot, and the stage cleanup reclaims it.
 export function retiredNodeModulesPath(stage) {
-  return join(stage, "node_modules.retired");
+  return join(stage, "retired", "node_modules");
 }
 
 export function prepareInstallManifest(manifest, profileDependencies) {
@@ -92,6 +93,7 @@ export function installFrontendDependencies(profile) {
       stdio: "inherit",
     });
     if (existsSync(current)) {
+      mkdirSync(dirname(previous), { recursive: true });
       renameSync(current, previous);
     }
     try {
