@@ -11,10 +11,13 @@ from codex_execution_common import (
     ExecutionContractError,
     binary_open_flags,
     cached_sha256_fd,
+    get_cached_sha256,
+    read_first_line_fd,
     required_integer,
     required_string,
     sha256_and_first_line_fd,
     stable_stat_identity,
+    store_cached_sha256,
     symlink_chain,
 )
 
@@ -114,21 +117,31 @@ class FileIdentity:
         cls,
         raw_path: str | Path,
     ) -> tuple[FileIdentity, bytes]:
-        """Capture identity and the file's first line in one read pass.
+        """Capture identity and the file's first line in one pass.
 
-        Saves a second full open+hash of the same file for callers (like
-        `capture_cli_launch`) that need both the attested identity and the
-        shebang line — `capture()` + a separate re-read to extract the
-        first line would hash the same bytes twice for no added safety.
-        Not cache-backed like `capture()`: it always needs a real read to
-        recover the first line, so there is no cheaper path on a cache hit.
+        On a cold cache miss this saves a second full open+hash of the
+        same file for callers (like `capture_cli_launch`) that need both
+        the attested identity and the shebang line - `capture()` + a
+        separate re-read to extract the first line would hash the same
+        bytes twice for no added safety. On a warm cache hit (the same
+        resolved path + stable stat tuple was already hashed - by a prior
+        `capture()`, a prior `capture_with_first_line()`, or any other
+        full-file hash of this exact file) it reuses that digest and only
+        reads the small leading prefix needed for the first line, instead
+        of re-hashing the whole file again.
         """
         def _hash(
             fd: int,
-            _resolved_path: str,
-            _stat_before: "os.stat_result",
+            resolved_path: str,
+            stat_before: "os.stat_result",
         ) -> tuple[str, bytes]:
-            return sha256_and_first_line_fd(fd)
+            cache_key = (resolved_path, stable_stat_identity(stat_before))
+            cached_digest = get_cached_sha256(cache_key)
+            if cached_digest is not None:
+                return cached_digest, read_first_line_fd(fd)
+            digest, first_line = sha256_and_first_line_fd(fd)
+            store_cached_sha256(cache_key, digest)
+            return digest, first_line
 
         return cls._capture(raw_path, _hash)
 

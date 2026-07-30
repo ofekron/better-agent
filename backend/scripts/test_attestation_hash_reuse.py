@@ -64,20 +64,50 @@ def _write_executable(path: Path, content: bytes) -> None:
 
 
 def _count_real_hashes(monkeypatch_calls: list[int]):
-    """Patch the raw hasher `cached_sha256_fd` falls back to on a cache
-    miss, so tests can count real (uncached) full-file reads."""
-    original = codex_execution_common.sha256_fd
+    """Patch the two raw, uncached full-file hashers a cache miss falls
+    back to (`sha256_fd` for `cached_sha256_fd`, and
+    `sha256_and_first_line_fd` for the shebang/first-line variant), so
+    tests can count real full-file reads regardless of which path took
+    them.
 
-    def _counting(fd: int) -> str:
+    `sha256_and_first_line_fd` is imported by name (`from
+    codex_execution_common import sha256_and_first_line_fd`) into both
+    codex_execution_identity and codex_execution_launch, so each of those
+    modules holds its own independent reference to the original function
+    - patching only the attribute on codex_execution_common would leave
+    those call sites hashing for real, uncounted. All three bindings are
+    patched and restored together.
+    """
+    import codex_execution_identity
+    import codex_execution_launch
+
+    original_sha256_fd = codex_execution_common.sha256_fd
+    original_first_line = codex_execution_common.sha256_and_first_line_fd
+
+    def _counting_sha256_fd(fd: int) -> str:
         monkeypatch_calls.append(1)
-        return original(fd)
+        return original_sha256_fd(fd)
 
-    codex_execution_common.sha256_fd = _counting
-    return original
+    def _counting_first_line(fd: int) -> tuple[str, bytes]:
+        monkeypatch_calls.append(1)
+        return original_first_line(fd)
+
+    codex_execution_common.sha256_fd = _counting_sha256_fd
+    codex_execution_common.sha256_and_first_line_fd = _counting_first_line
+    codex_execution_identity.sha256_and_first_line_fd = _counting_first_line
+    codex_execution_launch.sha256_and_first_line_fd = _counting_first_line
+    return (original_sha256_fd, original_first_line)
 
 
 def _restore_real_hashes(original) -> None:
-    codex_execution_common.sha256_fd = original
+    import codex_execution_identity
+    import codex_execution_launch
+
+    original_sha256_fd, original_first_line = original
+    codex_execution_common.sha256_fd = original_sha256_fd
+    codex_execution_common.sha256_and_first_line_fd = original_first_line
+    codex_execution_identity.sha256_and_first_line_fd = original_first_line
+    codex_execution_launch.sha256_and_first_line_fd = original_first_line
 
 
 def test_cached_sha256_fd_reuses_digest_for_unchanged_stat() -> None:
@@ -98,6 +128,42 @@ def test_cached_sha256_fd_reuses_digest_for_unchanged_stat() -> None:
             third = FileIdentity.capture(target)
             assert len(calls) == 2, "changed file incorrectly reused a cached digest"
             assert third.sha256 != first.sha256
+    finally:
+        _restore_real_hashes(original)
+
+
+def test_recapture_cli_launch_in_same_process_reuses_cache() -> None:
+    """Locks the exact regression a same-process benchmark caught:
+    `capture_cli_launch` used `FileIdentity.capture_with_first_line`,
+    whose hasher called `sha256_and_first_line_fd` directly and never
+    consulted/populated the shared hash cache - so a second capture of an
+    unchanged launcher (e.g. `prepare_run` on a later turn, same backend
+    process) always re-hashed the file from scratch. This is what makes a
+    warm turn's launch preparation cheap after the first turn."""
+    calls: list[int] = []
+    original = _count_real_hashes(calls)
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            cli = Path(raw) / "bin" / "claude"
+            _write_executable(cli, b"native-cli-payload" * 4096)
+            calls.clear()
+            first = capture_cli_launch(
+                logical_command="claude",
+                launcher_path=cli,
+                platform="linux",
+            )
+            after_first_capture = len(calls)
+            assert after_first_capture > 0, "first capture did no verification"
+            second = capture_cli_launch(
+                logical_command="claude",
+                launcher_path=cli,
+                platform="linux",
+            )
+            assert len(calls) == after_first_capture, (
+                "recapturing an unchanged CLI launcher in the same process "
+                "re-hashed it instead of reusing the process-wide cache"
+            )
+            assert first.launcher.sha256 == second.launcher.sha256
     finally:
         _restore_real_hashes(original)
 
@@ -149,19 +215,21 @@ def test_repeat_family_attest_collapses_to_one_full_hash_pass() -> None:
     original = _count_real_hashes(calls)
     try:
         with tempfile.TemporaryDirectory() as raw:
-            attestation = _capture_family(Path(raw))
-            # Capture already did real reads; only count what `.attest()`
-            # itself triggers from here on.
             calls.clear()
-            assert attestation.attest()
-            after_first = len(calls)
-            assert after_first > 0, "first attest() did no verification at all"
-            # Every subsequent attest() call on the SAME instance must be a
-            # cheap stat-only recheck: zero additional real hash reads.
-            for _ in range(5):
+            attestation = _capture_family(Path(raw))
+            after_capture = len(calls)
+            assert after_capture > 0, "capture() did no verification at all"
+            # `.attest()` - including its FIRST call - must not add any
+            # additional real hash reads: capture() already populated the
+            # process-wide cache for every component it touched (the
+            # launcher via capture_with_first_line, everything else via
+            # plain capture()), so re-verifying the same (path, stat) is a
+            # cache hit end to end, not just on the second call onward.
+            for _ in range(6):
                 assert attestation.attest()
-            assert len(calls) == after_first, (
-                "repeat attest() calls performed additional full-file hashing"
+            assert len(calls) == after_capture, (
+                "attest() performed additional full-file hashing beyond "
+                "what capture() already did"
             )
     finally:
         _restore_real_hashes(original)
@@ -312,6 +380,7 @@ def test_claude_sdk_package_cached_reuses_materialized_copy() -> None:
 
 TESTS = (
     test_cached_sha256_fd_reuses_digest_for_unchanged_stat,
+    test_recapture_cli_launch_in_same_process_reuses_cache,
     test_repeat_family_attest_collapses_to_one_full_hash_pass,
     test_stat_drift_after_full_attest_fails_closed_without_rehash,
     test_family_attestation_open_downstream_reuses_one_full_hash,

@@ -269,28 +269,54 @@ _hash_cache: "OrderedDict[tuple[str, tuple[int, ...]], str]" = OrderedDict()
 _hash_cache_lock = threading.Lock()
 
 
-def cached_sha256_fd(fd: int, cache_key: tuple[str, tuple[int, ...]]) -> str:
-    """sha256 of `fd`'s full content, reused across calls for an identical
-    (resolved path, stable stat tuple).
-
-    This is the single hash-verification primitive full-file attestation/
-    capture funnels through. A stat-tuple change is a different cache key
-    by construction, so drift always misses the cache and falls through
-    to a real read - the cache can only short-circuit hashing a file that
-    has provably not changed since the last time it was hashed (same
-    device/inode/size/mtime/ctime), never paper over a mismatch.
+def get_cached_sha256(cache_key: tuple[str, tuple[int, ...]]) -> str | None:
+    """Look up a previously-computed digest for (resolved path, stable stat
+    tuple) without reading the file. `None` means a real hash is required -
+    either genuinely cold, or the stat tuple has drifted since it was last
+    hashed (a different stat is a different cache key by construction, so
+    this can never return a stale digest for changed content).
     """
     with _hash_cache_lock:
         cached = _hash_cache.get(cache_key)
         if cached is not None:
             _hash_cache.move_to_end(cache_key)
-            return cached
-    digest = sha256_fd(fd)
+        return cached
+
+
+def store_cached_sha256(
+    cache_key: tuple[str, tuple[int, ...]],
+    digest: str,
+) -> None:
+    """Record a freshly-computed digest for (resolved path, stable stat
+    tuple), evicting the oldest entry once the cache is full."""
     with _hash_cache_lock:
         _hash_cache[cache_key] = digest
         _hash_cache.move_to_end(cache_key)
         while len(_hash_cache) > _HASH_CACHE_LIMIT:
             _hash_cache.popitem(last=False)
+
+
+def cached_sha256_fd(fd: int, cache_key: tuple[str, tuple[int, ...]]) -> str:
+    """sha256 of `fd`'s full content, reused across calls for an identical
+    (resolved path, stable stat tuple).
+
+    This is the single hash-verification primitive every full-file
+    attestation/capture that only needs the digest funnels through.
+    Callers that also need to recover bytes while hashing (e.g. reading a
+    shebang's first line, or a file's full content for materialization)
+    use `get_cached_sha256`/`store_cached_sha256` directly instead, so a
+    cache hit can still cheaply recover just the bytes it actually needs
+    without a full re-read. A stat-tuple change is a different cache key
+    by construction, so drift always misses the cache and falls through
+    to a real read - the cache can only short-circuit hashing a file that
+    has provably not changed since the last time it was hashed (same
+    device/inode/size/mtime/ctime), never paper over a mismatch.
+    """
+    cached = get_cached_sha256(cache_key)
+    if cached is not None:
+        return cached
+    digest = sha256_fd(fd)
+    store_cached_sha256(cache_key, digest)
     return digest
 
 
@@ -350,6 +376,27 @@ def sha256_and_first_line_fd(fd: int) -> tuple[str, bytes]:
                     line_complete = True
     os.lseek(fd, 0, os.SEEK_SET)
     return digest.hexdigest(), bytes(first_line)
+
+
+def read_first_line_fd(fd: int, limit: int = 4096) -> bytes:
+    """Read only the leading bytes needed to recover a shebang line.
+
+    Used on a `get_cached_sha256` hit: the digest is already known, so a
+    shebang-detecting caller only needs these few bytes, not a second
+    full-file read through `sha256_and_first_line_fd`."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    first_line = bytearray()
+    while len(first_line) < limit:
+        chunk = os.read(fd, limit - len(first_line))
+        if not chunk:
+            break
+        newline = chunk.find(b"\n")
+        if newline >= 0:
+            first_line.extend(chunk[:newline + 1])
+            break
+        first_line.extend(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return bytes(first_line)
 
 
 def canonical_json(value: Any) -> bytes:

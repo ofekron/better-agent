@@ -17,9 +17,12 @@ from codex_execution_common import (
     ExecutionContractError,
     binary_open_flags,
     cached_sha256_fd,
+    get_cached_sha256,
     parallel_map,
+    read_first_line_fd,
     sha256_and_first_line_fd,
     stable_stat_identity,
+    store_cached_sha256,
 )
 from codex_execution_identity import FileIdentity
 
@@ -335,6 +338,12 @@ def _read_shebang_tokens(
     *,
     expected: FileIdentity | None = None,
 ) -> tuple[str, ...]:
+    # `expected` (when given) carries the resolved path a prior full-file
+    # hash may already be cached under (e.g. from FileIdentity.capture()
+    # just before this call, or a previous launch resolution of the same
+    # unchanged file). Reuse that digest and only read the small leading
+    # prefix needed for the shebang line, instead of re-hashing the whole
+    # (possibly large) launcher file a second time.
     try:
         flags = binary_open_flags(
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
@@ -343,7 +352,21 @@ def _read_shebang_tokens(
         fd = os.open(target, flags)
         try:
             stat_before = os.fstat(fd)
-            digest, first_line = sha256_and_first_line_fd(fd)
+            cache_key = (
+                (expected.resolved_path, stable_stat_identity(stat_before))
+                if expected is not None
+                else None
+            )
+            cached_digest = (
+                get_cached_sha256(cache_key) if cache_key is not None else None
+            )
+            if cached_digest is not None:
+                digest = cached_digest
+                first_line = read_first_line_fd(fd)
+            else:
+                digest, first_line = sha256_and_first_line_fd(fd)
+                if cache_key is not None:
+                    store_cached_sha256(cache_key, digest)
             stat_after = os.fstat(fd)
             if stable_stat_identity(stat_before) != stable_stat_identity(
                 stat_after,
