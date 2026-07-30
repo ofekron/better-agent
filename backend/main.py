@@ -1252,6 +1252,7 @@ from provider_validation import (
     provider_permission as _provider_permission,
     provider_runner as _provider_runner,
     provider_reasoning_effort as _provider_reasoning_effort,
+    inherited_reasoning_effort as _inherited_reasoning_effort,
     resolve_provider_id_ref as _resolve_provider_id_ref,
     api_permission as _api_permission,
     required_model_from_body_or_provider as _required_model_from_body_or_provider,

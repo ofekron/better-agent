@@ -118,6 +118,22 @@ def main_test() -> int:
     assert inherited_session["model"] == "sender-model"
     assert inherited_session["reasoning_effort"] == provider_reasoning_effort
 
+    remote_inherited = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "remote inherited effort",
+        "cwd": r"C:\Users\Lenovo\agent-session",
+        "orchestration_mode": "native",
+        "node_id": "lenovo",
+        "provider_id": provider_id,
+        "model": provider_model,
+        "runner": "native",
+    })
+    assert remote_inherited.status_code == 200, remote_inherited.text
+    remote_inherited_session = session_manager.get(remote_inherited.json()["session_id"]) or {}
+    assert remote_inherited_session["node_id"] == "lenovo"
+    assert remote_inherited_session["cwd"] == r"C:\Users\Lenovo\agent-session"
+    assert remote_inherited_session["reasoning_effort"] == provider_reasoning_effort
+
     explicit = _post(client, {
         "sender_session_id": sender["id"],
         "name": "explicit",
