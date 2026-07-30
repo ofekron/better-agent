@@ -3868,6 +3868,8 @@ class Coordinator:
                     and logical_turn_identity
                     and logical_request_prefix
                 ):
+                    terminal_result = None
+                    execution = None
                     if self._session_cancelled.get(app_session_id):
                         logical_turn_outcome = "stopped"
                     lifecycle_snapshot = self.lifecycle_commands.snapshot(
@@ -3887,7 +3889,7 @@ class Coordinator:
                             and execution is not None
                             and execution.provider_run_id is not None
                         ):
-                            await asyncio.shield(
+                            terminal_result = await asyncio.shield(
                                 self.lifecycle_commands.finish_execution_and_turn(
                                     app_session_id,
                                     execution_identity=execution.identity,
@@ -3896,7 +3898,7 @@ class Coordinator:
                                 )
                             )
                         else:
-                            await asyncio.shield(
+                            terminal_result = await asyncio.shield(
                                 self.lifecycle_commands.finish_turn(
                                     request_id=f"{logical_request_prefix}:finish",
                                     session_id=app_session_id,
@@ -3904,6 +3906,20 @@ class Coordinator:
                                     outcome=logical_turn_outcome,
                                 )
                             )
+                    if terminal_result is not None and execution is not None:
+                        async def persist_and_acknowledge_terminal_render() -> None:
+                            await asyncio.to_thread(
+                                session_manager.flush_root_persist,
+                                app_session_id,
+                            )
+                            await self.lifecycle_commands.acknowledge_terminal_render(
+                                app_session_id,
+                                terminal_result.request_id,
+                            )
+
+                        await _await_cancellation_safe(
+                            persist_and_acknowledge_terminal_render(),
+                        )
                 if retry_params is not None:
                     reserved_attempt = await asyncio.to_thread(
                         session_manager.reserve_queued_prompt_delivery_attempt,

@@ -944,32 +944,56 @@ def _is_empty_assistant_scaffold(assistant: dict) -> bool:
     )
 
 
-def _unterminated_tail_candidates() -> list[tuple[str, str, str]]:
-    """Return ``(root_id, session_id, assistant_id)`` tail candidates."""
-    candidates: list[tuple[str, str, str]] = []
-    for session in session_manager.iter_all_entities():
-        messages = session.get("messages") or []
-        if not messages:
-            continue
-        assistant = messages[-1]
-        if not isinstance(assistant, dict) or assistant.get("role") != "assistant":
-            continue
-        assistant_id = str(assistant.get("id") or "")
-        session_id = str(session.get("id") or "")
-        if (
-            not assistant_id
-            or not session_id
-            or not _is_empty_assistant_scaffold(assistant)
-        ):
-            continue
-        root_id = session_manager._root_id_for(session_id)
-        if root_id:
-            candidates.append((root_id, session_id, assistant_id))
-    return candidates
+async def lifecycle_recovery_candidates(
+    coordinator,
+) -> tuple[list[tuple[str, str, str]], list[dict[str, str]]]:
+    """Return exact active and pending-terminal render identities."""
+    import lifecycle_command_store
 
+    snapshots, pending = await asyncio.gather(
+        coordinator.lifecycle_commands.active_snapshots(),
+        asyncio.to_thread(lifecycle_command_store.pending_terminal_renders),
+    )
 
-def pre_provider_orphan_candidates() -> list[tuple[str, str, str]]:
-    return _unterminated_tail_candidates()
+    def resolve() -> list[tuple[str, str, str]]:
+        identities: dict[tuple[str, str], tuple[str, str, str]] = {}
+        for session_id, snapshot in snapshots:
+            execution = snapshot.execution
+            assistant_id = (
+                execution.identity.assistant_message_id
+                if execution is not None
+                else ""
+            )
+            if not assistant_id:
+                session = session_manager.get(session_id) or {}
+                messages = session.get("messages") or []
+                assistant = messages[-1] if messages else None
+                if (
+                    isinstance(assistant, dict)
+                    and assistant.get("role") == "assistant"
+                    and _is_empty_assistant_scaffold(assistant)
+                ):
+                    assistant_id = str(assistant.get("id") or "")
+            root_id = session_manager._root_id_for(session_id)
+            if root_id and assistant_id:
+                identities[(session_id, assistant_id)] = (
+                    root_id,
+                    session_id,
+                    assistant_id,
+                )
+        for item in pending:
+            session_id = item["session_id"]
+            assistant_id = item["assistant_message_id"]
+            root_id = session_manager._root_id_for(session_id)
+            if root_id:
+                identities[(session_id, assistant_id)] = (
+                    root_id,
+                    session_id,
+                    assistant_id,
+                )
+        return list(identities.values())
+
+    return await asyncio.to_thread(resolve), pending
 
 
 def _started_turns_for_candidates(
@@ -1135,7 +1159,7 @@ async def reconcile_pre_provider_orphans(
 ) -> int:
     """Terminalize admitted turns that never acquired provider ownership."""
     if candidates is None:
-        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+        candidates, _ = await lifecycle_recovery_candidates(coordinator)
     if not candidates:
         return 0
 
@@ -1285,7 +1309,7 @@ async def reconcile_unbound_lifecycle_orphans(
     if not ownership_safe:
         return 0
     if candidates is None:
-        candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+        candidates, _ = await lifecycle_recovery_candidates(coordinator)
     snapshots = await coordinator.lifecycle_commands.active_snapshots()
     candidate_list = list(candidates)
     known_candidates = {
@@ -1515,7 +1539,9 @@ async def _reconcile_terminal_empty_assistant_tails(
     *,
     recovered: list[dict],
     ownership_documents: Optional[list[dict]],
+    pending_terminal_renders: Optional[list[dict[str, str]]] = None,
 ) -> int:
+    import lifecycle_command_store
     import user_msg_lifecycle
 
     protected_targets, protected_sessions = _descriptor_ownership(recovered)
@@ -1524,9 +1550,26 @@ async def _reconcile_terminal_empty_assistant_tails(
     )
     protected_targets.update(document_targets)
     protected_sessions.update(document_sessions)
-    candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
+    pending = (
+        pending_terminal_renders
+        if pending_terminal_renders is not None
+        else await asyncio.to_thread(
+            lifecycle_command_store.pending_terminal_renders,
+        )
+    )
     reconciled = 0
-    for _, session_id, assistant_id in candidates:
+    for item in pending:
+        session_id = item["session_id"]
+        assistant_id = item["assistant_message_id"]
+        request_id = item["request_id"]
+
+        async def acknowledge() -> None:
+            await asyncio.to_thread(
+                lifecycle_command_store.acknowledge_terminal_render,
+                session_id,
+                request_id,
+            )
+
         def turn_manager_protects() -> bool:
             return any(
                 not (target_id := str(run.get("target_message_id") or ""))
@@ -1540,18 +1583,31 @@ async def _reconcile_terminal_empty_assistant_tails(
             or turn_manager_protects()
         ):
             continue
+        obsolete = False
+        assistant_empty = False
+        lifecycle_message_id = ""
         with session_manager.batch(session_id):
             session = session_manager.get_ref(session_id)
             if session is None or not session.get("messages"):
-                continue
-            assistant = session["messages"][-1]
-            user_msg = _last_user_before(session, assistant)
-            lifecycle_message_id = (
-                str(user_msg.get("lifecycle_msg_id") or "")
-                if user_msg is not None
-                else ""
-            )
-        if not lifecycle_message_id:
+                obsolete = True
+            else:
+                assistant = session["messages"][-1]
+                if (
+                    not isinstance(assistant, dict)
+                    or assistant.get("id") != assistant_id
+                    or assistant.get("role") != "assistant"
+                ):
+                    obsolete = True
+                else:
+                    assistant_empty = _is_empty_assistant_scaffold(assistant)
+                    user_msg = _last_user_before(session, assistant)
+                    lifecycle_message_id = (
+                        str(user_msg.get("lifecycle_msg_id") or "")
+                        if user_msg is not None
+                        else ""
+                    )
+        if obsolete or lifecycle_message_id != item["lifecycle_message_id"]:
+            await acknowledge()
             continue
         snapshot = coordinator.lifecycle_commands.snapshot(session_id)
         if (
@@ -1560,14 +1616,22 @@ async def _reconcile_terminal_empty_assistant_tails(
             and snapshot.identity.lifecycle_message_id == lifecycle_message_id
         ):
             continue
-        terminal = (
-            await user_msg_lifecycle.terminal_event_for_lifecycle_async(
-                session_id,
-                lifecycle_message_id,
-            )
+        terminal = await user_msg_lifecycle.terminal_event_for_lifecycle_async(
+            session_id,
+            lifecycle_message_id,
         )
         if terminal is None:
-            continue
+            terminal = {
+                "type": (
+                    "user_message_failed"
+                    if item["outcome"] == "failed"
+                    else "user_message_done"
+                ),
+                "data": {
+                    "success": item["outcome"] == "complete",
+                    "cancelled": item["outcome"] == "stopped",
+                },
+            }
         snapshot = coordinator.lifecycle_commands.snapshot(session_id)
         if (
             turn_manager_protects()
@@ -1588,8 +1652,19 @@ async def _reconcile_terminal_empty_assistant_tails(
             fallback_error=_MISSING_BOUND_RUN_ERROR,
         )
         if outcome is None:
+            if not assistant_empty:
+                await asyncio.to_thread(
+                    session_manager.flush_root_persist,
+                    session_id,
+                )
+                await acknowledge()
             continue
+        await asyncio.to_thread(
+            session_manager.flush_root_persist,
+            session_id,
+        )
         await coordinator.turn_manager.emit_run_state(session_id)
+        await acknowledge()
         reconciled += 1
     if reconciled:
         logger.warning(
@@ -1599,12 +1674,31 @@ async def _reconcile_terminal_empty_assistant_tails(
     return reconciled
 
 
+async def reconcile_pending_terminal_renders(
+    coordinator,
+    *,
+    recovered: list[dict],
+    ownership_documents: Optional[list[dict]],
+    ownership_safe: bool = True,
+    pending_terminal_renders: Optional[list[dict[str, str]]] = None,
+) -> int:
+    if not ownership_safe:
+        return 0
+    return await _reconcile_terminal_empty_assistant_tails(
+        coordinator,
+        recovered=recovered,
+        ownership_documents=ownership_documents,
+        pending_terminal_renders=pending_terminal_renders,
+    )
+
+
 async def reconcile_missing_bound_lifecycle_orphans(
     coordinator,
     recovered: list[dict],
     *,
     ownership_documents: Optional[list[dict]] = None,
     ownership_safe: bool = True,
+    pending_terminal_renders: Optional[list[dict[str, str]]] = None,
 ) -> int:
     import user_msg_lifecycle
 
@@ -1732,10 +1826,12 @@ async def reconcile_missing_bound_lifecycle_orphans(
             "recovery: released %d missing bound lifecycle execution(s)",
             reconciled,
         )
-    await _reconcile_terminal_empty_assistant_tails(
+    await reconcile_pending_terminal_renders(
         coordinator,
         recovered=recovered,
         ownership_documents=ownership_documents,
+        ownership_safe=ownership_safe,
+        pending_terminal_renders=pending_terminal_renders,
     )
     return reconciled
 
@@ -3235,6 +3331,20 @@ async def _emit_recovered_user_message_terminal_on_main(
         else "failed"
     )
     lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+    terminal_result = None
+
+    async def acknowledge_terminal_render() -> None:
+        if terminal_result is None:
+            return
+        await asyncio.to_thread(
+            session_manager.flush_root_persist,
+            persist_sid,
+        )
+        await lifecycle_commands.acknowledge_terminal_render(
+            app_session_id,
+            terminal_result.request_id,
+        )
+
     if lifecycle_commands is not None:
         snapshot = lifecycle_commands.snapshot(app_session_id)
         execution = snapshot.execution
@@ -3272,7 +3382,7 @@ async def _emit_recovered_user_message_terminal_on_main(
                     "recovered terminal execution identity is ambiguous"
                 )
             else:
-                await lifecycle_commands.finish_execution_and_turn(
+                terminal_result = await lifecycle_commands.finish_execution_and_turn(
                     app_session_id,
                     execution_identity=execution.identity,
                     provider_run_id=run_id,
@@ -3288,6 +3398,7 @@ async def _emit_recovered_user_message_terminal_on_main(
         if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
             persist_sid, lifecycle_msg_id,
         ) is not None:
+            await acknowledge_terminal_render()
             return
     except Exception:
         logger.exception("recovery lifecycle terminal check failed")
@@ -3323,6 +3434,7 @@ async def _emit_recovered_user_message_terminal_on_main(
             lifecycle_msg_id,
         ) is None:
             raise RuntimeError("recovery lifecycle terminal was not persisted")
+        await acknowledge_terminal_render()
     except Exception:
         logger.exception(
             "recovery lifecycle terminal emit failed sid=%s run=%s",

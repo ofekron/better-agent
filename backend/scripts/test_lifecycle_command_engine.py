@@ -1139,7 +1139,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 4
     assert migrated.execute(
         "SELECT COUNT(*) FROM authority_owner"
     ).fetchone()[0] == 0
@@ -1274,7 +1274,102 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 3
+        assert type(version) is int and version == 4
+
+
+async def test_terminal_render_reconciliation_inbox() -> None:
+    engine = LifecycleCommandEngine(EventBus())
+    await engine.bind()
+    turn = identity("terminal-render")
+    execution = ExecutionTurnIdentity(
+        "execution-terminal-render",
+        "assistant-terminal-render",
+        "native",
+    )
+    await engine.begin_turn(
+        request_id="terminal-render-begin",
+        session_id="terminal-render-session",
+        identity=turn,
+        execution_policy="single",
+    )
+    await engine.start_execution(
+        "terminal-render-session",
+        execution_identity=execution,
+    )
+    await engine.bind_execution_run(
+        "terminal-render-session",
+        execution_identity=execution,
+        provider_run_id="provider-terminal-render",
+    )
+    await engine.finish_execution_and_turn(
+        "terminal-render-session",
+        execution_identity=execution,
+        provider_run_id="provider-terminal-render",
+        outcome="failed",
+    )
+    pending = [
+        item
+        for item in lifecycle_command_store.pending_terminal_renders()
+        if item["session_id"] == "terminal-render-session"
+    ]
+    assert len(pending) == 1
+    first_request_id = pending[0]["request_id"]
+    assert first_request_id
+    assert pending[0] == {
+        "session_id": "terminal-render-session",
+        "request_id": first_request_id,
+        "lifecycle_message_id": turn.lifecycle_message_id,
+        "execution_turn_id": execution.execution_turn_id,
+        "assistant_message_id": execution.assistant_message_id,
+        "outcome": "failed",
+    }
+    replacement_turn = identity("terminal-render-replacement")
+    replacement_execution = ExecutionTurnIdentity(
+        "execution-terminal-render-replacement",
+        "assistant-terminal-render-replacement",
+        "native",
+    )
+    await engine.begin_turn(
+        request_id="terminal-render-replacement-begin",
+        session_id="terminal-render-session",
+        identity=replacement_turn,
+        execution_policy="single",
+    )
+    await engine.start_execution(
+        "terminal-render-session",
+        execution_identity=replacement_execution,
+    )
+    await engine.bind_execution_run(
+        "terminal-render-session",
+        execution_identity=replacement_execution,
+        provider_run_id="provider-terminal-render-replacement",
+    )
+    replacement_result = await engine.finish_execution_and_turn(
+        "terminal-render-session",
+        execution_identity=replacement_execution,
+        provider_run_id="provider-terminal-render-replacement",
+        outcome="complete",
+    )
+    assert not lifecycle_command_store.acknowledge_terminal_render(
+        "terminal-render-session",
+        first_request_id,
+    )
+    pending = [
+        item
+        for item in lifecycle_command_store.pending_terminal_renders()
+        if item["session_id"] == "terminal-render-session"
+    ]
+    assert len(pending) == 1
+    assert pending[0]["request_id"] == replacement_result.request_id
+    assert await engine.acknowledge_terminal_render(
+        "terminal-render-session",
+        replacement_result.request_id,
+    )
+    assert all(
+        item["session_id"] != "terminal-render-session"
+        for item in lifecycle_command_store.pending_terminal_renders()
+    )
+    await engine.close()
 
 
 async def main() -> None:
@@ -1290,6 +1385,7 @@ async def main() -> None:
     await test_retry_requires_fresh_durable_delivery_attempt()
     await test_store_initialization_and_atomic_compare_insert()
     await test_execution_subturn_state_matrix()
+    await test_terminal_render_reconciliation_inbox()
     test_v1_migration_and_atomic_rollback()
     test_handler_validation_and_sqlite_scaling_contract()
     print("lifecycle command engine integration: ok")

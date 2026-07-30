@@ -28,9 +28,10 @@ from provider import (
 )
 from run_recovery import (
     integrate_recovered_runs,
+    lifecycle_recovery_candidates,
     mark_recovered_runs_terminal,
-    pre_provider_orphan_candidates,
     reconcile_missing_bound_lifecycle_orphans,
+    reconcile_pending_terminal_renders,
     reconcile_pre_provider_orphans,
     reconcile_unbound_lifecycle_orphans,
 )
@@ -127,7 +128,7 @@ async def _reconcile_queued_delivery_attempt(
             raise RuntimeError(
                 "queued retry collides with an active recovered execution"
             )
-        await _coordinator_ref.lifecycle_commands.finish_turn(
+        terminal_result = await _coordinator_ref.lifecycle_commands.finish_turn(
             request_id=(
                 f"startup-reconcile:{lifecycle_msg_id}:{queued_attempt}:finish"
             ),
@@ -135,6 +136,21 @@ async def _reconcile_queued_delivery_attempt(
             identity=active_identity,
             outcome="failed",
         )
+        pending_terminal_render = await asyncio.to_thread(
+            lifecycle_command_store.pending_terminal_render,
+            session_id,
+        )
+        if (
+            pending_terminal_render is not None
+            and pending_terminal_render["request_id"]
+            == terminal_result.request_id
+        ):
+            await reconcile_pending_terminal_renders(
+                _coordinator_ref,
+                recovered=[],
+                ownership_documents=[],
+                pending_terminal_renders=[pending_terminal_render],
+            )
         return queued_attempt
     if transition is None or active_same_turn:
         return queued_attempt
@@ -342,8 +358,8 @@ async def _recover_in_flight_task() -> None:
     try:
         loop = asyncio.get_running_loop()
         candidate_task = asyncio.create_task(
-            asyncio.to_thread(pre_provider_orphan_candidates),
-            name="startup-pre-provider-orphan-candidates",
+            lifecycle_recovery_candidates(_coordinator_ref),
+            name="startup-lifecycle-recovery-candidates",
         )
         recovery_task = asyncio.create_task(
             _scan_recovered_runs(
@@ -391,7 +407,7 @@ async def _recover_in_flight_task() -> None:
         )
         if live_session_ids:
             startup_recovery_gate.register_session_recovery(live_session_ids)
-        candidates = await candidate_task
+        candidates, pending_terminal_renders = await candidate_task
         candidate_targets = {
             (session_id, assistant_id)
             for _, session_id, assistant_id in candidates
@@ -410,6 +426,7 @@ async def _recover_in_flight_task() -> None:
             recovered,
             ownership_documents=ownership_documents,
             ownership_safe=ownership_safe,
+            pending_terminal_renders=pending_terminal_renders,
         )
         await reconcile_pre_provider_orphans(
             _coordinator_ref,

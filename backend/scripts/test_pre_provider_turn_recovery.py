@@ -26,7 +26,12 @@ from event_journal import publish_event  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from ingestion_versions import marker_matches_current, write_marker  # noqa: E402
 from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
-from lifecycle_command_model import ExecutionTurnIdentity, UserTurnIdentity  # noqa: E402
+from lifecycle_command_model import (  # noqa: E402
+    ExecutionTurnIdentity,
+    ExecutionTurnSnapshot,
+    LifecycleSnapshot,
+    UserTurnIdentity,
+)
 from run_recovery import (  # noqa: E402
     reconcile_pre_provider_orphans,
     reconcile_unbound_lifecycle_orphans,
@@ -37,6 +42,9 @@ import provider  # noqa: E402
 import run_recovery  # noqa: E402
 import runs_dir  # noqa: E402
 import user_msg_lifecycle  # noqa: E402
+import lifecycle_command_store  # noqa: E402
+
+lifecycle_command_store.initialize()
 
 
 class _TurnManager:
@@ -58,12 +66,42 @@ class _TurnManager:
         )
 
 
+_TEST_CANDIDATES: list[tuple[str, str]] = []
+
+
+class _LegacyLifecycleCommands:
+    async def active_snapshots(self):
+        return [
+            (
+                session_id,
+                LifecycleSnapshot(
+                    phase="starting",
+                    identity=UserTurnIdentity(
+                        f"user-{assistant_id}",
+                        f"lifecycle-{assistant_id}",
+                    ),
+                    revision=1,
+                    execution=ExecutionTurnSnapshot(
+                        "starting",
+                        ExecutionTurnIdentity(
+                            f"execution-{assistant_id}",
+                            assistant_id,
+                            "native",
+                        ),
+                    ),
+                    execution_policy="single",
+                ),
+            )
+            for session_id, assistant_id in _TEST_CANDIDATES
+        ]
+
+
 def _coordinator(
     lifecycle_commands: LifecycleCommandEngine | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         turn_manager=_TurnManager(),
-        lifecycle_commands=lifecycle_commands,
+        lifecycle_commands=lifecycle_commands or _LegacyLifecycleCommands(),
     )
 
 
@@ -99,6 +137,7 @@ def _seed_tail(
         assistant["completed_at"] = "2026-07-28T00:00:00+00:00"
     session_manager.append_assistant_msg(session_id, assistant)
     session_manager.flush_pending_persists()
+    _TEST_CANDIDATES.append((session_id, assistant_id))
     return session_id, user_id, assistant_id, turn_id
 
 

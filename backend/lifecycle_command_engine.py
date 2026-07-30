@@ -441,6 +441,18 @@ class LifecycleCommandEngine:
             lifecycle_command_store.active_session_snapshots,
         )
 
+    async def acknowledge_terminal_render(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> bool:
+        self._assert_ready()
+        return await asyncio.to_thread(
+            lifecycle_command_store.acknowledge_terminal_render,
+            session_id,
+            request_id,
+        )
+
     async def recover_unbound_execution(
         self,
         session_id: str,
