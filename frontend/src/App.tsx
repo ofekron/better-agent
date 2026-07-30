@@ -130,7 +130,8 @@ import type { ChatMessage, FileAttachment, FileDiscussion, FileFocus, Orchestrat
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
-import { isLeakedProviderMirror } from "./utils/modelDrift";
+import { isLeakedProfileMirror } from "./utils/modelDrift";
+import { useRuntimeProfiles } from "./hooks/useRuntimeProfiles";
 import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
@@ -1992,9 +1993,19 @@ function AppMain({
     if (!providerId) return null;
     return providers.find((p) => p.id === providerId) ?? null;
   }, [providers, currentSession?.provider_id]);
-  const defaultProvider = useMemo(
-    () => providers.find((p) => p.id === defaultProviderId) ?? null,
-    [providers, defaultProviderId],
+  // Runtime-profile snapshot: default profile drives the no-session model
+  // mirror and the drift/rate-limit prefill chains.
+  const { snapshot: runtimeProfilesSnapshot, profiles: runtimeProfiles } = useRuntimeProfiles();
+  const defaultRuntimeProfile = useMemo(
+    () =>
+      runtimeProfiles.find(
+        (p) => p.id === runtimeProfilesSnapshot?.default_runtime_profile_id,
+      ) ?? null,
+    [runtimeProfiles, runtimeProfilesSnapshot],
+  );
+  const runtimeProfileLastModels = useMemo(
+    () => runtimeProfilesSnapshot?.last_models ?? {},
+    [runtimeProfilesSnapshot],
   );
   const currentSessionCanSteer = !!currentProvider?.supports_steering;
   const currentSessionCanFork =
@@ -2021,27 +2032,28 @@ function AppMain({
       setProviders(pd.providers);
       setDefaultProviderId(pd.defaultProviderId);
       const active = pd.providers.find((p) => p.id === pd.defaultProviderId);
-      if (active) {
-        setProviderName(active.name);
-        // Only set model to the active provider's default when no session
-        // is selected. When a session IS selected, the model must come from
-        // the session record — setting it here triggers the drift detector
-        // which PATCHes the active provider's default onto sessions that
-        // use a DIFFERENT provider (e.g. Codex session + Z.AI active
-        // → model gets overwritten to glm-5.1).
-        if (!currentSessionRef.current) {
-          setModel(active.last_model || active.default_model || "");
-        }
-      } else {
-        setProviderName("");
-        if (!currentSessionRef.current) {
-          setModel("");
-        }
-      }
+      setProviderName(active ? active.name : "");
     } catch {
       // ignore — UI keeps stale label until next sync
     }
   }, []);
+
+  // Mirror the DEFAULT runtime profile's model into the global `model` state
+  // while no session is focused. When a session IS selected, the model must
+  // come from the session record — setting it here would trigger the drift
+  // detector, which PATCHes the default profile's model onto sessions backed
+  // by a DIFFERENT provider.
+  useEffect(() => {
+    if (!runtimeProfilesSnapshot) return;
+    if (currentSessionRef.current) return;
+    setModel(
+      defaultRuntimeProfile
+        ? runtimeProfilesSnapshot.last_models?.[defaultRuntimeProfile.id]
+          || defaultRuntimeProfile.default_model
+          || ""
+        : "",
+    );
+  }, [runtimeProfilesSnapshot, defaultRuntimeProfile]);
   useEffect(() => {
     if (authStatus === "authed" || !authStatus) {
       syncProvider();
@@ -2275,6 +2287,7 @@ function AppMain({
                 model: queued.model,
                 cwd: queued.cwd,
                 orchestrationMode: queued.orchestration_mode,
+                runtimeProfileId: queued.runtime_profile_id || undefined,
                 providerId: queued.provider_id,
                 nodeId: queued.node_id,
                 reasoningEffort: queued.reasoning_effort,
@@ -4531,10 +4544,17 @@ function AppMain({
       return;
     }
     if (currentSession.id !== lastSyncedSessionIdRef.current) return;
-    // Never persist a model that leaked from the active/default-provider
-    // mirror onto a session whose own provider differs — that write would
-    // corrupt the session's model (and now 400s at the backend, spamming).
-    if (isLeakedProviderMirror(model, currentProvider, defaultProvider)) return;
+    // Never persist a model that leaked from the default-profile mirror onto
+    // a session whose own provider differs — that write would corrupt the
+    // session's model (and now 400s at the backend, spamming).
+    if (
+      isLeakedProfileMirror(
+        model,
+        currentSession.provider_id,
+        defaultRuntimeProfile,
+        runtimeProfileLastModels,
+      )
+    ) return;
     // Gate on `model` being non-empty. Until the active provider's
     // default_model is pulled from /api/providers, local `model` is "" —
     // comparing against the session's stored model would always look
@@ -4555,7 +4575,7 @@ function AppMain({
       },
       { silent: true },
     ).then(() => refreshSessions()).catch(() => {});
-  }, [model, currentSession, refreshSessions, clientId, defaultProvider, currentProvider]);
+  }, [model, currentSession, refreshSessions, clientId, defaultRuntimeProfile, runtimeProfileLastModels]);
 
   // user_message_persisted ack is now handled imperatively by
   // `handleUserMessagePersisted` (passed to useWebSocket above) —
@@ -5110,12 +5130,23 @@ function AppMain({
   );
 
   const handleVoiceNewSession = useCallback(async () => {
-    const provider = currentProvider ?? defaultProvider;
-    const nextModel = currentSession?.model || model || provider?.last_model || provider?.default_model || "";
-    const nextProviderId = currentSession?.provider_id ?? provider?.id;
+    // Clone the focused session's runtime — its live profile when one
+    // resolves, else its raw stamped provider/runner (legacy). With no
+    // session focused, the default runtime profile seeds the new session.
+    const liveSessionProfile = currentSession?.runtime_profile_id
+      ? runtimeProfiles.find((p) => p.id === currentSession.runtime_profile_id) ?? null
+      : null;
+    const profile = currentSession ? liveSessionProfile : defaultRuntimeProfile;
+    const profileModel = profile
+      ? runtimeProfileLastModels[profile.id] || profile.default_model || ""
+      : "";
+    const nextModel = currentSession?.model || model || profileModel;
     const nextCwd = selectedProjectPath || currentSession?.cwd || cwd;
+    const providerForMode = currentProvider
+      ?? providers.find((p) => p.id === profile?.provider_id)
+      ?? null;
     const nextMode: OrchestrationMode =
-      currentSession?.orchestration_mode ?? (provider?.supports_manager_mode ? "team" : "native");
+      currentSession?.orchestration_mode ?? (providerForMode?.supports_manager_mode ? "team" : "native");
     if (!connected || !nextModel || !nextCwd) return;
 
     const session = await createSession({
@@ -5123,16 +5154,26 @@ function AppMain({
       model: nextModel,
       cwd: nextCwd,
       orchestrationMode: nextMode,
-      providerId: nextProviderId,
+      ...(profile
+        ? { runtimeProfileId: profile.id }
+        : {
+            providerId: currentSession?.provider_id,
+            runner: currentSession?.runner,
+          }),
       nodeId: currentSession?.node_id ?? "primary",
-      reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
-      runner: currentSession?.runner || provider?.runner,
+      reasoningEffort:
+        currentSession?.reasoning_effort
+        || (profile
+          ? runtimeProfilesSnapshot?.last_reasoning_efforts?.[profile.id]
+            || profile.default_reasoning_effort
+          : "")
+        || undefined,
       harnessProfileId: currentSession?.harness_profile_id || undefined,
     });
     if (session?.id) {
       navigateToCreatedSession(session);
     }
-  }, [defaultProvider, connected, createSession, currentProvider, currentSession, cwd, model, navigateToCreatedSession, selectedProjectPath]);
+  }, [connected, createSession, currentProvider, currentSession, cwd, model, navigateToCreatedSession, selectedProjectPath, providers, runtimeProfiles, defaultRuntimeProfile, runtimeProfileLastModels, runtimeProfilesSnapshot]);
 
   useEffect(() => {
     const onVoiceNewSession = () => {
@@ -5247,30 +5288,32 @@ function AppMain({
   }, [currentSession, refreshSessions, stopStreaming]);
 
   // Single source of truth for the one-click rate-limit fallback: which
-  // provider/model/effort "Continue on another provider" will use. Drives
-  // both the POST body and the button label.
+  // runtime profile/model/effort "Continue on another provider" will use.
+  // Drives both the POST body and the button label.
   const rateLimitFallbackTarget = useMemo(() => {
     if (!currentSession) return null;
     const currentProviderId = currentSession.provider_id ?? defaultProviderId;
-    const nextProvider = providers.find((provider) => {
-      if (provider.id === currentProviderId || provider.suspended) return false;
-      return !!(provider.last_model || provider.default_model);
+    const nextProfile = runtimeProfiles.find((profile) => {
+      if (profile.provider_id === currentProviderId) return false;
+      const provider = providers.find((p) => p.id === profile.provider_id);
+      if (!provider || provider.suspended) return false;
+      return !!(runtimeProfileLastModels[profile.id] || profile.default_model);
     });
-    if (!nextProvider) return null;
-    const model = nextProvider.last_model || nextProvider.default_model;
+    if (!nextProfile) return null;
+    const model = runtimeProfileLastModels[nextProfile.id] || nextProfile.default_model;
     const effort =
-      nextProvider.default_reasoning_effort ||
+      nextProfile.default_reasoning_effort ||
       currentSession.reasoning_effort ||
       "";
-    return { provider: nextProvider, model, effort };
-  }, [currentSession, defaultProviderId, providers]);
+    return { profile: nextProfile, model, effort };
+  }, [currentSession, defaultProviderId, providers, runtimeProfiles, runtimeProfileLastModels]);
 
   const rateLimitFallbackLabel = useMemo(() => {
     const target = rateLimitFallbackTarget;
     if (!target) return null;
     const base = t("rateLimit.continueOnTarget", {
       defaultValue: "Continue on {{provider}} · {{model}}",
-      provider: target.provider.name,
+      provider: target.profile.name,
       model: target.model,
     });
     if (!target.effort) return base;
@@ -5280,7 +5323,7 @@ function AppMain({
   const handleContinueRateLimitOnAnotherProvider = useCallback(
     async (assistantMessage: ChatMessage) => {
       if (!currentSession || !rateLimitFallbackTarget) return;
-      const { provider, model, effort } = rateLimitFallbackTarget;
+      const { profile, model, effort } = rateLimitFallbackTarget;
       try {
         await progressTrackedFetch(
           `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
@@ -5290,7 +5333,7 @@ function AppMain({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               assistant_message_id: assistantMessage.id,
-              provider_id: provider.id,
+              runtime_profile_id: profile.id,
               model,
               reasoning_effort: effort || undefined,
               client_id: clientId,
@@ -5312,7 +5355,7 @@ function AppMain({
     async (updates: SelectorUpdates) => {
       const assistantMessage = rateLimitPickFor;
       if (!currentSession || !assistantMessage) return;
-      if (!updates.provider_id || !updates.model) return;
+      if (!updates.runtime_profile_id || !updates.model) return;
       setRateLimitPickSaving(true);
       try {
         await progressTrackedFetch(
@@ -5323,7 +5366,7 @@ function AppMain({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               assistant_message_id: assistantMessage.id,
-              provider_id: updates.provider_id,
+              runtime_profile_id: updates.runtime_profile_id,
               model: updates.model,
               client_id: clientId,
             }),
@@ -5559,11 +5602,10 @@ function AppMain({
         name: localName,
         model: config.main.model,
         reasoning_effort: config.main.reasoningEffort,
-        runner: config.main.runner,
         permission: config.main.permission,
         cwd: config.cwd,
         orchestration_mode: config.orchestrationMode,
-        provider_id: config.main.providerId,
+        runtime_profile_id: config.main.runtimeProfileId,
         harness_profile_id: config.harnessProfileId || "",
         node_id: config.nodeId,
         created_at: now,
@@ -5691,13 +5733,12 @@ function AppMain({
           model: config.main.model,
           cwd: config.cwd,
           orchestrationMode: config.orchestrationMode,
-          providerId: config.main.providerId,
+          runtimeProfileId: config.main.runtimeProfileId,
           ...(config.fileEditEnabled
             ? { fileEditEnabled: true, fileEditPath: config.fileEditPath }
             : {}),
           nodeId: config.nodeId,
           reasoningEffort: config.main.reasoningEffort,
-          runner: config.main.runner,
           permission: config.main.permission,
           harnessProfileId: config.harnessProfileId || undefined,
           folderId: config.folderId,

@@ -7,6 +7,8 @@ import {
 } from "../src/components/NewSessionModal";
 import type { Provider } from "../src/types";
 import { cacheProviders } from "../src/utils/providerCache";
+import { cacheRuntimeProfilesSnapshot } from "../src/hooks/useRuntimeProfiles";
+import { makeProvider, makeRuntimeProfile, makeRuntimeProfilesSnapshot } from "./fixtures";
 
 vi.mock("../src/hooks/useMachines", () => ({
   useMachines: () => ({ machines: [] }),
@@ -16,31 +18,10 @@ vi.mock("../src/hooks/useLocalNodeId", () => ({
   useLocalNodeId: () => "primary",
 }));
 
-const provider: Provider = {
+const provider: Provider = makeProvider({
   id: "cached-claude",
   name: "Cached Claude",
-  kind: "claude",
-  mode: "subscription",
-  base_url: "",
-  config_dir: "",
-  custom_models: [],
-  default_model: "cached-default",
-  runner: "native",
-  runner_options: ["native"],
-  suspended: false,
-  reasoning_effort_options: ["low", "medium", "high", "xhigh"],
-  default_reasoning_effort: "medium",
-  permission_options: {},
-  default_permission: {},
-  has_api_key: false,
-  supports_fork: true,
-  supports_manager_mode: true,
-  supports_rewind: true,
-  supports_steering: true,
-  supports_native_subagents: false,
-  supports_reasoning_effort: true,
-  capability_overrides: {},
-};
+});
 
 function renderModal(open: boolean, onClose: () => void, onCreate: () => void = vi.fn()) {
   return render(
@@ -65,6 +46,15 @@ describe("NewSessionModal prompt draft", () => {
   beforeEach(() => {
     localStorage.clear();
     cacheProviders([provider], provider.id);
+    cacheRuntimeProfilesSnapshot(makeRuntimeProfilesSnapshot({
+      runtime_profiles: [makeRuntimeProfile({
+        id: "rp-cached",
+        provider_id: provider.id,
+        name: "Cached Claude",
+        default_model: "cached-default",
+      })],
+      default_runtime_profile_id: "rp-cached",
+    }));
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
   });
 

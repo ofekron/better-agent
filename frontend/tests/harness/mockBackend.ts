@@ -285,6 +285,42 @@ export class MockBackend {
     this.originalFetch = undefined;
   }
 
+  /** Runtime-profile projection DERIVED from the provider seed (one
+   * native-runner profile per provider) so harness tests that override
+   * providers get matching profiles for free. Mirrors the real backend's
+   * snapshot shape. */
+  private runtimeProfilesSnapshot() {
+    const now = "2026-01-01T00:00:00Z";
+    const profiles = this.state.providers.map((provider) => {
+      const legacy = provider as unknown as {
+        runner?: string;
+        default_model?: string;
+        default_reasoning_effort?: string;
+      };
+      return {
+        id: `rp-${provider.id}`,
+        provider_id: provider.id,
+        runner: legacy.runner ?? "native",
+        name: provider.name,
+        default_model: legacy.default_model ?? "",
+        default_reasoning_effort: legacy.default_reasoning_effort ?? "",
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+      };
+    });
+    const defaultId = this.state.default_provider_id
+      ? `rp-${this.state.default_provider_id}`
+      : profiles[0]?.id ?? null;
+    return {
+      runtime_profiles: profiles,
+      default_runtime_profile_id: defaultId,
+      deleted_providers: [],
+      last_models: {},
+      last_reasoning_efforts: {},
+    };
+  }
+
   private findMessage(session: Session, messageId: string): unknown {
     const found = session.messages?.find((message) => message.id === messageId);
     if (found) return found;
@@ -722,19 +758,31 @@ export class MockBackend {
       return { discussion };
     }
     if (method === "POST" && path === "/api/sessions") {
-      const b = body as Partial<Session> & { client_session_id?: string };
+      const b = body as Partial<Session> & {
+        client_session_id?: string;
+        runtime_profile_id?: string;
+      };
       const existing = b.client_session_id
         ? this.state.sessions.find((s) => s.id === b.client_session_id)
         : undefined;
       if (existing) return existing;
-      const providerId = typeof b.provider_id === "string" && b.provider_id
-        ? b.provider_id
-        : this.state.default_provider_id || this.state.providers[0]?.id || "";
+      // Runtime profile stamps provider (like the real backend); the raw
+      // provider_id param remains the legacy/explicit-override path.
+      const profile = typeof b.runtime_profile_id === "string" && b.runtime_profile_id
+        ? this.runtimeProfilesSnapshot().runtime_profiles.find(
+            (p) => p.id === b.runtime_profile_id,
+          )
+        : undefined;
+      const providerId = profile?.provider_id
+        ?? (typeof b.provider_id === "string" && b.provider_id
+          ? b.provider_id
+          : this.state.default_provider_id || this.state.providers[0]?.id || "");
       const s: Session = {
         id: b.client_session_id || `sess-${this.state.sessions.length + 1}`,
         name: b.name || "New Session",
         model: b.model || "claude-sonnet-4-6",
         provider_id: providerId,
+        runtime_profile_id: profile?.id ?? null,
         reasoning_effort: b.reasoning_effort || "",
         permission: b.permission || {},
         harness_profile_id: b.harness_profile_id || "",
@@ -869,6 +917,16 @@ export class MockBackend {
       if (sub === "/selectors" && method === "PATCH") {
         if (session) {
           const b = body as Partial<Session>;
+          if (b.runtime_profile_id) {
+            const profile = this.runtimeProfilesSnapshot().runtime_profiles.find(
+              (p) => p.id === b.runtime_profile_id,
+            );
+            if (profile) {
+              session.runtime_profile_id = profile.id;
+              session.provider_id = profile.provider_id;
+              session.runner = profile.runner as Session["runner"];
+            }
+          }
           if (b.provider_id) session.provider_id = b.provider_id;
           if (b.model) session.model = b.model;
           if (b.reasoning_effort !== undefined)
@@ -1283,6 +1341,10 @@ export class MockBackend {
         default_provider_id: this.state.default_provider_id,
         providers: this.state.providers,
       };
+    }
+    if (method === "GET" && path === "/api/runtime-profiles") {
+      if (this.state.installationProfile.setup_required) return setupGate();
+      return this.runtimeProfilesSnapshot();
     }
     if (method === "GET" && path === "/api/config") return this.state.config;
     if (method === "POST" && path === "/api/config") return { ok: true };

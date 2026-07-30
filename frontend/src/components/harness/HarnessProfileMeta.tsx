@@ -4,9 +4,10 @@ import { API } from "../../api";
 import { trackedFetch } from "../../progress/store";
 import type { Provider } from "../../types";
 import type { HarnessProfile } from "../../types";
-import { effortsForRunner, runnerForProvider } from "../modelPicker";
+import { effortsForRunner } from "../modelPicker";
 import type { HarnessFieldWrite } from "./types";
 import { useProviderModelCatalog } from "../../hooks/useProviderModelCatalog";
+import { useRuntimeProfiles } from "../../hooks/useRuntimeProfiles";
 import { ModelCatalogStatus } from "../ModelCatalogStatus";
 
 interface ProfileSummary {
@@ -23,30 +24,35 @@ interface Props {
 }
 
 const BASE_FIELD = "base_profile_id";
-const PROVIDER_FIELD = "default_provider_id";
+const RUNTIME_PROFILE_FIELD = "default_runtime_profile_id";
 const MODEL_FIELD = "default_model";
 const EFFORT_FIELD = "default_reasoning_effort";
 const PROVISIONING_PROMPT_FIELD = "provisioning_prompt";
 
-/** Base pointer + provider/model/effort pins. These are scalar profile fields,
- * not deltas over Default, so they render here rather than through the generic
- * descriptor renderer. Every write routes through the same /fields path. */
+/** Base pointer + runtime-profile/model/effort pins. These are scalar profile
+ * fields, not deltas over Default, so they render here rather than through the
+ * generic descriptor renderer. Every write routes through the same /fields
+ * path. */
 export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Props) {
   const { t } = useTranslation();
   const [providers, setProviders] = useState<Provider[]>([]);
+  const { snapshot, profiles: runtimeProfiles } = useRuntimeProfiles();
 
-  const pinnedProviderId = profile.default_provider_id ?? "";
+  const pinnedRuntimeProfileId = profile.default_runtime_profile_id ?? "";
   const pinnedModel = profile.default_model ?? "";
   const pinnedEffort = profile.default_reasoning_effort ?? "";
   const provisioningPrompt = profile.provisioning_prompt ?? "";
   const baseId = profile.base_profile_id ?? "";
+  const pinnedRuntimeProfile =
+    (snapshot?.runtime_profiles ?? []).find((item) => item.id === pinnedRuntimeProfileId)
+    ?? null;
   const {
     catalog,
     networkState,
     refresh,
     refreshing,
     refreshError,
-  } = useProviderModelCatalog(pinnedProviderId);
+  } = useProviderModelCatalog(pinnedRuntimeProfile?.provider_id ?? "");
   const models = catalog?.models ?? [];
   const [provisioningPromptDraft, setProvisioningPromptDraft] = useState(provisioningPrompt);
 
@@ -76,15 +82,20 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
     [profiles, profile.id],
   );
 
-  const pinnedProvider = providers.find((item) => item.id === pinnedProviderId);
+  const pinnedProvider = providers.find(
+    (item) => item.id === pinnedRuntimeProfile?.provider_id,
+  );
   // Keep the current pin visible even if the live catalog no longer lists it.
   const modelOptions = [...models];
   if (pinnedModel && !modelOptions.includes(pinnedModel)) {
     modelOptions.unshift(pinnedModel);
   }
-  const effortOptions = pinnedProvider
-    ? effortsForRunner(pinnedProvider, runnerForProvider(pinnedProvider))
+  const effortOptions = pinnedProvider && pinnedRuntimeProfile
+    ? effortsForRunner(pinnedProvider, pinnedRuntimeProfile.runner)
     : [];
+  // A tombstoned pin stays visible (badged) so the stored value is truthful;
+  // only live profiles are offered for new picks.
+  const pinnedTombstone = pinnedRuntimeProfile?.deleted_at ? pinnedRuntimeProfile : null;
 
   const write = (field: string, value: string) => onWrite({ path: ["profile_meta", field], value });
 
@@ -109,15 +120,20 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
       </div>
 
       <div className="harness-item-row">
-        <span className="harness-item-label">{t("harnessProfile.defaultProviderLabel")}</span>
+        <span className="harness-item-label">{t("harnessProfile.defaultRuntimeProfileLabel")}</span>
         <select
           className="harness-setting-input"
-          value={pinnedProviderId}
+          value={pinnedRuntimeProfileId}
           disabled={disabled}
-          onChange={(e) => write(PROVIDER_FIELD, e.target.value)}
+          onChange={(e) => write(RUNTIME_PROFILE_FIELD, e.target.value)}
         >
           <option value="">{t("harnessProfile.pinNone")}</option>
-          {providers.map((item) => (
+          {pinnedTombstone ? (
+            <option value={pinnedTombstone.id} disabled>
+              {pinnedTombstone.name} — {t("runtimeProfile.deletedBadge")}
+            </option>
+          ) : null}
+          {runtimeProfiles.map((item) => (
             <option key={item.id} value={item.id}>{item.name}</option>
           ))}
         </select>
@@ -129,7 +145,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
         <select
           className="harness-setting-input"
           value={pinnedModel}
-          disabled={disabled || !pinnedProviderId}
+          disabled={disabled || !pinnedRuntimeProfileId}
           onChange={(e) => write(MODEL_FIELD, e.target.value)}
         >
           <option value="">{t("harnessProfile.pinNone")}</option>
@@ -154,7 +170,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
         <select
           className="harness-setting-input"
           value={pinnedEffort}
-          disabled={disabled || !pinnedProviderId}
+          disabled={disabled || !pinnedRuntimeProfileId}
           onChange={(e) => write(EFFORT_FIELD, e.target.value)}
         >
           <option value="">{t("harnessProfile.pinNone")}</option>

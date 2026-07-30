@@ -13,6 +13,8 @@ import type {
 } from "../src/lib/voiceRecognition";
 import type { Provider } from "../src/types";
 import { cacheProviders } from "../src/utils/providerCache";
+import { cacheRuntimeProfilesSnapshot } from "../src/hooks/useRuntimeProfiles";
+import { makeProvider, makeRuntimeProfile, makeRuntimeProfilesSnapshot } from "./fixtures";
 
 let handlers: VoiceRecognizerHandlers | null = null;
 
@@ -39,31 +41,23 @@ vi.mock("../src/hooks/useLocalNodeId", () => ({
   useLocalNodeId: () => "primary",
 }));
 
-const provider: Provider = {
+const provider: Provider = makeProvider({
   id: "cached-claude",
   name: "Cached Claude",
-  kind: "claude",
-  mode: "subscription",
-  base_url: "",
-  config_dir: "",
-  custom_models: [],
-  default_model: "cached-default",
-  runner: "native",
-  runner_options: ["native"],
-  suspended: false,
-  reasoning_effort_options: ["low", "medium", "high", "xhigh"],
-  default_reasoning_effort: "medium",
-  permission_options: {},
-  default_permission: {},
-  has_api_key: false,
-  supports_fork: true,
-  supports_manager_mode: true,
-  supports_rewind: true,
-  supports_steering: true,
-  supports_native_subagents: false,
-  supports_reasoning_effort: true,
-  capability_overrides: {},
-};
+});
+
+function seedOfflineCaches() {
+  cacheProviders([provider], provider.id);
+  cacheRuntimeProfilesSnapshot(makeRuntimeProfilesSnapshot({
+    runtime_profiles: [makeRuntimeProfile({
+      id: "rp-cached",
+      provider_id: provider.id,
+      name: "Cached Claude",
+      default_model: "cached-default",
+    })],
+    default_runtime_profile_id: "rp-cached",
+  }));
+}
 
 function speak(transcript: string) {
   act(() => {
@@ -98,7 +92,7 @@ describe("new session modal voice mode", () => {
   });
 
   it("dictates into the initial prompt and creates on the send command", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn().mockResolvedValue(true);
 
@@ -141,7 +135,7 @@ describe("new session modal voice mode", () => {
   });
 
   it("keeps voice commands out of the chat composer while the modal owns them", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const appendToChat = vi.fn();
     window.addEventListener("better-agent-voice-append-draft", appendToChat);

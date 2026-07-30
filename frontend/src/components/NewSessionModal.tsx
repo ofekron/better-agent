@@ -9,9 +9,10 @@ import type {
   PastedImage,
   Project,
   Provider,
-  ProviderRunner,
   ReasoningEffort,
   Permission,
+  RuntimeProfile,
+  RuntimeProfilesSnapshot,
 } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { PUBLIC_EXTENSION_IDS } from "../extensionIds";
@@ -31,7 +32,6 @@ import {
   summarizeProvider,
   type QuotaSummary,
 } from "../utils/quotaStatus";
-import { providerDisplayName } from "../utils/providerDisplayName";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import Icon from "./Icon";
 import { ComposerImagePreviews } from "./ComposerImagePreviews";
@@ -53,29 +53,31 @@ import {
   cacheProviders,
   readProviderCache,
 } from "../utils/providerCache";
+import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
 import {
   effortsForRuntime,
   effortsForRunner,
-  runnerForProvider,
-  runnerLabelKey,
+  effortForProfile,
+  modelForProfile,
   type ModelRuntimeProfile,
 } from "./modelPicker";
 
 export const NEW_SESSION_PROMPT_TESTID = "new-session-prompt-textarea";
 
-interface RuntimeProfile {
-  providerId: string;
+/** Per-role runtime selection: the chosen runtime profile plus the
+ * session-level model/effort/permission overrides layered on top of it. */
+interface RoleSelection {
+  runtimeProfileId: string;
   model: string;
   reasoningEffort: ReasoningEffort | "";
-  runner: ProviderRunner;
   /** Per-session permission override. {} = inherit provider default. */
   permission: Permission;
 }
 
 interface SessionConfig {
   orchestrationMode: OrchestrationMode;
-  main: RuntimeProfile;
-  worker: RuntimeProfile;
+  main: RoleSelection;
+  worker: RoleSelection;
   cwd: string;
   fileEditEnabled: boolean;
   fileEditPath?: string;
@@ -235,20 +237,27 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const EMPTY_ROLE_SELECTION: RoleSelection = {
+  runtimeProfileId: "",
+  model: "",
+  reasoningEffort: "",
+  permission: {},
+};
+
 function resolveReasoningEffort(
-  saved: RuntimeProfile | undefined,
-  provider: Provider,
-  runner: ProviderRunner,
+  saved: Partial<RoleSelection> | undefined,
+  profile: RuntimeProfile,
+  snapshot: RuntimeProfilesSnapshot | null,
+  provider: Provider | undefined,
   role: "main" | "worker",
 ): ReasoningEffort | "" {
-  const options = effortsForRunner(provider, runner);
+  const options = provider ? effortsForRunner(provider, profile.runner) : [];
   if (options.length === 0) return "";
-  const savedRunner = saved?.runner || runnerForProvider(provider);
-  const savedEffort = saved?.providerId === provider.id && savedRunner === runner
-    ? saved.reasoningEffort
+  const savedEffort = saved?.runtimeProfileId === profile.id
+    ? saved.reasoningEffort ?? ""
     : "";
-  const lastEffort = provider.last_reasoning_effort ?? "";
-  const defaultEffort = provider.default_reasoning_effort || "";
+  const lastEffort = snapshot?.last_reasoning_efforts?.[profile.id] ?? "";
+  const defaultEffort = profile.default_reasoning_effort || "";
   const candidates =
     role === "main"
       ? [lastEffort, savedEffort, defaultEffort]
@@ -259,55 +268,55 @@ function resolveReasoningEffort(
 }
 
 function resolvePermission(
-  saved: RuntimeProfile | undefined,
-  provider: Provider,
+  saved: Partial<RoleSelection> | undefined,
+  profile: RuntimeProfile,
 ): Permission {
-  // Carry over a previously chosen override when the provider still matches;
+  // Carry over a previously chosen override when the profile still matches;
   // otherwise inherit the provider default ({}).
-  const savedPerm = saved?.providerId === provider.id ? saved.permission : {};
+  const savedPerm = saved?.runtimeProfileId === profile.id ? saved.permission : {};
   return savedPerm && Object.keys(savedPerm).length > 0 ? { ...savedPerm } : {};
 }
 
-export function resolveRuntimeProfile(
-  saved: RuntimeProfile | undefined,
+export function resolveRoleSelection(
+  saved: Partial<RoleSelection> | undefined,
+  profiles: RuntimeProfile[],
+  snapshot: RuntimeProfilesSnapshot | null,
   providers: Provider[],
-  defaultProviderId: string | null,
   role: "main" | "worker",
-): RuntimeProfile {
-  const availableProviders = providers.filter((item) => !item.suspended);
-  const provider =
-    availableProviders.find((item) => item.id === saved?.providerId)
-    ?? availableProviders.find((item) => item.id === defaultProviderId)
-    ?? availableProviders[0];
-  if (!provider) return { providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} };
+): RoleSelection {
+  const available = profiles.filter((profile) => {
+    const provider = providers.find((item) => item.id === profile.provider_id);
+    return !provider?.suspended;
+  });
+  const defaultId = snapshot?.default_runtime_profile_id ?? null;
+  const profile =
+    available.find((item) => item.id === saved?.runtimeProfileId)
+    ?? available.find((item) => item.id === defaultId)
+    ?? available[0];
+  if (!profile) return { ...EMPTY_ROLE_SELECTION };
+  const provider = providers.find((item) => item.id === profile.provider_id);
 
-  const savedRunner = saved?.providerId === provider.id ? saved.runner : undefined;
-  const runner = savedRunner && provider.runner_options.includes(savedRunner)
-    ? savedRunner
-    : runnerForProvider(provider);
-
-  const savedModel = saved?.providerId === provider.id ? saved.model : "";
-  const lastModel = provider.last_model ?? "";
-  // Main usage is what the backend records as `last_model`, so for the
-  // main role it outranks the locally-saved default. The worker role's
-  // only memory is the saved default — keep it first so a main pick on
-  // the same provider can't silently override the worker's model.
+  const savedModel = saved?.runtimeProfileId === profile.id ? saved.model ?? "" : "";
+  const lastModel = snapshot?.last_models?.[profile.id] ?? "";
+  // Main usage is what the backend records as the profile's last-used model,
+  // so for the main role it outranks the locally-saved default. The worker
+  // role's only memory is the saved default — keep it first so a main pick
+  // on the same profile can't silently override the worker's model.
   const candidates =
     role === "main"
-      ? [lastModel, savedModel, provider.default_model]
-      : [savedModel, lastModel, provider.default_model];
+      ? [lastModel, savedModel, profile.default_model]
+      : [savedModel, lastModel, profile.default_model];
   const model = candidates.find(Boolean) || "";
   return {
-    providerId: provider.id,
+    runtimeProfileId: profile.id,
     model,
-    reasoningEffort: resolveReasoningEffort(saved, provider, runner, role),
-    runner,
-    permission: resolvePermission(saved, provider),
+    reasoningEffort: resolveReasoningEffort(saved, profile, snapshot, provider, role),
+    permission: resolvePermission(saved, profile),
   };
 }
 
-/** Inline usage-left warning shown in a runtime profile picker when the
- * selected provider's worst-window quota is at warn or critical. Surfaces
+/** Inline usage-left warning shown in a role picker when the selected
+ * profile's provider worst-window quota is at warn or critical. Surfaces
  * the same reading the option labels append as "X% left", but prominently
  * so a near-exhausted provider is not missed before creating a session. */
 function UsageLeftWarning({
@@ -344,35 +353,44 @@ function UsageLeftWarning({
   );
 }
 
-function RuntimeProfilePicker({
+function RoleProfilePicker({
   label,
   role,
+  profiles,
   providers,
+  snapshot,
   value,
   onChange,
 }: {
   label: string;
   role: "main" | "worker";
+  /** Live runtime profiles this role may pick from (already capability-filtered). */
+  profiles: RuntimeProfile[];
   providers: Provider[];
-  value: RuntimeProfile;
-  onChange: (v: RuntimeProfile) => void;
+  snapshot: RuntimeProfilesSnapshot | null;
+  value: RoleSelection;
+  /** `userInitiated` is true only for explicit picks in this picker's
+   * controls — system refinements (catalog-driven model resets) pass false
+   * so the modal's defaults re-resolution isn't frozen by them. */
+  onChange: (v: RoleSelection, userInitiated?: boolean) => void;
 }) {
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API, providers);
-  const selectedProvider = providers.find((p) => p.id === value.providerId);
+  const selectedProfile = profiles.find((p) => p.id === value.runtimeProfileId);
+  const selectedProvider = providers.find((p) => p.id === selectedProfile?.provider_id);
   const {
     catalog,
     networkState,
     refresh,
     refreshing,
     refreshError,
-  } = useProviderModelCatalog(value.providerId);
+  } = useProviderModelCatalog(selectedProfile?.provider_id ?? "");
   const models = catalog?.models ?? [];
   const runtimeProfiles = (catalog?.runtime_profiles ?? []) as ModelRuntimeProfile[];
   const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
 
   useEffect(() => {
-    if (!catalog || catalog.provider_id !== value.providerId) return;
+    if (!catalog || !selectedProfile || catalog.provider_id !== selectedProfile.provider_id) return;
     if (
       catalog.authoritative
       && (
@@ -387,34 +405,46 @@ function RuntimeProfilePicker({
     }
     if (!catalog.models.length || catalog.models.includes(value.model)) return;
     onChange({ ...value, model: catalog.models[0] });
-  }, [catalog, onChange, value]);
+  }, [catalog, onChange, value, selectedProfile]);
+
+  const effortOptions = selectedProvider && selectedProfile
+    ? effortsForRuntime(selectedProvider, selectedProfile.runner, value.model, runtimeProfiles)
+    : [];
 
   return (
     <div className="ns-modal-section">
       <div className="ns-modal-section-title">{label}</div>
       <div className="ns-modal-row">
-        <label>{t("newSession.provider")}</label>
+        <label>{t("runtimeProfile.label", "Runtime profile")}</label>
         <select
-          data-testid="new-session-provider-select"
-          value={value.providerId}
+          data-testid="new-session-profile-select"
+          value={value.runtimeProfileId}
           onChange={(e) => {
-            const p = providers.find((pr) => pr.id === e.target.value && !pr.suspended);
-            if (!p) return;
+            const profile = profiles.find((p) => p.id === e.target.value);
+            if (!profile) return;
+            const provider = providers.find((p) => p.id === profile.provider_id);
+            if (provider?.suspended) return;
             onChange({
-              providerId: e.target.value,
-              model: p?.last_model || p?.default_model || "",
-              reasoningEffort: p ? resolveReasoningEffort(undefined, p, runnerForProvider(p), role) : "",
-              runner: runnerForProvider(p),
-              permission: p ? resolvePermission(undefined, p) : {},
-            });
+              runtimeProfileId: profile.id,
+              model: modelForProfile(profile, snapshot, []),
+              reasoningEffort: resolveReasoningEffort(undefined, profile, snapshot, provider, role),
+              permission: resolvePermission(undefined, profile),
+            }, true);
           }}
         >
-          {providers.map((p) => {
-            const q = summarizeProvider(quotaStatus, p);
+          {!value.runtimeProfileId && (
+            <option value="" disabled>
+              {t("runtimeProfile.select", "Select a runtime profile")}
+            </option>
+          )}
+          {profiles.map((profile) => {
+            const provider = providers.find((p) => p.id === profile.provider_id);
+            const q = summarizeProvider(quotaStatus, provider);
+            const suspended = !!provider?.suspended;
             return (
-              <option key={p.id} value={p.id} disabled={p.suspended}>
-                {optionLabelWithQuota(providerDisplayName(p), q, t)}
-                {p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
+              <option key={profile.id} value={profile.id} disabled={suspended}>
+                {optionLabelWithQuota(profile.name, q, t)}
+                {suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
               </option>
             );
           })}
@@ -422,33 +452,11 @@ function RuntimeProfilePicker({
       </div>
       {selectedQuota &&
       (selectedQuota.level === "warn" || selectedQuota.level === "critical") &&
-      selectedProvider ? (
+      selectedProfile ? (
         <UsageLeftWarning
           summary={selectedQuota}
-          providerLabel={providerDisplayName(selectedProvider)}
+          providerLabel={selectedProfile.name}
         />
-      ) : null}
-      {selectedProvider && selectedProvider.runner_options.length > 1 ? (
-        <div className="ns-modal-row ns-runtime-axis">
-          <label>{t("newSession.runner")}</label>
-          <select
-            value={value.runner}
-            onChange={(e) => {
-              const runner = e.target.value as ProviderRunner;
-              const options = effortsForRuntime(selectedProvider, runner, value.model, runtimeProfiles);
-              const reasoningEffort = options.includes(value.reasoningEffort as ReasoningEffort)
-                ? value.reasoningEffort
-                : options.includes(selectedProvider.default_reasoning_effort as ReasoningEffort)
-                  ? selectedProvider.default_reasoning_effort
-                  : options[0] || "";
-              onChange({ ...value, runner, reasoningEffort });
-            }}
-          >
-            {selectedProvider.runner_options.map((runner) => (
-              <option key={runner} value={runner}>{t(runnerLabelKey(selectedProvider.kind, runner))}</option>
-            ))}
-          </select>
-        </div>
       ) : null}
       <div className="ns-modal-row">
         <label>{t("newSession.model")}</label>
@@ -463,17 +471,15 @@ function RuntimeProfilePicker({
           }
           onChange={(e) => {
             const model = e.target.value;
-            if (!selectedProvider) {
-              onChange({ ...value, model });
+            if (!selectedProvider || !selectedProfile) {
+              onChange({ ...value, model }, true);
               return;
             }
-            const options = effortsForRuntime(selectedProvider, value.runner, model, runtimeProfiles);
+            const options = effortsForRuntime(selectedProvider, selectedProfile.runner, model, runtimeProfiles);
             const reasoningEffort = options.includes(value.reasoningEffort as ReasoningEffort)
               ? value.reasoningEffort
-              : options.includes(selectedProvider.default_reasoning_effort as ReasoningEffort)
-                ? selectedProvider.default_reasoning_effort
-                : options[0] || "";
-            onChange({ ...value, model, reasoningEffort });
+              : effortForProfile(selectedProfile, snapshot, options);
+            onChange({ ...value, model, reasoningEffort }, true);
           }}
         >
           {models.map((m) => (
@@ -493,15 +499,15 @@ function RuntimeProfilePicker({
         refreshing={refreshing}
         refreshError={refreshError}
       />
-      {selectedProvider && effortsForRuntime(selectedProvider, value.runner, value.model, runtimeProfiles).length ? (
+      {effortOptions.length ? (
         <div className="ns-modal-row">
           <label>{t("newSession.reasoningEffort")}</label>
           <select
             data-testid="new-session-effort-select"
             value={value.reasoningEffort}
-            onChange={(e) => onChange({ ...value, reasoningEffort: e.target.value as ReasoningEffort })}
+            onChange={(e) => onChange({ ...value, reasoningEffort: e.target.value as ReasoningEffort }, true)}
           >
-            {effortsForRuntime(selectedProvider, value.runner, value.model, runtimeProfiles).map((effort) => (
+            {effortOptions.map((effort) => (
               <option key={effort} value={effort}>
                 {t(`reasoningEffort.${effort}`)}
               </option>
@@ -526,7 +532,7 @@ function RuntimeProfilePicker({
                     const next: Permission = { ...value.permission };
                     if (v === "") delete next[axis];
                     else next[axis] = v;
-                    onChange({ ...value, permission: next });
+                    onChange({ ...value, permission: next }, true);
                   }}
                 >
                   <option value="">
@@ -652,15 +658,22 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
-  const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
-  const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
+  const [main, setMain] = useState<RoleSelection>({ ...EMPTY_ROLE_SELECTION });
+  const [worker, setWorker] = useState<RoleSelection>({ ...EMPTY_ROLE_SELECTION });
+  // Once the user explicitly picks in a role picker, the automatic
+  // (defaults + snapshot) re-resolution below must stop overriding it.
+  // Reset on every open.
+  const rolesTouchedRef = useRef(false);
+  // Runtime-profile snapshot: pull on mount + `runtime_profiles_changed`
+  // push convergence. Profiles are what the role pickers offer; providers
+  // below still supply capability/permission/quota facts.
+  const { snapshot, profiles, refresh: refreshRuntimeProfiles } = useRuntimeProfiles();
   // Fetches the provider catalog. `trackedFetch` already retries transient
   // failures internally (fetchWithRetry — 3 attempts, exponential backoff)
   // and records a persistent failure under the "providers:list" op via
   // `useOpProgress` below, so a manual retry (see `ns-providers-error`
   // below) just re-runs this same call.
   const loadProviders = useCallback(() => {
-    const defaults = loadDefaults();
     trackedFetch("providers:list", `${API}/api/providers`)
       .then((r) => r.json())
       .then((d) => {
@@ -668,8 +681,6 @@ export function NewSessionModal({
         const activeId: string | null = d.default_provider_id;
         cacheProviders(list, activeId);
         setProviders(list);
-        setMain(resolveRuntimeProfile(defaults.main, list, activeId, "main"));
-        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, "worker"));
       })
       .catch(() => {});
   }, []);
@@ -743,11 +754,26 @@ export function NewSessionModal({
     const cached = readProviderCache();
     if (cached) {
       setProviders(cached.providers);
-      setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, "main"));
-      setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, "worker"));
     }
+    // Clear role selections; the resolver effect below re-seeds them from
+    // the saved defaults once the profile snapshot is available.
+    rolesTouchedRef.current = false;
+    setMain({ ...EMPTY_ROLE_SELECTION });
+    setWorker({ ...EMPTY_ROLE_SELECTION });
     loadProviders();
   }, [open, sessionExtensionOptions, loadProviders]);
+
+  // Seed role selections from the saved defaults once the runtime-profile
+  // snapshot is available, and re-refine as providers stream in (effort
+  // options depend on provider runner profiles). Stops the moment the user
+  // explicitly picks, so it never clobbers an in-modal choice.
+  useEffect(() => {
+    if (!open || !snapshot) return;
+    if (rolesTouchedRef.current) return;
+    const defaults = loadDefaults();
+    setMain(resolveRoleSelection(defaults.main, profiles, snapshot, providers, "main"));
+    setWorker(resolveRoleSelection(defaults.worker, profiles, snapshot, providers, "worker"));
+  }, [open, snapshot, profiles, providers]);
 
   // Backfill `cwd` when `projects` arrives AFTER the modal opened. The
   // App-level projects list is fetched async on mount; if the user
@@ -836,17 +862,22 @@ export function NewSessionModal({
     if (!fileEditExtensionEnabled) setFileEditEnabled(false);
   }, [fileEditExtensionEnabled]);
 
-  // Capability gating: only manager-capable providers can drive the
-  // persistent "manager" session in manager mode. If the user has no
-  // such provider configured, the "manager" button is disabled and
-  // the modal forces "native". The main-role provider picker also
-  // filters to capable providers when in manager mode so the user
-  // can't pick a manager-incapable provider as the manager.
+  // Capability gating: only profiles backed by manager-capable providers can
+  // drive the persistent "manager" session in manager mode. If the user has
+  // no such profile configured, the "manager" button is disabled and the
+  // modal forces "native". The main-role profile picker also filters to
+  // capable profiles when in manager mode so the user can't pick a
+  // manager-incapable profile as the manager.
   const activeProviders = providers.filter((p) => !p.suspended);
-  const managerCapableProviders = activeProviders.filter(
-    (p) => p.supports_manager_mode,
-  );
-  const managerModeAvailable = teamEnabled && managerCapableProviders.length > 0;
+  const activeProfiles = profiles.filter((profile) => {
+    const provider = providers.find((p) => p.id === profile.provider_id);
+    return !provider?.suspended;
+  });
+  const managerCapableProfiles = activeProfiles.filter((profile) => {
+    const provider = providers.find((p) => p.id === profile.provider_id);
+    return !!provider?.supports_manager_mode;
+  });
+  const managerModeAvailable = teamEnabled && managerCapableProfiles.length > 0;
   const availableOrchestrationModes = useMemo<OrchestrationMode[]>(
     () => [
       ...(managerModeAvailable ? (["team"] as OrchestrationMode[]) : []),
@@ -863,25 +894,18 @@ export function NewSessionModal({
       setOrchestrationMode(effectiveOrchestrationMode);
     }
   }, [orchestrationMode, effectiveOrchestrationMode]);
-  // When in manager mode but `main` points at a non-manager-capable
-  // provider (e.g. user switched provider AFTER picking manager mode),
-  // reset `main` to the first manager-capable provider.
+  // When in manager mode but `main` points at a profile whose provider is
+  // not manager-capable (e.g. user switched profile AFTER picking manager
+  // mode), reset `main` to the first manager-capable profile.
   useEffect(() => {
     if (effectiveOrchestrationMode !== "team") return;
-    if (!main.providerId) return;
-    const cur = activeProviders.find((p) => p.id === main.providerId);
-    if (cur && cur.supports_manager_mode) return;
-    const fb = managerCapableProviders[0];
-    if (fb) {
-      setMain({
-        providerId: fb.id,
-        model: fb.default_model,
-        reasoningEffort: resolveReasoningEffort(undefined, fb, runnerForProvider(fb), "main"),
-        runner: runnerForProvider(fb),
-        permission: resolvePermission(main, fb),
-      });
-    }
-  }, [effectiveOrchestrationMode, main.providerId, activeProviders, managerCapableProviders]);
+    if (!main.runtimeProfileId) return;
+    if (managerCapableProfiles.some((p) => p.id === main.runtimeProfileId)) return;
+    if (!managerCapableProfiles.length) return;
+    setMain(
+      resolveRoleSelection(undefined, managerCapableProfiles, snapshot, providers, "main"),
+    );
+  }, [effectiveOrchestrationMode, main.runtimeProfileId, managerCapableProfiles, snapshot, providers]);
 
   const addAttachments = useCallback((files: File[]) => {
     files.forEach((file) => {
@@ -906,7 +930,7 @@ export function NewSessionModal({
     ? (folderPathMap.get(folderId) ?? t("session.unfiled"))
     : t("session.unfiled");
   const missingProviderConfig =
-    !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
+    !main.runtimeProfileId || (effectiveOrchestrationMode === "team" && !worker.runtimeProfileId);
   const createDisabled = !(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig);
 
   const handleCreate = async (action: NewSessionCreationAction, promptOverride?: string) => {
@@ -1126,37 +1150,55 @@ export function NewSessionModal({
                 type="button"
                 className="btn-secondary"
                 disabled={providersOp.inflight}
-                onClick={loadProviders}
+                onClick={() => {
+                  loadProviders();
+                  refreshRuntimeProfiles();
+                }}
               >
                 {providersOp.inflight ? t("newSession.providersRetrying") : t("newSession.providersRetry")}
               </button>
             </div>
           )}
           {effectiveOrchestrationMode === "native" && (
-            <RuntimeProfilePicker
+            <RoleProfilePicker
               label={t("newSession.sessionRuntimeProfile")}
               role="main"
+              profiles={activeProfiles}
               providers={activeProviders}
+              snapshot={snapshot}
               value={main}
-              onChange={setMain}
+              onChange={(v, userInitiated) => {
+                if (userInitiated) rolesTouchedRef.current = true;
+                setMain(v);
+              }}
             />
           )}
 
           {effectiveOrchestrationMode === "team" && (
             <>
-              <RuntimeProfilePicker
+              <RoleProfilePicker
                 label={t("newSession.managerRuntimeProfile")}
                 role="main"
-                providers={managerCapableProviders}
+                profiles={managerCapableProfiles}
+                providers={activeProviders}
+                snapshot={snapshot}
                 value={main}
-                onChange={setMain}
+                onChange={(v, userInitiated) => {
+                  if (userInitiated) rolesTouchedRef.current = true;
+                  setMain(v);
+                }}
               />
-              <RuntimeProfilePicker
+              <RoleProfilePicker
                 label={t("newSession.workerRuntimeProfile")}
                 role="worker"
+                profiles={activeProfiles}
                 providers={activeProviders}
+                snapshot={snapshot}
                 value={worker}
-                onChange={setWorker}
+                onChange={(v, userInitiated) => {
+                  if (userInitiated) rolesTouchedRef.current = true;
+                  setWorker(v);
+                }}
               />
             </>
           )}
@@ -1348,4 +1390,4 @@ export function NewSessionModal({
   );
 }
 
-export type { SessionConfig, RuntimeProfile };
+export type { SessionConfig, RoleSelection };

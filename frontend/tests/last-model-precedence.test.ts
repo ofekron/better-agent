@@ -1,154 +1,156 @@
 import { describe, expect, it } from "vitest";
-import { resolveRuntimeProfile } from "../src/components/NewSessionModal";
+import { resolveRoleSelection } from "../src/components/NewSessionModal";
 import { effortsForRuntime } from "../src/components/modelPicker";
-import type { Provider } from "../src/types";
+import {
+  makeProvider,
+  makeRuntimeProfile,
+  makeRuntimeProfilesSnapshot,
+} from "./fixtures";
 
-function provider(overrides: Partial<Provider>): Provider {
-  return {
-    id: "p1",
-    name: "Claude",
-    kind: "claude",
-    mode: "subscription",
-    base_url: "",
-    config_dir: "",
-    custom_models: [],
-    default_model: "default-model",
-    runner: "native",
-    runner_options: ["native"],
-    runner_profiles: [{ runner: "native", reasoning_efforts: ["low", "medium", "high", "xhigh"] }],
-    suspended: false,
-    reasoning_effort_options: ["low", "medium", "high", "xhigh"],
-    default_reasoning_effort: "medium",
-    permission_options: {},
-    default_permission: {},
-    has_api_key: false,
-    supports_fork: true,
-    supports_manager_mode: true,
-    supports_rewind: true,
-    supports_steering: true,
-    supports_native_subagents: false,
-    supports_reasoning_effort: true,
-    capability_overrides: {},
-    ...overrides,
-  };
-}
+const profile = makeRuntimeProfile({ default_model: "default-model" });
+const providers = [makeProvider()];
 
-describe("resolveRuntimeProfile model precedence", () => {
-  it("main role: backend last_model outranks the locally-saved default", () => {
-    const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
-      [provider({ last_model: "last-model" })],
-      "p1",
+describe("resolveRoleSelection model precedence", () => {
+  it("main role: backend last-used model outranks the locally-saved default", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_models: { "rp-1": "last-model" },
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-1", model: "saved-model", reasoningEffort: "high", permission: {} },
+      [profile],
+      snapshot,
+      providers,
       "main",
     );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "high", runner: "native", permission: {} });
+    expect(r).toEqual({ runtimeProfileId: "rp-1", model: "last-model", reasoningEffort: "high", permission: {} });
   });
 
-  it("worker role: saved default outranks backend last_model (main usage must not override the worker pick)", () => {
-    const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
-      [provider({ last_model: "last-model" })],
-      "p1",
+  it("worker role: saved default outranks backend last-used model (main usage must not override the worker pick)", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_models: { "rp-1": "last-model" },
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-1", model: "saved-model", reasoningEffort: "high", permission: {} },
+      [profile],
+      snapshot,
+      providers,
       "worker",
     );
-    expect(r).toEqual({ providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} });
+    expect(r).toEqual({ runtimeProfileId: "rp-1", model: "saved-model", reasoningEffort: "high", permission: {} });
   });
 
-  it("worker role falls back to last_model when nothing is saved for the provider", () => {
-    const r = resolveRuntimeProfile(
-      { providerId: "other", model: "irrelevant", reasoningEffort: "low", runner: "native", permission: {} },
-      [provider({ id: "p1", last_model: "last-model" })],
-      "p1",
+  it("worker role falls back to last-used model when nothing is saved for the profile", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_models: { "rp-1": "last-model" },
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-other", model: "irrelevant", reasoningEffort: "low", permission: {} },
+      [profile],
+      snapshot,
+      providers,
       "worker",
     );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
+    expect(r).toEqual({ runtimeProfileId: "rp-1", model: "last-model", reasoningEffort: "medium", permission: {} });
   });
 
   it.each(["main", "worker"] as const)(
-    "%s role falls back to default_model when no last_model and no saved",
+    "%s role falls back to the profile default model when no last-used and no saved",
     (role) => {
-      const r = resolveRuntimeProfile(
-        undefined,
-        [provider({})],
-        "p1",
-        role,
-      );
-      expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", runner: "native", permission: {} });
+      const snapshot = makeRuntimeProfilesSnapshot({ runtime_profiles: [profile] });
+      const r = resolveRoleSelection(undefined, [profile], snapshot, providers, role);
+      expect(r).toEqual({ runtimeProfileId: "rp-1", model: "default-model", reasoningEffort: "medium", permission: {} });
     },
   );
 
-  it("defers last_model validation to the authoritative catalog hook", () => {
-    const r = resolveRuntimeProfile(
-      undefined,
-      [provider({ last_model: "retired-model" })],
-      "p1",
-      "main",
-    );
-    expect(r).toEqual({ providerId: "p1", model: "retired-model", reasoningEffort: "medium", runner: "native", permission: {} });
+  it("defers last-used model validation to the authoritative catalog hook", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_models: { "rp-1": "retired-model" },
+    });
+    const r = resolveRoleSelection(undefined, [profile], snapshot, providers, "main");
+    expect(r).toEqual({ runtimeProfileId: "rp-1", model: "retired-model", reasoningEffort: "medium", permission: {} });
   });
 
-  it("accepts last_model unvalidated when the model list is empty (not yet fetched)", () => {
-    const r = resolveRuntimeProfile(
-      undefined,
-      [provider({ last_model: "last-model" })],
-      "p1",
-      "main",
-    );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
-  });
-
-  it("main role: backend last_reasoning_effort outranks the locally-saved effort", () => {
-    const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
-      [provider({ last_reasoning_effort: "high" })],
-      "p1",
+  it("main role: backend last-used effort outranks the locally-saved effort", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_reasoning_efforts: { "rp-1": "high" },
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-1", model: "saved-model", reasoningEffort: "low", permission: {} },
+      [profile],
+      snapshot,
+      providers,
       "main",
     );
     expect(r.reasoningEffort).toBe("high");
   });
 
-  it("worker role: saved effort outranks backend last_reasoning_effort", () => {
-    const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
-      [provider({ last_reasoning_effort: "high" })],
-      "p1",
+  it("worker role: saved effort outranks backend last-used effort", () => {
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [profile],
+      last_reasoning_efforts: { "rp-1": "high" },
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-1", model: "saved-model", reasoningEffort: "low", permission: {} },
+      [profile],
+      snapshot,
+      providers,
       "worker",
     );
     expect(r.reasoningEffort).toBe("low");
   });
 
-  it("keeps a supported saved runner and resolves effort from that runner profile", () => {
-    const r = resolveRuntimeProfile(
-      {
-        providerId: "p1",
-        model: "saved-model",
-        reasoningEffort: "minimal",
-        runner: "better_agent_runner",
-        permission: {},
-      },
-      [provider({
-        runner_options: ["native", "better_agent_runner"],
-        runner_profiles: [
-          { runner: "native", reasoning_efforts: ["medium", "high"] },
-          { runner: "better_agent_runner", reasoning_efforts: ["minimal", "low"] },
-        ],
-      })],
-      "p1",
-      "worker",
-    );
-    expect(r.runner).toBe("better_agent_runner");
+  it("resolves effort from the profile's runner profile", () => {
+    const baProfile = makeRuntimeProfile({
+      id: "rp-ba",
+      runner: "better_agent_runner",
+      default_reasoning_effort: "minimal",
+    });
+    const provider = makeProvider({
+      runner_options: ["native", "better_agent_runner"],
+      runner_profiles: [
+        { runner: "native", reasoning_efforts: ["medium", "high"] },
+        { runner: "better_agent_runner", reasoning_efforts: ["minimal", "low"] },
+      ],
+    });
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [baProfile],
+      default_runtime_profile_id: "rp-ba",
+    });
+    const r = resolveRoleSelection(undefined, [baProfile], snapshot, [provider], "worker");
+    expect(r.runtimeProfileId).toBe("rp-ba");
     expect(r.reasoningEffort).toBe("minimal");
   });
 
+  it("falls back to the default profile when a suspended provider backs the saved profile", () => {
+    const suspendedProfile = makeRuntimeProfile({ id: "rp-sus", provider_id: "sus" });
+    const snapshot = makeRuntimeProfilesSnapshot({
+      runtime_profiles: [suspendedProfile, profile],
+      default_runtime_profile_id: "rp-1",
+    });
+    const r = resolveRoleSelection(
+      { runtimeProfileId: "rp-sus", model: "x", reasoningEffort: "low", permission: {} },
+      [suspendedProfile, profile],
+      snapshot,
+      [makeProvider(), makeProvider({ id: "sus", suspended: true })],
+      "main",
+    );
+    expect(r.runtimeProfileId).toBe("rp-1");
+  });
+
   it("uses model-specific effort combinations when the catalog provides them", () => {
-    const agy = provider({
+    const agy = makeProvider({
       kind: "agy",
       runner_options: ["native", "better_agent_runner"],
     });
     const profiles = [
       { runner: "better_agent_runner" as const, model: "agy-2.5-flash", reasoning_efforts: ["none", "minimal"] as const },
       { runner: "better_agent_runner" as const, model: "agy-3.5-flash", reasoning_efforts: ["minimal"] as const },
-    ].map((profile) => ({ ...profile, reasoning_efforts: [...profile.reasoning_efforts] }));
+    ].map((entry) => ({ ...entry, reasoning_efforts: [...entry.reasoning_efforts] }));
     expect(effortsForRuntime(agy, "better_agent_runner", "agy-2.5-flash", profiles)).toContain("none");
     expect(effortsForRuntime(agy, "better_agent_runner", "agy-3.5-flash", profiles)).not.toContain("none");
   });

@@ -50,6 +50,7 @@ export interface OfflineCreateSessionEntry {
     | "cwd"
     | "orchestration_mode"
     | "provider_id"
+    | "runtime_profile_id"
     | "node_id"
     | "created_at"
     | "updated_at"

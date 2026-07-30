@@ -3,8 +3,9 @@ import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import type { Provider, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
+import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
 import { ModelPickerModal } from "./ModelPickerModal";
-import { runnerLabelKey, type SelectorUpdates } from "./modelPicker";
+import { runnerLabelKey, sessionProfileView, type SelectorUpdates } from "./modelPicker";
 import { providerDisplayName } from "../utils/providerDisplayName";
 
 interface Props {
@@ -29,16 +30,16 @@ export function SessionSelectorControls({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { snapshot } = useRuntimeProfiles();
   const saving = useOpProgress(saveOp(session.id)).inflight;
   const busy = disabled || saving;
 
   const save = async (updates: SelectorUpdates) => {
     setError(null);
     const prev = {
-      provider_id: session.provider_id,
+      runtime_profile_id: session.runtime_profile_id,
       model: session.model,
       reasoning_effort: session.reasoning_effort,
-      runner: session.runner,
       permission: session.permission,
     };
     onChange(updates);
@@ -62,12 +63,21 @@ export function SessionSelectorControls({
     }
   };
 
-  const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
-  const selectedProvider = providers.find((p) => p.id === selectedProviderId);
-  const runnerLabel = selectedProvider && selectedProvider.runner_options.length > 1
-    ? t(runnerLabelKey(selectedProvider.kind, session.runner || selectedProvider.runner), session.runner || selectedProvider.runner)
-    : "";
-  const selectorSummary = [providerDisplayName(selectedProvider), session.model, runnerLabel].filter(Boolean).join(" / ");
+  const view = sessionProfileView(session, snapshot);
+  // Live/tombstoned profile: its name is the runtime summary. Legacy session
+  // with no resolvable profile: fall back to the raw stamped values.
+  const legacyProvider = providers.find((p) => p.id === session.provider_id);
+  const runtimeLabel = view.profile
+    ? view.deleted
+      ? `${view.profile.name} (${t("runtimeProfile.deletedBadge", "Deleted")})`
+      : view.profile.name
+    : [
+      providerDisplayName(legacyProvider),
+      session.runner
+        ? t(runnerLabelKey(legacyProvider?.kind || "", session.runner), session.runner)
+        : "",
+    ].filter(Boolean).join(" / ");
+  const selectorSummary = [runtimeLabel, session.model].filter(Boolean).join(" / ");
 
   if (!providers.length) return null;
 

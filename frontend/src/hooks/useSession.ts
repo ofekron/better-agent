@@ -39,6 +39,11 @@ export interface CreateSessionOptions {
   model: string;
   cwd: string;
   orchestrationMode?: OrchestrationMode;
+  /** Runtime profile to create from — the backend stamps provider+runner
+   * from it. Preferred over the raw providerId/runner pair, which remains
+   * for legacy/explicit-override paths (backend attaches a matching
+   * profile when one exists). */
+  runtimeProfileId?: string;
   providerId?: string;
   fileEditEnabled?: boolean;
   fileEditPath?: string;
@@ -1558,6 +1563,7 @@ export function useSession(authStatus?: string) {
         model,
         cwd,
         orchestrationMode = "team",
+        runtimeProfileId,
         providerId,
         fileEditEnabled = false,
         fileEditPath,
@@ -1583,6 +1589,7 @@ export function useSession(authStatus?: string) {
             model,
             cwd,
             orchestration_mode: orchestrationMode,
+            runtime_profile_id: runtimeProfileId,
             provider_id: providerId,
             file_edit_enabled: fileEditEnabled,
             file_edit_path: fileEditPath,

@@ -16,9 +16,15 @@ import {
   type NewSessionExtensionOption,
   type SessionConfig,
 } from "../src/components/NewSessionModal";
-import type { Provider } from "../src/types";
+import type { Provider, RuntimeProfilesSnapshot } from "../src/types";
 import { completeOp, startOp } from "../src/progress/store";
 import { cacheProviders } from "../src/utils/providerCache";
+import { cacheRuntimeProfilesSnapshot } from "../src/hooks/useRuntimeProfiles";
+import {
+  makeProvider,
+  makeRuntimeProfile,
+  makeRuntimeProfilesSnapshot,
+} from "./fixtures";
 
 vi.mock("../src/hooks/useMachines", () => ({
   useMachines: () => ({ machines: [] }),
@@ -55,31 +61,10 @@ afterAll(() => {
   }
 });
 
-const provider: Provider = {
+const provider: Provider = makeProvider({
   id: "cached-claude",
   name: "Cached Claude",
-  kind: "claude",
-  mode: "subscription",
-  base_url: "",
-  config_dir: "",
-  custom_models: [],
-  default_model: "cached-default",
-  runner: "native",
-  runner_options: ["native"],
-  suspended: false,
-  reasoning_effort_options: ["low", "medium", "high", "xhigh"],
-  default_reasoning_effort: "medium",
-  permission_options: {},
-  default_permission: {},
-  has_api_key: false,
-  supports_fork: true,
-  supports_manager_mode: true,
-  supports_rewind: true,
-  supports_steering: true,
-  supports_native_subagents: false,
-  supports_reasoning_effort: true,
-  capability_overrides: {},
-};
+});
 
 const nativeOnlyProvider: Provider = {
   ...provider,
@@ -87,6 +72,35 @@ const nativeOnlyProvider: Provider = {
   name: "Cached Native Only",
   supports_manager_mode: false,
 };
+
+const profile = makeRuntimeProfile({
+  id: "rp-cached",
+  provider_id: provider.id,
+  name: "Cached Claude",
+  default_model: "cached-default",
+});
+
+const nativeOnlyProfile = makeRuntimeProfile({
+  id: "rp-native",
+  provider_id: nativeOnlyProvider.id,
+  name: "Cached Native Only",
+  default_model: "cached-default",
+});
+
+const snapshot: RuntimeProfilesSnapshot = makeRuntimeProfilesSnapshot({
+  runtime_profiles: [profile],
+  default_runtime_profile_id: profile.id,
+});
+
+/** Seed both offline caches — the role pickers need the runtime-profile
+ * snapshot, providers supply capability/permission facts. */
+function seedOfflineCaches(
+  providerList: Provider[] = [provider],
+  snap: RuntimeProfilesSnapshot = snapshot,
+) {
+  cacheProviders(providerList, providerList[0]?.id ?? null);
+  cacheRuntimeProfilesSnapshot(snap);
+}
 
 async function renderSettled(ui: ReactElement) {
   const view = render(ui);
@@ -106,7 +120,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("only shows creating for this modal's own submission", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     let resolveCreate!: () => void;
     const createPending = new Promise<void>((resolve) => {
@@ -156,7 +170,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("keeps the prompt draft when create fails and clears it only on success", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi
       .fn<() => Promise<boolean>>()
@@ -201,7 +215,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("offers all create actions and remembers the last selection", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn();
 
@@ -270,13 +284,13 @@ describe("NewSessionModal offline provider cache", () => {
     expect(getByRole("combobox", { name: "Harness profile" })).toBeTruthy();
   });
 
-  it("creates with cached provider and model when provider fetches fail", async () => {
-    cacheProviders([provider], provider.id);
+  it("creates with cached runtime profile and model when fetches fail", async () => {
+    seedOfflineCaches();
     localStorage.setItem(
       "better-agent-new-session-defaults",
       JSON.stringify({
         orchestrationMode: "native",
-        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", runner: "native", permission: {} },
+        main: { runtimeProfileId: profile.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
       }),
     );
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
@@ -293,10 +307,10 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      const providerSelect = container.querySelector(
-        `option[value="${provider.id}"]`,
+      const profileSelect = container.querySelector(
+        `option[value="${profile.id}"]`,
       )?.parentElement as HTMLSelectElement | null;
-      expect(providerSelect?.value).toBe(provider.id);
+      expect(profileSelect?.value).toBe(profile.id);
     });
     const modelSelect = container.querySelector(
       'option[value="cached-opus"]',
@@ -309,7 +323,7 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", runner: "native", permission: {} },
+        main: { runtimeProfileId: profile.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
       }),
       undefined,
       "send-and-open",
@@ -317,12 +331,18 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("hides orchestration choice and creates native when native is the only available mode", async () => {
-    cacheProviders([nativeOnlyProvider], nativeOnlyProvider.id);
+    seedOfflineCaches(
+      [nativeOnlyProvider],
+      makeRuntimeProfilesSnapshot({
+        runtime_profiles: [nativeOnlyProfile],
+        default_runtime_profile_id: nativeOnlyProfile.id,
+      }),
+    );
     localStorage.setItem(
       "better-agent-new-session-defaults",
       JSON.stringify({
         orchestrationMode: "team",
-        main: { providerId: nativeOnlyProvider.id, model: "cached-default" },
+        main: { runtimeProfileId: nativeOnlyProfile.id, model: "cached-default" },
       }),
     );
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
@@ -339,7 +359,7 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(`option[value="${nativeOnlyProvider.id}"]`)).toBeTruthy();
+      expect(container.querySelector(`option[value="${nativeOnlyProfile.id}"]`)).toBeTruthy();
     });
 
     expect(queryByText("newSession.orchestration")).toBeNull();
@@ -360,7 +380,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("creates file edit sessions without selecting a file in the modal", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
@@ -375,7 +395,7 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
+      expect(container.querySelector(`option[value="${profile.id}"]`)).toBeTruthy();
     });
 
     fireEvent.click(getByLabelText("newSession.fileEdit"));
@@ -398,7 +418,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("lets extension options patch the created session config", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
     const options: NewSessionExtensionOption[] = [
@@ -425,7 +445,7 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
+      expect(container.querySelector(`option[value="${profile.id}"]`)).toBeTruthy();
     });
 
     fireEvent.click(getByLabelText("Demo option"));
@@ -443,7 +463,7 @@ describe("NewSessionModal offline provider cache", () => {
   });
 
   it("keeps same-id extension options isolated by extension id", async () => {
-    cacheProviders([provider], provider.id);
+    seedOfflineCaches();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn<(config: SessionConfig) => void>();
 
@@ -474,7 +494,7 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
+      expect(container.querySelector(`option[value="${profile.id}"]`)).toBeTruthy();
     });
 
     fireEvent.click(getByLabelText("Second extension"));
@@ -508,6 +528,12 @@ describe("NewSessionModal providers load failure", () => {
           json: async () => ({ providers: [provider], default_provider_id: provider.id }),
         } as Response);
       }
+      if (url.includes("/api/runtime-profiles") && !providersShouldFail) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => snapshot,
+        } as Response);
+      }
       return Promise.reject(new TypeError("offline"));
     });
 
@@ -524,7 +550,7 @@ describe("NewSessionModal providers load failure", () => {
     await waitFor(() => {
       expect(modal.getByTestId("new-session-providers-error")).toBeTruthy();
     });
-    expect(modal.container.querySelector(`option[value="${provider.id}"]`)).toBeNull();
+    expect(modal.container.querySelector(`option[value="${profile.id}"]`)).toBeNull();
 
     providersShouldFail = false;
     await clickSettled(
@@ -534,6 +560,8 @@ describe("NewSessionModal providers load failure", () => {
     await waitFor(() => {
       expect(modal.queryByTestId("new-session-providers-error")).toBeNull();
     });
-    expect(modal.container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
+    await waitFor(() => {
+      expect(modal.container.querySelector(`option[value="${profile.id}"]`)).toBeTruthy();
+    });
   });
 });

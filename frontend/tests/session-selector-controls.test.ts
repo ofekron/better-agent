@@ -7,7 +7,7 @@ const inputArea = readFileSync("src/components/InputArea.tsx", "utf8");
 const component = readFileSync("src/components/SessionSelectorControls.tsx", "utf8");
 const modal = readFileSync("src/components/ModelPickerModal.tsx", "utf8");
 
-describe("existing-session provider/model selectors", () => {
+describe("existing-session runtime-profile/model selectors", () => {
   it("renders the per-session selector controls in the prompt overflow menu", () => {
     expect(app).toContain("SessionSelectorControls");
     expect(app).toContain("composerOverflowNode");
@@ -16,16 +16,26 @@ describe("existing-session provider/model selectors", () => {
     expect(app).toContain("applySessionMetadata(currentSession.id, updates)");
   });
 
-  it("persists provider/model changes through the session selectors endpoint on OK", () => {
+  it("persists runtime-profile/model changes through the session selectors endpoint on OK", () => {
     expect(component).toContain("/api/sessions/${encodeURIComponent(session.id)}/selectors");
     expect(component).toContain("openPicker");
     expect(component).toContain("onConfirm={(updates) => void save(updates)}");
+    expect(component).toContain("runtime_profile_id: session.runtime_profile_id");
     expect(modal).toContain("changedUpdates(session, draft)");
-    expect(modal).toContain("draftProvider.runner_options.length > 1");
-    expect(component).toContain("runner: session.runner");
+    // The profile picker replaced the provider+runner pickers.
+    expect(modal).toContain('t("runtimeProfile.label"');
+    expect(modal).not.toContain("newSession.provider");
+    expect(modal).not.toContain("newSession.runner\"");
     expect(modal).toContain('t("newSession.cancel", "Cancel")');
     expect(modal).toContain('t("common.ok", "OK")');
     expect(modal).not.toContain("onChange={(e) => changeModel(e.target.value)}");
+  });
+
+  it("resolves legacy sessions and tombstoned profiles for truthful display", () => {
+    expect(component).toContain("sessionProfileView");
+    expect(component).toContain("runtimeProfile.deletedBadge");
+    expect(modal).toContain("runtimeProfile.legacyBadge");
+    expect(modal).toContain("runtimeProfile.deletedBadge");
   });
 
   it("documents lazy continuation semantics for selector changes", () => {

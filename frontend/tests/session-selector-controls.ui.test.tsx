@@ -1,8 +1,13 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionSelectorControls } from "../src/components/SessionSelectorControls";
-import type { Provider, Session } from "../src/types";
+import type { Session } from "../src/types";
+import {
+  makeProvider,
+  makeRuntimeProfilesSnapshot,
+  makeRuntimeProfile,
+} from "./fixtures";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -15,38 +20,13 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function provider(overrides: Partial<Provider> = {}): Provider {
-  return {
-    id: "claude",
-    name: "Claude",
-    kind: "claude",
-    mode: "subscription",
-    base_url: "",
-    config_dir: "",
-    custom_models: [],
-    default_model: "sonnet",
-    runner: "native",
-    runner_options: ["native"],
-    suspended: false,
-    reasoning_effort_options: ["low", "medium", "high"],
-    default_reasoning_effort: "medium",
-    permission_options: {},
-    default_permission: {},
-    has_api_key: false,
-    supports_fork: true,
-    supports_manager_mode: true,
-    supports_rewind: true,
-    supports_steering: true,
-    supports_native_subagents: false,
-    supports_reasoning_effort: true,
-    capability_overrides: {},
-    ...overrides,
-  };
-}
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -54,6 +34,7 @@ function session(overrides: Partial<Session> = {}): Session {
     name: "Session",
     model: "sonnet",
     provider_id: "claude",
+    runtime_profile_id: "rp-1",
     cwd: "/tmp/project",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
@@ -80,20 +61,32 @@ function catalog(models: string[]) {
   };
 }
 
+const snapshot = makeRuntimeProfilesSnapshot({
+  runtime_profiles: [makeRuntimeProfile({ default_model: "sonnet" })],
+});
+
+function jsonResponse(body: unknown) {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+}
+
 describe("SessionSelectorControls picker interactions", () => {
   it("stages model edits until OK and discards them on Cancel", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(
-      new Response(JSON.stringify(catalog(["sonnet", "opus"])), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    ));
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime-profiles")) return jsonResponse(snapshot);
+      return jsonResponse(catalog(["sonnet", "opus"]));
+    });
     const onChange = vi.fn();
 
     const { getByRole, queryByRole } = render(
       <SessionSelectorControls
         session={session()}
-        providers={[provider()]}
+        providers={[makeProvider()]}
         onChange={onChange}
       />,
     );
@@ -118,7 +111,6 @@ describe("SessionSelectorControls picker interactions", () => {
       expect(onChange).toHaveBeenCalledWith({
         model: "opus",
         reasoning_effort: "medium",
-        runner: "native",
       });
     });
   });
@@ -126,37 +118,28 @@ describe("SessionSelectorControls picker interactions", () => {
   it("shows provider quota remaining in model options", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/runtime-profiles")) return jsonResponse(snapshot);
       if (url.includes("/quota-status")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              // Keyed by provider id (providerQuotaKey prefers id over
-              // "<kind>::<config_dir>"), matching the extension's response.
-              providers: {
-                claude: {
-                  provider: "claude",
-                  label: "Claude",
-                  supported: true,
-                  windows: [{ key: "weekly", label: "Weekly", used_percent: 57 }],
-                },
-              },
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
-        );
+        return jsonResponse({
+          // Keyed by provider id (providerQuotaKey prefers id over
+          // "<kind>::<config_dir>"), matching the extension's response.
+          providers: {
+            claude: {
+              provider: "claude",
+              label: "Claude",
+              supported: true,
+              windows: [{ key: "weekly", label: "Weekly", used_percent: 57 }],
+            },
+          },
+        });
       }
-      return Promise.resolve(
-        new Response(JSON.stringify(catalog(["sonnet", "opus"])), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+      return jsonResponse(catalog(["sonnet", "opus"]));
     });
 
     const { getByRole } = render(
       <SessionSelectorControls
         session={session()}
-        providers={[provider()]}
+        providers={[makeProvider()]}
         onChange={vi.fn()}
       />,
     );
