@@ -3,12 +3,11 @@ from __future__ import annotations
 import importlib.util
 import sys
 import sysconfig
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 from codex_execution_common import (
-    AttestOnceCache,
     ExecutionContractError,
     required_string,
     timed_contract_step,
@@ -36,12 +35,6 @@ class RunnerLaunch:
     runner_kind: str
     runner_module: str
     frozen: bool
-    _attest_cache: AttestOnceCache = field(
-        default_factory=AttestOnceCache,
-        compare=False,
-        hash=False,
-        repr=False,
-    )
 
     def validate(self) -> None:
         _validate_runner(self)
@@ -53,7 +46,7 @@ class RunnerLaunch:
 
     def attest(self) -> bool:
         with timed_contract_step("provider.runner_launch.attest"):
-            return self._attest_cache.resolve(self._attest, self.attest_metadata)
+            return self._attest()
 
     def _attest(self) -> bool:
         try:
@@ -78,35 +71,6 @@ class RunnerLaunch:
             and (
                 self.frozen_bundle is None
                 or self.frozen_bundle.attest()
-            )
-        )
-
-    def attest_metadata(self) -> bool:
-        """Cheap stat-tuple-only re-check for a runner launch this same
-        instance already fully hash-attested earlier in the same
-        launch/spawn cycle."""
-        try:
-            self.validate()
-        except ExecutionContractError:
-            return False
-        if self.frozen:
-            return (
-                self.frozen_bundle is not None
-                and self.frozen_bundle.attest_metadata()
-            )
-        return (
-            self.launch.attest_metadata()
-            and (
-                self.runner_entry is None
-                or self.runner_entry.attest_metadata()
-            )
-            and (
-                self.development_runtime is None
-                or self.development_runtime.attest_metadata()
-            )
-            and (
-                self.frozen_bundle is None
-                or self.frozen_bundle.attest_metadata()
             )
         )
 
