@@ -188,14 +188,13 @@ export function installFrontendLogger(): void {
   console.error = (...args: unknown[]) => {
     nativeConsoleError(...args);
     if (isBenignConsoleError(args)) return;
-    const errArg = args.find((a) => a instanceof Error) as Error | undefined;
     // React's error boundaries pass an ErrorInfo object carrying
     // `componentStack` (the "at <Component>" tree) as a separate arg.
     // That tree is the most useful clue for debugging a crash, so surface
     // it in the dedicated stack field instead of letting it get buried as
     // escaped JSON inside the message.
     const componentStack = extractComponentStack(args);
-    let stack = errArg?.stack || "";
+    let stack = extractConsoleStack(args);
     if (componentStack) {
       stack = stack
         ? `${stack}\nReact component stack:${componentStack}`
@@ -372,6 +371,17 @@ function isBenignConsoleError(args: unknown[]): boolean {
   if (keys.length !== 1 || keys[0] !== "message") return false;
   const message = (arg as { message?: unknown }).message;
   return typeof message === "string" && benignConsoleErrorMessages.has(message);
+}
+
+function extractConsoleStack(args: unknown[]): string {
+  const error = args.find((arg) => arg instanceof Error);
+  if (error instanceof Error) return error.stack || "";
+  for (const arg of args) {
+    if (!arg || typeof arg !== "object" || Array.isArray(arg)) continue;
+    const stack = (arg as { stack?: unknown }).stack;
+    if (typeof stack === "string" && stack) return stack;
+  }
+  return "";
 }
 
 /** Pull React's `componentStack` out of a console.error arg list (the

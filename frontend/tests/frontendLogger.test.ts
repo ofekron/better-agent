@@ -146,6 +146,22 @@ describe("frontend logger", () => {
     expect(payload.message).not.toContain("SessionStatusBadge");
   });
 
+  it("preserves stacks from structured console errors", async () => {
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    console.error({
+      message: "TypeError: cannot read property 'value' of null",
+      stack: "TypeError: cannot read property 'value' of null\n    at flushQueue (InputArea.tsx:625:24)",
+    });
+    await flushLoggerTransport();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const payload = JSON.parse(call[1].body);
+    expect(payload.stack).toContain("at flushQueue");
+  });
+
   it("does not forward benign mobile no-intent console errors", async () => {
     const { installFrontendLogger } = await import("../src/lib/frontendLogger");
 
