@@ -551,6 +551,14 @@ def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
     return _dedupe_preserve_order(models + custom + seed)
 
 
+def _resolved_provider_record(provider_id: Optional[str]) -> Optional[dict]:
+    """Resolve provider_id (None = the active default) to a secret-bearing
+    record, or None when there is no backing provider."""
+    if provider_id is None:
+        return get_default_provider() or None
+    return get_provider_with_key(provider_id)
+
+
 def available_models(provider_id: Optional[str] = None) -> list[str]:
     """Active models only. Legacy providers with static cold-start data
     return that list before their first refresh. Codex/Fugu return only
@@ -561,15 +569,8 @@ def available_models(provider_id: Optional[str] = None) -> list[str]:
     it (project rule: "Never use hardcoded values that will be shown
     when no valid values available — very confusing").
     """
-    if provider_id is None:
-        active = get_default_provider()
-        if not active:
-            return []
-        return _models_for(active)
-    rec = get_provider_with_key(provider_id)
-    if not rec:
-        return []
-    return _models_for(rec)
+    rec = _resolved_provider_record(provider_id)
+    return _models_for(rec) if rec else []
 
 
 def models_for_provider(provider_id: str) -> list[str]:
@@ -588,15 +589,8 @@ def available_models_including_retired(provider_id: Optional[str] = None) -> lis
     """Active + recently-retired (within RETIRED_STICKY_DAYS). Use for
     `default_model` validation so a session pinned to a just-retired
     model still resolves."""
-    if provider_id is None:
-        active = get_default_provider()
-        if not active:
-            return []
-        return _models_for(active, include_retired=True)
-    rec = get_provider_with_key(provider_id)
-    if not rec:
-        return []
-    return _models_for(rec, include_retired=True)
+    rec = _resolved_provider_record(provider_id)
+    return _models_for(rec, include_retired=True) if rec else []
 
 
 def models_catalog(provider_id: Optional[str] = None) -> dict:
