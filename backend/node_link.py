@@ -43,6 +43,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import HTTPException
 
 import app_version
+import repository_alignment
 import node_registry_store
 import node_store
 import shadow_jsonl
@@ -460,24 +461,55 @@ async def node_connect(websocket: WebSocket) -> None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
 
-    # Reciprocal handshake — node uses this to verify it's talking to
-    # the primary it expects.
+    node_app_version = handshake.get("app_version")
+    if not isinstance(node_app_version, dict):
+        node_app_version = {}
+    node_repositories = handshake.get("repositories")
+    if not isinstance(node_repositories, list):
+        node_repositories = []
+    manifest_error = ""
+    try:
+        desired_repositories = await asyncio.to_thread(
+            repository_alignment.desired_manifest
+        )
+    except Exception as exc:
+        desired_repositories = []
+        manifest_error = str(exc)
+        logger.exception("node_link: could not build repository manifest")
+    repositories_ready = (
+        not manifest_error
+        and bool(desired_repositories)
+        and repository_alignment.repositories_match(
+            node_repositories,
+            desired_repositories,
+        )
+    )
     await websocket.send_json({
         "type": "handshake",
         "protocol_version": PROTOCOL_VERSION,
         "node_id": _primary_id(),
+        "repository_alignment_accepted": repositories_ready,
     })
-
-    node_app_version = handshake.get("app_version")
-    if not isinstance(node_app_version, dict):
-        node_app_version = {}
     conn = await node_store.register(
         spec,
         websocket,
         app_commit_sha=app_version.clean_commit_sha(node_app_version.get("commit_sha")),
         app_dirty=node_app_version.get("dirty") is True,
+        repositories=node_repositories,
+        repository_alignment_ready=repositories_ready,
     )
     logger.info("node_link: %s connected", node_id)
+    if manifest_error:
+        node_store.mark_runtime_failed(
+            node_id,
+            conn,
+            f"primary repository manifest unavailable: {manifest_error}",
+        )
+    elif not repositories_ready:
+        asyncio.create_task(
+            _align_node_repositories(node_id, conn, desired_repositories),
+            name=f"node-repository-align-{node_id}",
+        )
 
     # Send resume_stream so the node knows what we already ingested.
     try:
@@ -834,6 +866,60 @@ async def send_restart(node_id: str) -> None:
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
     await conn.ws.send_json({"type": "restart"})
+
+
+async def _align_node_repositories(
+    node_id: str,
+    expected_connection,
+    manifest: list[dict],
+) -> None:
+    node_store.mark_repository_alignment(
+        node_id,
+        expected_connection,
+        ready=False,
+        status="syncing",
+    )
+    try:
+        result = await rpc_call(
+            node_id,
+            "align_repositories",
+            {"manifest": manifest},
+            timeout=1500.0,
+            version_ready_required=False,
+        )
+        if node_store.get_connection(node_id) is not expected_connection:
+            return
+        repositories = result.get("repositories") if isinstance(result, dict) else None
+        restart_required = bool(
+            isinstance(result, dict) and result.get("restart_required")
+        )
+        node_store.mark_repository_alignment(
+            node_id,
+            expected_connection,
+            ready=not restart_required,
+            status="restarting" if restart_required else "aligned",
+            repositories=repositories if isinstance(repositories, list) else None,
+        )
+        if restart_required:
+            await send_restart(node_id)
+            return
+        import node_config_sync
+
+        await node_config_sync.on_node_state(node_id, "connected")
+    except Exception as exc:
+        logger.exception("node_link: repository alignment failed for %s", node_id)
+        node_store.mark_repository_alignment(
+            node_id,
+            expected_connection,
+            ready=False,
+            status="blocked",
+            error=str(exc),
+        )
+        node_store.mark_runtime_failed(
+            node_id,
+            expected_connection,
+            f"node {node_id!r} repository alignment failed: {exc}",
+        )
 
 
 async def rpc_call(

@@ -29,6 +29,7 @@ from typing import Any, Optional
 import websockets
 
 import app_version
+import repository_alignment
 import node_identity
 import node_rpc_handlers as rpc_handlers
 import perf
@@ -319,6 +320,9 @@ class NodeClient:
                 "protocol_version": PROTOCOL_VERSION,
                 "node_id": my_id,
                 "app_version": app_version.current_build_info(),
+                "repositories": repository_alignment.current_repositories(
+                    app_version.current_build_info()
+                ),
                 "registration": {
                     "address": identity.address,
                     "cwd_roots": list(identity.cwd_roots),
@@ -345,6 +349,9 @@ class NodeClient:
                 or msg.get("protocol_version") != PROTOCOL_VERSION
             ):
                 raise RuntimeError(f"primary handshake mismatch: {msg!r}")
+            repository_alignment.record_primary_attestation(
+                msg.get("repository_alignment_accepted") is True
+            )
 
             self._connection_generation += 1
             connection_generation = self._connection_generation

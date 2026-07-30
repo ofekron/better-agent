@@ -68,6 +68,10 @@ class NodeConnection:
     app_dirty: bool = False
     runtime_ready: bool = False
     runtime_error: str = ""
+    repositories: list[dict[str, Any]] = field(default_factory=list)
+    repository_alignment_ready: bool = False
+    repository_alignment_status: str = "pending"
+    repository_alignment_error: str = ""
     # Inflight RPC futures keyed by request_id.
     pending_rpcs: dict[str, asyncio.Future] = field(default_factory=dict)
     # Inflight runs keyed by run_id — proxies a RemoteRunState held by
@@ -398,6 +402,8 @@ async def register(
     *,
     app_commit_sha: str = "",
     app_dirty: bool = False,
+    repositories: list[dict[str, Any]] | None = None,
+    repository_alignment_ready: bool = False,
 ) -> NodeConnection:
     """Mark a node as connected with its live WS handle. Replaces any
     prior NodeConnection for the same id (re-registration races on
@@ -428,6 +434,11 @@ async def register(
         last_seen=now,
         app_commit_sha=app_commit_sha,
         app_dirty=app_dirty,
+        repositories=list(repositories or []),
+        repository_alignment_ready=repository_alignment_ready,
+        repository_alignment_status=(
+            "aligned" if repository_alignment_ready else "pending"
+        ),
         last_acked_offset=persisted,
     )
     if prior is not None:
@@ -528,7 +539,11 @@ def mark_runtime_ready(
 ) -> bool:
     """Publish readiness only for the connection that was projected."""
     conn = get_connection(node_id)
-    if conn is not expected_connection or conn.runtime_ready:
+    if (
+        conn is not expected_connection
+        or conn.runtime_ready
+        or not conn.repository_alignment_ready
+    ):
         return False
     conn.runtime_ready = True
     global _state_version
@@ -536,6 +551,28 @@ def mark_runtime_ready(
     for waiter in tuple(_runtime_ready_waiters.get(node_id, ())):
         if not waiter.done():
             waiter.set_result(conn)
+    return True
+
+
+def mark_repository_alignment(
+    node_id: str,
+    expected_connection: NodeConnection,
+    *,
+    ready: bool,
+    status: str,
+    error: str = "",
+    repositories: list[dict[str, Any]] | None = None,
+) -> bool:
+    conn = get_connection(node_id)
+    if conn is not expected_connection:
+        return False
+    conn.repository_alignment_ready = ready
+    conn.repository_alignment_status = status
+    conn.repository_alignment_error = error
+    if repositories is not None:
+        conn.repositories = list(repositories)
+    global _state_version
+    _state_version += 1
     return True
 
 
@@ -722,6 +759,17 @@ def snapshot() -> list[dict]:
             "version_status": _version_status(node_commit_sha, primary_commit_sha),
             "runtime_ready": is_primary or bool(conn and conn.runtime_ready),
             "runtime_error": "" if is_primary else (conn.runtime_error if conn else ""),
+            "repositories": [] if is_primary else (conn.repositories if conn else []),
+            "repository_alignment_status": (
+                "aligned" if is_primary else (
+                    conn.repository_alignment_status if conn else "unknown"
+                )
+            ),
+            "repository_alignment_error": (
+                "" if is_primary else (
+                    conn.repository_alignment_error if conn else ""
+                )
+            ),
         })
     return out
 

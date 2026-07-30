@@ -15,6 +15,8 @@ from backend_recovery_policy import decide_recovery
 from browser_backend_supervisor import BrowserBackendSupervisor
 from restart_request import clear_restart_request, consume_restart_request
 
+_PRIMARY_ATTESTATION_TIMEOUT_SECONDS = 90.0
+
 
 def _ready(port: int) -> bool:
     try:
@@ -38,6 +40,7 @@ def run(
     wall_time: Callable[[], float] = time.time,
     health_probe: Callable[[int], bool] = _ready,
     install_signal_handlers: bool = True,
+    primary_attestation_timeout_seconds: float = _PRIMARY_ATTESTATION_TIMEOUT_SECONDS,
 ) -> int:
     from paths import bc_home
 
@@ -65,20 +68,40 @@ def run(
             clear_restart_request(restart_path)
             started_at = wall_time()
             healthy_at: float | None = None
+            from daemonhost import pointer
+
+            active_checkout = Path(pointer.resolve(str(checkout))).resolve()
             generation = supervisor.handle({
                 "op": "start",
-                "checkout": str(checkout),
+                "checkout": str(active_checkout),
                 "host": host,
                 "port": port,
             })
             generation_id = str(generation["generation_id"])
             pid = int(generation["pid"])
+            activation_reverted = False
             while not stopping.wait(0.25):
                 status = supervisor.handle({"op": "status"})
                 if status.get("terminal") is True:
                     break
                 if healthy_at is None and health_probe(port):
-                    healthy_at = monotonic()
+                    import repository_alignment
+
+                    activation = repository_alignment.finalize_node_activation(
+                        active_checkout
+                    )
+                    if activation == "active":
+                        healthy_at = monotonic()
+                    elif activation == "rejected" or (
+                        monotonic() - started_at
+                        >= primary_attestation_timeout_seconds
+                    ):
+                        if activation != "rejected":
+                            repository_alignment.expire_node_activation(
+                                active_checkout
+                            )
+                        supervisor.handle({"op": "signal", "signal": "TERM"})
+                        activation_reverted = True
             if stopping.is_set():
                 return 0
             status = supervisor.handle({"op": "status"})
@@ -89,6 +112,9 @@ def run(
             ):
                 raise RuntimeError("backend generation ended without terminal acknowledgement")
             exit_code = int(status["returncode"])
+            if activation_reverted:
+                attempts = 0
+                continue
             request_id = consume_restart_request(
                 restart_path,
                 not_before=started_at,
@@ -103,7 +129,7 @@ def run(
                     decision="restart",
                     generation_id=generation_id,
                     pid=pid,
-                    checkout=str(checkout),
+                    checkout=str(active_checkout),
                     request_id=request_id,
                 )
                 continue
@@ -125,7 +151,7 @@ def run(
                 restart_attempt=attempts,
                 generation_id=generation_id,
                 pid=pid,
-                checkout=str(checkout),
+                checkout=str(active_checkout),
             )
             if decision.action == "circuit_open":
                 return exit_code or 1

@@ -39,7 +39,7 @@ import type { FileEditorHandle } from "./components/FileViewer";
 import { ConfigPanelContext } from "./components/configPanelContext";
 import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
-import { sameProjectPath } from "./utils/projectPath";
+import { projectPathName, sameProjectPath } from "./utils/projectPath";
 import { sessionHasForkSource } from "./utils/sessionFork";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
@@ -3556,7 +3556,7 @@ function AppMain({
       const p = projects.find((proj) => proj.path === path);
       return (
         p?.name ||
-        path.replace(/\/+$/, "").split("/").pop() ||
+        projectPathName(path) ||
         path
       );
     },
@@ -6887,7 +6887,7 @@ function AppMain({
                   p.path === selectedProjectPath &&
                   (p.node_id || "primary") === selectedProjectNodeId,
               )?.name ||
-                selectedProjectPath.replace(/\/+$/, "").split("/").pop() ||
+                projectPathName(selectedProjectPath) ||
                 selectedProjectPath}
             </span>
             <ProjectGitStatus

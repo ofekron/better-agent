@@ -174,6 +174,26 @@ def set_remembered_session(path: str, node_id: str, session_id: str) -> dict:
         return _snapshot(data)
 
 
+def rewrite_project_paths(rewrites: dict[tuple[str, str], str]) -> None:
+    if not rewrites:
+        return
+    with _lock:
+        data = _load()
+        selected = _selected_project_from(data)
+        if selected:
+            key = (selected["node_id"], selected["path"])
+            if key in rewrites:
+                data["selected_project"] = {**selected, "path": rewrites[key]}
+        remembered = _remembered_sessions_from(data)
+        next_remembered: dict[str, dict[str, str]] = {}
+        for path, by_node in remembered.items():
+            for node_id, session_id in by_node.items():
+                repaired = rewrites.get((node_id, path), path)
+                next_remembered.setdefault(repaired, {})[node_id] = session_id
+        data["remembered_session_by_project"] = next_remembered
+        _save(data)
+
+
 def _deleted_tab_ids_from(data: dict) -> list[str]:
     raw = data.get("deleted_session_tab_ids")
     if not isinstance(raw, list):

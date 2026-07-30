@@ -32,6 +32,7 @@ from execution_template import ExecutionArtifact, PreparedExecution
 from provider import Provider, StreamEvent, get_provider, start_prepared_run
 from session_manager import manager as session_manager
 import perf
+import repository_alignment
 
 logger = logging.getLogger(__name__)
 _extension_import_limit = asyncio.Semaphore(1)
@@ -1334,6 +1335,9 @@ def _rpc_read_run_jsonl(params: dict) -> dict:
 
 
 _HANDLERS = {
+    "align_repositories": lambda params: repository_alignment.align_repositories(
+        params.get("manifest")
+    ),
     "list_dir": _rpc_list_dir,
     "list_sessions": _rpc_list_sessions,
     "sync_provider_config": _rpc_sync_provider_config,

@@ -37,6 +37,8 @@ describe("ProjectTabs project list modal", () => {
       />,
     );
 
+    expect(screen.getByRole("button", { name: "Alpha · primary" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Beta · remote-1" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Manage projects" }));
 
     expect(screen.getByRole("dialog", { name: "Manage projects" })).toBeTruthy();

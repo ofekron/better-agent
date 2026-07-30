@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import PurePath, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 
 class NodePathError(ValueError):
@@ -25,6 +25,25 @@ def absolute_node_path(value: str) -> PurePath:
     if ".." in path.parts:
         raise NodePathError(f"node path must not contain traversal: {value!r}")
     return path
+
+
+def canonical_node_path(value: str, node_id: str) -> str:
+    if node_id == "primary":
+        return str(Path(value).expanduser().resolve())
+    path = absolute_node_path(value)
+    if isinstance(path, PureWindowsPath):
+        text = str(path)
+        if len(text) >= 2 and text[1] == ":":
+            return text[0].upper() + text[1:]
+        return text
+    return str(path)
+
+
+def node_path_name(value: str, node_id: str) -> str:
+    try:
+        return absolute_node_path(value).name if node_id != "primary" else Path(value).name
+    except (NodePathError, OSError, ValueError):
+        return value
 
 
 def validate_cwd_roots(values: object) -> tuple[str, ...]:

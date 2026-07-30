@@ -3,6 +3,7 @@ import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemIntoView } from "src/utils/tabScroll";
+import { projectPathName } from "src/utils/projectPath";
 import type { Project } from "../types";
 import { ProjectStatusBadge } from "./ProjectStatusBadge";
 
@@ -142,8 +143,7 @@ export function ProjectTabs({
         const projNode = p.node_id || "primary";
         const isActive = p.path === currentPath && projNode === currentNodeId;
         const key = `${projNode}::${p.path}`;
-        const label =
-          p.name || p.path.replace(/\/+$/, "").split("/").pop() || p.path;
+        const label = p.name || projectPathName(p.path) || p.path;
         return (
           <div
             ref={isActive ? activeRef : undefined}
@@ -158,11 +158,11 @@ export function ProjectTabs({
               disabled={disabled}
               title={
                 disabled
-                  ? `${p.path} — AI search bypasses the project filter`
-                  : p.path
+                  ? `${projNode} — ${p.path} — AI search bypasses the project filter`
+                  : `${projNode} — ${p.path}`
               }
             >
-              <span className="project-tab-label">{label}</span>
+              <span className="project-tab-label">{label} · {projNode}</span>
               <span className="project-tab-status">
                 <ProjectStatusBadge path={p.path} nodeId={projNode} />
                 {(() => {
@@ -283,8 +283,7 @@ export function ProjectTabs({
                 {projects.map((project) => {
                   const nodeId = project.node_id || "primary";
                   const key = `${nodeId}::${project.path}`;
-                  const label =
-                    project.name || project.path.replace(/\/+$/, "").split("/").pop() || project.path;
+                  const label = project.name || projectPathName(project.path) || project.path;
                   return (
                     <label key={key} className="project-list-modal-row">
                       <input
@@ -297,9 +296,7 @@ export function ProjectTabs({
                         <span className="project-list-modal-name">{label}</span>
                         <span className="project-list-modal-path">{project.path}</span>
                       </span>
-                      {nodeId !== "primary" && (
-                        <span className="project-list-modal-node">{nodeId}</span>
-                      )}
+                      <span className="project-list-modal-node">{nodeId}</span>
                     </label>
                   );
                 })}

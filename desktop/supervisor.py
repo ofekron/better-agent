@@ -499,9 +499,8 @@ class BackendSupervisor:
                 return False
             try:
                 with urllib.request.urlopen(self.health_url, timeout=2) as r:
-                    if r.status == 200:
+                    if r.status == 200 and self._confirm_active_checkout():
                         self._generation_healthy_at = self._monotonic()
-                        self._confirm_active_checkout()
                         return True
             except (urllib.error.URLError, OSError):
                 pass
@@ -765,7 +764,7 @@ class BackendSupervisor:
             session.stop()
 
     def _resolved_checkout(self) -> Path:
-        if self.role != "primary" or getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False):
             return _REPO_ROOT.resolve()
         from daemonhost import pointer
 
@@ -775,15 +774,23 @@ class BackendSupervisor:
         _checkout_python(checkout)
         return checkout
 
-    def _confirm_active_checkout(self) -> None:
-        if self.role != "primary" or getattr(sys, "frozen", False):
-            return
+    def _confirm_active_checkout(self) -> bool:
+        if getattr(sys, "frozen", False):
+            return True
         from daemonhost import pointer, switch_control
         from daemonhost.jsonio import write_json
         from daemonhost.paths import refresh_result_path
 
         request_id = str(pointer.read().get("request_id") or "")
-        pointer.confirm_healthy(str(self._active_checkout), request_id)
+        if self.role == "node" and request_id:
+            import repository_alignment
+
+            if repository_alignment.finalize_node_activation(
+                self._active_checkout
+            ) != "active":
+                return False
+        else:
+            pointer.confirm_healthy(str(self._active_checkout), request_id)
         if request_id:
             write_json(refresh_result_path(), {
                 "request_id": request_id,
@@ -791,6 +798,7 @@ class BackendSupervisor:
                 "error": None,
             })
             switch_control.service_tick(str(self._active_checkout))
+        return True
 
     def _recover_failed_switch(self, error: str) -> bool:
         from daemonhost import pointer, switch_control

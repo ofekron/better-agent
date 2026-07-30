@@ -257,6 +257,28 @@ def list_mappings() -> list[dict]:
     return _read_file()
 
 
+def rewrite_project_paths(rewrites: dict[tuple[str, str], str]) -> None:
+    if not rewrites:
+        return
+    groups = _read_file()
+    changed = False
+    for group in groups:
+        members = group.get("members")
+        if not isinstance(members, list):
+            continue
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            node_id = member.get("node_id") or "primary"
+            path = member.get("path")
+            repaired = rewrites.get((node_id, path))
+            if repaired and repaired != path:
+                member["path"] = repaired
+                changed = True
+    if changed:
+        _write_file(groups)
+
+
 def rebuild_and_save(projects: list[dict]) -> list[dict]:
     """Re-run auto_match against the given projects, merge with any
     manually-created groups, filter out previously-rejected groups,

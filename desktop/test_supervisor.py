@@ -699,6 +699,8 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
 
 
 def test_backend_contract_resolves_before_credential_session_opens() -> bool:
+    import supervisor as supervisor_module
+
     calls: list[str] = []
     real_backend_argv = supervisor_module.backend_argv
     real_popen = supervisor_module.subprocess.Popen

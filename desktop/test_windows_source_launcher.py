@@ -22,6 +22,7 @@ class FakeSupervisor:
         self.starts = 0
         self.shutdown_called = False
         self.generation_id = ""
+        self.signals = 0
 
     def handle(self, request):
         if request["op"] == "start":
@@ -41,6 +42,9 @@ class FakeSupervisor:
                 ),
                 "returncode": 1,
             }
+        if request["op"] == "signal":
+            self.signals += 1
+            return {"ok": True}
         raise AssertionError(request)
 
     def shutdown(self) -> None:
@@ -104,3 +108,61 @@ def test_terminal_generation_must_match_and_cleanup(tmp_path) -> None:
         )
 
     assert supervisor.shutdown_called is True
+
+
+def test_missing_primary_attestation_reverts_generation(tmp_path, monkeypatch) -> None:
+    class RestartObserved(RuntimeError):
+        pass
+
+    class AttestationSupervisor(FakeSupervisor):
+        def handle(self, request):
+            if request["op"] == "start" and self.signals:
+                raise RestartObserved
+            if request["op"] == "status" and self.signals == 0:
+                return {
+                    "terminal": False,
+                    "generation_id": self.generation_id,
+                    "returncode": None,
+                }
+            return super().handle(request)
+
+    supervisor = AttestationSupervisor(tmp_path)
+    states = iter([0, 100, 100, 100, 100, 100, 100])
+    finalized: list[Path] = []
+    expired: list[Path] = []
+
+    monkeypatch.setattr(
+        windows_source_launcher,
+        "_ready",
+        lambda _: True,
+    )
+    import repository_alignment
+
+    monkeypatch.setattr(
+        repository_alignment,
+        "finalize_node_activation",
+        lambda path: finalized.append(path) or "pending",
+    )
+    monkeypatch.setattr(
+        repository_alignment,
+        "expire_node_activation",
+        lambda path: expired.append(path) or True,
+    )
+
+    with pytest.raises(RestartObserved):
+        windows_source_launcher.run(
+            tmp_path,
+            "127.0.0.1",
+            8000,
+            supervisor=supervisor,
+            state_root=tmp_path,
+            monotonic=lambda: next(states, 100),
+            wall_time=lambda: 0,
+            health_probe=lambda _: True,
+            install_signal_handlers=False,
+            primary_attestation_timeout_seconds=10,
+        )
+
+    assert finalized
+    assert expired
+    assert supervisor.signals >= 1

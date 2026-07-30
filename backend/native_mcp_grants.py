@@ -165,10 +165,10 @@ def project_target(node_id: str, project_path: str) -> str | None:
     user-controlled input (a project path); reject rather than trust."""
     import project_store
 
-    normalized = project_store._normalize(project_path)
+    resolved_node_id = node_id or "primary"
+    normalized = project_store._normalize(project_path, resolved_node_id)
     if normalized is None:
         return None
-    resolved_node_id = node_id or "primary"
     if _TARGET_SEP in resolved_node_id or _TARGET_SEP in normalized:
         return None
     return f"{resolved_node_id}{_TARGET_SEP}{normalized}"
@@ -250,6 +250,27 @@ def list_grants(
     if target is not None:
         grants = [g for g in grants if g.target == target]
     return grants
+
+
+def rewrite_project_paths(rewrites: dict[tuple[str, str], str]) -> None:
+    if not rewrites:
+        return
+    with _LOCK:
+        data = _read()
+        changed = False
+        for raw in data["grants"]:
+            if not isinstance(raw, dict) or raw.get("scope") != "project":
+                continue
+            target = raw.get("target")
+            if not isinstance(target, str) or _TARGET_SEP not in target:
+                continue
+            node_id, old_path = target.split(_TARGET_SEP, 1)
+            repaired = rewrites.get((node_id, old_path))
+            if repaired and repaired != old_path:
+                raw["target"] = f"{node_id}{_TARGET_SEP}{repaired}"
+                changed = True
+        if changed:
+            _write(data)
 
 
 def _validate_scope_target(scope: str, target: str) -> None:

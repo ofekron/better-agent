@@ -30,3 +30,8 @@ export function sameProjectPath(
   if (cwd === projectPath) return true;
   return canonicalProjectPath(cwd) === canonicalProjectPath(projectPath);
 }
+
+export function projectPathName(path: string | null | undefined): string {
+  const text = (path ?? "").replace(/[\\/]+$/, "");
+  return text.split(/[\\/]/).pop() || text;
+}
