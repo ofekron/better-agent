@@ -32,10 +32,12 @@ _LOCK_ACQUIRE_POLL_INTERVAL = 0.25
 _log = logging.getLogger("backend_instance_lock")
 
 
-def acquire_backend_instance_lock() -> None:
+def acquire_backend_instance_lock(*, role: str = "primary") -> None:
     global _LOCK_FD, _LOCK_PATH
 
-    path = ba_home() / "backend.lock"
+    if role not in {"primary", "node"}:
+        raise ValueError(f"unsupported backend role: {role}")
+    path = ba_home() / ("backend.lock" if role == "primary" else "node-backend.lock")
     if _LOCK_FD is not None:
         if _LOCK_PATH == path:
             return
@@ -44,7 +46,11 @@ def acquire_backend_instance_lock() -> None:
             f"cannot also use {path}"
         )
 
-    authority = assert_primary_backend_launch_authorized()
+    authority = (
+        assert_primary_backend_launch_authorized()
+        if role == "primary"
+        else None
+    )
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + _LOCK_ACQUIRE_RETRY_SECONDS
     warned = False
@@ -76,7 +82,8 @@ def acquire_backend_instance_lock() -> None:
         raise
 
     try:
-        authority = assert_primary_backend_launch_authorized()
+        if role == "primary":
+            authority = assert_primary_backend_launch_authorized()
         os.ftruncate(fd, 0)
         os.write(
             fd,
@@ -84,11 +91,12 @@ def acquire_backend_instance_lock() -> None:
                 f"pid={os.getpid()}\n"
                 f"host={socket.gethostname()}\n"
                 f"ba_home={ba_home()}\n"
-                f"generation={authority.generation}\n"
+                f"generation={authority.generation if authority else 'node'}\n"
             ).encode("utf-8"),
         )
         os.fsync(fd)
-        clear_primary_backend_launch_token(authority)
+        if authority is not None:
+            clear_primary_backend_launch_token(authority)
         _LOCK_FD = fd
         _LOCK_PATH = path
     except Exception:

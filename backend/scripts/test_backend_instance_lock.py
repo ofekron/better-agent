@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-backend-lock-")
@@ -61,6 +62,13 @@ def main() -> int:
 
         lock_path = Path(_TMP_HOME) / "backend.lock"
         assert lock_path.exists()
+        with patch(
+            "backend_instance_lock.assert_primary_backend_launch_authorized",
+            side_effect=AssertionError("node lock requested primary authority"),
+        ):
+            acquire_backend_instance_lock(role="node")
+            release_backend_instance_lock()
+        assert (Path(_TMP_HOME) / "node-backend.lock").exists()
         print("PASS backend instance lock excludes same-home second process")
         return 0
     finally:
