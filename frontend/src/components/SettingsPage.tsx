@@ -2366,7 +2366,10 @@ function permissionOptionsForKind(kind: string): Record<string, string[]> {
 
 function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]): Provider["runner_options"] {
   if (saved?.length) return saved;
-  if (kind === "fugu") return ["native", "better_agent_runner"];
+  // codex's better_agent_runner choice speaks OpenAI's Codex ResponsesAPI
+  // directly over the ChatGPT-subscription OAuth credential (subscription
+  // mode only — see the mode-forcing effect in ProviderForm below).
+  if (kind === "fugu" || kind === "codex") return ["native", "better_agent_runner"];
   return kind === "openai" ? ["better_agent_runner"] : ["native"];
 }
 
@@ -2480,6 +2483,11 @@ function ProviderForm({
       if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
       if (!defaultModel) setDefaultModel("fugu");
     }
+    // codex's better_agent_runner choice is the ChatGPT-subscription
+    // ResponsesAPI wire protocol — there is no API-key variant of it.
+    if (kind === "codex" && runner === "better_agent_runner" && mode_ !== "subscription") {
+      setMode("subscription");
+    }
   }, [baseUrl, defaultModel, kind, mode_, modes, runner]);
 
   const updateRunner = (next: Provider["runner"]) => {
@@ -2488,6 +2496,9 @@ function ProviderForm({
       setMode("api_key");
       if (!baseUrl) setBaseUrl(SAKANA_FUGU_API_BASE_URL);
       if (!defaultModel) setDefaultModel("fugu");
+    }
+    if (kind === "codex" && next === "better_agent_runner") {
+      setMode("subscription");
     }
   };
 

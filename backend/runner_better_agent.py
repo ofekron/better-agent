@@ -2279,12 +2279,30 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         _fail(run_dir, f"cwd does not exist: {cwd}")
         return 1
 
-    api_key = os.environ.get("OPENAI_API_KEY") or ""
-    base_url = os.environ.get("OPENAI_BASE_URL") or ""
+    # provider_mode discriminates the wire protocol: a genuine OpenAI-
+    # compatible provider is always mode "api_key" (enforced by
+    # config_store._reject_unsupported_provider_config); "subscription" here
+    # means a kind with its own OAuth protocol (currently only codex — see
+    # runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS) is driving this
+    # in-process agent loop over ITS OWN wire format instead of Chat
+    # Completions. Both still write the SAME session_events.jsonl shape.
+    codex_subscription = inputs.get("provider_mode") == "subscription"
     model = inputs.get("model") or ""
-    if not api_key or not base_url or not model:
-        _fail(run_dir, "OPENAI_API_KEY / OPENAI_BASE_URL / model not configured")
-        return 1
+    api_key = ""
+    base_url = ""
+    codex_home: Optional[Path] = None
+    if codex_subscription:
+        codex_home_str = os.environ.get("CODEX_HOME") or ""
+        if not codex_home_str or not model:
+            _fail(run_dir, "CODEX_HOME / model not configured for codex subscription")
+            return 1
+        codex_home = Path(codex_home_str)
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY") or ""
+        base_url = os.environ.get("OPENAI_BASE_URL") or ""
+        if not api_key or not base_url or not model:
+            _fail(run_dir, "OPENAI_API_KEY / OPENAI_BASE_URL / model not configured")
+            return 1
 
     prompt = inputs.get("prompt") or ""
     app_session_id = inputs.get("app_session_id") or _new_uuid()
@@ -2418,6 +2436,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             finish_reason, tool_calls, asst_text, asst_reasoning, chunk_usage = await _one_round(
                 base_url, api_key, model, messages, emitter, run_dir, tool_schemas,
                 reasoning_effort=reasoning_effort,
+                codex_home=codex_home, app_session_id=app_session_id,
             )
             if (run_dir / "cancel").exists():
                 # `_one_round` breaks promptly on the cancel sentinel without
@@ -2523,19 +2542,43 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     return 0 if error is None else 1
 
 
+def _model_stream(
+    base_url: str, api_key: str, model: str, messages: list[dict],
+    tool_schemas: list[dict], reasoning_effort: Optional[str],
+    codex_home: Optional[Path], app_session_id: str,
+) -> AsyncIterator[dict]:
+    """Select the wire backend for one streaming round. `codex_home` set
+    means this run is a codex ChatGPT-subscription turn (see `_run`'s
+    `provider_mode` check) — speak the Codex ResponsesAPI instead of Chat
+    Completions. Both yield the SAME Chat-Completions-shaped chunk dict, so
+    `_one_round` below consumes either identically."""
+    if codex_home is not None:
+        import runner_better_agent_codex_subscription as _codex_subscription
+        return _codex_subscription.stream_chat(
+            codex_home=codex_home, model=model, messages=messages,
+            tools=tool_schemas, reasoning_effort=reasoning_effort,
+            session_id=app_session_id,
+        )
+    return _stream_chat(
+        base_url, api_key, model, messages, tool_schemas,
+        reasoning_effort=reasoning_effort,
+    )
+
+
 async def _one_round(
     base_url: str, api_key: str, model: str, messages: list[dict],
     emitter: EventEmitter, run_dir: Path, tool_schemas: list[dict] = TOOL_SCHEMAS,
     reasoning_effort: Optional[str] = None,
+    codex_home: Optional[Path] = None, app_session_id: str = "",
 ) -> tuple[Optional[str], list[dict], Optional[str], Optional[str], Optional[dict]]:
     """Stream one assistant response. Finalize text/thinking/tool_calls.
     Returns (finish_reason, finalized_tool_calls, assistant_text,
     reasoning_content, usage)."""
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for chunk in _stream_chat(
-        base_url, api_key, model, messages, tool_schemas,
-        reasoning_effort=reasoning_effort,
+    async for chunk in _model_stream(
+        base_url, api_key, model, messages, tool_schemas, reasoning_effort,
+        codex_home, app_session_id,
     ):
         if (run_dir / "cancel").exists():
             break

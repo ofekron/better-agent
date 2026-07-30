@@ -592,6 +592,17 @@ def assert_provider_not_suspended(provider_id: str | None, *, action: str = "sta
 
 
 def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
+    # A subscription-mode provider whose kind owns a native OAuth protocol
+    # (currently just codex — see runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS)
+    # is allowed to run on better_agent_runner: it speaks that kind's own
+    # ResponsesAPI-equivalent wire protocol, not the generic OpenAI-compatible
+    # API-key path the check below guards against.
+    if (
+        mode == "subscription"
+        and kind in runtime_profile.SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS
+        and str(runner or "").strip() == "better_agent_runner"
+    ):
+        return
     runtime_kind = _runtime_kind_for_config(kind, runner)
     if runtime_kind == "openai" and mode == "subscription":
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)

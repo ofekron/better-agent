@@ -85,6 +85,14 @@ SPECS: dict[str, ProviderSpec] = {
         credential_config_env="CODEX_HOME",
         transport_gateway_env="OPENAI_BASE_URL",
         transport_default_base_url="https://api.openai.com/v1",
+        # better_agent_runner speaks OpenAI's internal Codex ResponsesAPI
+        # directly over the ChatGPT-subscription OAuth credential in
+        # CODEX_HOME/auth.json (see runner_better_agent_codex_subscription.py).
+        # It resolves to the "openai" runtime kind at spawn time — same
+        # in-process agent host as every other better_agent_runner provider —
+        # so it is NOT a separate manifest entry/class; only subscription mode
+        # exposes it (see runtime_profile.supported_runners).
+        runner_choices=("native", "better_agent_runner"),
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",

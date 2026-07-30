@@ -15,10 +15,30 @@ class RuntimeProfile:
     runner: str
 
 
+# Kinds whose subscription-mode credentials better_agent_runner knows how to
+# speak natively (a provider-owned OAuth/session protocol) rather than a
+# plain OpenAI-compatible API key. Each such kind still resolves to the
+# "openai" runtime kind at spawn time (see `runtime_kind` below) — BA owns
+# the same in-process agent loop either way; only the HTTP wire protocol
+# inside runner_better_agent.py differs, selected at runtime from the
+# provider's own mode/credentials. A sibling kind (e.g. a future Claude
+# ChatGPT-equivalent) adds its own entry here without touching this one.
+SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS: frozenset[str] = frozenset({"codex"})
+
+
 def supported_runners(provider_record: dict | None) -> tuple[str, ...]:
     record = provider_record or {}
-    choices = provider_manifest.runner_choices_for(record.get("kind"))
-    if record.get("mode") == "api_key":
+    kind = record.get("kind")
+    choices = provider_manifest.runner_choices_for(kind)
+    mode = record.get("mode")
+    if kind in SUBSCRIPTION_CAPABLE_BA_RUNNER_KINDS:
+        # This kind's better_agent_runner choice speaks its own subscription
+        # OAuth protocol (e.g. codex's ResponsesAPI), never the generic
+        # OpenAI-compatible API-key path — only offer it in subscription mode.
+        if mode == "subscription":
+            return choices
+        return tuple(choice for choice in choices if choice != "better_agent_runner")
+    if mode == "api_key":
         return choices
     return tuple(choice for choice in choices if choice != "better_agent_runner")
 

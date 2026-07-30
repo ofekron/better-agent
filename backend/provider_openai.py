@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional
 
 import httpx
+import config_store
 from provider_session_events import SessionEventsProvider
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -118,9 +119,25 @@ class OpenAIProvider(SessionEventsProvider):
         env.pop("OPENAI_API_KEY", None)
         env.pop("OPENAI_BASE_URL", None)
         # Snapshot the record atomically (provider.py record setter
-        # replaces the whole dict); pass api_key + base_url through to
-        # the runner so it can authenticate against Chat Completions.
+        # replaces the whole dict).
         rec = self.runtime_record()
+        if rec.get("kind") == "codex" and rec.get("mode") == "subscription":
+            # codex + better_agent_runner + subscription: the runner speaks
+            # OpenAI's Codex ResponsesAPI directly over the ChatGPT-subscription
+            # OAuth credential the `codex` CLI's own login produces. It reads
+            # that credential from CODEX_HOME/auth.json (isolated per-account
+            # exactly like the native codex runner — see
+            # config_store.provider_credential_env), never from
+            # OPENAI_API_KEY/OPENAI_BASE_URL.
+            cred = config_store.provider_credential_env(rec)
+            if cred:
+                env[cred[0]] = cred[1]
+            else:
+                from paths import user_home
+                env["CODEX_HOME"] = str(user_home() / ".codex")
+            return self.finalize_env(env)
+        # Pass api_key + base_url through to the runner so it can
+        # authenticate against Chat Completions.
         api_key = rec.get("api_key")
         base_url = rec.get("base_url")
         if api_key:
