@@ -140,7 +140,7 @@ fi
 # ${arr[@]+"${arr[@]}"} (not plain "${arr[@]}") because macOS's default
 # /bin/bash is 3.2, where an empty array under `set -u` throws "unbound
 # variable" on plain expansion — this guard is a no-op on bash >=4.4.
-RUN_ARGS=(--rm "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
+RUN_ARGS=(--rm --cpus=2 "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
