@@ -4878,6 +4878,11 @@ select:focus-visible,
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  /* Let badges shrink/truncate within the footer line instead of pushing
+     past the viewport edge when a label (e.g. a worker description) is
+     long. Without this the nowrap badge overflows its flex container. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .run-badge {
@@ -4892,7 +4897,11 @@ select:focus-visible,
   font-size: calc(11px * var(--app-font-scale));
   font-weight: 500;
   line-height: 1;
+  /* nowrap on the line, but the badge itself must be constrainable so a
+     long label truncates (see .run-badge-label) rather than overflowing. */
   white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
   animation: run-badge-glow 2s ease-in-out infinite;
 }
 
@@ -4923,6 +4932,7 @@ button.run-badge-clickable:focus-visible {
 
 .run-badge-pulse {
   display: inline-block;
+  flex: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -4934,9 +4944,16 @@ button.run-badge-clickable:focus-visible {
 .run-badge-label {
   text-transform: capitalize;
   letter-spacing: 0.2px;
+  /* The only flexible part of the badge — truncate here when the badge
+     can't fit (long worker description / kind label), keeping the pulse
+     dot and elapsed-time visible. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .run-badge-age {
+  flex: none;
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }
