@@ -1903,7 +1903,16 @@ function AppMain({
     onTurnStarted: () => {},
     onQueueConsumed: (data) => {
       setQueuedForSession(data.app_session_id, (prev, hasLocalProjection) => {
-        if (!data.queued_id) return [];
+        if (!data.queued_id) {
+          // ws_chat.py's subscribe-time stale-queue cleanup reflects an
+          // empty queue as of subscribe REGISTRATION time, which can
+          // already be stale by emit time (a prompt queued in the gap
+          // reaches the now-registered subscriber first). Only apply it
+          // when there's no fresher local projection to protect — an
+          // existing local projection already reflects state from after
+          // that stale snapshot.
+          return hasLocalProjection ? prev : [];
+        }
         const base = hasLocalProjection
           ? prev
           : visibleQueuedPromptBanners(getNode(data.app_session_id)?.queued_prompts);
@@ -2233,6 +2242,17 @@ function AppMain({
     releaseOwnDispatchedOfflineActions();
   }, [connected, releaseOwnDispatchedOfflineActions]);
   const routeSessionId = route.kind === "session" ? route.sessionId : null;
+  // Refs so the async flush closure below always reads the LATEST
+  // route/target state, even when an earlier invocation is still mid-flight
+  // (paused inside acquireOfflineFlushLock/liveTabIds) while a new entry is
+  // enqueued for a session the app has since navigated to. Reading the
+  // closured `routeSessionId`/`wsTargetSessionId` directly would let that
+  // stale invocation judge readiness against pre-navigation state and send
+  // a deferred entry before its target session is actually ready.
+  const routeSessionIdRef = useRef(routeSessionId);
+  routeSessionIdRef.current = routeSessionId;
+  const wsTargetSessionIdRef = useRef(wsTargetSessionId);
+  wsTargetSessionIdRef.current = wsTargetSessionId;
   useEffect(() => {
     if (!connected || offlineFlushRunningRef.current) return;
     offlineFlushRunningRef.current = true;
@@ -2253,13 +2273,30 @@ function AppMain({
       releaseDeadOfflineClaims(await liveTabIds());
       try {
         for (const entry of offlineQueue.getAll()) {
+          // A `send-and-open` initial prompt is owned by the dedicated
+          // pendingInitialPromptRef effect above for as long as this tab
+          // still holds it — that effect is a plain synchronous reaction to
+          // `connected`/`currentSession`/`wsTargetSessionId`, immune to the
+          // async lock-acquire window this loop awaits below. Racing it
+          // from here would let a stale snapshot of route/session state
+          // (captured before this tab's own navigate-to-created-session
+          // committed) send the prompt before its target is actually ready.
+          // Once the ref clears (sent, or this tab reloaded and lost it),
+          // this loop is the sole path — e.g. replaying the durable entry
+          // after a reload.
+          if (
+            entry.type !== "create_session" &&
+            pendingInitialPromptRef.current?.clientId === entry.clientId
+          ) {
+            continue;
+          }
           if (
             entry.type !== "create_session" &&
             entry.deferUntilTargetReady &&
-            routeSessionId === entry.sessionId &&
+            routeSessionIdRef.current === entry.sessionId &&
             (
-              currentSession?.id !== entry.sessionId ||
-              wsTargetSessionId !== entry.sessionId
+              currentSessionRef.current?.id !== entry.sessionId ||
+              wsTargetSessionIdRef.current !== entry.sessionId
             )
           ) {
             continue;
@@ -4449,14 +4486,20 @@ function AppMain({
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
       .filter((s): s is Session => Boolean(s));
+    const joinedMsOf = (s: Session) => {
+      const ms = Date.parse(openSessionJoinedAt[s.id] || "");
+      return Number.isNaN(ms) ? -Infinity : ms;
+    };
     const tsOf = (s: Session) => {
-      if (sessionTabsSort === "tab_joined_at") {
-        const ms = Date.parse(openSessionJoinedAt[s.id] || "");
-        return Number.isNaN(ms) ? -Infinity : ms;
-      }
+      if (sessionTabsSort === "tab_joined_at") return joinedMsOf(s);
       const v = (s as unknown as Record<string, unknown>)[sessionTabsSort];
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
-      return Number.isNaN(ms) ? -Infinity : ms;
+      // No value for the chosen sort field (e.g. a session just created has
+      // no last_user_prompt_at/last_opened_at yet): fall back to when this
+      // tab joined the strip instead of -Infinity, so a brand-new tab reads
+      // as "just happened" rather than sinking behind every session that
+      // simply has an older but PRESENT timestamp.
+      return Number.isNaN(ms) ? joinedMsOf(s) : ms;
     };
     const sortedRecords = records
       .map((s, i) => ({ s, i }))

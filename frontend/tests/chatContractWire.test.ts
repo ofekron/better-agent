@@ -109,6 +109,9 @@ describe("chat panel wire contract (real captured REST + WS payloads)", () => {
     );
 
     expect(h.raw.container.textContent).toContain("live pushed assistant reply");
+    // Completed turns default to collapsed (docs/chat-panel.md); expand
+    // so readMessages sees the assistant-message testid element.
+    await h.expandTurn("u1");
     const view = h.toJSON();
     expect(view.chat.messages.find((m) => m.id === assistantMsgId)?.text).toContain(
       "live pushed assistant reply",
@@ -119,6 +122,9 @@ describe("chat panel wire contract (real captured REST + WS payloads)", () => {
   it("manager-mode worker delegation: panel metadata renders immediately, events hydrate via the real lazy fetch", async () => {
     const h = await renderApp({ seed: { sessions: [managerRestSnapshot] } });
     await h.selectSession(managerScenario.sessionId);
+    // Completed turns default to collapsed (docs/chat-panel.md); expand
+    // so the worker panel's entity-block content is in the DOM.
+    await h.expandTurn("u1");
 
     // GET /api/sessions/{id} never inlines worker-panel events (confirmed
     // against the real backend — no stub/preview either, unlike top-level
@@ -145,6 +151,9 @@ describe("chat panel wire contract (real captured REST + WS payloads)", () => {
 
     h.emit(managerWsReplay);
     await h.flush();
+    // Completed turns default to collapsed (docs/chat-panel.md); expand
+    // so the worker panel's entity-block content is in the DOM.
+    await h.expandTurn("u1");
 
     expect(h.raw.container.textContent).toContain("delegate this to a worker");
     expect(h.raw.container.textContent).toContain("contract test worker");

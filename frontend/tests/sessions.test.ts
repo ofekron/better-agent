@@ -1293,9 +1293,12 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession("b");
 
     const types = h.outbound.map((f) => `${f.type}:${f.app_session_id ?? ""}`);
-    // unsubscribe for "a" must precede subscribe for "b"
+    // Auto-select (src/autoSelectSession.ts) may subscribe to a remembered
+    // session on mount before either explicit selectSession call, so
+    // "unsubscribe:a" must precede the LAST "subscribe:b" (the one from
+    // switching back to b), not necessarily the first.
     const idxUnsubA = types.indexOf("unsubscribe:a");
-    const idxSubB = types.indexOf("subscribe:b");
+    const idxSubB = types.lastIndexOf("subscribe:b");
     expect(idxUnsubA).toBeGreaterThanOrEqual(0);
     expect(idxSubB).toBeGreaterThan(idxUnsubA);
     h.unmount();

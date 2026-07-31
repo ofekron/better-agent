@@ -77,7 +77,13 @@ describe("overlay extension-module-slot has no flow footprint", () => {
     expect(body).toMatch(/min-height:\s*0/);
     expect(body).toMatch(/width:\s*auto/);
 
-    const mobileBody = ruleBody(".extension-module-slot--composer-actions,");
+    // `.extension-module-slot--composer-actions,` alone also matches
+    // earlier inside the unrelated `.input-row > :where(...)` list —
+    // anchor on the full grouped-selector text so the match lands on the
+    // actual mobile `min-height/width` reset rule.
+    const mobileBody = ruleBody(
+      ".extension-module-slot--toolbar,\n  .extension-module-slot--topbar,\n  .extension-module-slot--composer-actions,",
+    );
     expect(mobileBody).toMatch(/min-height:\s*0/);
     expect(mobileBody).toMatch(/width:\s*auto/);
   });

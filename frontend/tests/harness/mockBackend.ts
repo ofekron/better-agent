@@ -268,9 +268,27 @@ export class MockBackend {
   draftSeqs: Map<string, number> = new Map();
   private routeHolds: { method: string; path: string | RegExp; promise: Promise<void> }[] = [];
   private originalFetch: typeof fetch | undefined;
+  private sessionPageLimit: number | null = null;
 
   seed(partial: Partial<BackendState>): void {
     this.state = { ...this.state, ...partial };
+  }
+
+  /** Cap `GET /api/sessions` responses like the real endpoint does.
+   *
+   * The real route is `Query(50, ge=1, le=200)`, so a caller that sends no
+   * `limit` — which is exactly what `sessionRegistry.bootstrap()` does —
+   * gets ONE PAGE, not the whole corpus. This mock defaults to returning
+   * every seeded session, which means most harness tests let the frontend
+   * observe sessions production would never have returned in that
+   * response. Tests that depend on page-boundary behavior opt in here.
+   *
+   * Flipping this on by default is the correct end state and is tracked
+   * separately: several existing suites currently rely on the registry
+   * knowing about sessions below page 1, which production cannot
+   * guarantee. */
+  setSessionPageLimit(limit: number | null): void {
+    this.sessionPageLimit = limit;
   }
 
   /** Keep `state.sessions[].messages` in sync with `messages_replay` /
@@ -288,17 +306,46 @@ export class MockBackend {
       if (!d.app_session_id || !Array.isArray(d.messages) || d.messages.length === 0) return;
       const node = this.findSessionNode(d.app_session_id);
       if (!node) return;
-      const byId = new Map((node.messages ?? []).map((m, i) => [m.id, i]));
-      const merged = [...(node.messages ?? [])];
-      for (const m of d.messages) {
-        const idx = byId.get(m.id);
-        if (idx !== undefined) merged[idx] = m;
-        else {
-          byId.set(m.id, merged.length);
-          merged.push(m);
-        }
-      }
-      node.messages = merged;
+      node.messages = mergeMessagesById(node.messages, d.messages);
+      return;
+    }
+    // Same real-backend-consistency reasoning as messages_replay/delta
+    // above: `user_message_persisted` is the ack a REAL backend only
+    // emits after the message is already durably stored, so a REST
+    // reconcile triggered afterward (e.g. applySessionReconciled on
+    // turn-terminal) always sees it too. Without this, a test that only
+    // `emit`s the ack (never mutates `state.sessions`) has the message
+    // vanish the moment any later reconcile refetches the session.
+    // Session-level running/monitoring state is backend-owned: the real
+    // backend recomputes it, broadcasts the delta, AND serves the same
+    // value on every subsequent `/api/sessions` row. Project it onto the
+    // mock's store so REST and WS agree the way they do in production —
+    // otherwise every REST refresh silently contradicts the WS delta and
+    // the harness cannot represent a running session at all.
+    if (
+      event.type === "session_monitoring_changed" ||
+      event.type === "session_running_changed"
+    ) {
+      const d = event.data as {
+        session_id?: string;
+        monitoring_state?: string;
+        value?: boolean;
+      };
+      if (!d.session_id) return;
+      const node = this.findSessionNode(d.session_id);
+      if (!node) return;
+      const monitoring = d.monitoring_state
+        ?? (d.value ? "active" : "stopped");
+      node.monitoring_state = monitoring;
+      node.is_running = monitoring !== "stopped";
+      return;
+    }
+    if (event.type === "user_message_persisted") {
+      const d = event.data as { session_id?: string; user_message?: ChatMessage };
+      if (!d.session_id || !d.user_message) return;
+      const node = this.findSessionNode(d.session_id);
+      if (!node) return;
+      node.messages = mergeMessagesById(node.messages, [d.user_message]);
       return;
     }
     // Turn-terminal frames (turn_complete/turn_stopped/error) finalize the
@@ -773,7 +820,16 @@ export class MockBackend {
       // Second pass: filter eng sessions out of the sidebar and stamp
       // each remaining row with its pending_eng_session_id (if any).
       const offset = Number.parseInt(query.offset ?? "0", 10);
-      const limit = Number.parseInt(query.limit ?? String(this.state.sessions.length), 10);
+      // A caller that sends no `limit` gets the mock's default page size:
+      // the whole corpus unless the test opted into the real endpoint's
+      // `Query(50, ge=1, le=200)` via `setSessionPageLimit`. See that
+      // method's comment, and backend/scripts/test_session_listing_page_scope.py
+      // for the contract it mirrors.
+      const defaultLimit = this.sessionPageLimit ?? this.state.sessions.length;
+      const limit = Math.min(
+        Number.parseInt(query.limit ?? String(defaultLimit), 10) || defaultLimit,
+        this.sessionPageLimit === null ? Number.MAX_SAFE_INTEGER : 200,
+      );
       const sessions = this.state.sessions
           .filter((s) => s.working_mode !== "prompt_engineering")
           .filter((s) => sessionMatchesListQuery(s, query))
@@ -1519,6 +1575,26 @@ function jsonResponse(data: unknown, status: number = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** Id-based upsert: replaces an existing message in place, appends a new
+ *  one. Shared by every `applyWsEvent` branch that projects a WS message
+ *  onto the mock's `state.sessions`, so they all merge the same way. */
+function mergeMessagesById(
+  existing: ChatMessage[] | undefined,
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map((existing ?? []).map((m, i) => [m.id, i]));
+  const merged = [...(existing ?? [])];
+  for (const m of incoming) {
+    const idx = byId.get(m.id);
+    if (idx !== undefined) merged[idx] = m;
+    else {
+      byId.set(m.id, merged.length);
+      merged.push(m);
+    }
+  }
+  return merged;
 }
 
 function findNodeInTree(root: Session, id: string): Session | null {

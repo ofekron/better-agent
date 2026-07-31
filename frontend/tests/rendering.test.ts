@@ -107,7 +107,7 @@ describe("message rendering", () => {
     hResolved.unmount();
   });
 
-  it("renders every turn expanded by default (collapse is user-initiated only)", async () => {
+  it("completed turns render collapsed by default; expanding reveals the response", async () => {
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "old" }),
@@ -118,13 +118,20 @@ describe("message rendering", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+
+    // Per docs/chat-panel.md's render(turn): a completed (non-live) turn
+    // defaults to collapsed — only the initiator renders as a message.
+    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "u2"]);
+
+    await h.expandTurn("u1");
+    await h.expandTurn("u2");
 
     const ids = h.toJSON().chat.messages.map((m) => m.id);
     expect(ids).toEqual(["u1", "a1", "u2", "a2"]);
     h.unmount();
   });
 
-  it("clicking a manually-collapsed turn's header again re-expands it", async () => {
+  it("clicking a turn's header toggles it between collapsed and expanded", async () => {
     const session = makeSession({
       messages: [
         makeUserMsg({ id: "u1", content: "old" }),
@@ -136,21 +143,19 @@ describe("message rendering", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    // Collapse is only ever user-initiated — simulate the click a real
-    // user makes on the prior turn's header.
+    // Completed turns default to collapsed.
+    expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
+
     const header = h.$(
       '[data-testid="user-message"][data-message-id="u1"] .message-box-header-main',
     )!;
     header.click();
     await h.flush();
-    expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
+    expect(h.toJSON().chat.messages.map((m) => m.id)).toContain("a1");
 
     header.click();
     await h.flush();
-
-    const ids = h.toJSON().chat.messages.map((m) => m.id);
-    expect(ids).toContain("a1");
-    expect(ids).toContain("a2");
+    expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
     h.unmount();
   });
 
@@ -394,31 +399,43 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("renders model switch events", () => {
-    const message = makeAssistantMsg({
-      events: [
-        {
-          type: "model_switched",
-          data: {
-            previous_provider_id: "claude",
-            previous_model: "sonnet",
-            provider_id: "codex",
-            model: "gpt-5-codex",
-            changed: ["provider_id", "model"],
-          },
-        },
+  it("renders model switch events as a trailing turn-group marker", async () => {
+    // model_switched events are extracted from the response message's
+    // events and rendered as a ModelSwitchBoundaryEvents marker on the
+    // owning TurnGroup (see Chat.tsx's modelSwitchEvents/turnGroups) —
+    // not inline in the assistant's own event timeline (AssistantMessage
+    // filters them out via isModelSwitchedEvent).
+    const session = makeSession({
+      messages: [
+        makeUserMsg({ id: "u", content: "switch" }),
+        makeAssistantMsg({
+          id: "a",
+          content: "done",
+          events: [
+            {
+              type: "model_switched",
+              data: {
+                previous_provider_id: "claude",
+                previous_model: "sonnet",
+                provider_id: "codex",
+                model: "gpt-5-codex",
+                changed: ["provider_id", "model"],
+              },
+            },
+          ],
+        }),
       ],
     });
-    const { container, unmount } = render(
-      React.createElement(MessageBubble, {
-        message,
-        orchestrationMode: "native",
-      }),
-    );
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
 
-    expect(container.querySelector(".event-model-switched")?.textContent).toContain("Model switched");
-    expect(container.textContent).toContain("claude / sonnet to codex / gpt-5-codex");
-    unmount();
+    const marker = h.$('[data-testid="model-switch-trailing"] .event-model-switched');
+    expect(marker).not.toBeNull();
+    // Harness i18next has empty resources — t() returns the key, not
+    // English copy (see message.modelSwitched in en.json).
+    expect(marker!.textContent).toContain("message.modelSwitched");
+    expect(marker!.textContent).toContain("claude / sonnet to codex / gpt-5-codex");
+    h.unmount();
   });
 
   it("dedups consecutive identical todo snapshots", () => {
@@ -469,13 +486,61 @@ describe("message rendering", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     await h.typeAndSend("oops");
+    // finalizeTerminalAssistant (useSession.ts) only stamps the
+    // initiating USER message on an error terminal when that user
+    // message is already the persisted node.messages entry (not the
+    // pending/optimistic one) preceding a streaming assistant
+    // placeholder — mirroring the real backend order
+    // (user_message_persisted -> messages_delta -> turn_start -> error)
+    // where the turn already created + then removed an assistant
+    // message before its exception path marks the user message errored.
+    const sendFrame = h.outbound.find((f) => f.type === "send_message") as
+      | { client_id?: string }
+      | undefined;
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: session.id,
+        user_message: {
+          id: "u-real",
+          role: "user",
+          content: "oops",
+          client_id: sendFrame?.client_id,
+          seq: 0,
+        },
+      },
+    });
+    await h.flush();
 
     h.emit({ type: "turn_start", data: { session_id: session.id } });
+    h.emit({
+      type: "messages_delta",
+      data: {
+        app_session_id: session.id,
+        messages: [
+          makeAssistantMsg({ id: "a-fail", content: "", seq: 1, isStreaming: true }),
+        ],
+      },
+    });
+    await h.flush();
     h.emit({
       type: "error",
       data: { error: "Backend exploded", session_id: session.id },
     });
-    await h.flush();
+    // The backend's terminal-turn path also clears the session's live
+    // run-state registry entry (turn_manager.run_state_remove +
+    // emit_run_state) alongside the "error" WS frame — sessionRegistry's
+    // onTurnStart already flipped monitoring_state to "active" on the
+    // earlier turn_start, and only a run_state/session_running_changed/
+    // session_monitoring_changed event clears it back. Without this,
+    // `isRunning` stays true forever and MessageStatus permanently
+    // suppresses the error chrome (TurnGroupImpl passes
+    // `status={isRunning ? undefined : initiatorMessage.status}`).
+    h.emit({ type: "run_state", data: { app_session_id: session.id, runs: [] } });
+    // Poll for the actual DOM chrome — Chat.tsx also throttles turn-group
+    // re-renders to at most one commit per 140ms while the session is
+    // running (see fix-playbook.md's render-throttle-race note).
+    await h.waitFor(() => h.$(".message-status.status-error") !== null);
 
     const failed = h.toJSON().chat.messages.find(
       (m) => m.role === "user" && m.status === "error",
@@ -623,6 +688,18 @@ describe("message rendering", () => {
         orchestrationMode: "native",
       }),
     );
+
+    // The WebSearch action isn't the turn's final item (trailing prose
+    // follows it), so it renders inside a collapsed AutoActionGroup by
+    // default — open it before looking for the tool card.
+    const groupHeader = await waitFor(() => {
+      const el = container.querySelector<HTMLElement>(".auto-action-group-header");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    await act(async () => {
+      groupHeader.click();
+    });
 
     await waitFor(() => expect(container.querySelector(".tool-call")).not.toBeNull());
     const tool = container.querySelector(".tool-call");
@@ -807,21 +884,26 @@ describe("message rendering", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    // StoppedIndicator renders inside the assistant message_content area.
-    const assistant = h.$('[data-testid="assistant-message"]');
-    expect(assistant).not.toBeNull();
-    expect(assistant!.textContent ?? "").toMatch(/[Ss]topped/);
+    // StoppedIndicator is part of the turn's Result, which per
+    // docs/chat-panel.md's renderCollapsedTurn renders even while the
+    // turn is collapsed — no expand needed.
+    const indicator = h.$(".stopped-indicator");
+    expect(indicator).not.toBeNull();
+    expect(indicator!.textContent ?? "").toMatch(/[Ss]topped/);
     h.unmount();
   });
 
-  it("empty session shows the placeholder welcome text", async () => {
+  it("empty session renders an empty chat with no placeholder messages", async () => {
+    // The old ".chat-empty" welcome placeholder no longer exists for
+    // regular sessions (only the Ask singleton renders a greeting hero —
+    // see the "reserves the chat header for an empty Ask session" test
+    // above); a regular empty session's chat area simply stays empty.
     const session = makeSession({ messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const empty = h.$(".chat-empty");
-    expect(empty).not.toBeNull();
-    expect(empty!.textContent).toContain("Better Agent");
+    expect(h.toJSON().chat.messages).toEqual([]);
+    expect(h.$('[data-testid="chat-messages"]')).not.toBeNull();
     h.unmount();
   });
 
@@ -857,10 +939,11 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  // Regression: pre-fix the preamble used `[Selected text]:` and `"""`,
-  // which ReactMarkdown parsed as link reference definitions and ate the
-  // labels + their following lines. The user's "yes" comment vanished
-  // from the rendered bubble even though the text was on the wire.
+  // buildInlineTagsPreamble emits a structured `<inline-tags><c><sel>...`
+  // tag block, rendered as `.inline-tags-card` cards (not raw markdown),
+  // so each tag's selected text and comment render as separate DOM nodes
+  // instead of markdown-prone "[Selected text]: ... User comment: yes"
+  // lines.
   it("inline-tag preamble renders selected text and user comments visibly", async () => {
     const tags: InlineTag[] = [
       {
@@ -885,13 +968,18 @@ describe("message rendering", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const u1 = h.toJSON().chat.messages.find((m) => m.id === "u1");
-    expect(u1).toBeDefined();
-    expect(u1!.text).toContain("ephemeral");
-    expect(u1!.text).toContain("Replace the chat input area temporarily?");
-    // Both "User comment: yes" lines must survive markdown rendering.
-    const yesCount = (u1!.text.match(/User comment:\s*yes/g) ?? []).length;
-    expect(yesCount).toBe(2);
+    const u1el = h.$('[data-testid="user-message"][data-message-id="u1"]');
+    expect(u1el).not.toBeNull();
+    const selectedTexts = Array.from(
+      u1el!.querySelectorAll(".inline-tags-card-selected"),
+    ).map((el) => el.textContent);
+    expect(selectedTexts).toContain("ephemeral");
+    expect(selectedTexts).toContain("Replace the chat input area temporarily?");
+    const comments = u1el!.querySelectorAll(".comment-card-comment");
+    expect(comments).toHaveLength(2);
+    for (const comment of Array.from(comments)) {
+      expect(comment.textContent).toBe("yes");
+    }
     h.unmount();
   });
 
@@ -1038,74 +1126,38 @@ describe("message rendering", () => {
   });
 
   // ── Md flip-view + file-edit layout ───────────────────────────
-  it("FR-MD-FLIP: persistent file-edit md session opens to formatted view, not Monaco", async () => {
+  // A `working_mode: "file_editing"` session (array-shaped
+  // working_mode_meta, the only currently-supported shape per
+  // FR-FILE.0.1) always renders through MultiFileEditor, which mounts
+  // each per-file FileEditor with `diskWritable={false}` (real project
+  // files the agent owns — see the prop doc in FileEditor.tsx). In
+  // FileEditorPrimitives.tsx, `editing = mdEditing || !diskWritable`,
+  // so `.md` files there are ALWAYS shown in (read-only) Monaco, never
+  // the rendered-markdown view — because comment/selection capture
+  // (`useMonacoSelectionCapture`, FR-FILE.0.5) is only wired to the
+  // Monaco editor, not the ReactMarkdown formatted view. So the
+  // FR-FILE.0.16 markdown view/edit toggle (format-by-default,
+  // double-click to raw-edit) is unreachable for this working mode —
+  // it only applies to the diskWritable=true FileEditor usage (the
+  // prompt-engineering flow), which is unit-tested directly in
+  // tests/markdown-edit-view.test.tsx. This is a possible FR-FILE.0.16
+  // gap for file_editing sessions, flagged for a product decision
+  // rather than silently changed here (fixing it risks breaking
+  // FR-FILE.0.5 comment-selection on markdown files).
+  it("file-editing md session renders a read-only Monaco editor, not the FR-FILE.0.16 formatted view", async () => {
     const session = makeSession({
-      id: "fe-md-formatted",
+      id: "fe-md-monaco",
       name: "✏️ Edit — x.md",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/x.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/x.md"),
     });
     const h = await renderApp({
       seed: { sessions: [session], files: { "/tmp/x.md": "# Hello" } },
     });
     await h.selectSession(session.id);
 
-    expect(h.$('[data-testid="eng-file-md-formatted"]')).not.toBeNull();
-    expect(h.$('[data-testid="eng-file-md-monaco"]')).toBeNull();
-    h.unmount();
-  });
-
-  it("FR-MD-FLIP: double-click on the formatted markdown container flips to Monaco edit", async () => {
-    const session = makeSession({
-      id: "fe-md-flip",
-      working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/y.md",
-        original_content: "",
-        persistent: true,
-      },
-    });
-    const h = await renderApp({
-      seed: { sessions: [session], files: { "/tmp/y.md": "# Hi" } },
-    });
-    await h.selectSession(session.id);
-
-    const formatted = h.$('[data-testid="eng-file-md-formatted"]');
-    expect(formatted).not.toBeNull();
-    formatted!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    await h.flush();
-
     expect(h.$('[data-testid="eng-file-md-monaco"]')).not.toBeNull();
     expect(h.$('[data-testid="eng-file-md-formatted"]')).toBeNull();
-    h.unmount();
-  });
-
-  it("FR-MD-FLIP: single-click does NOT flip the formatted view to edit mode", async () => {
-    const session = makeSession({
-      id: "fe-md-single",
-      working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/single.md",
-        original_content: "",
-        persistent: true,
-      },
-    });
-    const h = await renderApp({
-      seed: { sessions: [session], files: { "/tmp/single.md": "# nope" } },
-    });
-    await h.selectSession(session.id);
-
-    const formatted = h.$('[data-testid="eng-file-md-formatted"]');
-    expect(formatted).not.toBeNull();
-    formatted!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await h.flush();
-
-    expect(h.$('[data-testid="eng-file-md-formatted"]')).not.toBeNull();
-    expect(h.$('[data-testid="eng-file-md-monaco"]')).toBeNull();
     h.unmount();
   });
 
@@ -1181,6 +1233,19 @@ describe("message rendering", () => {
         },
       },
     });
+    // With two open tabs seeded, which one resolves as "current" first
+    // (auto-select vs. tab-restore) is a race. Click fe's own topbar tab
+    // (not the sidebar row — the sidebar list is hidden while minimized,
+    // i.e. exactly when fe is already current) to deterministically make
+    // it current before asserting the sidebar collapses for it.
+    // Seeding two open tabs kicks off a multi-hop async cascade (auth ->
+    // sessions -> ui-selection -> topbar-pinned -> per-session summary/
+    // "opened" fetches) before SessionTabs renders both movement keys.
+    // renderApp's initial flush only guarantees one settle cycle, which can
+    // land mid-cascade; wait for both tabs to actually be in the DOM before
+    // clicking, rather than assuming a fixed number of flushes sufficed.
+    await h.waitFor(() => h.$$("[data-tab-movement-key]").length === 2);
+    await h.click(`[data-tab-movement-key="${fe.id}"] .session-tab`);
     expect((h.$(".sidebar") as HTMLElement).style.width).toBe(`${SIDEBAR_MINIMIZED_WIDTH}px`);
 
     await h.click(`[data-tab-movement-key="${regular.id}"] .session-tab`);

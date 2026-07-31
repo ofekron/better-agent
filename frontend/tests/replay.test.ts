@@ -650,6 +650,9 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       data: { app_session_id: partial.id, success: true },
     });
     await h.flush();
+    // Completed (non-live) turns default to collapsed — expand to see
+    // the assistant message as a rendered element.
+    await h.expandTurn("u3");
     expect(h.toJSON().chat.messages.map((message) => message.id)).toEqual(["u3", "a3"]);
     expect(h.raw.container.textContent).toContain("partial failure");
 
@@ -697,6 +700,16 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
 
     h.dropConnection();
     h.reopenConnection();
+    // User messages always render regardless of collapse — wait on those
+    // first, then expand the newly-arrived turns to see their answers.
+    await waitFor(h, () =>
+      h.toJSON().chat.messages
+        .filter((message) => message.role === "user")
+        .map((message) => message.id)
+        .join(",") === "u1,u2,u3"
+    );
+    await h.expandTurn("u1");
+    await h.expandTurn("u2");
     await waitFor(h, () =>
       h.toJSON().chat.messages.map((message) => message.id).join(",") ===
       "u1,a1,u2,a2,u3,a3"
@@ -759,6 +772,9 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       h,
       () => h.raw.container.textContent?.includes("second") ?? false,
     );
+    // Completed turns default to collapsed — expand to see "a" as a
+    // rendered assistant-message element in chat.messages.
+    await h.expandTurn("u1");
 
     expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "a"]);
     const user = h.raw.container.querySelector(

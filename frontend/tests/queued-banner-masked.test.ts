@@ -101,8 +101,12 @@ describe("queued banner masking by the local queue projection", () => {
     const h = await renderWithSession([queued("q-A", "prompt A")]);
     expect(bannerText(h)).toContain("prompt A");
 
-    // Cancel-all sets queuedBySession[sid] = null.
+    // Cancelling a queued prompt is gated behind a confirmation modal
+    // (App.tsx handleCancelQueued); confirming it is what actually sets
+    // queuedBySession[sid] = null.
     await h.click('[data-testid="queued-prompt-banner"] .queued-cancel-btn');
+    await h.flush();
+    await h.click(".modal-footer button:last-child");
     await h.flush();
     expect(bannerText(h)).not.toContain("prompt A");
 

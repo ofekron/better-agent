@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import { MessageBubble, TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 import type { WSEvent } from "../src/types";
@@ -42,6 +42,20 @@ function burstEvents(n: number): WSEvent[] {
 function burstEventsWithLeadTime(n: number, ts: string): WSEvent[] {
   const events = burstEvents(n);
   return [{ ...events[0], _ts: ts }, ...events.slice(1)];
+}
+
+/** Completed turns default to collapsed (docs/chat-panel.md); expand every
+ *  collapsed group inside `root` — the same header click a user makes — so
+ *  assertions can see entity-block content (e.g. an auto-action-group)
+ *  that a collapsed summary omits. */
+function expandAllTurns(root: HTMLElement): void {
+  for (;;) {
+    const btn = root.querySelector<HTMLButtonElement>(
+      '.message-box-header-main[aria-expanded="false"]',
+    );
+    if (!btn) return;
+    fireEvent.click(btn);
+  }
 }
 
 function renderGroup(n: number) {
@@ -111,6 +125,8 @@ describe("action group burst collapse", () => {
         orchestrationMode="native"
       />,
     );
+
+    expandAllTurns(container);
 
     const prompt = container.querySelector('[data-testid="user-message"]');
     const responseBranch = container.querySelector(".turn-group-children");

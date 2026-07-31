@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, fireEvent } from "@testing-library/react";
 import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 
@@ -9,6 +9,19 @@ function toggleLabels(container: HTMLElement): (string | null)[] {
   return Array.from(
     container.querySelectorAll(".timeline-toggle-label"),
   ).map((el) => el.textContent);
+}
+
+/** Completed turns default to collapsed (docs/chat-panel.md); expand every
+ *  collapsed group inside `root` — the same header click a user makes — so
+ *  assertions can see entity labels a collapsed summary omits. */
+function expandAllTurns(root: HTMLElement): void {
+  for (;;) {
+    const btn = root.querySelector<HTMLButtonElement>(
+      '.message-box-header-main[aria-expanded="false"]',
+    );
+    if (!btn) return;
+    fireEvent.click(btn);
+  }
 }
 
 describe("primary-entity toggle label by orchestration mode", () => {
@@ -43,6 +56,7 @@ describe("primary-entity toggle label by orchestration mode", () => {
         orchestrationMode="team"
       />,
     );
+    expandAllTurns(container);
     expect(container.querySelector(".role-label-manager .role-chip")?.textContent).toBe("Team");
   });
 
@@ -77,6 +91,7 @@ describe("primary-entity toggle label by orchestration mode", () => {
       />,
     );
 
+    expandAllTurns(container);
     const text = container.textContent ?? "";
     expect(text.indexOf("primary before")).toBeLessThan(text.indexOf("Review Subsession"));
     expect(text.indexOf("Review Subsession")).toBeLessThan(text.indexOf("primary after"));

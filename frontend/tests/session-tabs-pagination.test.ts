@@ -804,11 +804,17 @@ describe("session tabs with paged sessions", () => {
     await h.selectSession(first.id);
 
     expect(await waitFor(h, () => tabIds(h)[0] === first.id)).toBe(true);
+    // The tab reorder above happens optimistically (this test's namesake) —
+    // it does NOT mean selectSession skips its REST fetch on a cache hit.
+    // The session-tree cache (sessionTreeCacheRef) only avoids a loading
+    // flash by rendering the cached tree immediately; every select still
+    // issues exactly one fresh GET, so re-selecting "first" here adds
+    // exactly one more call to the pre-reselect count.
     expect(
       h.restCalls.filter(
         (c) => c.method === "GET" && c.path === `/api/sessions/${first.id}`,
       ),
-    ).toHaveLength(restCallsBefore);
+    ).toHaveLength(restCallsBefore + 1);
     h.unmount();
   }, 10000);
 
@@ -1227,11 +1233,14 @@ describe("session tabs with paged sessions", () => {
     await h.clickByText(/^(\+ New|session\.newButton)$/);
     await h.click(".modal-footer .btn-primary");
 
-    expect(window.location.pathname).toBe("/s/sess-3");
+    // Session ids are minted client-side (commit 491f09dbe) — the created
+    // session is no longer a predictable backend-sequential "sess-3".
+    const createdId = h.createdSessionId();
+    expect(window.location.pathname).toBe(`/s/${createdId}`);
     expect(
       await waitFor(
         h,
-        () => tabIds(h).join(",") === "pinned-session,sess-3,existing-session",
+        () => tabIds(h).join(",") === `pinned-session,${createdId},existing-session`,
       ),
     ).toBe(true);
     h.unmount();

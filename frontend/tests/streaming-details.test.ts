@@ -27,7 +27,11 @@ async function seedTurn(h: Awaited<ReturnType<typeof renderApp>>, sessionId: str
 
 describe("live event accumulation onto canonical messages", () => {
   it("routes live primary events to the active run target, not the last assistant", async () => {
-    const session = makeSession();
+    // Team mode: live-event text renders through the entity-block
+    // timeline (src/strategies/Strategy.ts buildEntityBlocks requires
+    // team mode or a worker panel — native-mode prose streams via
+    // message_content_updated instead, not the raw events array).
+    const session = makeSession({ orchestration_mode: "team" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
@@ -69,6 +73,7 @@ describe("live event accumulation onto canonical messages", () => {
     h.emit({
       type: "agent_message",
       data: {
+        app_session_id: session.id,
         uuid: "targeted-event",
         type: "assistant",
         message: {
@@ -76,7 +81,13 @@ describe("live event accumulation onto canonical messages", () => {
         },
       },
     });
-    await h.flush();
+    // Chat.tsx throttles turn-group re-renders to 1/140ms while the
+    // session is running (useThrottledValue) — poll past that window
+    // instead of a single flush.
+    await h.waitFor(() =>
+      (h.toJSON().chat.messages.find((m) => m.id === "active-assistant")?.text ?? "")
+        .includes("new targeted chunk"),
+    );
 
     const view = h.toJSON();
     expect(
@@ -89,7 +100,8 @@ describe("live event accumulation onto canonical messages", () => {
   });
 
   it("manager_event text accumulates inside the canonical assistant bubble", async () => {
-    const session = makeSession();
+    // Team mode: see the routing test above for why.
+    const session = makeSession({ orchestration_mode: "team" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     await seedTurn(h, session.id);
@@ -97,8 +109,9 @@ describe("live event accumulation onto canonical messages", () => {
     h.emit({
       type: "manager_event",
       data: {
+        app_session_id: session.id,
         event: {
-          type: "claude_message",
+          type: "agent_message",
           data: {
             type: "assistant",
             message: { content: [{ type: "text", text: "first chunk" }] },
@@ -109,8 +122,9 @@ describe("live event accumulation onto canonical messages", () => {
     h.emit({
       type: "manager_event",
       data: {
+        app_session_id: session.id,
         event: {
-          type: "claude_message",
+          type: "agent_message",
           data: {
             type: "assistant",
             message: { content: [{ type: "text", text: "second chunk" }] },
@@ -118,7 +132,12 @@ describe("live event accumulation onto canonical messages", () => {
         },
       },
     });
-    await h.flush();
+    // Chat.tsx throttles turn-group re-renders to 1/140ms while the
+    // session is running (useThrottledValue) — poll past that window
+    // instead of a single flush.
+    await h.waitFor(() =>
+      (h.toJSON().chat.messages.find((m) => m.id === "a")?.text ?? "").includes("second chunk"),
+    );
 
     const assistant = h.toJSON().chat.messages.find((m) => m.id === "a");
     expect(assistant?.text ?? "").toContain("first chunk");
@@ -135,6 +154,7 @@ describe("live event accumulation onto canonical messages", () => {
     h.emit({
       type: "worker_start",
       data: {
+        app_session_id: session.id,
         delegation_id: "d1",
         worker_session_id: "w-bc",
         worker_description: "Researcher",
@@ -150,7 +170,8 @@ describe("live event accumulation onto canonical messages", () => {
   });
 
   it("turn_start updates manager_session_id WITHOUT clearing prior events", async () => {
-    const session = makeSession();
+    // Team mode: see the routing test above for why.
+    const session = makeSession({ orchestration_mode: "team" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     await seedTurn(h, session.id);
@@ -158,8 +179,9 @@ describe("live event accumulation onto canonical messages", () => {
     h.emit({
       type: "manager_event",
       data: {
+        app_session_id: session.id,
         event: {
-          type: "claude_message",
+          type: "agent_message",
           data: {
             type: "assistant",
             message: { content: [{ type: "text", text: "prelude" }] },
@@ -167,7 +189,12 @@ describe("live event accumulation onto canonical messages", () => {
         },
       },
     });
-    await h.flush();
+    // Chat.tsx throttles turn-group re-renders to 1/140ms while the
+    // session is running (useThrottledValue) — poll past that window
+    // instead of a single flush.
+    await h.waitFor(() =>
+      (h.toJSON().chat.messages.find((m) => m.id === "a")?.text ?? "").includes("prelude"),
+    );
     expect(
       h.toJSON().chat.messages.find((m) => m.id === "a")?.text ?? "",
     ).toContain("prelude");
@@ -179,7 +206,11 @@ describe("live event accumulation onto canonical messages", () => {
     // assistant message wholesale.
     h.emit({
       type: "turn_start",
-      data: { session_id: session.id, manager_session_id: "sid-1" },
+      data: {
+        app_session_id: session.id,
+        session_id: session.id,
+        manager_session_id: "sid-1",
+      },
     });
     await h.flush();
 

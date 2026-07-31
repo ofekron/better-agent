@@ -318,14 +318,23 @@ describe("client_id matching + per-session pending", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("retry optimistic failure");
     const firstSend = h.outbound.find((frame) => frame.type === "send_message")!;
-    h.emit({
-      type: "error",
-      data: {
-        app_session_id: session.id,
-        client_id: firstSend.client_id,
-        error: "offline",
+    h.emitMany([
+      {
+        type: "error",
+        data: {
+          app_session_id: session.id,
+          client_id: firstSend.client_id,
+          error: "offline",
+        },
       },
-    });
+      // A real backend always pairs turn-termination with a run_state
+      // update (see turn-group-collapse.test.tsx) — without it `is_running`
+      // (src/lib/sessionRegistry.ts, driven ONLY by `run_state` frames)
+      // stays stuck at its optimistic "true" from the original send, which
+      // keeps the turn group's `isRunning` true and suppresses the failed
+      // message's Retry button (MessageBubble.tsx TurnGroupImpl).
+      { type: "run_state", data: { app_session_id: session.id, runs: [] } },
+    ]);
     await h.flush();
     h.dropConnection();
 

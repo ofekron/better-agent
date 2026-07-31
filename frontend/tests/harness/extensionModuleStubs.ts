@@ -339,9 +339,7 @@ function WorkersPanel({ context, React }: ExtensionComponentProps) {
   const { useCallback, useEffect, useState } = React;
   const apiBaseUrl = typeof context.apiBaseUrl === "string" ? context.apiBaseUrl : "";
   const cwd = typeof context.cwd === "string" ? context.cwd : "";
-  const events = Array.isArray(context.events)
-    ? (context.events as { type?: string }[])
-    : [];
+  const contextEvents = context.events;
   const [workers, setWorkers] = useState<{ worker_id?: string; description?: string }[]>([]);
 
   const refresh = useCallback(async () => {
@@ -363,10 +361,13 @@ function WorkersPanel({ context, React }: ExtensionComponentProps) {
   }, [refresh]);
 
   useEffect(() => {
+    const events = Array.isArray(contextEvents)
+      ? (contextEvents as { type?: string }[])
+      : [];
     if (!events.length) return;
     const last = events[events.length - 1];
     if (last?.type === "workers_changed") void refresh();
-  }, [events, refresh]);
+  }, [contextEvents, refresh]);
 
   return h(
     "div",

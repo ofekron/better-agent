@@ -1,59 +1,43 @@
 import { describe, it, expect } from "vitest";
-import { fireEvent } from "@testing-library/react";
 import "../src/i18n";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 
-function findOrchestrationSelect(container: HTMLElement): HTMLSelectElement {
-  // Both ModelSelector and OrchestrationSelector use class `.model-selector`
-  // — disambiguate by scanning for the one whose label says "Orchestration".
-  const wrappers = container.querySelectorAll<HTMLElement>(".model-selector");
-  for (const w of Array.from(wrappers)) {
-    const label = w.querySelector("label");
-    if (label?.textContent?.toLowerCase().includes("orchestration")) {
-      const select = w.querySelector("select");
-      if (select) return select as HTMLSelectElement;
-    }
-  }
-  throw new Error("orchestration select not found");
-}
-
 describe("orchestration selector → /selectors PATCH", () => {
-  it("changing the selector PATCHes /api/sessions/:id/selectors with the new mode", async () => {
+  it("an existing session has no orchestration-mode selector — mode is frozen at creation", async () => {
+    // App.tsx's model-drift-sync effect explicitly does NOT patch
+    // orchestration_mode: it's frozen at creation, and the selector shown
+    // in NewSessionModal is a global preference for *new* sessions only.
+    // No `.model-selector`-shaped control exists to change it for an
+    // already-created session.
     const session = makeSession({ orchestration_mode: "manager" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const select = findOrchestrationSelect(h.raw.container as HTMLElement);
-    expect(select.value).toBe("manager");
-
-    fireEvent.change(select, { target: { value: "native" } });
-    await h.flush();
-
-    const patches = h.backend.calls.filter(
-      (c) =>
-        c.method === "PATCH" && c.path === `/api/sessions/${session.id}/selectors`,
+    const hasOrchestrationSelector = Array.from(
+      h.raw.container.querySelectorAll<HTMLElement>(".model-selector"),
+    ).some((w) =>
+      w.querySelector("label")?.textContent?.toLowerCase().includes("orchestration"),
     );
-    expect(patches.length).toBeGreaterThan(0);
-    // The user's selector change is the most recent PATCH and carries native.
-    expect(patches[patches.length - 1].body).toMatchObject({
-      orchestration_mode: "native",
-    });
+    expect(hasOrchestrationSelector).toBe(false);
     h.unmount();
   });
 
-  it("after switching to native the workers panel disappears", async () => {
-    const session = makeSession({ orchestration_mode: "manager" });
+  it("the workers panel is available via the Workers sidebar tab regardless of the session's orchestration mode", async () => {
+    // workersTabAvailable (App.tsx) gates on the team extension + a cwd,
+    // never on orchestration_mode — the panel mounts only once the Workers
+    // tab is selected (defaults to the Sessions tab), independent of mode.
+    // This file loads the real i18n bundle (see the project-suggestion
+    // test below), so the tab's visible label is real copy, not a key.
+    const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
-    expect(h.toJSON().sidebar.workersPanelVisible).toBe(true);
-
-    fireEvent.change(findOrchestrationSelect(h.raw.container as HTMLElement), {
-      target: { value: "native" },
-    });
     await h.flush();
-
     expect(h.toJSON().sidebar.workersPanelVisible).toBe(false);
+
+    await h.clickByText("Workers");
+
+    expect(h.toJSON().sidebar.workersPanelVisible).toBe(true);
     h.unmount();
   });
 

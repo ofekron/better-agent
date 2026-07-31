@@ -16932,7 +16932,12 @@ pre .inline-tag-highlight {
   line-height: 1;
 }
 
-.project-status-running {
+/* One shape for every per-project dimension counter; the variants below
+   only carry color, so the counters read as one row of peers. */
+.project-status-running,
+.project-status-unread,
+.project-status-waiting,
+.project-status-errored {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -16943,6 +16948,30 @@ pre .inline-tag-highlight {
   font-size: calc(11px * var(--app-font-scale));
   font-weight: 700;
   border-radius: 9px;
+  animation: project-status-enter 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+@keyframes project-status-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-status-running,
+  .project-status-unread,
+  .project-status-waiting,
+  .project-status-errored {
+    animation: none;
+  }
+}
+
+.project-status-running {
   background: color-mix(in srgb, var(--agent) 18%, transparent);
   color: var(--agent);
   border: 1px solid color-mix(in srgb, var(--agent) 50%, transparent);
@@ -16959,19 +16988,29 @@ pre .inline-tag-highlight {
   animation: pulse-badge 1.6s ease-in-out infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .project-status-running::before {
+    animation: none;
+  }
+}
+
 .project-status-unread {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  margin-inline-start: 0;
-  font-size: calc(11px * var(--app-font-scale));
-  font-weight: 700;
-  border-radius: 9px;
   background: var(--accent, #7b68ee);
   color: #fff;
+}
+
+/* Waiting on the user — the same warning hue the per-session
+   input/approval indicators use, so the two surfaces agree at a glance. */
+.project-status-waiting {
+  background: color-mix(in srgb, var(--warning, #d29922) 20%, transparent);
+  color: var(--warning, #d29922);
+  border: 1px solid color-mix(in srgb, var(--warning, #d29922) 55%, transparent);
+}
+
+.project-status-errored {
+  background: color-mix(in srgb, var(--error, #f85149) 20%, transparent);
+  color: var(--error, #f85149);
+  border: 1px solid color-mix(in srgb, var(--error, #f85149) 55%, transparent);
 }
 
 /* ───── Fork split view ───────────────────────────────────────────── */

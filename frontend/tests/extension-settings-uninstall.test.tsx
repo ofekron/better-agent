@@ -64,32 +64,41 @@ describe("ExtensionUiSettingsSection uninstall", () => {
       }
       return null;
     });
-    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
+    // happy-dom (this suite's test environment) does not implement
+    // window.confirm, so it can't be vi.spyOn'd (no function to wrap) —
+    // install a plain replacement instead, same as forkSplit.test.tsx.
+    const originalConfirm = window.confirm;
+    const confirmMock = vi.fn().mockReturnValue(false);
+    window.confirm = confirmMock;
 
-    render(<ExtensionUiSettingsSection />);
+    try {
+      render(<ExtensionUiSettingsSection />);
 
-    expect(await screen.findByText("Empty Extension")).toBeTruthy();
-    expect(screen.getByText("ofek.empty-extension")).toBeTruthy();
-    expect(screen.getByText("Does nothing")).toBeTruthy();
+      expect(await screen.findByText("Empty Extension")).toBeTruthy();
+      expect(screen.getByText("ofek.empty-extension")).toBeTruthy();
+      expect(screen.getByText("Does nothing")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
-    expect(confirmMock).toHaveBeenCalledWith("Uninstall Empty Extension?");
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      expect.stringMatching(/\/api\/extensions\/ofek\.empty-extension$/),
-      expect.objectContaining({ method: "DELETE" }),
-    );
-
-    confirmMock.mockReturnValue(true);
-    fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
+      fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
+      expect(confirmMock).toHaveBeenCalledWith("Uninstall Empty Extension?");
+      expect(fetchMock).not.toHaveBeenCalledWith(
         expect.stringMatching(/\/api\/extensions\/ofek\.empty-extension$/),
         expect.objectContaining({ method: "DELETE" }),
       );
-    });
-    await waitFor(() => expect(screen.queryByText("Empty Extension")).toBeNull());
-    expect(await screen.findByText("No extensions installed.")).toBeTruthy();
+
+      confirmMock.mockReturnValue(true);
+      fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringMatching(/\/api\/extensions\/ofek\.empty-extension$/),
+          expect.objectContaining({ method: "DELETE" }),
+        );
+      });
+      await waitFor(() => expect(screen.queryByText("Empty Extension")).toBeNull());
+      expect(await screen.findByText("No extensions installed.")).toBeTruthy();
+    } finally {
+      window.confirm = originalConfirm;
+    }
   });
 
   it("blocks disabling and uninstalling required extensions", async () => {

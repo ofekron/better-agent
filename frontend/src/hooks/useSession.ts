@@ -202,10 +202,20 @@ function sameSessionListFilters(
   a: SessionListFilters,
   b: SessionListFilters,
 ): boolean {
+  const searchA = a.search ?? "";
+  const searchB = b.search ?? "";
   return (
     (a.projectPath ?? "") === (b.projectPath ?? "") &&
-    (a.search ?? "") === (b.search ?? "") &&
-    sameStringList(a.searchFields, b.searchFields) &&
+    searchA === searchB &&
+    // fetchSessionPage only sends `search_fields` alongside a non-empty
+    // `search` query (see its param builder below) — with no search text,
+    // differing `searchFields` defaults (e.g. SessionList's UI default of
+    // ["title","first_prompt"] vs the hook's empty initial state) produce
+    // an IDENTICAL wire request, so they must not register as a filters
+    // change here. Comparing them unconditionally caused a spurious
+    // "filters changed" classification on every mount, firing a redundant
+    // duplicate page-0 fetch alongside the mount-time fetchSessions() call.
+    (!searchA && !searchB || sameStringList(a.searchFields, b.searchFields)) &&
     Boolean(a.showArchived) === Boolean(b.showArchived) &&
     (a.fileEditMode ?? "any") === (b.fileEditMode ?? "any") &&
     sameStringList(a.folderIds, b.folderIds) &&

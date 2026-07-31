@@ -687,6 +687,11 @@ describe("SessionList advanced filters", () => {
             id: "unfiled",
             name: "Unfiled session",
             cwd: "/tmp/project",
+            // Non-empty so it doesn't land in the "new sessions" bucket
+            // (isNewSession, src/lib/sessionSort.ts), which renders above
+            // folders regardless of folder_id — this test is about
+            // folder-vs-unfiled ordering specifically, not that bucket.
+            message_count: 1,
           }),
           makeSession({
             id: "foldered",
