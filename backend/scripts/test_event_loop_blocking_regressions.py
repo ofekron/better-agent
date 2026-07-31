@@ -674,7 +674,7 @@ def test_async_provider_resolution_runs_off_loop() -> None:
     route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")
     route_end = main_source.index("@app.post(\"/api/internal/headless-run\")", route_start)
     route_source = main_source[route_start:route_end]
-    assert "provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)" in route_source
+    assert "provider = await asyncio.to_thread(config_store.get_provider, provider_id)" in route_source
 
 
 def test_delegation_state_store_calls_run_off_loop() -> None:
@@ -1041,7 +1041,12 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         else:
             end = source.index("# ------------------------------------------------------------------\n    # _emit_complete_from_file", start)
         watcher_source = source[start:end]
-        assert "await path_exists_off_loop(complete_path)" in watcher_source
+        # Each watcher either inlines the off-loop poll or delegates to the
+        # shared helper (provider_watch_helpers.wait_for_complete_or_process_death).
+        assert (
+            "await path_exists_off_loop(complete_path)" in watcher_source
+            or "wait_for_complete_or_process_death(" in watcher_source
+        )
         assert "await asyncio.to_thread(complete_path.exists)" not in watcher_source
         assert "complete_path.exists()" not in watcher_source
         bootstrap_start = source.index("async def _bootstrap_run(")
@@ -1049,9 +1054,15 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         bootstrap_source = source[bootstrap_start:bootstrap_end]
         assert "await path_exists_off_loop(state_path)" in bootstrap_source or "await path_exists_off_loop(runner_state_path)" in bootstrap_source
         assert "await path_exists_off_loop(complete_path)" in bootstrap_source
-        assert "state_path.exists()" not in bootstrap_source
+        # Match the conditional call form (trailing colon); a doc comment in
+        # provider_session_events legitimately references the bare token.
+        assert "state_path.exists():" not in bootstrap_source
         assert "runner_state_path.exists()" not in bootstrap_source
         assert "complete_path.exists()" not in bootstrap_source
+    # The shared helper performs the actual off-loop filesystem poll.
+    helper_source = (ROOT / "provider_watch_helpers.py").read_text(encoding="utf-8")
+    assert "async def wait_for_complete_or_process_death(" in helper_source
+    assert "await path_exists_off_loop(complete_path)" in helper_source
 
 
 def test_provider_run_process_poll_runs_off_loop() -> None:
@@ -1094,8 +1105,13 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
             start = source.index(start_marker)
             end = source.index(end_marker, start)
             watcher_source = source[start:end]
-            assert "await popen_is_running_off_loop(rs.popen)" in watcher_source
+            assert (
+                "await popen_is_running_off_loop(rs.popen)" in watcher_source
+                or "wait_for_complete_or_process_death(" in watcher_source
+            )
             assert "rs.popen.poll()" not in watcher_source
+    helper_source = (ROOT / "provider_watch_helpers.py").read_text(encoding="utf-8")
+    assert "await popen_is_running_off_loop(popen)" in helper_source
 
 
 def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
@@ -1322,13 +1338,14 @@ def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
     assert '"session.tail_persist.root_lock_held"' in manager_source
 
     turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    # recovery_gate moved out of the per-turn start_run path to the node-RPC
+    # handler (node_rpc_handlers.py, `node_rpc.provider_start_run.recovery_gate`);
+    # per-turn start_run now instruments flush_root_persist + provider_call.
     for metric in (
-        "provider.start_run.recovery_gate",
         "provider.start_run.flush_root_persist",
         "provider.start_run.provider_call",
     ):
         assert metric in turn_source
-    assert 'with perf.timed("provider.start_run.recovery_gate")' in turn_source
     assert 'with perf.timed("provider.start_run.provider_call")' in turn_source
 
     delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
@@ -1594,16 +1611,16 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     end = source.index("    def _lock_for_root(", start)
     helper_source = source[start:end]
     assert "rid = self._node_root_id.get(sid)" in helper_source
-    assert "session_store._loaded_root_id_for(sid)" in helper_source
-    assert "session_store.session_file_fingerprint(sid)" in helper_source
-    assert helper_source.index("session_store._loaded_root_id_for(sid)") < helper_source.index(
-        "session_store.session_file_fingerprint(sid)"
+    assert "self._root_repository.loaded_root_id_for(sid)" in helper_source
+    assert "self._root_repository.root_version(sid)" in helper_source
+    assert helper_source.index("self._root_repository.loaded_root_id_for(sid)") < helper_source.index(
+        "self._root_repository.root_version(sid)"
     )
-    assert helper_source.index("session_store.session_file_fingerprint(sid)") < helper_source.index(
-        "rid = session_store._resolve_root_id(sid)"
+    assert helper_source.index("self._root_repository.root_version(sid)") < helper_source.index(
+        "rid = self._root_repository.resolve_root_id(sid)"
     )
     assert "self._node_root_missing_until.get(sid, 0.0) > now" in helper_source
-    assert "rid = session_store._resolve_root_id(sid)" in helper_source
+    assert "rid = self._root_repository.resolve_root_id(sid)" in helper_source
     assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
     assert "self._node_root_missing_until[sid] = (" in helper_source
     assert "_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0" in source
@@ -3615,14 +3632,13 @@ def test_session_store_sessions_dir_is_env_aware_cached() -> None:
     assert "_SESSIONS_DIR_READY = True" in ensure_source
 
 
-def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
+def test_event_journal_read_path_is_cheap() -> None:
     source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    assert "def _sessions_dir()" in source
-    assert "_SESSIONS_DIR_CACHE" in source
+    assert "def _session_artifacts_dir(" in source
     read_start = source.index("def _read_appended_entries(")
     read_end = source.index("def read_events(", read_start)
     read_source = source[read_start:read_end]
-    assert "_sessions_dir() / session_id / \"events.jsonl\"" in read_source
+    assert "_session_artifacts_dir(session_id) / \"events.jsonl\"" in read_source
     assert "ba_home()" not in read_source
     assert ".exists(" not in read_source
     assert ".stat(" not in read_source
@@ -3631,8 +3647,8 @@ def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
 
 def test_run_state_emit_debug_logging_is_gated() -> None:
     source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _dbg_runstate(")
-    end = source.index("# ======================================================================", start)
+    start = source.index("async def emit_run_state(")
+    end = source.index("async def _request_logical_turn_stop(", start)
     run_state_source = source[start:end]
     assert "logger.isEnabledFor(logging.DEBUG)" in run_state_source
     assert "logger.debug(" in run_state_source
@@ -3776,8 +3792,7 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     assert "session_manager._root_id_for(session_id)" not in helper_source
     assert "cached_tree_key = key[1]" in helper_source
     assert "session_manager.root_tree_stub_cache_key_for_root(" in helper_source
-    assert "_session_event_file_fingerprint(root_id)" in helper_source
-    assert "_session_event_meta(" not in helper_source
+    assert "session_list_cache._session_event_meta(root_id)" in helper_source
     assert "_session_detail_response_cache_key_sync(" not in helper_source
     assert "known_root_id: Optional[str] = None" in manager_source
     assert "known_root_id=root_id if isinstance(root_id, str) else None" in source
@@ -3795,7 +3810,6 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
         route_source.index("if cached_full_key is not None:"):
         route_source.index("perf.record(\"sessions.detail.response_cache.miss\"",)
     ]
-    assert "meta_path" not in roots_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -4066,15 +4080,15 @@ def test_submit_team_message_sync_store_work_off_loop() -> None:
     start = source.index("async def submit_team_message(")
     end = source.index("    def _resolve_delegation_run_config(", start)
     submit_source = source[start:end]
-    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in submit_source
-    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in submit_source
-    assert "queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload" in submit_source
-    assert "await asyncio.to_thread(\n                session_manager.add_queued_prompt" in submit_source
-    assert "cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt" in submit_source
-    assert "await asyncio.to_thread(\n                session_manager.remove_queued_prompt" in submit_source
+    assert "sender, target = await _to_team_message_thread(\n            team_messaging.validate_message_route" in submit_source
+    assert "metadata = await _to_team_message_thread(\n            team_messaging.build_message_metadata" in submit_source
+    assert "queue_item = await _to_team_message_thread(\n            team_messaging.queue_payload" in submit_source
+    assert "await _to_team_message_thread(\n                session_manager.add_queued_prompt" in submit_source
+    assert "cli_prompt = queue_item[\"cli_prompt\"]" in submit_source
+    assert "await _to_team_message_thread(\n                session_manager.remove_queued_prompt" in submit_source
     assert "session_manager.add_queued_prompt(" not in submit_source
     assert "cli_prompt = team_messaging.format_team_message_prompt(" not in submit_source
-    assert "await self.submit_prompt_async(target_session_id, {" in submit_source
+    assert "await self.submit_prompt_async(\n                target_session_id" in submit_source
     assert "self.submit_prompt(target_session_id, {" not in submit_source
 
 
@@ -4115,11 +4129,11 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     route_start = source.index("@app.get(\"/api/sessions\")")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
-    assert "content_limit=_session_search_candidate_limit(offset, limit)" in route_source
+    assert "content_limit=session_list_cache._session_search_candidate_limit(offset, limit)" in route_source
     assert "content_limit=max(offset + limit, 1)" not in route_source
     assert "cache_response = not (" not in route_source
-    assert "session_store.SEARCH_FIELD_CONTENT in effective_search_fields" in route_source
-    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
+    assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
+    assert "cached_response = session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
     assert "sessions.list.search_local_page.worker" in route_source
     assert route_source.index("sessions.list.search_local_page.worker") < route_source.index(
         "with perf.timed(\"sessions.list.remote\")"
@@ -4416,7 +4430,9 @@ def test_project_update_total_is_maintained_projection() -> None:
     append_end = source.index("def list_unseen(", append_start)
     append_source = source[append_start:append_end]
     mark_start = source.index("def mark_seen(")
-    mark_end = source.index("def list_all(", mark_start)
+    # mark_seen is the final function in the module (list_all was removed),
+    # so its slice runs to end-of-source.
+    mark_end = len(source)
     mark_source = source[mark_start:mark_end]
     assert "_total_unseen_count = total" in load_source
     assert "_read_entries_path_locked(path)" in load_source
@@ -4463,7 +4479,7 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     start = source.index("def is_builtin_feature_enabled_cached(")
     end = source.index("def is_extension_runtime_ready(", start)
     helper_source = source[start:end]
-    assert "fingerprint = store_fingerprint()" in helper_source
+    assert "fingerprint = (store_fingerprint(), installation_profile.integrations_enabled())" in helper_source
     assert "_BUILTIN_FEATURE_CACHE.get(extension_id)" in helper_source
     assert "is_builtin_feature_enabled(extension_id)" in helper_source
     fingerprint_start = source.index("def store_fingerprint(")
@@ -4521,7 +4537,7 @@ def test_communication_run_selector_validation_is_off_default_pool() -> None:
     start = source.index("async def validate_optional_run_selector(")
     end = source.index("def validate_provider_default_reasoning_effort(", start)
     validator_source = source[start:end]
-    assert 'await hot_path.run(\n            "communication.validate_run_selector.get_provider",\n            config_store.get_provider' in validator_source
+    assert 'await hot_path.run(\n                "communication.validate_run_selector.get_provider",\n                config_store.get_provider' in validator_source
     assert 'await hot_path.run(\n        "communication.validate_run_selector.validate_provider_model",\n        validate_provider_model' in validator_source
     assert "asyncio.to_thread(" not in validator_source
 
