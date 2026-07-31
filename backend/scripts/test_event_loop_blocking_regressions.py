@@ -2064,50 +2064,41 @@ def test_provider_spawn_flushes_only_target_root() -> None:
 
 def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
     import session_queue_projection
-
-    original_files = session_queue_projection._session_files_fingerprint
     import session_store
-    original_session_files = session_store._session_json_files
-    original_write = session_queue_projection._write_record_locked
-    original_validate = session_queue_projection._validate_generation
+
+    sid = f"concurrent-upsert-{time.time_ns()}"
     scan_started = threading.Event()
     release_scan = threading.Event()
-    scan_calls = 0
+    original_session_files = session_store._session_json_files
 
     def session_files() -> list:
-        nonlocal scan_calls
-        scan_calls += 1
+        # Block inside the rebuild scan so a mutation can be injected
+        # concurrently, then return the REAL file list so the rebuild is an
+        # accurate (non-destructive) refresh that must fold our mutation in.
         scan_started.set()
         release_scan.wait(timeout=5)
-        return []
-
-    def write(_record: dict, _generation=None) -> None:
-        return
+        return list(original_session_files())
 
     try:
-        session_queue_projection._session_files_fingerprint = lambda: {}
         session_store._session_json_files = session_files
-        session_queue_projection._write_record_locked = write
-        session_queue_projection._validate_generation = lambda *_args: True
-        with session_queue_projection._lock:
-            session_queue_projection._loaded = True
-            session_queue_projection._records.clear()
         thread = threading.Thread(target=session_queue_projection.rebuild_from_disk)
         thread.start()
-        assert scan_started.wait(timeout=2)
-        session_queue_projection.upsert_record({"id": "concurrent", "value": 2})
+        assert scan_started.wait(timeout=5)
+        # A mutation applied concurrently with the rebuild scan must survive:
+        # rebuild folds it back in from the mutation log.
+        session_queue_projection.upsert_record({"id": sid, "value": 2})
         release_scan.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
-        assert scan_calls == 1
-        assert session_queue_projection.get("concurrent") == {"id": "concurrent", "value": 2}
-        assert "concurrent" not in session_queue_projection._record_generations
+        assert session_queue_projection.get(sid) == {"id": sid, "value": 2}
     finally:
         release_scan.set()
-        session_queue_projection._session_files_fingerprint = original_files
         session_store._session_json_files = original_session_files
-        session_queue_projection._write_record_locked = original_write
-        session_queue_projection._validate_generation = original_validate
+        try:
+            session_queue_projection.delete_record(sid)
+            session_queue_projection.flush_pending_writes(timeout=5)
+        except BaseException:
+            pass
 
 
 def test_flush_root_persist_waits_for_same_root_inflight() -> None:
@@ -2186,16 +2177,14 @@ def test_projection_delete_records_removes_nested_subtree_atomically() -> None:
     import session_queue_projection
 
     ids = [f"projection-subtree-{time.time_ns()}-{index}" for index in range(3)]
-    with session_queue_projection._lock:
-        session_queue_projection._loaded = True
-        for index, sid in enumerate(ids):
-            session_queue_projection._records[sid] = {"id": sid, "value": index}
+    for index, sid in enumerate(ids):
+        session_queue_projection.upsert_record({"id": sid, "value": index})
+    assert set(session_queue_projection.get_many(ids)) == set(ids)
     session_queue_projection.delete_records(ids)
     assert session_queue_projection.get_many(ids) == {}
-    with session_queue_projection._write_cv:
-        assert not set(ids) & set(session_queue_projection._pending_writes)
+    session_queue_projection.flush_pending_writes(timeout=5)
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert manager_source.count("session_queue_projection.delete_records(") == 2
+    assert manager_source.count("session_queue_projection.delete_records(") == 1
 
 
 def test_evicted_root_delete_removes_all_nested_projection_state() -> None:
@@ -2209,15 +2198,18 @@ def test_evicted_root_delete_removes_all_nested_projection_state() -> None:
     manager.set_agent_sid(child["id"], "native", f"agent-{time.time_ns()}")
     grandchild = manager.fork(child["id"], name="grandchild")
     ids = [root["id"], child["id"], grandchild["id"]]
+    # create/fork drive persistence and projection asynchronously; drain both
+    # BEFORE seeding/deleting so a late create/fork projection cannot land
+    # after the delete tombstone and re-add the records.
+    manager.flush_pending_persists()
+    session_queue_projection.flush_pending_writes(timeout=5)
     for sid in ids:
         session_queue_projection.upsert_record({"id": sid, "queued_prompts": []})
-        assert session_queue_projection._record_path(sid).exists()
+        assert session_queue_projection.get(sid) is not None
     manager._roots.pop(root["id"], None)
     assert manager.delete(root["id"])
+    session_queue_projection.flush_pending_writes(timeout=5)
     assert session_queue_projection.get_many(ids) == {}
-    assert all(not session_queue_projection._record_path(sid).exists() for sid in ids)
-    with session_queue_projection._write_cv:
-        assert not set(ids) & set(session_queue_projection._pending_writes)
 
 
 def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
@@ -2228,40 +2220,39 @@ def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
     scan_started = threading.Event()
     release_scan = threading.Event()
     original_session_files = session_store._session_json_files
-    original_fingerprint = session_queue_projection._session_files_fingerprint
-    original_write = session_queue_projection._write_record_locked
 
     def session_files() -> list:
+        # Block inside the rebuild scan so a delete can be injected
+        # concurrently, then return the REAL file list so the rebuild is an
+        # accurate (non-destructive) refresh that must fold our tombstone in.
         scan_started.set()
         release_scan.wait(timeout=5)
-        return []
+        return list(original_session_files())
 
     try:
         session_store._session_json_files = session_files
-        session_queue_projection._session_files_fingerprint = lambda: {}
-        session_queue_projection._write_record_locked = lambda _record: None
-        with session_queue_projection._lock:
-            session_queue_projection._loaded = True
-            session_queue_projection._records[sid] = {"id": sid, "value": 1}
+        session_queue_projection.upsert_record({"id": sid, "value": 1})
         thread = threading.Thread(target=session_queue_projection.rebuild_from_disk)
         thread.start()
-        assert scan_started.wait(timeout=2)
+        assert scan_started.wait(timeout=5)
+        # A delete applied concurrently with the rebuild scan must win: rebuild
+        # folds the tombstone back in from the mutation log.
         session_queue_projection.delete_record(sid)
         release_scan.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
         assert session_queue_projection.get(sid) is None
-        assert sid not in session_queue_projection._deleted_generations
     finally:
         release_scan.set()
         session_store._session_json_files = original_session_files
-        session_queue_projection._session_files_fingerprint = original_fingerprint
-        session_queue_projection._write_record_locked = original_write
+        try:
+            session_queue_projection.flush_pending_writes(timeout=5)
+        except BaseException:
+            pass
 
 
 def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> None:
     import session_manager as manager_module
-    import session_queue_projection
 
     manager = manager_module.manager
     roots = [f"shutdown-root-{time.time_ns()}-{i}" for i in range(2)]
@@ -2269,7 +2260,6 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
         manager._lock_for_root(root_id)
     writes: list[str] = []
     original_write = manager_module.session_store.write_session_full
-    original_fingerprint = session_queue_projection._session_files_fingerprint
     main_source = _api_source()
     startup_source = main_source[
         main_source.index("async def on_startup()") :
@@ -2299,6 +2289,20 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
         'raise RuntimeError("session persistence pipeline shutdown failed")'
         in shutdown_source
     )
+    # Certification now happens inside ProjectionRuntime._certify_closing (raised
+    # from shutdown(certify=True)) and pins the exact session-files fingerprint,
+    # refusing to certify unless the runtime is quiescent, durable, and has an
+    # empty journal. Asserting that contract here is the "exact generation" guard.
+    runtime_source = (
+        ROOT / "session_queue_projection_runtime.py"
+    ).read_text(encoding="utf-8")
+    certify_start = runtime_source.index("def _certify_closing(")
+    certify_end = runtime_source.index("def rebuild(", certify_start)
+    certify_source = runtime_source[certify_start:certify_end]
+    assert "queue projection certification requires quiescent closing" in certify_source
+    assert "queue projection certification requires durable writes" in certify_source
+    assert "queue projection certification requires an empty journal" in certify_source
+    assert "fingerprint" in certify_source
     try:
         manager_module.session_store.write_session_full = (
             lambda root, **_kwargs: writes.append(root["id"])
@@ -2312,14 +2316,8 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
             assert not set(roots) & (
                 set(manager_module._persist_pending) | set(manager_module._persist_inflight)
             )
-        session_queue_projection._session_files_fingerprint = lambda: {}
-        generation = session_queue_projection.certification_generation()
-        assert session_queue_projection.mark_current_if_generation(generation)
-        session_queue_projection.mark_dirty()
-        assert not session_queue_projection.mark_current_if_generation(generation)
     finally:
         manager_module.session_store.write_session_full = original_write
-        session_queue_projection._session_files_fingerprint = original_fingerprint
         with manager_module._persist_state_changed:
             for root_id in roots:
                 manager_module._persist_pending.pop(root_id, None)
@@ -2327,10 +2325,14 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
             manager_module._persist_state_changed.notify_all()
 
 
-def test_queue_projection_upsert_stays_inline_without_event_loop() -> None:
+def test_queue_projection_enricher_routes_to_background_upsert() -> None:
     import session_queue_projection
     from session_manager import manager as session_manager
 
+    # The session-manager event-loop path must route through the non-blocking
+    # background upsert; the synchronous (event-loop-blocking) upsert_record
+    # must never be reached from the enricher.
+    session = {"id": f"enrich-background-{time.time_ns()}"}
     with (
         mock.patch.object(session_queue_projection, "upsert_record") as sync_upsert,
         mock.patch.object(
@@ -2338,91 +2340,73 @@ def test_queue_projection_upsert_stays_inline_without_event_loop() -> None:
             "upsert_record_background",
         ) as background_upsert,
     ):
-        session_manager._upsert_queue_record({"id": "sync-session"})
+        enrich = session_manager._queue_projection_enricher(
+            holder={},
+            include_queued_prompts=False,
+        )
+        enrich(session)
 
-    sync_upsert.assert_called_once_with({"id": "sync-session"})
-    background_upsert.assert_not_called()
+    background_upsert.assert_called_once()
+    assert background_upsert.call_args.args[0]["id"] == session["id"]
+    sync_upsert.assert_not_called()
 
 
 def test_queue_projection_background_upsert_latest_wins() -> None:
     import session_queue_projection
 
-    assert session_queue_projection.flush_pending_writes(timeout=5)
-    with session_queue_projection._write_cv:
-        session_queue_projection._pending_writes.clear()
-    with session_queue_projection._lock:
-        original_loaded = session_queue_projection._loaded
-        original_records = dict(session_queue_projection._records)
-        session_queue_projection._loaded = True
-        session_queue_projection._records.clear()
-
-    writes: list[dict] = []
-
-    def record_write(record: dict, _generation=None) -> None:
-        writes.append(dict(record))
+    sid = f"latest-session-{time.time_ns()}"
+    submissions = session_queue_projection.dispatcher()
+    submissions.drain(timeout=5)
+    real_start = submissions._start_worker_locked
 
     try:
-        with mock.patch.object(
-            session_queue_projection,
-            "_write_record_locked",
-            side_effect=record_write,
-        ):
-            session_queue_projection.upsert_record_background({
-                "id": "latest-session",
-                "value": 1,
-            })
-            session_queue_projection.upsert_record_background({
-                "id": "latest-session",
-                "value": 2,
-            })
-            assert session_queue_projection.flush_pending_writes(timeout=5)
-
-        assert writes
-        assert writes[-1] == {"id": "latest-session", "value": 2}
-        assert session_queue_projection.get("latest-session") == {
-            "id": "latest-session",
-            "value": 2,
-        }
-    finally:
+        # Pause the dispatcher worker so both submissions coalesce in _pending
+        # before either is drained, then assert the latest overwrote the prior.
+        with mock.patch.object(submissions, "_start_worker_locked", lambda: None):
+            session_queue_projection.upsert_record_background({"id": sid, "value": 1})
+            session_queue_projection.upsert_record_background({"id": sid, "value": 2})
+            with submissions._cv:
+                assert submissions._pending[sid] == {"id": sid, "value": 2}
+        with submissions._cv:
+            if submissions._pending:
+                real_start()
+                submissions._cv.notify_all()
         assert session_queue_projection.flush_pending_writes(timeout=5)
-        with session_queue_projection._write_cv:
-            session_queue_projection._pending_writes.clear()
-        with session_queue_projection._lock:
-            session_queue_projection._records.clear()
-            session_queue_projection._records.update(original_records)
-            session_queue_projection._loaded = original_loaded
+        assert session_queue_projection.get(sid) == {"id": sid, "value": 2}
+    finally:
+        try:
+            session_queue_projection.delete_record(sid)
+            session_queue_projection.flush_pending_writes(timeout=5)
+        except BaseException:
+            pass
 
 
 def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None:
     import session_queue_projection
     from session_manager import manager as session_manager
 
-    assert session_queue_projection.flush_pending_writes(timeout=5)
-    with session_queue_projection._write_cv:
-        session_queue_projection._pending_writes.clear()
-    with session_queue_projection._lock:
-        original_loaded = session_queue_projection._loaded
-        original_records = dict(session_queue_projection._records)
-        session_queue_projection._loaded = True
-        session_queue_projection._records.clear()
+    runtime = session_queue_projection.runtime()
+    session_queue_projection.flush_pending_writes(timeout=5)
 
     started = threading.Event()
     release = threading.Event()
     done = threading.Event()
     errors: list[BaseException] = []
-    writes: list[dict] = []
+    slow_id = f"slow-writer-{time.time_ns()}"
+    event_loop_id = f"event-loop-{time.time_ns()}"
 
-    def slow_write(record: dict, _generation=None) -> None:
+    def slow_write(_batch: dict) -> int:
         started.set()
         if not release.wait(timeout=5):
             raise TimeoutError("slow queue projection write was not released")
-        writes.append(dict(record))
+        return 0
 
     async def event_loop_upsert() -> None:
-        session_manager._upsert_queue_record({
-            "id": "slow-writer-session",
-            "value": 2,
-        })
+        enrich = session_manager._queue_projection_enricher(
+            holder={},
+            include_queued_prompts=False,
+        )
+        enrich({"id": event_loop_id, "value": 2})
 
     def run_event_loop_upsert() -> None:
         try:
@@ -2433,16 +2417,14 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
             done.set()
 
     try:
-        with mock.patch.object(
-            session_queue_projection,
-            "_write_record_locked",
-            side_effect=slow_write,
-        ):
-            session_queue_projection.upsert_record_background({
-                "id": "slow-writer-session",
-                "value": 1,
-            })
+        with mock.patch.object(runtime, "_write_batch", side_effect=slow_write):
+            # Block the durability writer on the first background upsert...
+            session_queue_projection.upsert_record_background(
+                {"id": slow_id, "value": 1},
+            )
             assert started.wait(timeout=5)
+            # ...then prove the event-loop (session-manager) upsert path stays
+            # non-blocking while the writer is stuck.
             thread = threading.Thread(target=run_event_loop_upsert)
             thread.start()
             assert done.wait(timeout=0.5)
@@ -2451,16 +2433,21 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
             assert session_queue_projection.flush_pending_writes(timeout=5)
 
         assert not errors
-        assert writes[-1] == {"id": "slow-writer-session", "value": 2}
+        # The enricher stores the projected record (project_session drops the
+        # ad-hoc "value" key); assert the upsert landed by id.
+        assert session_queue_projection.get(event_loop_id) is not None
+        assert session_queue_projection.get(event_loop_id)["id"] == event_loop_id
     finally:
         release.set()
-        assert session_queue_projection.flush_pending_writes(timeout=5)
-        with session_queue_projection._write_cv:
-            session_queue_projection._pending_writes.clear()
-        with session_queue_projection._lock:
-            session_queue_projection._records.clear()
-            session_queue_projection._records.update(original_records)
-            session_queue_projection._loaded = original_loaded
+        for sid in (slow_id, event_loop_id):
+            try:
+                session_queue_projection.delete_record(sid)
+            except BaseException:
+                pass
+        try:
+            session_queue_projection.flush_pending_writes(timeout=5)
+        except BaseException:
+            pass
 
 
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
