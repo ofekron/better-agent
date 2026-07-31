@@ -23,6 +23,12 @@ os.environ["BETTER_CLAUDE_HOME"] = str(TEST_HOME)
 sys.path.insert(0, str(ROOT / "desktop"))
 sys.path.insert(0, str(ROOT / "backend"))
 
+# desktop/ is excluded from the backend-only test image (.dockerignore); skip
+# cleanly when the desktop/private modules are not on path.
+import pytest  # noqa: E402
+
+pytest.importorskip("credential_session")
+
 import credential_session  # noqa: E402
 import provider  # noqa: E402
 import provider_claude  # noqa: E402

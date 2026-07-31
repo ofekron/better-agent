@@ -14,6 +14,13 @@
 #   ./scripts/run-backend-tests.sh --ref <git-ref>       # test an exact commit/tag/branch, ignoring local changes
 #   ./scripts/run-backend-tests.sh -- -k some_test       # pass args through to `python -m pytest`
 #   ./scripts/run-backend-tests.sh --ref HEAD~1 -- scripts/test_foo.py
+#   ./scripts/run-backend-tests.sh --coverage            # measure coverage, write reports to ./coverage-backend/
+#   ./scripts/run-backend-tests.sh --coverage /tmp/cov   # ...to a custom dir
+#
+# Coverage (--coverage) mounts an output dir into the container (which runs
+# --rm, so reports written inside the layer would be lost) and appends
+# pytest-cov args. Scope/omit rules live in backend/pyproject.toml's
+# [tool.coverage.*], so the same scope is measured regardless of caller.
 #
 # RUN_LLM_TESTS is forwarded only if already set in the calling shell — this
 # script never sets it itself. Per repo policy, live-LLM test runs require
@@ -32,12 +39,24 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.test"
 
 REF=""
+COVERAGE_DIR=""
 PYTEST_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref)
       REF="$2"
       shift 2
+      ;;
+    --coverage)
+      # --coverage [DIR]: use the default dir unless an explicit path is given.
+      # Guard so `--coverage --` (DIR omitted) doesn't swallow the separator.
+      if [ "${2:-}" = "" ] || [ "${2#-}" != "${2:-}" ]; then
+        COVERAGE_DIR="$REPO_ROOT/coverage-backend"
+        shift 1
+      else
+        COVERAGE_DIR="$2"
+        shift 2
+      fi
       ;;
     --)
       shift
@@ -116,6 +135,27 @@ fi
 PYTEST_CACHE_DIR="$REPO_ROOT/backend/.pytest_cache"
 mkdir -p "$PYTEST_CACHE_DIR"
 RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
+
+# Coverage: mount the output dir (the container runs --rm, so reports written
+# to its layer would be discarded) and append pytest-cov args. Scope/omit is
+# driven by backend/pyproject.toml, so --cov needs no explicit source.
+if [ -n "$COVERAGE_DIR" ]; then
+  # docker -v needs an absolute path; resolve or create it.
+  case "$COVERAGE_DIR" in
+    /*) ;;
+    *) COVERAGE_DIR="$REPO_ROOT/$COVERAGE_DIR" ;;
+  esac
+  mkdir -p "$COVERAGE_DIR"
+  RUN_ARGS+=(-v "$COVERAGE_DIR:/coverage")
+  # += avoids reading PYTEST_ARGS (empty-array read trips set -u on bash 3.2).
+  PYTEST_ARGS+=(
+    --cov
+    --cov-report=term-missing
+    --cov-report="json:/coverage/coverage.json"
+    --cov-report="html:/coverage/html"
+    --cov-config=/repo/backend/pyproject.toml
+  )
+fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}"

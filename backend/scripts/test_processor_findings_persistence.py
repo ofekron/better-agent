@@ -17,7 +17,14 @@ TEST_HOME = Path(tempfile.mkdtemp(prefix="ba-test-processor-findings-"))
 paths.engage_test_home(TEST_HOME)
 
 import requirement_context
-from requirement_analysis import on_demand
+
+# requirement_analysis lives in the private requirements extension
+# (better-agent-private/), excluded from the backend-only test image
+# (.dockerignore). Skip cleanly when it is not on path.
+import pytest  # noqa: E402
+
+pytest.importorskip("requirement_analysis")
+from requirement_analysis import on_demand  # noqa: E402
 
 
 def test_parse_clean_json():

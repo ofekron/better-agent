@@ -1,1 +1,7 @@
 pytest>=8.0.0,<9
+# Coverage tooling for the unit/full-stack tiers. Test-only — stays out of
+# requirements.txt so the runtime image never carries it. Wired into
+# scripts/run-backend-tests.sh --coverage, which mounts an output dir since
+# the container runs with --rm.
+pytest-cov>=5.0.0
+coverage>=7.6.0

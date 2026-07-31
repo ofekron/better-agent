@@ -17,6 +17,7 @@ htmlcov/
 htmlcov-*/
 coverage-unit/
 coverage-fullstack/
+coverage-backend/
 coverage_*.json
 *.covergage
 

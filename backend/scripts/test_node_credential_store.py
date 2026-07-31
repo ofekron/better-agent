@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "desktop"))
 
+# desktop/ is excluded from the backend-only test image (.dockerignore), so
+# these modules exist only where the desktop/private code is on path. Skip
+# cleanly there instead of erroring at collection.
+import pytest  # noqa: E402
+
+pytest.importorskip("node_credential_store")
+pytest.importorskip("credential_session")
+
 import node_credential_store
 from node_credential_store import node_provider_credential_store
 from credential_session import ProviderCredentialBroker

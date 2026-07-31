@@ -15,6 +15,12 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import config_store  # noqa: E402
 import credential_clone_api  # noqa: E402
+
+# desktop/ is excluded from the backend-only test image (.dockerignore); skip
+# cleanly when credential_session (desktop) is not on path.
+import pytest  # noqa: E402
+
+pytest.importorskip("credential_session")
 import credential_session  # noqa: E402
 
 

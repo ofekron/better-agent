@@ -26,6 +26,17 @@ backend/__pycache__/
 **/__pycache__/
 **/*.pyc
 
+# Coverage run output (Coverage Grind routine) — never part of any image.
+coverage/
+coverage-backend/
+coverage-unit/
+coverage-fullstack/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+htmlcov-*/
+
 .better-claude/
 .better-agent/
 .routine-outputs/
