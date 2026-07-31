@@ -23,6 +23,7 @@ import internal_guards
 import perf
 import session_organization_store
 import session_search
+import session_status
 import session_store
 import user_input_store
 import user_prefs
@@ -558,26 +559,6 @@ def _require_tag_source_owner(source: object, token: str) -> None:
 
 # ── Status buckets, filtering, sorting, and search-score plumbing ──
 
-# Attention-marker tags emitted by the user-attention extension. The tag
-# rides the marker projection (see file_ref_resolver.detect_markers); we
-# read it here rather than match on color/tooltip (which drift).
-_MARKER_TAG_NEEDS_DECISION = "NEEDS_USER_DECISION"
-_MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE"
-_RUNNING_STATES = ("active", "waiting_on_background")
-
-
-def _has_open_work_items(session: dict) -> bool:
-    items = (
-        list(session.get("current_todos") or [])
-        + list(session.get("current_tasks") or [])
-    )
-    return any(
-        (item or {}).get("status") != "completed"
-        for item in items
-        if isinstance(item, dict)
-    )
-
-
 #: Status buckets a sidebar session can fall into, highest priority first.
 #: The single source of truth for both the status sort order (rank = reverse
 #: index) and the status include/exclude filter.
@@ -598,45 +579,26 @@ def _session_status_key(
     unread_by_sid: dict[str, int],
     pending_input_by_sid: dict[str, int] | None = None,
 ) -> str:
-    """Which SESSION_STATUS_KEYS bucket this session is in."""
-    sid = session.get("id") or ""
-    # Snapshot wins for local rows (their summary has no monitoring_state at
-    # sort time); fall back to the row's own fields for remote-node rows that
-    # aren't in the local snapshot.
-    state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
-    pending_inputs = None
-    if pending_input_by_sid is not None:
-        pending_inputs = pending_input_by_sid.get(sid)
-    if pending_inputs is None:
-        pending_inputs = session.get("pending_user_input_count", 0)
-    try:
-        pending_input_count = max(0, int(pending_inputs or 0))
-    except (TypeError, ValueError):
-        pending_input_count = 0
-    if session.get("has_error") or session.get("unseen_error"):
+    """Which SESSION_STATUS_KEYS bucket this session is in.
+
+    A priority projection of the independent dimensions in
+    `session_status.compute` — the bucket is what the sidebar sorts and
+    filters on, so exactly one wins per session.
+    """
+    status = session_status.compute(
+        session, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+    )
+    if status.errored:
         return "error"
-    markers = session.get("markers") or {}
-    tags = {
-        (m or {}).get("tag")
-        for m in markers.values()
-        if isinstance(m, dict)
-    }
-    if (
-        state == "blocked_on_user"
-        or pending_input_count > 0
-        or _MARKER_TAG_NEEDS_DECISION in tags
-    ):
+    if status.waiting_for_user:
         return "needs_decision"
-    unread = unread_by_sid.get(sid)
-    if unread is None:
-        unread = session.get("unread_count", 0)
-    if (unread or 0) > 0 and state not in _RUNNING_STATES:
+    if status.unread and not status.busy:
         return "unread"
-    if _has_open_work_items(session):
+    if status.open_work:
         return "open_work"
-    if state in _RUNNING_STATES:
+    if status.busy:
         return "running"
-    if _MARKER_TAG_ALL_TASKS_DONE in tags:
+    if status.is_done:
         return "all_done"
     return "idle"
 

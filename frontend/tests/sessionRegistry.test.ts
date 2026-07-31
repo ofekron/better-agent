@@ -322,6 +322,8 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     // Visibility flips to hidden: backend ships cwd="" — we honor it.
     eventBus.publish("session_unread_changed", {
@@ -333,6 +335,8 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 0,
       unread_session_count: 0,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     // Per-session state still applies — chat view may still consume it.
     expect(sessionRegistry.getSession("flipper").unread_count).toBe(4);
@@ -353,10 +357,14 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 2,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     expect(sessionRegistry.getProject("/q", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
   });
 
@@ -374,6 +382,8 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("", "primary")).toEqual({
       running_count: 0,
       unread_session_count: 0,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
   });
 
@@ -403,11 +413,15 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 2,
       unread_session_count: 2,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     eventBus.publish("session_deleted", { session_id: "a" });
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
   });
 
@@ -418,6 +432,8 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     eventBus.publish("session_metadata_updated", {
       session_id: "mover",
@@ -426,10 +442,14 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 0,
       unread_session_count: 0,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
     expect(sessionRegistry.getProject("/q", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
   });
 
@@ -457,7 +477,164 @@ describe("sessionRegistry — project aggregates", () => {
     expect(sessionRegistry.getProject("/p", "primary")).toEqual({
       running_count: 1,
       unread_session_count: 1,
+      waiting_for_user_count: 0,
+      errored_count: 0,
     });
+  });
+});
+
+/**
+ * Every status dimension gets its own project counter, and every
+ * dimension mutation must move it. Before these, only running/unread
+ * were aggregated and only running/unread deltas triggered a project
+ * recompute — so an error or a waiting-for-user change left the project
+ * badge stale until an unrelated delta happened to recompute it.
+ */
+describe("sessionRegistry — per-dimension project counters", () => {
+  beforeEach(async () => {
+    await resetRegistry();
+  });
+
+  const NEEDS_DECISION = "NEEDS_USER_DECISION";
+
+  async function seedOne() {
+    await bootstrapWith([
+      { id: "s1", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+    ]);
+    return () => sessionRegistry.getProject("/p", "primary");
+  }
+
+  it("running_count counts active and background work, not idle or approval-blocked", async () => {
+    await bootstrapWith([
+      { id: "act", cwd: "/p", node_id: "primary" },
+      { id: "bg", cwd: "/p", node_id: "primary" },
+      { id: "idle", cwd: "/p", node_id: "primary" },
+      { id: "blocked", cwd: "/p", node_id: "primary" },
+    ]);
+    for (const [session_id, monitoring_state] of [
+      ["act", "active"],
+      ["bg", "waiting_on_background"],
+      ["idle", "idle"],
+      ["blocked", "blocked_on_user"],
+    ] as const) {
+      eventBus.publish("session_monitoring_changed", {
+        session_id,
+        monitoring_state,
+        cwd: "/p",
+        node_id: "primary",
+      });
+    }
+    const agg = sessionRegistry.getProject("/p", "primary");
+    // "idle" and "blocked_on_user" are live processes with no work in
+    // flight — Idle on the Running dimension.
+    expect(agg.running_count).toBe(2);
+    // The approval-blocked one shows on its own dimension instead.
+    expect(agg.waiting_for_user_count).toBe(1);
+  });
+
+  it("errored_count moves on session_error_changed", async () => {
+    const agg = await seedOne();
+    expect(agg().errored_count).toBe(0);
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
+    expect(agg().errored_count).toBe(1);
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: false });
+    expect(agg().errored_count).toBe(0);
+  });
+
+  it("errored_count clears when a new turn starts on the session", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
+    expect(agg().errored_count).toBe(1);
+    eventBus.publish("turn_start", { app_session_id: "s1" });
+    expect(agg().errored_count).toBe(0);
+    // …and the same turn_start makes it running.
+    expect(agg().running_count).toBe(1);
+  });
+
+  it("waiting_for_user_count moves on a pending user-input request", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_user_input_changed", {
+      session_id: "s1",
+      pending_user_input_count: 1,
+    });
+    expect(agg().waiting_for_user_count).toBe(1);
+    eventBus.publish("session_user_input_changed", {
+      session_id: "s1",
+      pending_user_input_count: 0,
+    });
+    expect(agg().waiting_for_user_count).toBe(0);
+  });
+
+  it("waiting_for_user_count moves on a NEEDS_USER_DECISION marker", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_marker_changed", {
+      session_id: "s1",
+      extension_id: "user-attention",
+      marker: { color: "#f80", tooltip: "decide", tag: NEEDS_DECISION },
+    });
+    expect(agg().waiting_for_user_count).toBe(1);
+    eventBus.publish("session_marker_changed", {
+      session_id: "s1",
+      extension_id: "user-attention",
+      marker: null,
+    });
+    expect(agg().waiting_for_user_count).toBe(0);
+  });
+
+  it("a marker that is not NEEDS_USER_DECISION does not mark the session waiting", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_marker_changed", {
+      session_id: "s1",
+      extension_id: "user-attention",
+      marker: { color: "#08f", tooltip: "done", tag: "ALL_TASKS__DONE" },
+    });
+    expect(agg().waiting_for_user_count).toBe(0);
+  });
+
+  it("dimensions never mask each other — one session can hit every counter", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_monitoring_changed", {
+      session_id: "s1",
+      monitoring_state: "active",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    eventBus.publish("session_unread_changed", {
+      session_id: "s1",
+      unread_count: 4,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
+    eventBus.publish("session_user_input_changed", {
+      session_id: "s1",
+      pending_user_input_count: 2,
+    });
+    expect(agg()).toEqual({
+      running_count: 1,
+      unread_session_count: 1,
+      waiting_for_user_count: 1,
+      errored_count: 1,
+    });
+  });
+
+  it("counters are per project — a sibling project is untouched", async () => {
+    await bootstrapWith([
+      { id: "a", cwd: "/p", node_id: "primary" },
+      { id: "b", cwd: "/q", node_id: "primary" },
+    ]);
+    eventBus.publish("session_error_changed", { session_id: "a", has_error: true });
+    expect(sessionRegistry.getProject("/p", "primary").errored_count).toBe(1);
+    expect(sessionRegistry.getProject("/q", "primary").errored_count).toBe(0);
+  });
+
+  it("a project with only an errored session still has an aggregate entry", async () => {
+    const agg = await seedOne();
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
+    // Regression: the aggregate map used to be pruned when running and
+    // unread were both zero, which would drop a project whose only
+    // signal is an error or a waiting-for-user request.
+    expect(agg().errored_count).toBe(1);
   });
 });
 

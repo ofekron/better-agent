@@ -51,8 +51,10 @@
  *
  * Two consumer hooks:
  *   • `useSessionMeta(sid)` — session status fields for one sid.
- *   • `useProjectAggregate(path, nodeId)` — `{ running_count,
- *     unread_session_count }` for one project (matched by cwd + node_id).
+ *   • `useProjectAggregate(path, nodeId)` — one independent counter per
+ *     status dimension (`running_count`, `unread_session_count`,
+ *     `waiting_for_user_count`, `errored_count`) for one project
+ *     (matched by cwd + node_id).
  */
 
 import { useSyncExternalStore } from "react";
@@ -96,6 +98,8 @@ export interface SessionMeta {
 export interface ProjectAggregate {
   running_count: number;
   unread_session_count: number;
+  waiting_for_user_count: number;
+  errored_count: number;
 }
 
 type SessionRegistryRow = {
@@ -132,21 +136,30 @@ interface SessionEntry {
   current_tasks: TaskItem[];
 }
 
-/** The one place `is_running` is defined: a session is running iff its
- * monitoring state is anything other than "stopped". */
+/** The one place `is_running` is defined, mirroring the backend's
+ * `session_status.SessionStatus.busy`: a session is running iff it has
+ * foreground work in flight ("active") or background work still
+ * finishing ("waiting_on_background").
+ *
+ * "idle" and "blocked_on_user" are live processes with no work in
+ * flight — they are Idle on the Running dimension and carry their signal
+ * on the waiting-on-user dimension instead, so one dimension never
+ * masks the other. */
 function isRunning(state: MonitoringState): boolean {
-  return state !== "stopped";
+  return state === "active" || state === "waiting_on_background";
 }
 
-/** The one definition of "running" for the per-project badge: a session
- * counts as running when an agent turn is in flight OR a TestApe run is
- * active on it. Both mean the session is doing work from the badge's
- * point of view, so the project dot must include either. */
-function entryRunning(entry: {
-  monitoring_state: MonitoringState;
-  testape_active?: boolean;
-}): boolean {
-  return isRunning(entry.monitoring_state) || !!entry.testape_active;
+/** Waiting-on-user, mirroring the backend dimension: a pending
+ * user-facing request, an approval blocking the turn, or a
+ * NEEDS_USER_DECISION marker on the latest turn. */
+function isWaitingForUser(entry: SessionEntry): boolean {
+  return (
+    entry.monitoring_state === "blocked_on_user"
+    || entry.pending_user_input_count > 0
+    || Object.values(entry.markers).some(
+      (m) => m?.tag === MARKER_TAG_NEEDS_DECISION,
+    )
+  );
 }
 
 function entryFromRow(row: SessionRegistryRow): SessionEntry {
@@ -181,7 +194,58 @@ const EMPTY_SESSION: SessionMeta = {
 const EMPTY_AGGREGATE: ProjectAggregate = {
   running_count: 0,
   unread_session_count: 0,
+  waiting_for_user_count: 0,
+  errored_count: 0,
 };
+
+/** One session's projection onto its project's counters, mirroring the
+ * backend's `_project_aggregates` so the live registry count and the
+ * REST bootstrap count agree. Dimensions are independent — one session
+ * may contribute to several.
+ *
+ * One deliberate asymmetry: an active TestApe run also counts as
+ * running. TestApe activity arrives only as a WS event and has no
+ * server-side store, so the backend cannot see it and the REST
+ * bootstrap resets it to false. The badge is more truthful with it than
+ * without it, so the live count includes it. */
+function contributionOf(entry: SessionEntry): boolean[] {
+  return [
+    isRunning(entry.monitoring_state) || !!entry.testape_active,
+    entry.unread_count > 0,
+    isWaitingForUser(entry),
+    entry.has_error,
+  ];
+}
+
+const AGGREGATE_COUNTERS: (keyof ProjectAggregate)[] = [
+  "running_count",
+  "unread_session_count",
+  "waiting_for_user_count",
+  "errored_count",
+];
+
+function accumulate(agg: ProjectAggregate, entry: SessionEntry): void {
+  contributionOf(entry).forEach((counts, i) => {
+    if (counts) agg[AGGREGATE_COUNTERS[i]] += 1;
+  });
+}
+
+/** The exact change-gate for a project recompute: the aggregate can only
+ * move when a session's contribution changes. Derived from the same
+ * projection the counters use, so no counter can go stale because a
+ * dimension was left out of an ad-hoc condition. */
+function aggregateSignature(entry: SessionEntry): string {
+  return contributionOf(entry).map((b) => (b ? "1" : "0")).join("");
+}
+
+function isEmptyAggregate(agg: ProjectAggregate): boolean {
+  return (
+    agg.running_count === 0
+    && agg.unread_session_count === 0
+    && agg.waiting_for_user_count === 0
+    && agg.errored_count === 0
+  );
+}
 
 type Listener = () => void;
 type BufferedDelta =
@@ -569,15 +633,27 @@ class SessionRegistry {
     });
   }
 
+  /** Single funnel for replacing one session's entry: store it, notify
+   * the session, and recompute the project aggregate when this session's
+   * contribution to it changed. Every per-dimension mutation goes
+   * through here, so a counter can never miss an update because its
+   * handler forgot to recompute. */
+  private commitEntry(sid: string, prev: SessionEntry, next: SessionEntry) {
+    this.sessions.set(sid, next);
+    this.version += 1;
+    this.notifySession(sid);
+    if (aggregateSignature(next) === aggregateSignature(prev)) return;
+    this.recomputeProject(prev.cwd, prev.node_id);
+    this.notifyProject(prev.cwd, prev.node_id);
+  }
+
   private onError(d: SessionErrorPayload) {
     if (!d.session_id) return;
     const prev = this.sessions.get(d.session_id);
     if (!prev) return; // error dot doesn't materialize a session
     const next = !!d.has_error;
     if (prev.has_error === next) return;
-    this.sessions.set(d.session_id, { ...prev, has_error: next });
-    this.version += 1;
-    this.notifySession(d.session_id);
+    this.commitEntry(d.session_id, prev, { ...prev, has_error: next });
   }
 
   private onTurnStart(d: SessionTurnStartPayload) {
@@ -586,9 +662,11 @@ class SessionRegistry {
     const prev = this.sessions.get(sid);
     if (!prev) return;
     if (!prev.has_error && prev.monitoring_state === "active") return;
-    this.sessions.set(sid, { ...prev, has_error: false, monitoring_state: "active" });
-    this.version += 1;
-    this.notifySession(sid);
+    this.commitEntry(sid, prev, {
+      ...prev,
+      has_error: false,
+      monitoring_state: "active",
+    });
   }
 
   private onUserInput(d: SessionUserInputPayload) {
@@ -598,9 +676,7 @@ class SessionRegistry {
     if (!prev) return; // input dot doesn't materialize a session
     const next = Math.max(0, Number(d.pending_user_input_count) || 0);
     if (prev.pending_user_input_count === next) return;
-    this.sessions.set(sid, { ...prev, pending_user_input_count: next });
-    this.version += 1;
-    this.notifySession(sid);
+    this.commitEntry(sid, prev, { ...prev, pending_user_input_count: next });
   }
 
   private onMarker(d: SessionMarkerPayload) {
@@ -618,9 +694,7 @@ class SessionRegistry {
     } else {
       delete markers[d.extension_id];
     }
-    this.sessions.set(d.session_id, { ...prev, markers });
-    this.version += 1;
-    this.notifySession(d.session_id);
+    this.commitEntry(d.session_id, prev, { ...prev, markers });
   }
 
   private onTestApeState(d: { session_id: string; active: boolean }) {
@@ -628,17 +702,7 @@ class SessionRegistry {
     const prev = this.sessions.get(d.session_id);
     if (!prev) return;
     if ((prev.testape_active ?? false) === d.active) return; // no-op
-    const next: SessionEntry = { ...prev, testape_active: d.active };
-    this.sessions.set(d.session_id, next);
-    this.version += 1;
-    this.notifySession(d.session_id);
-    // testape_active feeds the project running aggregate (entryRunning).
-    // Recompute the project when the flip crosses the running boundary —
-    // e.g. a stopped session gaining/losing a TestApe run.
-    if (entryRunning(prev) !== entryRunning(next)) {
-      this.recomputeProject(prev.cwd, prev.node_id);
-      this.notifyProject(prev.cwd, prev.node_id);
-    }
+    this.commitEntry(d.session_id, prev, { ...prev, testape_active: d.active });
   }
 
   /** Shared delta-apply path for monitoring-state + unread. The
@@ -709,7 +773,7 @@ class SessionRegistry {
       nextState !== prev.monitoring_state || nextUnread !== prev.unread_count;
     if (!routingChanged && !valueChanged) return;
 
-    this.sessions.set(sid, {
+    const next: SessionEntry = {
       unread_count: nextUnread,
       pending_user_input_count: prev.pending_user_input_count,
       monitoring_state: nextState,
@@ -720,24 +784,17 @@ class SessionRegistry {
       has_error: prev.has_error,
       current_todos: prev.current_todos,
       current_tasks: prev.current_tasks,
-    });
-    this.version += 1;
-    this.notifySession(sid);
-    // The project aggregate only moves when running-ness crosses the
-    // stopped boundary, unread changes, or the session migrates projects —
-    // NOT on an active↔idle↔waiting flip (still running). Skip the project
-    // recompute/notify otherwise so badge re-renders don't storm.
-    const projectChanged =
-      entryRunning({ monitoring_state: nextState, testape_active: prev.testape_active }) !==
-        entryRunning(prev) ||
-      nextUnread !== prev.unread_count ||
-      routingChanged;
-    if (projectChanged) {
-      this.recomputeProject(prev.cwd, prev.node_id);
-      if (routingChanged) this.recomputeProject(payloadCwd, payloadNode);
-      this.notifyProject(prev.cwd, prev.node_id);
-      if (routingChanged) this.notifyProject(payloadCwd, payloadNode);
-    }
+    };
+    // Commits the entry and recomputes the origin project when this
+    // session's contribution changed.
+    this.commitEntry(sid, prev, next);
+    // A migration additionally moves the destination project, and moves
+    // the origin one even when the contribution itself is unchanged.
+    if (!routingChanged) return;
+    this.recomputeProject(prev.cwd, prev.node_id);
+    this.recomputeProject(payloadCwd, payloadNode);
+    this.notifyProject(prev.cwd, prev.node_id);
+    this.notifyProject(payloadCwd, payloadNode);
   }
 
   private onCreated(d: SessionCreatedPayload) {
@@ -828,11 +885,10 @@ class SessionRegistry {
       const key = projectKey(entry.cwd, entry.node_id);
       let agg = out.get(key);
       if (!agg) {
-        agg = { running_count: 0, unread_session_count: 0 };
+        agg = { ...EMPTY_AGGREGATE };
         out.set(key, agg);
       }
-      if (entryRunning(entry)) agg.running_count += 1;
-      if (entry.unread_count > 0) agg.unread_session_count += 1;
+      accumulate(agg, entry);
     }
     return out;
   }
@@ -844,21 +900,16 @@ class SessionRegistry {
   private recomputeProject(cwd: string, nodeId: string) {
     if (!cwd) return; // hidden — no aggregate to recompute
     const key = projectKey(cwd, nodeId);
-    let running = 0;
-    let unreadSessions = 0;
+    const agg: ProjectAggregate = { ...EMPTY_AGGREGATE };
     for (const entry of this.sessions.values()) {
       if (entry.cwd !== cwd || entry.node_id !== nodeId) continue;
-      if (entryRunning(entry)) running += 1;
-      if (entry.unread_count > 0) unreadSessions += 1;
+      accumulate(agg, entry);
     }
-    if (running === 0 && unreadSessions === 0) {
+    if (isEmptyAggregate(agg)) {
       this.projects.delete(key);
-    } else {
-      this.projects.set(key, {
-        running_count: running,
-        unread_session_count: unreadSessions,
-      });
+      return;
     }
+    this.projects.set(key, agg);
   }
 
   private recomputeAndNotifySession(sid: string, cwd: string, nodeId: string) {

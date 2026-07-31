@@ -27,6 +27,7 @@ _test_home.isolate("bc_test_status_filter_")
 import main  # noqa: E402
 import session_list_cache  # noqa: E402
 import session_listing_api  # noqa: E402
+import session_status  # noqa: E402
 
 failures: list[str] = []
 
@@ -80,7 +81,7 @@ check("key.needs_decision", key({"id": "blocked"}) == "needs_decision")
 check("key.unread", key({"id": "new"}) == "unread")
 check("key.open_work", key({"id": "x", "current_todos": [{"status": "pending"}]}) == "open_work")
 check("key.running", key({"id": "run"}) == "running")
-check("key.all_done", key({"id": "x", "markers": {"e": {"tag": session_listing_api._MARKER_TAG_ALL_TASKS_DONE}}}) == "all_done")
+check("key.all_done", key({"id": "x", "markers": {"e": {"tag": session_status.MARKER_TAG_ALL_TASKS_DONE}}}) == "all_done")
 check("key.idle", key({"id": "quiet"}) == "idle")
 check(
     "key.rank_parity",

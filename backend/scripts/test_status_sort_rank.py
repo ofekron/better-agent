@@ -27,6 +27,7 @@ _test_home.isolate("bc_test_status_sort_")
 import main  # noqa: E402
 import session_store  # noqa: E402
 import session_listing_api  # noqa: E402
+import session_status  # noqa: E402
 
 failures: list[str] = []
 
@@ -39,8 +40,8 @@ def check(name: str, cond: bool) -> None:
         print(f"ok   {name}")
 
 
-NEEDS = session_listing_api._MARKER_TAG_NEEDS_DECISION
-DONE = session_listing_api._MARKER_TAG_ALL_TASKS_DONE
+NEEDS = session_status.MARKER_TAG_NEEDS_DECISION
+DONE = session_status.MARKER_TAG_ALL_TASKS_DONE
 
 
 def marker(tag: str) -> dict:

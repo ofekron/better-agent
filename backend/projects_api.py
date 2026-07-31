@@ -16,6 +16,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 import project_mapping_store
 import project_store
+import session_status
+import user_input_store
 from i18n import t
 from session_manager import manager as session_manager
 
@@ -59,20 +61,38 @@ _project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
 _project_aggregates_gen = 0
 
 
+def empty_aggregate() -> dict[str, int]:
+    """The zero value for every project counter. One definition, shared
+    by the aggregation itself and by projects that have no sessions."""
+    return {
+        "running_count": 0,
+        "unread_session_count": 0,
+        "waiting_for_user_count": 0,
+        "errored_count": 0,
+    }
+
+
 def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
     """Compute per-project (cwd, node_id) → counts for status badges.
 
+    Counts each status dimension independently via
+    `session_status.compute`, the same derivation the sidebar rows use,
+    so a project counter can never disagree with the rows it summarizes.
+    Dimensions do not mask each other: one errored, unread session
+    increments both counters.
+
     Cached: recompute only when the generation counter bumps (set by
     session mutation events via `invalidate_project_aggregates`).
-    Reads from the background-tick running-state cache — no PID
-    probing on the event loop."""
+    Reads from the background-tick monitoring cache — no PID probing on
+    the event loop."""
     global _project_aggregates_cache, _project_aggregates_gen
     if _project_aggregates_gen > 0 and _project_aggregates_cache:
         return _project_aggregates_cache
     import working_mode as _wm
     _, _, cached_state_snapshot = _require_configured()
-    running_sids, _ = cached_state_snapshot()
+    _, monitoring_by_sid = cached_state_snapshot()
     unread_by_sid = session_manager.unread_counts_snapshot()
+    pending_input_by_sid = user_input_store.pending_counts_by_session()
     agg: dict[tuple[str, str], dict[str, int]] = {}
     for s in session_manager.list():
         if _wm.should_hide_from_sidebar(s):
@@ -81,14 +101,18 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
         cwd = s.get("cwd") or ""
         if not sid or not cwd:
             continue
-        key = (cwd, s.get("node_id") or "primary")
-        slot = agg.setdefault(
-            key, {"running_count": 0, "unread_session_count": 0}
+        status = session_status.compute(
+            s, monitoring_by_sid, unread_by_sid, pending_input_by_sid
         )
-        if sid in running_sids:
+        slot = agg.setdefault((cwd, s.get("node_id") or "primary"), empty_aggregate())
+        if status.running == session_status.RUNNING:
             slot["running_count"] += 1
-        if unread_by_sid.get(sid, 0) > 0:
+        if status.unread:
             slot["unread_session_count"] += 1
+        if status.waiting_for_user:
+            slot["waiting_for_user_count"] += 1
+        if status.errored:
+            slot["errored_count"] += 1
     _project_aggregates_cache = agg
     _project_aggregates_gen += 1
     return agg
@@ -107,12 +131,7 @@ async def get_projects():
     out: list[dict] = []
     for p in await asyncio.to_thread(project_store.list_projects):
         key = (p.get("path") or "", p.get("node_id") or "primary")
-        slot = aggs.get(key, {"running_count": 0, "unread_session_count": 0})
-        out.append({
-            **p,
-            "running_count": slot["running_count"],
-            "unread_session_count": slot["unread_session_count"],
-        })
+        out.append({**p, **aggs.get(key, empty_aggregate())})
     return {"projects": out}
 
 
