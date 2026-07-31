@@ -1075,6 +1075,22 @@ def _seed_flow(rec, proc, fingerprint=None):
     return fp
 
 
+def _clear_flow(provider_id):
+    """Drop every projection entry a _monitor/_start test may have touched."""
+    provider_auth._procs.pop(provider_id, None)
+    provider_auth._flow_fingerprints.pop(provider_id, None)
+    provider_auth._provider_auth_fingerprints.pop(provider_id, None)
+    provider_auth._states.pop(provider_id, None)
+
+
+def _supersede_flow(rec, fp):
+    """Make `fp` no longer current so `_flow_is_current` returns False:
+    both projection dicts must disagree with the in-flight fingerprint."""
+    newer = (fp[0], fp[1], fp[2] + 1, fp[3], fp[4], fp[5])
+    provider_auth._flow_fingerprints[rec["id"]] = newer
+    provider_auth._provider_auth_fingerprints[rec["id"]] = newer
+
+
 def test_monitor_login_timeout_reaps_and_refreshes():
     rec = _add_provider()
     proc = _FakeProc(returncode=None)
@@ -1258,6 +1274,166 @@ def test_monitor_skips_state_update_when_flow_superseded():
         provider_auth._flow_fingerprints.pop(rec["id"], None)
         provider_auth._provider_auth_fingerprints.pop(rec["id"], None)
         provider_auth._states.pop(rec["id"], None)
+        _reset_status_globals()
+        _restore_all()
+
+
+def test_monitor_login_nonzero_exit_skips_status_probe_and_aborts():
+    """A login subprocess that exits non-zero must not be probed for auth
+    status (no exit_code==0 branch) and must not be committed: with
+    status_fingerprint still None, the guard at the commit check
+    short-circuits and the monitor returns without touching state, so a
+    crashed login can never be misclassified as success."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=1, stderr=b"oauth denied")
+    fp = _seed_flow(rec, proc)
+    probed: list = []
+
+    async def _must_not_probe(provider, expected_fingerprint=None):
+        probed.append(provider)
+        return True
+    provider_auth._status_authenticated = _must_not_probe  # type: ignore
+
+    async def _scenario():
+        await provider_auth._monitor(rec["id"], "login", proc, fp, _noop_broadcast)
+
+    try:
+        _run(_scenario())
+        assert not probed, "non-zero exit must skip the status probe"
+        assert provider_auth._states.get(rec["id"], {}).get("status") != (
+            provider_auth.STATE_LOGIN_SUCCESS
+        )
+    finally:
+        _clear_flow(rec["id"])
+        _reset_status_globals()
+        _restore_all()
+
+
+def test_monitor_login_fingerprint_drift_skips_status_probe():
+    """If the provider record changed under the login (the config snapshot
+    read after exit 0 no longer matches the in-flight fingerprint), the
+    authoritative status probe is skipped — there is nothing authoritative
+    to confirm against the stale flow."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=0, stderr=b"")
+    fp = _seed_flow(rec, proc)
+    probed: list = []
+
+    async def _must_not_probe(provider, expected_fingerprint=None):
+        probed.append(provider)
+        return True
+    provider_auth._status_authenticated = _must_not_probe  # type: ignore
+
+    drifted = dict(rec)
+    drifted["revision"] = rec["revision"] + 1
+    orig_get = config_store.get_provider
+    config_store.get_provider = lambda pid: drifted  # type: ignore
+
+    async def _scenario():
+        await provider_auth._monitor(rec["id"], "login", proc, fp, _noop_broadcast)
+
+    try:
+        _run(_scenario())
+        assert not probed, "fingerprint drift must skip the status probe"
+        assert provider_auth._states.get(rec["id"], {}).get("status") != (
+            provider_auth.STATE_LOGIN_SUCCESS
+        )
+    finally:
+        config_store.get_provider = orig_get  # type: ignore
+        _clear_flow(rec["id"])
+        _reset_status_globals()
+        _restore_all()
+
+
+def test_monitor_login_status_probe_raises_is_logged_as_failed():
+    """A crashing status probe is swallowed, logged, and resolves to a
+    failed login rather than wedging the record busy."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=0, stderr=b"")
+    fp = _seed_flow(rec, proc)
+
+    async def _crash(provider, expected_fingerprint=None):
+        raise RuntimeError("probe transport broke")
+    provider_auth._status_authenticated = _crash  # type: ignore
+
+    async def _scenario():
+        await provider_auth._monitor(rec["id"], "login", proc, fp, _noop_broadcast)
+
+    try:
+        _run(_scenario())
+        assert provider_auth._states[rec["id"]]["status"] == (
+            provider_auth.STATE_LOGIN_FAILED
+        )
+    finally:
+        _clear_flow(rec["id"])
+        _reset_status_globals()
+        _restore_all()
+
+
+def test_monitor_timeout_with_stale_flow_skips_state_and_refresh():
+    """A timeout on a flow that was already superseded must still reap the
+    proc (via finally) but must neither write a failed state nor trigger a
+    refresh — the superseding flow owns the projection now."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=None)
+    fp = _seed_flow(rec, proc)
+    _supersede_flow(rec, fp)
+    refreshed: list = []
+
+    async def _fake_refresh(pid, b):
+        refreshed.append(pid)
+    provider_auth.refresh_auth_status = _fake_refresh  # type: ignore
+    provider_auth._kill_proc = lambda p: setattr(proc, "returncode", -9)  # type: ignore
+    provider_auth.LOGIN_TIMEOUT_SECONDS = 0.02  # type: ignore
+
+    async def _hang(p):
+        await asyncio.sleep(5)
+        return b"", b""
+    proc._communicate_fn = _hang
+
+    async def _scenario():
+        await provider_auth._monitor(rec["id"], "login", proc, fp, _noop_broadcast)
+
+    try:
+        _run(_scenario())
+        assert not refreshed, "superseded timeout must not refresh"
+        assert provider_auth._states.get(rec["id"], {}).get("status") != (
+            provider_auth.STATE_LOGIN_FAILED
+        )
+    finally:
+        _clear_flow(rec["id"])
+        _reset_status_globals()
+        _restore_all()
+
+
+def test_monitor_exception_with_stale_flow_skips_state_and_broadcast():
+    """A transport crash on a superseded flow must not broadcast a failed
+    state — only the still-current flow may mutate the projection."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=None)
+    fp = _seed_flow(rec, proc)
+    _supersede_flow(rec, fp)
+    fired: list = []
+
+    async def _broadcast():
+        fired.append(1)
+
+    async def _crash(p):
+        raise RuntimeError("transport broke")
+    proc._communicate_fn = _crash
+    provider_auth._kill_proc = lambda p: None  # type: ignore
+
+    async def _scenario():
+        await provider_auth._monitor(rec["id"], "login", proc, fp, _broadcast)
+
+    try:
+        _run(_scenario())
+        assert not fired, "superseded exception must not broadcast"
+        assert provider_auth._states.get(rec["id"], {}).get("status") != (
+            provider_auth.STATE_LOGIN_FAILED
+        )
+    finally:
+        _clear_flow(rec["id"])
         _reset_status_globals()
         _restore_all()
 
