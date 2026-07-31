@@ -215,7 +215,6 @@ def _parse_task_id_from_result(result_content: Any) -> Optional[str]:
         if stripped.isdigit():
             return stripped
         # Try "ID: N" or "task N" patterns
-        import re
         m = re.search(r'(?:ID|id|task)[^\d]*(\d+)', stripped)
         if m:
             return m.group(1)
