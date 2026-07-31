@@ -19,7 +19,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from event_bus import BusEvent, EventBus  # noqa: E402
+from event_bus import EventBus  # noqa: E402
 from event_bus_subscribers import _refresh_session_content_projection  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import (  # noqa: E402

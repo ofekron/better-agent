@@ -16,7 +16,6 @@ from better_agent_sdk.surfaces import (
     _schema_shape,
     build_client,
     build_registry,
-    specs_from_fastmcp,
 )
 from runtime_broker import RuntimeBroker
 

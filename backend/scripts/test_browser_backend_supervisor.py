@@ -25,7 +25,6 @@ pytest.importorskip("credential_session")
 
 import credential_session  # noqa: E402
 import provider_credentials  # noqa: E402
-from desktop.browser_backend_control import request as control_request  # noqa: E402
 from desktop.browser_backend_supervisor import BrowserBackendSupervisor  # noqa: E402
 
 

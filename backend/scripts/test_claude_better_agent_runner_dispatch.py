@@ -55,11 +55,7 @@ import _test_home  # noqa: E402
 _TEST_HOME = _test_home.TestHome.acquire("bc-test-claude-ba-dispatch-")
 
 import config_store  # noqa: E402
-from provider import RecoveredPopen  # noqa: E402
 from provider_claude import ClaudeProvider, RunState as ClaudeRunState  # noqa: E402
-from provider_claude_better_agent_runner import (  # noqa: E402
-    ClaudeBetterAgentRunnerProvider,
-)
 from provider_family_execution_runtime import family_launch_from_artifact  # noqa: E402
 from provider_session_events import RunState as SessionEventsRunState  # noqa: E402
 import provider_claude  # noqa: E402

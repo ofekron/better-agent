@@ -14,7 +14,7 @@ import models  # noqa: E402
 import config_store  # noqa: E402
 from provider import ProviderCredentialError, _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
-from provider_fugu import FUGU_MODELS, FuguProvider  # noqa: E402
+from provider_fugu import FuguProvider  # noqa: E402
 from provider_openai import OpenAIProvider  # noqa: E402
 from provider_runtime import _preserved_env_keys  # noqa: E402
 from runner_codex import _build_app_server_argv  # noqa: E402

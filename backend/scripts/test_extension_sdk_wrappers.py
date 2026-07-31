@@ -22,7 +22,6 @@ for _p in (_BACKEND, os.path.join(_REPO, "sdk")):
 
 from better_agent_sdk import (  # noqa: E402
     Client,
-    BetterAgentError,
     FrontendModule,
     Instruction,
     McpPredicate,

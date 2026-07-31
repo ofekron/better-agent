@@ -14,7 +14,6 @@ import json
 import os
 import shutil
 import sys
-from unittest import mock
 import threading
 from pathlib import Path
 

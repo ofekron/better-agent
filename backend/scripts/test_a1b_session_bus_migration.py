@@ -43,7 +43,7 @@ def _check(cond: bool, label: str, failures: list[str]) -> None:
 
 async def _run(failures: list[str]) -> None:
     import main
-    from event_bus import bus, BusEvent
+    from event_bus import bus
 
     sm = main.session_manager
     # Bind the running loop so `_fire`'s bus path is active for this

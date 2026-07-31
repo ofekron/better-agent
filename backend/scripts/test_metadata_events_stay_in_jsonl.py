@@ -26,7 +26,6 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from paths import ba_home  # noqa: E402

@@ -10,7 +10,6 @@ BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from provider import StreamEvent
 from provider_claude import ClaudeProvider, RunState
 
 
