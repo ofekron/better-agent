@@ -44,6 +44,19 @@ class TestFamilyLaunchAttestationRetry(unittest.TestCase):
         with self.assertRaises(ExecutionContractError):
             family_launch_from_artifact(artifact, max_retries=1)
 
+    def test_attest_with_reason_returns_structured_failure(self):
+        from provider_family_launch_attestation import FamilyLaunchAttestation
+
+        mock_attestation = MagicMock(spec=FamilyLaunchAttestation)
+        mock_attestation.fingerprint = "abc"
+        mock_attestation._computed_fingerprint.return_value = "def"
+        mock_attestation.family = "claude"
+
+        ok, reason = FamilyLaunchAttestation.attest_with_reason(mock_attestation)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "fingerprint_mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -330,21 +330,59 @@ class FamilyLaunchAttestation:
         )
 
     def attest(self) -> bool:
+        ok, _ = self.attest_with_reason()
+        return ok
+
+    def attest_with_reason(self) -> tuple[bool, str]:
         with timed_contract_step("provider.family_attestation.attest"):
             if self.fingerprint != self._computed_fingerprint():
-                return False
-            return self._attest_cache.resolve(
-                self._full_attest,
-                self.attest_metadata,
-            )
+                return False, "fingerprint_mismatch"
+            
+            def full_check() -> tuple[bool, str]:
+                if not self.runner.attest():
+                    return False, "runner_launch_attestation_failed"
+                if not self.downstream.attest():
+                    return False, "downstream_cli_attestation_failed"
+                if not self.config.attest():
+                    return False, "config_scope_attestation_failed"
+                for package in self.critical_packages:
+                    if not package.attest():
+                        return False, f"critical_package_attestation_failed:{package.package_name}"
+                return True, "ok"
+
+            def meta_check() -> tuple[bool, str]:
+                if not self.runner.attest_metadata():
+                    return False, "runner_launch_metadata_attestation_failed"
+                if not self.downstream.attest_metadata():
+                    return False, "downstream_cli_metadata_attestation_failed"
+                if not self.config.attest_metadata():
+                    return False, "config_scope_metadata_attestation_failed"
+                for package in self.critical_packages:
+                    if not package.attest_metadata():
+                        return False, f"critical_package_metadata_attestation_failed:{package.package_name}"
+                return True, "ok"
+
+            res = self._attest_cache.resolve(full_check, meta_check)
+            if not res[0]:
+                import logging
+                logging.warning("FamilyLaunchAttestation failed: reason=%s family=%s", res[1], self.family)
+            return res
 
     def _full_attest(self) -> bool:
-        return (
-            self.runner.attest()
-            and self.downstream.attest()
-            and self.config.attest()
-            and all(package.attest() for package in self.critical_packages)
-        )
+        return self._full_attest_with_reason()[0]
+
+    def _full_attest_with_reason(self) -> tuple[bool, str]:
+        if not self.runner.attest():
+            return False, "runner_launch_attestation_failed"
+        if not self.downstream.attest():
+            return False, "downstream_cli_attestation_failed"
+        if not self.config.attest():
+            return False, "config_scope_attestation_failed"
+        for package in self.critical_packages:
+            if not package.attest():
+                return False, f"critical_package_attestation_failed:{package.package_name}"
+        return True, "ok"
+
 
     def attest_metadata(self) -> bool:
         """Cheap stat-tuple-only re-check used once this attestation has
