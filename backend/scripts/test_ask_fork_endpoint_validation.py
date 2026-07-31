@@ -17,10 +17,21 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from fastapi import HTTPException  # noqa: E402
+import pytest  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
 import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
+import _test_authority  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_internal_authority():
+    """These tests cover ask-fork handler logic (validation, delegation
+    plumbing), not the internal-token / team-orchestration runtime guard. The
+    guard has its own coverage; stub it so direct handler calls proceed."""
+    with _test_authority.stub_internal_authority():
+        yield
 
 
 def _install_team_orchestration_extension() -> None:
@@ -364,8 +375,8 @@ def test_ask_fork_locked_runner_accepts_provider_config():
     call_start = source.index("return await run_delegation_locked(")
     call_end = source.index("\n    finally:", call_start)
     call = source[call_start:call_end]
-    assert "provider_id=provider_id" in call
-    assert "reasoning_effort=reasoning_effort" in call
+    assert "provider_id=worker_provider_id" in call
+    assert "reasoning_effort=worker_reasoning_effort" in call
     assert "provisioned_tool_profile=provisioned_tool_profile" in call
 
 
