@@ -1124,6 +1124,16 @@ export function Chat({
       window.removeEventListener("tool_approval_resolved", onResolved);
     };
   }, [session?.id, removeToolApproval]);
+  // Focused-pane label for InputArea's fork-target chip: only while the
+  // split view is up; mirrors ForkSplitView's paneLabel.
+  const forkTargetLabel = useMemo(() => {
+    if (!tree || userFacingForks(tree).length === 0) return undefined;
+    const focusedId = focusedSessionId ?? tree.id;
+    if (focusedId === tree.id) return t("fork.original");
+    const fork = userFacingForks(tree).find((f) => f.id === focusedId);
+    return fork?.name || t("fork.fork");
+  }, [tree, focusedSessionId, t]);
+
   const chatInlineActionContext = useMemo(
     () => ({
       workerApprovals: pendingApprovals,
@@ -1815,6 +1825,7 @@ export function Chat({
               onSend={onSend}
               onSteer={onSteer}
               onInterrupt={onInterrupt}
+              forkTargetLabel={forkTargetLabel}
               canSteer={!!canSteer}
               onFork={onForkAndSend}
               canFork={!!onForkAndSend && canForkSession}
