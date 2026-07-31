@@ -20,6 +20,7 @@ import project_update_store  # noqa: E402
 import config_store  # noqa: E402
 import installation_profile  # noqa: E402
 import better_agent_sdk as sdk  # noqa: E402
+import _test_installation  # noqa: E402
 
 # Bare test homes have no installation.json, so _record_active() gates every
 # ui_hooks()/is_extension_active() check in this file on integrations_enabled()
@@ -31,22 +32,18 @@ installation_profile.integrations_enabled = lambda: True  # type: ignore[assignm
 def _configure_project_structure_runtime() -> None:
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["project_structure_edit"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    assignments["project_structure_edit"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
 
 
 def _configure_ask_runtime() -> None:
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["session_search_worker"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    assignments["session_search_worker"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
 
 
@@ -183,11 +180,9 @@ def _install_active_assistant() -> str:
     )
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["assistant"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    assignments["assistant"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
     _install_ui_hook_extension(
         assistant_id,

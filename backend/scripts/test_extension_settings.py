@@ -20,6 +20,7 @@ import builtin_mcp_config  # noqa: E402
 import better_agent_sdk as sdk  # noqa: E402
 import config_store  # noqa: E402
 import installation_profile  # noqa: E402
+import _test_installation  # noqa: E402
 
 # Bare test homes have no installation.json, so _record_active() would gate
 # every installed-extension assertion here on integrations being off. Same
@@ -440,11 +441,9 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
     }
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["default_session"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    assignments["default_session"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
     cfg_on = builtin_mcp_config.with_builtin_mcp_servers(inputs, {"mcp_servers": {}})
     assert "scheduler" in cfg_on["mcp_servers"]

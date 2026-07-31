@@ -90,3 +90,27 @@ def activate(
     installation_profile.mark_selection_applied()
     assert not installation_profile.selection_pending()
     return profile
+
+
+def default_llm_assignment(provider_id: str | None = None) -> dict[str, str]:
+    """An internal_llm_assignments entry for a provider, reading default model
+    and reasoning effort from its runtime profile.
+
+    The v3 config schema moved default_model/default_reasoning_effort off the
+    provider record and onto its runtime profile, so callers must not read
+    `provider["default_model"]`. This is the single test-side source for that
+    lookup; assignment-seeding fixtures route through it instead of forking the
+    read in every file. ``provider_id`` defaults to the first listed provider.
+    """
+    import config_store
+
+    providers = config_store.list_providers()["providers"]
+    pid = provider_id or providers[0]["id"]
+    profile = next(
+        p for p in config_store.list_runtime_profiles() if p["provider_id"] == pid
+    )
+    return {
+        "provider_id": pid,
+        "model": profile["default_model"],
+        "reasoning_effort": profile.get("default_reasoning_effort") or "",
+    }

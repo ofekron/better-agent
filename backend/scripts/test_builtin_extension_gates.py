@@ -81,14 +81,12 @@ def check(condition: bool, message: str) -> None:
 
 
 def configure_internal_llm_defaults(*tasks: str) -> None:
+    import _test_installation
+
     provider = main.config_store.list_providers()["providers"][0]
     assignments = main.config_store.get_internal_llm_assignments()
     for task in tasks:
-        assignments[task] = {
-            "provider_id": provider["id"],
-            "model": provider["default_model"],
-            "reasoning_effort": provider.get("default_reasoning_effort") or "",
-        }
+        assignments[task] = _test_installation.default_llm_assignment(provider["id"])
     main.config_store.set_internal_llm_assignments(assignments)
 
 

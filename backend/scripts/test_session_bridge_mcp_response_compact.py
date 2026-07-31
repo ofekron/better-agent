@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import extension_store  # noqa: E402
 import config_store  # noqa: E402
+import _test_installation  # noqa: E402
 import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
 import session_bridge_api  # noqa: E402
@@ -24,11 +25,9 @@ from session_manager import manager as session_manager  # noqa: E402
 def _enable_team_extension() -> None:
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["default_session"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    assignments["default_session"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
     data = extension_store._load()  # type: ignore[attr-defined]
     data["extensions"][extension_store.extension_id_for_role('team-orchestration')] = {

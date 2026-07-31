@@ -58,11 +58,15 @@ def _install_team_orchestration_extension() -> None:
         force_enabled=True,
     )
     provider = config_store.list_providers()["providers"][0]
+    profile = next(
+        p for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == provider["id"]
+    )
     assignments = config_store.get_internal_llm_assignments()
     assignments["default_session"] = {
         "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
+        "model": profile["default_model"],
+        "reasoning_effort": profile.get("default_reasoning_effort") or "",
     }
     config_store.set_internal_llm_assignments(assignments)
 
