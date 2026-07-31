@@ -258,7 +258,11 @@ async def _create_interactive_fork(
     persistent: bool,
     name: str,
     cfg: ProvisionedConfig,
-) -> dict:
+    session_id: Optional[str] = None,
+) -> tuple[dict, bool]:
+    """Returns `(session, resumed)`. `resumed=True` means a concurrent create
+    carrying the same `session_id` won the race — the winner owns session
+    setup and bootstrap injection; the caller must not repeat either."""
     base_session_id = await _ensure_file_edit_base(cfg)
     base_session = session_manager.get(base_session_id) or {}
     base_agent_sid = str(base_session.get("agent_session_id") or "").strip()
@@ -270,19 +274,28 @@ async def _create_interactive_fork(
         base_agent_sid,
     )
 
-    session = session_manager.create(
-        name=name,
-        model=cfg.model,
-        cwd=project_cwd,
-        orchestration_mode="native",
-        source="web",
-        provider_id=cfg.provider_id,
-        runner=cfg.runner,
-        reasoning_effort=cfg.reasoning_effort or None,
-        node_id=cfg.node_id,
-        # File-editing sessions are opened by an explicit user action.
-        user_initiated=True,
-    )
+    try:
+        session = session_manager.create(
+            name=name,
+            model=cfg.model,
+            cwd=project_cwd,
+            orchestration_mode="native",
+            source="web",
+            provider_id=cfg.provider_id,
+            runner=cfg.runner,
+            reasoning_effort=cfg.reasoning_effort or None,
+            node_id=cfg.node_id,
+            # File-editing sessions are opened by an explicit user action.
+            user_initiated=True,
+            # Client-supplied idempotency key: a timed-out create retried by
+            # the frontend resolves to this same session, never a duplicate.
+            id=session_id,
+        )
+    except ValueError:
+        existing = session_manager.get(session_id) if session_id else None
+        if existing is None:
+            raise
+        return existing, True
     session_manager.set_forked_from(session["id"], base_agent_sid)
     if parent_lines > 0:
         session_manager._run(
@@ -307,7 +320,7 @@ async def _create_interactive_fork(
     # so a simultaneous `/api/sessions` snapshot doesn't briefly surface a
     # temporal file-editor session in the sidebar without its working_mode meta.
     await asyncio.to_thread(session_manager.flush_pending_persists)
-    return session_manager.get(session["id"]) or session
+    return session_manager.get(session["id"]) or session, False
 
 
 async def start_empty(
@@ -319,6 +332,7 @@ async def start_empty(
     reasoning_effort: Optional[str] = None,
     persistent: bool = False,
     node_id: str = "primary",
+    session_id: Optional[str] = None,
 ) -> dict:
     if not cwd:
         raise ValueError("cwd is required for a file-editing session")
@@ -334,22 +348,23 @@ async def start_empty(
         node_id=node_id,
     )
 
-    full_session = await _create_interactive_fork(
+    full_session, resumed = await _create_interactive_fork(
         project_cwd=project_cwd,
         file_paths=[],
         original_contents={},
         persistent=persistent,
         name=f"✏️ Edit — {Path(project_cwd).name}",
         cfg=cfg,
+        session_id=session_id,
     )
     return {
         "session_id": full_session["id"],
         "file_paths": [],
         "original_contents": {},
         "meta_prompt": None,
-        "user_ask": _EMPTY_SESSION_ASK,
+        "user_ask": None if resumed else _EMPTY_SESSION_ASK,
         "session": full_session,
-        "resumed": False,
+        "resumed": resumed,
     }
 
 
@@ -363,6 +378,7 @@ async def start(
     reasoning_effort: Optional[str] = None,
     persistent: bool = False,
     node_id: str = "primary",
+    session_id: Optional[str] = None,
 ) -> dict:
     """Create a fresh file-editing session for *file_path*.
 
@@ -372,7 +388,10 @@ async def start(
 
     Every call creates a new user-facing Better Agent session backed by a
     provider fork of the warmed file-editing base. There is intentionally no
-    cwd/file-path reuse or join path.
+    cwd/file-path reuse or join path. The one exception is `session_id`,
+    the client's idempotency key: a concurrent/retried create carrying the
+    same id resolves to that session with `resumed=True` and no bootstrap
+    prompt, instead of minting a duplicate.
 
     Returns: {
       "session_id": str,
@@ -399,23 +418,24 @@ async def start(
         node_id=node_id,
     )
 
-    full_session = await _create_interactive_fork(
+    full_session, resumed = await _create_interactive_fork(
         project_cwd=project_cwd,
         file_paths=[resolved],
         original_contents={resolved: orig},
         persistent=persistent,
         name=f"✏️ Edit — {Path(resolved).name}",
         cfg=cfg,
+        session_id=session_id,
     )
     return {
         "session_id": full_session["id"],
         "file_paths": [resolved],
         "original_contents": {resolved: orig},
-        "meta_prompt": _META_PROMPT.format(
+        "meta_prompt": None if resumed else _META_PROMPT.format(
             file_list=_format_file_list([resolved]),
         ),
         "session": full_session,
-        "resumed": False,
+        "resumed": resumed,
     }
 
 def cleanup(session_id: str) -> bool:

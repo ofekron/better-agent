@@ -1038,6 +1038,7 @@ async def create_session(body: Any = Body(default=None)):
                     reasoning_effort=requested_effort,
                     persistent=True,
                     node_id=node_id,
+                    session_id=client_session_id,
                 )
             else:
                 result = await file_editor.start_empty(
@@ -1048,6 +1049,7 @@ async def create_session(body: Any = Body(default=None)):
                     reasoning_effort=requested_effort,
                     persistent=True,
                     node_id=node_id,
+                    session_id=client_session_id,
                 )
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
