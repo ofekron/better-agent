@@ -19,6 +19,11 @@
 # script never sets it itself. Per repo policy, live-LLM test runs require
 # the user's explicit per-run approval; setting it here would silently grant
 # that approval on every invocation.
+#
+# Speed: Docker layer caching means the apt/pip layers only re-run when
+# backend/requirements*.txt change (see docker/Dockerfile.test's COPY
+# ordering) — a plain code-change re-run only re-executes the fast COPY-source
+# layer plus pytest itself, not a full environment rebuild.
 
 set -euo pipefail
 
@@ -80,6 +85,16 @@ RUN_ARGS=(--rm)
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
+
+# `--rm` throws away the container's writable layer on exit, which would
+# otherwise reset pytest's own incremental cache (.pytest_cache, used by
+# --lf/--ff) on every invocation. Persist it on the host in the same place a
+# native `pytest` run would write it, so repeat runs stay incremental. Already
+# excluded from the build context (.dockerignore) and self-ignored by git
+# (pytest writes its own .gitignore into this directory).
+PYTEST_CACHE_DIR="$REPO_ROOT/backend/.pytest_cache"
+mkdir -p "$PYTEST_CACHE_DIR"
+RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}"
