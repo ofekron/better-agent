@@ -35,7 +35,6 @@ from anyio.abc import SocketAttribute
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
-from mcp_prewarm import paths as mp_paths
 from mcp_prewarm import tcp_transport
 from runtime_broker import _require_posix_peer
 

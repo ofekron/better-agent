@@ -1,6 +1,5 @@
 """Model-free tests for the project-match decision logic and loader."""
 import json
-import os
 import tempfile
 from pathlib import Path
 

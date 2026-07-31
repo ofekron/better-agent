@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from i18n import t
 from stores import pending_approvals, worker_store
 from orchs._subprocess_agent import SubprocessAgent
 from prompt_templates import render_prompt
-from provider import StreamEvent
 from session_manager import manager as session_manager
 
 if TYPE_CHECKING:

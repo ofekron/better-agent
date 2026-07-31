@@ -18,7 +18,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Protocol
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

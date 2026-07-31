@@ -31,7 +31,7 @@ Pending verdict persistence:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from i18n import t
 import extension_store
