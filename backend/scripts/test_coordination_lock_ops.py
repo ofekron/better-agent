@@ -219,8 +219,6 @@ async def test_non_lease_ops_ignore_invalid_lease_seconds() -> None:
 
 
 async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> None:
-    import extension_store
-
     captured_payloads: list[dict] = []
 
     def fake_post_loopback_sync(payload: dict, **kwargs) -> dict:
@@ -233,18 +231,15 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         }
 
     original_post = runner_better_agent._post_loopback_sync
-    original_ready = extension_store.is_extension_runtime_ready
     try:
         runner_better_agent._post_loopback_sync = fake_post_loopback_sync
-        extension_store.is_extension_runtime_ready = lambda extension_id: (
-            extension_id == extension_store.BUILTIN_COORDINATION_EXTENSION_ID
-        )
         registry = LockRegistry()
         handlers = runner_better_agent._build_loopback_tool_handlers(
             {
                 "backend_url": "http://127.0.0.1:1",
                 "internal_token": "token",
                 "app_session_id": "session-a",
+                "coordination_enabled": True,
             },
             cwd="/repo",
             model="model-a",
@@ -263,6 +258,7 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
                 "internal_token": "token",
                 "app_session_id": "session-a",
                 "provider_id": "provider-a",
+                "coordination_enabled": True,
             },
             cwd="/repo",
             model="model-a",
@@ -273,7 +269,6 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         })
     finally:
         runner_better_agent._post_loopback_sync = original_post
-        extension_store.is_extension_runtime_ready = original_ready
 
     check(
         "name 'provider_id' is not defined" not in single_text,
