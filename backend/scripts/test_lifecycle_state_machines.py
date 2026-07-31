@@ -22,7 +22,11 @@ from event_bus import BusEvent, EventBus  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
 from json_store import read_json, write_json  # noqa: E402
 import lifecycle_state_store  # noqa: E402
-from lifecycle_state_machines import LifecycleStateTree  # noqa: E402
+from lifecycle_state_machines import (  # noqa: E402
+    AdmissionLifecycleMachine,
+    LifecycleStateTree,
+    TurnLifecycleMachine,
+)
 
 
 def _execution():
@@ -915,6 +919,642 @@ async def test_persist_merges_ordered_sessions_tombstones_and_retries() -> None:
     concurrent = lifecycle_state_store.load()["sessions"]["concurrent"]["prompts"]
     assert set(concurrent) == {"first", "second"}
     assert merge_calls == 2
+    await tree.close()
+
+
+# ---------------------------------------------------------------------------
+# Edge cases, error guards, and reconciliation no-op paths. Each test asserts
+# a real behaviour (a raise, a state change, or a deliberate no-op) rather than
+# merely executing a line. They extend lifecycle_state_machines.py coverage
+# past the core happy-path flows above.
+# ---------------------------------------------------------------------------
+
+
+def _identity(
+    *,
+    user_turn_id: str = "user-turn",
+    lifecycle_message_id: str = "user-turn",
+    execution_turn_id: str = "turn-run",
+    assistant_message_id: str = "assistant-message",
+) -> dict:
+    return {
+        "user_turn_id": user_turn_id,
+        "lifecycle_message_id": lifecycle_message_id,
+        "execution_turn_id": execution_turn_id,
+        "assistant_message_id": assistant_message_id,
+    }
+
+
+async def _register_admission(
+    tree: LifecycleStateTree,
+    session_id: str,
+    *,
+    run_id: str,
+    execution,
+    identity: dict | None = None,
+) -> str:
+    identity = identity or _identity()
+    handle_id = tree.register_execution_handle(execution)
+    await tree.publish(
+        "lifecycle.admission_registered",
+        root_id=session_id,
+        session_id=session_id,
+        run_id=run_id,
+        payload={"execution_handle": handle_id, **identity},
+    )
+    return handle_id
+
+
+def _reset_store() -> None:
+    """Reset the shared temp-home store to empty.
+
+    The module-level _test_home.isolate() shares one store across every test
+    in this file; each test that assumes an empty slate must reset it first.
+    """
+    write_json(lifecycle_state_store._path(), {"version": 2, "sessions": {}})
+
+
+def _turn_projection(execution_turn_id: str) -> dict:
+    """A valid v2 running turn with full identity and no execution record.
+
+    The store validator permits a running turn whose `executions` map does not
+    contain the active execution_turn_id, so this shape loads normally.
+    """
+    return {
+        "state": "running",
+        "user_turn_id": "u",
+        "lifecycle_message_id": "u",
+        "execution_turn_id": execution_turn_id,
+        "assistant_message_id": "a",
+        "executions": {},
+        "admissions": {},
+        "steers": {},
+    }
+
+
+def _event(
+    type_: str,
+    session_id: str,
+    *,
+    payload: dict | None = None,
+    run_id: str | None = None,
+    message_id: str | None = None,
+) -> BusEvent:
+    return BusEvent(
+        type=type_,
+        root_id=session_id,
+        sid=session_id,
+        payload=payload or {},
+        run_id=run_id,
+        msg_id=message_id,
+    )
+
+
+def test_assert_owner_rejects_unbound_access() -> None:
+    tree = LifecycleStateTree(EventBus())
+    with pytest.raises(RuntimeError, match="owning loop"):
+        tree.session("x")
+
+
+def test_cancel_is_noop_for_already_terminal_admission() -> None:
+    cancelled = AdmissionLifecycleMachine(
+        "run", "turn-run", None, None, None, None, None, state="cancelled"
+    )
+    cancelled.cancel()
+    assert cancelled.state == "cancelled"
+    failed = AdmissionLifecycleMachine(
+        "run", "turn-run", None, None, None, None, None, state="failed"
+    )
+    failed.cancel()
+    assert failed.state == "failed"
+
+
+async def test_bind_rejects_a_foreign_event_loop() -> None:
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    other = asyncio.new_event_loop()
+    tree._loop = other
+    try:
+        with pytest.raises(RuntimeError, match="cannot move between event loops"):
+            await tree.bind()
+    finally:
+        other.close()
+
+
+async def test_has_active_session_and_active_turn_identity() -> None:
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    assert tree.has_active_session("unknown") is False
+    assert tree.active_turn_identity("unknown") is None
+    tree.session("idle")
+    assert tree.has_active_session("idle") is False
+    assert tree.active_turn_identity("idle") is None
+    await _start_turn(tree, "active")
+    assert tree.has_active_session("active") is True
+    assert tree.active_turn_identity("active") == _identity()
+    await tree.close()
+
+
+async def test_retire_and_flush_noop_for_idle_state() -> None:
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    tree._retire_session_if_idle("unknown")  # unknown session -> no crash
+    await tree.flush()  # nothing pending, no task -> returns cleanly
+    assert tree._pending_session_projections == {}
+    await tree.close()
+
+
+async def test_steer_rerequest_is_ignored_and_invalid_transition_raises() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        run_id=None,
+        payload={},
+    )
+    # A steer created without a run_id backfills it from a later event.
+    await tree.publish(
+        "lifecycle.steer_accepted",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        run_id="run-9",
+        payload={},
+    )
+    assert tree.session("s").turn.steers["steer-1"].provider_run_id == "run-9"
+    assert tree.session("s").turn.steers["steer-1"].state == "accepted"
+    # A second "requested" for an existing steer is ignored (no reset).
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        payload={},
+    )
+    assert tree.session("s").turn.steers["steer-1"].state == "accepted"
+    await tree.publish(
+        "lifecycle.steer_persisted",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        payload={},
+    )
+    # An illegal transition raises inside the handler. EventBus.publish swallows
+    # subscriber exceptions, so exercise the handler directly.
+    with pytest.raises(ValueError, match="invalid steer transition"):
+        await tree._apply(_event("lifecycle.steer_accepted", "s", message_id="steer-1"))
+    await tree.close()
+
+
+async def test_reconcile_turn_missing_noop_paths() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s", execution_turn_id="exec-1")
+    identity = _identity(execution_turn_id="exec-1")
+    # A queued prompt keeps the session alive across the stop transition so the
+    # post-state is observable (an idle session would be retired on the spot).
+    await tree.publish(
+        "user_message_queued",
+        root_id="s",
+        session_id="s",
+        message_id="p",
+        payload={},
+    )
+    # Non-legacy running turn, mismatched identity -> ignored, stays running.
+    await tree.publish(
+        "lifecycle.reconcile_turn_missing",
+        root_id="s",
+        session_id="s",
+        payload=_identity(execution_turn_id="other", user_turn_id="other"),
+    )
+    assert tree.session("s").turn.state == "running"
+    # Matching identity -> turn stopped.
+    await tree.publish(
+        "lifecycle.reconcile_turn_missing",
+        root_id="s",
+        session_id="s",
+        payload=identity,
+    )
+    assert tree.session("s").turn.state == "stopped"
+    await tree.close()
+
+
+async def test_reconcile_admission_missing_identity_gated() -> None:
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await _register_admission(tree, "s", run_id="run-1", execution=_execution())
+    # Unknown run -> no-op.
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="s",
+        session_id="s",
+        run_id="run-missing",
+        payload=_identity(),
+    )
+    assert "run-1" in tree.session("s").turn.admissions
+    # Mismatched identity -> no-op.
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="s",
+        session_id="s",
+        run_id="run-1",
+        payload=_identity(execution_turn_id="other", user_turn_id="other"),
+    )
+    assert "run-1" in tree.session("s").turn.admissions
+    # Matching identity -> admission dropped.
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="s",
+        session_id="s",
+        run_id="run-1",
+        payload=_identity(),
+    )
+    assert "run-1" not in tree.session("s").turn.admissions
+    await tree.close()
+
+
+async def test_legacy_reconcile_admission_missing_requires_legacy_payload() -> None:
+    _seed_v1_legacy_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    # Legacy-reconciling turn: a non-legacy payload is rejected (no-op).
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="legacy",
+        session_id="legacy",
+        run_id="live-run",
+        payload=_identity(),
+    )
+    assert "live-run" in tree.session("legacy").turn.admissions
+    # The legacy sentinel payload drops the admission.
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="legacy",
+        session_id="legacy",
+        run_id="live-run",
+        payload={"legacy_reconciling": True},
+    )
+    assert "live-run" not in tree.session("legacy").turn.admissions
+    await tree.close()
+
+
+async def test_legacy_reconcile_turn_missing_with_payload_is_noop() -> None:
+    _seed_v1_legacy_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    assert tree.session("legacy").turn.state == "legacy_reconciling"
+    await tree.publish(
+        "lifecycle.reconcile_turn_missing",
+        root_id="legacy",
+        session_id="legacy",
+        payload={"legacy_reconciling": True},
+    )
+    assert tree.session("legacy").turn.state == "legacy_reconciling"
+    await tree.close()
+
+
+async def test_reconcile_steer_parent_gone_removes_steer() -> None:
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        run_id="run-9",
+        payload={},
+    )
+    await tree.publish(
+        "lifecycle.reconcile_steer_parent_gone",
+        root_id="s",
+        session_id="s",
+        message_id="steer-1",
+        run_id="run-9",
+        payload={},
+    )
+    assert "steer-1" not in tree.session("s").turn.steers
+    await tree.close()
+
+
+async def test_admission_cancel_requested_skips_non_matching() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await _register_admission(tree, "s", run_id="run-a", execution=_execution())
+    # Mismatched identity -> no admission cancelled (the `continue` path).
+    await tree.publish(
+        "lifecycle.admission_cancel_requested",
+        root_id="s",
+        session_id="s",
+        payload=_identity(
+            execution_turn_id="other", assistant_message_id="x", user_turn_id="other"
+        ),
+    )
+    assert tree.session("s").turn.admissions["run-a"].state == "registered"
+    await tree.close()
+
+
+async def test_admission_identity_matches_tolerates_malformed_payload() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await _register_admission(tree, "s", run_id="run-a", execution=_execution())
+    # A malformed payload reaching _admission_identity_matches (via the
+    # reconcile_admission_missing handler, which does not pre-validate identity)
+    # is treated as a non-match rather than crashing.
+    await tree.publish(
+        "lifecycle.reconcile_admission_missing",
+        root_id="s",
+        session_id="s",
+        run_id="run-a",
+        payload={"incomplete": True},
+    )
+    assert "run-a" in tree.session("s").turn.admissions
+    assert tree.session("s").turn.admissions["run-a"].state == "registered"
+    await tree.close()
+
+
+async def test_admission_registered_rejects_bad_handle() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    # EventBus.publish swallows subscriber exceptions, so exercise the handler
+    # directly to observe the guard raises.
+    with pytest.raises(TypeError, match="execution handle"):
+        await tree._apply(
+            _event(
+                "lifecycle.admission_registered",
+                "s",
+                run_id="run-1",
+                payload={"execution_handle": 123, **_identity()},
+            )
+        )
+    with pytest.raises(KeyError, match="execution handle is unavailable"):
+        await tree._apply(
+            _event(
+                "lifecycle.admission_registered",
+                "s",
+                run_id="run-1",
+                payload={"execution_handle": "no-such-handle", **_identity()},
+            )
+        )
+    await tree.close()
+
+
+async def test_admission_state_event_for_unknown_run_is_noop() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    await tree.publish(
+        "lifecycle.admission_admitted",
+        root_id="s",
+        session_id="s",
+        run_id="never-registered",
+        payload=_identity(),
+    )
+    assert tree.session("s").turn.admissions == {}
+    await tree.close()
+
+
+async def test_reconcile_unknown_session_and_requirements_skip_idle() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    # Reconciling a session the tree never heard of is a no-op.
+    await tree.reconcile(
+        "unknown",
+        live_run_ids=set(),
+        queued_message_ids=set(),
+        completed_message_ids=set(),
+    )
+    # An idle session contributes nothing to reconciliation requirements.
+    tree.session("idle")
+    assert tree.reconciliation_requirements() == {}
+    await tree.close()
+
+
+async def test_reconcile_drops_missing_admission_and_orphaned_steer() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s")
+    # A live admission keeps the turn non-missing, so the admission/steer fact
+    # loops run (turn_missing is False whenever live_run_ids is non-empty).
+    await _register_admission(tree, "s", run_id="run-alive", execution=_execution())
+    await _register_admission(tree, "s", run_id="run-dead", execution=_execution())
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="s",
+        session_id="s",
+        message_id="steer-dead",
+        run_id="run-dead",
+        payload={},
+    )
+    # A steer whose parent is still live is retained (exercises the `continue`).
+    await tree.publish(
+        "lifecycle.steer_requested",
+        root_id="s",
+        session_id="s",
+        message_id="steer-alive",
+        run_id="run-alive",
+        payload={},
+    )
+    await tree.reconcile(
+        "s",
+        live_run_ids={"run-alive"},
+        queued_message_ids=set(),
+        completed_message_ids=set(),
+    )
+    assert "run-alive" in tree.session("s").turn.admissions
+    assert "run-dead" not in tree.session("s").turn.admissions
+    assert "steer-dead" not in tree.session("s").turn.steers
+    assert "steer-alive" in tree.session("s").turn.steers
+    await tree.close()
+
+
+async def test_start_execution_turn_rejects_running_conflicts() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await _start_turn(tree, "s", execution_turn_id="exec-1")
+    with pytest.raises(ValueError, match="cannot replace a running execution turn"):
+        await tree._apply(
+            _event(
+                "lifecycle.turn_start",
+                "s",
+                payload=_identity(execution_turn_id="exec-2"),
+            )
+        )
+    with pytest.raises(ValueError, match="cannot replace an active logical user turn"):
+        await tree._apply(
+            _event(
+                "lifecycle.turn_start",
+                "s",
+                payload=_identity(user_turn_id="other-user", execution_turn_id="exec-1"),
+            )
+        )
+    await tree.close()
+
+
+async def test_handlers_skip_missing_execution_record() -> None:
+    # A valid v2 projection may carry a running turn whose execution_turn_id has
+    # no matching entry in `executions`. Terminal and reconcile-turn-missing
+    # handlers must skip the missing execution rather than KeyError.
+    write_json(lifecycle_state_store._path(), {
+        "version": 2,
+        "sessions": {
+            "to-complete": {
+                "prompts": {"p": {"state": "queued"}},
+                "turn": _turn_projection("exec-1"),
+            },
+            "to-stop": {
+                "prompts": {"p": {"state": "queued"}},
+                "turn": _turn_projection("exec-2"),
+            },
+        },
+    })
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="to-complete",
+        session_id="to-complete",
+        payload=_identity(
+            user_turn_id="u",
+            lifecycle_message_id="u",
+            execution_turn_id="exec-1",
+            assistant_message_id="a",
+        ),
+    )
+    assert tree.session("to-complete").turn.state == "complete"
+    await tree.publish(
+        "lifecycle.reconcile_turn_missing",
+        root_id="to-stop",
+        session_id="to-stop",
+        payload=_identity(
+            user_turn_id="u",
+            lifecycle_message_id="u",
+            execution_turn_id="exec-2",
+            assistant_message_id="a",
+        ),
+    )
+    assert tree.session("to-stop").turn.state == "stopped"
+    await tree.close()
+
+
+async def test_terminal_event_on_turn_without_execution_id() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    # A terminal event for a turn with no execution_turn_id (an idle turn that
+    # never received turn_start) must resolve cleanly rather than KeyError.
+    await tree.publish(
+        "user_message_queued",
+        root_id="s",
+        session_id="s",
+        message_id="p",
+        payload={},
+    )
+    await tree.publish(
+        "lifecycle.turn_complete",
+        root_id="s",
+        session_id="s",
+        payload=_identity(),
+    )
+    assert tree.session("s").turn.state == "complete"
+    await tree.close()
+
+
+def test_restore_skips_malformed_projection_entries() -> None:
+    # _restore is the tree's own defensive parser for a persisted projection.
+    # Every malformed entry (non-str key or non-dict value) is skipped rather
+    # than crashing; only well-formed entries materialize in the sessions map.
+    tree = LifecycleStateTree(EventBus())
+    tree._restore(
+        {
+            "sessions": {
+                5: "not-a-session",  # non-str key -> skip
+                "ok": {
+                    "prompts": {
+                        "p": {"state": "queued"},
+                        7: "not-a-prompt",  # non-str key -> skip
+                    },
+                    "turn": {
+                        "state": "running",
+                        "executions": {
+                            9: "not-an-exec",  # non-str key -> skip
+                            "exec-1": {"state": "running"},
+                        },
+                        "admissions": {
+                            "bad-adm": "not-a-dict",  # non-dict value -> skip
+                            # non-str execution_turn_id -> skip
+                            "bad-exec": {"execution_turn_id": 5},
+                            "good-adm": {
+                                "execution_turn_id": "exec-1",
+                                "state": "registered",
+                            },
+                        },
+                        "steers": {11: "not-a-steer"},  # non-str key -> skip
+                    },
+                },
+            }
+        }
+    )
+    session = tree._sessions["ok"]
+    assert set(session.prompts) == {"p"}
+    assert set(session.turn.executions) == {"exec-1"}
+    assert set(session.turn.admissions) == {"good-adm"}
+    assert session.turn.steers == {}
+    # The non-str-keyed session never materialized.
+    assert 5 not in tree._sessions
+
+
+def test_start_execution_turn_rejects_legacy_and_terminal_user_mismatch() -> None:
+    legacy = TurnLifecycleMachine(state="legacy_reconciling", user_turn_id="old-user")
+    with pytest.raises(ValueError, match="legacy logical turn requires reconciliation"):
+        LifecycleStateTree._start_execution_turn(legacy, _identity(user_turn_id="new"))
+
+    terminal = TurnLifecycleMachine(state="complete", user_turn_id="old-user")
+    terminal.admissions["run-1"] = AdmissionLifecycleMachine(
+        "run-1", "exec-1", "old-user", None, None, None, None
+    )
+    with pytest.raises(ValueError, match="terminal logical turn retained admissions"):
+        LifecycleStateTree._start_execution_turn(terminal, _identity(user_turn_id="new"))
+
+
+async def test_flush_spawns_persist_task_when_none_live() -> None:
+    _reset_store()
+    tree = LifecycleStateTree(EventBus())
+    await tree.bind()
+    # A pending projection with no live persist task forces flush() to spawn
+    # the persist loop itself (the _schedule_persist fast path already creates
+    # one, so this is the only way to reach that branch in flush()).
+    tree._pending_session_projections = {
+        "s": {
+            "prompts": {},
+            "turn": {
+                "state": "idle",
+                "executions": {},
+                "admissions": {},
+                "steers": {},
+            },
+        }
+    }
+    tree._persist_task = None
+    await tree.flush()
+    assert tree._pending_session_projections == {}
     await tree.close()
 
 
