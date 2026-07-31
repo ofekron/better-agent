@@ -532,18 +532,13 @@ def _apply_proposed_sessions(
             msg_id,
             {"ask_result": result},
         )
-        event = {
-            "session_id": target_sid,
-            "msg_id": msg_id,
-            "ask_result": result,
-        }
     else:
         session_manager.set_msg_ask_result(target_sid, msg_id, result)
-        event = {
-            "session_id": target_sid,
-            "msg_id": msg_id,
-            "ask_result": result,
-        }
+    event = {
+        "session_id": target_sid,
+        "msg_id": msg_id,
+        "ask_result": result,
+    }
     return result, event
 
 
@@ -947,6 +942,8 @@ def _ask_error_message(error_code: object) -> str:
 
 
 def _ask_assistant_message_from_worker_result(result: dict) -> dict:
+    # Single instant for both stamps so timestamp and completed_at agree.
+    now = datetime.now().isoformat()
     # The Ask turn is represented entirely by its inline picker footer: the
     # reasoning lives in `ask_result.reasoning`, the matches + actions in the
     # picker. The assistant message itself carries NO body — empty content and
@@ -962,9 +959,9 @@ def _ask_assistant_message_from_worker_result(result: dict) -> dict:
         "role": "assistant",
         "content": "",
         "events": [],
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now,
         "isStreaming": False,
-        "completed_at": datetime.now().isoformat(),
+        "completed_at": now,
     }
     return msg
 
