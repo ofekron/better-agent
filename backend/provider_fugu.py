@@ -16,7 +16,6 @@ provider), then add a Fugu provider.
 
 from __future__ import annotations
 
-import os
 from typing import ClassVar, Optional
 
 from provider_codex import CodexProvider

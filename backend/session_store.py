@@ -58,7 +58,7 @@ from root_change_wal import RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
 from reasoning_effort import normalize_reasoning_effort
 import runtime_profile
-from permission import normalize_permission, default_permission_for_kind
+from permission import normalize_permission
 # `worker_store` is imported lazily inside `list_sessions` — the
 # single call site. Keeping it lazy here lets `worker_store` and
 # `orchs/base` import `session_manager` at top level without a

@@ -26,7 +26,7 @@ except Exception:
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 # Assert an adequate fd limit before any backend module opens handles.
 from fd_limits import raise_fd_limit
@@ -37,7 +37,6 @@ from event_bus import BusEvent, bus as event_bus
 import browser_trust
 from paths import ba_home
 from i18n import t
-from reasoning_effort import normalize_reasoning_effort
 import perf
 from bounded_async_executor import AdmissionOverloaded
 from requirements_query_runner import (
@@ -169,9 +168,6 @@ from session_list_cache import _invalidate_session_list_user_prefs_cache
 #
 config_store.apply_provider_config_env_vars()
 
-from pydantic import BaseModel
-
-from provider import known_providers
 from orchestrator import Coordinator
 from session_manager import manager as session_manager
 from session_manager import (

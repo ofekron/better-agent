@@ -402,7 +402,6 @@ async def handle_restart(node_client, msg: dict) -> None:
     """
     logger.info("node_rpc: restart requested — re-execing process")
     import sys
-    import signal
 
     # Give the WS a moment to flush the ack, then exec.
     await node_client.stop()
