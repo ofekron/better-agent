@@ -41,6 +41,33 @@ def _run_with_mobile_package_json(frontend_dir: Path, during_script: str) -> str
     return completed
 
 
+def _run_projection_assertion(
+    frontend_dir: Path, platforms: list[str]
+) -> subprocess.CompletedProcess[str]:
+    script = (
+        f"import {{ assertNativeRunnerProjection }} from {json.dumps(CAP_SYNC.as_uri())};"
+        f"assertNativeRunnerProjection({json.dumps(str(frontend_dir))}, "
+        f"{json.dumps(platforms)});"
+    )
+    return subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=frontend_dir,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_runner_projection_fixture(frontend_dir: Path, contents: str) -> None:
+    paths = [
+        frontend_dir / "dist/runners/offline-sync.js",
+        frontend_dir / "android/app/src/main/assets/public/runners/offline-sync.js",
+        frontend_dir / "ios/App/App/public/runners/offline-sync.js",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+
+
 def test_mobile_deps_merged_in_during_the_call() -> None:
     # This is the failure this fixes: `cap sync` reads package.json to
     # discover native plugins, and frontend/package.json intentionally
@@ -81,6 +108,39 @@ def test_package_json_restored_after_failure() -> None:
         )
         assert completed.returncode != 0
         assert (frontend_dir / "package.json").read_text() == original
+
+
+def test_native_runner_projections_match_canonical_bundle() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_runner_projection_fixture(frontend_dir, "canonical runner")
+        completed = _run_projection_assertion(frontend_dir, ["android", "ios"])
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_stale_native_runner_projection_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_runner_projection_fixture(frontend_dir, "canonical runner")
+        (
+            frontend_dir
+            / "android/app/src/main/assets/public/runners/offline-sync.js"
+        ).write_text("stale runner")
+        completed = _run_projection_assertion(frontend_dir, ["android"])
+        assert completed.returncode != 0
+        assert "does not match the canonical mobile bundle" in completed.stderr
+
+
+def test_missing_native_runner_projection_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_runner_projection_fixture(frontend_dir, "canonical runner")
+        (
+            frontend_dir / "ios/App/App/public/runners/offline-sync.js"
+        ).unlink()
+        completed = _run_projection_assertion(frontend_dir, ["ios"])
+        assert completed.returncode != 0
+        assert "ENOENT" in completed.stderr
 
 
 def test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json() -> None:
@@ -138,6 +198,17 @@ def test_rebuild_android_apk_builds_vite_in_mobile_mode() -> None:
         )
 
 
+def test_rebuild_android_apk_verifies_runner_after_sync_before_packaging() -> None:
+    source = REBUILD_ANDROID_APK.read_text()
+    sync_position = source.find('execSync("npx cap sync android"')
+    verify_position = source.find('assertNativeRunnerProjection(FRONTEND, ["android"])')
+    package_position = source.find("./gradlew assembleDebug")
+    assert sync_position >= 0
+    assert verify_position >= 0
+    assert package_position >= 0
+    assert sync_position < verify_position < package_position
+
+
 def test_rebuild_android_apk_installs_mobile_dependencies_before_vite() -> None:
     source = REBUILD_ANDROID_APK.read_text()
     install_call = re.search(
@@ -183,8 +254,12 @@ if __name__ == "__main__":
     test_mobile_deps_merged_in_during_the_call()
     test_package_json_restored_after_success()
     test_package_json_restored_after_failure()
+    test_native_runner_projections_match_canonical_bundle()
+    test_stale_native_runner_projection_fails_closed()
+    test_missing_native_runner_projection_fails_closed()
     test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json()
     test_rebuild_android_apk_builds_vite_in_mobile_mode()
+    test_rebuild_android_apk_verifies_runner_after_sync_before_packaging()
     test_rebuild_android_apk_installs_mobile_dependencies_before_vite()
     test_mobile_lock_matches_merged_manifest()
     test_rebuild_android_apk_creates_release_destination_before_copy()

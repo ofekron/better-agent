@@ -15,7 +15,10 @@ import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { withMobilePackageJson } from "../frontend/scripts/cap-sync.mjs";
+import {
+  assertNativeRunnerProjection,
+  withMobilePackageJson,
+} from "../frontend/scripts/cap-sync.mjs";
 import { installFrontendDependencies } from "../frontend/scripts/install-frontend-deps.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -134,6 +137,7 @@ try {
   withMobilePackageJson(FRONTEND, () => {
     execSync("npx cap sync android", { cwd: FRONTEND, env, stdio: "inherit" });
   });
+  assertNativeRunnerProjection(FRONTEND, ["android"]);
   execSync(
     `./gradlew assembleDebug --no-daemon -PbcVersionCode=${VERSION_CODE} -PbcVersionName=${VERSION_NAME}`,
     { cwd: ANDROID, env, stdio: "inherit" },

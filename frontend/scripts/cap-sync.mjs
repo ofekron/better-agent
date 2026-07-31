@@ -13,6 +13,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readMobileDependencies } from "./mobile-dependencies.mjs";
 
 const frontend = dirname(dirname(fileURLToPath(import.meta.url)));
+const nativeRunnerPaths = {
+  android: [
+    "android", "app", "src", "main", "assets",
+    "public", "runners", "offline-sync.js",
+  ],
+  ios: ["ios", "App", "App", "public", "runners", "offline-sync.js"],
+};
 
 export function mergeManifestWithMobileDeps(manifest, mobileDependencies) {
   return {
@@ -49,6 +56,27 @@ export function withMobilePackageJson(frontendDir, run) {
   }
 }
 
+export function assertNativeRunnerProjection(
+  frontendDir,
+  platforms = ["android", "ios"],
+) {
+  const canonical = readFileSync(
+    join(frontendDir, "dist", "runners", "offline-sync.js"),
+  );
+  for (const platform of platforms) {
+    const pathParts = nativeRunnerPaths[platform];
+    if (!pathParts) {
+      throw new Error(`unsupported native platform: ${platform}`);
+    }
+    const projected = readFileSync(join(frontendDir, ...pathParts));
+    if (!canonical.equals(projected)) {
+      throw new Error(
+        `${platform} offline runner does not match the canonical mobile bundle`,
+      );
+    }
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
@@ -56,4 +84,5 @@ if (invokedDirectly) {
   withMobilePackageJson(frontend, () => {
     execFileSync("npx", ["cap", "sync"], { cwd: frontend, stdio: "inherit" });
   });
+  assertNativeRunnerProjection(frontend);
 }
