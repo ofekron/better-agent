@@ -37,6 +37,7 @@ vi.mock("../src/lib/frontendLogger", () => ({
   installFrontendLogger: vi.fn(),
   logFailure: vi.fn(),
   logTiming: vi.fn(),
+  memorySnapshot: vi.fn(() => ({})),
 }));
 
 vi.mock("../src/lib/mobileUpdater", () => ({

@@ -13,6 +13,46 @@ import type {
   WSEvent,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
+import type { BuiltinExtensionKey } from "../../src/extensionIds";
+import { finalizeTerminalAssistant } from "../../src/hooks/useSession";
+
+/** Logical key -> extension id served by GET /api/extensions/builtin-ids.
+ *  Single source for the `/api/extensions/<id>/backend/...` proxy family:
+ *  a known id re-dispatches onto the canonical /api/... handler below, so
+ *  each endpoint keeps exactly one mock implementation. */
+export const TEST_BUILTIN_EXTENSION_IDS: Record<BuiltinExtensionKey, string> = {
+  ask: "ofek-dev.ask",
+  team: "ofek-dev.team-orchestration",
+  supervisor: "ofek-dev.supervisor",
+  projectStructure: "ofek-dev.project-structure",
+  machineNodes: "ofek-dev.machine-nodes",
+  credentialBroker: "ofek-dev.credential-broker",
+  canvas: "ofek-dev.canvas",
+  promptEngineer: "ofek-dev.prompt-engineer",
+  browserHarness: "ofek-dev.browser-harness",
+  agentBoard: "ofek-dev.agent-board",
+  requirements: "ofek-dev.requirements",
+  sessionBridge: "ofek-dev.session-bridge",
+  testape: "ofek-dev.testape",
+  scheduler: "ofek-dev.scheduler",
+  routines: "ofek-dev.routines",
+};
+
+const TEST_EXTENSION_ID_SET = new Set<string>(
+  Object.values(TEST_BUILTIN_EXTENSION_IDS),
+);
+
+/** Known-id `/api/extensions/<id>/backend/<rest>` requests normalize to the
+ *  canonical `/api/<rest>` path before recording and routing, so each
+ *  endpoint has exactly one mock handler and restCalls stay stable against
+ *  the proxy prefix. Empty/unknown ids pass through and 404 in route(). */
+function canonicalizeExtensionBackendPath(path: string): string {
+  const match = path.match(/^\/api\/extensions\/([^/]+)\/backend(\/.*)$/);
+  if (match && TEST_EXTENSION_ID_SET.has(decodeURIComponent(match[1]))) {
+    return `/api${match[2]}`;
+  }
+  return path;
+}
 
 export interface InstallationProfileState {
   status: string;
@@ -243,12 +283,11 @@ export class MockBackend {
    *  refetch (e.g. after `turn_complete`). Called by the harness's
    *  `emit`/`emitMany` before delivering the frame to the mock socket. */
   applyWsEvent(event: WSEvent): void {
-    if (event.type !== "messages_replay" && event.type !== "messages_delta") return;
-    const d = event.data as { app_session_id?: string; messages?: ChatMessage[] };
-    if (!d.app_session_id || !Array.isArray(d.messages) || d.messages.length === 0) return;
-    for (const root of this.state.sessions) {
-      const node = findNodeInTree(root, d.app_session_id);
-      if (!node) continue;
+    if (event.type === "messages_replay" || event.type === "messages_delta") {
+      const d = event.data as { app_session_id?: string; messages?: ChatMessage[] };
+      if (!d.app_session_id || !Array.isArray(d.messages) || d.messages.length === 0) return;
+      const node = this.findSessionNode(d.app_session_id);
+      if (!node) return;
       const byId = new Map((node.messages ?? []).map((m, i) => [m.id, i]));
       const merged = [...(node.messages ?? [])];
       for (const m of d.messages) {
@@ -262,6 +301,43 @@ export class MockBackend {
       node.messages = merged;
       return;
     }
+    // Turn-terminal frames (turn_complete/turn_stopped/error) finalize the
+    // in-flight streaming assistant placeholder. A later REST reconcile
+    // (applySessionReconciled) refetches this session, so the mock's
+    // stored messages must already reflect the same terminal outcome the
+    // frontend computed locally — otherwise the reconcile round-trip
+    // resurrects the placeholder the WS event just finalized. Reuses the
+    // production reducer so both paths agree by construction.
+    if (
+      event.type === "turn_complete" ||
+      event.type === "turn_stopped" ||
+      event.type === "error"
+    ) {
+      const d = event.data as {
+        app_session_id?: string;
+        session_id?: string;
+        stopped_at?: string;
+        interrupted_by_msg_id?: string;
+        error?: string;
+      };
+      const sid = d.app_session_id ?? d.session_id;
+      if (!sid) return;
+      const node = this.findSessionNode(sid);
+      if (!node) return;
+      node.messages = finalizeTerminalAssistant(node.messages ?? [], {
+        stoppedAt: d.stopped_at,
+        interruptedByMsgId: d.interrupted_by_msg_id,
+        errorText: event.type === "error" ? (d.error ?? "") : undefined,
+      });
+    }
+  }
+
+  private findSessionNode(appSessionId: string): Session | undefined {
+    for (const root of this.state.sessions) {
+      const node = findNodeInTree(root, appSessionId);
+      if (node) return node;
+    }
+    return undefined;
   }
 
   reset(): void {
@@ -376,7 +452,7 @@ export class MockBackend {
         : input.url;
     const method = (init?.method ?? "GET").toUpperCase();
     const u = new URL(url, ORIGIN);
-    const path = u.pathname;
+    const path = canonicalizeExtensionBackendPath(u.pathname);
     const query: Record<string, string> = {};
     u.searchParams.forEach((v, k) => {
       query[k] = v;
@@ -470,22 +546,71 @@ export class MockBackend {
       };
     }
     if (method === "GET" && path === "/api/extensions/frontend-entrypoints") {
+      // Mirrors the real manifests: team-orchestration serves the workers
+      // panel and the worker-approval inline cards from one entry module;
+      // credential-broker serves the consent inline cards. The module_urls
+      // resolve to tests/harness/extensionModuleStubs.ts via the loader
+      // mock in tests/setup.ts.
       return {
-        entrypoints: [{
-          extension_id: "ofek-dev.team-orchestration",
-          name: "Team Orchestration",
-          frontend_modules: [{
-            slot: "team-sidebar",
-            id: "workers-panel",
-            label: "Workers",
-            kind: "module",
-            module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
-          }],
-        }],
+        entrypoints: [
+          {
+            extension_id: "ofek-dev.team-orchestration",
+            name: "Team Orchestration",
+            frontend_modules: [
+              {
+                slot: "team-sidebar",
+                id: "workers-panel",
+                label: "Workers",
+                kind: "module",
+                module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
+              },
+              {
+                slot: "chat-inline-actions",
+                id: "worker-approvals",
+                label: "Worker approvals",
+                kind: "module",
+                module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
+              },
+            ],
+          },
+          {
+            extension_id: "ofek-dev.credential-broker",
+            name: "Credential broker",
+            frontend_modules: [
+              {
+                slot: "chat-inline-actions",
+                id: "credential-consents",
+                label: "Credential consents",
+                kind: "module",
+                module_url: "/api/extensions/ofek-dev.credential-broker/frontend/ui/credential-broker.entry.js",
+              },
+            ],
+          },
+          {
+            extension_id: "ofek-dev.prompt-engineer",
+            name: "Prompt Engineer",
+            frontend_modules: [
+              {
+                slot: "session-action-modal",
+                id: "prompt-engineer-start-modal",
+                label: "Prompt Engineer start modal",
+                kind: "module",
+                module_url: "/api/extensions/ofek-dev.prompt-engineer/frontend/ui/prompt-engineer.entry.js",
+              },
+              {
+                slot: "session-workspace-overlay",
+                id: "prompt-engineer-overlay",
+                label: "Prompt Engineer overlay",
+                kind: "module",
+                module_url: "/api/extensions/ofek-dev.prompt-engineer/frontend/ui/prompt-engineer.entry.js",
+              },
+            ],
+          },
+        ],
       };
     }
     if (method === "GET" && path === "/api/extensions/builtin-ids") {
-      return { ids: {} };
+      return { ids: { ...TEST_BUILTIN_EXTENSION_IDS } };
     }
     // ---- Mount-time endpoints App fires unconditionally ----
     // Every one of these was previously unhandled, so any renderApp() test
@@ -513,7 +638,17 @@ export class MockBackend {
     }
     if (method === "POST" && path === "/api/logs/frontend") return { ok: true };
     if (method === "GET" && path === "/api/extensions/ui-hooks") return { hooks: {} };
-    if (method === "GET" && path === "/api/extensions") return { extensions: [] };
+    if (method === "GET" && path === "/api/extensions") {
+      // A real installation has the builtin extensions installed+enabled;
+      // useBuiltinExtensionFlags matches records by manifest.id against the
+      // builtin-ids map, so derive from the same single-source map.
+      return {
+        extensions: Object.entries(TEST_BUILTIN_EXTENSION_IDS).map(([key, id]) => ({
+          manifest: { id, name: key },
+          enabled: true,
+        })),
+      };
+    }
     if (method === "GET" && path === "/api/marketplace-bridge") {
       return {
         revision: 0,
@@ -527,13 +662,15 @@ export class MockBackend {
       return { schema_version: 1, folders: [], tags: [], assignments: {}, models: [] };
     }
     if (method === "GET" && path === "/api/git-status") return { is_git: false };
+    // Machine-nodes extension backend: App mounts useMachines unconditionally.
+    if (method === "GET" && path === "/api/nodes") return [];
     const toolApprovalsMatch = path.match(/^\/api\/sessions\/[^/]+\/tool-approvals\/pending$/);
     if (method === "GET" && toolApprovalsMatch) return { approvals: [] };
-    // `/api/extensions/{extension_id}/backend/{path}` proxy family — the
-    // frontend calls these with an empty extension_id when no matching
-    // extension is configured for the test session, which the real router
-    // 404s (Starlette's path param needs >=1 char). Mirror that instead of
-    // faking success for an extension that was never seeded.
+    // `/api/extensions/{extension_id}/backend/{path}` proxy family. Known
+    // builtin ids were already normalized to the canonical /api/{path} by
+    // canonicalizeExtensionBackendPath, so only empty/unknown ids reach
+    // here — mirror the real router's 404 (Starlette's path param needs
+    // >=1 char; an extension that isn't installed has no backend).
     if (/^\/api\/extensions\/[^/]*\/backend\//.test(path)) return notFound();
     if (method === "GET" && path === "/api/ui-selection") {
       return this.state.uiSelection;
@@ -626,12 +763,11 @@ export class MockBackend {
       // can carry a `pending_eng_session_id` for the resume badge.
       const engByParent = new Map<string, string>();
       for (const s of this.state.sessions) {
-        const meta = s as Session & {
-          is_prompt_engineering?: boolean;
-          prompt_eng_meta?: { parent_session_id?: string };
-        };
-        if (meta.is_prompt_engineering && meta.prompt_eng_meta?.parent_session_id) {
-          engByParent.set(meta.prompt_eng_meta.parent_session_id, s.id);
+        if (
+          s.working_mode === "prompt_engineering" &&
+          s.working_mode_meta?.parent_session_id
+        ) {
+          engByParent.set(s.working_mode_meta.parent_session_id, s.id);
         }
       }
       // Second pass: filter eng sessions out of the sidebar and stamp
@@ -639,10 +775,7 @@ export class MockBackend {
       const offset = Number.parseInt(query.offset ?? "0", 10);
       const limit = Number.parseInt(query.limit ?? String(this.state.sessions.length), 10);
       const sessions = this.state.sessions
-          .filter(
-            (s) => !(s as Session & { is_prompt_engineering?: boolean })
-              .is_prompt_engineering,
-          )
+          .filter((s) => s.working_mode !== "prompt_engineering")
           .filter((s) => sessionMatchesListQuery(s, query))
           .map((s) => ({
             ...sessionSummary(s),
@@ -867,20 +1000,13 @@ export class MockBackend {
         // real backend's cleanup loop in main.py.
         const cascadedEng: string[] = [];
         for (const s of this.state.sessions) {
-          const meta = s as Session & {
-            is_prompt_engineering?: boolean;
-            prompt_eng_meta?: {
-              parent_session_id?: string;
-              temp_file_path?: string;
-            };
-          };
           if (
-            meta.is_prompt_engineering &&
-            meta.prompt_eng_meta?.parent_session_id === id
+            s.working_mode === "prompt_engineering" &&
+            s.working_mode_meta?.parent_session_id === id
           ) {
             cascadedEng.push(s.id);
-            if (meta.prompt_eng_meta.temp_file_path) {
-              delete this.state.files[meta.prompt_eng_meta.temp_file_path];
+            if (s.working_mode_meta.temp_file_path) {
+              delete this.state.files[s.working_mode_meta.temp_file_path];
             }
           }
         }
@@ -1036,6 +1162,9 @@ export class MockBackend {
         );
         return { ok: true };
       }
+      if (sub === "/schedules" && method === "GET") {
+        return { schedules: [] };
+      }
       if (sub === "/notes" && method === "POST") {
         if (!session) return notFound();
         const b = body as { text?: string };
@@ -1074,24 +1203,12 @@ export class MockBackend {
         // parent, return it without touching the temp file. Mirrors the
         // real backend's single-eng-per-parent invariant.
         const existing = this.state.sessions.find(
-          (s) => {
-            const meta = (s as Session & {
-              is_prompt_engineering?: boolean;
-              prompt_eng_meta?: { parent_session_id?: string };
-            });
-            return (
-              meta.is_prompt_engineering &&
-              meta.prompt_eng_meta?.parent_session_id === session.id
-            );
-          },
+          (s) =>
+            s.working_mode === "prompt_engineering" &&
+            s.working_mode_meta?.parent_session_id === session.id,
         );
         if (existing) {
-          const meta = (existing as Session & {
-            prompt_eng_meta?: {
-              temp_file_path?: string;
-              original_content?: string;
-            };
-          }).prompt_eng_meta;
+          const meta = existing.working_mode_meta;
           return {
             eng_session_id: existing.id,
             temp_file_path: meta?.temp_file_path ?? "",
@@ -1113,11 +1230,12 @@ export class MockBackend {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           messages: [],
-          is_prompt_engineering: true,
-          prompt_eng_meta: {
+          working_mode: "prompt_engineering",
+          working_mode_meta: {
             parent_session_id: session.id,
             temp_file_path: tempPath,
             original_content: draft,
+            mode,
           },
         } as unknown as Session;
         this.state.sessions.unshift(eng);
@@ -1133,23 +1251,13 @@ export class MockBackend {
       if (sub === "/prompt-engineer" && method === "GET") {
         // Resume-path lookup: live eng session whose parent is `id`.
         if (!session) return notFound();
-        const eng = this.state.sessions.find((s) => {
-          const meta = (s as Session & {
-            is_prompt_engineering?: boolean;
-            prompt_eng_meta?: { parent_session_id?: string };
-          });
-          return (
-            meta.is_prompt_engineering &&
-            meta.prompt_eng_meta?.parent_session_id === id
-          );
-        });
+        const eng = this.state.sessions.find(
+          (s) =>
+            s.working_mode === "prompt_engineering" &&
+            s.working_mode_meta?.parent_session_id === id,
+        );
         if (!eng) return notFound();
-        const meta = (eng as Session & {
-          prompt_eng_meta?: {
-            temp_file_path?: string;
-            original_content?: string;
-          };
-        }).prompt_eng_meta;
+        const meta = eng.working_mode_meta;
         return {
           eng_session_id: eng.id,
           temp_file_path: meta?.temp_file_path ?? "",
@@ -1160,11 +1268,9 @@ export class MockBackend {
       }
       if (sub === "/prompt-engineer" && method === "DELETE") {
         if (!session) return notFound();
-        const meta = (
-          session as Session & {
-            prompt_eng_meta?: { temp_file_path?: string };
-          }
-        ).prompt_eng_meta;
+        const meta = session.working_mode === "prompt_engineering"
+          ? session.working_mode_meta
+          : undefined;
         if (meta?.temp_file_path) {
           delete this.state.files[meta.temp_file_path];
         }
@@ -1177,15 +1283,9 @@ export class MockBackend {
       }
       if (sub === "/prompt-eng-result" && method === "GET") {
         if (!session) return notFound();
-        const meta = (
-          session as Session & {
-            prompt_eng_meta?: {
-              temp_file_path?: string;
-              parent_session_id?: string;
-              original_content?: string;
-            };
-          }
-        ).prompt_eng_meta;
+        const meta = session.working_mode === "prompt_engineering"
+          ? session.working_mode_meta
+          : undefined;
         const path = meta?.temp_file_path;
         return {
           content: (path && this.state.files[path]) ?? "",

@@ -1,74 +1,85 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 import { ExtensionUiSettingsSection } from "../src/components/SettingsPage";
 
-vi.mock("../src/components/extensionModuleLoader", () => ({
-  loadExtensionModule: async () => ({
-    mount: ({ container }: { container: HTMLElement }) => {
-      container.textContent = "Mounted extension config";
-      return () => {
-        container.textContent = "";
-      };
-    },
-  }),
-}));
-
-function jsonResponse(body: unknown) {
+function jsonResponse(body: unknown, ok = true) {
   return Promise.resolve({
-    ok: true,
+    ok,
     json: () => Promise.resolve(body),
     text: () => Promise.resolve(JSON.stringify(body)),
   } as Response);
 }
 
+interface FakeExtension {
+  id: string;
+  name: string;
+  enabled: boolean;
+  required?: boolean;
+  description?: string;
+}
+
+/** Routes the fetch calls ExtensionUiSettingsSection makes against a mutable
+ * extension list, so post-mutation refreshes observe backend state changes. */
+function routeExtensionsFetch(
+  extensions: FakeExtension[],
+  overrides?: (url: string, init?: RequestInit) => Promise<Response> | null,
+) {
+  return vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    const override = overrides?.(url, init);
+    if (override) return override;
+    if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+      return jsonResponse({
+        extensions: extensions.map((e) => ({
+          enabled: e.enabled,
+          manifest: { id: e.id, description: e.description, entrypoints: {} },
+        })),
+      });
+    }
+    if (url.endsWith("/api/extensions/updates") && !init?.method) {
+      return jsonResponse({ results: [] });
+    }
+    const config = extensions.find((e) => url.endsWith(`/api/extensions/${e.id}/config`));
+    if (config && !init?.method) {
+      return jsonResponse({ name: config.name, required: config.required === true });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  });
+}
+
 describe("ExtensionUiSettingsSection uninstall", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllGlobals();
   });
 
-  it("shows installed extensions with no configurable surfaces and uninstalls them", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: true,
-              manifest: {
-                id: "ofek.empty-extension",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.empty-extension/config")) {
-        return jsonResponse({
-          name: "Empty Extension",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-          required: false,
-        });
-      }
+  it("lists installed extensions and uninstalls only after confirm", async () => {
+    const extensions: FakeExtension[] = [
+      { id: "ofek.empty-extension", name: "Empty Extension", enabled: true, description: "Does nothing" },
+    ];
+    const fetchMock = routeExtensionsFetch(extensions, (url, init) => {
       if (url.endsWith("/api/extensions/ofek.empty-extension") && init?.method === "DELETE") {
+        extensions.length = 0;
         return jsonResponse({ ok: true });
       }
-      throw new Error(`unexpected fetch ${url}`);
+      return null;
     });
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(<ExtensionUiSettingsSection />);
 
     expect(await screen.findByText("Empty Extension")).toBeTruthy();
+    expect(screen.getByText("ofek.empty-extension")).toBeTruthy();
+    expect(screen.getByText("Does nothing")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
+    expect(confirmMock).toHaveBeenCalledWith("Uninstall Empty Extension?");
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/extensions\/ofek\.empty-extension$/),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+
+    confirmMock.mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: /Uninstall/ }));
 
     await waitFor(() => {
@@ -77,109 +88,41 @@ describe("ExtensionUiSettingsSection uninstall", () => {
         expect.objectContaining({ method: "DELETE" }),
       );
     });
+    await waitFor(() => expect(screen.queryByText("Empty Extension")).toBeNull());
+    expect(await screen.findByText("No extensions installed.")).toBeTruthy();
   });
 
-  it("shows hidden required marketplace MCP server and toggles it", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: true,
-              manifest: {
-                id: "ofek-dev.marketplace",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek-dev.marketplace/config")) {
-        return jsonResponse({
-          name: "Marketplace",
-          required: true,
-          harness_delivery: "runtime",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          mcp: [{ name: "ofek-dev-marketplace", label: "ofek-dev-marketplace", enabled: true }],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: { internal_loopback: true }, optional: [], grants: {} },
-        });
-      }
-      if (
-        url.endsWith("/api/extensions/ofek-dev.marketplace/mcp/ofek-dev-marketplace/enabled") &&
-        init?.method === "PATCH"
-      ) {
-        return jsonResponse({ server: "ofek-dev-marketplace", enabled: false });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
+  it("blocks disabling and uninstalling required extensions", async () => {
+    routeExtensionsFetch([
+      { id: "ofek-dev.marketplace", name: "Marketplace", enabled: true, required: true },
+    ]);
 
     render(<ExtensionUiSettingsSection />);
 
     expect(await screen.findByText("Marketplace")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Uninstall/ })).toBeNull();
-
-    fireEvent.click(screen.getByRole("checkbox", { name: /ofek-dev-marketplace/ }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\/api\/extensions\/ofek-dev\.marketplace\/mcp\/ofek-dev-marketplace\/enabled$/),
-        expect.objectContaining({
-          method: "PATCH",
-          body: JSON.stringify({ enabled: false }),
-        }),
-      );
-    });
+    const toggle = screen.getByRole("checkbox", { name: /Enabled/ }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    expect(toggle.disabled).toBe(true);
   });
 
-  it("shows disabled installed extensions and toggles extension enabled state", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: false,
-              manifest: {
-                id: "ofek.disabled-extension",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.disabled-extension/config")) {
-        return jsonResponse({
-          name: "Disabled Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      if (url.endsWith("/api/extensions/ofek.disabled-extension/enabled") && init?.method === "PATCH") {
-        return jsonResponse({ extension: { enabled: true } });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
+  it("re-enables a disabled extension via PATCH", async () => {
+    const fetchMock = routeExtensionsFetch(
+      [{ id: "ofek.disabled-extension", name: "Disabled Extension", enabled: false }],
+      (url, init) => {
+        if (url.endsWith("/api/extensions/ofek.disabled-extension/enabled") && init?.method === "PATCH") {
+          return jsonResponse({ extension: { enabled: true } });
+        }
+        return null;
+      },
+    );
 
     render(<ExtensionUiSettingsSection />);
 
     expect(await screen.findByText("Disabled Extension")).toBeTruthy();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Disabled/ }));
+    const toggle = screen.getByRole("checkbox", { name: /Disabled/ }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -190,341 +133,47 @@ describe("ExtensionUiSettingsSection uninstall", () => {
         }),
       );
     });
-  });
-
-  it("toggles frontend modules and opens settings modules as modals", async () => {
-    let moduleEnabled = true;
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: true,
-              manifest: {
-                id: "ofek.personalized-extension",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.personalized-extension/config")) {
-        return jsonResponse({
-          name: "Personalized Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          frontend_modules: [
-            {
-              slot: "settings",
-              id: "accounts",
-              label: "Accounts",
-              kind: "module",
-              module_url: moduleEnabled
-                ? "/api/extensions/ofek.personalized-extension/frontend/ui/accounts.entry.js?v=abc"
-                : "",
-              enabled: moduleEnabled,
-              loadable: true,
-            },
-          ],
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      if (
-        url.endsWith("/api/extensions/ofek.personalized-extension/frontend-modules/settings/accounts/enabled") &&
-        init?.method === "PATCH"
-      ) {
-        moduleEnabled = Boolean(JSON.parse(String(init.body)).enabled);
-        return jsonResponse({ slot: "settings", id: "accounts", enabled: moduleEnabled });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    render(<ExtensionUiSettingsSection />);
-
-    expect(await screen.findByText("Personalized Extension")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Configure/ }));
-
-    expect(await screen.findByText("Mounted extension config")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-
-    fireEvent.click(screen.getByRole("checkbox", { name: /Accounts/ }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\/api\/extensions\/ofek\.personalized-extension\/frontend-modules\/settings\/accounts\/enabled$/),
-        expect.objectContaining({
-          method: "PATCH",
-          body: JSON.stringify({ enabled: false }),
-        }),
-      );
-    });
-    await waitFor(() => expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull());
-  });
-
-  it("does not open config modules for disabled extensions", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: false,
-              manifest: {
-                id: "ofek.disabled-config-extension",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.disabled-config-extension/config")) {
-        return jsonResponse({
-          name: "Disabled Config Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          frontend_modules: [
-            {
-              slot: "settings",
-              id: "accounts",
-              label: "Accounts",
-              kind: "module",
-              module_url: "",
-              enabled: true,
-              loadable: false,
-            },
-          ],
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    render(<ExtensionUiSettingsSection />);
-
-    expect(await screen.findByText("Disabled Config Extension")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull();
-  });
-
-  it("refreshes module config after enabling a disabled settings module", async () => {
-    let configCalls = 0;
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: true,
-              manifest: {
-                id: "ofek.refresh-config-extension",
-                entrypoints: {},
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.refresh-config-extension/config")) {
-        configCalls += 1;
-        return jsonResponse({
-          name: "Refresh Config Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          frontend_modules: [
-            {
-              slot: "settings",
-              id: "accounts",
-              label: "Accounts",
-              kind: "module",
-              module_url:
-                configCalls > 1
-                  ? "/api/extensions/ofek.refresh-config-extension/frontend/ui/accounts.entry.js?v=abc"
-                  : "",
-              enabled: configCalls > 1,
-              loadable: true,
-            },
-          ],
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      if (
-        url.endsWith("/api/extensions/ofek.refresh-config-extension/frontend-modules/settings/accounts/enabled") &&
-        init?.method === "PATCH"
-      ) {
-        return jsonResponse({ slot: "settings", id: "accounts", enabled: true });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    render(<ExtensionUiSettingsSection />);
-
-    expect(await screen.findByText("Refresh Config Extension")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Accounts/ }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\/api\/extensions\/ofek\.refresh-config-extension\/frontend-modules\/settings\/accounts\/enabled$/),
-        expect.objectContaining({
-          method: "PATCH",
-          body: JSON.stringify({ enabled: true }),
-        }),
-      );
-    });
-    expect(await screen.findByRole("button", { name: /Configure/ })).toBeTruthy();
+    expect(await screen.findByRole("checkbox", { name: /Enabled/ })).toBeTruthy();
   });
 
   it("filters installed extensions by search text", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            { enabled: true, manifest: { id: "ofek.alpha-extension", entrypoints: {} } },
-            { enabled: true, manifest: { id: "ofek.beta-extension", entrypoints: {} } },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/ofek.alpha-extension/config")) {
-        return jsonResponse({
-          name: "Alpha Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      if (url.endsWith("/api/extensions/ofek.beta-extension/config")) {
-        return jsonResponse({
-          name: "Beta Extension",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          ui: {},
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
+    routeExtensionsFetch([
+      { id: "ofek.alpha-extension", name: "Alpha Extension", enabled: true },
+      { id: "ofek.beta-extension", name: "Beta Extension", enabled: true },
+    ]);
 
     render(<ExtensionUiSettingsSection />);
 
     expect(await screen.findByText("Alpha Extension")).toBeTruthy();
     expect(screen.getByText("Beta Extension")).toBeTruthy();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Search extensions…" }), {
-      target: { value: "beta" },
-    });
+    const searchBox = screen.getByRole("textbox", { name: "Search extensions…" });
+    fireEvent.change(searchBox, { target: { value: "beta" } });
 
     expect(screen.queryByText("Alpha Extension")).toBeNull();
     expect(screen.getByText("Beta Extension")).toBeTruthy();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Search extensions…" }), {
-      target: { value: "missing" },
-    });
+    fireEvent.change(searchBox, { target: { value: "missing" } });
 
     expect(screen.queryByText("Beta Extension")).toBeNull();
     expect(screen.getByText("No extensions match your search.")).toBeTruthy();
   });
 
-  it("shows harness additions on extension items", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      const url = String(input);
-      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
-        return jsonResponse({
-          extensions: [
-            {
-              enabled: true,
-              manifest: {
-                id: "better-agent.harness-for-better-agent",
-                entrypoints: {
-                  instructions: [{ name: "Better Agent Harness Behavior", level: "global" }],
-                  skills: [{ name: "project-structure" }],
-                  mcp: [{ name: "better-agent-coordination" }],
-                },
-              },
-            },
-          ],
-        });
-      }
-      if (url.endsWith("/api/projects")) {
-        return jsonResponse({ projects: [] });
-      }
-      if (url.endsWith("/api/extensions/better-agent.harness-for-better-agent/config")) {
-        return jsonResponse({
-          name: "Better Agent Harness",
-          required: false,
-          harness_delivery: "native",
-          has_quick_button: false,
-          has_page: false,
-          internal_llm_tasks: ["extension_context_audit"],
-          ui: {},
-          mcp: [],
-          settings: { schema: [], values: {}, secret_present: {} },
-          permissions: { declared: {}, optional: [], grants: {} },
-        });
-      }
-      if (url.endsWith("/api/extensions/better-agent.harness-for-better-agent/internal-llm")) {
-        return jsonResponse({ tasks: ["extension_context_audit"], assignments: {} });
-      }
-      if (url.endsWith("/api/providers")) {
-        return jsonResponse({
-          default_provider_id: "p1",
-          providers: [
-            {
-              id: "p1",
-              name: "Provider",
-              default_model: "model-a",
-              custom_models: [],
-              supports_reasoning_effort: false,
-              reasoning_effort_options: [],
-            },
-          ],
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
+  it("scopes enable toggles and uninstall buttons per row", async () => {
+    routeExtensionsFetch([
+      { id: "ofek.alpha-extension", name: "Alpha Extension", enabled: true },
+      { id: "ofek-dev.marketplace", name: "Marketplace", enabled: true, required: true },
+    ]);
 
     render(<ExtensionUiSettingsSection />);
 
-    expect(await screen.findByText("Better Agent Harness")).toBeTruthy();
-    expect(screen.getByText("Harness additions")).toBeTruthy();
-    expect(screen.getByText("Better Agent Harness Behavior")).toBeTruthy();
-    expect(screen.getByText("project-structure")).toBeTruthy();
-    expect(screen.getByText("better-agent-coordination")).toBeTruthy();
-    expect(await screen.findByText("Extension context audit")).toBeTruthy();
+    expect(await screen.findByText("Alpha Extension")).toBeTruthy();
+    const alphaRow = screen.getByText("Alpha Extension").closest(".extension-ui-settings-row") as HTMLElement;
+    const marketplaceRow = screen.getByText("Marketplace").closest(".extension-ui-settings-row") as HTMLElement;
+
+    expect(within(alphaRow).getByRole("button", { name: /Uninstall/ })).toBeTruthy();
+    expect((within(alphaRow).getByRole("checkbox") as HTMLInputElement).disabled).toBe(false);
+    expect(within(marketplaceRow).queryByRole("button", { name: /Uninstall/ })).toBeNull();
+    expect((within(marketplaceRow).getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
   });
 });

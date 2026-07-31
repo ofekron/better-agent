@@ -13,9 +13,25 @@ function typeDraft(container: HTMLElement, value: string): void {
   fireEvent.change(ta, { target: { value } });
 }
 
-function engineerBtn(h: { $: (s: string) => HTMLElement | null }):
-  HTMLButtonElement | null {
+type EngineerHarness = {
+  $: (s: string) => HTMLElement | null;
+  click: (s: string) => Promise<void>;
+};
+
+/** The Engineer entry lives in the composer's ⋯ overflow menu; open it
+ * (idempotently) so the button exists in the DOM. */
+async function openOverflowMenu(h: EngineerHarness): Promise<void> {
+  if (!h.$(".input-overflow-menu")) await h.click(".input-overflow-trigger");
+}
+
+async function engineerBtn(h: EngineerHarness): Promise<HTMLButtonElement | null> {
+  await openOverflowMenu(h);
   return h.$('[data-testid="engineer-btn"]') as HTMLButtonElement | null;
+}
+
+async function clickEngineer(h: EngineerHarness): Promise<void> {
+  await openOverflowMenu(h);
+  await h.click('[data-testid="engineer-btn"]');
 }
 
 function overlay(h: { $: (s: string) => HTMLElement | null }): HTMLElement | null {
@@ -28,13 +44,13 @@ describe("prompt-engineering — start flow", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    const btn = engineerBtn(h);
+    const btn = await engineerBtn(h);
     expect(btn).not.toBeNull();
     expect(btn!.disabled).toBe(false);
 
     // Click with no draft → modal still opens. Backend POST will carry
     // an empty `draft`, which the real backend now accepts.
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     expect(h.$('[data-testid="prompt-eng-mode-new"]')).not.toBeNull();
     h.unmount();
   });
@@ -45,7 +61,7 @@ describe("prompt-engineering — start flow", () => {
     await h.selectSession(session.id);
 
     // Don't type anything. Just click ⚙, pick Fresh.
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -72,9 +88,9 @@ describe("prompt-engineering — start flow", () => {
     typeDraft(h.raw.container as HTMLElement, "refine this");
     await h.flush();
 
-    expect(engineerBtn(h)!.disabled).toBe(false);
+    expect((await engineerBtn(h))!.disabled).toBe(false);
 
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     // Modal renders both mode buttons.
     expect(h.$('[data-testid="prompt-eng-mode-fork"]')).not.toBeNull();
@@ -83,13 +99,13 @@ describe("prompt-engineering — start flow", () => {
   });
 
   it("'Fork' is disabled while parent has no claude_sid; 'Fresh' is always available", async () => {
-    const session = makeSession({ manager_claude_session_id: null });
+    const session = makeSession({ agent_session_id: null });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
     typeDraft(h.raw.container as HTMLElement, "draft");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     const fork = h.$('[data-testid="prompt-eng-mode-fork"]') as
       HTMLButtonElement;
@@ -102,14 +118,14 @@ describe("prompt-engineering — start flow", () => {
 
   it("'Fork' is enabled once the parent has a claude_sid", async () => {
     const session = makeSession({
-      manager_claude_session_id: "claude-sid-123",
+      agent_session_id: "claude-sid-123",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
     typeDraft(h.raw.container as HTMLElement, "draft");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     const fork = h.$('[data-testid="prompt-eng-mode-fork"]') as
       HTMLButtonElement;
@@ -124,7 +140,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     const fresh = h.$('[data-testid="prompt-eng-mode-new"]') as
       HTMLButtonElement;
@@ -154,7 +170,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     const fresh = h.$('[data-testid="prompt-eng-mode-new"]') as
       HTMLButtonElement;
@@ -180,7 +196,7 @@ describe("prompt-engineering — cancel flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -190,8 +206,7 @@ describe("prompt-engineering — cancel flow", () => {
     expect(overlay(h)).not.toBeNull();
     const engId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )?.id;
     expect(engId).toBeDefined();
 
@@ -218,14 +233,14 @@ describe("prompt-engineering — cancel flow", () => {
 describe("prompt-engineering — Send flow", () => {
   it("Send reads the temp file, ws.sendMessage's the parent, then DELETEs the eng session", async () => {
     const session = makeSession({
-      manager_claude_session_id: "claude-sid-abc",
+      agent_session_id: "claude-sid-abc",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
     typeDraft(h.raw.container as HTMLElement, "first draft");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -234,8 +249,7 @@ describe("prompt-engineering — Send flow", () => {
 
     const engId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )!.id;
 
     // Simulate Claude editing the prompt.md file. FileEditor polls
@@ -294,7 +308,7 @@ describe("prompt-engineering — file-anchored comments", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -303,8 +317,7 @@ describe("prompt-engineering — file-anchored comments", () => {
 
     const engId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )!.id;
 
     // Drive the comment endpoint directly. The DiffEditor (Monaco) is
@@ -364,7 +377,7 @@ async function startEngOverlay(
     { target: { value: "improve me" } },
   );
   await h.flush();
-  await h.clickByText(/⚙ Engineer/);
+  await clickEngineer(h);
   fireEvent.click(
     h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
   );
@@ -372,8 +385,7 @@ async function startEngOverlay(
   await h.flush();
   const engId = h.backend.state.sessions.find(
     (s) =>
-      (s as typeof s & { is_prompt_engineering?: boolean })
-        .is_prompt_engineering,
+      s.working_mode === "prompt_engineering",
   )!.id;
   return { h, parentId: session.id, engId };
 }
@@ -386,7 +398,7 @@ describe("prompt-engineering — Send edge cases", () => {
     vi.stubGlobal("alert", alertSpy);
 
     const { h, engId } = await startEngOverlay({
-      manager_claude_session_id: "claude-sid-x",
+      agent_session_id: "claude-sid-x",
     });
 
     // Force the temp file to empty — the result endpoint will return
@@ -459,7 +471,7 @@ describe("prompt-engineering — Start failure", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
 
     // Yank the parent session out of the mock backend's state. The
     // start route returns notFound() (404) when it can't find the
@@ -474,21 +486,22 @@ describe("prompt-engineering — Start failure", () => {
     await h.flush();
     await h.flush();
 
-    // Toast renders with the failure message.
+    // Toast renders with the failure message. The harness i18n runs with
+    // empty resources, so the toast label surfaces as its key.
     const container = h.raw.container as HTMLElement;
-    expect(container.textContent).toMatch(/Engineer start failed/);
+    expect(container.textContent).toMatch(/app\.engineerStartFailed/);
     // No overlay (start aborted).
     expect(overlay(h)).toBeNull();
 
     // Click the toast's × dismiss button.
     const dismissBtn = Array.from(
       container.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((b) => b.textContent?.trim() === "×" && b.parentElement?.textContent?.includes("Engineer start failed"));
+    ).find((b) => b.textContent?.trim() === "×" && b.parentElement?.textContent?.includes("app.engineerStartFailed"));
     expect(dismissBtn).toBeDefined();
     fireEvent.click(dismissBtn!);
     await h.flush();
 
-    expect(h.raw.container.textContent).not.toMatch(/Engineer start failed/);
+    expect(h.raw.container.textContent).not.toMatch(/app\.engineerStartFailed/);
     h.unmount();
   });
 });
@@ -517,7 +530,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -527,8 +540,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
     expect(overlay(h)).not.toBeNull();
     const engId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )!.id;
 
     const callsBefore = h.backend.calls.length;
@@ -562,7 +574,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "first draft" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -571,13 +583,11 @@ describe("prompt-engineering — overlay UX guardrails", () => {
 
     const firstEngId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )!.id;
     const engCountBefore = h.backend.state.sessions.filter(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     ).length;
     expect(engCountBefore).toBe(1);
 
@@ -593,7 +603,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "different draft" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -602,8 +612,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
 
     const engCountAfter = h.backend.state.sessions.filter(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     ).length;
     expect(engCountAfter).toBe(1);
     expect(overlay(h)).not.toBeNull();
@@ -624,7 +633,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -675,7 +684,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );
@@ -684,8 +693,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
 
     const engId = h.backend.state.sessions.find(
       (s) =>
-        (s as typeof s & { is_prompt_engineering?: boolean })
-          .is_prompt_engineering,
+        s.working_mode === "prompt_engineering",
     )!.id;
     expect(engId).toBeDefined();
 
@@ -708,7 +716,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
   it("opening the overlay swaps currentSession to the eng session (chat title shows the eng name)", async () => {
     const session = makeSession({
       name: "My Project",
-      manager_claude_session_id: "claude-sid-y",
+      agent_session_id: "claude-sid-y",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -721,7 +729,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
-    await h.clickByText(/⚙ Engineer/);
+    await clickEngineer(h);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
     );

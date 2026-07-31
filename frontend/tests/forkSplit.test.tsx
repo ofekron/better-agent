@@ -19,6 +19,24 @@ beforeEach(() => {
   });
 });
 
+/** Completed turns default to collapsed (docs/chat-panel.md); expand every
+ * collapsed group inside `root` — the same header click a user makes — so
+ * assertions can see assistant/response text. */
+async function expandAllTurns(root: HTMLElement | null): Promise<void> {
+  if (!root) return;
+  // Each click can reveal nested collapsed groups; loop until stable.
+  for (;;) {
+    const btn = root.querySelector<HTMLButtonElement>(
+      '.message-box-header-main[aria-expanded="false"]',
+    );
+    if (!btn) return;
+    await act(async () => {
+      btn.click();
+      await Promise.resolve();
+    });
+  }
+}
+
 /** Render a component into a detached container — used for unit tests
  * of ForkSplitView in isolation, without the full App harness. */
 async function renderComponent(node: React.ReactNode): Promise<{
@@ -460,10 +478,12 @@ describe("ForkSplitView (isolated)", () => {
         onReopenFork={() => {}}
       />,
     );
-    const shared = h.container.querySelector('[data-testid="fork-shared"]');
-    const fPane = h.container.querySelector(
+    const shared = h.container.querySelector<HTMLElement>('[data-testid="fork-shared"]');
+    const fPane = h.container.querySelector<HTMLElement>(
       `[data-testid="fork-pane"][data-session-id="f1"]`,
     );
+    await expandAllTurns(shared);
+    await expandAllTurns(fPane);
     const sharedText = shared?.textContent ?? "";
     const fPaneText = fPane?.textContent ?? "";
     // Shared region renders S0/S1 but NOT the divergent message.
@@ -484,7 +504,7 @@ describe("fork-and-send through App harness", () => {
   it("session_forked WS event appends a new pane and auto-focuses it", async () => {
     const session = makeSession({
       id: "sess-A",
-      manager_claude_session_id: "claude-A",
+      agent_session_id: "claude-A",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -520,7 +540,7 @@ describe("fork-and-send through App harness", () => {
   it("close_fork updates the pane and falls focus through to the next open pane", async () => {
     const session = makeSession({
       id: "sess-A",
-      manager_claude_session_id: "claude-A",
+      agent_session_id: "claude-A",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -571,7 +591,7 @@ describe("multi-pane WebSocket subscription", () => {
   it("subscribes to a new fork id when session_forked arrives, unsubscribes when the tree changes", async () => {
     const root = makeSession({
       id: "root",
-      manager_claude_session_id: "claude-A",
+      agent_session_id: "claude-A",
     });
     const other = makeSession({ id: "other" });
     const h = await renderApp({ seed: { sessions: [root, other] } });
@@ -628,7 +648,7 @@ describe("useSession tree reducers (via WS replay routing)", () => {
   it("messages_replay routed to a fork id lands in the fork's slot, not the root's", async () => {
     const root = makeSession({
       id: "root",
-      manager_claude_session_id: "claude-A",
+      agent_session_id: "claude-A",
     });
     const h = await renderApp({ seed: { sessions: [root] } });
     await h.selectSession(root.id);
@@ -663,6 +683,7 @@ describe("useSession tree reducers (via WS replay routing)", () => {
     const forkPane = h.$(
       `[data-testid="fork-pane"][data-session-id="${child.id}"]`,
     );
+    await expandAllTurns(forkPane);
     const text = forkPane?.textContent ?? "";
     expect(text).toContain("FORK MSG");
     expect(text).toContain("FORK REPLY");

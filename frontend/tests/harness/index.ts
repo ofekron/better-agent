@@ -3,6 +3,7 @@ import userEvent, { type UserEvent } from "@testing-library/user-event";
 import React from "react";
 import { afterEach } from "vitest";
 import App from "../../src/App";
+import { loadBuiltinExtensionIds } from "../../src/extensionIds";
 import type { Session, WSEvent } from "../../src/types";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
@@ -39,6 +40,11 @@ export interface Harness {
   typeAndSend(text: string): Promise<void>;
   /** Click a session row to make it the current one. */
   selectSession(sessionId: string): Promise<void>;
+  /** Expand a collapsed turn group via its header — the same click a user
+   * makes. Completed turns default to collapsed (docs/chat-panel.md), so
+   * tests asserting on a turn's assistant/response DOM expand it first.
+   * No-op when the turn is already expanded. */
+  expandTurn(initiatorMessageId: string): Promise<void>;
   /** Approve a pending fresh-worker creation card. */
   approveWorker(delegationId: string): Promise<void>;
   /** Deny a pending fresh-worker creation card. */
@@ -55,6 +61,14 @@ export interface Harness {
   reopenConnection(): void;
   /** Force a microtask + timer flush so React effects settle. */
   flush(): Promise<void>;
+  /** Poll `predicate` (flushing between attempts) until it returns true
+   * or `timeoutMs` elapses, then throws. Chat.tsx throttles turn-group
+   * re-renders to one commit per 140ms while the session is running
+   * (`useThrottledValue`) — a single `flush()`'s zero-delay tick can
+   * land before that trailing timer fires, so any assertion on DOM
+   * state produced by a live WS event on a running session must poll
+   * past the real 140ms window instead of flushing once. */
+  waitFor(predicate: () => boolean, timeoutMs?: number): Promise<void>;
   /** Tear down without cleanup() being called by setup.ts afterEach. */
   unmount(): void;
   readonly raw: RenderResult;
@@ -96,6 +110,11 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     delay: null,
     pointerEventsCheck: 0,
   });
+
+  // The real bootstrap (main.tsx) gates first paint on the builtin-ids
+  // load; mirror it so extBackendBase() resolves ids before App's mount
+  // fetches fire against the mock's extension-backend proxy routes.
+  await loadBuiltinExtensionIds();
 
   const result = render(React.createElement(App));
   let active = true;
@@ -168,6 +187,17 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await user.click(row);
       await flushAll();
     },
+    expandTurn: async (initiatorMessageId: string) => {
+      const box = result.container.querySelector(
+        `[data-message-id="${cssEscape(initiatorMessageId)}"]`,
+      );
+      const header = box?.querySelector(
+        '.message-box-header-main[aria-expanded="false"]',
+      ) as HTMLButtonElement | null;
+      if (!header) return;
+      await user.click(header);
+      await flushAll();
+    },
     approveWorker: async (delegationId: string) => {
       const card = findApprovalCard(result.container as HTMLElement, delegationId);
       const btn = card.querySelector("button.approve") as HTMLButtonElement | null;
@@ -212,6 +242,17 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     dropConnection: () => wsController.closeCurrent(),
     reopenConnection: () => wsController.reopenCurrent(),
     flush: flushAll,
+    waitFor: async (predicate: () => boolean, timeoutMs = 300) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        await flushAll();
+        if (predicate()) return;
+        if (Date.now() >= deadline) {
+          throw new Error(`Harness: waitFor predicate did not hold within ${timeoutMs}ms`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    },
     unmount: teardown,
     raw: result,
     clickByText: async (text: string | RegExp) => {

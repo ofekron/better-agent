@@ -8,11 +8,13 @@ describe("harness smoke", () => {
       seed: { sessions: [makeSession()] },
     });
 
+    // Auto-select redirects the Ask home to the only session instead of
+    // sitting empty (src/autoSelectSession.ts), so it's active on boot.
     const view = h.toJSON();
     expect(view.sidebar.sessions).toEqual([
-      { id: "sess-1", name: expect.stringContaining("test session"), active: false },
+      { id: "sess-1", name: expect.stringContaining("test session"), active: true },
     ]);
-    expect(view.input.disabled).toBe(true);
+    expect(view.input.disabled).toBe(false);
 
     h.unmount();
   });
@@ -132,7 +134,7 @@ describe("harness smoke", () => {
       type: "send_message",
       prompt: "hello",
       app_session_id: session.id,
-      orchestration_mode: "manager",
+      orchestration_mode: "native",
       client_id: expect.stringMatching(/^pending-/),
     });
     view = h.toJSON();
@@ -166,6 +168,8 @@ describe("harness smoke", () => {
     });
     h.emit({ type: "turn_complete", data: { session_id: session.id, success: true } });
     await h.flush();
+    // Completed turns default to collapsed; expand to see the assistant.
+    await h.expandTurn("u1");
 
     view = h.toJSON();
     expect(view.chat.messages.find((m) => m.id === "u1")?.role).toBe("user");
@@ -227,6 +231,14 @@ describe("harness smoke", () => {
 
     h.emit({ type: "turn_start", data: { session_id: session.id } });
     h.emit({ type: "error", data: { error: "boom", session_id: session.id } });
+    // `is_running` is a backend-owned projection driven only by
+    // run_state/session_running_changed/session_monitoring_changed events
+    // (src/lib/sessionRegistry.ts) — the real backend emits an empty
+    // run_state alongside the error to signal the turn ended.
+    h.emit({
+      type: "run_state",
+      data: { app_session_id: session.id, runs: [] },
+    });
     await h.flush();
 
     const view = h.toJSON();
@@ -328,6 +340,8 @@ describe("harness smoke", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     await h.flush();
+    // Completed turns default to collapsed; expand to see the assistant.
+    await h.expandTurn("un");
 
     const view = h.toJSON();
     expect(view.chat.messages.map((m) => m.id)).toEqual(["un", "an"]);
@@ -348,6 +362,9 @@ describe("harness smoke", () => {
     });
     await h.selectSession(session.id);
     await h.flush();
+    // The workers panel (an extension module) only mounts on the Workers
+    // sidebar tab; open it so [data-testid="workers-panel"] is in the DOM.
+    await h.clickByText(/sidebar\.workersTab/);
 
     const callsBefore = h.restCalls.filter(
       (c) => c.method === "GET" && c.path === "/api/workers",

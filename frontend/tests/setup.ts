@@ -50,6 +50,10 @@ await i18n
 
 beforeEach(() => {
   installMemoryStorage();
+  // Route state leaks across tests otherwise: a prior test's /s/<id> URL
+  // makes App's route-sync effect fetch/select that session in the next
+  // test's fresh mock backend.
+  window.history.replaceState(null, "", "/");
 });
 
 afterEach(() => {
@@ -60,6 +64,14 @@ afterEach(() => {
 // the chat surface — file viewer, monaco, markdown preview, modals,
 // etc. are out of scope and would otherwise pull
 // in megabytes of code or touch APIs happy-dom doesn't support.
+
+// Extension frontend modules are backend-served assets the node runtime
+// cannot dynamically import; resolve them to the harness contract doubles.
+// A test file's own vi.mock of the loader overrides this default.
+vi.mock("../src/components/extensionModuleLoader", async () => {
+  const stubs = await import("./harness/extensionModuleStubs");
+  return { loadExtensionModule: stubs.loadStubExtensionModule };
+});
 
 vi.mock("@uiw/react-markdown-preview", () => ({
   default: ({ source }: { source?: string }) =>

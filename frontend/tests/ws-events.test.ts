@@ -33,7 +33,8 @@ describe("WebSocket event handling", () => {
       .filter((m) => m.role === "user")
       .map((m) => m.id);
     expect(userIdsAfter).toEqual(["u1"]);
-    // The remaining turn is the latest → auto-expanded → assistant rendered.
+    // Completed turns default to collapsed; expand to see the assistant.
+    await h.expandTurn("u1");
     expect(
       h.toJSON().chat.messages.find((m) => m.id === "a1"),
     ).toBeDefined();
@@ -86,6 +87,8 @@ describe("WebSocket event handling", () => {
     // assert only that nothing crashes and the event count grew.
     // (Concrete assertion: the assistant container's text now contains the
     // streamed update if the renderer parses it — best-effort below.)
+    // Completed turns default to collapsed; expand to see the assistant.
+    await h.expandTurn("u");
     const assistant = h.toJSON().chat.messages.find((m) => m.id === "a");
     expect(assistant).toBeDefined();
     h.unmount();

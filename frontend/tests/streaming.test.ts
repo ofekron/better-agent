@@ -170,6 +170,8 @@ describe("streaming + multi-session behavior", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    // Completed turns default to collapsed; expand to see the chip.
+    await h.expandTurn("u");
 
     expect(h.$(".manager-scope")).not.toBeNull();
     expect(h.$(".role-label-manager")).not.toBeNull();
