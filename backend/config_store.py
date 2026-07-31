@@ -608,11 +608,6 @@ def provider_suspended(provider_id: str | None) -> bool:
     return False
 
 
-def assert_provider_not_suspended(provider_id: str | None, *, action: str = "start runs") -> None:
-    if provider_id and provider_suspended(provider_id):
-        raise RuntimeError(f"provider {provider_id} is suspended; cannot {action}")
-
-
 CLAUDE_BETTER_AGENT_RUNNER_REQUIRES_SUBSCRIPTION = (
     "Claude's Better Agent runner speaks the subscription OAuth wire "
     "format only; there is no api_key backend for it. Use the native "
@@ -1877,10 +1872,6 @@ def default_session_model() -> str:
 
 def default_session_provider_id() -> Optional[str]:
     return resolve_internal_llm("default_session")["provider_id"]
-
-
-def default_session_reasoning_effort() -> str:
-    return resolve_internal_llm("default_session")["reasoning_effort"]
 
 
 # ----------------------------------------------------------------------------
