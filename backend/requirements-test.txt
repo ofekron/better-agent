@@ -5,3 +5,8 @@ pytest>=8.0.0,<9
 # the container runs with --rm.
 pytest-cov>=5.0.0
 coverage>=7.6.0
+# Opt-in parallelism for scripts/run-backend-tests.sh --parallel. Not used by
+# default: some backend/scripts integration tests spawn real subprocesses on
+# fixed resources, and forcing parallelism on suites never vetted for it
+# risks flaky cross-worker races rather than fixing anything.
+pytest-xdist>=3.6.0

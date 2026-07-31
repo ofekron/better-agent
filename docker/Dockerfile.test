@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Better Agent — canonical backend Python test-runner image.
 #
 # This is the ONLY sanctioned way to run backend/scripts pytest tests: it
@@ -55,8 +56,16 @@ COPY backend/requirements.txt backend/requirements-claude.txt backend/requiremen
 # deliberately excludes requirements-mobile.txt, which backend/scripts tests
 # don't import — plus requirements-test.txt (pytest itself), which is test
 # tooling, not application runtime, so it stays out of requirements.txt.
-RUN cd backend \
- && pip install --no-cache-dir -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
+#
+# BuildKit cache mount: persists pip's download/wheel cache across image
+# rebuilds (keyed by this layer, so it survives even when requirements*.txt
+# changes invalidate the layer itself) instead of --no-cache-dir discarding
+# it every time. Requires `# syntax=docker/dockerfile:1` above and BuildKit
+# enabled on the daemon (default; scripts/run-backend-tests.sh also sets
+# DOCKER_BUILDKIT=1 explicitly so this works even on older daemons).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    cd backend \
+ && pip install -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
 
 # Matches docker/entrypoint.sh's PYTHONPATH convention: better_agent_sdk
 # (repo-root sdk/) is a plain source directory, not a pip package. Set here

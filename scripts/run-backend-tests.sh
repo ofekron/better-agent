@@ -16,6 +16,15 @@
 #   ./scripts/run-backend-tests.sh --ref HEAD~1 -- scripts/test_foo.py
 #   ./scripts/run-backend-tests.sh --coverage            # measure coverage, write reports to ./coverage-backend/
 #   ./scripts/run-backend-tests.sh --coverage /tmp/cov   # ...to a custom dir
+#   ./scripts/run-backend-tests.sh --parallel             # run via pytest-xdist, workers = nproc
+#   ./scripts/run-backend-tests.sh --parallel 4            # ...with an explicit worker count
+#
+# --parallel is opt-in, never the default: backend/scripts integration tests
+# spawn real subprocesses against fixed resources (ports, temp homes) that
+# were never audited for cross-worker safety under pytest-xdist. Forcing it
+# on by default would trade a slow-but-correct suite for a fast-but-flaky
+# one — pass --parallel yourself once you've confirmed the target subset is
+# parallel-safe (e.g. -k a single isolated module).
 #
 # Coverage (--coverage) mounts an output dir into the container (which runs
 # --rm, so reports written inside the layer would be lost) and appends
@@ -39,12 +48,18 @@
 
 set -euo pipefail
 
+# BuildKit is required for docker/Dockerfile.test's pip cache mount
+# (`RUN --mount=type=cache`). Modern Docker Desktop/OrbStack default to it,
+# but set it explicitly so this also works on older or reconfigured daemons.
+export DOCKER_BUILDKIT=1
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.test"
 
 REF=""
 COVERAGE_DIR=""
+PARALLEL_WORKERS=""
 PYTEST_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,6 +75,17 @@ while [ $# -gt 0 ]; do
         shift 1
       else
         COVERAGE_DIR="$2"
+        shift 2
+      fi
+      ;;
+    --parallel)
+      # --parallel [N]: same optional-value guard as --coverage. Bare
+      # --parallel maps to pytest-xdist's `-n auto` (one worker per core).
+      if [ "${2:-}" = "" ] || [ "${2#-}" != "${2:-}" ]; then
+        PARALLEL_WORKERS="auto"
+        shift 1
+      else
+        PARALLEL_WORKERS="$2"
         shift 2
       fi
       ;;
@@ -169,6 +195,13 @@ if [ -n "$COVERAGE_DIR" ]; then
     --cov-report="html:/coverage/html"
     --cov-config=/repo/backend/pyproject.toml
   )
+fi
+
+# pytest-cov ships built-in support for combining coverage data across
+# pytest-xdist workers, so --parallel + --coverage compose with no extra
+# config beyond both being present.
+if [ -n "$PARALLEL_WORKERS" ]; then
+  PYTEST_ARGS+=(-n "$PARALLEL_WORKERS")
 fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
