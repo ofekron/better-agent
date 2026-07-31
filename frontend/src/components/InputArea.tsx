@@ -830,7 +830,9 @@ export function InputArea({
           )}
         </div>
       )}
-      {!queueCollapsed && visibleQueuedPrompts.map((item) => (
+      {!queueCollapsed && (
+        <div className="queued-list-items" data-testid="queued-list-items">
+          {visibleQueuedPrompts.map((item) => (
         <QueuedPromptBanner
           key={item.id}
           preview={item.preview}
@@ -864,7 +866,9 @@ export function InputArea({
           selectLabel={t("input.queuedSelect")}
           compactActions={compactActionMenus}
         />
-      ))}
+          ))}
+        </div>
+      )}
       {forkTargetLabel && (
         <div
           className="input-fork-target"
