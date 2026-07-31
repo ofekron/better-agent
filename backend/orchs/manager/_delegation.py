@@ -300,6 +300,7 @@ def delegate_error_payload(
 
 async def _cleanup_ephemeral_delegate_fork(
     *,
+    coordinator: "Coordinator",
     app_session_id: str,
     worker_agent_session_id: str,
     fork_agent_session_id: Optional[str],
@@ -330,6 +331,14 @@ async def _cleanup_ephemeral_delegate_fork(
         session_manager.delete(fork_agent_session_id)
 
     try:
+        # Cancel BEFORE delete: the outer delegation just published its
+        # terminal lifecycle event, but the ephemeral fork's own turn
+        # may not actually be finished yet. Without this the fork's
+        # runner is orphaned exactly like the direct-delete and
+        # worker-fanout paths (commits 29d01d58e, 4d003508a) — still
+        # streaming provider events against a root that's about to
+        # vanish.
+        await coordinator.cancel_session(fork_agent_session_id)
         await asyncio.to_thread(_cleanup)
     except Exception:
         logger.exception("ephemeral delegate fork cleanup failed")
@@ -1655,6 +1664,7 @@ async def run_delegation_locked(
     panel["token_usage"] = token_usage
 
     await _cleanup_ephemeral_delegate_fork(
+        coordinator=coordinator,
         app_session_id=app_session_id,
         worker_agent_session_id=worker_agent_session_id,
         fork_agent_session_id=fork_agent_session_id,
