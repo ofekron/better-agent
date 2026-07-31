@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import pytest
 import shutil
 import sys
 from pathlib import Path
@@ -262,6 +263,18 @@ def _install_fixture(extension_id: str, mcp_name: str) -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
     extension_store.grant_consent(extension_id)
     extension_store.set_mcp_server_enabled(extension_id, mcp_name, True)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _install_fixture_servers():
+    """Install both fixture extensions once for the pytest path.
+
+    `main()` installs them for the standalone run, but under pytest the
+    `test_*` functions run directly with no setup, leaving the extension store
+    empty and every inclusion/exclusion assertion against an empty server set.
+    """
+    _install_fixture(KEPT_EXT, KEPT_SERVER)
+    _install_fixture(DROPPED_EXT, DROPPED_SERVER)
 
 
 def _scoped_profile() -> dict:

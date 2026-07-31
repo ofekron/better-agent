@@ -29,6 +29,7 @@ _API_MODULES = (
     "user_prefs_api.py",
     "projects_api.py",
     "providers_api.py",
+    "requirements_api.py",
     "harness_profiles_api.py",
     "internal_extension_api.py",
     "internal_messaging_api.py",
@@ -57,7 +58,18 @@ _API_MODULES = (
 
 
 def _api_source() -> str:
-    parts = [(ROOT / name).read_text(encoding="utf-8") for name in _API_MODULES]
+    # Each split module begins with `from __future__ import annotations`. In a
+    # concatenated blob only the first occurrence sits at file top, so the rest
+    # raise "from __future__ imports must occur at the beginning of the file"
+    # under symtable/compile. Drop every such line per-part before joining.
+    parts = []
+    for name in _API_MODULES:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        text = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("from __future__ import")
+        )
+        parts.append(text)
     return "\n".join(parts).replace("@router.", "@app.")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
