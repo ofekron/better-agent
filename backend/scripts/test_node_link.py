@@ -35,6 +35,8 @@ from stores import pending_node_registrations  # noqa: E402
 import node_registry_store  # noqa: E402
 import shadow_jsonl  # noqa: E402
 from topology import NodeSpec  # noqa: E402
+from fastapi import WebSocketDisconnect  # noqa: E402
+from node_protocol import PROTOCOL_VERSION  # noqa: E402
 
 
 def _reset_modules():
@@ -1407,6 +1409,598 @@ def test_runtime_operations_routes_to_handler_with_node_id():
             sys.modules["runtime_operation_api"] = saved
         else:
             sys.modules.pop("runtime_operation_api", None)
+        _reset_modules()
+
+
+# ============================================================ small uncovered gaps
+
+
+def test_public_pending_cache_expired_record_invalidates():
+    """A cached record whose expires_at has lapsed forces a cache miss
+    so the next read re-projects from the store (line 173)."""
+    _seed_pending("pend-exp")
+    try:
+        node_link.public_pending_nodes()  # populate the cache
+        version = pending_node_registrations.version()
+        past = (datetime.now() - timedelta(seconds=1)).isoformat()
+        node_link._public_pending_cache = (version, [{"node_id": "pend-exp", "expires_at": past}])
+        assert node_link.public_pending_nodes_cached() is None  # expired -> miss
+    finally:
+        node_link._public_pending_cache = None
+        _reset_modules()
+
+
+def test_public_pending_nodes_serves_cache_hit():
+    """On a cache hit, public_pending_nodes returns the cached projection
+    verbatim without re-reading the store (line 181)."""
+    _seed_pending("pend-hit")
+    try:
+        node_link.public_pending_nodes()  # populate
+        version = pending_node_registrations.version()
+        sentinel = [{"node_id": "SENTINEL"}]  # no expires_at -> never expired
+        node_link._public_pending_cache = (version, sentinel)
+        served = node_link.public_pending_nodes()
+        assert served == sentinel  # cache hit, store untouched
+    finally:
+        node_link._public_pending_cache = None
+        _reset_modules()
+
+
+def test_route_inbound_ping_swallows_send_failure():
+    """A failure sending the pong frame must not crash the inbound loop
+    (lines 563-564)."""
+
+    class _FailPongWS(_FakeWS):
+        async def send_json(self, obj):
+            raise OSError("pong socket gone")
+
+    _conn("pingfail-n", ws=_FailPongWS())
+
+    async def _scenario():
+        await node_link._route_inbound("pingfail-n", {"type": "ping", "ts": 1})
+
+    try:
+        _run(_scenario())  # no raise; send exception swallowed
+    finally:
+        _reset_modules()
+
+
+def test_incident_rejection_non_serializable_is_malformed():
+    """A payload that cannot be JSON-serialized is rejected as malformed
+    at the size-computation guard (lines 708-709)."""
+    now = time.time()
+    msg = {"incident_id": object()}  # json.dumps raises TypeError
+    assert node_link._incident_rejection_reason(msg, now=now) == "malformed"
+
+
+# ============================================================ node_connect handshake
+
+class _HSWS:
+    """Fake WebSocket for driving node_connect end-to-end: header auth,
+    a scripted receive_json queue, and recorded accept/send/close. When
+    the queue drains, receive_json raises WebSocketDisconnect so the
+    inbound loop takes its disconnect branch (the real ASGI transport is
+    the only thing not exercised)."""
+
+    def __init__(self, *, auth="", inbox=None, receive_exc=None):
+        self.headers = {"authorization": auth} if auth else {}
+        self.sent: list[dict] = []
+        self.closes: list[tuple] = []
+        self.accepted = False
+        self._inbox = list(inbox or [])
+        self._receive_exc = receive_exc
+
+    async def accept(self):
+        self.accepted = True
+
+    async def send_json(self, obj):
+        self.sent.append(obj)
+
+    async def receive_json(self):
+        if self._receive_exc is not None:
+            exc = self._receive_exc
+            self._receive_exc = None
+            raise exc
+        if not self._inbox:
+            raise WebSocketDisconnect(1001, "drained")
+        return self._inbox.pop(0)
+
+    async def close(self, *, code=1000, reason=None):
+        self.closes.append((code, reason))
+
+
+def _last_reject(ws: _HSWS) -> dict:
+    for frame in reversed(ws.sent):
+        if isinstance(frame, dict) and frame.get("type") == "handshake_reject":
+            return frame
+    return {}
+
+
+def _drive_node_connect(ws: _HSWS) -> None:
+    _run(node_link.node_connect(ws))
+
+
+def test_node_connect_rejects_when_machine_nodes_not_ready():
+    orig = node_link._machine_nodes_not_ready_reason
+    node_link._machine_nodes_not_ready_reason = lambda: "nodes not ready"
+    ws = _HSWS(inbox=[{"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "n"}])
+    try:
+        _drive_node_connect(ws)
+        assert ws.accepted
+        assert _last_reject(ws)["reason"] == "nodes not ready"
+        assert ws.closes  # closed with policy violation
+    finally:
+        node_link._machine_nodes_not_ready_reason = orig
+        _reset_modules()
+
+
+def test_node_connect_handshake_timeout_closes():
+    ws = _HSWS(receive_exc=asyncio.TimeoutError())
+    try:
+        _drive_node_connect(ws)
+        assert ws.closes and ws.closes[-1][1] == "no handshake"
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_handshake_disconnect_returns_silently():
+    ws = _HSWS(receive_exc=WebSocketDisconnect(1001, "dc"))
+    try:
+        _drive_node_connect(ws)
+        assert ws.closes == []  # disconnect branch: no close frame sent
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_rejects_wrong_handshake_type():
+    ws = _HSWS(inbox=[{"type": "not_handshake"}])
+    try:
+        _drive_node_connect(ws)
+        assert "expected handshake" in _last_reject(ws)["reason"]
+        assert ws.closes
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_rejects_protocol_mismatch():
+    ws = _HSWS(inbox=[{"type": "handshake", "protocol_version": "0", "node_id": "n"}])
+    try:
+        _drive_node_connect(ws)
+        assert "protocol_version mismatch" in _last_reject(ws)["reason"]
+        assert ws.closes
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_rejects_missing_node_id():
+    ws = _HSWS(inbox=[{"type": "handshake", "protocol_version": PROTOCOL_VERSION}])
+    try:
+        _drive_node_connect(ws)
+        assert _last_reject(ws)["reason"] == "missing node_id"
+        assert ws.closes
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_rejects_known_node_bad_secret():
+    _seed_registry("kn-bad", secret="right")
+    ws = _HSWS(auth="Bearer wrong", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-bad"}])
+    try:
+        _drive_node_connect(ws)
+        assert _last_reject(ws)["reason"] == "bad secret"
+        assert ws.closes
+    finally:
+        _reset_modules()
+
+
+def test_node_connect_rejects_unapproved_registration():
+    orig = node_link._await_registration
+
+    async def _none(*a, **k):
+        return None
+
+    node_link._await_registration = _none
+    ws = _HSWS(auth="Bearer s", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "newbie"}])
+    try:
+        _drive_node_connect(ws)
+        assert _last_reject(ws)["reason"] == "registration not approved"
+        assert ws.closes
+    finally:
+        node_link._await_registration = orig
+        _reset_modules()
+
+
+def _record_register():
+    """Wrap node_store.register to capture the connection object it builds
+    so a test can inspect it after node_connect unregisters it."""
+    recorded: dict = {}
+    orig = node_store.register
+
+    async def _wrap(spec, ws, **kw):
+        conn = await orig(spec, ws, **kw)
+        recorded["conn"] = conn
+        return conn
+
+    node_store.register = _wrap
+    return recorded, orig
+
+
+def test_node_connect_happy_known_node_routes_inbound_then_disconnects():
+    _seed_registry("kn-ok", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+    aligned = []
+
+    async def _noop_align(nid, conn, manifest):
+        aligned.append((nid, manifest))
+
+    node_link._align_node_repositories = _noop_align
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-ok",
+         "app_version": {"commit_sha": "abc123", "dirty": False}, "repositories": []},
+        {"type": "ping", "ts": 7},
+    ])
+    try:
+        _drive_node_connect(ws)
+        # Handshake ack naming the primary.
+        assert any(f.get("type") == "handshake" and f.get("node_id") == node_link._primary_id()
+                   for f in ws.sent)
+        # Inbound ping answered with a pong.
+        assert any(f.get("type") == "pong" and f.get("ts") == 7 for f in ws.sent)
+        # resume_stream sent so the node knows our ingested offsets.
+        assert any(f.get("type") == "resume_stream" for f in ws.sent)
+        # Empty manifest -> repositories not ready -> alignment task scheduled.
+        assert aligned and aligned[0][0] == "kn-ok"
+        # Disconnect branch ran the finally: connection unregistered.
+        assert node_store.get_connection("kn-ok") is None
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_marks_runtime_failed_when_manifest_unavailable():
+    _seed_registry("kn-mf", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+
+    def _boom_manifest():
+        raise RuntimeError("manifest io failed")
+
+    node_link.repository_alignment.desired_manifest = _boom_manifest
+    recorded, orig_reg = _record_register()
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-mf",
+         "app_version": {}, "repositories": []}])
+    try:
+        _drive_node_connect(ws)
+        conn = recorded["conn"]
+        assert "repository manifest unavailable" in conn.runtime_error
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_store.register = orig_reg
+        _reset_modules()
+
+
+def test_node_connect_aligned_repositories_skips_align_task():
+    _seed_registry("kn-aligned", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_rm = node_link.repository_alignment.repositories_match
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: [{"role": "public", "required": True}]
+    node_link.repository_alignment.repositories_match = lambda obs, des: True
+    aligned = []
+
+    async def _noop_align(nid, conn, manifest):
+        aligned.append(nid)
+
+    node_link._align_node_repositories = _noop_align
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-aligned",
+         "app_version": {}, "repositories": [{"role": "public"}]}])
+    try:
+        _drive_node_connect(ws)
+        assert aligned == []  # already aligned -> no background align task
+        ack = [f for f in ws.sent if f.get("type") == "handshake"][0]
+        assert ack["repository_alignment_accepted"] is True
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link.repository_alignment.repositories_match = orig_rm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_coerces_non_dict_app_version_and_repositories():
+    """Malformed handshake scalars for app_version / repositories are
+    coerced to their empty defaults before being used (lines 466, 469)."""
+    _seed_registry("kn-coerce", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+
+    async def _noop_align(nid, conn, manifest):
+        return None
+
+    node_link._align_node_repositories = _noop_align
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-coerce",
+         "app_version": "not-a-dict", "repositories": "not-a-list"}])
+    try:
+        _drive_node_connect(ws)
+        # Coercion let the happy path complete: handshake ack was sent.
+        assert any(f.get("type") == "handshake" for f in ws.sent)
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_swallows_resume_stream_send_failure():
+    """A failure sending resume_stream must be logged and swallowed, not
+    crash the connect (lines 523-524)."""
+    _seed_registry("kn-rs", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+
+    async def _noop_align(nid, conn, manifest):
+        return None
+
+    node_link._align_node_repositories = _noop_align
+
+    class _ResumeFailWS(_HSWS):
+        async def send_json(self, obj):
+            if isinstance(obj, dict) and obj.get("type") == "resume_stream":
+                raise OSError("resume send gone")
+            await super().send_json(obj)
+
+    ws = _ResumeFailWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-rs",
+         "app_version": {}, "repositories": []}])
+    try:
+        _drive_node_connect(ws)  # no raise; resume failure swallowed
+        assert not any(f.get("type") == "resume_stream" for f in ws.sent)
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_closes_when_machine_nodes_go_not_ready_mid_stream():
+    """If machine-nodes runtime goes not-ready after handshake, the inbound
+    loop closes the socket with the reason (lines 530-534)."""
+    _seed_registry("kn-mid", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_ready = node_link._machine_nodes_not_ready_reason
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+
+    async def _noop_align(nid, conn, manifest):
+        return None
+
+    node_link._align_node_repositories = _noop_align
+    calls = {"n": 0}
+
+    def _ready():
+        calls["n"] += 1
+        # Pre-loop check (pass) -> None; first in-loop check -> not ready.
+        return None if calls["n"] == 1 else "runtime degraded"
+
+    node_link._machine_nodes_not_ready_reason = _ready
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-mid",
+         "app_version": {}, "repositories": []},
+        {"type": "ping", "ts": 1},  # drives one loop iteration
+    ])
+    try:
+        _drive_node_connect(ws)
+        assert ws.closes and "runtime degraded" in str(ws.closes[-1])
+    finally:
+        node_link._machine_nodes_not_ready_reason = orig_ready
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_swallows_inbound_loop_crash():
+    """A non-disconnect exception from the inbound stream is caught and
+    logged, then the connection is unregistered (lines 543-544, 546)."""
+    _seed_registry("kn-crash", secret="right", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+
+    async def _noop_align(nid, conn, manifest):
+        return None
+
+    node_link._align_node_repositories = _noop_align
+    ws = _HSWS(auth="Bearer right", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-crash",
+         "app_version": {}, "repositories": []},
+        {"type": "ping", "ts": 1},  # second frame: _receive raises on it
+    ])
+    # Drain the handshake, then the next receive raises a non-disconnect error.
+    real_receive = ws.receive_json
+
+    async def _receive():
+        frame = await real_receive()
+        if frame.get("type") != "handshake":
+            raise RuntimeError("stream corrupted")
+        return frame
+
+    ws.receive_json = _receive
+    try:
+        _drive_node_connect(ws)  # no raise; loop crash swallowed
+        assert node_store.get_connection("kn-crash") is None  # finally unregistered
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+def test_node_connect_registration_approved_proceeds_to_connect():
+    """An unknown node that gets approved mid-handshake proceeds past the
+    registration block and connects (covers the 456->464 branch arrow)."""
+    _seed_pending("kn-approve", secret="topsecret", cwd_roots=(str(Path(_TMP)),))
+    orig_dm = node_link.repository_alignment.desired_manifest
+    orig_align = node_link._align_node_repositories
+    node_link.repository_alignment.desired_manifest = lambda: []
+
+    async def _noop_align(nid, conn, manifest):
+        return None
+
+    node_link._align_node_repositories = _noop_align
+    ws = _HSWS(auth="Bearer topsecret", inbox=[
+        {"type": "handshake", "protocol_version": PROTOCOL_VERSION, "node_id": "kn-approve",
+         "registration": {"address": "5.5.5.5", "cwd_roots": [str(Path(_TMP))]},
+         "app_version": {}, "repositories": []}])
+
+    async def _scenario():
+        task = asyncio.ensure_future(node_link.node_connect(ws))
+        await asyncio.sleep(0.05)  # let _await_registration register a waiter
+        await node_link.approve_registration("kn-approve")
+        return await asyncio.wait_for(task, timeout=3.0)
+
+    try:
+        _run(_scenario())
+        # Approved node proceeded through the happy path: handshake ack sent.
+        assert any(f.get("type") == "handshake" for f in ws.sent)
+        assert any(f.get("type") == "registration_pending" for f in ws.sent)
+        assert node_store.get_connection("kn-approve") is None  # disconnected at end
+    finally:
+        node_link.repository_alignment.desired_manifest = orig_dm
+        node_link._align_node_repositories = orig_align
+        _reset_modules()
+
+
+# ============================================================ jsonl_line offset accounting
+
+
+def test_handle_jsonl_line_lower_offset_does_not_rewind_cursor():
+    """A late-arriving lower node_offset must not rewind the cursor
+    (the 668->exit branch: condition False -> no update)."""
+    conn = _conn("jl3-n")
+    shadow_jsonl.reset_for_tests()
+
+    async def _scenario():
+        await node_link._handle_jsonl_line(
+            "jl3-n",
+            {"root_id": "root-j", "fork_agent_sid": "fork-1", "file_version": 1,
+             "line_offset_in_version": 0, "line": "{}\n", "node_offset": 8},
+        )
+        # Lower offset -> ignored, cursor stays at 8.
+        await node_link._handle_jsonl_line(
+            "jl3-n",
+            {"root_id": "root-j", "fork_agent_sid": "fork-1", "file_version": 1,
+             "line_offset_in_version": 1, "line": "{}\n", "node_offset": 3},
+        )
+
+    try:
+        _run(_scenario())
+        assert conn.last_acked_offset["root-j"] == 8
+    finally:
+        _reset_modules()
+
+
+# ============================================================ _align_node_repositories
+
+
+def test_align_node_repositories_restart_required_sends_restart():
+    conn = _conn("align-r1")
+
+    async def _rpc(*a, **k):
+        return {"restart_required": True, "repositories": [{"role": "x"}]}
+
+    restarted = []
+    orig_rpc = node_link.rpc_call
+    orig_restart = node_link.send_restart
+    node_link.rpc_call = _rpc
+
+    async def _restart(nid):
+        restarted.append(nid)
+
+    node_link.send_restart = _restart
+    try:
+        _run(node_link._align_node_repositories("align-r1", conn, [{"role": "x"}]))
+        assert restarted == ["align-r1"]
+        assert conn.repository_alignment_status == "restarting"
+        assert conn.repository_alignment_ready is False
+    finally:
+        node_link.rpc_call = orig_rpc
+        node_link.send_restart = orig_restart
+        _reset_modules()
+
+
+def test_align_node_repositories_aligned_and_notifies_config_sync():
+    conn = _conn("align-r2")
+
+    async def _rpc(*a, **k):
+        return {"restart_required": False, "repositories": [{"role": "y"}]}
+
+    orig_rpc = node_link.rpc_call
+    node_link.rpc_call = _rpc
+    import types
+    fake_ncs = types.ModuleType("node_config_sync")
+    notified = []
+
+    async def _on_state(nid, state):
+        notified.append((nid, state))
+
+    fake_ncs.on_node_state = _on_state
+    saved = sys.modules.get("node_config_sync")
+    sys.modules["node_config_sync"] = fake_ncs
+    try:
+        _run(node_link._align_node_repositories("align-r2", conn, [{"role": "y"}]))
+        assert conn.repository_alignment_status == "aligned"
+        assert conn.repository_alignment_ready is True
+        assert conn.repositories == [{"role": "y"}]
+        assert notified == [("align-r2", "connected")]
+    finally:
+        node_link.rpc_call = orig_rpc
+        if saved is not None:
+            sys.modules["node_config_sync"] = saved
+        else:
+            sys.modules.pop("node_config_sync", None)
+        _reset_modules()
+
+
+def test_align_node_repositories_returns_when_connection_replaced():
+    conn = _conn("align-r3")
+
+    async def _rpc(*a, **k):
+        # A reconnect swapped the live connection while the RPC was in flight.
+        _conn("align-r3")
+        return {"restart_required": False, "repositories": []}
+
+    orig_rpc = node_link.rpc_call
+    node_link.rpc_call = _rpc
+    try:
+        _run(node_link._align_node_repositories("align-r3", conn, []))
+        # Early return: status never advanced past the initial "syncing".
+        assert conn.repository_alignment_status == "syncing"
+    finally:
+        node_link.rpc_call = orig_rpc
+        _reset_modules()
+
+
+def test_align_node_repositories_blocked_on_rpc_failure():
+    conn = _conn("align-r4")
+
+    async def _rpc(*a, **k):
+        raise RuntimeError("rpc dead")
+
+    orig_rpc = node_link.rpc_call
+    node_link.rpc_call = _rpc
+    try:
+        _run(node_link._align_node_repositories("align-r4", conn, []))
+        assert conn.repository_alignment_status == "blocked"
+        assert conn.repository_alignment_ready is False
+        assert "rpc dead" in (conn.repository_alignment_error or "")
+        assert "repository alignment failed" in (conn.runtime_error or "")
+    finally:
+        node_link.rpc_call = orig_rpc
         _reset_modules()
 
 
