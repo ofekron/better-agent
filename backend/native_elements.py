@@ -38,6 +38,11 @@ class NativeParseDeferred(RuntimeError):
     pass
 
 
+def _opt_str(mapping: dict, key: str) -> str:
+    value = mapping.get(key)
+    return value if isinstance(value, str) else ""
+
+
 @dataclass
 class NativeElement:
     """One greppable unit from any provider transcript.
@@ -297,8 +302,8 @@ def _native_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[
             if not isinstance(obj, dict) or obj.get("isSidechain") or obj.get("isMeta"):
                 continue
             kind = obj.get("type")
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
-            uid = obj.get("uuid") if isinstance(obj.get("uuid"), str) else ""
+            ts = _opt_str(obj, "timestamp")
+            uid = _opt_str(obj, "uuid")
             message = obj.get("message")
             if not isinstance(message, dict):
                 continue
@@ -359,7 +364,7 @@ def _codex_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[d
                 continue
             if not isinstance(obj, dict):
                 continue
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            ts = _opt_str(obj, "timestamp")
             payload = obj.get("payload")
             if not isinstance(payload, dict):
                 continue
@@ -376,7 +381,7 @@ def _codex_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[d
             text = "\n".join(t for t in texts if t).strip()
             if not _codex_is_real_prompt(text):
                 continue
-            uid = payload.get("id") if isinstance(payload.get("id"), str) else ""
+            uid = _opt_str(payload, "id")
             messages.append({"role": "user", "content": text, "timestamp": ts, "id": uid})
     return messages, events_by_msg_id
 
@@ -432,7 +437,7 @@ def _pi_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict
             continue
         role = message.get("role")
         ts = _pi_timestamp(obj, message)
-        uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+        uid = _opt_str(obj, "id")
         if role == "user":
             text = _pi_content_text(message.get("content")).strip()
             if text:
@@ -468,7 +473,7 @@ def _pi_timestamp(obj: dict, message: dict | None = None) -> str:
         return datetime.fromtimestamp(message["timestamp"] / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
     if message and isinstance(message.get("timestamp"), str):
         return message["timestamp"]
-    return obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+    return _opt_str(obj, "timestamp")
 
 
 def _pi_assistant_text(content: object) -> str:
@@ -587,13 +592,13 @@ def _claude_elements(
             if not isinstance(obj, dict) or obj.get("isSidechain") or obj.get("isMeta"):
                 continue
             line_type = obj.get("type")
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
-            uid = obj.get("uuid") if isinstance(obj.get("uuid"), str) else ""
+            ts = _opt_str(obj, "timestamp")
+            uid = _opt_str(obj, "uuid")
             message = obj.get("message")
             if not isinstance(message, dict):
                 continue
             content = message.get("content")
-            role = message.get("role") if isinstance(message.get("role"), str) else ""
+            role = _opt_str(message, "role")
             if line_type == "user":
                 if isinstance(content, str):
                     if content.strip():
@@ -629,7 +634,7 @@ def _claude_elements(
                             if text:
                                 elements.append(NativeElement("reasoning", "assistant", text, "", ts, uid))
                         elif bt == "tool_use":
-                            name = block.get("name") if isinstance(block.get("name"), str) else ""
+                            name = _opt_str(block, "name")
                             text = f"{name} {_stringify(block.get('input'))}".strip()
                             elements.append(NativeElement("tool_call", "assistant", text, name, ts, block.get("id") or uid))
     return elements
@@ -653,16 +658,16 @@ def _pi_elements(
             if isinstance(value, dict):
                 objects.append(value)
     for obj in objects:
-        uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+        uid = _opt_str(obj, "id")
         if obj.get("type") in {"compaction", "branch_summary"}:
-            summary = obj.get("summary") if isinstance(obj.get("summary"), str) else ""
+            summary = _opt_str(obj, "summary")
             if summary.strip():
                 elements.append(NativeElement("reasoning", "assistant", summary.strip(), "", _pi_timestamp(obj), uid))
             continue
         message = _pi_message_entry(obj)
         if not message:
             continue
-        role = message.get("role") if isinstance(message.get("role"), str) else ""
+        role = _opt_str(message, "role")
         ts = _pi_timestamp(obj, message)
         if role == "user":
             text = _pi_content_text(message.get("content")).strip()
@@ -684,7 +689,7 @@ def _pi_elements(
                 elif kind == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"].strip():
                     elements.append(NativeElement("reasoning", "assistant", block["thinking"].strip(), "", ts, uid))
                 elif kind == "toolCall":
-                    name = block.get("name") if isinstance(block.get("name"), str) else ""
+                    name = _opt_str(block, "name")
                     text = f"{name} {_stringify(block.get('arguments'))}".strip()
                     elements.append(NativeElement("tool_call", "assistant", text, name, ts, block.get("id") or uid))
         elif role == "toolResult":
@@ -693,10 +698,10 @@ def _pi_elements(
                 name = message.get("toolName") if isinstance(message.get("toolName"), str) else ""
                 elements.append(NativeElement("tool_result", "user", text, name, ts, message.get("toolCallId") or uid))
         elif role == "bashExecution":
-            command = message.get("command") if isinstance(message.get("command"), str) else ""
+            command = _opt_str(message, "command")
             if command.strip():
                 elements.append(NativeElement("command", "user", command.strip(), "bash", ts, uid))
-            output = message.get("output") if isinstance(message.get("output"), str) else ""
+            output = _opt_str(message, "output")
             if output.strip():
                 elements.append(NativeElement("tool_result", "user", output.strip(), "bash", ts, uid))
         elif role in {"custom", "branchSummary", "compactionSummary"}:
@@ -706,10 +711,6 @@ def _pi_elements(
             if text:
                 elements.append(NativeElement("meta", role, text, "", ts, uid))
     return elements
-
-
-def _codex_content_text(content: object) -> str:
-    return _codex_text_content(content)
 
 
 def _codex_output_text(output: object) -> str:
@@ -743,15 +744,15 @@ def _codex_elements(
                 continue
             if not isinstance(obj, dict):
                 continue
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+            ts = _opt_str(obj, "timestamp")
             payload = obj.get("payload")
             if not isinstance(payload, dict):
                 continue
             pt = payload.get("type")
-            uid = payload.get("id") if isinstance(payload.get("id"), str) else ""
+            uid = _opt_str(payload, "id")
             if pt == "message":
-                role = payload.get("role") if isinstance(payload.get("role"), str) else ""
-                text = _codex_content_text(payload.get("content")).strip()
+                role = _opt_str(payload, "role")
+                text = _codex_text_content(payload.get("content")).strip()
                 if not text:
                     continue
                 if role == "user":
@@ -764,7 +765,7 @@ def _codex_elements(
                 if text:
                     elements.append(NativeElement("reasoning", "assistant", text, "", ts, uid))
             elif pt in ("function_call", "custom_tool_call", "tool_search_call"):
-                name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+                name = _opt_str(payload, "name")
                 args = payload.get("arguments")
                 if args is None:
                     args = payload.get("input")
