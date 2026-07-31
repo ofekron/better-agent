@@ -853,34 +853,6 @@ select:focus-visible,
   color: var(--accent);
 }
 
-/* ======================================= */
-/* Model Selector                          */
-/* ======================================= */
-
-.model-selector {
-  margin-bottom: 8px;
-}
-
-.model-selector label {
-  display: block;
-  font-size: calc(11px * var(--app-font-scale));
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.model-selector select {
-  width: 100%;
-  padding: 6px 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-primary);
-  font-size: calc(12px * var(--app-font-scale));
-  cursor: pointer;
-}
-
 .browser-harness-toggle {
   display: flex;
   align-items: center;
