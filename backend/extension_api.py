@@ -237,10 +237,6 @@ class SetFrontendModuleEnabledRequest(BaseModel):
     enabled: bool
 
 
-class SetNativeExposureRequest(BaseModel):
-    enabled: bool
-
-
 class SetPermissionGrantRequest(BaseModel):
     granted: bool
 
@@ -1298,25 +1294,6 @@ async def set_extension_frontend_module_enabled(
         raise _extension_error(exc) from exc
     await _broadcast_extension_changed(extension_id=extension_id)
     return {"slot": slot, "id": module_id, "enabled": enabled}
-
-
-@router.patch("/{extension_id}/harness-additions/{kind}/{name}/native-exposure")
-async def set_extension_native_exposure(
-    extension_id: str,
-    kind: str,
-    name: str,
-    req: SetNativeExposureRequest,
-):
-    try:
-        exposed = extension_store.set_native_harness_exposed(
-            extension_id, kind, name, req.enabled
-        )
-    except extension_store.ExtensionError as exc:
-        raise _extension_error(exc) from exc
-    await _broadcast_extension_changed(
-        "extension.config.native_exposure", extension_id=extension_id
-    )
-    return {"kind": kind, "name": name, "native_exposed": exposed}
 
 
 @router.patch("/{extension_id}/permissions/{permission}/granted")

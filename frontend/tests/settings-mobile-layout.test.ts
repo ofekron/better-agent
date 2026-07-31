@@ -37,7 +37,7 @@ describe("Settings mobile layout", () => {
 
   it("stacks dense extension controls instead of overflowing", () => {
     expect(styles).toContain(
-      ".extension-ui-settings-row,\n  .extension-ui-settings-group,\n  .extension-ui-settings-native-exposure {\n    grid-template-columns: minmax(0, 1fr);",
+      ".extension-ui-settings-row,\n  .extension-ui-settings-group {\n    grid-template-columns: minmax(0, 1fr);",
     );
     expect(styles).toContain(
       ".extension-ui-settings-permission-main {\n    flex-direction: column;",

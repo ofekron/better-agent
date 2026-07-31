@@ -7130,20 +7130,6 @@ button.run-badge-clickable:focus-visible {
   font-family: var(--font-mono, monospace);
   font-size: calc(11px * var(--app-font-scale));
 }
-.extension-ui-settings-native-exposure {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(120px, 0.32fr) minmax(0, 1fr);
-  align-items: start;
-  gap: 7px 12px;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
-}
-.extension-ui-settings-native-exposure-label {
-  color: var(--text-muted);
-  font-size: calc(11px * var(--app-font-scale));
-  line-height: 1.35;
-}
 .extension-ui-settings-native-providers {
   display: flex;
   flex-wrap: wrap;
@@ -7949,7 +7935,7 @@ button.run-badge-clickable:focus-visible {
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 5px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-surface);
   transition: border-color 0.18s ease, box-shadow 0.18s ease,
     background-color 0.18s ease;
 }
@@ -19995,8 +19981,7 @@ button.progress-inflight {
   }
 
   .extension-ui-settings-row,
-  .extension-ui-settings-group,
-  .extension-ui-settings-native-exposure {
+  .extension-ui-settings-group {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -21725,8 +21710,7 @@ button.progress-inflight {
     grid-template-columns: 1fr;
   }
 
-  .extension-ui-settings-harness-addition,
-  .extension-ui-settings-native-exposure {
+  .extension-ui-settings-harness-addition {
     grid-template-columns: 1fr;
   }
 

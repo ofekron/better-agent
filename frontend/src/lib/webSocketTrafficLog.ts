@@ -44,7 +44,7 @@ export const KNOWN_WEB_SOCKET_EVENT_TYPES = new Set([
   "extension.config.settings", "extension.config.instructions",
   "extension.config.ui_settings", "extension.config.internal_llm",
   "extension.config.permissions", "extension.config.mcp",
-  "extension.config.skills", "extension.config.native_exposure",
+  "extension.config.skills",
   "extension.ui", "extension.ui.frontend_modules", "extension.harness.default",
   "extension.harness.default.disabled_builtin_extensions",
   "extension.harness.default.disabled_builtin_tools",

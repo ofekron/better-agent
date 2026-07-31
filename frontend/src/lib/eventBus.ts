@@ -118,7 +118,6 @@ export interface BusEventMap {
   "extension.config.permissions": Record<string, unknown>;
   "extension.config.mcp": Record<string, unknown>;
   "extension.config.skills": Record<string, unknown>;
-  "extension.config.native_exposure": Record<string, unknown>;
   "extension.ui": Record<string, unknown>;
   "extension.ui.frontend_modules": Record<string, unknown>;
   "extension.harness.default": Record<string, unknown>;

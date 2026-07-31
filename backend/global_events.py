@@ -21,7 +21,6 @@ EXTENSION_CHANGE_TOPICS = frozenset((
     "extension.config.permissions",
     "extension.config.mcp",
     "extension.config.skills",
-    "extension.config.native_exposure",
     "extension.ui",
     "extension.ui.frontend_modules",
     "extension.harness.default",
