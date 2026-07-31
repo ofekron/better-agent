@@ -88,14 +88,41 @@ def test_backend_lifecycle_owns_catalog_refresh_tasks() -> None:
 
 
 def test_codex_and_fugu_manual_refresh_use_catalog_authority_owner() -> None:
-    source = (BACKEND / "app_lifecycle.py").read_text(encoding="utf-8")
-    helper = source.split(
-        "async def _refresh_provider_models(",
-        1,
-    )[1].split("\n\n@app.get", 1)[0]
+    # Catalog-authority-owned kinds (codex, fugu) route their manual refresh
+    # through model_catalog_refresh instead of models.refresh_one. Proven
+    # behaviorally against providers_api._refresh_provider_models so the test
+    # survives refactors of the helper's source layout.
+    import providers_api
 
-    assert 'record.get("kind") in {"codex", "fugu"}' in helper
-    assert "model_catalog_refresh.request_refresh_background(" in helper
+    catalog_refreshed: list[str] = []
+    models_refreshed: list[str] = []
+    orig_catalog = model_catalog_refresh.request_refresh_background
+    orig_models = models.refresh_one
+    model_catalog_refresh.request_refresh_background = (
+        lambda provider_id: catalog_refreshed.append(provider_id)
+    )
+
+    async def _stub_refresh_one(provider_id: str) -> None:
+        models_refreshed.append(provider_id)
+
+    models.refresh_one = _stub_refresh_one
+    try:
+        codex_result = asyncio.run(
+            providers_api._refresh_provider_models({"id": "codex-1", "kind": "codex"})
+        )
+        fugu_result = asyncio.run(
+            providers_api._refresh_provider_models({"id": "fugu-1", "kind": "fugu"})
+        )
+    finally:
+        model_catalog_refresh.request_refresh_background = orig_catalog
+        models.refresh_one = orig_models
+
+    # codex delegates to the catalog authority owner; fugu is curated (no-op).
+    assert codex_result is None
+    assert fugu_result is None
+    assert catalog_refreshed == ["codex-1"]
+    # Neither catalog-authority kind falls through to a direct models refresh.
+    assert models_refreshed == []
 
 
 def test_legacy_due_refresh_excludes_catalog_authority_owner() -> None:

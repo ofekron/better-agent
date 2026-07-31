@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1049,11 +1050,18 @@ def test_notify_catalog_auth_changed_swallows_errors():
     def _boom(provider_id):
         raise RuntimeError("catalog unavailable")
     fake.notify_provider_auth_changed = _boom  # type: ignore
+    # Restore the ORIGINAL module, not just pop: a bare pop forces every later
+    # `import model_catalog_refresh` in the process to re-import a fresh
+    # (unpatched) module object, silently breaking other tests' stubs.
+    original = sys.modules.get("model_catalog_refresh")
     sys.modules["model_catalog_refresh"] = fake
     try:
         provider_auth._notify_catalog_auth_changed("any-id")  # must not raise
     finally:
-        sys.modules.pop("model_catalog_refresh", None)
+        if original is not None:
+            sys.modules["model_catalog_refresh"] = original
+        else:
+            sys.modules.pop("model_catalog_refresh", None)
 
 
 # ============================================================ _monitor branches
@@ -1377,6 +1385,82 @@ def test_start_obsolete_when_registration_predicate_fails():
 
 
 # ============================================================ cancel
+
+
+def _drive_start_cancel_during_registration(*, committed: bool):
+    """Spawn _start, cancel it while it awaits shield(registration), and
+    return (proc, killed, discarded). `committed` selects the branch: when
+    True the registration commits the flow (still_current True -> discard);
+    when False it reports the record obsolete (still_current False -> kill)."""
+    rec = _add_provider()
+    proc = _FakeProc(returncode=None)
+    _install_spawn(lambda: proc)
+    reached = threading.Event()
+    release = threading.Event()
+
+    def _blocking_apply(pid, predicate, apply):
+        if committed:
+            apply()  # register() commits the flow
+        reached.set()
+        release.wait(2.0)
+        return committed
+
+    config_store.apply_if_provider_matches = _blocking_apply  # type: ignore
+    killed: list = []
+    provider_auth._kill_proc = lambda p: killed.append(p)  # type: ignore
+    discarded: list = []
+
+    async def _discard_registered_flow(pid, fingerprint, p):
+        discarded.append(p)
+
+    provider_auth._discard_registered_flow = _discard_registered_flow  # type: ignore
+
+    async def _scenario():
+        task = asyncio.ensure_future(provider_auth._start(
+            rec["id"], "login", provider_auth.STATE_LOGIN_RUNNING, _noop_broadcast))
+        # Let _start progress to `await shield(registration)`.
+        for _ in range(400):
+            if reached.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert reached.is_set(), "registration never reached the block point"
+        task.cancel()
+        release.set()  # registration completes -> resolves still_current
+        raised = False
+        try:
+            await task
+        except asyncio.CancelledError:
+            raised = True
+        assert raised
+
+    try:
+        _run(_scenario())
+    finally:
+        provider_auth._states.pop(rec["id"], None)
+        provider_auth._procs.pop(rec["id"], None)
+        provider_auth._flow_fingerprints.pop(rec["id"], None)
+        _reset_status_globals()
+        _restore_all()
+    return proc, killed, discarded
+
+
+def test_start_cancel_during_registration_discards_committed_flow():
+    """Cancelling _start while it awaits shield(registration), where the
+    registration DID commit (still_current True), discards the registered
+    flow. Covers the asyncio.CancelledError branch (lines 1063-1066)."""
+    proc, killed, discarded = _drive_start_cancel_during_registration(committed=True)
+    assert discarded == [proc]
+    # A committed flow is torn down via _discard_registered_flow, not a bare kill.
+    assert killed == []
+
+
+def test_start_cancel_during_registration_kills_uncommitted_proc():
+    """Cancelling _start while it awaits shield(registration), where the
+    registration did NOT commit (still_current False), kills+reaps the proc
+    without discarding a registered flow. Covers lines 1067-1069."""
+    proc, killed, discarded = _drive_start_cancel_during_registration(committed=False)
+    assert killed == [proc]
+    assert discarded == []
 
 
 def test_cancel_returns_false_when_no_proc():
