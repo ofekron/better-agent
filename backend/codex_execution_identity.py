@@ -146,17 +146,29 @@ class FileIdentity:
         return cls._capture(raw_path, _hash)
 
     def attest(self) -> bool:
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
         try:
-            return FileIdentity.capture(self.requested_path) == self
-        except ExecutionContractError:
-            return False
+            current = FileIdentity.capture(self.requested_path)
+            if current == self:
+                return True, "ok"
+            return False, f"file_changed:{self.requested_path}"
+        except ExecutionContractError as exc:
+            return False, f"file_unavailable:{self.requested_path}:{exc}"
 
     def attest_metadata(self) -> bool:
+        return self.attest_metadata_with_reason()[0]
+
+    def attest_metadata_with_reason(self) -> tuple[bool, str]:
         try:
             current = FileIdentity.capture_metadata(self.requested_path)
-        except ExecutionContractError:
-            return False
-        return self.metadata_matches(current)
+            if self.metadata_matches(current):
+                return True, "ok"
+            return False, f"file_metadata_changed:{self.requested_path}"
+        except ExecutionContractError as exc:
+            return False, f"file_metadata_unavailable:{self.requested_path}:{exc}"
+
 
     def metadata_matches(
         self,
@@ -371,11 +383,14 @@ class ConfigIdentity:
         )
 
     def attest(self) -> bool:
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
         root = Path(self.root_path)
         candidate = Path(self.config_path)
         try:
             if root.resolve(strict=True) != root:
-                return False
+                return False, f"config_root_resolved_mismatch:{self.root_path}"
             parent = candidate.parent.resolve(strict=True)
             parent_stat = parent.stat()
             if (
@@ -384,13 +399,15 @@ class ConfigIdentity:
                 or self._parent_routing_identity(parent_stat)
                 != self.parent_routing_identity
             ):
-                return False
+                return False, f"config_parent_mismatch:{self.parent_path}"
             current = ConfigIdentity.capture(root, candidate)
-        except ExecutionContractError:
-            return False
-        except OSError:
-            return False
-        return current.config_file == self.config_file
+        except ExecutionContractError as exc:
+            return False, f"config_capture_failed:{self.config_path}:{exc}"
+        except OSError as exc:
+            return False, f"config_oserror:{self.config_path}:{exc}"
+        if current.config_file != self.config_file:
+            return False, f"config_file_mismatch:{self.config_path}"
+        return True, "ok"
 
     @property
     def parent_routing_identity(self) -> tuple[int, int, int]:
@@ -409,13 +426,16 @@ class ConfigIdentity:
         )
 
     def attest_metadata(self) -> bool:
+        return self.attest_metadata_with_reason()[0]
+
+    def attest_metadata_with_reason(self) -> tuple[bool, str]:
         root = Path(self.root_path)
         candidate = Path(self.config_path)
         try:
             if root.resolve(strict=True) != root:
-                return False
+                return False, f"config_root_resolved_mismatch:{self.root_path}"
             if not candidate.absolute().is_relative_to(root):
-                return False
+                return False, f"config_candidate_escapes_root:{self.config_path}"
             resolved_parent = candidate.parent.resolve(strict=True)
             parent_stat = resolved_parent.stat()
             if (
@@ -425,12 +445,15 @@ class ConfigIdentity:
                 or self._parent_routing_identity(parent_stat)
                 != self.parent_routing_identity
             ):
-                return False
-        except OSError:
-            return False
+                return False, f"config_parent_metadata_mismatch:{self.parent_path}"
+        except OSError as exc:
+            return False, f"config_metadata_oserror:{self.config_path}:{exc}"
         if self.config_file is None:
-            return not candidate.exists() and not candidate.is_symlink()
-        return self.config_file.attest_metadata()
+            if candidate.exists() or candidate.is_symlink():
+                return False, f"config_file_unexpectedly_exists:{self.config_path}"
+            return True, "ok"
+        return self.config_file.attest_metadata_with_reason()
+
 
 
 def config_identity_from_dict(raw: Mapping[str, Any]) -> ConfigIdentity:

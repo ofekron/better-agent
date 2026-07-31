@@ -177,8 +177,11 @@ class AgyProvider(SessionEventsProvider):
             ),
             config=config_scope,
         )
-        if not launch.attest():
-            raise RuntimeError("AGY launch authority changed during preparation")
+        ok, attest_reason = launch.attest_with_reason()
+        if not ok:
+            logger.error("AGY launch authority attestation failed during preparation: reason=%s", attest_reason)
+            raise RuntimeError(f"AGY launch authority changed during preparation (reason: {attest_reason})")
+
         projection = structural_provider_runtime_plan(
             runner_input,
             self.KIND,

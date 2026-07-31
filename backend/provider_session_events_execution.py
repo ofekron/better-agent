@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
+
 
 from cli_paths import resolve_cli_binary
 from codex_execution_common import ExecutionContractError
@@ -382,10 +386,13 @@ def _launch_attestation(
         ),
         config=config,
     )
-    if not launch.attest():
+    ok, attest_reason = launch.attest_with_reason()
+    if not ok:
+        logger.error("session-events launch authority attestation failed: reason=%s", attest_reason)
         raise ExecutionContractError(
-            "session-events launch authority changed during preparation",
+            f"session-events launch authority changed during preparation (reason: {attest_reason})",
         )
+
     return launch
 
 

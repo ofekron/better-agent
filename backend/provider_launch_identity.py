@@ -97,10 +97,17 @@ class DirectoryIdentity:
         )
 
     def attest(self) -> bool:
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
         try:
-            return DirectoryIdentity.capture(self.requested_path) == self
-        except ExecutionContractError:
-            return False
+            current = DirectoryIdentity.capture(self.requested_path)
+            if current == self:
+                return True, "ok"
+            return False, f"directory_changed:{self.requested_path}"
+        except ExecutionContractError as exc:
+            return False, f"directory_unavailable:{self.requested_path}:{exc}"
+
 
     def to_dict(self) -> dict[str, Any]:
         return {

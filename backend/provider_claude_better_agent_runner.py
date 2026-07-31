@@ -271,11 +271,17 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         ),
         config=config,
     )
-    if not launch.attest():
+    ok, attest_reason = launch.attest_with_reason()
+    if not ok:
+        logger.error(
+            "Claude better_agent_runner launch authority attestation failed: reason=%s",
+            attest_reason,
+        )
         raise RuntimeError(
             "Claude better_agent_runner launch authority changed "
-            "during preparation",
+            f"during preparation (reason: {attest_reason})",
         )
+
     projection = structural_provider_runtime_plan(runner_input, provider.KIND)
     capabilities = snapshot_family_runtime_capabilities(
         family=provider.KIND,

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Mapping
+
+logger = logging.getLogger(__name__)
+
+
 
 from codex_execution_common import (
     AttestOnceCache,
@@ -74,31 +79,39 @@ class ConfigScopeIdentity:
     resume: FileIdentity | None
 
     def attest(self) -> bool:
-        return (
-            self.root.attest()
-            and all(
-                parallel_map(
-                    lambda identity: identity.attest(),
-                    self.files,
-                ),
-            )
-            and (self.resume is None or self.resume.attest())
-        )
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
+        ok, reason = self.root.attest_with_reason()
+        if not ok:
+            return False, f"config_root:{reason}"
+        for identity in self.files:
+            ok, reason = identity.attest_with_reason()
+            if not ok:
+                return False, f"config_file:{reason}"
+        if self.resume is not None:
+            ok, reason = self.resume.attest_with_reason()
+            if not ok:
+                return False, f"config_resume:{reason}"
+        return True, "ok"
 
     def attest_metadata(self) -> bool:
-        """Cheap stat-tuple-only re-check for a config scope this same
-        instance already fully hash-attested earlier in the same
-        launch/spawn cycle."""
-        return (
-            self.root.attest()
-            and all(
-                parallel_map(
-                    lambda identity: identity.attest_metadata(),
-                    self.files,
-                ),
-            )
-            and (self.resume is None or self.resume.attest_metadata())
-        )
+        return self.attest_metadata_with_reason()[0]
+
+    def attest_metadata_with_reason(self) -> tuple[bool, str]:
+        ok, reason = self.root.attest_with_reason()
+        if not ok:
+            return False, f"config_root_metadata:{reason}"
+        for identity in self.files:
+            ok, reason = identity.attest_metadata_with_reason()
+            if not ok:
+                return False, f"config_file_metadata:{reason}"
+        if self.resume is not None:
+            ok, reason = self.resume.attest_metadata_with_reason()
+            if not ok:
+                return False, f"config_resume_metadata:{reason}"
+        return True, "ok"
+
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -205,17 +218,31 @@ class CriticalPackageIdentity:
     files: tuple[FileIdentity, ...]
 
     def attest(self) -> bool:
-        return self.root.attest() and all(
-            parallel_map(FileIdentity.attest, self.files),
-        )
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
+        ok, reason = self.root.attest_with_reason()
+        if not ok:
+            return False, f"package_root:{reason}"
+        for identity in self.files:
+            ok, reason = identity.attest_with_reason()
+            if not ok:
+                return False, f"package_file:{reason}"
+        return True, "ok"
 
     def attest_metadata(self) -> bool:
-        """Cheap stat-tuple-only re-check for a package this same
-        instance already fully hash-attested earlier in the same
-        launch/spawn cycle."""
-        return self.root.attest() and all(
-            parallel_map(FileIdentity.attest_metadata, self.files),
-        )
+        return self.attest_metadata_with_reason()[0]
+
+    def attest_metadata_with_reason(self) -> tuple[bool, str]:
+        ok, reason = self.root.attest_with_reason()
+        if not ok:
+            return False, f"package_root_metadata:{reason}"
+        for identity in self.files:
+            ok, reason = identity.attest_metadata_with_reason()
+            if not ok:
+                return False, f"package_file_metadata:{reason}"
+        return True, "ok"
+
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -337,54 +364,50 @@ class FamilyLaunchAttestation:
         with timed_contract_step("provider.family_attestation.attest"):
             if self.fingerprint != self._computed_fingerprint():
                 return False, "fingerprint_mismatch"
-            
-            def full_check() -> tuple[bool, str]:
-                if not self.runner.attest():
-                    return False, "runner_launch_attestation_failed"
-                if not self.downstream.attest():
-                    return False, "downstream_cli_attestation_failed"
-                if not self.config.attest():
-                    return False, "config_scope_attestation_failed"
-                for package in self.critical_packages:
-                    if not package.attest():
-                        return False, f"critical_package_attestation_failed:{package.package_name}"
-                return True, "ok"
 
-            def meta_check() -> tuple[bool, str]:
-                if not self.runner.attest_metadata():
-                    return False, "runner_launch_metadata_attestation_failed"
-                if not self.downstream.attest_metadata():
-                    return False, "downstream_cli_metadata_attestation_failed"
-                if not self.config.attest_metadata():
-                    return False, "config_scope_metadata_attestation_failed"
-                for package in self.critical_packages:
-                    if not package.attest_metadata():
-                        return False, f"critical_package_metadata_attestation_failed:{package.package_name}"
-                return True, "ok"
-
-            res = self._attest_cache.resolve(full_check, meta_check)
+            res = self._attest_cache.resolve(
+                self._full_attest_with_reason,
+                self.attest_metadata_with_reason,
+            )
             if not res[0]:
-                import logging
-                logging.warning("FamilyLaunchAttestation failed: reason=%s family=%s", res[1], self.family)
+                logger.warning(
+                    "FamilyLaunchAttestation failed: reason=%s family=%s",
+                    res[1],
+                    self.family,
+                )
             return res
 
+    def _full_attest_with_reason(self) -> tuple[bool, str]:
+        if not self.runner.attest():
+            return False, "runner_launch_attestation_failed"
+        if not self.downstream.attest():
+            return False, "downstream_cli_attestation_failed"
+        ok, reason = self.config.attest_with_reason()
+        if not ok:
+            return False, f"config_scope_attestation_failed:{reason}"
+        for package in self.critical_packages:
+            ok, reason = package.attest_with_reason()
+            if not ok:
+                return False, f"critical_package_attestation_failed:{package.package_name}:{reason}"
+        return True, "ok"
+
     def attest_metadata(self) -> bool:
-        """Cheap stat-tuple-only re-check used once this attestation has
-        already been fully hash-verified earlier in the same launch/spawn
-        cycle (see `AttestOnceCache`) - collapses the repeated
-        `open_runner`/`open_downstream`/`materialize_sdk` re-checks at
-        each layer boundary into a stat walk instead of a full re-hash
-        of the runner bundle, downstream CLI, config files, and SDK
-        package every single time."""
-        return (
-            self.runner.attest_metadata()
-            and self.downstream.attest_metadata()
-            and self.config.attest_metadata()
-            and all(
-                package.attest_metadata()
-                for package in self.critical_packages
-            )
-        )
+        return self.attest_metadata_with_reason()[0]
+
+    def attest_metadata_with_reason(self) -> tuple[bool, str]:
+        if not self.runner.attest_metadata():
+            return False, "runner_launch_metadata_attestation_failed"
+        if not self.downstream.attest_metadata():
+            return False, "downstream_cli_metadata_attestation_failed"
+        ok, reason = self.config.attest_metadata_with_reason()
+        if not ok:
+            return False, f"config_scope_metadata_attestation_failed:{reason}"
+        for package in self.critical_packages:
+            ok, reason = package.attest_metadata_with_reason()
+            if not ok:
+                return False, f"critical_package_metadata_attestation_failed:{package.package_name}:{reason}"
+        return True, "ok"
+
 
     def _assert_attested(self) -> None:
         if not self.attest():

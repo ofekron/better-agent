@@ -516,11 +516,14 @@ class ClaudeProvider(Provider):
         )
         ok, attest_reason = launch.attest_with_reason()
         if not ok:
-            import logging
-            logging.error("Claude launch authority attestation failed during preparation: reason=%s", attest_reason)
+            logger.error(
+                "Claude launch authority attestation failed during preparation: reason=%s",
+                attest_reason,
+            )
             raise RuntimeError(
                 f"Claude launch authority changed during preparation (reason: {attest_reason})",
             )
+
         projection = structural_provider_runtime_plan(
             runner_input,
             self.KIND,
