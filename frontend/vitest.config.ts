@@ -25,6 +25,10 @@ export default defineConfig({
     },
   },
   test: {
+    // Cap worker processes so test runs can't saturate the dev machine's
+    // CPUs and starve the backend event loop (concurrent test runs were
+    // observed pushing load avg to 44+ and stalling turn acknowledgement).
+    maxWorkers: 2,
     environment: "happy-dom",
     globals: true,
     setupFiles: ["./tests/setup.ts"],
