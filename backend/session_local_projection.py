@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import perf
 from todo_projection import extract_tasks_from_normalized, extract_todos_from_normalized
@@ -36,21 +36,27 @@ def _all_tasks_done_items(items: list) -> list | None:
     ]
 
 
+def _project_collection(
+    fields: dict[str, list],
+    key: str,
+    normalized: dict[str, Any],
+    current: list,
+    extractor: Callable[[dict[str, Any], list], list | None],
+) -> None:
+    """Project one collection: take the extractor's delta, or — when the
+    agent emitted the all-tasks-done marker — mark every current item done."""
+    result = extractor(normalized, current)
+    if result is not None:
+        fields[key] = result
+    elif f"<{_ALL_TASKS_DONE_MARKER_TAG}>" in _agent_message_text(normalized):
+        completed = _all_tasks_done_items(current)
+        if completed is not None:
+            fields[key] = completed
+
+
 def project_event_fields(normalized: dict[str, Any], current_todos: list, current_tasks: list) -> dict[str, list]:
     with perf.timed("session.local_projection.project_event"):
         fields: dict[str, list] = {}
-        todos = extract_todos_from_normalized(normalized, current_todos)
-        if todos is not None:
-            fields["current_todos"] = todos
-        elif f"<{_ALL_TASKS_DONE_MARKER_TAG}>" in _agent_message_text(normalized):
-            completed = _all_tasks_done_items(current_todos)
-            if completed is not None:
-                fields["current_todos"] = completed
-        tasks = extract_tasks_from_normalized(normalized, current_tasks)
-        if tasks is not None:
-            fields["current_tasks"] = tasks
-        elif f"<{_ALL_TASKS_DONE_MARKER_TAG}>" in _agent_message_text(normalized):
-            completed_tasks = _all_tasks_done_items(current_tasks)
-            if completed_tasks is not None:
-                fields["current_tasks"] = completed_tasks
+        _project_collection(fields, "current_todos", normalized, current_todos, extract_todos_from_normalized)
+        _project_collection(fields, "current_tasks", normalized, current_tasks, extract_tasks_from_normalized)
         return fields

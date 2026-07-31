@@ -47,8 +47,3 @@ def _worker_main() -> None:
             logger.debug("session search projection failed", exc_info=True)
         finally:
             _queue.task_done()
-
-
-def drain_for_tests() -> None:
-    _ensure_worker()
-    _queue.join()
