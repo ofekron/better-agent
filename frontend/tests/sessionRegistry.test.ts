@@ -15,10 +15,10 @@ import {
  * render. These tests pin its delta-application semantics.
  *
  * INVARIANTs locked here:
- *  - Sessions enter the map ONLY via bootstrap, `session_created`, or
- *    `session_metadata_updated`. Running/unread deltas for unknown
- *    sids are silently dropped (no phantom-entry inflation of
- *    aggregates).
+ *  - Sessions enter the map via a `/api/sessions` page merge,
+ *    `session_created`, or a routed delta carrying a visible cwd.
+ *    Running/unread deltas for unknown sids with an EMPTY cwd are
+ *    silently dropped (no phantom-entry inflation of aggregates).
  *  - Per-project aggregates are derived locally by summing visible
  *    sessions. Hidden sessions (cwd === "") never contribute.
  *  - Bootstrap races: deltas arriving before the first successful

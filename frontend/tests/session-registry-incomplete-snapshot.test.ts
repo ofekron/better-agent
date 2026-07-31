@@ -11,13 +11,13 @@ describe("session registry incomplete snapshots", () => {
   it("keeps existing registry state and retries an incomplete empty bootstrap", async () => {
     vi.useFakeTimers();
     sessionRegistry.__resetForTests();
-    sessionRegistry.replaceFromRows([{
+    sessionRegistry.mergeFromRows([{
       id: "existing",
       cwd: "/tmp/project",
       node_id: "primary",
       is_running: false,
       unread_count: 2,
-    }]);
+    }], sessionRegistry.beginPageFetch());
 
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

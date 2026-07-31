@@ -8,15 +8,13 @@ import type { SessionListFilters } from "../src/hooks/useSession";
  *
  * The sessionRegistry is the ALL-projects source of truth for the
  * per-project running/unread badges. Only a full, UNFILTERED global list
- * page may `replaceFromRows` (which evicts everything not in the page).
- * A fetch narrowed to one project — or by search/tag/folder/etc. — is a
- * subset; replacing from it wiped every OTHER project's sessions out of
- * the registry, zeroing their badges until a fresh WS delta happened to
- * re-materialize them (steadily-running sessions with no state flip never
- * did). `isGlobalUnfilteredFetch` gates that: narrowed fetches must return
- * false so the caller seeds (fill-only) instead of replacing.
+ * page may `mergeFromRows` (which refreshes the entries it carries). A
+ * fetch narrowed to one project — or by search/tag/folder/etc. — is a
+ * subset whose rows reflect that narrowing, so it must not restate global
+ * entries. `isGlobalUnfilteredFetch` gates that: narrowed fetches must
+ * return false so the caller seeds (fill-only) instead.
  */
-describe("isGlobalUnfilteredFetch — registry replace vs seed gate", () => {
+describe("isGlobalUnfilteredFetch — registry merge vs seed gate", () => {
   it("true only when no narrowing filter is active", () => {
     expect(isGlobalUnfilteredFetch({})).toBe(true);
     // Non-narrowing view/sort knobs don't change the session universe.

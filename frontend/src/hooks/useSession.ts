@@ -149,12 +149,10 @@ function sameStringList(a?: string[], b?: string[]): boolean {
 /** True only when this list fetch covers the full, unfiltered global
  * session universe (no narrowing filter active). The sessionRegistry is
  * the ALL-projects source of truth for per-project running/unread
- * aggregates, so only a global fetch may `replaceFromRows` (which evicts
- * everything not in the page). A fetch narrowed to one project (or search/
- * tag/folder/etc.) is a subset — replacing from it would wipe every OTHER
- * project's sessions out of the registry, zeroing their aggregate badges
- * until a fresh WS delta happened to re-materialize them. Narrowed fetches
- * therefore `seedFromRows` (fill-only) instead. */
+ * aggregates, so only a global fetch may `mergeFromRows` (which refreshes
+ * the entries it carries). A fetch narrowed to one project (or search/
+ * tag/folder/etc.) is a subset whose rows reflect that narrowing, so
+ * narrowed fetches `seedFromRows` (fill-only) instead. */
 export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
   return (
     !f.projectPath &&
@@ -1306,6 +1304,10 @@ export function useSession(authStatus?: string) {
       // Snapshot the insert watermark at DISPATCH time: rows inserted
       // after this are newer than this page and must survive its replace.
       const dispatchInsertGen = sessionInsertGenRef.current;
+      // Same idea for the registry: entries a WS delta moves while this
+      // page is in flight are newer than the page and must not be
+      // regressed by its rows.
+      const registryDispatchSeq = sessionRegistry.beginPageFetch();
       sessionsLoadingPageRef.current = true;
       if (!replace) setSessionsLoadingMore(true);
       // Silent background refreshes (status-churn refetch) must not flash
@@ -1363,12 +1365,13 @@ export function useSession(authStatus?: string) {
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
         if (replace && offset === 0 && isGlobalUnfilteredFetch(filters)) {
-          // Only a full, unfiltered global page may replace the registry
-          // (the ALL-projects aggregate source of truth). A project- or
-          // otherwise-narrowed replace would evict every other project's
-          // sessions, zeroing their running/unread badges — the bug this
-          // guard closes. See isGlobalUnfilteredFetch.
-          sessionRegistry.replaceFromRows(page);
+          // Only a full, unfiltered global page may refresh existing
+          // registry entries (the ALL-projects aggregate source of
+          // truth). A project- or otherwise-narrowed page describes a
+          // subset, so its rows must not restate global state. See
+          // isGlobalUnfilteredFetch. Neither path evicts: `/api/sessions`
+          // is paginated, so absence from a page is not removal.
+          sessionRegistry.mergeFromRows(page, registryDispatchSeq);
         } else {
           // Seed the registry from this page (async callback — NOT during
           // render) so deeper-page rows have a live entry for both the

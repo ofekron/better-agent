@@ -262,6 +262,9 @@ interface SessionDeletedPayload {
 interface SessionMetadataPayload {
   session_id: string;
   patch?: {
+    // Set (non-empty) means the session became sidebar-hidden, which is
+    // the same signal an empty `cwd` carries on a routed delta.
+    working_mode?: string | null;
     cwd?: string;
     node_id?: string;
     current_todos?: TodoItem[];
@@ -270,12 +273,15 @@ interface SessionMetadataPayload {
 }
 
 class SessionRegistry {
-  // Per-sid entry — populated by bootstrap REST + WS deltas.
-  // Sessions enter the map via THREE paths only: bootstrap mass
-  // insert, `session_created`, or `session_metadata_updated`. The
-  // running/unread patch handlers REFUSE to insert (guards against
-  // phantom entries from delta events for sessions that should have
-  // been filtered server-side).
+  // Per-sid entry — populated by `/api/sessions` pages + WS deltas.
+  // Sessions enter the map via a page merge (`mergeFromRows` /
+  // `seedFromRows`), `session_created`, or a routed delta whose payload
+  // carries a visible cwd (`applyRoutedDelta`). A delta arriving with an
+  // empty cwd for an unknown sid is dropped — that is the phantom-entry
+  // guard against sessions the backend filters server-side.
+  // Entries leave the map ONLY via `session_deleted`: `/api/sessions` is
+  // paginated and filtered, so absence from a page is not evidence of
+  // removal.
   private sessions: Map<string, SessionEntry> = new Map();
 
   // Per-project aggregate keyed by `<node_id>::<cwd>`. Derived from
@@ -296,6 +302,14 @@ class SessionRegistry {
   private _bootstrapped = false;
   private _bootstrapInFlight: Promise<void> | null = null;
   private _deltaBuffer: BufferedDelta[] = [];
+
+  // Monotonic clock over per-session mutations, plus each sid's last
+  // tick. A `/api/sessions` page is a snapshot taken when the request was
+  // dispatched; any sid mutated after that watermark has a newer truth
+  // locally, so the page's row for it must be discarded rather than
+  // applied on top. See `beginPageFetch` / `mergeFromRows`.
+  private _deltaSeq = 0;
+  private _lastDeltaSeqBySid = new Map<string, number>();
 
   /** Detach the bus subscriptions + DOM listeners wired by `bind()`.
    * Without this, a `bind()` caller that itself unmounts (e.g. React's
@@ -395,6 +409,7 @@ class SessionRegistry {
   }
 
   private async _doBootstrap(): Promise<void> {
+    const dispatchedAtSeq = this.beginPageFetch();
     let res: Response;
     try {
       res = await fetch(`${API}/api/sessions`);
@@ -423,14 +438,42 @@ class SessionRegistry {
       return;
     }
 
-    this.replaceFromRows(rows);
+    this.mergeFromRows(rows, dispatchedAtSeq);
   }
 
-  replaceFromRows(rows: SessionRegistryRow[]): void {
-    const nextSessions = new Map<string, SessionEntry>();
+  /** Watermark for a `/api/sessions` page fetch. Read it BEFORE issuing
+   * the request and hand it back to `mergeFromRows`, so entries a WS
+   * delta moved while the request was in flight survive the merge. */
+  beginPageFetch(): number {
+    return this._deltaSeq;
+  }
+
+  /** Apply a `/api/sessions` page to the registry.
+   *
+   * `/api/sessions` is paginated (`offset`/`limit`, default 50) and
+   * filtered (archived excluded; folder/pinned/empty sessions outrank
+   * recency), so a page is NEVER a complete snapshot of the session
+   * universe. Sids absent from it are kept — the only eviction path is
+   * an explicit `session_deleted`. Wiping them instead degraded
+   * `getSession(sid)` to EMPTY_SESSION (`monitoring_state: "stopped"`)
+   * for every session below the first page, which silently reported the
+   * OPEN session as not running and collapsed its live turn group in the
+   * chat panel with no user action.
+   *
+   * `dispatchedAtSeq` is the `beginPageFetch()` watermark taken when the
+   * request was issued. Any sid mutated after it — by a WS delta OR by
+   * another page that already landed — holds the newer truth, so its row
+   * is discarded rather than allowed to regress the entry. Applied rows
+   * stamp the clock themselves, which is what makes two concurrently
+   * in-flight pages (registry bootstrap + sidebar refresh) resolve to the
+   * later-landing one instead of the later-resolving one. */
+  mergeFromRows(rows: SessionRegistryRow[], dispatchedAtSeq: number): void {
+    const nextSessions = new Map<string, SessionEntry>(this.sessions);
     for (const s of rows) {
       if (!s?.id) continue;
+      if ((this._lastDeltaSeqBySid.get(s.id) ?? 0) > dispatchedAtSeq) continue;
       nextSessions.set(s.id, entryFromRow(s));
+      this._lastDeltaSeqBySid.set(s.id, ++this._deltaSeq);
     }
     this.sessions = nextSessions;
     this.projects = this.deriveAllProjects(nextSessions);
@@ -736,8 +779,19 @@ class SessionRegistry {
     const patch = d.patch ?? {};
     const hasTodoPatch =
       patch.current_todos !== undefined || patch.current_tasks !== undefined;
-    if (patch.cwd === undefined && patch.node_id === undefined && !hasTodoPatch) return;
-    const newCwd = patch.cwd ?? prev.cwd;
+    if (
+      patch.cwd === undefined &&
+      patch.node_id === undefined &&
+      patch.working_mode === undefined &&
+      !hasTodoPatch
+    ) return;
+    // A session that gains a working_mode is sidebar-hidden and must stop
+    // contributing to its project aggregate — same rule the routed-delta
+    // path applies when the backend ships `cwd: ""`. The patch carries no
+    // cwd, so route it to "" here. Clearing working_mode cannot restore
+    // the cwd from this payload; the next routed delta or list page does.
+    const hiddenNow = patch.working_mode !== undefined && !!patch.working_mode;
+    const newCwd = hiddenNow ? "" : (patch.cwd ?? prev.cwd);
     const newNode = patch.node_id ?? prev.node_id;
     const nextTodos = patch.current_todos ?? prev.current_todos;
     const nextTasks = patch.current_tasks ?? prev.current_tasks;
@@ -815,6 +869,10 @@ class SessionRegistry {
   }
 
   private notifySession(sid: string) {
+    // Single funnel for per-session mutations (create, delete, routed
+    // delta, metadata, markers, error, seed) — the one place that stamps
+    // the mutation clock a page merge compares its watermark against.
+    this._lastDeltaSeqBySid.set(sid, ++this._deltaSeq);
     const ls = this.sessionListeners.get(sid);
     if (ls) for (const fn of ls) fn();
   }
@@ -938,6 +996,7 @@ class SessionRegistry {
     this.sessions.clear();
     this.projects.clear();
     this.metaCache.clear();
+    this._lastDeltaSeqBySid.clear();
     this._deltaBuffer = [];
     this._bootstrapped = false;
     this._bootstrapInFlight = null;
