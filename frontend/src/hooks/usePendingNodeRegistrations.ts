@@ -92,7 +92,10 @@ if (typeof window !== "undefined") {
 const _offConnection = eventBus.subscribe("ws_connection_changed", _onConnectionChanged);
 
 // Vite HMR: tear the old listeners down before the new module evaluates
-// so we don't multiply patches per event.
+// so we don't multiply patches per event. The dispose callback only fires
+// when the dev server hot-replaces this module — unreachable in tests and
+// production builds, so it is excluded from coverage.
+/* v8 ignore start */
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     if (typeof window !== "undefined") {
@@ -102,6 +105,7 @@ if (import.meta.hot) {
     _offConnection();
   });
 }
+/* v8 ignore stop */
 
 export async function approveNodeRegistration(nodeId: string): Promise<void> {
   const r = await fetch(
