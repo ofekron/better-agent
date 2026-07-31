@@ -41,14 +41,6 @@ class InvokeCapabilityRequest(_StrictPayload):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class _CwdPayload(_StrictPayload):
-    cwd: str = ""
-
-
-class _SettingsPayload(_CwdPayload):
-    capability_id: str = ""
-
-
 class _AskSearchPayload(_StrictPayload):
     query: str = Field(min_length=1)
     max_results: int | None = Field(default=None, gt=0)
