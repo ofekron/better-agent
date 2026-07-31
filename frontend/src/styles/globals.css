@@ -976,9 +976,13 @@ select:focus-visible,
   min-width: 0;
   flex: 1 1 auto;
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 6px;
+  column-gap: 6px;
+  /* No row gap: the only wrapped row is the search-scope strip, which must
+     contribute zero height while collapsed. It carries its own top padding. */
+  row-gap: 0;
   text-transform: none;
   letter-spacing: 0;
 }
@@ -1182,6 +1186,11 @@ select:focus-visible,
   }
   .session-search.expanded {
     flex: 1 1 100%;
+    order: -1;
+    margin-bottom: 6px;
+  }
+  /* Keep the scope strip directly under the search box, above the buttons. */
+  .session-search-scope.open {
     order: -1;
   }
   .session-search.expanded .session-search-input-wrap {
@@ -1528,23 +1537,63 @@ select:focus-visible,
   text-decoration: line-through;
 }
 
+/* Search scope rides under the search box: it shapes the query, not the list,
+   so it is deliberately outside the Filters panel. Collapses to zero height
+   with the search box via the 0fr/1fr grid transition. */
+.session-search-scope {
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  text-transform: none;
+  letter-spacing: 0;
+  transition: grid-template-rows 0.18s ease, opacity 0.18s ease;
+}
+
+.session-search-scope.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.session-search-scope-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-search-scope-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+.session-search-scope-label {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 .session-search-field-filter {
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
 .session-search-field-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 24px;
   max-width: 100%;
-  padding: 3px 7px 3px 5px;
+  min-height: 24px;
+  padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
+  background: transparent;
   color: var(--text-muted);
   font-size: calc(11px * var(--app-font-scale));
   line-height: 1.2;
+  overflow-wrap: anywhere;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 
 .session-search-field-toggle.active {
@@ -1553,17 +1602,11 @@ select:focus-visible,
   background: var(--bg-tertiary);
 }
 
-.session-search-field-toggle input {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--accent);
-  flex-shrink: 0;
-}
-
-.session-search-field-toggle span {
-  min-width: 0;
-  overflow-wrap: anywhere;
+@media (prefers-reduced-motion: reduce) {
+  .session-search-scope,
+  .session-search-field-toggle {
+    transition: none;
+  }
 }
 
 .session-org-filter,

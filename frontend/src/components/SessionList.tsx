@@ -2106,7 +2106,6 @@ function SessionListImpl({
     setSelectedModes([]);
     setSelectedSources([]);
     setFileEditModeFilter("any");
-    setSelectedSearchFields(SESSION_SEARCH_FIELDS);
     setStatusFilters({});
   }, []);
 
@@ -2190,8 +2189,6 @@ function SessionListImpl({
   const advancedFilterActive =
     statusFilterCount > 0 ||
     showArchived ||
-    selectedSearchFields.length !== SESSION_SEARCH_FIELDS.length ||
-    !SESSION_SEARCH_FIELDS.every((f) => selectedSearchFields.includes(f)) ||
     selectedFolderIds.length > 0 ||
     selectedTagIds.length > 0 ||
     activeProviderIds.length > 0 ||
@@ -3009,6 +3006,35 @@ function SessionListImpl({
               {t("session.newButton")}
             </button>
           )}
+          {/* Search scope belongs to the query, not to the list filters, so it
+              rides under the search box and only while that box is open. */}
+          <div className={`session-search-scope${searchExpanded ? " open" : ""}`} aria-hidden={!searchExpanded}>
+            <div className="session-search-scope-inner">
+              <div className="session-search-scope-row">
+                <span className="session-search-scope-label">{t("session.searchIn")}</span>
+                <div className="session-search-field-filter">
+                  {SESSION_SEARCH_FIELDS_ALL.map((field) => {
+                    const active = selectedSearchFields.includes(field);
+                    return (
+                      <button
+                        key={field}
+                        type="button"
+                        className={`session-search-field-toggle ${active ? "active" : ""}`}
+                        aria-pressed={active}
+                        tabIndex={searchExpanded ? 0 : -1}
+                        // Keep the input focused so toggling a scope doesn't
+                        // collapse the box out from under the click.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => toggleSearchField(field)}
+                      >
+                        {t(`session.searchField.${field}`)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       {(aiResult || aiError || aiLoading || searchStatusLoading) && (
@@ -3198,29 +3224,6 @@ function SessionListImpl({
                       >
                         {showArchived ? t("session.hideArchived") : t("session.showArchived")}
                       </button>
-                    </div>
-                  </FilterDisclosure>
-                  <FilterDisclosure
-                    id="filters.searchIn"
-                    label={t("session.searchIn")}
-                    activeCount={selectedSearchFields.length}
-                    isExpanded={isFilterGroupExpanded}
-                    onToggle={toggleFilterGroup}
-                  >
-                    <div className="session-tag-filter session-search-field-filter">
-                      {SESSION_SEARCH_FIELDS_ALL.map((field) => {
-                        const active = selectedSearchFields.includes(field);
-                        return (
-                          <label key={field} className={`session-search-field-toggle ${active ? "active" : ""}`}>
-                            <input
-                              type="checkbox"
-                              checked={active}
-                              onChange={() => toggleSearchField(field)}
-                            />
-                            <span>{t(`session.searchField.${field}`)}</span>
-                          </label>
-                        );
-                      })}
                     </div>
                   </FilterDisclosure>
                   {providerOptions.length > 0 && (

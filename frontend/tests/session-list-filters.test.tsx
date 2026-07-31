@@ -289,10 +289,46 @@ describe("SessionList advanced filters", () => {
 
     expect(global).toBeTruthy();
     expect(project).toBeTruthy();
-    expect(within(global as HTMLElement).getByText("session.searchIn")).toBeTruthy();
+    // Search scope is a search setting, not a list setting: it lives under the
+    // search box, never inside the Filters panel.
+    expect(within(global as HTMLElement).queryByText("session.searchIn")).toBeNull();
     expect(within(global as HTMLElement).getByText("session.providerFilter")).toBeTruthy();
     expect(within(project as HTMLElement).getByText("session.folder")).toBeTruthy();
     expect(within(project as HTMLElement).getByText("session.tags")).toBeTruthy();
+  });
+
+  it("exposes search scope under the search box, outside the Filters panel", async () => {
+    const onBackendFiltersChange = vi.fn();
+    const { container } = renderList([makeSession({ id: "a", name: "Alpha" })], {
+      onBackendFiltersChange,
+    });
+
+    const scope = container.querySelector(".session-search-scope");
+    expect(scope).toBeTruthy();
+    expect(scope?.classList.contains("open")).toBe(false);
+
+    const input = screen.getByLabelText("session.searchPlaceholder");
+    fireEvent.focus(input);
+    await waitFor(() =>
+      expect(
+        container.querySelector(".session-search-scope")?.classList.contains("open"),
+      ).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "session.searchField.content" }));
+
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ searchFields: ["title", "first_prompt", "content"] }),
+      ),
+    );
+
+    // Narrowing search scope must not mark the list Filters button as active.
+    expect(
+      screen
+        .getByRole("button", { name: "session.advancedFilterPanel" })
+        .classList.contains("active"),
+    ).toBe(false);
   });
 
   it("sends provider, model, and mode chips to backend filters", async () => {
