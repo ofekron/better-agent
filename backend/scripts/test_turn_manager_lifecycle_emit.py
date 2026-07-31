@@ -534,6 +534,145 @@ def test_publish_terminal_swallows_subscriber_exception() -> None:
         _unsubscribe(_bad_handler)
 
 
+def test_reconcile_lifecycle_projection_clears_orphaned_running_indicator() -> None:
+    """Regression: the "running" indicator must match the native session's
+    PID lifecycle, not linger forever.
+
+    If lifecycle's terminal bus event (turn_complete/turn_stopped) is lost
+    after the run_state entry backing it is gone — e.g. an exception during
+    finalization — `lifecycle.has_active_session` stays True with no PID
+    behind it. `reconcile_lifecycle_projection` must clear that stuck state
+    when it finds no live run backing it, so the running indicator can
+    self-heal on the recurring background tick instead of only at the next
+    full backend restart.
+    """
+    sid = "sid-reconcile-orphan"
+
+    async def _scenario() -> None:
+        tm = TurnManager(_StubCoordinator())
+        await tm.lifecycle.publish(
+            "lifecycle.turn_start",
+            root_id=sid,
+            session_id=sid,
+            payload=_IDENTITY,
+        )
+        assert tm.lifecycle.has_active_session(sid) is True, (
+            "setup: turn_start must mark the session active"
+        )
+        # No run_state entry exists for `sid` — the lost-terminal-event
+        # scenario: the PID-driven side has nothing to say about this
+        # session, but lifecycle still thinks it's running.
+        assert tm._run_state.get(sid) is None
+
+        await tm.reconcile_lifecycle_projection()
+
+        assert tm.lifecycle.has_active_session(sid) is False, (
+            "reconcile_lifecycle_projection did not clear a lifecycle turn "
+            "stuck 'running' with no live PID/run backing it — the running "
+            "indicator would stay stuck on forever"
+        )
+
+    asyncio.run(_scenario())
+
+
+def test_reconcile_lifecycle_projection_preserves_between_attempts_retry_gap() -> None:
+    """A dead PID on a run the turn coroutine still owns (continuation /
+    retry between attempts) must NOT be reconciled away as orphaned — that
+    is the exact false-negative `_entry_owned_by_live_turn` exists to
+    prevent, and periodic reconciliation must not reintroduce it."""
+    sid = "sid-reconcile-retry-gap"
+    run_id = "run-retry-1"
+    dead_pid = 999_999_999  # never a real PID
+
+    async def _scenario() -> None:
+        tm = TurnManager(_StubCoordinator())
+        await tm.lifecycle.publish(
+            "lifecycle.turn_start",
+            root_id=sid,
+            session_id=sid,
+            payload=_IDENTITY,
+        )
+        tm.run_state_add(sid, run_id=run_id, kind="native", pid=dead_pid)
+        tm.active_run_ids[sid] = [run_id]
+        tm.cancel_events[sid] = asyncio.Event()
+
+        assert tm._entry_owned_by_live_turn(sid, {"run_id": run_id}) is True, (
+            "setup: the retry-gap entry must be recognized as live-turn-owned"
+        )
+
+        await tm.reconcile_lifecycle_projection()
+
+        assert tm.lifecycle.has_active_session(sid) is True, (
+            "reconcile_lifecycle_projection killed the running indicator "
+            "for an in-flight turn during its between-attempts retry gap"
+        )
+
+    asyncio.run(_scenario())
+
+
+def test_dead_non_retry_run_state_converges_via_prune_then_reconcile() -> None:
+    """A dead pid on a run entry that is NOT retry-owned (a crashed/orphaned
+    run, not a between-attempts gap) must converge to "not running" through
+    the same per-tick sequence `_bg_tick_loop` uses: `tick_running_state`
+    (pruning) runs before `reconcile_lifecycle_projection` — pinning the
+    ordering `_bg_tick_loop` depends on for this class of divergence to
+    self-heal within one tick instead of requiring a backend restart."""
+    sid = "sid-reconcile-dead-orphan"
+    run_id = "run-dead-orphan-1"
+    dead_pid = 999_999_998  # never a real PID
+
+    async def _scenario() -> None:
+        tm = TurnManager(_StubCoordinator())
+        await tm.lifecycle.publish(
+            "lifecycle.turn_start",
+            root_id=sid,
+            session_id=sid,
+            payload=_IDENTITY,
+        )
+        tm.run_state_add(sid, run_id=run_id, kind="native", pid=dead_pid)
+        # No `active_run_ids`/`cancel_events` entry — this run is orphaned,
+        # not owned by an in-flight turn coroutine.
+        assert tm._entry_owned_by_live_turn(sid, {"run_id": run_id}) is False
+
+        # Same order `_bg_tick_loop` runs every 2s: prune dead entries
+        # first, then re-ground the lifecycle projection.
+        tm.tick_running_state()
+        assert tm._run_state.get(sid) is None, (
+            "setup: the dead non-retry entry must be pruned before reconcile"
+        )
+
+        await tm.reconcile_lifecycle_projection()
+
+        assert tm.lifecycle.has_active_session(sid) is False, (
+            "a dead, non-retry-owned run must converge to 'not running' "
+            "within one prune+reconcile tick cycle"
+        )
+
+    asyncio.run(_scenario())
+
+
+def test_bg_tick_loop_prunes_before_scheduling_lifecycle_reconcile() -> None:
+    """Structural guard for the ordering the tests above depend on: if a
+    future edit reorders `_bg_tick_loop` so lifecycle reconcile is
+    scheduled before dead entries are pruned for the same tick, a dead
+    non-retry run could be seen as "live" by reconcile one tick longer than
+    necessary. Lock the source order so that regression fails loudly."""
+    src = Path(__file__).resolve().parent.parent.joinpath(
+        "turn_manager.py",
+    ).read_text(encoding="utf-8")
+    start = src.index("def _bg_tick_loop(")
+    end = src.index("def _schedule_lifecycle_reconcile(", start)
+    body = src[start:end]
+    refresh_idx = body.index("self._refresh_cache()")
+    schedule_idx = body.index("self._schedule_lifecycle_reconcile()")
+    assert refresh_idx < schedule_idx, (
+        "_bg_tick_loop must prune dead run_state entries "
+        "(_refresh_cache -> tick_running_state) before scheduling "
+        "reconcile_lifecycle_projection, or dead non-retry runs will be "
+        "misread as live for an extra tick"
+    )
+
+
 if __name__ == "__main__":
     test_textual_check_no_other_bus_publish_in_module()
     test_run_turn_source_calls_helper_at_every_terminal()
@@ -548,4 +687,8 @@ if __name__ == "__main__":
     test_reported_error_makes_the_done_payload_fail()
     test_run_turn_hands_its_reported_error_to_the_done_emit()
     test_publish_terminal_swallows_subscriber_exception()
+    test_reconcile_lifecycle_projection_clears_orphaned_running_indicator()
+    test_reconcile_lifecycle_projection_preserves_between_attempts_retry_gap()
+    test_dead_non_retry_run_state_converges_via_prune_then_reconcile()
+    test_bg_tick_loop_prunes_before_scheduling_lifecycle_reconcile()
     print("OK: TurnManager sole lifecycle emitter — runtime + structural")

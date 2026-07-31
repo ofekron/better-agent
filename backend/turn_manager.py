@@ -332,6 +332,11 @@ class TurnManager:
         self._cache_lock = threading.Lock()
         self._bg_tick_started = False
         self._audit_tick_counter = 0
+        # In-flight guard for _schedule_lifecycle_reconcile: skip scheduling
+        # a new reconcile pass while the previous one is still awaiting
+        # (e.g. a slow session_manager.get_lite disk read), so a stalled
+        # pass can't pile up an unbounded queue of overlapping tasks.
+        self._lifecycle_reconcile_future: "asyncio.Future | None" = None
         # Event loop captured in start_background_tick(); used to hand a
         # pruned-session emit_run_state back from the background thread.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1103,12 +1108,42 @@ class TurnManager:
             try:
                 _time.sleep(2.0)
                 self._refresh_cache()
+                self._schedule_lifecycle_reconcile()
                 self._audit_tick_counter += 1
                 if self._audit_tick_counter >= _AUDIT_EVERY_TICKS:
                     self._audit_tick_counter = 0
                     self.audit_running_discrepancies()
             except Exception:
                 logger.exception("bg tick failed")
+
+    def _schedule_lifecycle_reconcile(self) -> None:
+        """Re-ground the lifecycle projection against live PID/run truth.
+
+        `reconcile_lifecycle_projection` is the only code path that clears a
+        stuck `lifecycle.turn.state` ("running") when its terminal bus event
+        (turn_complete/turn_stopped) was lost — e.g. an exception during
+        finalization. Without this call on the recurring tick, that call ran
+        exactly once (at backend startup, from recovery.py), so any session
+        whose lifecycle state got stuck after boot stayed "running" in the
+        UI forever, fully disconnected from the actual native PID. It's an
+        async coroutine that mutates `LifecycleStateTree` and asserts it
+        runs on the bound event loop, so — like `emit_run_state` above — it
+        must be handed to the loop via `run_coroutine_threadsafe`, not
+        awaited inline from this background OS thread.
+        """
+        if self._loop is None:
+            return
+        pending = self._lifecycle_reconcile_future
+        if pending is not None and not pending.done():
+            return
+        try:
+            self._lifecycle_reconcile_future = asyncio.run_coroutine_threadsafe(
+                self.reconcile_lifecycle_projection(), self._loop,
+            )
+        except Exception:
+            logger.warning(
+                "_schedule_lifecycle_reconcile: schedule failed", exc_info=True,
+            )
 
     def _refresh_cache(self) -> None:
         """Run tick_running_state then snapshot running/monitoring into cache."""
@@ -1492,6 +1527,14 @@ class TurnManager:
                     and (
                         run.get("pid") is None
                         or _pid_alive(run.get("pid"))
+                        # Between-attempts gap (continuation/retry): the
+                        # provider subprocess already exited but the turn
+                        # coroutine still owns this run — same grace window
+                        # `_prune_dead_entries` honors. Without this, a
+                        # periodic reconcile mid-turn would emit
+                        # `reconcile_turn_missing` and kill the running
+                        # indicator for a turn that is very much alive.
+                        or self._entry_owned_by_live_turn(session_id, run)
                     )
                 )
             await self.lifecycle.reconcile(
