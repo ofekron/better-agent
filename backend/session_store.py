@@ -4007,23 +4007,6 @@ def _session_runner(value: object, provider_id: Optional[str]) -> str:
     return runtime_profile.resolve_runner(record, requested)
 
 
-def _kind_for_provider(provider_id: Optional[str]) -> str:
-    if not provider_id:
-        return ""
-    record = config_store.get_provider(provider_id)
-    return (record or {}).get("kind", "") or ""
-
-
-def _default_permission_for_provider(
-    provider_id: Optional[str], runner: object = None,
-) -> dict:
-    record = config_store.get_provider(provider_id) if provider_id else None
-    kind = runtime_profile.runtime_kind(record or {}, runner) if record else ""
-    default = (record or {}).get("default_permission")
-    norm = normalize_permission(kind, default)
-    return norm if norm is not None else default_permission_for_kind(kind)
-
-
 def _session_permission(
     value: object, provider_id: Optional[str], runner: object = None,
 ) -> dict:
