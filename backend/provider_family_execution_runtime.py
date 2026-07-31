@@ -81,13 +81,31 @@ def _contract_payload(artifact: ExecutionArtifact) -> dict[str, Any]:
 
 def family_launch_from_artifact(
     artifact: ExecutionArtifact,
+    *,
+    max_retries: int = 1,
 ) -> FamilyLaunchAttestation:
     launch = FamilyLaunchAttestation.from_payload(
         _contract_payload(artifact),
     )
-    if launch.family != family_execution_kind(artifact) or not launch.attest():
+    if launch.family != family_execution_kind(artifact):
         raise ExecutionContractError("family launch authority mismatch")
-    return launch
+    
+    if launch.attest():
+        return launch
+
+    # Bounded 1-shot retry for transient live file edits during prepare->spawn window
+    for attempt in range(max_retries):
+        import logging
+        logging.warning(
+            "family_launch_from_artifact attestation mismatch (attempt %d/%d), retrying attestation...",
+            attempt + 1,
+            max_retries,
+        )
+        if launch.attest():
+            return launch
+
+    raise ExecutionContractError("family launch authority mismatch")
+
 
 
 def family_capability_manifest_from_artifact(
