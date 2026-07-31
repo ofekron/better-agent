@@ -401,6 +401,47 @@ def test_cli_path_swap_and_windows_wrappers_fail_closed() -> None:
         assert not windows.attest()
 
 
+def test_config_root_concurrent_writes_do_not_false_reject_launch() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        attestation = _capture(root)
+        assert attestation.attest()
+
+        # The provider CLI legitimately writes new, untracked files under the
+        # live config root between prepare and spawn (e.g. a fresh session
+        # jsonl for a concurrent turn, elsewhere in the same config dir).
+        # That mutates the root directory's own mtime/ctime but must NOT
+        # fail attestation: only the explicitly-tracked config files/resume
+        # log are security relevant, not incidental root directory churn.
+        untracked = root / "config" / "projects" / "other-session.jsonl"
+        untracked.parent.mkdir(parents=True, exist_ok=True)
+        untracked.write_text('{"type":"user"}\n', encoding="utf-8")
+        os.utime(root / "config", None)
+        ok, reason = attestation.attest_with_reason()
+        assert ok, reason
+
+        # Removing a previously-tracked file still fails closed (per-file
+        # attestation on the specific paths that matter is unaffected).
+        (root / "config" / "settings.json").unlink()
+        assert not attestation.attest()
+
+
+def test_config_root_swap_still_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        attestation = _capture(root)
+        assert attestation.attest()
+
+        config_root = root / "config"
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        shutil.rmtree(config_root)
+        config_root.symlink_to(elsewhere, target_is_directory=True)
+        ok, reason = attestation.attest_with_reason()
+        assert not ok
+        assert "config_root" in reason
+
+
 def test_source_package_config_resume_and_symlink_drift_fail_attestation() -> None:
     mutators = (
         lambda root: (root / "backend" / "runner.py").write_bytes(b"changed"),
@@ -816,6 +857,8 @@ TESTS = (
     test_windows_path_ctime_is_not_cross_handle_authority,
     test_runner_argv_shapes_are_exact_for_dev_frozen_and_windows,
     test_cli_path_swap_and_windows_wrappers_fail_closed,
+    test_config_root_concurrent_writes_do_not_false_reject_launch,
+    test_config_root_swap_still_fails_closed,
     test_source_package_config_resume_and_symlink_drift_fail_attestation,
     test_payload_round_trip_and_tamper_are_strict,
     test_pinned_launch_and_sdk_materialization_do_not_reread_resolution,

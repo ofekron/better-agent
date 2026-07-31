@@ -47,6 +47,43 @@ def _require_object(
         raise ExecutionContractError(f"invalid {label}")
 
 
+def _capture_directory_stat(
+    raw_path: str | Path,
+) -> tuple[Path, Path, tuple[tuple[str, str], ...], os.stat_result]:
+    """TOCTOU-safe directory (requested, resolved, symlink_chain, stat) capture.
+
+    Shared by DirectoryIdentity (full content-metadata identity) and
+    DirectoryScopeIdentity (path-confinement-only identity): both need the
+    same before/after re-stat guard against a directory swap happening
+    mid-capture, they just disagree on which of the captured stat fields are
+    later treated as attestation-relevant.
+    """
+    requested = Path(raw_path)
+    if not requested.is_absolute():
+        raise ExecutionContractError("authority directory must be absolute")
+    try:
+        chain_before = symlink_chain(requested)
+        resolved_before = requested.resolve(strict=True)
+        before = resolved_before.stat()
+        chain_after = symlink_chain(requested)
+        resolved_after = requested.resolve(strict=True)
+        after = resolved_after.stat()
+    except (OSError, RuntimeError) as exc:
+        raise ExecutionContractError(
+            "authority directory is unavailable",
+        ) from exc
+    if (
+        not stat.S_ISDIR(after.st_mode)
+        or chain_before != chain_after
+        or resolved_before != resolved_after
+        or stable_stat_identity(before) != stable_stat_identity(after)
+    ):
+        raise ExecutionContractError(
+            "authority directory changed during identity capture",
+        )
+    return requested, resolved_after, chain_after, after
+
+
 @dataclass(frozen=True)
 class DirectoryIdentity:
     requested_path: str
@@ -61,29 +98,9 @@ class DirectoryIdentity:
 
     @classmethod
     def capture(cls, raw_path: str | Path) -> DirectoryIdentity:
-        requested = Path(raw_path)
-        if not requested.is_absolute():
-            raise ExecutionContractError("authority directory must be absolute")
-        try:
-            chain_before = symlink_chain(requested)
-            resolved_before = requested.resolve(strict=True)
-            before = resolved_before.stat()
-            chain_after = symlink_chain(requested)
-            resolved_after = requested.resolve(strict=True)
-            after = resolved_after.stat()
-        except (OSError, RuntimeError) as exc:
-            raise ExecutionContractError(
-                "authority directory is unavailable",
-            ) from exc
-        if (
-            not stat.S_ISDIR(after.st_mode)
-            or chain_before != chain_after
-            or resolved_before != resolved_after
-            or stable_stat_identity(before) != stable_stat_identity(after)
-        ):
-            raise ExecutionContractError(
-                "authority directory changed during identity capture",
-            )
+        requested, resolved_after, chain_after, after = _capture_directory_stat(
+            raw_path,
+        )
         return cls(
             requested_path=str(requested.absolute()),
             resolved_path=str(resolved_after),
@@ -163,6 +180,109 @@ class DirectoryIdentity:
             )
         ):
             raise ExecutionContractError("invalid directory identity")
+        return cls(
+            requested_path=requested_path,
+            resolved_path=resolved_path,
+            symlink_chain=tuple((item[0], item[1]) for item in chain),
+            **integers,
+        )
+
+
+@dataclass(frozen=True)
+class DirectoryScopeIdentity:
+    """Path-confinement-only directory identity.
+
+    Unlike DirectoryIdentity, this intentionally does NOT track mutable
+    content metadata (size/mtime_ns/ctime_ns): it is for a root whose
+    CONTENTS are expected to change while the identity is held live (e.g. a
+    provider CLI's own config directory, which the CLI itself writes to —
+    new session/lock files, rewritten settings — during a normal launch).
+    A directory's mtime/ctime change whenever an entry is added or removed
+    underneath it, so pinning those fields for a live-written root produces
+    false-positive attestation failures unrelated to any real tamper.
+
+    Security for what actually matters inside such a root is enforced per
+    file, by ConfigIdentity/FileIdentity attestation on the exact paths the
+    caller cares about (credentials, settings, resume log). This type only
+    pins WHICH directory the root resolves to (device + inode + resolved
+    path + symlink chain + mode), so path-escape / root-swap checks stay
+    meaningful even while legitimate concurrent writes happen inside it.
+    """
+
+    requested_path: str
+    resolved_path: str
+    mode: int
+    device: int
+    inode: int
+    symlink_chain: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def capture(cls, raw_path: str | Path) -> DirectoryScopeIdentity:
+        requested, resolved_after, chain_after, after = _capture_directory_stat(
+            raw_path,
+        )
+        return cls(
+            requested_path=str(requested.absolute()),
+            resolved_path=str(resolved_after),
+            mode=after.st_mode,
+            device=after.st_dev,
+            inode=after.st_ino,
+            symlink_chain=chain_after,
+        )
+
+    def attest(self) -> bool:
+        return self.attest_with_reason()[0]
+
+    def attest_with_reason(self) -> tuple[bool, str]:
+        try:
+            current = DirectoryScopeIdentity.capture(self.requested_path)
+            if current == self:
+                return True, "ok"
+            return False, f"directory_scope_changed:{self.requested_path}"
+        except ExecutionContractError as exc:
+            return False, f"directory_scope_unavailable:{self.requested_path}:{exc}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requested_path": self.requested_path,
+            "resolved_path": self.resolved_path,
+            "mode": self.mode,
+            "device": self.device,
+            "inode": self.inode,
+            "symlink_chain": [list(item) for item in self.symlink_chain],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> DirectoryScopeIdentity:
+        _require_object(raw, {
+            "requested_path",
+            "resolved_path",
+            "mode",
+            "device",
+            "inode",
+            "symlink_chain",
+        }, "directory scope identity")
+        requested_path = required_string(raw, "requested_path")
+        resolved_path = required_string(raw, "resolved_path")
+        integers = {
+            key: required_integer(raw, key)
+            for key in ("mode", "device", "inode")
+        }
+        chain = raw["symlink_chain"]
+        if (
+            not Path(requested_path).is_absolute()
+            or not Path(resolved_path).is_absolute()
+            or not stat.S_ISDIR(integers["mode"])
+            or any(value < 0 for value in integers.values())
+            or type(chain) is not list
+            or any(
+                type(item) is not list
+                or len(item) != 2
+                or any(type(value) is not str for value in item)
+                for item in chain
+            )
+        ):
+            raise ExecutionContractError("invalid directory scope identity")
         return cls(
             requested_path=requested_path,
             resolved_path=resolved_path,

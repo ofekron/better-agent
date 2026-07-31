@@ -33,6 +33,7 @@ from codex_execution_identity import (
 from provider_launch_identity import (
     AttestedLaunch,
     DirectoryIdentity,
+    DirectoryScopeIdentity,
     _require_object,
     capture_cli_launch,
 )
@@ -48,7 +49,7 @@ from provider_runner_launch import RunnerLaunch, capture_runner_launch
 from provider_manifest import artifact_family_kinds
 
 
-ATTESTATION_SCHEMA = 1
+ATTESTATION_SCHEMA = 2
 _FAMILIES = artifact_family_kinds()
 _PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -74,7 +75,7 @@ def _config_to_dict(identity: ConfigIdentity) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ConfigScopeIdentity:
-    root: DirectoryIdentity
+    root: DirectoryScopeIdentity
     files: tuple[ConfigIdentity, ...]
     resume: FileIdentity | None
 
@@ -137,7 +138,7 @@ class ConfigScopeIdentity:
         ):
             raise ExecutionContractError("invalid config scope")
         value = cls(
-            root=DirectoryIdentity.from_dict(raw["root"]),
+            root=DirectoryScopeIdentity.from_dict(raw["root"]),
             files=tuple(config_identity_from_dict(value) for value in files),
             resume=(
                 file_identity_from_dict(resume)
@@ -172,7 +173,7 @@ def capture_config_scope(
     config_paths: tuple[str | Path, ...] = (),
     resume_path: str | Path | None = None,
 ) -> ConfigScopeIdentity:
-    root = DirectoryIdentity.capture(root_path)
+    root = DirectoryScopeIdentity.capture(root_path)
     requested_root = Path(root.requested_path)
     resolved_root = Path(root.resolved_path)
     resolved_config_paths: list[Path] = []
