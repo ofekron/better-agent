@@ -119,31 +119,30 @@ def run_catalog_lock(root: Optional[Path] = None):
             unlock(lock_file.fileno())
 
 
-def _run_state_ledger_backfill_current(root: Path) -> bool:
-    marker = run_state_ledger_backfill_marker_path(root)
+def _marker_version_current(marker_path: Path, version: int) -> bool:
     try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
+        data = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return data.get("version") == _RUN_STATE_LEDGER_BACKFILL_VERSION
+    return data.get("version") == version
+
+
+def _run_state_ledger_backfill_current(root: Path) -> bool:
+    return _marker_version_current(
+        run_state_ledger_backfill_marker_path(root), _RUN_STATE_LEDGER_BACKFILL_VERSION
+    )
 
 
 def _run_state_app_index_backfill_current(root: Path) -> bool:
-    marker = run_state_app_index_backfill_marker_path(root)
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return data.get("version") == _RUN_STATE_APP_INDEX_BACKFILL_VERSION
+    return _marker_version_current(
+        run_state_app_index_backfill_marker_path(root), _RUN_STATE_APP_INDEX_BACKFILL_VERSION
+    )
 
 
 def _reconciled_marker_backfill_current(root: Path) -> bool:
-    marker = reconciled_marker_index_backfill_marker_path(root)
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return data.get("version") == _RECONCILED_MARKER_BACKFILL_VERSION
+    return _marker_version_current(
+        reconciled_marker_index_backfill_marker_path(root), _RECONCILED_MARKER_BACKFILL_VERSION
+    )
 
 
 def _append_run_state_ledger(path: Path, data: dict) -> None:
@@ -489,6 +488,13 @@ def _write_run_state_cache(
         logger.debug("runs_dir: failed to write run-state ledger cache", exc_info=True)
 
 
+def _row_written_at(row: dict) -> float:
+    try:
+        return float(row.get("written_at"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _upsert_run_state_index_row(
     index: dict[str, list[tuple[float, str]]],
     row: dict,
@@ -497,10 +503,7 @@ def _upsert_run_state_index_row(
     state_path = str(row.get("state_path") or "")
     if not sid or not state_path:
         return
-    try:
-        written_at = float(row.get("written_at"))
-    except (TypeError, ValueError):
-        written_at = 0.0
+    written_at = _row_written_at(row)
     values = [
         (existing_written_at, existing_state_path)
         for existing_written_at, existing_state_path in index.get(sid, [])
@@ -538,10 +541,7 @@ def _extend_run_state_cache_after_append(
                 return
             sid = str(row.get("session_id") or "")
             app_session_id = str(row.get("app_session_id") or "")
-            try:
-                written_at = float(row.get("written_at"))
-            except (TypeError, ValueError):
-                written_at = 0.0
+            written_at = _row_written_at(row)
             conn.execute(
                 "INSERT OR REPLACE INTO entries (sid, state_path, written_at, app_session_id) "
                 "VALUES (?, ?, ?, ?)",
@@ -609,10 +609,7 @@ def ledger_state_files_for_sid(root: Path, agent_sid: str) -> list[Path]:
                 state_path_str = str(state_path)
                 if not _run_state_path_string_has_ledger_shape(state_path_str, root):
                     continue
-                try:
-                    written_at = float(row.get("written_at"))
-                except (TypeError, ValueError):
-                    written_at = 0.0
+                written_at = _row_written_at(row)
                 key = (sid, state_path_str)
                 current = latest_by_key.get(key)
                 if current is None or written_at >= current[0]:
