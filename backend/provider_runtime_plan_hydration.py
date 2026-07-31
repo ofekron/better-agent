@@ -14,14 +14,23 @@ from codex_execution_common import ExecutionContractError
 RUNNER_OPERATION_BROKER_REF = {"kind": "runner_operation_broker"}
 
 
+def _canonical_json_text(value: Any) -> str:
+    """Deterministic JSON encoding shared by key derivation and value capture.
+
+    `capture_runtime_hydration` stores a value under the key `hydration_key`
+    computes from its reference, so both MUST serialize identically — any
+    divergence breaks hydration lookups at apply time."""
+    return json.dumps(
+        value,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def hydration_key(reference: Mapping[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(
-            reference,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8"),
+        _canonical_json_text(reference).encode("utf-8"),
     ).hexdigest()
 
 
@@ -33,12 +42,7 @@ def capture_runtime_hydration(
     if hydration is None:
         return
     try:
-        encoded = json.dumps(
-            value,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        encoded = _canonical_json_text(value)
     except (TypeError, ValueError) as exc:
         raise ExecutionContractError(
             "runtime hydration value must be JSON-compatible",
