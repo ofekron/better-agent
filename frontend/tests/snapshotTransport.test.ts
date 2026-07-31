@@ -1128,6 +1128,115 @@ describe("SnapshotTransport — decode + validation branches", () => {
     transport.handle({ type: "messages_delta", data: { app_session_id: "s1", messages: [] } }, send, apply, 10);
     expect(apply).not.toHaveBeenCalled();
   });
+
+  it("discards a chunk whose cooperative base64 decode goes stale mid-decode", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    // One chunk whose base64 payload spans >1 decode slice (2048 quartets) so the
+    // decoder yields to the browser between slices.
+    const big = await frames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [
+        { id: "m1", role: "assistant", content: "x".repeat(7000) },
+      ] },
+    }, 7000);
+    // A second snapshot for the SAME key, used to supersede the first while its
+    // chunk decode is suspended at the yield point.
+    const small = await frames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    }, 9);
+
+    transport.handle(big.begin, send, apply);
+    send.mockClear();
+    transport.handle(big.chunks[0], send, apply);
+    // Flush microtasks only: the chunk decode runs to its first yieldToBrowser()
+    // (a setTimeout) and suspends. No macrotask has fired yet.
+    await Promise.resolve();
+    // Supersede mid-decode: bumps the first transfer's generation.
+    transport.handle(small.begin, send, apply);
+    await settle();
+
+    // The stale chunk is silently dropped — no corrupt refresh, no apply of big.
+    expect(send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "snapshot_refresh", data: expect.objectContaining({ reason: "corrupt" }) }),
+    );
+    expect(apply).not.toHaveBeenCalled();
+
+    // The transport stays healthy: completing the superseding snapshot applies it.
+    for (const chunk of small.chunks) transport.handle(chunk, send, apply);
+    transport.handle(small.end, send, apply);
+    await transport.whenIdle();
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply.mock.calls[0][0]).toMatchObject({ type: "messages_replay", data: { app_session_id: "s1" } });
+  });
+
+  it("end() flags an assembled snapshot whose bytes verify by digest but fail to parse as JSON", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    // Valid UTF-8 (so the fatal decoder succeeds) but not valid JSON; digest is
+    // computed over these exact bytes so the digest check passes and parsing throws.
+    const bytes = encoder.encode("!");
+    const d = await digest(bytes);
+    const revision = `sha256:${d}`;
+    const begin = { type: "snapshot_begin", data: {
+      snapshot_id: "snap-parse", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision, digest: d, total_bytes: bytes.length,
+      total_chunks: 1, chunk_bytes: bytes.length, resume_from: 0,
+    } };
+    const chunk = { type: "snapshot_chunk", data: {
+      snapshot_id: "snap-parse", revision, index: 0, payload: base64(bytes),
+    } };
+    const end = { type: "snapshot_end", data: {
+      snapshot_id: "snap-parse", revision, digest: d,
+      total_bytes: bytes.length, total_chunks: 1,
+    } };
+
+    transport.handle(begin as WSEvent, send, apply);
+    transport.handle(chunk as WSEvent, send, apply);
+    transport.handle(end as WSEvent, send, apply);
+    await transport.whenIdle();
+
+    expect(apply).not.toHaveBeenCalled();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt", key: "messages_replay:s1" },
+    });
+  });
+
+  it("re-beginning a key requests restart of the other unrelated in-flight transfers", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const a = await frames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    }, 9);
+    // Same event type, different key → a second distinct in-flight transfer.
+    const b = await frames({
+      type: "messages_replay", data: { app_session_id: "s2", messages: [] },
+    }, 9);
+    b.begin.data.key = "messages_replay:s2";
+    b.begin.data.snapshot_id = "snap-b";
+    b.begin.data.refresh_id = "b".repeat(32);
+    b.chunks.forEach((chunk) => { chunk.data.snapshot_id = "snap-b"; });
+    b.end.data.snapshot_id = "snap-b";
+
+    transport.handle(a.begin, send, apply);
+    transport.handle(b.begin, send, apply);
+    send.mockClear();
+    // Re-beginning key A supersedes it; the unrelated transfer B is reported for restart.
+    transport.handle(a.begin, send, apply);
+
+    expect(send).toHaveBeenCalledWith({
+      type: "snapshot_refresh", data: {
+        key: "messages_replay:s2",
+        event_type: "messages_replay",
+        failed_revision: b.revision,
+        refresh_id: "b".repeat(32),
+        reason: "restart_required",
+      },
+    });
+    expect(apply).not.toHaveBeenCalled();
+  });
 });
 
 describe("useWebSocket snapshot routing", () => {
