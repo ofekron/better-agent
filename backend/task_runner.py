@@ -525,13 +525,38 @@ async def launch_task(
         raise TaskLaunchError(
             str(acquired.get("error") or "routine launch is busy"), status=409,
         )
+    import contextlib
+
     import routine_lock
 
+    holder_token = str(acquired.get("holder_token") or "")
+
+    async def _renew_launch_lock() -> None:
+        # The lease is 15 minutes, but a launch's warm_base/bundle-capture
+        # step can legitimately run far longer (observed: ~50 minutes for
+        # task 34c34d0d64aa). Without renewal the lock silently expires
+        # mid-launch, so a second concurrent launch of the same singleton
+        # routine could slip in through the now-empty lock before this one
+        # finishes — the exact race the lock exists to prevent. Renew well
+        # inside the lease window so a slow poll never lets it lapse.
+        while True:
+            await asyncio.sleep(5 * 60)
+            await coordination.lock_ops(
+                key=lock_key,
+                renew=True,
+                holder_token=holder_token,
+                lease_seconds=15 * 60,
+            )
+
     lock_fd = None
+    renew_task = asyncio.create_task(_renew_launch_lock())
     try:
         lock_fd = await asyncio.to_thread(routine_lock.acquire, "launch", task_id)
         return await _launch_task_once(task_id, **params)
     finally:
+        renew_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await renew_task
         try:
             if lock_fd is not None:
                 await asyncio.to_thread(routine_lock.release, lock_fd)
@@ -539,7 +564,7 @@ async def launch_task(
             released = await coordination.lock_ops(
                 key=lock_key,
                 release=True,
-                holder_token=str(acquired.get("holder_token") or ""),
+                holder_token=holder_token,
             )
             if released.get("success") is not True:
                 logger.error("routine launch lock release failed for %s", task_id)
