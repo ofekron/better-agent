@@ -1,6 +1,5 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import React from "react";
 import { FileEditorOverlay } from "../src/components/FileEditorOverlay";
 
 describe("FileEditorOverlay layout", () => {

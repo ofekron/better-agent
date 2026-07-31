@@ -1,6 +1,5 @@
 import { render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import React from "react";
 import "../src/i18n";
 import { Login } from "../src/components/Login";
 import {

@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
-import React from "react";
 import { MessageBubble, TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 import type { WSEvent } from "../src/types";

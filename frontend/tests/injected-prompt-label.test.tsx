@@ -1,6 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
-import React from "react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import "../src/i18n";

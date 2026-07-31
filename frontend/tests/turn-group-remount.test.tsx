@@ -1,6 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, waitFor } from "@testing-library/react";
-import React from "react";
 import "../src/i18n";
 import { Chat } from "../src/components/Chat";
 import { makeSession, makeUserMsg } from "./fixtures";

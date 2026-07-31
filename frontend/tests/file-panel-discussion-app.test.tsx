@@ -1,4 +1,3 @@
-import React from "react";
 import { act, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeSession } from "./fixtures";

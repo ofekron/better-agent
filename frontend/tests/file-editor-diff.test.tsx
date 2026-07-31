@@ -1,6 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import React from "react";
 import { FileEditor } from "../src/components/FileEditor";
 
 vi.mock("../src/components/FileEditorPrimitives", () => ({

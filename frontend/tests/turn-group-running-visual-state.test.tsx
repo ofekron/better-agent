@@ -1,6 +1,5 @@
 import { afterEach, cleanup, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
-import React from "react";
 import "../src/i18n";
 import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
