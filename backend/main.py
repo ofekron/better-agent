@@ -914,6 +914,21 @@ async def _delete_session_tree(session_id: str) -> bool:
 
     _t = _time.perf_counter()
     removed_sids = await asyncio.to_thread(session_manager.subtree_ids, session_id)
+    # `cancel_session` above only reaches `session_id` itself and its
+    # `working_mode` children. Delegation/team-orchestration forks live in
+    # the same tree but aren't `working_mode` sessions, so without this
+    # pass their runner processes are orphaned: still running, still
+    # streaming provider events against a root that's about to vanish —
+    # turn_manager._publish_provider_stream_event then raises "cannot
+    # resolve root" on every event, indefinitely, until the runner exits
+    # on its own. `cancel_session` is idempotent, so re-cancelling
+    # `session_id`/working-mode children already handled above is a no-op.
+    await asyncio.gather(
+        *(coordinator.cancel_session(sid) for sid in removed_sids),
+        return_exceptions=True,
+    )
+    _dmark("subtree_cancel", _t)
+    _t = _time.perf_counter()
     ok = await asyncio.to_thread(session_manager.delete, session_id)
     _dmark("session_delete", _t)
     if ok:
