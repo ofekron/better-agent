@@ -37,12 +37,14 @@ WORKDIR /repo
 # of the tree, so dependency installs cache across source-only changes.
 COPY sdk/runtime-requirements.txt sdk/runtime-requirements.txt
 COPY vendor/ vendor/
-COPY backend/requirements.txt backend/requirements-claude.txt backend/
+COPY backend/requirements.txt backend/requirements-claude.txt backend/requirements-test.txt backend/
 
-# Same dependency set CI installs for backend/scripts tests — deliberately
-# excludes requirements-mobile.txt, which backend/scripts tests don't import.
+# Same runtime dependency set CI installs for backend/scripts tests —
+# deliberately excludes requirements-mobile.txt, which backend/scripts tests
+# don't import — plus requirements-test.txt (pytest itself), which is test
+# tooling, not application runtime, so it stays out of requirements.txt.
 RUN cd backend \
- && pip install --no-cache-dir -r requirements.txt -r requirements-claude.txt
+ && pip install --no-cache-dir -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
 
 # .dockerignore (repo root) strips .git, node_modules, the private nested
 # repo, and venv/build artifacts — same context used by docker/Dockerfile.

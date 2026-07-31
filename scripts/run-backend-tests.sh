@@ -69,19 +69,30 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
+# Pinned to linux/amd64 to match CI (GitHub Actions runners are x86_64), not
+# whatever arch the build host happens to be. This also sidesteps a broken
+# upstream sdist: pyxdelta only publishes prebuilt wheels for manylinux
+# (x86_64) / macOS / Windows, not linux/arm64, so a native arm64 build (e.g.
+# Apple Silicon Docker Desktop/OrbStack) falls back to pip building pyxdelta
+# from source — and that sdist is missing xdelta/xdelta3/xdelta3.c (only the
+# headers are packaged), so the build fails with
+# "fatal error: xdelta3.c: No such file or directory" regardless of this
+# repo's own dependency set.
+PLATFORM_ARGS=(--platform linux/amd64)
+
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
   IMAGE_TAG="better-agent-backend-tests:${COMMIT_SHA}"
   echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build -f docker/Dockerfile.test -t "$IMAGE_TAG" -
+    | docker build "${PLATFORM_ARGS[@]}" -f docker/Dockerfile.test -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-backend-tests:worktree"
   echo "run-backend-tests: building $IMAGE_TAG from the working tree (uncommitted changes included)"
-  docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker build "${PLATFORM_ARGS[@]}" -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
-RUN_ARGS=(--rm)
+RUN_ARGS=(--rm "${PLATFORM_ARGS[@]}")
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
