@@ -10,7 +10,6 @@ was on Inherit, even though a default provider was configured.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import tempfile

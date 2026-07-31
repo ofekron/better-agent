@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

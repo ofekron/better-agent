@@ -103,7 +103,7 @@ class _RateLimitProvider:
         return False
 
     def parse_rate_limit(self, error, events):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timezone
         # reset ~now → orchestrator wait floor (5s) keeps each retry short.
         return datetime.now(timezone.utc)
 

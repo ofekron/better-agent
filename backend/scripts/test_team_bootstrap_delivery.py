@@ -19,7 +19,6 @@ No claude CLI subprocess — `turn_manager.run_turn` is stubbed to capture.
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import sys
 from pathlib import Path

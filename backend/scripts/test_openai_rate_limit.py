@@ -12,7 +12,7 @@ through, no retry).
 """
 
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent

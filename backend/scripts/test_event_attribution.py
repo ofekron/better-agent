@@ -22,7 +22,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 
 # State-isolation rule: set BETTER_CLAUDE_HOME BEFORE importing any
 # backend module so every store, runs root, traces dir lands in a

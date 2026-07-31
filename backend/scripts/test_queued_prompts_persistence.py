@@ -11,12 +11,10 @@ Run with:
 from __future__ import annotations
 
 import json
-import asyncio
 import os
 import shutil
 import sys
 from unittest import mock
-import tempfile
 import threading
 from pathlib import Path
 

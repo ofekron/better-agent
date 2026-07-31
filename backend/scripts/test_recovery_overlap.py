@@ -16,7 +16,6 @@ Run with:
     cd backend && .venv/bin/python scripts/test_recovery_overlap.py
 """
 import asyncio
-import os
 import sys
 import tempfile
 from pathlib import Path

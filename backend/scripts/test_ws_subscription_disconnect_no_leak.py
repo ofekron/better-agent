@@ -35,9 +35,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 # State-isolation rule: set BETTER_CLAUDE_HOME BEFORE importing backend.

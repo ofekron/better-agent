@@ -1,7 +1,6 @@
 import os
 import shutil
 import sys
-import tempfile
 
 import _test_home
 TMP_HOME = _test_home.isolate("bc-test-runner-import-")

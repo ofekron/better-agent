@@ -16,7 +16,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

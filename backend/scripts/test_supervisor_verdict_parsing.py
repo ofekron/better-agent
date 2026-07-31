@@ -1,5 +1,4 @@
 import pytest
-import re
 from orchs.supervisor._verdict import _parse_verdict
 
 def test_parse_verdict_basic():

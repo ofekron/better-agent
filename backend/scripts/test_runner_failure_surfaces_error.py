@@ -44,7 +44,6 @@ import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
 
 # Per CLAUDE.md: isolate ~/.better-claude state BEFORE importing any
 # backend module.

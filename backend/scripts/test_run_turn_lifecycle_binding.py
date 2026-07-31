@@ -16,8 +16,6 @@ the code object's locals) and passes after (it becomes a bound local). It is
 robust to either fix shape: sourcing it locally OR threading it as a
 parameter both put the name in `co_varnames`.
 """
-import os
-import tempfile
 
 import _test_home
 _test_home.isolate("bc_test_lifecycle_")

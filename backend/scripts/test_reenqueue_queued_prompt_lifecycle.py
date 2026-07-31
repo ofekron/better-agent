@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 from types import SimpleNamespace
 
 import _test_home

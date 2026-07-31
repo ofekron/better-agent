@@ -18,8 +18,6 @@ helper, which the snapshot builder does not call when
 import json
 import os
 import sys
-import tempfile
-from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-stub-pins-model-switched-")

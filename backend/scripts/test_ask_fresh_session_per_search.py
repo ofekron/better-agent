@@ -11,9 +11,7 @@ throwaway workers would clutter the UI and could be proposed as targets.
 excludes it. This guard writes a worker-mode session to disk and asserts
 `_build_index` (and `validate_proposed`) skip it.
 """
-import os
 import sys
-import tempfile
 
 import _test_home
 _test_home.isolate("bc_test_search_worker_")

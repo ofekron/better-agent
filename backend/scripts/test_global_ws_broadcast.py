@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path

@@ -23,7 +23,6 @@ import os
 import shutil
 import socket
 import sys
-import tempfile
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-terminal-asid-")

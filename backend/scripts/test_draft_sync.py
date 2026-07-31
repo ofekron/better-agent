@@ -18,7 +18,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 
 # Per CLAUDE.md, isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module so the dev's real session store is

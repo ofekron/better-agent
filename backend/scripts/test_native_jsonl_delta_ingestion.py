@@ -28,7 +28,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import uuid as _uuid
 from pathlib import Path
 

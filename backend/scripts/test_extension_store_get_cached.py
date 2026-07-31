@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 
 import _test_home
 _test_home.isolate("bc-test-ext-get-cached-")

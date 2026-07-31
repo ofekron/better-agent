@@ -21,7 +21,6 @@ runs (depth >= 2); post-fix the guard prevents it (depth == 1).
 import os
 import shutil
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 

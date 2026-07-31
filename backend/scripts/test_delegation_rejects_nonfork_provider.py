@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 # Per CLAUDE.md, isolate ~/.better-claude state to a tempdir BEFORE

@@ -19,7 +19,6 @@ import os
 import shutil
 import shutil as _shutil
 import sys
-import tempfile
 from pathlib import Path
 
 

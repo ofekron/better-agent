@@ -35,7 +35,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import time
 
 # State-isolation rule: set BETTER_CLAUDE_HOME BEFORE importing any

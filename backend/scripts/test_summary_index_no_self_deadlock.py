@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import threading
 
 import _test_home

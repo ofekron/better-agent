@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 
 import _test_home
 _test_home.isolate("ba-rs-")

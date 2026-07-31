@@ -22,7 +22,6 @@ Run with:
 import asyncio
 import os
 import sys
-import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

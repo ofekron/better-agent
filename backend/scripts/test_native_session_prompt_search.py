@@ -28,7 +28,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

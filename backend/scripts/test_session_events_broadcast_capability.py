@@ -16,7 +16,6 @@ These assertions lock:
 from __future__ import annotations
 
 import inspect
-import os
 import sys
 import tempfile
 from pathlib import Path

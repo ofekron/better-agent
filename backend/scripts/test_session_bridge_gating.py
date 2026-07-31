@@ -5,9 +5,7 @@ Run: python backend/scripts/test_session_bridge_gating.py
 """
 
 import asyncio
-import os
 import sys
-import tempfile
 import types
 from pathlib import Path
 

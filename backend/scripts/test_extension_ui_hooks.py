@@ -4,9 +4,7 @@ manifest builders round-tripping through core validation."""
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home

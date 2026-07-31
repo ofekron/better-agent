@@ -16,7 +16,6 @@ locals) and passes after (it becomes a bound local).
 Run with:
     cd backend && .venv/bin/python scripts/test_run_turn_provider_binding.py
 """
-import os
 import sys
 from pathlib import Path
 

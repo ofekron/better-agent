@@ -28,7 +28,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-phantom-")

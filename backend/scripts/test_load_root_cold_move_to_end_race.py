@@ -23,7 +23,6 @@ import collections
 import os
 import shutil
 import sys
-import tempfile
 
 import _test_home
 _BC_HOME = _test_home.isolate("bc-cold-race-test-")

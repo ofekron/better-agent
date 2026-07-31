@@ -14,11 +14,9 @@ Run with:
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
-import tempfile
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-meta-")

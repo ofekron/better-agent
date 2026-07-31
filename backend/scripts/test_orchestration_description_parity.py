@@ -16,7 +16,6 @@ Run: python backend/scripts/test_orchestration_description_parity.py
 """
 import os
 import sys
-import tempfile
 
 # Isolate state dir BEFORE importing backend modules (project rule).
 import _test_home

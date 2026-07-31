@@ -26,7 +26,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import uuid
 
 import _test_home

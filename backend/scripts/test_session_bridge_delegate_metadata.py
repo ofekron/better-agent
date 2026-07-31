@@ -10,7 +10,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 import types
 
 import _test_home

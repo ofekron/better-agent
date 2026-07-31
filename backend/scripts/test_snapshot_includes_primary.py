@@ -14,7 +14,6 @@ Fix: snapshot() emits a role="primary" entry (id matching
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 # ── Isolate state ──────────────────────────────────────────────────────────

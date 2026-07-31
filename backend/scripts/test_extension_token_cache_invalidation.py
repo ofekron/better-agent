@@ -13,7 +13,6 @@ store_fingerprint, so an external write invalidates it.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 import sys

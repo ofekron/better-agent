@@ -24,7 +24,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 # Per CLAUDE.md: isolate ~/.better-claude state to a tempdir BEFORE

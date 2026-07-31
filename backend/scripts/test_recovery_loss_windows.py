@@ -29,10 +29,8 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import time
 import uuid
-from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-recovery-loss-")

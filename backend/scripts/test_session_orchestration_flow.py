@@ -20,9 +20,7 @@ import os
 import json
 import shutil
 import sys
-import tempfile
 import threading
-import time
 from pathlib import Path
 
 # Per CLAUDE.md, isolate ~/.better-claude state to a tempdir BEFORE

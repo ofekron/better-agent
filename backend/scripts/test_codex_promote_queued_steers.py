@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 from pathlib import Path
 import shutil
 import sys
-import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "backend"))

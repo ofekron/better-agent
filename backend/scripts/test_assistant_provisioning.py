@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from pathlib import Path
 
 # Per CLAUDE.md: isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module.

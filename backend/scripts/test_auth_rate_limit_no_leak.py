@@ -15,7 +15,6 @@ import atexit
 import os
 import shutil
 import sys
-import tempfile
 
 # State-dir isolation BEFORE importing backend modules (project rule).
 import _test_home

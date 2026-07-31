@@ -8,13 +8,11 @@ is missing due to an early crash.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
 import sys
 import uuid
-from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-agy-recovery-")

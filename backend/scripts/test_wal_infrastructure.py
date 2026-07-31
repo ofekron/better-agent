@@ -29,11 +29,9 @@ Run with:
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import stat
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

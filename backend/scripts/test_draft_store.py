@@ -13,9 +13,7 @@ Verifies:
     methods, or `DRAFT_FLUSH_DELAY` constant.
 """
 import ast
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home

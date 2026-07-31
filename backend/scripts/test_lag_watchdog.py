@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

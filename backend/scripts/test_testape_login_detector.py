@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from contextlib import contextmanager
 
 import _test_home

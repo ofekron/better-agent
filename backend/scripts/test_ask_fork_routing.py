@@ -9,9 +9,7 @@ instructions/worker/delegation-id contract, so no fork logic is duplicated.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home

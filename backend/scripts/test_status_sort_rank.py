@@ -14,7 +14,6 @@ Locks the backend half of the "group by status" sort option:
 Run with:
     cd backend && .venv/bin/python scripts/test_status_sort_rank.py
 """
-import os
 import sys
 from pathlib import Path
 

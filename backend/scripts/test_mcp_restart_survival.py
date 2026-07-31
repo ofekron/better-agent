@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path

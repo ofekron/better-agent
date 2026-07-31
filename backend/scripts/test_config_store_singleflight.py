@@ -17,7 +17,6 @@ import json
 import sys
 import threading
 import time
-import tempfile
 
 import _test_home
 _test_home.isolate("bc-test-config-singleflight-")

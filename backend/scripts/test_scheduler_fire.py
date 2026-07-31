@@ -10,7 +10,6 @@ import asyncio
 import os
 import shutil
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 import _test_home

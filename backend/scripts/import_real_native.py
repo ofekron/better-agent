@@ -22,7 +22,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

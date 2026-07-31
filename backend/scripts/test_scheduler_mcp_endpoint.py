@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 import _test_home

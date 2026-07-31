@@ -11,7 +11,6 @@ over idle; stopped when no live run.
 
 import os
 import sys
-import tempfile
 
 import _test_home
 _test_home.isolate("bc_montest_")

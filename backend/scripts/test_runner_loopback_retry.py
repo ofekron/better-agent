@@ -1,5 +1,4 @@
 import sys
-import tempfile
 import urllib.error
 import json
 import io

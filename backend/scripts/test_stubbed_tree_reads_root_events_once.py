@@ -1,7 +1,6 @@
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import _test_home

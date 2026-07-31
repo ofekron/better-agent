@@ -21,7 +21,6 @@ import os
 import base64
 import shutil
 import sys
-import tempfile
 import urllib.request
 
 import _test_home

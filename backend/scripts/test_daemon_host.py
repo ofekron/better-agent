@@ -9,7 +9,6 @@ Run: backend/.venv/bin/python backend/scripts/test_daemon_host.py
 from __future__ import annotations
 
 import shutil
-import json
 import os
 import subprocess
 import sys
