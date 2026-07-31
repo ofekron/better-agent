@@ -1195,6 +1195,8 @@
   "message.effort": "Усилие",
   "message.runner": "Раннер",
   "message.runtimeChanged": "Среда выполнения изменена",
+  "message.modelSwitched": "Модель изменена",
+  "message.reasoningChanged": "Уровень рассуждений изменён",
   "newSession.machineVersionMismatch": "версия не совпадает",
   "newSession.machineDirty": "локальные изменения",
   "rateLimit.continueOnAnotherProvider": "Продолжить у другого провайдера",

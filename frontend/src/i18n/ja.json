@@ -1193,6 +1193,8 @@
   "message.effort": "労力",
   "message.runner": "ランナー",
   "message.runtimeChanged": "ランタイムが変更されました",
+  "message.modelSwitched": "モデルを切り替えました",
+  "message.reasoningChanged": "推論レベルを変更しました",
   "newSession.machineVersionMismatch": "バージョン不一致",
   "newSession.machineDirty": "ローカル変更",
   "rateLimit.continueOnAnotherProvider": "別のプロバイダーで続行",

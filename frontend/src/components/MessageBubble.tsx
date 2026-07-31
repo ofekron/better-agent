@@ -38,6 +38,7 @@ import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId, providerKindForId } from "../utils/providerCache";
+import { providerDisplayName } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
 import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
@@ -959,6 +960,8 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const previousModel = typeof data.previous_model === "string" ? data.previous_model : "";
   const previousProviderId = typeof data.previous_provider_id === "string" ? data.previous_provider_id : "";
   const previousProviderName = typeof data.previous_provider_name === "string" ? data.previous_provider_name : "";
+  const providerNick = typeof data.provider_nickname === "string" ? data.provider_nickname : "";
+  const previousProviderNick = typeof data.previous_provider_nickname === "string" ? data.previous_provider_nickname : "";
   const previousProviderKind = typeof data.previous_provider_kind === "string" ? data.previous_provider_kind : "";
   const reasoningEffort = typeof data.reasoning_effort === "string" ? data.reasoning_effort : "";
   const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
@@ -969,12 +972,16 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const hasReasoningChange = changed.includes("reasoning_effort");
   const hasRunnerChange = changed.includes("runner");
   if (!model && !providerId && !reasoningEffort && !runner) return null;
-  const fromProvider = previousProviderName
-    || (previousProviderKind ? t(runtimeKindLabelKey(previousProviderKind), { defaultValue: previousProviderKind }) : "")
-    || previousProviderId;
-  const toProvider = providerName
-    || (providerKind ? t(runtimeKindLabelKey(providerKind), { defaultValue: providerKind }) : "")
-    || providerId;
+  const fromProvider = providerDisplayName(
+    { name: previousProviderName, nickname: previousProviderNick },
+    (previousProviderKind ? t(runtimeKindLabelKey(previousProviderKind), { defaultValue: previousProviderKind }) : "")
+      || previousProviderId,
+  );
+  const toProvider = providerDisplayName(
+    { name: providerName, nickname: providerNick },
+    (providerKind ? t(runtimeKindLabelKey(providerKind), { defaultValue: providerKind }) : "")
+      || providerId,
+  );
   const includeEffort = hasReasoningChange || Boolean(reasoningEffort || previousReasoningEffort);
   const includeRunner = hasRunnerChange || Boolean(runner || previousRunner);
   const fromRunner = previousRunner ? t(runnerLabelKey(previousProviderKind, previousRunner), previousRunner) : "";
@@ -986,7 +993,7 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
     : reasoningEffort;
   const label = hasRunnerChange
     ? t("message.runtimeChanged")
-    : hasModelChange || !hasReasoningChange ? "Model switched" : "Reasoning changed";
+    : hasModelChange || !hasReasoningChange ? t("message.modelSwitched") : t("message.reasoningChanged");
   return (
     <div className="event-model-switched">
       <span>{label}</span>

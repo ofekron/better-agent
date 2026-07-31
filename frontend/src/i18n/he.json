@@ -1224,6 +1224,8 @@
   "message.effort": "מאמץ",
   "message.runner": "מנוע הרצה",
   "message.runtimeChanged": "סביבת הריצה השתנתה",
+  "message.modelSwitched": "המודל הוחלף",
+  "message.reasoningChanged": "רמת החשיבה שונתה",
   "newSession.machineVersionMismatch": "גרסה לא תואמת",
   "newSession.machineDirty": "שינויים מקומיים",
   "rateLimit.continueOnAnotherProvider": "המשך בספק אחר",

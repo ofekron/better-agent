@@ -1193,6 +1193,8 @@
   "message.effort": "Aufwand",
   "message.runner": "Runner",
   "message.runtimeChanged": "Runtime changed",
+  "message.modelSwitched": "Modell gewechselt",
+  "message.reasoningChanged": "Reasoning geändert",
   "newSession.machineVersionMismatch": "Versionskonflikt",
   "newSession.machineDirty": "lokale Änderungen",
   "rateLimit.continueOnAnotherProvider": "Bei anderem Anbieter fortsetzen",

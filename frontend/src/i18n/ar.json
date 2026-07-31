@@ -1193,6 +1193,8 @@
   "message.effort": "الجهد",
   "message.runner": "المشغّل",
   "message.runtimeChanged": "تغيّرت بيئة التشغيل",
+  "message.modelSwitched": "تم تبديل النموذج",
+  "message.reasoningChanged": "تم تغيير مستوى التفكير",
   "newSession.machineVersionMismatch": "عدم تطابق الإصدار",
   "newSession.machineDirty": "تغييرات محلية",
   "rateLimit.continueOnAnotherProvider": "المتابعة على مزوّد آخر",

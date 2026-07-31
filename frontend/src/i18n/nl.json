@@ -1193,6 +1193,8 @@
   "message.effort": "Inspanning",
   "message.runner": "Runner",
   "message.runtimeChanged": "Runtime changed",
+  "message.modelSwitched": "Model gewisseld",
+  "message.reasoningChanged": "Redenering gewijzigd",
   "newSession.machineVersionMismatch": "versie komt niet overeen",
   "newSession.machineDirty": "lokale wijzigingen",
   "rateLimit.continueOnAnotherProvider": "Doorgaan op andere provider",

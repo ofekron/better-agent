@@ -1224,6 +1224,8 @@
   "message.effort": "Effort",
   "message.runner": "Runner",
   "message.runtimeChanged": "Runtime changed",
+  "message.modelSwitched": "Model switched",
+  "message.reasoningChanged": "Reasoning changed",
   "newSession.machineVersionMismatch": "version mismatch",
   "newSession.machineDirty": "local changes",
   "rateLimit.continueOnAnotherProvider": "Continue on another provider",

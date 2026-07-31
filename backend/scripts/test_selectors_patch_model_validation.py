@@ -37,6 +37,7 @@ def main_test() -> int:
         "name": "Provider A",
         "kind": "claude",
         "mode": "subscription",
+        "nickname": "Work",
         "default_model": "model-a",
         "custom_models": ["model-a"],
     })
@@ -44,6 +45,7 @@ def main_test() -> int:
         "name": "Provider B",
         "kind": "claude",
         "mode": "subscription",
+        "nickname": "Personal",
         "default_model": "model-b",
         "custom_models": ["model-b"],
     })
@@ -89,6 +91,12 @@ def main_test() -> int:
     assert len(journal_switches) == 1, rows
     assert journal_switches[0]["data"]["previous_model"] == "model-a"
     assert journal_switches[0]["data"]["model"] == "model-b"
+    # The account nickname distinguishes two providers of the same kind, so it
+    # must be snapshotted alongside the name on both sides of the switch.
+    assert journal_switches[0]["data"]["previous_provider_name"] == "Provider A"
+    assert journal_switches[0]["data"]["previous_provider_nickname"] == "Work"
+    assert journal_switches[0]["data"]["provider_name"] == "Provider B"
+    assert journal_switches[0]["data"]["provider_nickname"] == "Personal"
     summary = session_store._build_summary_for_root(rec)
     assert summary["model"] == "model-b"
     assert summary["model_history"] == ["model-a", "model-b"]
