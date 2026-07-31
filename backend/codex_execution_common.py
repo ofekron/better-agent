@@ -320,6 +320,16 @@ def cached_sha256_fd(fd: int, cache_key: tuple[str, tuple[int, ...]]) -> str:
     return digest
 
 
+_AttestResultT = TypeVar("_AttestResultT")
+
+
+def _attest_result_ok(result: object) -> bool:
+    """Pass/fail of an attestation result: a bare bool, or `(ok, reason)`."""
+    if isinstance(result, tuple):
+        return bool(result[0])
+    return bool(result)
+
+
 class AttestOnceCache:
     """Per-instance cache collapsing repeated full-hash attestation calls.
 
@@ -339,18 +349,19 @@ class AttestOnceCache:
 
     def resolve(
         self,
-        full_check: Callable[[], bool],
-        metadata_check: Callable[[], bool],
-    ) -> bool:
+        full_check: Callable[[], _AttestResultT],
+        metadata_check: Callable[[], _AttestResultT],
+    ) -> _AttestResultT:
         with self._lock:
             verified = self._verified
         if verified:
             return metadata_check()
-        if not full_check():
-            return False
+        result = full_check()
+        if not _attest_result_ok(result):
+            return result
         with self._lock:
             self._verified = True
-        return True
+        return result
 
 
 def sha256_and_first_line_fd(fd: int) -> tuple[str, bytes]:

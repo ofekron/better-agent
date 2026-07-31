@@ -368,22 +368,6 @@ class FamilyLaunchAttestation:
                 logging.warning("FamilyLaunchAttestation failed: reason=%s family=%s", res[1], self.family)
             return res
 
-    def _full_attest(self) -> bool:
-        return self._full_attest_with_reason()[0]
-
-    def _full_attest_with_reason(self) -> tuple[bool, str]:
-        if not self.runner.attest():
-            return False, "runner_launch_attestation_failed"
-        if not self.downstream.attest():
-            return False, "downstream_cli_attestation_failed"
-        if not self.config.attest():
-            return False, "config_scope_attestation_failed"
-        for package in self.critical_packages:
-            if not package.attest():
-                return False, f"critical_package_attestation_failed:{package.package_name}"
-        return True, "ok"
-
-
     def attest_metadata(self) -> bool:
         """Cheap stat-tuple-only re-check used once this attestation has
         already been fully hash-verified earlier in the same launch/spawn
