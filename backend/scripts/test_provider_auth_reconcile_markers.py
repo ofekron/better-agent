@@ -10,10 +10,12 @@ provider tokens, no network.
 """
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -287,6 +289,175 @@ def test_reconcile_provider_config_skips_when_nothing_changed():
         assert broadcast_calls == [], "broadcast fired despite no changes"
     finally:
         provider_auth._config_change_broadcast = None
+        _restore_all()
+
+
+class _CaptureHandler(logging.Handler):
+    """Collects LogRecords so tests can assert on the reconcile done-callback's
+    error log without a pytest fixture (keeps the module self-runnable)."""
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_reconcile_kills_stale_in_flight_proc_on_config_drift():
+    """Security: when a provider's committed config drifts from the in-flight
+    login flow, reconciliation kills the still-running login subprocess so a
+    superseded OAuth exchange can't complete against stale credentials. Also
+    covers the broadcast-None branch (changed set non-empty, no broadcast)."""
+    rec = _add_provider()
+    provider_auth._provider_auth_fingerprints.clear()
+    provider_auth._committed_config_changes.clear()
+    provider_auth._flow_fingerprints.pop(rec["id"], None)
+    killed: list = []
+    provider_auth._kill_proc = lambda proc: killed.append(proc)  # type: ignore
+    live = type("P", (), {"returncode": None, "pid": 4242})()
+    provider_auth._procs[rec["id"]] = live
+    provider_auth._config_change_broadcast = None  # exercises 285->287 branch
+    provider_auth._status_shutting_down = False
+    provider_auth._config_reconcile_requested = True
+    try:
+
+        async def _drive():
+            await provider_auth._reconcile_provider_config()
+
+        asyncio.run(_drive())
+        assert live in killed, "stale in-flight proc was not killed on drift"
+        assert rec["id"] not in provider_auth._flow_fingerprints
+    finally:
+        provider_auth._procs.pop(rec["id"], None)
+        provider_auth._config_change_broadcast = None
+        _restore_all()
+
+
+def test_reconcile_skips_kill_when_flow_fingerprint_matches_current():
+    """If a record is marked changed (via committed-config changes) but its
+    in-flight flow fingerprint already matches the new authority, there is no
+    drift to kill for -> the kill block is skipped (line 277 False branch)."""
+    rec = _add_provider()
+    current_fp = provider_auth._auth_fingerprint(rec)
+    assert current_fp is not None
+    provider_auth._provider_auth_fingerprints[rec["id"]] = current_fp
+    provider_auth._flow_fingerprints[rec["id"]] = current_fp
+    provider_auth._committed_config_changes = {rec["id"]}
+    provider_auth._auth_cache.pop(rec["id"], None)
+    killed: list = []
+    provider_auth._kill_proc = lambda proc: killed.append(proc)  # type: ignore
+    finished = type("P", (), {"returncode": 0, "pid": 7})()
+    provider_auth._procs[rec["id"]] = finished
+    provider_auth._config_change_broadcast = None
+    provider_auth._status_shutting_down = False
+    provider_auth._config_reconcile_requested = True
+    try:
+
+        async def _drive():
+            await provider_auth._reconcile_provider_config()
+
+        asyncio.run(_drive())
+        assert killed == [], "no kill expected when flow fingerprint matches current"
+        # committed-config changes are drained once reconciled into the change set.
+        assert provider_auth._committed_config_changes == set()
+    finally:
+        provider_auth._procs.pop(rec["id"], None)
+        provider_auth._config_change_broadcast = None
+        _restore_all()
+
+
+def test_reconcile_loops_again_when_broadcast_redrives_request():
+    """The reconcile while-loop must re-iterate when something re-arms
+    _config_reconcile_requested during the in-flight iteration (here: the
+    broadcast callback), covering the 287->235 loop back-edge in-task."""
+    rec = _add_provider()
+    provider_auth._provider_auth_fingerprints.clear()
+    provider_auth._committed_config_changes.clear()
+    broadcast_calls = {"n": 0}
+
+    async def broadcast():
+        broadcast_calls["n"] += 1
+        if broadcast_calls["n"] == 1:
+            # Re-arm mid-iteration so the while-loop runs a second time in-task.
+            provider_auth._config_reconcile_requested = True
+
+    refreshed: list = []
+    provider_auth.maybe_schedule_refresh = lambda pid, b: refreshed.append(pid)  # type: ignore
+    provider_auth._config_change_broadcast = broadcast
+    provider_auth._status_shutting_down = False
+    provider_auth._config_reconcile_requested = True
+    try:
+
+        async def _drive():
+            await provider_auth._reconcile_provider_config()
+
+        asyncio.run(_drive())
+        # Second iteration finds nothing changed -> broadcast fires exactly once.
+        assert broadcast_calls["n"] == 1, broadcast_calls["n"]
+        assert rec["id"] in refreshed
+    finally:
+        provider_auth._config_change_broadcast = None
+        _restore_all()
+
+
+def test_reconcile_done_callback_logs_and_rerequests_on_failure():
+    """The reconcile task's done-callback (a) logs the exception when the task
+    raised, and (b) re-requests reconciliation when a request is still pending.
+    A gated list_providers blocks the failing task so we can re-arm the request
+    flag while the task is still in flight (otherwise the task clears it before
+    raising)."""
+    provider_auth._provider_auth_fingerprints.clear()
+    provider_auth._committed_config_changes.clear()
+    gate = threading.Event()
+    calls = {"n": 0}
+
+    def _gated_list():
+        calls["n"] += 1
+        gate.wait(timeout=3.0)
+        if calls["n"] == 1:
+            raise RuntimeError("reconcile boom")
+        return _orig_list_providers()
+
+    config_store.list_providers = _gated_list
+    handler = _CaptureHandler()
+    provider_auth.logger.addHandler(handler)
+    try:
+
+        async def scenario():
+            provider_auth._status_shutting_down = False
+            provider_auth.configure_config_change_broadcast(None)
+            provider_auth.bind_config_change_loop()  # requests reconcile -> task1
+            # Wait for task1 to enter _reconcile_provider_config and block on gate.
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if calls["n"] >= 1:
+                    break
+            # Re-arm the request flag while task1 is blocked (it already cleared it).
+            provider_auth._request_config_reconcile()
+            assert provider_auth._config_reconcile_requested is True
+            gate.set()  # release task1 -> raises -> done-callback fires
+            # Pump until the re-requested task2 settles and no request stays pending.
+            for _ in range(400):
+                await asyncio.sleep(0.01)
+                t = provider_auth._config_reconcile_task
+                if t is not None and t.done() and not provider_auth._config_reconcile_requested:
+                    break
+            await asyncio.sleep(0.02)
+
+        asyncio.run(scenario())
+        # 223: the failure was logged.
+        assert any(
+            "config reconciliation failed" in r.getMessage() for r in handler.records
+        ), [r.getMessage() for r in handler.records]
+        # 228: the done-callback re-requested, so a second list_providers ran.
+        assert calls["n"] >= 2, calls["n"]
+    finally:
+        provider_auth.logger.removeHandler(handler)
+        provider_auth._config_change_broadcast = None
+        provider_auth._config_change_loop = None
+        provider_auth._config_reconcile_task = None
+        gate.set()
         _restore_all()
 
 
