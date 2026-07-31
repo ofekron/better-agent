@@ -7643,7 +7643,10 @@ function AppMain({
             const sendOrch =
               parentRecord?.orchestration_mode ??
               (fallback?.orchestration_mode as OrchestrationMode | undefined);
-            await selectSession(parentId);
+            // Navigate via the URL so the route-sync effect swaps the
+            // selection — a direct selectSession loses to the effect,
+            // which re-selects the eng session still in the URL.
+            navigate(sessionPath(parentId));
             sendMessage(
               content,
               sendModel,
@@ -7682,7 +7685,8 @@ function AppMain({
             } catch {
               // The cleanup is idempotent and the session may already be gone.
             }
-            await selectSession(parentId);
+            // Same route-sync rule as onPromptEngineerSend: swap via URL.
+            navigate(sessionPath(parentId));
             refreshSessions();
           };
 
@@ -8234,7 +8238,12 @@ function AppMain({
                   const data = await handle.promise;
                   const engSid = data.eng_session_id;
                   handle.armWSExtender(makeSessionExtender(engSid, "turn_complete"));
-                  await selectSession(engSid);
+                  // Navigate via the URL so the route-sync effect drives
+                  // selectSession — same pattern as handleResumeEng. A
+                  // direct selectSession here loses to the route-sync
+                  // effect, which re-selects the parent still in the URL
+                  // and unmounts the overlay.
+                  navigate(sessionPath(engSid));
                   setPromptEngModalDraft(null);
                   refreshSessions();
                 } catch (e) {
