@@ -432,7 +432,7 @@ class OrchestrationStrategy(ABC):
         """Trace step label for a primary turn in this mode
         (e.g. 'native_turn' or 'manager_turn')."""
 
-    def wrap_cli_prompt(self, *, cwd: str, prompt: str, session: dict) -> str:
+    async def wrap_cli_prompt(self, *, cwd: str, prompt: str, session: dict) -> str:
         """Transform the user prompt into the text actually fed to the
         CLI for a primary turn. Identity by default (native); manager
         overrides to prepend BOOTSTRAP + <known_workers>."""
@@ -486,7 +486,7 @@ class OrchestrationStrategy(ABC):
         final_cli = (
             cli_prompt
             if cli_prompt is not None
-            else self.wrap_cli_prompt(cwd=cwd, prompt=prompt, session=session)
+            else await self.wrap_cli_prompt(cwd=cwd, prompt=prompt, session=session)
         )
         await coordinator.turn_manager.run_turn(
             session=session,

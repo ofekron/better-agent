@@ -302,7 +302,7 @@ async def _release_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
     if not holder_token:
         return {"success": False, "error": "holder_token_required"}
 
-    async with _locks_guard:
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -320,16 +320,18 @@ async def _release_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
 
             for key in locked:
                 _locks.pop(key, None)
-            changed = True
             _save_locks_unlocked()
+            return {"success": True, "released": True, "key": keys[0], "keys": keys}
 
-    return {"success": True, "released": True, "key": keys[0], "keys": keys}
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
 
 
 async def _release_owned_keys(keys: list[str], owner: dict[str, str]) -> dict[str, Any]:
     if not owner:
         return {"success": False, "error": "owner_required"}
-    async with _locks_guard:
+
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -352,13 +354,17 @@ async def _release_owned_keys(keys: list[str], owner: dict[str, str]) -> dict[st
                 _locks.pop(lock_key, None)
                 changed = True
             _save_locks_if_changed_unlocked(changed)
-    return {"success": True, "released": True, "key": released[0] if released else "", "keys": released}
+            return {"success": True, "released": True, "key": released[0] if released else "", "keys": released}
+
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
 
 
 async def _list_owned_locks(owner: dict[str, str]) -> dict[str, Any]:
     if not owner:
         return {"success": False, "error": "owner_required"}
-    async with _locks_guard:
+
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -373,13 +379,17 @@ async def _list_owned_locks(owner: dict[str, str]) -> dict[str, Any]:
                 if _same_trusted_owner(rec, owner)
             ]
             _save_locks_if_changed_unlocked(changed)
-    return {"success": True, "locks": locks, "keys": [item["key"] for item in locks]}
+            return {"success": True, "locks": locks, "keys": [item["key"] for item in locks]}
+
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
 
 
 async def _validate_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
     if not holder_token:
         return {"success": False, "error": "holder_token_required"}
-    async with _locks_guard:
+
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -396,11 +406,15 @@ async def _validate_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
             _save_locks_if_changed_unlocked(changed)
             return result
 
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
+
 
 async def _reattach_keys(keys: list[str], owner: dict[str, str]) -> dict[str, Any]:
     if not owner:
         return {"success": False, "error": "owner_required"}
-    async with _locks_guard:
+
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -443,6 +457,9 @@ async def _reattach_keys(keys: list[str], owner: dict[str, str]) -> dict[str, An
             _save_locks_if_changed_unlocked(changed)
             return result
 
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
+
 
 async def _renew_keys(
     keys: list[str],
@@ -450,7 +467,7 @@ async def _renew_keys(
     owner: dict[str, str],
     lease_seconds: float,
 ) -> dict[str, Any]:
-    async with _locks_guard:
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -483,7 +500,6 @@ async def _renew_keys(
                 _locks[lock_key]["expires_at"] = expires_at
                 _locks[lock_key]["renewed_at"] = now
                 _locks[lock_key]["renewed_at_epoch"] = renewed_at_epoch
-            changed = True
             if len(tokens) == 1:
                 result = _success_payload(key=keys[0], keys=keys, token=next(iter(tokens)), now=now)
                 _save_locks_unlocked()
@@ -502,6 +518,9 @@ async def _renew_keys(
             _save_locks_unlocked()
             return result
 
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)
+
 
 async def _acquire_keys(
     keys: list[str],
@@ -516,73 +535,79 @@ async def _acquire_keys(
     deadline = start + timeout_seconds
     waited = False
 
+    def _do() -> dict[str, Any] | None:
+        nonlocal acquired, waited_keys, waited
+        with _locked_store():
+            _load_locks_unlocked()
+            now = _now()
+            changed = _expire_locks(now, keys)
+            acquired = {
+                lock_key
+                for lock_key in acquired
+                if (
+                    (rec := _locks.get(lock_key))
+                    and secrets.compare_digest(str(rec.get("holder_token") or ""), token)
+                )
+            }
+            blocked: dict[str, Any] | None = None
+            blocked_keys: set[str] = set()
+            for lock_key in sorted(keys):
+                rec = _held_by_other(lock_key, token)
+                if rec:
+                    blocked_keys.add(lock_key)
+                    if blocked is None:
+                        blocked = _blocked_payload(lock_key, rec, now)
+                    continue
+                if lock_key not in acquired:
+                    acquired_at = _now()
+                    _locks[lock_key] = _lock_record(token, acquired_at + lease_seconds, owner, acquired_at)
+                    acquired.add(lock_key)
+                    changed = True
+
+            if blocked:
+                waited = True
+                waited_keys.update(blocked_keys)
+
+            if not blocked:
+                result = _success_payload(
+                    key=keys[0],
+                    keys=keys,
+                    token=token,
+                    now=now,
+                    waited=waited,
+                    waited_seconds=_now() - start,
+                    waited_keys=waited_keys,
+                )
+                _save_locks_unlocked()
+                return result
+
+            if now >= deadline:
+                for acquired_key in acquired:
+                    rec = _locks.get(acquired_key)
+                    if rec and secrets.compare_digest(str(rec.get("holder_token") or ""), token):
+                        _locks.pop(acquired_key, None)
+                        changed = True
+                result = {
+                    "success": False,
+                    "error": "timeout",
+                    "key": blocked["key"],
+                    "keys": keys,
+                    "locked_keys": sorted(acquired),
+                    "blocked_keys": sorted(waited_keys or blocked_keys),
+                    "expires_in_seconds": blocked["expires_in_seconds"],
+                    "holder": blocked["holder"],
+                }
+                _save_locks_unlocked()
+                return result
+
+            _save_locks_if_changed_unlocked(changed)
+            return None
+
     while True:
         async with _locks_guard:
-            with _locked_store():
-                _load_locks_unlocked()
-                now = _now()
-                changed = _expire_locks(now, keys)
-                acquired = {
-                    lock_key
-                    for lock_key in acquired
-                    if (
-                        (rec := _locks.get(lock_key))
-                        and secrets.compare_digest(str(rec.get("holder_token") or ""), token)
-                    )
-                }
-                blocked: dict[str, Any] | None = None
-                blocked_keys: set[str] = set()
-                for lock_key in sorted(keys):
-                    rec = _held_by_other(lock_key, token)
-                    if rec:
-                        blocked_keys.add(lock_key)
-                        if blocked is None:
-                            blocked = _blocked_payload(lock_key, rec, now)
-                        continue
-                    if lock_key not in acquired:
-                        acquired_at = _now()
-                        _locks[lock_key] = _lock_record(token, acquired_at + lease_seconds, owner, acquired_at)
-                        acquired.add(lock_key)
-                        changed = True
-
-                if blocked:
-                    waited = True
-                    waited_keys.update(blocked_keys)
-
-                if not blocked:
-                    result = _success_payload(
-                        key=keys[0],
-                        keys=keys,
-                        token=token,
-                        now=now,
-                        waited=waited,
-                        waited_seconds=_now() - start,
-                        waited_keys=waited_keys,
-                    )
-                    _save_locks_unlocked()
-                    return result
-
-                if now >= deadline:
-                    for acquired_key in acquired:
-                        rec = _locks.get(acquired_key)
-                        if rec and secrets.compare_digest(str(rec.get("holder_token") or ""), token):
-                            _locks.pop(acquired_key, None)
-                            changed = True
-                    result = {
-                        "success": False,
-                        "error": "timeout",
-                        "key": blocked["key"],
-                        "keys": keys,
-                        "locked_keys": sorted(acquired),
-                        "blocked_keys": sorted(waited_keys or blocked_keys),
-                        "expires_in_seconds": blocked["expires_in_seconds"],
-                        "holder": blocked["holder"],
-                    }
-                    _save_locks_unlocked()
-                    return result
-
-                _save_locks_if_changed_unlocked(changed)
-
+            result = await asyncio.to_thread(_do)
+        if result is not None:
+            return result
         await asyncio.sleep(min(_MULTI_LOCK_POLL_SECONDS, max(0, deadline - _now())))
 
 
@@ -668,7 +693,7 @@ async def lock_ops(
             return {"success": False, "error": "invalid_timeout_seconds"}
         return await _acquire_keys(normalized_keys, timeout, lease, normalized_owner)
 
-    async with _locks_guard:
+    def _do() -> dict[str, Any]:
         with _locked_store():
             _load_locks_unlocked()
             now = _now()
@@ -694,3 +719,6 @@ async def lock_ops(
             result = _success_payload(key=key, keys=[key], token=token, now=now)
             _save_locks_unlocked()
             return result
+
+    async with _locks_guard:
+        return await asyncio.to_thread(_do)

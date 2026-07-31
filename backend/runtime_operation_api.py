@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -78,7 +79,8 @@ async def handle(raw: dict[str, Any]) -> dict[str, Any]:
         if not request.request_id:
             raise ValueError("durable operation request_id is required")
         try:
-            response = operation_requests.admit(
+            response = await asyncio.to_thread(
+                operation_requests.admit,
                 client=client,
                 operation=request.operation,
                 payload=payload,

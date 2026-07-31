@@ -442,7 +442,7 @@ async def node_connect(websocket: WebSocket) -> None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    spec, auth_reason = _resolve_known_spec(node_id, presented)
+    spec, auth_reason = await asyncio.to_thread(_resolve_known_spec, node_id, presented)
     if auth_reason is not None:
         # Known node, but auth failed — hard reject.
         await websocket.send_json({"type": "handshake_reject", "reason": auth_reason})

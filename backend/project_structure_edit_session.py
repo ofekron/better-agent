@@ -419,7 +419,7 @@ async def _run_review(
             caller_session_id=edit_singleton_id(),
         )
         ctx = {"project_cwd": project_cwd, "skill_dir": skill_dir}
-        base_session_id = ensure_session(MAINTAINER_SPEC, cfg)
+        base_session_id = await asyncio.to_thread(ensure_session, MAINTAINER_SPEC, cfg)
         result = await asyncio.wait_for(
             dispatch(
                 MAINTAINER_SPEC,

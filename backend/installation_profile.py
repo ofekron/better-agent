@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -166,15 +168,36 @@ def _provider_command(provider: str) -> str:
     return provider_setup.installer_for(provider).command
 
 
+_load_cache_lock = threading.Lock()
+# (path, fingerprint) -> parsed+validated result. `load()` is called
+# unwrapped from many hot async paths (session_manager, orchestrator,
+# extension_store, provider adapters) — an mtime+size fingerprint cache
+# avoids re-reading and re-parsing installation.json on every call, same
+# pattern as models.py/virtual_session_store.py's `_read_cache`.
+_load_cache: tuple[Path, tuple[int, int], dict[str, Any]] | None = None
+
+
 def load() -> dict[str, Any]:
+    global _load_cache
     path = _path()
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except OSError:
+        with _load_cache_lock:
+            _load_cache = None
         return _inactive("missing")
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+    with _load_cache_lock:
+        if _load_cache is not None and _load_cache[0] == path and _load_cache[1] == fingerprint:
+            return copy.deepcopy(_load_cache[2])
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return _validate_active(value)
+        result = _validate_active(value)
     except (OSError, json.JSONDecodeError, InstallationProfileError):
-        return _inactive("invalid")
+        result = _inactive("invalid")
+    with _load_cache_lock:
+        _load_cache = (path, fingerprint, result)
+    return copy.deepcopy(result)
 
 
 def require_active() -> dict[str, Any]:

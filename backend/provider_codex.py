@@ -187,6 +187,11 @@ def _read_codex_rollout_complete(
     return payload
 
 
+def _read_json_file(path: Path) -> Any:
+    """Sync read+parse — run via `asyncio.to_thread` from async callers."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _read_run_rollout_complete(run_dir: Path, session_id: Optional[str]) -> Optional[dict[str, Any]]:
     bs: dict = {}
     rs_disk: dict = {}
@@ -848,7 +853,7 @@ class CodexProvider(Provider):
         while True:
             if await path_exists_off_loop(state_path):
                 try:
-                    parsed = json.loads(state_path.read_text(encoding="utf-8"))
+                    parsed = await asyncio.to_thread(_read_json_file, state_path)
                     if parsed.get("session_id"):
                         runner_state = parsed
                         break
@@ -902,7 +907,7 @@ class CodexProvider(Provider):
                     if isinstance(v, dict)
                 }
         rs.processed_byte_offset = start_byte
-        self._write_backend_state(rs)
+        await asyncio.to_thread(self._write_backend_state, rs)
 
         try:
             rs.queue.put_nowait(StreamEvent("session_discovered", {"session_id": session_id}))
@@ -1214,7 +1219,7 @@ class CodexProvider(Provider):
         if existing_terminal is not None:
             rs.child_terminal_states[source_key] = existing_terminal
             terminal_event.set()
-        self._write_backend_state(rs)
+        await asyncio.to_thread(self._write_backend_state, rs)
 
         if tail_start_byte > source_start_byte:
             historical, _ = await asyncio.to_thread(
@@ -1318,13 +1323,15 @@ class CodexProvider(Provider):
             "session_id": rs.session_id,
             "token_usage": None,
         }
-        if complete_path.exists():
+        if await path_exists_off_loop(complete_path):
             try:
-                payload = json.loads(complete_path.read_text(encoding="utf-8"))
+                payload = await asyncio.to_thread(_read_json_file, complete_path)
             except Exception:
                 logger.exception("failed to parse complete.json for %s", rs.run_id)
         else:
-            recovered_payload = _read_run_rollout_complete(rs.run_dir, rs.session_id)
+            recovered_payload = await asyncio.to_thread(
+                _read_run_rollout_complete, rs.run_dir, rs.session_id,
+            )
             if recovered_payload is not None:
                 payload = recovered_payload
         if getattr(rs, "cancelled", False):

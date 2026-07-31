@@ -59,6 +59,11 @@ _TAIL_POLL_INTERVAL = 0.05
 _RUNNER_EVENT_TYPES = {"agent_message", "worker_start", "worker_event", "worker_complete"}
 
 
+def _read_json_file(path: Path) -> Any:
+    """Sync read+parse — run via `asyncio.to_thread` from async callers."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def runner_event_to_stream_event(event: dict) -> StreamEvent:
     event_type = event.get("type")
     event_data = event.get("data")
@@ -276,7 +281,7 @@ class SessionEventsProvider(Provider):
         while True:
             if await path_exists_off_loop(state_path):
                 try:
-                    parsed = json.loads(state_path.read_text(encoding="utf-8"))
+                    parsed = await asyncio.to_thread(_read_json_file, state_path)
                     if parsed.get("session_id"):
                         runner_state = parsed
                         break
@@ -417,9 +422,9 @@ class SessionEventsProvider(Provider):
             "session_id": rs.session_id,
             "token_usage": None,
         }
-        if complete_path.exists():
+        if await path_exists_off_loop(complete_path):
             try:
-                payload = json.loads(complete_path.read_text(encoding="utf-8"))
+                payload = await asyncio.to_thread(_read_json_file, complete_path)
             except Exception:
                 logger.exception("failed to parse complete.json for %s", rs.run_id)
         try:

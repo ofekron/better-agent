@@ -216,7 +216,12 @@ def add(
 
 def get(node_id: str) -> Optional[dict]:
     """Load one approved-node record, or None if absent / malformed /
-    wrong schema version."""
+    wrong schema version. Deliberately reads the authority file directly
+    on every call — unlike `list_all()`'s warm cache — so a secret-hash
+    check always sees the current on-disk state, including an out-of-band
+    edit that hasn't bumped the registry's version file (see
+    `test_list_all_returns_copies_and_get_reads_authority_file`). Async
+    callers must offload this via `asyncio.to_thread`."""
     try:
         path = _path(node_id)
     except ValueError:

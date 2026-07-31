@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextvars
 import inspect
@@ -698,7 +699,9 @@ def _require_grant(token: str, capability: str, action: str) -> str:
 
 
 async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
-    caller_extension = _require_grant(token, request.capability, request.action)
+    caller_extension = await asyncio.to_thread(
+        _require_grant, token, request.capability, request.action,
+    )
     catalog = operation_catalog.current()
     try:
         registered = catalog.capability_descriptor(request.capability, request.action)

@@ -10,6 +10,7 @@ makes a session delegation-capable is gated separately in runner.py.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 import uuid
@@ -35,7 +36,7 @@ class NativeStrategy(OrchestrationStrategy):
     def trace_step_name(self) -> str:
         return "native_turn"
 
-    def wrap_cli_prompt(self, *, cwd: str, prompt: str, session: dict) -> str:
+    async def wrap_cli_prompt(self, *, cwd: str, prompt: str, session: dict) -> str:
         if (session.get("orchestration_mode") or "team") not in ("team", "manager"):
             return prompt
         # Bare (TestApe-isolated) sessions get an EMPTY system prompt — the
@@ -44,7 +45,13 @@ class NativeStrategy(OrchestrationStrategy):
             return prompt
         from orchs.manager import bootstrap as manager_bootstrap
         is_first_turn = session.get("agent_session_id") is None
-        return manager_bootstrap.build_wrapped_prompt(
+        # build_wrapped_prompt -> format_team_context ->
+        # worker_store.list_worker_projection / team_store.find_for_session
+        # do unwrapped disk I/O (an uncached full-directory scan in
+        # team_store's case) — offload it the same way the sibling call in
+        # orchs/manager/_delegation.py does.
+        return await asyncio.to_thread(
+            manager_bootstrap.build_wrapped_prompt,
             cwd,
             prompt,
             is_first_turn,

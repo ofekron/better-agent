@@ -94,7 +94,7 @@ async def storage_get(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    extension_id = _require_storage_extension(x_internal_token)
+    extension_id = await asyncio.to_thread(_require_storage_extension, x_internal_token)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     return await asyncio.to_thread(_read_value, extension_id, _resolve_key(extension_id, body.get("key")))
@@ -105,7 +105,7 @@ async def storage_put(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    extension_id = _require_storage_extension(x_internal_token)
+    extension_id = await asyncio.to_thread(_require_storage_extension, x_internal_token)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     path = _resolve_key(extension_id, body.get("key"))
@@ -144,7 +144,7 @@ async def storage_delete(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    extension_id = _require_storage_extension(x_internal_token)
+    extension_id = await asyncio.to_thread(_require_storage_extension, x_internal_token)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     path = _resolve_key(extension_id, body.get("key"))

@@ -31,6 +31,7 @@ loop. Up to ``MAX_VERDICTS_PER_TURN`` cycles per user prompt.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
@@ -115,17 +116,20 @@ def _last_user_request(session: Optional[dict]) -> str:
     return ""
 
 
-def _primary_jsonl_info(session: dict) -> tuple[Optional[str], Optional[int]]:
+async def _primary_jsonl_info(session: dict) -> tuple[Optional[str], Optional[int]]:
     """Return (jsonl_path, line_count) for the primary agent's claude
-    session (`agent_session_id`)."""
+    session (`agent_session_id`). `compute_jsonl_path` can trigger a full
+    directory scan on cache miss and `count_jsonl_lines` reads the whole
+    file on a cold/changed cache — offload both, matching the identical
+    helpers' off-loop wrapping in orchs/manager/_delegation.py."""
     sid = session.get("agent_session_id")
     if not sid:
         return None, None
     cwd = session.get("cwd") or ""
-    path = compute_jsonl_path(cwd, sid)
+    path = await asyncio.to_thread(compute_jsonl_path, cwd, sid)
     if not path:
         return None, None
-    return str(path), count_jsonl_lines(path)
+    return str(path), await asyncio.to_thread(count_jsonl_lines, path)
 
 
 def _format_todos_block(todos: Optional[list[dict]]) -> str:
@@ -358,7 +362,7 @@ async def request_verdict(
     fresh_for_gate = session_manager.get(app_session_id) or primary_session
     primary_last = _last_message_text(fresh_for_gate, "assistant")
     original_request = _last_user_request(fresh_for_gate)
-    ws_path, ws_lines = _primary_jsonl_info(fresh_for_gate)
+    ws_path, ws_lines = await _primary_jsonl_info(fresh_for_gate)
 
     prompt = _choose_verdict_prompt(
         fresh_for_gate,
@@ -465,7 +469,7 @@ async def request_review(
         logger.warning("review: missing session %s", app_session_id)
         return
 
-    ws_path, ws_lines = _primary_jsonl_info(primary)
+    ws_path, ws_lines = await _primary_jsonl_info(primary)
     original_request = _last_user_request(primary)
     todos = primary.get("current_todos")
 

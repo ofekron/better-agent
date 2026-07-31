@@ -188,15 +188,29 @@ def _now() -> str:
     return datetime.now().isoformat()
 
 
+_load_cache: tuple[tuple[int, int], dict[str, Any]] | None = None
+
+
 def _load() -> dict[str, Any]:
+    """Read every stored profile. Called unwrapped from several async API
+    routes (via `list_profiles`/`get_profile`/`harness_profile_selection`),
+    so a full-table scan + per-row `json.loads` runs on every call unless
+    cached. `store_fingerprint()` is a cheap single-row read; only re-scan
+    and re-parse the whole table when it changes."""
+    global _load_cache
+    fingerprint = store_fingerprint()
     with _DB_LOCK:
+        if _load_cache is not None and _load_cache[0] == fingerprint:
+            return copy.deepcopy(_load_cache[1])
         conn = _connect()
         try:
             rows = conn.execute("SELECT id, data FROM profiles").fetchall()
         finally:
             conn.close()
-    profiles = {row[0]: json.loads(row[1]) for row in rows}
-    return {"schema_version": SCHEMA_VERSION, "profiles": profiles}
+        profiles = {row[0]: json.loads(row[1]) for row in rows}
+        result = {"schema_version": SCHEMA_VERSION, "profiles": profiles}
+        _load_cache = (fingerprint, result)
+        return copy.deepcopy(result)
 
 
 def _upsert_profile_row(conn: sqlite3.Connection, profile: dict[str, Any]) -> None:
