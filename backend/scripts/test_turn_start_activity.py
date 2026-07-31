@@ -7,6 +7,10 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-turn-start-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

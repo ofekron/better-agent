@@ -29,6 +29,10 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

@@ -8,6 +8,10 @@ import time
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-recovery-quanta-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

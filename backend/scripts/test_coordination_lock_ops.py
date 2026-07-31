@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP = _test_home.isolate("bc-coordination-locks-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

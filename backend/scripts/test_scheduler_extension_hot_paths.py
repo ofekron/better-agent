@@ -13,6 +13,10 @@ from fastapi import Header, Request
 
 import _test_home
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 HOME = Path(_test_home.isolate_installed("ba-test-scheduler-hot-"))
 BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:

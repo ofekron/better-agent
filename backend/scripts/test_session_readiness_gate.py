@@ -15,6 +15,10 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
 if str(BACKEND) not in sys.path:

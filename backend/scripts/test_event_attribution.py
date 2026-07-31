@@ -27,6 +27,10 @@ import sys
 # backend module so every store, runs root, traces dir lands in a
 # throwaway tempdir.
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP_HOME = _test_home.isolate("bc-test-event-attribution-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

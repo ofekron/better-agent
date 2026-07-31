@@ -8,6 +8,10 @@ from pathlib import Path
 
 import _test_home
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:

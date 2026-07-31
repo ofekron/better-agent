@@ -42,6 +42,10 @@ from unittest.mock import patch
 import _test_home
 import _test_installation
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 _TMP_HOME = _test_home.isolate("bc-test-hop-perf-")
 _test_installation.activate(Path(_TMP_HOME), provider="claude")
 

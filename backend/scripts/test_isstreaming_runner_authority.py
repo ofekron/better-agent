@@ -44,6 +44,10 @@ import uuid
 from pathlib import Path
 
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP_HOME = _test_home.isolate("bc-test-isstreaming-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

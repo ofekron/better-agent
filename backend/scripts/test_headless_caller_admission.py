@@ -10,6 +10,10 @@ import threading
 import uuid
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 
 TEST_HOME = tempfile.mkdtemp(prefix="ba-headless-callers-")
 os.environ["BETTER_AGENT_HOME"] = TEST_HOME

@@ -5,6 +5,10 @@ import tempfile
 from pathlib import Path
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import runner_codex

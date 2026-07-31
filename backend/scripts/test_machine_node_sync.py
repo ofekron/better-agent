@@ -8,6 +8,10 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 _BACKEND = Path(__file__).resolve().parents[1]
 _ROOT = _BACKEND.parent
 if str(_BACKEND) not in sys.path:

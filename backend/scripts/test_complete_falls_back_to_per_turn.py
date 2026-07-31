@@ -41,6 +41,10 @@ from pathlib import Path
 
 # Per CLAUDE.md: isolate ~/.better-claude state BEFORE importing backend.
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP_HOME = _test_home.isolate("bc-test-perturn-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

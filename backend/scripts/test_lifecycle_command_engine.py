@@ -12,6 +12,10 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))

@@ -30,6 +30,10 @@ from pathlib import Path
 from typing import Optional
 
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP_HOME = _test_home.isolate("bc-test-ingest-scenarios-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

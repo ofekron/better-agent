@@ -6,6 +6,10 @@ import tempfile
 from pathlib import Path
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))

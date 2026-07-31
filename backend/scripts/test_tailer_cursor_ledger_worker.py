@@ -55,6 +55,10 @@ import sys
 import time
 
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _TMP_HOME = _test_home.isolate("bc-test-cursor-ledger-worker-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

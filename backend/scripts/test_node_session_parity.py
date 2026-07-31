@@ -31,6 +31,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import _test_home
+
+import pytest
+
+pytestmark = pytest.mark.anyio
 _BC_HOME = _test_home.isolate("bc-node-parity-")
 # Isolate from the developer's real multi-machine setup — these tests
 # assert single-machine semantics (no topology).
