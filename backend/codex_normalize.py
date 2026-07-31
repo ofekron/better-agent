@@ -198,29 +198,6 @@ def _normalize_command_started(item: dict, parent_uuid: str) -> dict:
     }
 
 
-def _normalize_command_completed(item: dict, parent_uuid: str) -> dict:
-    output = item.get("aggregated_output", "")
-    exit_code = item.get("exit_code")
-    status = item.get("status", "completed")
-    content = output
-    if status == "failed" and exit_code is not None and exit_code != 0:
-        content = f"Error: exit code {exit_code}\n{output}"
-    return {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": item.get("id", ""),
-                "content": content or "",
-            }],
-        },
-        "uuid": _new_uuid(),
-        "parentUuid": parent_uuid,
-        "timestamp": datetime.now().isoformat(),
-    }
-
-
 def _normalize_file_change(item: dict, parent_uuid: str) -> dict:
     changes = item.get("changes", [])
     status = item.get("status", "completed")
