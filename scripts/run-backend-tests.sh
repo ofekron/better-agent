@@ -29,8 +29,13 @@
 #
 # Speed: Docker layer caching means the apt/pip layers only re-run when
 # backend/requirements*.txt change (see docker/Dockerfile.test's COPY
-# ordering) — a plain code-change re-run only re-executes the fast COPY-source
-# layer plus pytest itself, not a full environment rebuild.
+# ordering). The working-tree path (no --ref) builds only the `deps` target
+# (interpreter + deps, no source) and bind-mounts the live repo over /repo at
+# `docker run` time, so a source-only edit costs zero image rebuild/export —
+# previously every invocation re-baked + re-exported a full source layer even
+# though only the pytest run itself needed the fresh code. The --ref path
+# still builds the `full` target (deps + COPY) from a `git archive` of the
+# pinned commit, since that path must test a frozen tree, not a live mount.
 
 set -euo pipefail
 
@@ -106,16 +111,18 @@ case "$DOCKER_ARCH" in
     ;;
 esac
 
+BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
   IMAGE_TAG="better-agent-backend-tests:${COMMIT_SHA}"
   echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test -t "$IMAGE_TAG" -
+    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
 else
-  IMAGE_TAG="better-agent-backend-tests:worktree"
-  echo "run-backend-tests: building $IMAGE_TAG from the working tree (uncommitted changes included)"
-  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+  IMAGE_TAG="better-agent-backend-tests:deps"
+  BIND_MOUNT_REPO=1
+  echo "run-backend-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
+  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
 # ${arr[@]+"${arr[@]}"} (not plain "${arr[@]}") because macOS's default
@@ -126,15 +133,22 @@ if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
 
-# `--rm` throws away the container's writable layer on exit, which would
-# otherwise reset pytest's own incremental cache (.pytest_cache, used by
-# --lf/--ff) on every invocation. Persist it on the host in the same place a
-# native `pytest` run would write it, so repeat runs stay incremental. Already
-# excluded from the build context (.dockerignore) and self-ignored by git
-# (pytest writes its own .gitignore into this directory).
-PYTEST_CACHE_DIR="$REPO_ROOT/backend/.pytest_cache"
-mkdir -p "$PYTEST_CACHE_DIR"
-RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
+if [ "$BIND_MOUNT_REPO" = "1" ]; then
+  # Working-tree path: the `deps` image has no source baked in. Bind-mount
+  # the live repo over /repo so pytest sees uncommitted edits with zero
+  # rebuild — this also makes .pytest_cache read/write the host path
+  # directly, so no separate cache volume is needed (unlike the `full`/--ref
+  # path below, whose image has its own baked-in, non-host /repo/backend).
+  RUN_ARGS+=(-v "$REPO_ROOT:/repo")
+else
+  # `--ref` path: the `full` image bakes in a frozen `git archive` snapshot,
+  # not the host repo, so its /repo/backend/.pytest_cache isn't the host
+  # path — mount the host's cache dir explicitly to still get incremental
+  # --lf/--ff behavior instead of losing it to `--rm` every run.
+  PYTEST_CACHE_DIR="$REPO_ROOT/backend/.pytest_cache"
+  mkdir -p "$PYTEST_CACHE_DIR"
+  RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
+fi
 
 # Coverage: mount the output dir (the container runs --rm, so reports written
 # to its layer would be discarded) and append pytest-cov args. Scope/omit is

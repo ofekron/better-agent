@@ -15,7 +15,19 @@
 # uses actions/setup-python@v5 with "3.13") and docker/Dockerfile, not
 # README.md's manual `backend/.venv` instructions (3.14) — 3.13 is the
 # version this repo's CI actually verifies against.
-FROM python:3.13-slim
+#
+# Two stages, one image family:
+#   `deps` — interpreter + OS packages + pip deps only, no source. Rebuilds
+#     only when requirements*.txt change, so it's effectively free to build on
+#     every invocation. scripts/run-backend-tests.sh builds this target and
+#     bind-mounts the live working tree over /repo at `docker run` time for
+#     uncommitted-changes runs — skips the "COPY . /repo" + layer-export cost
+#     (dominant wall-clock cost of the old single-stage image) on every edit.
+#   `full` (default target — `docker build` with no --target lands here) —
+#     `deps` plus a baked-in COPY of the build context. Used for the
+#     `--ref <commit>` pinned path, where the run must test an exact frozen
+#     tree via `git archive`, not a live bind mount.
+FROM python:3.13-slim AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -46,12 +58,9 @@ COPY backend/requirements.txt backend/requirements-claude.txt backend/requiremen
 RUN cd backend \
  && pip install --no-cache-dir -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
 
-# .dockerignore (repo root) strips .git, node_modules, the private nested
-# repo, and venv/build artifacts — same context used by docker/Dockerfile.
-COPY . /repo
-
 # Matches docker/entrypoint.sh's PYTHONPATH convention: better_agent_sdk
-# (repo-root sdk/) is a plain source directory, not a pip package.
+# (repo-root sdk/) is a plain source directory, not a pip package. Set here
+# (source-independent) so `deps` alone is runnable against a bind-mounted /repo.
 ENV PYTHONPATH=/repo:/repo/backend:/repo/sdk
 
 # Isolated from any real Better Agent state per backend/paths.py::bc_home()
@@ -66,3 +75,12 @@ WORKDIR /repo/backend
 # shell already had it set (i.e. the user already approved that run).
 ENTRYPOINT ["python", "-m", "pytest"]
 CMD []
+
+# ---- full: deps + baked-in source, for the --ref (pinned-commit) path ----
+FROM deps AS full
+
+# .dockerignore (repo root) strips .git, node_modules, the private nested
+# repo, and venv/build artifacts — same context used by docker/Dockerfile.
+WORKDIR /repo
+COPY . /repo
+WORKDIR /repo/backend
