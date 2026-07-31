@@ -1,0 +1,66 @@
+# Better Agent — canonical backend Python test-runner image.
+#
+# This is the ONLY sanctioned way to run backend/scripts pytest tests: it
+# pins the interpreter, OS packages, and pip dependency set to one
+# reproducible image, independent of whatever venv (backend/.venv,
+# backend/.venvs/<hash>) happens to be active on the host. See
+# scripts/run-backend-tests.sh for the wrapper that builds and runs this
+# image, optionally pinned to an exact git commit via `git archive`.
+#
+# Unlike docker/Dockerfile (the real, runnable app image) this never builds
+# the frontend or installs a provider CLI — backend/scripts tests don't need
+# either (see backend/pyproject.toml's testpaths=["scripts"]).
+#
+# Python version matches CI (.github/workflows/installation-mode-parity.yml
+# uses actions/setup-python@v5 with "3.13") and docker/Dockerfile, not
+# README.md's manual `backend/.venv` instructions (3.14) — 3.13 is the
+# version this repo's CI actually verifies against.
+FROM python:3.13-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# git: some backend paths shell out to it (repo introspection).
+# build-essential + libffi-dev: argon2-cffi's cffi backend if no wheel
+#   matches this base image's glibc/arch (same reasoning as docker/Dockerfile).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git \
+      build-essential \
+      libffi-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+
+# Copy only what backend/requirements*.txt need to resolve before the rest
+# of the tree, so dependency installs cache across source-only changes.
+COPY sdk/runtime-requirements.txt sdk/runtime-requirements.txt
+COPY vendor/ vendor/
+COPY backend/requirements.txt backend/requirements-claude.txt backend/
+
+# Same dependency set CI installs for backend/scripts tests — deliberately
+# excludes requirements-mobile.txt, which backend/scripts tests don't import.
+RUN cd backend \
+ && pip install --no-cache-dir -r requirements.txt -r requirements-claude.txt
+
+# .dockerignore (repo root) strips .git, node_modules, the private nested
+# repo, and venv/build artifacts — same context used by docker/Dockerfile.
+COPY . /repo
+
+# Matches docker/entrypoint.sh's PYTHONPATH convention: better_agent_sdk
+# (repo-root sdk/) is a plain source directory, not a pip package.
+ENV PYTHONPATH=/repo:/repo/backend:/repo/sdk
+
+# Isolated from any real Better Agent state per backend/paths.py::bc_home()
+# — belt-and-suspenders alongside backend/scripts/conftest.py's own
+# per-session tempdir home guard.
+ENV BETTER_AGENT_HOME=/root/.better-agent-test-home
+
+WORKDIR /repo/backend
+
+# No RUN_LLM_TESTS here — that gate stays unset by default so live-LLM tests
+# self-skip; scripts/run-backend-tests.sh only forwards it if the caller's
+# shell already had it set (i.e. the user already approved that run).
+ENTRYPOINT ["python", "-m", "pytest"]
+CMD []

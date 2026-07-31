@@ -29,7 +29,7 @@ Runtime profile is a user-created execution identity stored in the provider conf
 - `switch_control_daemon/line_switch_runtime/`: bundled switch-control adapter for in-app line metadata, navigation, and legacy pointer switches. The standalone line owner/launcher is the separate `/Users/ofekron/ba-switch` repo.
 - Private extensions are installed packages discovered through persisted manifests. Public core must not import or probe the nested `better-agent-private` source tree.
 - Root instruction files: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` hold provider-facing repo instructions.
-- Tests: backend integration scripts live under `backend/scripts/`; frontend tests live under `frontend/tests/`.
+- Tests: backend integration scripts live under `backend/scripts/`; frontend tests live under `frontend/tests/`. Run backend tests via `./scripts/run-backend-tests.sh` (Docker, `docker/Dockerfile.test`), never a bare host venv — see root `CLAUDE.md`'s "Running backend Python" section.
 - Persistent Better Agent state must route through `backend/paths.py::bc_home()` and honor `BETTER_AGENT_HOME`.
 
 ## Keeping This Skill Current
