@@ -6,6 +6,10 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -67,7 +71,14 @@ async def _start_turn(
     return identity
 
 
-def test_schema_v1_migrates_contiguously_to_v2() -> None:
+def _seed_v1_legacy_store() -> None:
+    """Write a v1 store with a running 'legacy' session to migrate from.
+
+    Every test that binds a LifecycleStateTree expecting the persisted
+    'legacy' session must seed the store itself; module-level temp-home
+    state is shared across tests but no test may rely on another test's
+    on-disk side effects.
+    """
     write_json(lifecycle_state_store._path(), {
         "version": 1,
         "sessions": {
@@ -90,6 +101,10 @@ def test_schema_v1_migrates_contiguously_to_v2() -> None:
             },
         },
     })
+
+
+def test_schema_v1_migrates_contiguously_to_v2() -> None:
+    _seed_v1_legacy_store()
     migrated = lifecycle_state_store.load()
     assert migrated["version"] == 2
     turn = migrated["sessions"]["legacy"]["turn"]
@@ -104,6 +119,7 @@ def test_schema_v1_migrates_contiguously_to_v2() -> None:
 
 
 async def test_migrated_running_state_binds_and_reconciles_without_matching_live_turn() -> None:
+    _seed_v1_legacy_store()
     event_bus = EventBus()
     tree = LifecycleStateTree(event_bus)
     await tree.bind()

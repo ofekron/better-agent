@@ -73,9 +73,10 @@ class _RecordingProvider(Provider):
         del execution, start_arguments
         yield _PROVIDER_RECORD
 
-    def _start_run(self, *, run_id, _execution, **kwargs) -> None:
+    def _start_run(self, *, run_id, _execution, **kwargs) -> bool:
         self.spawned_run_ids.append(run_id)
         self._runs[run_id] = _FakeRunState(run_id=run_id, run_dir=runs_root() / run_id)
+        return True
 
     def _write_backend_state(self, rs) -> None:
         pass
@@ -125,41 +126,29 @@ def _start(provider: _RecordingProvider, execution: PreparedExecution) -> bool:
         loop.close()
 
 
-def test_case_a_cancel_while_admission_pending() -> bool:
+def test_case_a_cancel_while_admission_pending() -> None:
     """Cancel before commit (admission still pending): no spawn."""
     provider = _new_provider()
     execution = _make_execution(provider, "run-a")
     execution._mark_cancelled()  # lifecycle.cancel() while admission_pending
     result = _start(provider, execution)
-    if result is not False:
-        print(f"[A] expected start=False, got {result}")
-        return False
-    if provider.spawned_run_ids:
-        print(f"[A] expected no spawn, got {provider.spawned_run_ids}")
-        return False
-    return True
+    assert result is False, f"[A] expected start=False, got {result}"
+    assert not provider.spawned_run_ids, f"[A] expected no spawn, got {provider.spawned_run_ids}"
 
 
-def test_case_b_cancel_after_commit_before_start() -> bool:
+def test_case_b_cancel_after_commit_before_start() -> None:
     """THE BUG WINDOW: commit succeeds, cancel arrives, then start must NOT
     spawn. Pre-fix this spawns (commit already resolved admission True)."""
     provider = _new_provider()
     execution = _make_execution(provider, "run-b")
-    if not execution._try_commit_spawn():
-        print("[B] setup commit failed")
-        return False
+    assert execution._try_commit_spawn(), "[B] setup commit failed"
     execution._request_cancel_after_admission()  # cancel lands after commit
     result = _start(provider, execution)
-    if result is not False:
-        print(f"[B] expected start=False, got {result}")
-        return False
-    if provider.spawned_run_ids:
-        print(f"[B] expected no spawn, got {provider.spawned_run_ids}")
-        return False
-    return True
+    assert result is False, f"[B] expected start=False, got {result}"
+    assert not provider.spawned_run_ids, f"[B] expected no spawn, got {provider.spawned_run_ids}"
 
 
-def test_case_c_cancel_lands_between_commit_and_spawn() -> bool:
+def test_case_c_cancel_lands_between_commit_and_spawn() -> None:
     """Cancel arrives during the commit->spawn span (after `_try_commit_spawn`
     passes but before spawn). Exercises the provider pre-spawn recheck (gate 2).
     We simulate by making commit set the cancel Event right after resolving
@@ -182,27 +171,17 @@ def test_case_c_cancel_lands_between_commit_and_spawn() -> bool:
     finally:
         et.PreparedExecution._try_commit_spawn = original_commit  # type: ignore[assignment]
 
-    if result is not False:
-        print(f"[C] expected start=False, got {result}")
-        return False
-    if provider.spawned_run_ids:
-        print(f"[C] expected no spawn, got {provider.spawned_run_ids}")
-        return False
-    return True
+    assert result is False, f"[C] expected start=False, got {result}"
+    assert not provider.spawned_run_ids, f"[C] expected no spawn, got {provider.spawned_run_ids}"
 
 
-def test_positive_control_normal_launch() -> bool:
+def test_positive_control_normal_launch() -> None:
     """No cancel: spawn happens, start returns True (normal launch unchanged)."""
     provider = _new_provider()
     execution = _make_execution(provider, "run-ok")
     result = _start(provider, execution)
-    if result is not True:
-        print(f"[+] expected start=True, got {result}")
-        return False
-    if provider.spawned_run_ids != ["run-ok"]:
-        print(f"[+] expected spawn ['run-ok'], got {provider.spawned_run_ids}")
-        return False
-    return True
+    assert result is True, f"[+] expected start=True, got {result}"
+    assert provider.spawned_run_ids == ["run-ok"], f"[+] expected spawn ['run-ok'], got {provider.spawned_run_ids}"
 
 
 TESTS = [
@@ -216,10 +195,13 @@ TESTS = [
 def main() -> int:
     failures = []
     for name, fn in TESTS:
-        ok = fn()
-        print(("PASS" if ok else "FAIL") + f": {name}")
-        if not ok:
+        try:
+            fn()
+        except AssertionError as exc:
+            print(f"FAIL: {name}: {exc}")
             failures.append(name)
+        else:
+            print(f"PASS: {name}")
     if failures:
         print("Failures:", ", ".join(failures))
         return 1
