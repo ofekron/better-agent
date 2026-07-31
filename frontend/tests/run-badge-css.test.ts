@@ -39,4 +39,16 @@ describe("run-badge truncation (mobile out-of-bounds fix)", () => {
     expect(ruleBody(".run-badge-pulse")).toContain("flex: none");
     expect(ruleBody(".run-badge-age")).toContain("flex: none");
   });
+
+  /**
+   * The running badge must sit on its own line, left-aligned — the layout
+   * it had before the chips + badge were consolidated into one (right-
+   * aligned) footer. The chips keep their right alignment on the line
+   * above; the badge does not cluster on the right.
+   */
+  it("renders the running badge left-aligned on its own line in the footer", () => {
+    const stack = ruleBody(".assistant-run-meta-footer .run-badge-stack");
+    expect(stack).toContain("flex-basis: 100%");
+    expect(stack).toContain("justify-content: flex-start");
+  });
 });

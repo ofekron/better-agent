@@ -10233,6 +10233,12 @@ button.run-badge-clickable:focus-visible {
 }
 
 .assistant-run-meta-footer .run-badge-stack {
+  /* The running badge sits on its own line, left-aligned — matching the
+     pre-consolidation layout (it was a separate left-aligned element
+     before the chips + badge were merged into one footer). The chips
+     keep their right alignment on the line above. */
+  flex-basis: 100%;
+  justify-content: flex-start;
   animation: assistant-run-meta-footer-enter 0.18s ease-out;
 }
 
