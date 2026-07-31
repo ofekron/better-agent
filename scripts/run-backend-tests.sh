@@ -56,6 +56,8 @@ export DOCKER_BUILDKIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.test"
+# shellcheck source=lib/docker-platform.sh
+source "$HERE/lib/docker-platform.sh"
 
 REF=""
 COVERAGE_DIR=""
@@ -119,23 +121,7 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
-# Auto-detect the Docker daemon's native arch and only force linux/amd64 when
-# it's arm64 — pyxdelta has no linux/arm64 wheel on PyPI, and its sdist is
-# missing xdelta/xdelta3/xdelta3.c (upstream packaging bug: only headers are
-# shipped), so a native arm64 build (e.g. Apple Silicon Docker
-# Desktop/OrbStack) fails with "fatal error: xdelta3.c: No such file or
-# directory". On an x86_64 daemon (matches CI: GitHub Actions runners are
-# x86_64) the native build already has the wheel available, so building
-# natively is both correct and avoids unnecessary QEMU emulation.
-DOCKER_ARCH="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
-case "$DOCKER_ARCH" in
-  arm64|aarch64)
-    PLATFORM_ARGS=(--platform linux/amd64)
-    ;;
-  *)
-    PLATFORM_ARGS=()
-    ;;
-esac
+docker_platform_detect
 
 BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then

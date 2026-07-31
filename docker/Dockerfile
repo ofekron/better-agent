@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Better Agent — production container image.
 #
 # Unlike tests/install-smoke/Dockerfile (a throwaway image whose only job
@@ -59,7 +60,13 @@ COPY . /repo
 
 # Real frontend build — not a stub. frontend/package.json's vendor deps
 # .dockerignore does not exclude.
-RUN cd frontend && npm ci && npm run build
+#
+# BuildKit cache mount: persists npm's package cache across builds of
+# different refs/commits (see scripts/run-app.sh's --ref path), so only
+# actually-changed dependencies re-download instead of every build starting
+# from an empty npm cache. Requires the `# syntax` directive above.
+RUN --mount=type=cache,target=/root/.npm \
+    cd frontend && npm ci && npm run build
 
 # Real backend venv + real provider CLI install (npm install -g
 # @anthropic-ai/claude-code) — no stub. `--mode desktop-ui-only` skips the
@@ -68,7 +75,11 @@ RUN cd frontend && npm ci && npm run build
 # different mode.
 ARG BETTER_AGENT_INSTALL_MODE=desktop-ui-only
 ARG BETTER_AGENT_PROVIDER=claude
-RUN python3 scripts/install.py \
+# Cache mount for uv's package cache — same rationale as the npm mount above:
+# install.py's dependency_plan drives `uv`, whose default cache lives under
+# $HOME/.cache/uv (this RUN still executes as root, HOME=/root at this point).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    python3 scripts/install.py \
       --mode "${BETTER_AGENT_INSTALL_MODE}" \
       --provider "${BETTER_AGENT_PROVIDER}" \
       --yes
