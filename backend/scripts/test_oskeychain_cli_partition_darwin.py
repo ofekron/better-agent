@@ -20,6 +20,18 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import oskeychain  # noqa: E402
 
+# Standalone real-keychain proof: it stores/deletes entries in the real
+# login keychain, which is non-hermetic and has no place in the pytest
+# unit tier (the unit tier must be isolated via BETTER_AGENT_HOME and the
+# OS keychain cannot be diverted to a tempdir). Run it standalone:
+#   cd backend && .venv/bin/python scripts/test_oskeychain_cli_partition_darwin.py
+if __name__ != "__main__":
+    import pytest
+
+    pytestmark = pytest.mark.skip(
+        reason="standalone real-keychain integration proof; run via `python scripts/test_oskeychain_cli_partition_darwin.py`",
+    )
+
 _LOGIN_KEYCHAIN = Path.home() / "Library" / "Keychains" / "login.keychain-db"
 
 

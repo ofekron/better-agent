@@ -23,6 +23,19 @@ if _BACKEND not in sys.path:
 import auth_secrets  # noqa: E402
 import keychain_names  # noqa: E402
 
+# This file is a standalone keychain integration script: its `test_*`
+# functions return bool (checked by `main_run`) and mutate the real macOS
+# keychain via /usr/bin/security, which is non-hermetic and can block on
+# authorization outside an interactive session. Under pytest the bool
+# returns assert nothing, so it carries no unit-tier value anyway. Run it
+# standalone:  cd backend && .venv/bin/python scripts/test_auth_bootstrap.py
+if __name__ != "__main__":
+    import pytest
+
+    pytestmark = pytest.mark.skip(
+        reason="standalone keychain integration script; run via `python scripts/test_auth_bootstrap.py`",
+    )
+
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
