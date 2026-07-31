@@ -1,10 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
 import { eventBus } from "../src/lib/eventBus";
 import {
   sessionRegistry,
   statusRankOf,
   statusRankForRow,
+  useSessionMeta,
+  useProjectAggregate,
+  ackSessionSeen,
+  markSessionUnread,
 } from "../src/lib/sessionRegistry";
 
 /**
@@ -803,5 +808,211 @@ describe("status rank (mirror of backend _session_status_rank)", () => {
     const b = sessionRegistry.getSession(sid);
     expect(a).toBe(b); // SAME reference — cache invariant holds
     expect(a.testape_active).toBe(false);
+  });
+});
+
+describe("sessionRegistry — project subscribers", () => {
+  beforeEach(async () => {
+    await resetRegistry();
+  });
+
+  it("subscribeProject fires only for its own project key, then cleans up", async () => {
+    await bootstrapWith([
+      { id: "pa", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+      { id: "pb", cwd: "/q", node_id: "primary", is_running: false, unread_count: 0 },
+    ]);
+    let pFires = 0;
+    let qFires = 0;
+    const offP = sessionRegistry.subscribeProject("/p", "primary", () => pFires++);
+    // A second subscriber on the same key reuses the existing listener set.
+    let p2Fires = 0;
+    const offP2 = sessionRegistry.subscribeProject("/p", "primary", () => p2Fires++);
+    const offQ = sessionRegistry.subscribeProject("/q", "primary", () => qFires++);
+
+    eventBus.publish("session_unread_changed", {
+      session_id: "pa",
+      unread_count: 1,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(pFires).toBe(1);
+    expect(p2Fires).toBe(1);
+    expect(qFires).toBe(0);
+
+    eventBus.publish("session_unread_changed", {
+      session_id: "pb",
+      unread_count: 1,
+      cwd: "/q",
+      node_id: "primary",
+    });
+    expect(pFires).toBe(1);
+    expect(qFires).toBe(1);
+
+    // Unsubscribing one of two keeps the set alive for the other. The
+    // delta must actually change the aggregate (unread 1→0 flips
+    // unread_session_count) for the remaining listener to fire.
+    offP();
+    eventBus.publish("session_unread_changed", {
+      session_id: "pa",
+      unread_count: 0,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(pFires).toBe(1);
+    expect(p2Fires).toBe(2);
+
+    // Last subscriber off → the listener set is pruned from the map.
+    offP2();
+    offQ();
+    p2Fires = 0;
+    qFires = 0;
+    eventBus.publish("session_unread_changed", {
+      session_id: "pa",
+      unread_count: 4,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(p2Fires).toBe(0);
+    expect(qFires).toBe(0);
+  });
+
+  it("subscribeProject keys by node id (primary vs secondary are independent)", () => {
+    let primaryFires = 0;
+    const off = sessionRegistry.subscribeProject("/p", "secondary", () => primaryFires++);
+    eventBus.publish("session_unread_changed", {
+      session_id: "pn",
+      unread_count: 1,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    expect(primaryFires).toBe(0);
+    off();
+  });
+
+  it("bootstrap fans out to every project + session listener via notifyAll", async () => {
+    let projectFires = 0;
+    let sessionFires = 0;
+    const offP = sessionRegistry.subscribeProject("/p", "primary", () => projectFires++);
+    const offS = sessionRegistry.subscribeSession("boot-1", () => sessionFires++);
+    await bootstrapWith([{ id: "boot-1", cwd: "/p", node_id: "primary", is_running: true }]);
+    expect(projectFires).toBeGreaterThanOrEqual(1);
+    expect(sessionFires).toBeGreaterThanOrEqual(1);
+    offP();
+    offS();
+  });
+});
+
+describe("sessionRegistry — React hooks", () => {
+  beforeEach(async () => {
+    await resetRegistry();
+  });
+
+  it("useSessionMeta returns EMPTY_SESSION for a null sid and live meta for a real one", async () => {
+    await bootstrapWith([
+      { id: "hook-s", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+    ]);
+
+    const { result: empty, unmount: unmountEmpty } = renderHook(() => useSessionMeta(null));
+    expect(empty.current.unread_count).toBe(0);
+    expect(empty.current.is_running).toBe(false);
+    unmountEmpty();
+
+    const { result, rerender } = renderHook(() => useSessionMeta("hook-s"));
+    expect(result.current.unread_count).toBe(0);
+
+    // A bus delta mutates the slice; useSyncExternalStore re-renders.
+    act(() => {
+      eventBus.publish("session_unread_changed", {
+        session_id: "hook-s",
+        unread_count: 5,
+        cwd: "/p",
+        node_id: "primary",
+      });
+    });
+    expect(result.current.unread_count).toBe(5);
+    rerender();
+    expect(result.current.unread_count).toBe(5);
+  });
+
+  it("useProjectAggregate returns EMPTY_AGGREGATE for a null path and live counts for a real one", async () => {
+    await bootstrapWith([
+      { id: "agg-s", cwd: "/p", node_id: "primary", is_running: true, unread_count: 0 },
+    ]);
+
+    const { result: empty, unmount: unmountEmpty } = renderHook(() =>
+      useProjectAggregate(null),
+    );
+    expect(empty.current).toEqual({
+      running_count: 0,
+      unread_session_count: 0,
+      waiting_for_user_count: 0,
+      errored_count: 0,
+    });
+    unmountEmpty();
+
+    const { result } = renderHook(() => useProjectAggregate("/p"));
+    expect(result.current.running_count).toBe(1);
+
+    act(() => {
+      eventBus.publish("session_unread_changed", {
+        session_id: "agg-s",
+        unread_count: 2,
+        cwd: "/p",
+        node_id: "primary",
+      });
+    });
+    expect(result.current.unread_session_count).toBe(1);
+  });
+});
+
+describe("sessionRegistry — imperative seen/unread acks", () => {
+  beforeEach(async () => {
+    await resetRegistry();
+  });
+
+  it("ackSessionSeen POSTs /seen with the uid and resolves on success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    (globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
+
+    await ackSessionSeen("sess ack/1", "user-7");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`/api/sessions/${encodeURIComponent("sess ack/1")}/seen`);
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ uid: "user-7" });
+  });
+
+  it("ackSessionSeen resolves silently when the POST rejects (no retry)", async () => {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
+
+    await expect(ackSessionSeen("sess-fail", null)).resolves.toBeUndefined();
+  });
+
+  it("markSessionUnread POSTs /unread and resolves on success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    (globalThis as unknown as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
+
+    await markSessionUnread("sess ack/2");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`/api/sessions/${encodeURIComponent("sess ack/2")}/unread`);
+    expect(init).toMatchObject({ method: "POST" });
+  });
+
+  it("markSessionUnread resolves silently when the POST rejects", async () => {
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
+
+    await expect(markSessionUnread("sess-fail")).resolves.toBeUndefined();
   });
 });
