@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { SnapshotTransport } from "../src/lib/snapshotTransport";
+import { SnapshotTransport, MAX_SNAPSHOT_BYTES, MAX_CHUNKS, MAX_BUFFERED_LIVE_EVENTS } from "../src/lib/snapshotTransport";
 import { useWebSocket } from "../src/hooks/useWebSocket";
 import type { WSEvent } from "../src/types";
 import { MockWebSocketController } from "./harness/mockWebSocket";
@@ -753,6 +753,379 @@ describe("SnapshotTransport", () => {
       refresh_id: REFRESH_ID, success: false, root_ids: [],
     } }, vi.fn(), apply);
     await settle();
+    expect(apply).not.toHaveBeenCalled();
+  });
+});
+
+describe("SnapshotTransport — decode + validation branches", () => {
+  it("decodes a base64 chunk whose payload contains '+' and '/' (codes 43/47)", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    // bytes 251/255 base64-encode to "+/8=" — exercises the '+' (43) and '/' (47) arms.
+    const payloadStr = base64(Uint8Array.of(251, 255));
+    expect(payloadStr).toBe("+/8=");
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-plus", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    send.mockClear();
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-plus", revision: "rev1", index: 0, payload: payloadStr,
+    } }, send, vi.fn());
+    await settle();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "snapshot_ack", data: expect.objectContaining({ next_chunk: 1 }),
+    }));
+  });
+
+  it.each([
+    ["padding '=' at non-final position", "AA=B", 119],
+    ["invalid third sextet", "AA%C", 122],
+    ["single '=' at non-last quartet", "AAA=AAAA", 125],
+    ["invalid fourth sextet", "AAB%", 128],
+    ["length not a multiple of four", "AAA", 96],
+  ] as const)("rejects malformed base64 (%s) as corrupt without ack", async (_name, payload) => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-m", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 8, total_chunks: 4, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    send.mockClear();
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-m", revision: "rev1", index: 0, payload,
+    } }, send, vi.fn());
+    await settle();
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "snapshot_ack" }));
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("begin rejects non-object / malformed-refresh-id data without side effects", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    expect(transport.handle({ type: "snapshot_begin", data: "nope" }, send, vi.fn())).toBe(true);
+    expect(transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-x", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: "not-hex", revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 2, total_chunks: 1, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn())).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("begin requests too_large recovery for an oversized snapshot", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-big", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: MAX_SNAPSHOT_BYTES + 1, total_chunks: 2, chunk_bytes: 9, resume_from: 0,
+    } }, send, vi.fn());
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "too_large" },
+    });
+  });
+
+  it("begin silently drops a resume that does not match the staged transfer", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const begin = {
+      snapshot_id: "snap-a", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2,
+    };
+    transport.handle({ type: "snapshot_begin", data: { ...begin, resume_from: 0 } }, send, vi.fn());
+    send.mockClear();
+    transport.handle({ type: "snapshot_begin", data: { ...begin, snapshot_id: "snap-b", resume_from: 1 } }, send, vi.fn());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("begin rejects a structurally valid frame with a bad digest / chunk ratio", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    // Valid refresh_id + revision + eventType, but digest is not 64-hex.
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-v", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "not-a-sha",
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("end ignores non-object data and unknown snapshot ids", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    expect(transport.handle({ type: "snapshot_end", data: "nope" }, send, vi.fn())).toBe(true);
+    transport.handle({ type: "snapshot_end", data: {
+      snapshot_id: "ghost", revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2,
+    } }, send, vi.fn());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("handle returns false for an unrelated event when idle", () => {
+    const transport = new SnapshotTransport();
+    expect(transport.handle({ type: "messages_delta", data: {} }, vi.fn(), vi.fn())).toBe(false);
+  });
+
+  it("cancelled and refresh_required are no-ops when no matching transfer / malformed", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    expect(transport.handle({ type: "snapshot_cancelled", data: { snapshot_id: "ghost" } }, send, vi.fn())).toBe(true);
+    transport.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: "rev1", refresh_id: "bad", reason: "too_large",
+    } }, send, vi.fn());
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("queueChunk rejects non-object data, wrong revision, and out-of-range index", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-q", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    send.mockClear();
+
+    // non-object data + wrong revision → silent no-ops (transfer stays staged).
+    transport.handle({ type: "snapshot_chunk", data: "bad" }, send, vi.fn());
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-q", revision: "other", index: 0, payload: "AAAA",
+    } }, send, vi.fn());
+    expect(send).not.toHaveBeenCalled();
+
+    // out-of-range index → corrupt (clears the transfer; must be last).
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-q", revision: "rev1", index: 99, payload: "AAAA",
+    } }, send, vi.fn());
+    await settle();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("a text chunk for a binary-v1 transfer is corrupt", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const payload = await binaryFrames({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
+    transport.handle(payload.begin, send, vi.fn());
+    send.mockClear();
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: SNAPSHOT_ID, revision: payload.revision, index: 0, payload: "AAAA",
+    } }, send, vi.fn());
+    await settle();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("a binary frame for a base64 transfer is corrupt", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const payload = await frames({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
+    payload.begin.data.snapshot_id = SNAPSHOT_ID;
+    transport.handle(payload.begin, send, vi.fn());
+    send.mockClear();
+    transport.handleBinary(binaryChunk(SNAPSHOT_ID, 0, Uint8Array.of(0, 0, 0)), send, vi.fn());
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("bounds in-flight binary chunk tasks and fails over on overflow", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const bytes = encoder.encode(JSON.stringify({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } }));
+    const chunkBytes = 9;
+    const totalChunks = MAX_CHUNKS;
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: SNAPSHOT_ID, key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: chunkBytes * totalChunks, total_chunks: totalChunks, chunk_bytes: chunkBytes,
+      resume_from: 0, encoding: "binary-v1",
+    } }, send, vi.fn());
+    send.mockClear();
+    // Fire MAX_CHUNKS+1 binary chunks synchronously before any acceptChunk
+    // microtask runs — the +1th sees pendingChunkTasks >= MAX_CHUNKS → overflow.
+    const chunk = binaryChunk(SNAPSHOT_ID, 0, bytes.slice(0, chunkBytes));
+    for (let i = 0; i <= MAX_CHUNKS; i += 1) {
+      transport.handleBinary(chunk, send, vi.fn());
+    }
+    expect(send.mock.calls.some(([f]) => f.type === "snapshot_refresh" && f.data?.reason === "overflow")).toBe(true);
+  });
+
+  it("drain tracks an async snapshot apply", async () => {
+    const transport = new SnapshotTransport();
+    const apply = vi.fn(() => Promise.resolve());
+    const payload = await frames({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
+    transport.handle(payload.begin, vi.fn(), apply);
+    payload.chunks.forEach((c) => transport.handle(c, vi.fn(), apply));
+    transport.handle(payload.end, vi.fn(), apply);
+    await transport.whenIdle();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it("overflows the recovery live buffer, discards buffered live, and re-requests refresh", () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    transport.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID, reason: "too_large",
+    } }, send, vi.fn());
+    send.mockClear();
+    // Flood past MAX_BUFFERED_LIVE_EVENTS while a recovery is in flight.
+    for (let i = 0; i <= MAX_BUFFERED_LIVE_EVENTS; i += 1) {
+      transport.handle({ type: "messages_delta", data: { app_session_id: "s1", messages: [] } }, send, vi.fn(), 1);
+    }
+    expect(send.mock.calls.some(([f]) => f.type === "snapshot_refresh" && f.data?.reason === "overflow")).toBe(true);
+  });
+
+  it("end() rejects an assembled snapshot whose digest does not match", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const bytes = encoder.encode(JSON.stringify({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    }));
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-d", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: bytes.length, total_chunks: 1, chunk_bytes: bytes.length, resume_from: 0,
+    } }, send, vi.fn());
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-d", revision: "rev1", index: 0, payload: base64(bytes),
+    } }, send, vi.fn());
+    transport.handle({ type: "snapshot_end", data: {
+      snapshot_id: "snap-d", revision: "rev1", digest: "0".repeat(64),
+      total_bytes: bytes.length, total_chunks: 1,
+    } }, send, vi.fn());
+    await settle();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("end() rejects an assembled snapshot whose parsed event has the wrong type", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const bytes = encoder.encode(JSON.stringify({ type: "other", data: {} }));
+    const dgst = await digest(bytes);
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-p", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: dgst,
+      total_bytes: bytes.length, total_chunks: 1, chunk_bytes: bytes.length, resume_from: 0,
+    } }, send, vi.fn());
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-p", revision: "rev1", index: 0, payload: base64(bytes),
+    } }, send, vi.fn());
+    transport.handle({ type: "snapshot_end", data: {
+      snapshot_id: "snap-p", revision: "rev1", digest: dgst,
+      total_bytes: bytes.length, total_chunks: 1,
+    } }, send, vi.fn());
+    await settle();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("acceptChunk flags a decoded chunk whose byte length does not match expected", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-l", key: "messages_replay:s1", event_type: "messages_replay",
+      refresh_id: REFRESH_ID, revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    send.mockClear();
+    // "AAAA" decodes to 3 bytes; expected for a non-final 2-byte chunk is 2.
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-l", revision: "rev1", index: 0, payload: "AAAA",
+    } }, send, vi.fn());
+    await settle();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("reconcileAuthority ignores unknown refresh ids, sync applies, and rejected applies", async () => {
+    // Unknown refresh id → no-op (no apply).
+    const t1 = new SnapshotTransport();
+    const apply1 = vi.fn();
+    t1.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID, reason: "too_large",
+    } }, vi.fn(), apply1);
+    t1.handle({ type: "session_reconciled", data: {
+      root_id: "s1", scope_sids: ["s1"], snapshot_refresh_id: "deadbeef".repeat(8),
+    } }, vi.fn(), apply1);
+    expect(apply1).not.toHaveBeenCalled();
+
+    // Sync (non-promise) apply → applied but not tracked as pending.
+    const t2 = new SnapshotTransport();
+    const apply2 = vi.fn(() => undefined);
+    t2.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID, reason: "too_large",
+    } }, vi.fn(), apply2);
+    t2.handle({ type: "session_reconciled", data: {
+      root_id: "s1", scope_sids: ["s1"], snapshot_refresh_id: REFRESH_ID,
+    } }, vi.fn(), apply2);
+    expect(apply2).toHaveBeenCalledOnce();
+
+    // Rejecting apply → pending deleted on rejection, recovery still completable.
+    const t3 = new SnapshotTransport();
+    const applied3: WSEvent[] = [];
+    const apply3 = vi.fn((event: WSEvent) => {
+      if (event.type === "session_reconciled") return Promise.reject(new Error("boom"));
+      applied3.push(event);
+      return Promise.resolve();
+    });
+    t3.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID, reason: "too_large",
+    } }, vi.fn(), apply3);
+    t3.handle({ type: "session_reconciled", data: {
+      root_id: "s1", scope_sids: ["s1"], snapshot_refresh_id: REFRESH_ID,
+    } }, vi.fn(), apply3);
+    const live = { type: "messages_delta", data: { app_session_id: "s1", messages: [] } } as WSEvent;
+    t3.handle(live, vi.fn(), apply3, 10);
+    // Let the rejecting apply's rejection handler delete its pending entry
+    // before the terminal refresh_complete checks recovery.pending.size.
+    await settle();
+    t3.handle({ type: "snapshot_refresh_complete", data: {
+      refresh_id: REFRESH_ID, success: true, root_ids: ["s1"],
+    } }, vi.fn(), apply3);
+    await settle();
+    expect(applied3).toEqual([live]);
+  });
+
+  it("failBoundary during an active recovery preserves the in-flight recovery", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    // In-flight recovery A.
+    transport.handle({ type: "snapshot_refresh_required", data: {
+      key: "messages_replay:s1", event_type: "messages_replay",
+      revision: `sha256:${"a".repeat(64)}`, refresh_id: REFRESH_ID, reason: "too_large",
+    } }, send, vi.fn());
+    // A new snapshot begins mid-recovery, then a corrupt chunk trips failBoundary.
+    transport.handle({ type: "snapshot_begin", data: {
+      snapshot_id: "snap-mid", key: "messages_replay:s2", event_type: "messages_replay",
+      refresh_id: "b".repeat(32), revision: "rev1", digest: "0".repeat(64),
+      total_bytes: 4, total_chunks: 2, chunk_bytes: 2, resume_from: 0,
+    } }, send, vi.fn());
+    send.mockClear();
+    transport.handle({ type: "snapshot_chunk", data: {
+      snapshot_id: "snap-mid", revision: "rev1", index: 99, payload: "AAAA",
+    } }, send, vi.fn());
+    await settle();
+    // The failed transfer B is reported; recovery A survives and still gates live events.
+    expect(send.mock.calls.some(([f]) => f.type === "snapshot_refresh")).toBe(true);
+    const apply = vi.fn();
+    transport.handle({ type: "messages_delta", data: { app_session_id: "s1", messages: [] } }, send, apply, 10);
     expect(apply).not.toHaveBeenCalled();
   });
 });
