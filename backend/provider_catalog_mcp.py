@@ -54,7 +54,12 @@ def available_provider_models_response(
             continue
         if not _fuzzy_matches(
             provider_query,
-            [record.get("id"), record.get("name"), record.get("kind")],
+            [
+                record.get("id"),
+                record.get("name"),
+                record.get("kind"),
+                record.get("nickname"),
+            ],
         ):
             continue
         supported_runners = runtime_profile.supported_runners(record)
@@ -99,6 +104,7 @@ def available_provider_models_response(
         providers.append({
             "provider_id": provider_id,
             "name": record.get("name", ""),
+            "nickname": record.get("nickname", ""),
             "kind": record.get("kind", ""),
             "runner": profile_defaults["runner"],
             "runtime_profiles": runtime_profiles,

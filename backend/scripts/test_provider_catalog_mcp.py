@@ -51,6 +51,7 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
         "default_model": "router-default",
         "custom_models": ["custom-turbo-model"],
         "default_reasoning_effort": "high",
+        "custom_reasoning_efforts": ["xhigh"],
     })
 
     provider_result = available_provider_models_response(provider="ruter")
@@ -66,10 +67,10 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
     assert matched_models == {"custom-turbo-model"}
 
     effort_result = available_provider_models_response(
-        provider="codx",
+        provider="ruter",
         reasoning_effort="xhig",
     )
-    assert _names(effort_result) == {"Codex"}
+    assert _names(effort_result) == {"Router Lab"}
     matched_efforts = {
         effort
         for runtime_profile in effort_result["providers"][0]["runtime_profiles"]
@@ -90,9 +91,44 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
     assert runner_result["filters"]["runner"] == "better agent"
 
 
+def test_provider_filter_matches_and_returns_nickname() -> None:
+    almog = config_store.add_provider({
+        "name": "Claude",
+        "kind": "claude",
+        "nickname": "Almog",
+        "mode": "subscription",
+        "custom_models": ["almog-model"],
+    })
+    personal = config_store.add_provider({
+        "name": "Claude",
+        "kind": "claude",
+        "nickname": "Personal",
+        "mode": "subscription",
+        "custom_models": ["personal-model"],
+    })
+
+    result = available_provider_models_response(provider="almog")
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["providers"][0]["provider_id"] == almog["id"]
+    assert result["providers"][0]["nickname"] == "Almog"
+    all_providers = available_provider_models_response()["providers"]
+    nicknames = {
+        provider["provider_id"]: provider["nickname"]
+        for provider in all_providers
+        if provider["provider_id"] in {almog["id"], personal["id"]}
+    }
+    assert nicknames == {
+        almog["id"]: "Almog",
+        personal["id"]: "Personal",
+    }
+
+
 def main() -> int:
     test_returns_all_non_suspended_providers()
     test_fuzzy_provider_model_effort_and_runner_filters()
+    test_provider_filter_matches_and_returns_nickname()
     print("provider catalog MCP: OK")
     return 0
 
