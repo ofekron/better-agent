@@ -32,11 +32,15 @@ async def _run() -> int:
             failures.append(label)
 
     broadcasts: list[object] = []
+    cancelled: list[str] = []
 
     async def broadcast_workers_changed(cwd):
         broadcasts.append(cwd)
 
-    bind_worker_fanout_cleanup(broadcast_workers_changed)
+    async def cancel_session(session_id):
+        cancelled.append(session_id)
+
+    bind_worker_fanout_cleanup(broadcast_workers_changed, cancel_session)
 
     caller = session_manager.create(name="caller", cwd=_TMP, orchestration_mode="native")
     worker = session_manager.create(name="worker", cwd=_TMP, orchestration_mode="native")
@@ -63,6 +67,11 @@ async def _run() -> int:
     )
     check(session_manager.get(fork["id"]) is None, "delegate-fork session deleted")
     check(broadcasts == [None], "workers_changed broadcast emitted once")
+    check(
+        cancelled == [fork["id"]],
+        "cancel_session called for the cleared fork before it was deleted "
+        "(a live turn on this fork must not be orphaned by cleanup)",
+    )
 
     deleted = session_manager.create(name="deleted", cwd=_TMP, orchestration_mode="native")
     other_worker = session_manager.create(name="other-worker", cwd=_TMP, orchestration_mode="native")
@@ -100,6 +109,10 @@ async def _run() -> int:
     check(
         session_manager.get(caller_fork["id"]) is None,
         "caller-scope delegate-fork session deleted on session delete cleanup",
+    )
+    check(
+        cancelled == [fork["id"], caller_fork["id"]],
+        "cancel_session called for the caller-scope fork before it was deleted",
     )
 
     deleted_worker = session_manager.create(
@@ -143,6 +156,10 @@ async def _run() -> int:
         "worker-side delegate-fork session deleted on registered worker delete",
     )
     check(broadcasts == [None, None, None], "workers_changed broadcast emitted for each cleanup")
+    check(
+        cancelled == [fork["id"], caller_fork["id"], worker_side_fork["id"]],
+        "cancel_session called for the worker-side fork before it was deleted",
+    )
 
     responsive = session_manager.create(
         name="responsive-delete",

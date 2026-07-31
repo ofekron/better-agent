@@ -680,7 +680,7 @@ from event_bus_subscribers import (
     bind_pre_turn_hooks,
     bind_worker_fanout_cleanup,
 )
-bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
+bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed, coordinator.cancel_session)
 bind_post_turn_hooks()
 bind_pre_turn_hooks()
 # Deleting a session closes its tab: the open-tab list projects session

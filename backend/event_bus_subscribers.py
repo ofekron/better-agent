@@ -944,15 +944,14 @@ def _session_change_from_event(event: BusEvent) -> dict:
     return change
 
 
-def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
+def bind_worker_fanout_cleanup(broadcast_workers_changed, cancel_session) -> None:
     """Project worker/fork invalidation facts into worker_store state."""
     def _project(
         session_id: str,
         *,
         caller_scope: bool,
         remove_worker: bool,
-        op_label: str,
-    ) -> None:
+    ) -> list[str]:
         from stores import worker_store as _ws
 
         cleared = _ws.cleanup_session_fanout(
@@ -960,14 +959,7 @@ def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
             caller_scope=caller_scope,
             remove_worker=remove_worker,
         )
-        for fork_session_id in cleared:
-            try:
-                session_manager.delete(fork_session_id)
-            except Exception:
-                logger.exception(
-                    "delete delegate-fork BC %s failed during %s",
-                    fork_session_id, op_label,
-                )
+        return list(cleared)
 
     async def _handler(event: BusEvent) -> None:
         payload = event.payload
@@ -979,13 +971,40 @@ def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:
         caller_scope = bool(payload.get("caller_scope"))
         remove_worker = bool(payload.get("remove_worker"))
         try:
-            await asyncio.to_thread(
+            cleared = await asyncio.to_thread(
                 _project,
                 session_id,
                 caller_scope=caller_scope,
                 remove_worker=remove_worker,
-                op_label=op_label,
             )
+            if cleared:
+                for fork_session_id in cleared:
+                    # cancel_session BEFORE delete: this is a second,
+                    # independent delegate-fork deletion path from
+                    # _delete_session_tree's subtree-wide cancel (see
+                    # commit 29d01d58e) — session.worker_fanout_required
+                    # fires here for many reasons beyond session delete
+                    # (worker close, other invalidation events), so a
+                    # cleared fork can still have an active turn. Without
+                    # this the fork's runner is orphaned exactly like the
+                    # original incident: still streaming provider events
+                    # against a root that's about to vanish.
+                    try:
+                        await cancel_session(fork_session_id)
+                    except Exception:
+                        logger.exception(
+                            "cancel delegate-fork BC %s failed during %s",
+                            fork_session_id, op_label,
+                        )
+                    try:
+                        await asyncio.to_thread(
+                            session_manager.delete, fork_session_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "delete delegate-fork BC %s failed during %s",
+                            fork_session_id, op_label,
+                        )
             await broadcast_workers_changed(None)
         except Exception:
             logger.exception(
