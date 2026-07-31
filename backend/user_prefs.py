@@ -169,10 +169,6 @@ def _display_name_pref(prefs: dict, login_username: str | None = None) -> str | 
     return DEFAULT_USER_DISPLAY_NAME
 
 
-def get_user_display_name(login_username: str | None = None) -> str | None:
-    return _display_name_pref(_load(), login_username)
-
-
 def set_user_display_name(value: object) -> str | None:
     cleaned = _clean_user_display_name(value)
     prefs = _load()
@@ -271,15 +267,6 @@ def set_session_auto_delete_days(days: int | None) -> int | None:
     return days
 
 
-def get_font_family() -> FontFamily:
-    return _choice_pref(
-        _load(),
-        "font_family",
-        DEFAULT_FONT_FAMILY,
-        ("system", "serif", "mono", "inter"),
-    )
-
-
 def set_font_family(font_family: FontFamily) -> FontFamily:
     if font_family not in ("system", "serif", "mono", "inter"):
         raise ValueError(f"Invalid font_family: {font_family!r}")
@@ -287,16 +274,6 @@ def set_font_family(font_family: FontFamily) -> FontFamily:
     prefs["font_family"] = font_family
     _save(prefs)
     return font_family
-
-
-def get_font_size() -> int:
-    return _bounded_int_pref(
-        _load(),
-        "font_size",
-        DEFAULT_FONT_SIZE,
-        MIN_FONT_SIZE,
-        MAX_FONT_SIZE,
-    )
 
 
 def set_font_size(font_size: int) -> int:
@@ -400,17 +377,6 @@ def set_session_status_sort(enabled: bool) -> bool:
     return enabled
 
 
-def get_session_tabs_sort() -> SessionTabsSort:
-    """Which timestamp the open-session tabs bar sorts by (descending):
-    last modification, last user prompt, or last opened on a client."""
-    return _choice_pref(
-        _load(),
-        "sessions_tabs_sort",
-        DEFAULT_SESSION_TABS_SORT,
-        SESSION_TABS_SORT_VALUES,
-    )
-
-
 def set_session_tabs_sort(value: str) -> SessionTabsSort:
     if value not in SESSION_TABS_SORT_VALUES:
         raise ValueError(f"Invalid sessions_tabs_sort: {value!r}")
@@ -420,10 +386,6 @@ def set_session_tabs_sort(value: str) -> SessionTabsSort:
     return value
 
 
-def get_session_tabs_visible() -> bool:
-    return _bool_pref(_load(), "sessions_tabs_visible", DEFAULT_SESSION_TABS_VISIBLE)
-
-
 def set_session_tabs_visible(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         raise ValueError(f"Invalid sessions_tabs_visible: {enabled!r}")
@@ -431,17 +393,6 @@ def set_session_tabs_visible(enabled: bool) -> bool:
     prefs["sessions_tabs_visible"] = enabled
     _save(prefs)
     return enabled
-
-
-def get_voice_close_on_background() -> bool:
-    """Whether vocal mode auto-closes when the app goes to the background.
-    Default ON: the mic stops listening and vocal mode disables itself on
-    visibility loss, so the user does not need to remember to turn it off."""
-    return _bool_pref(
-        _load(),
-        "voice_close_on_background",
-        DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
-    )
 
 
 def set_voice_close_on_background(enabled: bool) -> bool:
