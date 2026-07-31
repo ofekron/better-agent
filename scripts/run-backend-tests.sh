@@ -69,30 +69,40 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
-# Pinned to linux/amd64 to match CI (GitHub Actions runners are x86_64), not
-# whatever arch the build host happens to be. This also sidesteps a broken
-# upstream sdist: pyxdelta only publishes prebuilt wheels for manylinux
-# (x86_64) / macOS / Windows, not linux/arm64, so a native arm64 build (e.g.
-# Apple Silicon Docker Desktop/OrbStack) falls back to pip building pyxdelta
-# from source — and that sdist is missing xdelta/xdelta3/xdelta3.c (only the
-# headers are packaged), so the build fails with
-# "fatal error: xdelta3.c: No such file or directory" regardless of this
-# repo's own dependency set.
-PLATFORM_ARGS=(--platform linux/amd64)
+# Auto-detect the Docker daemon's native arch and only force linux/amd64 when
+# it's arm64 — pyxdelta has no linux/arm64 wheel on PyPI, and its sdist is
+# missing xdelta/xdelta3/xdelta3.c (upstream packaging bug: only headers are
+# shipped), so a native arm64 build (e.g. Apple Silicon Docker
+# Desktop/OrbStack) fails with "fatal error: xdelta3.c: No such file or
+# directory". On an x86_64 daemon (matches CI: GitHub Actions runners are
+# x86_64) the native build already has the wheel available, so building
+# natively is both correct and avoids unnecessary QEMU emulation.
+DOCKER_ARCH="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+case "$DOCKER_ARCH" in
+  arm64|aarch64)
+    PLATFORM_ARGS=(--platform linux/amd64)
+    ;;
+  *)
+    PLATFORM_ARGS=()
+    ;;
+esac
 
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
   IMAGE_TAG="better-agent-backend-tests:${COMMIT_SHA}"
   echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build "${PLATFORM_ARGS[@]}" -f docker/Dockerfile.test -t "$IMAGE_TAG" -
+    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-backend-tests:worktree"
   echo "run-backend-tests: building $IMAGE_TAG from the working tree (uncommitted changes included)"
-  docker build "${PLATFORM_ARGS[@]}" -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
-RUN_ARGS=(--rm "${PLATFORM_ARGS[@]}")
+# ${arr[@]+"${arr[@]}"} (not plain "${arr[@]}") because macOS's default
+# /bin/bash is 3.2, where an empty array under `set -u` throws "unbound
+# variable" on plain expansion — this guard is a no-op on bash >=4.4.
+RUN_ARGS=(--rm "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
