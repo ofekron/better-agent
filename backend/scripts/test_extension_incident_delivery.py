@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 import asyncio
 import atexit
 import sys

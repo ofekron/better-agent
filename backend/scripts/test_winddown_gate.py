@@ -14,6 +14,10 @@ serialization gate:
    an orphan CLI into the session transcript.
 """
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 import asyncio
 import shutil
 import sys

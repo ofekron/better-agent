@@ -6,6 +6,10 @@ IO / asyncio tail loops run.
 Run: python backend/scripts/test_native_files_manager.py
 """
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 import os
 import shutil
 import sys

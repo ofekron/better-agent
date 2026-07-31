@@ -21,6 +21,8 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
@@ -39,7 +41,7 @@ from provider_claude import _runs_root  # noqa: E402
 import run_recovery  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
+pytestmark = pytest.mark.anyio
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 _BOOTSTRAP_ERROR = (

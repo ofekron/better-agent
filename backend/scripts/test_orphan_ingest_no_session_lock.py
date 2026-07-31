@@ -36,6 +36,10 @@ Run with:
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.anyio
+
 import asyncio
 import os
 import shutil
