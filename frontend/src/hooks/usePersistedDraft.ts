@@ -55,3 +55,69 @@ export function usePersistedDraft(
 
   return [value, set, clear];
 }
+
+/**
+ * Same auto-saving/restoring contract as `usePersistedDraft`, generalized to
+ * any JSON-serializable value (e.g. draft attachments). `empty` is both the
+ * initial value and what `clear`/an empty-equivalent `set` resets to.
+ */
+export function usePersistedJSONDraft<T>(
+  key: string | null,
+  empty: T,
+): [T, (v: T | ((prev: T) => T)) => void, () => void] {
+  // Callers must pass a stable (module-level) `empty` value — it's a real
+  // dependency here, not a fresh literal per render.
+  const read = useCallback(
+    (k: string | null): T => {
+      if (!k) return empty;
+      try {
+        const raw = localStorage.getItem(k);
+        return raw ? (JSON.parse(raw) as T) : empty;
+      } catch {
+        return empty;
+      }
+    },
+    [empty],
+  );
+
+  const [value, setValue] = useState<T>(() => read(key));
+  const keyRef = useRef(key);
+
+  useEffect(() => {
+    if (keyRef.current === key) return;
+    keyRef.current = key;
+    setValue(read(key));
+  }, [key, read]);
+
+  const isEmpty = useCallback((v: T) => Array.isArray(v) ? v.length === 0 : !v, []);
+
+  const set = useCallback(
+    (v: T | ((prev: T) => T)) => {
+      setValue((prev) => {
+        const next = typeof v === "function" ? (v as (prev: T) => T)(prev) : v;
+        if (key) {
+          try {
+            if (!isEmpty(next)) localStorage.setItem(key, JSON.stringify(next));
+            else localStorage.removeItem(key);
+          } catch {
+            /* quota / private mode — draft stays in memory */
+          }
+        }
+        return next;
+      });
+    },
+    [key, isEmpty],
+  );
+
+  const clear = useCallback(() => {
+    setValue(empty);
+    if (!key) return;
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+  }, [key, empty]);
+
+  return [value, set, clear];
+}

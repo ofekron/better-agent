@@ -155,4 +155,46 @@ describe("NewSessionModal prompt draft", () => {
     expect(view.queryByRole("button", { name: "newSession.keepDraftDiscard" })).toBeNull();
     view.unmount();
   });
+
+  it("restores a draft attachment after the modal is dismissed and reopened", async () => {
+    const first = renderModal(true, () => {});
+    await promptTextarea(first);
+    const fileInput = first.getByTestId("new-session-attachment-input") as HTMLInputElement;
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(first.getByText("notes.txt")).toBeTruthy();
+    });
+    first.unmount();
+
+    const second = renderModal(true, () => {});
+    await promptTextarea(second);
+    await waitFor(() => {
+      expect(second.getByText("notes.txt")).toBeTruthy();
+    });
+    second.unmount();
+  });
+
+  it("clears the draft attachment once the create it fed into succeeds", async () => {
+    const onCreate = vi.fn().mockResolvedValue(true);
+    const view = renderModal(true, () => {}, onCreate);
+    await promptTextarea(view);
+    const fileInput = view.getByTestId("new-session-attachment-input") as HTMLInputElement;
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(view.getByText("notes.txt")).toBeTruthy();
+    });
+
+    fireEvent.click(view.getByRole("button", { name: "newSession.createAndSendAndOpen" }));
+    await waitFor(() => {
+      expect(onCreate).toHaveBeenCalled();
+    });
+    view.unmount();
+
+    const reopened = renderModal(true, () => {});
+    await promptTextarea(reopened);
+    expect(reopened.queryByText("notes.txt")).toBeNull();
+    reopened.unmount();
+  });
 });

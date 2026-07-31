@@ -19,7 +19,7 @@ import { PUBLIC_EXTENSION_IDS } from "../extensionIds";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
-import { usePersistedDraft } from "../hooks/usePersistedDraft";
+import { usePersistedDraft, usePersistedJSONDraft } from "../hooks/usePersistedDraft";
 import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
 import { navigateRoute } from "../hooks/useRoute";
 import { ConfirmModal } from "./ConfirmModal";
@@ -157,10 +157,15 @@ interface Props {
 }
 
 const STORAGE_KEY = "better-agent-new-session-defaults";
-// Unsent initial-prompt text survives closing the modal so a half-written
-// prompt is never lost; cleared on successful create or on explicit discard.
+// Unsent initial-prompt text (and its attachments) survives closing the
+// modal so a half-written prompt is never lost; all three are cleared
+// together on successful create or on explicit discard.
 const PROMPT_DRAFT_KEY = "better-agent-new-session-prompt-draft";
+const PROMPT_DRAFT_IMAGES_KEY = "better-agent-new-session-prompt-draft-images";
+const PROMPT_DRAFT_FILES_KEY = "better-agent-new-session-prompt-draft-files";
 const EMPTY_EXTENSION_OPTIONS: NewSessionExtensionOption[] = [];
+const EMPTY_IMAGES: PastedImage[] = [];
+const EMPTY_FILES: FileAttachment[] = [];
 
 interface NewSessionDefaults extends Partial<SessionConfig> {
   creationAction?: NewSessionCreationAction;
@@ -642,8 +647,21 @@ export function NewSessionModal({
     investigation ? null : PROMPT_DRAFT_KEY,
   );
   const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
-  const [initialImages, setInitialImages] = useState<PastedImage[]>([]);
-  const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
+  const [initialImages, setInitialImages, clearImagesDraft] = usePersistedJSONDraft<PastedImage[]>(
+    investigation ? null : PROMPT_DRAFT_IMAGES_KEY,
+    EMPTY_IMAGES,
+  );
+  const [initialFiles, setInitialFiles, clearFilesDraft] = usePersistedJSONDraft<FileAttachment[]>(
+    investigation ? null : PROMPT_DRAFT_FILES_KEY,
+    EMPTY_FILES,
+  );
+  // Clears the text draft and its attachments together — call after a
+  // successful create/send or an explicit discard, never on failure.
+  const clearPromptAndAttachmentsDraft = useCallback(() => {
+    clearPromptDraft();
+    clearImagesDraft();
+    clearFilesDraft();
+  }, [clearPromptDraft, clearImagesDraft, clearFilesDraft]);
   const [harnessProfileId, setHarnessProfileId] = useState("");
   // File Edit's availability derives purely from whether the
   // "ofek-dev.file-edit" extension is enabled on the currently selected
@@ -737,8 +755,13 @@ export function NewSessionModal({
     const defaults = loadDefaults();
     setEditedPrompt(investigation?.prompt ?? "");
     dictatedRef.current = "";
-    setInitialImages(investigation?.images ?? []);
-    setInitialFiles(investigation?.files ?? []);
+    // Investigation attachments come from the caller each time. Otherwise
+    // leave images/files as-is — they're the persisted draft, restored by
+    // usePersistedJSONDraft, and reopening the modal must not wipe them.
+    if (investigation) {
+      setInitialImages(investigation.images ?? []);
+      setInitialFiles(investigation.files ?? []);
+    }
     setHarnessProfileId(defaults.harnessProfileId ?? "");
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
@@ -939,7 +962,7 @@ export function NewSessionModal({
         setInitialFiles((prev) => [...prev, attachment]);
       });
     });
-  }, []);
+  }, [setInitialImages, setInitialFiles]);
 
   const promptText = investigation ? editedPrompt : initialPrompt;
   promptRef.current = promptText;
@@ -984,7 +1007,7 @@ export function NewSessionModal({
         ? { ...investigation, prompt: promptOverride ?? editedPrompt, images: initialImages, files: initialFiles }
         : undefined;
       const created = await onCreate(config, ctx, action);
-      if (created) clearPromptDraft();
+      if (created) clearPromptAndAttachmentsDraft();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1007,7 +1030,7 @@ export function NewSessionModal({
   // it. Cancelling with unsent text asks whether to keep the draft.
   const requestCancel = () => {
     if (creating) return;
-    if (!investigation && initialPrompt.trim()) {
+    if (!investigation && (initialPrompt.trim() || initialImages.length > 0 || initialFiles.length > 0)) {
       setDiscardPromptOpen(true);
       return;
     }
@@ -1398,7 +1421,7 @@ export function NewSessionModal({
       confirmLabel={t("newSession.keepDraftDiscard")}
       cancelLabel={t("newSession.keepDraftKeep")}
       onConfirm={() => {
-        clearPromptDraft();
+        clearPromptAndAttachmentsDraft();
         setDiscardPromptOpen(false);
         onClose();
       }}
