@@ -10,7 +10,6 @@ any `test_*.py` that defines no collectable test function or `Test*` class.
 This test pins both directions: standalone-only files are ignored, real
 test modules always pass through.
 """
-import ast
 import importlib.util
 from pathlib import Path
 

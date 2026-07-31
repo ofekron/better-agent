@@ -10,7 +10,6 @@ matched and their events were silently dropped.
 Reproduces the adv-reviewer gap: call_87e2fdc579454fd09cb2ca74 registered
 as subagent_type="Agent" but the meta file said agentType="general-purpose".
 """
-import pytest
 from claude_jsonl_enrich import _SubagentRegistry
 
 

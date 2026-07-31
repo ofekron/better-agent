@@ -22,7 +22,6 @@ os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
-import importlib  # noqa: E402
 import runner_better_agent  # noqa: E402
 import tool_approval  # noqa: E402
 
