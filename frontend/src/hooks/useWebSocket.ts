@@ -1504,6 +1504,28 @@ export function useWebSocket(
             new CustomEvent("tool_approval_resolved", { detail: event.data }),
           );
         }
+        // Fresh-worker creation lifecycle: project the WS facts to window
+        // events so every open Chat updates its approval cards — including
+        // a card resolved from another tab. Chat subscribes to these
+        // (better-agent-worker-*).
+        if (event.type === "worker_creation_requested") {
+          window.dispatchEvent(
+            new CustomEvent("better-agent-worker-requested", { detail: event.data }),
+          );
+        }
+        if (
+          event.type === "worker_creation_approved" ||
+          event.type === "worker_creation_failed"
+        ) {
+          window.dispatchEvent(
+            new CustomEvent(
+              event.type === "worker_creation_approved"
+                ? "better-agent-worker-approved"
+                : "better-agent-worker-failed",
+              { detail: event.data },
+            ),
+          );
+        }
       } catch (err) {
         frameFailed = true;
         logFailure("websocket", "frame_failed", err, {
