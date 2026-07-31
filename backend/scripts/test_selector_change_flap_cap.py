@@ -15,9 +15,15 @@ stuck at "Running...".
 
 Uses the real rate-limit retry branch (capped generously high here, so it
 never itself becomes the limiting factor) purely as the "back to top"
-driver, and asserts the total number of provider spawns stays bounded by
-`_SELECTOR_CHANGE_MAX_ATTEMPTS` instead of scaling ~2x with the number of
-drive-loop revisits.
+driver, with a provider that flips `session.model` on every attempt. Counts
+the selector-change restart log line directly (turn_manager logs one INFO
+per restart) rather than total provider spawns, because total spawns are
+NOT a clean signal here: a preemption-driven respawn and a genuine
+rate-limit retry both increment the same counter, so gating success on a
+spawn-count threshold would make extra preemptions reach that threshold
+*sooner*, masking the bug. Counting the restart log line measures exactly
+what the user sees (one "Model switched" event per restart), independent
+of that confound.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_selector_change_flap_cap.py
@@ -25,6 +31,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import sys
@@ -43,6 +50,7 @@ import turn_manager  # noqa: E402
 import installation_profile  # noqa: E402
 import session_manager as _sm_mod  # noqa: E402
 import session_queue_projection  # noqa: E402
+import config_store  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from provider import StreamEvent, prepare_execution  # noqa: E402
@@ -56,7 +64,18 @@ session_manager.flush_root_persist = lambda _root_id: None
 
 _MODEL_A = "claude-opus-5"
 _MODEL_B = "claude-sonnet-5"
+_RESTART_MARKER = "preempting due to provider/model change"
 _coordinator: Coordinator
+
+
+class _RestartCounter(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if _RESTART_MARKER in record.getMessage():
+            self.count += 1
 
 
 async def _noop_ws(_event: dict) -> None:
@@ -100,13 +119,12 @@ class _FlappingModelProvider:
     KIND = "claude"
     _runs: dict = {}
 
-    def __init__(self, sid: str, *, fail_count: int) -> None:
-        self.id = "retry-claude"
+    def __init__(self, sid: str, provider_id: str, *, fail_count: int) -> None:
+        self.id = provider_id
         self.record = {"name": self.id}
         self.sid = sid
         self.fail_count = fail_count
         self.start_calls = 0
-        self.prepared: list[dict] = []
 
     def is_running(self, run_id: str) -> bool:
         return False
@@ -115,7 +133,6 @@ class _FlappingModelProvider:
         return datetime.now(timezone.utc)
 
     def prepare_run(self, **arguments):
-        self.prepared.append(dict(arguments))
         return prepare_execution(
             {
                 "id": self.id,
@@ -157,7 +174,7 @@ async def test_selector_change_flapping_is_bounded() -> bool:
     shutil.rmtree(os.path.join(_TMP_HOME, "sessions"), ignore_errors=True)
 
     selector_cap = 2
-    rate_limit_rounds = 12  # drive-loop revisits from the (generously capped) rate-limit branch
+    rate_limit_rounds = 10  # drive-loop revisits from the (generously capped) rate-limit branch
 
     original_selector_cap = turn_manager._SELECTOR_CHANGE_MAX_ATTEMPTS
     original_rate_limit_cap = turn_manager._RATE_LIMIT_MAX_ATTEMPTS
@@ -166,18 +183,29 @@ async def test_selector_change_flapping_is_bounded() -> bool:
     turn_manager._SELECTOR_CHANGE_MAX_ATTEMPTS = selector_cap
     turn_manager._RATE_LIMIT_MAX_ATTEMPTS = rate_limit_rounds + 5
 
-    root = session_manager.create(name="selector-flap", cwd="/tmp", model=_MODEL_A)
+    provider_id = config_store.get_default_provider()["id"]
+    root = session_manager.create(
+        name="selector-flap", cwd="/tmp", model=_MODEL_A, provider_id=provider_id,
+    )
     sid = root["id"]
+    # Seed last_active_* to match the session's OWN starting selectors so the
+    # only mismatches that occur are the ones this test deliberately creates.
     session_manager.set_agent_sid(
-        sid, "native", "seed-sid", provider_id="seed-provider", model=_MODEL_A,
+        sid, "native", "seed-sid", provider_id=provider_id, model=_MODEL_A,
     )
 
-    provider = _FlappingModelProvider(sid, fail_count=rate_limit_rounds)
+    provider = _FlappingModelProvider(sid, provider_id, fail_count=rate_limit_rounds)
     _coordinator.provider_for_session = lambda _sid: provider
     _coordinator.provider_for_run = lambda *_args, **_kwargs: provider
 
+    restart_counter = _RestartCounter()
+    original_logger_level = turn_manager.logger.level
+    # The restart line logs at INFO; the app's ambient logging config (root
+    # at WARNING) would otherwise suppress it before it reaches the handler.
+    turn_manager.logger.setLevel(logging.INFO)
+    turn_manager.logger.addHandler(restart_counter)
     try:
-        result = await asyncio.wait_for(
+        await asyncio.wait_for(
             _run_turn_with_lifecycle(sid=sid, lifecycle_id="selector-flap-user"),
             timeout=90.0,
         )
@@ -185,24 +213,22 @@ async def test_selector_change_flapping_is_bounded() -> bool:
         print("\033[31mFAIL\033[0m selector-change flapping looped forever (no cap)")
         return False
     finally:
+        turn_manager.logger.removeHandler(restart_counter)
+        turn_manager.logger.setLevel(original_logger_level)
         turn_manager._SELECTOR_CHANGE_MAX_ATTEMPTS = original_selector_cap
         turn_manager._RATE_LIMIT_MAX_ATTEMPTS = original_rate_limit_cap
         _coordinator.provider_for_session = original_provider_for_session
         _coordinator.provider_for_run = original_provider_for_run
 
-    del result  # run_turn's return isn't the terminal result; provider.start_calls is the signal
-
-    # Uncapped, every drive-loop revisit after the flip piles on an extra
-    # selector-change restart: start_calls would climb toward roughly
-    # 2 * (rate_limit_rounds + 1). Capped, the extra restarts stop once
-    # `_SELECTOR_CHANGE_MAX_ATTEMPTS` is spent.
-    upper_bound = (rate_limit_rounds + 1) + selector_cap + 2
-    unbounded_floor = 2 * rate_limit_rounds
-    ok = provider.start_calls <= upper_bound < unbounded_floor
+    # session.model flips on every one of the `rate_limit_rounds` rounds, so
+    # an uncapped loop would fire one selector-change restart per round
+    # (restart_counter.count == rate_limit_rounds). Capped, it must stop at
+    # `_SELECTOR_CHANGE_MAX_ATTEMPTS` regardless of how many rounds occur.
+    ok = restart_counter.count == selector_cap
     print(
         f"\033[32m{('PASS','FAIL')[not ok]}\033[0m "
-        f"selector-change restarts capped (start_run calls={provider.start_calls}, "
-        f"expected <= {upper_bound}, uncapped would approach {unbounded_floor})"
+        f"selector-change restarts capped at {selector_cap} "
+        f"(observed={restart_counter.count}, rounds={rate_limit_rounds})"
     )
     return ok
 
