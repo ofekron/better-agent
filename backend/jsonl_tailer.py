@@ -632,6 +632,13 @@ def _scan_direct_subagent_metas(
     return results
 
 
+def _read_nonblank_lines(path: Path) -> list[str]:
+    """Synchronous full-file read for `_drain_agent_jsonl` — run via
+    `asyncio.to_thread` to keep the disk read off the event loop."""
+    with path.open("r", encoding="utf-8") as f:
+        return [stripped for line in f if (stripped := line.rstrip("\n"))]
+
+
 def _scan_workflow_subagent_metas(
     wf_base: Path, known: set[str]
 ) -> list[tuple[str, str, Path]]:
@@ -869,30 +876,34 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             await self._drain_agent_jsonl(jsonl_path, parent_tuid)
 
     async def _drain_agent_jsonl(self, jsonl_path: Path, parent_tuid: str) -> None:
-        """Read an agent jsonl end-to-end and dispatch each enriched line."""
+        """Read an agent jsonl end-to-end and dispatch each enriched line.
+
+        The disk read runs off-loop (`asyncio.to_thread`) since a
+        completed subagent jsonl can be large; enrichment and dispatch
+        stay on the loop because `enrich_jsonl_line` mutates
+        `self.subagent_registry`, shared mutable state other tailer
+        coroutines also touch.
+        """
         try:
-            with jsonl_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.rstrip("\n")
-                    if not line:
-                        continue
-                    ev = enrich_jsonl_line(
-                        line,
-                        {}, {},  # fresh dicts — this is a one-shot drain
-                        self.subagent_registry,
-                        parent_tool_use_id=parent_tuid,
-                    )
-                    if ev is None:
-                        continue
-                    try:
-                        await self._call_dispatch(ev["data"])
-                    except Exception:
-                        logger.exception(
-                            "subagent final-drain dispatch failed for %s",
-                            jsonl_path,
-                        )
+            lines = await asyncio.to_thread(_read_nonblank_lines, jsonl_path)
         except OSError:
-            pass
+            return
+        for line in lines:
+            ev = enrich_jsonl_line(
+                line,
+                {}, {},  # fresh dicts — this is a one-shot drain
+                self.subagent_registry,
+                parent_tool_use_id=parent_tuid,
+            )
+            if ev is None:
+                continue
+            try:
+                await self._call_dispatch(ev["data"])
+            except Exception:
+                logger.exception(
+                    "subagent final-drain dispatch failed for %s",
+                    jsonl_path,
+                )
 
     # --- subagent fan-out ----------------------------------------------
     def _subagents_dir(self) -> Path:

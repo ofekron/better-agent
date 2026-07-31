@@ -4938,7 +4938,7 @@ async def _prepare_remote_desc(
                 "token_usage": None,
                 "finished_at": datetime.now().isoformat(),
             }
-        atomic_write_json(run_dir / "complete.json", complete)
+        await asyncio.to_thread(atomic_write_json, run_dir / "complete.json", complete)
 
     sid = (
         st.get("session_id")
@@ -4958,7 +4958,7 @@ async def _prepare_remote_desc(
                 run_id, exc_info=True,
             )
     if shadow is not None:
-        atomic_write_json(run_dir / "state.json", {
+        await asyncio.to_thread(atomic_write_json, run_dir / "state.json", {
             "session_id": sid,
             "jsonl_path": str(shadow),
             "pre_query_byte_offset": int(st.get("pre_query_byte_offset") or 0),

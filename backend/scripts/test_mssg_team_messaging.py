@@ -1083,7 +1083,7 @@ def test_ask_team_message_can_target_sub_session(monkeypatch):
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
-            coordinator._init_turn_messages(
+            await coordinator._init_turn_messages(
                 session=session,
                 app_session_id=sid,
                 prompt=params["prompt"],
@@ -1148,7 +1148,7 @@ def test_ask_team_message_failed_target_returns_error_without_empty_response(mon
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
-            coordinator._init_turn_messages(
+            await coordinator._init_turn_messages(
                 session=session,
                 app_session_id=sid,
                 prompt=params["prompt"],
@@ -1249,7 +1249,7 @@ def test_ask_team_message_done_without_assistant_fails_closed(monkeypatch):
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
-            coordinator._init_turn_messages(
+            await coordinator._init_turn_messages(
                 session=session,
                 app_session_id=sid,
                 prompt=params["prompt"],
@@ -1382,14 +1382,14 @@ def test_init_turn_messages_persists_team_metadata():
         },
     }
 
-    user_msg = coordinator._init_turn_messages(
+    user_msg = asyncio.run(coordinator._init_turn_messages(
         session=session,
         app_session_id=target["id"],
         prompt="done",
         images=None,
         source="mssg",
         team_message=team_message,
-    )
+    ))
 
     assert user_msg["source"] == "mssg"
     assert user_msg["team_message"] == team_message
@@ -1508,14 +1508,14 @@ def test_ask_response_omits_token_usage():
         orchestration_mode="manager",
     )
     coordinator = Coordinator()
-    user_msg = coordinator._init_turn_messages(
+    user_msg = asyncio.run(coordinator._init_turn_messages(
         session=session_manager.get(target["id"]),
         app_session_id=target["id"],
         prompt="question",
         images=None,
         source="team_ask",
         lifecycle_msg_id="life-ask",
-    )
+    ))
     session_manager.append_assistant_msg(target["id"], {
         "id": "assistant-answer",
         "role": "assistant",
@@ -1542,14 +1542,14 @@ def test_ask_response_falls_back_to_event_text_when_content_empty():
         orchestration_mode="manager",
     )
     coordinator = Coordinator()
-    user_msg = coordinator._init_turn_messages(
+    user_msg = asyncio.run(coordinator._init_turn_messages(
         session=session_manager.get(target["id"]),
         app_session_id=target["id"],
         prompt="question",
         images=None,
         source="team_ask",
         lifecycle_msg_id="life-event-fallback",
-    )
+    ))
     session_manager.append_assistant_msg(target["id"], {
         "id": "assistant-event-answer",
         "role": "assistant",
@@ -1591,14 +1591,14 @@ def test_ask_response_uses_matching_lifecycle_turn_only():
     coordinator = Coordinator()
     session = session_manager.get(target["id"])
 
-    coordinator._init_turn_messages(
+    asyncio.run(coordinator._init_turn_messages(
         session=session,
         app_session_id=target["id"],
         prompt="earlier message",
         images=None,
         source="mssg",
         lifecycle_msg_id="life-earlier",
-    )
+    ))
     session_manager.append_assistant_msg(target["id"], {
         "id": "assistant-earlier",
         "role": "assistant",
@@ -1607,14 +1607,14 @@ def test_ask_response_uses_matching_lifecycle_turn_only():
         "timestamp": "2026-06-16T10:01:00",
         "isStreaming": False,
     })
-    coordinator._init_turn_messages(
+    asyncio.run(coordinator._init_turn_messages(
         session=session_manager.get(target["id"]),
         app_session_id=target["id"],
         prompt="ask message",
         images=None,
         source="team_ask",
         lifecycle_msg_id="life-ask-only",
-    )
+    ))
     session_manager.append_assistant_msg(target["id"], {
         "id": "assistant-ask",
         "role": "assistant",

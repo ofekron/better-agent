@@ -1322,7 +1322,8 @@ class Coordinator:
             "lifecycle_msg_id": lifecycle_msg_id,
         }
         if images:
-            event_data["images"] = _save_message_images(
+            event_data["images"] = await asyncio.to_thread(
+                _save_message_images,
                 app_session_id,
                 event_data["uuid"],
                 images,
@@ -5391,7 +5392,7 @@ class Coordinator:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
-    def _init_turn_messages(
+    async def _init_turn_messages(
         self,
         *,
         session: dict,
@@ -5454,7 +5455,8 @@ class Coordinator:
         if team_message:
             user_msg["team_message"] = team_message
         if images:
-            user_msg["images"] = _save_message_images(
+            user_msg["images"] = await asyncio.to_thread(
+                _save_message_images,
                 app_session_id,
                 user_msg["id"],
                 images,

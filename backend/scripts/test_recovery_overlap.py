@@ -454,7 +454,7 @@ def test_claimed_queued_prompt_persists_at_delivery_boundary() -> None:
             try:
                 persisted_session = session_manager.get(params["app_session_id"])
                 assert persisted_session is not None
-                c._init_turn_messages(
+                await c._init_turn_messages(
                     session=persisted_session,
                     app_session_id=params["app_session_id"],
                     prompt=params["prompt"],

@@ -341,13 +341,17 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     try:
         from runs_dir import atomic_write_json, runs_root
         rd = runs_root() / run_id
-        rd.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(rd / "remote_ctx.json", {
-            "root_id": root_id,
-            "worker_agent_session_id": worker_agent_session_id,
-            "cwd": cwd,
-            "provider_id": artifact.provider_id,
-        })
+
+        def _persist_remote_ctx() -> None:
+            rd.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(rd / "remote_ctx.json", {
+                "root_id": root_id,
+                "worker_agent_session_id": worker_agent_session_id,
+                "cwd": cwd,
+                "provider_id": artifact.provider_id,
+            })
+
+        await asyncio.to_thread(_persist_remote_ctx)
         ctx.drain_task = asyncio.create_task(
             _drain_queue(node_client, ctx), name=f"drain-{run_id[:8]}",
         )

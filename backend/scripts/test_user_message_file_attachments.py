@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -29,7 +30,7 @@ def test_user_message_persists_file_metadata_without_data() -> bool:
         source="test",
     )
     sid = session["id"]
-    msg = coordinator._init_turn_messages(
+    msg = asyncio.run(coordinator._init_turn_messages(
         session=session,
         app_session_id=sid,
         prompt="read this",
@@ -42,7 +43,7 @@ def test_user_message_persists_file_metadata_without_data() -> bool:
         }],
         client_id="pending-1",
         lifecycle_msg_id="life-1",
-    )
+    ))
     fresh = session_manager.get(sid)
     stored = fresh["messages"][0]
     return (
@@ -67,13 +68,13 @@ def test_malformed_file_attachment_fails_closed() -> bool:
         source="test",
     )
     try:
-        coordinator._init_turn_messages(
+        asyncio.run(coordinator._init_turn_messages(
             session=session,
             app_session_id=session["id"],
             prompt="bad",
             images=None,
             files=[{"name": "bad.txt", "media_type": "text/plain"}],
-        )
+        ))
     except ValueError:
         return True
     return False

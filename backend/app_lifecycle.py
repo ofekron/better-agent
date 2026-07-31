@@ -332,7 +332,7 @@ async def on_startup():
     that touches disk, parses jsonl, or scans subprocesses MUST be
     scheduled, not awaited inline.
     """
-    acquire_backend_instance_lock()
+    await asyncio.to_thread(acquire_backend_instance_lock)
     provider_auth.reopen_status_probes()
     provider_auth.bind_config_change_loop()
     # Kill any OAuth login/logout CLI that outlived a prior backend crash

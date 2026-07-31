@@ -27,6 +27,7 @@ Optional env vars (override the persisted node_identity.json):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -100,7 +101,7 @@ _client: NodeClient | None = None
 async def _on_startup() -> None:
     global _client
 
-    acquire_backend_instance_lock(role="node")
+    await asyncio.to_thread(acquire_backend_instance_lock, role="node")
 
     # Topology supplies the primary address to dial. The node itself no
     # longer needs to be declared there (dynamic approval flow) nor share

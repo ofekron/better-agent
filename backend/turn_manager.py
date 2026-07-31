@@ -1781,7 +1781,7 @@ class TurnManager:
         # (orchestrator's handle_prompt catch), never a success-shaped
         # `done` for a prompt that was never persisted.
         try:
-            user_msg = self._c._init_turn_messages(
+            user_msg = await self._c._init_turn_messages(
                 session=session,
                 app_session_id=persist_to,
                 prompt=prompt,
