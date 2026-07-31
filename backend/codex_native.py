@@ -282,13 +282,6 @@ async def resolve_rollout_path_polled(
         await asyncio.sleep(poll_interval)
 
 
-def file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -693,21 +686,13 @@ class CodexRolloutNormalizer:
             return rows
 
         if payload_type == "web_search_call":
-            item = _web_search_item_from_payload(payload)
-            call_id = item.get("id", "")
-            search_key = _web_search_dedupe_key(item)
-            if (
-                (call_id and call_id in self.seen_web_search_calls)
-                or search_key in self.seen_web_search_keys
-            ):
+            item = self._claim_web_search_item(payload)
+            if item is None:
                 return []
             event = _normalize_web_search(item, self.parent_uuid)
             event["uuid"] = _response_item_uuid(
                 self.parent_uuid, payload, ":web_search",
             )
-            if call_id:
-                self.seen_web_search_calls.add(call_id)
-            self.seen_web_search_keys.add(search_key)
             return self._push(event)
 
         return self._push(_normalize_response_item_event(payload, self.parent_uuid))
@@ -810,7 +795,10 @@ class CodexRolloutNormalizer:
         event["parentUuid"] = agent_parent_uuid
         return event
 
-    def _normalize_web_search_payload(self, payload: dict) -> list[dict]:
+    def _claim_web_search_item(self, payload: dict) -> Optional[dict]:
+        """Build the web-search item from payload and claim it against the
+        per-normalizer dedup sets. Returns the item on first sight, None if
+        this search was already emitted this turn."""
         item = _web_search_item_from_payload(payload)
         call_id = item.get("id", "")
         search_key = _web_search_dedupe_key(item)
@@ -818,12 +806,17 @@ class CodexRolloutNormalizer:
             (call_id and call_id in self.seen_web_search_calls)
             or search_key in self.seen_web_search_keys
         ):
-            return []
-        normalized = _normalize_web_search(item, self.parent_uuid)
+            return None
         if call_id:
             self.seen_web_search_calls.add(call_id)
         self.seen_web_search_keys.add(search_key)
-        return self._push(normalized)
+        return item
+
+    def _normalize_web_search_payload(self, payload: dict) -> list[dict]:
+        item = self._claim_web_search_item(payload)
+        if item is None:
+            return []
+        return self._push(_normalize_web_search(item, self.parent_uuid))
 
     def _normalize_item_event(self, event_type: str, item: dict) -> list[dict]:
         item_type = item.get("type", "")
