@@ -47,6 +47,7 @@ import { ForkSplitView } from "./ForkSplitView";
 import { SessionTabs } from "./SessionTabs";
 import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
+import { SessionProvisioningNotice } from "./SessionProvisioningNotice";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
@@ -1798,6 +1799,10 @@ export function Chat({
         const effectiveIsStreaming = isStreaming || sessionRunning;
         return (
           <>
+            <SessionProvisioningNotice
+              provisioning={session?.fork_provisioning}
+            />
+
             <ShortcutResponses
               onSend={(prompt) => onSend(prompt, [], [])}
               isStreaming={effectiveIsStreaming}

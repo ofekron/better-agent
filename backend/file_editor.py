@@ -29,6 +29,7 @@ from datetime import datetime
 
 from session_manager import manager as session_manager
 import config_store
+import session_readiness
 import working_mode
 from prompt_templates import render_prompt
 from provisioning import DirtyPolicy, ProvisionedConfig, ProvisionedSessionSpec, register
@@ -40,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 MODE = "file_editing"
 BASE_MODE = "file_editing_base"
+
+# In-flight background warms, keyed by the session awaiting its binding.
+# Prevents a retried create or a post-failure re-arm from running two
+# warms against the same session.
+_PROVISIONING_TASKS: dict[str, "asyncio.Task"] = {}
 
 _META_PROMPT = render_prompt("file_editor/bootstrap.md")
 _PROVISION_PROMPT = render_prompt("file_editor/provision.md")
@@ -262,18 +268,16 @@ async def _create_interactive_fork(
 ) -> tuple[dict, bool]:
     """Returns `(session, resumed)`. `resumed=True` means a concurrent create
     carrying the same `session_id` won the race — the winner owns session
-    setup and bootstrap injection; the caller must not repeat either."""
-    base_session_id = await _ensure_file_edit_base(cfg)
-    base_session = session_manager.get(base_session_id) or {}
-    base_agent_sid = str(base_session.get("agent_session_id") or "").strip()
-    if not base_agent_sid:
-        raise RuntimeError("file-editing base did not initialize")
-    parent_lines = await _base_line_count_async(
-        project_cwd,
-        base_session,
-        base_agent_sid,
-    )
+    setup and bootstrap injection; the caller must not repeat either.
 
+    Returns WITHOUT waiting for the provisioned base. Warming it spawns a
+    provider CLI and runs a one-time provision turn (20-30s healthy, and
+    serialized per base identity), which is far too long to hold an HTTP
+    request open. Everything knowable now is bound now; the three
+    warm-dependent fields are bound by `_provision_fork` in the
+    background, and until then `session_readiness` holds the session's
+    prompts at the dispatch gate.
+    """
     try:
         session = session_manager.create(
             name=name,
@@ -290,29 +294,26 @@ async def _create_interactive_fork(
             # Client-supplied idempotency key: a timed-out create retried by
             # the frontend resolves to this same session, never a duplicate.
             id=session_id,
+            # Written as part of the FIRST record write, so a crash before
+            # the next persist cannot bring the session back dispatchable
+            # but unbound.
+            fork_provisioning=session_readiness.pending_fact(),
         )
     except ValueError:
         existing = session_manager.get(session_id) if session_id else None
         if existing is None:
             raise
         return existing, True
-    session_manager.set_forked_from(session["id"], base_agent_sid)
-    if parent_lines > 0:
-        session_manager._run(
-            session["id"],
-            lambda s: s.__setitem__("parent_line_count_at_fork", parent_lines),
-            {"kind": "fork_parent_line_count_set"},
-            bump_updated_at=False,
-        )
+    sid = session["id"]
     working_mode.mark_working_mode(
-        session["id"],
+        sid,
         mode=MODE,
         meta={
             "project_cwd": project_cwd,
             "file_paths": list(file_paths),
             "original_contents": dict(original_contents),
             "persistent": persistent,
-            "base_session_id": base_session_id,
+            # base_session_id is stamped by the background warm.
         },
     )
     # The session was just created as a normal user session, then marked as
@@ -320,7 +321,100 @@ async def _create_interactive_fork(
     # so a simultaneous `/api/sessions` snapshot doesn't briefly surface a
     # temporal file-editor session in the sidebar without its working_mode meta.
     await asyncio.to_thread(session_manager.flush_pending_persists)
-    return session_manager.get(session["id"]) or session, False
+    schedule_fork_provisioning(sid, cfg, project_cwd)
+    return session_manager.get(sid) or session, False
+
+
+def _commit_fork_binding(
+    sid: str,
+    base_session_id: str,
+    base_agent_sid: str,
+    parent_lines: int,
+) -> None:
+    """Bind the three warm-dependent fields. Runs off the event loop."""
+    current = session_manager.get_fields(sid, ("agent_session_id",)) or {}
+    if current.get("agent_session_id"):
+        # `is_fork_first_turn` requires the session to have NO provider sid
+        # of its own, so a fork marker stamped now could never be consumed
+        # and would sit on the record forever. Refuse loudly instead.
+        raise RuntimeError(
+            "session already has its own provider session; refusing to stamp "
+            "a fork marker that can never be consumed"
+        )
+    session_manager.set_forked_from(sid, base_agent_sid)
+    if parent_lines > 0:
+        session_manager._run(
+            sid,
+            lambda s: s.__setitem__("parent_line_count_at_fork", parent_lines),
+            {"kind": "fork_parent_line_count_set"},
+            bump_updated_at=False,
+        )
+    working_mode.update_working_mode_meta(sid, {"base_session_id": base_session_id})
+    session_manager.flush_pending_persists()
+
+
+async def _provision_fork(
+    sid: str,
+    cfg: ProvisionedConfig,
+    project_cwd: str,
+) -> None:
+    """Warm the base and bind the fork, then release the session's queued
+    prompts. Any failure is recorded on the session so the waiting prompts
+    fail visibly rather than hanging."""
+    try:
+        base_session_id = await asyncio.wait_for(
+            _ensure_file_edit_base(cfg),
+            timeout=session_readiness.WARM_TIMEOUT_S,
+        )
+        base_session = session_manager.get(base_session_id) or {}
+        base_agent_sid = str(base_session.get("agent_session_id") or "").strip()
+        if not base_agent_sid:
+            raise RuntimeError("file-editing base did not initialize")
+        parent_lines = await _base_line_count_async(
+            project_cwd,
+            base_session,
+            base_agent_sid,
+        )
+        await asyncio.to_thread(
+            _commit_fork_binding,
+            sid,
+            base_session_id,
+            base_agent_sid,
+            parent_lines,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "file-edit provisioning failed for %s: %s", sid[:8], exc, exc_info=True,
+        )
+        await session_readiness.mark_failed(sid, exc)
+        return
+    # Only after the binding is persisted — waking waiters first would let
+    # a turn dispatch before `forked_from_agent_sid` is readable.
+    await session_readiness.mark_ready(sid)
+
+
+def schedule_fork_provisioning(
+    sid: str,
+    cfg: ProvisionedConfig,
+    project_cwd: str,
+) -> None:
+    """Start the background warm for `sid`, unless one is already running.
+
+    Deduped so an idempotent create (a retry resolving to the same
+    session) or a re-arm after failure never runs two warms against one
+    session.
+    """
+    existing = _PROVISIONING_TASKS.get(sid)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(
+        _provision_fork(sid, cfg, project_cwd),
+        name=f"file-edit-provision:{sid[:8]}",
+    )
+    _PROVISIONING_TASKS[sid] = task
+    task.add_done_callback(lambda t: _PROVISIONING_TASKS.pop(sid, None))
 
 
 async def start_empty(
@@ -437,6 +531,85 @@ async def start(
         "session": full_session,
         "resumed": resumed,
     }
+
+def _config_for_session(session: dict) -> tuple[ProvisionedConfig, str]:
+    meta = session.get("working_mode_meta") or {}
+    project_cwd = str(meta.get("project_cwd") or session.get("cwd") or "")
+    if not project_cwd:
+        raise RuntimeError("session has no project cwd to provision against")
+    cfg = _file_edit_config(
+        project_cwd=project_cwd,
+        model=session.get("model"),
+        provider_id=session.get("provider_id"),
+        runner=session.get("runner"),
+        reasoning_effort=session.get("reasoning_effort"),
+        node_id=session.get("node_id") or "primary",
+    )
+    return cfg, project_cwd
+
+
+async def rearm_fork_provisioning_if_failed(sid: str) -> bool:
+    """Give a session whose provisioning failed another attempt.
+
+    Without this, `failed` is terminal: every later prompt on the session
+    is rejected forever with no way back. Re-arming when the user sends a
+    new prompt makes "try again" the natural recovery, and the dedup in
+    `schedule_fork_provisioning` keeps a retry storm to one live warm.
+    """
+    if not session_readiness.fork_provisioning_failed(sid):
+        return False
+    session = await asyncio.to_thread(session_manager.get, sid)
+    if not session or session.get("working_mode") != MODE:
+        return False
+    try:
+        cfg, project_cwd = _config_for_session(session)
+    except Exception as exc:
+        logger.warning("cannot re-arm provisioning for %s: %s", sid[:8], exc)
+        return False
+    await session_readiness.mark_pending(sid)
+    schedule_fork_provisioning(sid, cfg, project_cwd)
+    return True
+
+
+async def recover_pending_fork_provisioning() -> dict:
+    """Re-arm background warms interrupted by a backend restart.
+
+    A session persisted while its warm was in flight comes back with the
+    pending fact but no live task, and nothing else would ever set its
+    resolution event — every prompt on it would wait at the dispatch gate
+    forever. Crash recovery re-enqueues durable queued prompts, so this
+    MUST run before prompt admission reopens.
+
+    A pending session that cannot be re-armed is failed rather than left
+    pending: a visible failure is recoverable, silent parking is not.
+    """
+    rearmed: list[str] = []
+    failed: list[str] = []
+    for session in list(session_manager.iter_root_sessions()):
+        if session_readiness.state_of(session) != session_readiness.STATE_PENDING:
+            continue
+        sid = session.get("id")
+        if not sid:
+            continue
+        try:
+            cfg, project_cwd = _config_for_session(session)
+            schedule_fork_provisioning(sid, cfg, project_cwd)
+        except Exception as exc:
+            logger.warning(
+                "cannot re-arm file-edit provisioning for %s: %s", sid[:8], exc,
+            )
+            await session_readiness.mark_failed(sid, exc)
+            failed.append(sid)
+            continue
+        rearmed.append(sid)
+    if rearmed or failed:
+        logger.info(
+            "file-edit provisioning recovery: re-armed=%d failed=%d",
+            len(rearmed),
+            len(failed),
+        )
+    return {"rearmed": rearmed, "failed": failed}
+
 
 def cleanup(session_id: str) -> bool:
     """Delete the file-editor session record. No temp dirs to clean up —

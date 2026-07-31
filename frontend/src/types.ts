@@ -887,6 +887,12 @@ export interface CapabilityContext {
   outputs: CapabilityContextOutput[];
 }
 
+export interface ForkProvisioning {
+  state: "pending" | "failed";
+  error?: string | null;
+  updated_at?: string;
+}
+
 export interface QueuedPrompt {
   id: string;
   lifecycle_msg_id?: string;
@@ -1106,6 +1112,10 @@ export interface Session {
    * show them as queued banners instead of losing them or rendering them as
    * normal chat messages before the backend actually sends them. */
   queued_prompts?: QueuedPrompt[];
+  /** Present only while this session is still waiting for the provisioned
+   * base it forks from. Prompts sent meanwhile are queued by the backend
+   * and handed over once the binding lands. Absent means nothing pending. */
+  fork_provisioning?: ForkProvisioning | null;
   capability_contexts?: CapabilityContext[];
   /** True if this session is the ephemeral inner side of a prompt-
    * engineering session. Filtered out of the sidebar list — the

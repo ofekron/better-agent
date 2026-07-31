@@ -65,6 +65,7 @@ _METADATA_KINDS = {
     "todos_snapshot",
     "tasks_updated",
     "queued_prompts_updated",
+    "fork_provisioning_changed",
     "last_opened_set",
 }
 
@@ -647,6 +648,11 @@ class SessionWSBroadcaster:
             patch = {
                 "queued_prompts": list(change.get("queued_prompts") or [])
             }
+        elif kind == "fork_provisioning_changed":
+            # Explicit null on clear: a patch that simply omitted the key
+            # could not express "no longer pending", leaving the client
+            # showing a provisioning session forever.
+            patch = {"fork_provisioning": change.get("fork_provisioning")}
         elif kind == "last_opened_set":
             patch = {"last_opened_at": change.get("at")}
         else:

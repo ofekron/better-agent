@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+import session_readiness
 from session_manager import manager as session_manager
 from user_msg_lifecycle import emit_queued, new_lifecycle_msg_id
 
@@ -35,6 +36,10 @@ async def inject(
     is_queued = (
         coordinator.turn_manager.has_active_turn(session_id)
         or coordinator.turn_manager.has_active_runs(session_id)
+        # The file-edit bootstrap is injected while the provisioned base
+        # is still warming, so without this it would be recorded as an
+        # immediate send while actually waiting at the dispatch gate.
+        or session_readiness.is_awaiting_fork_provisioning(session_id)
     )
     lifecycle_kind = "queued_behind" if is_queued else "send"
     queue_position = coordinator.get_queued_count(session_id)

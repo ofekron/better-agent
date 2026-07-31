@@ -80,6 +80,8 @@ export type SessionMetadataPatch = {
   agent_rename_allowed?: boolean;
   working_mode?: Session["working_mode"];
   working_mode_meta?: Session["working_mode_meta"];
+  /** null is meaningful: it is how the backend says provisioning finished. */
+  fork_provisioning?: Session["fork_provisioning"];
   notes?: import("../types").Note[];
   current_todos?: import("../types").TodoItem[];
   current_tasks?: import("../types").TaskItem[];
@@ -1159,6 +1161,10 @@ export function useSession(authStatus?: string) {
       if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
       if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;
       if (patch.fork_closed !== undefined) next.fork_closed = patch.fork_closed;
+      // Keyed on `!== undefined` so an explicit null clears the field —
+      // that null IS the "provisioning finished" signal.
+      if (patch.fork_provisioning !== undefined)
+        next.fork_provisioning = patch.fork_provisioning;
       if (patch.model !== undefined) next.model = patch.model;
       if (patch.reasoning_effort !== undefined) {
         next.reasoning_effort = patch.reasoning_effort as Session["reasoning_effort"];

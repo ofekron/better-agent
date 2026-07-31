@@ -55,6 +55,7 @@ from trace_collector import (
     merge_token_usages,
 )
 import loop_affinity
+import session_readiness
 from session_manager import manager as session_manager
 from sync_wait_graph import SyncWaitGraph
 # user_msg_lifecycle emits routed through UserPromptManager — no
@@ -3556,6 +3557,95 @@ class Coordinator:
         await event.wait()
         return True
 
+    async def _gate_on_fork_provisioning(
+        self,
+        app_session_id: str,
+        q: asyncio.Queue,
+        params: dict,
+    ) -> bool:
+        """Single tri-state gate for a session whose provisioned fork
+        binding is still outstanding. Returns True when the caller must
+        `continue` (the item was either put back to wait, or failed).
+
+        Deliberately ONE gate switching on all three states rather than a
+        pair of boolean guards: "not pending" reads as "runnable", so a
+        FAILED session would fall through to a normal dispatch — an
+        unforked provider session in the user's project cwd without the
+        provisioned tool profile, which is exactly what the gate exists
+        to prevent.
+        """
+        state = session_readiness.gate_state(app_session_id)
+        if state == session_readiness.RESOLVED_READY:
+            return False
+        if state == session_readiness.STATE_PENDING:
+            return await self._defer_until_fork_provisioned(
+                app_session_id, q, params,
+            )
+        await self._fail_for_failed_fork_provisioning(app_session_id, params)
+        return True
+
+    async def _defer_until_fork_provisioned(
+        self,
+        app_session_id: str,
+        q: asyncio.Queue,
+        item: object,
+    ) -> bool:
+        """Hold a prompt until the session's provisioned fork binding
+        lands, mirroring `_defer_if_queued_editing` above: the item goes
+        back to the FRONT of the queue and we wait on the binding itself.
+
+        Restoring rather than parking mid-loop is deliberate. The durable
+        `queued_prompts` row stays intact, so the prompt keeps rendering
+        as queued and cancel/steer/promote keep operating on it, and the
+        A10 in-flight claim further down is never held across a 20-28s
+        warm (which would 409 every PATCH /selectors on an idle session).
+
+        Dispatching before `forked_from_agent_sid` is bound would start a
+        brand-new UNFORKED provider session in the user's project cwd
+        without the provisioned tool profile — so a FAILED binding is
+        handled by `_fail_for_failed_fork_provisioning`, never by
+        releasing the prompt.
+        """
+        await self._restore_queue_front(q, item)
+        await session_readiness.wait_until_resolved(app_session_id)
+        return True
+
+    async def _fail_for_failed_fork_provisioning(
+        self,
+        app_session_id: str,
+        params: dict,
+    ) -> None:
+        """Fail a prompt whose session can never be provisioned. Letting
+        it through would run it unforked; deferring it would park it
+        forever."""
+        reason = (
+            session_readiness.failure_reason(app_session_id)
+            or "provisioning failed"
+        )
+        item_id = params.get("_queued_id")
+        if item_id:
+            self._forget_active_prompt_item(item_id)
+            await asyncio.to_thread(
+                session_manager.remove_queued_prompt,
+                app_session_id,
+                item_id,
+            )
+        lifecycle_msg_id = params.get("lifecycle_msg_id")
+        if lifecycle_msg_id:
+            from user_msg_lifecycle import emit_failed
+            await emit_failed(
+                app_session_id=app_session_id,
+                lifecycle_msg_id=lifecycle_msg_id,
+                reason="fork_provisioning_failed",
+                error=reason,
+            )
+        logger.warning(
+            "dropping prompt for %s: provisioned fork binding failed (%s)",
+            app_session_id[:8],
+            reason,
+        )
+        return True
+
     async def update_latest_queued(
         self,
         app_session_id: str,
@@ -3606,6 +3696,8 @@ class Coordinator:
                 # Sentinel: cancel_session fed this to unblock us.
                 break
             if await self._defer_if_queued_editing(app_session_id, q, params):
+                continue
+            if await self._gate_on_fork_provisioning(app_session_id, q, params):
                 continue
             original_params = copy.deepcopy(params)
             # A10 TOCTOU closure: stamp the session as "claimed for

@@ -40,6 +40,7 @@ from session_detail_api import (
     _parse_ws_disallowed_tools,
     _rewind_latest_user_for_alter,
 )
+import session_readiness
 from session_manager import manager as session_manager
 from stores import pending_approvals
 from user_msg_lifecycle import (
@@ -1181,9 +1182,26 @@ async def websocket_chat(websocket: WebSocket):
                 # has_active_runs (not has_active_turn): also covers the
                 # dequeue→cancel_events gap and recovered live runs, so
                 # an interrupt can't silently degrade to a plain queue.
+                # A new prompt is the user retrying, so give a session
+                # whose provisioning failed another attempt rather than
+                # rejecting every prompt on it forever.
+                if session_readiness.fork_provisioning_failed(app_session_id):
+                    import file_editor
+                    await file_editor.rearm_fork_provisioning_if_failed(
+                        app_session_id
+                    )
+
                 is_queued = (
                     coordinator.turn_manager.has_active_turn(app_session_id)
                     or coordinator.turn_manager.has_active_runs(app_session_id)
+                    # A session still warming its provisioned base has no
+                    # active turn or run, but its prompt WILL wait at the
+                    # dispatch gate. Reporting it as queued up-front is
+                    # what stops the UI rendering it as a sent message and
+                    # then moving it into the queue afterwards.
+                    or session_readiness.is_awaiting_fork_provisioning(
+                        app_session_id
+                    )
                 )
 
                 lifecycle_msg_id = new_lifecycle_msg_id()

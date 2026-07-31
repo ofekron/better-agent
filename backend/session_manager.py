@@ -4259,6 +4259,7 @@ class SessionManager:
         storage_scope: Optional[dict] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
+        fork_provisioning: Optional[dict] = None,
     ) -> dict:
         # bare_config marks a TestApe-isolated session: empty system prompt
         # (no skills / CLAUDE.md / injected instructions) and orchestration_mode
@@ -4309,6 +4310,7 @@ class SessionManager:
             storage_scope=storage_scope,
             id=id,
             created_at=created_at,
+            fork_provisioning=fork_provisioning,
         )
         sess["capability_contexts"] = list(capability_contexts or [])
         self._ensure_project_for_session(sess)
@@ -5100,6 +5102,24 @@ class SessionManager:
             sid,
             lambda s: s.__setitem__("forked_from_agent_sid", agent_sid),
             {"kind": "forked_from_set", "agent_sid": agent_sid},
+        )
+
+    def set_fork_provisioning(
+        self, sid: str, fact: Optional[dict],
+    ) -> Optional[dict]:
+        """Write the awaiting-provisioned-fork fact, or REMOVE it when
+        `fact` is None. Presence is the dispatch gate — see
+        `session_readiness` — so removal is how a binding resolves."""
+        def _do(s: dict) -> None:
+            if fact is None:
+                s.pop("fork_provisioning", None)
+            else:
+                s["fork_provisioning"] = dict(fact)
+
+        return self._run(
+            sid,
+            _do,
+            {"kind": "fork_provisioning_changed", "fork_provisioning": fact},
         )
 
     def clear_forked_from_supervisor(self, sid: str) -> Optional[dict]:

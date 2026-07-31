@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from event_bus import bus, BusEvent
+import session_readiness
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,38 @@ def mark_working_mode(
         _do,
         {"kind": "working_mode_marked", "mode": mode},
         enrich=lambda s: {
+            "working_mode": s.get("working_mode"),
+            "working_mode_meta": s.get("working_mode_meta"),
+        },
+    )
+    if session is None:
+        return None
+    root_id = session_manager.root_id_for(sid)
+    if root_id is None:
+        raise RuntimeError("working-mode session lost its root identity")
+    session_manager.flush_root_persist(root_id)
+    return session
+
+
+def update_working_mode_meta(sid: str, patch: dict) -> Optional[dict]:
+    """Merge keys into an existing ``working_mode_meta``.
+
+    `mark_working_mode` REPLACES the meta dict, which is wrong for values
+    that only become known after the session is already live — e.g. the
+    provisioned base a file-editing session forked from, which lands when
+    the background warm completes.
+    """
+    def _do(s: dict) -> None:
+        meta = dict(s.get("working_mode_meta") or {})
+        meta.update(patch)
+        s["working_mode_meta"] = meta
+
+    session = session_manager._run(
+        sid,
+        _do,
+        {"kind": "working_mode_marked"},
+        enrich=lambda s: {
+            "mode": s.get("working_mode"),
             "working_mode": s.get("working_mode"),
             "working_mode_meta": s.get("working_mode_meta"),
         },
@@ -135,6 +168,9 @@ def cleanup_session(
         return False
 
     ok = session_manager.delete(session_id)
+    # Drop any unresolved provisioning-gate event so a deleted session
+    # does not leak one per abandoned warm.
+    session_readiness.forget(session_id)
 
     if extra_paths:
         for p in extra_paths:

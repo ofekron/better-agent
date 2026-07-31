@@ -4944,6 +4944,7 @@ def create_session(
     storage_scope: Optional[dict] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
+    fork_provisioning: Optional[dict] = None,
 ) -> dict:
     """Create a new ROOT session and persist it.
 
@@ -5090,6 +5091,11 @@ def create_session(
         "harness_profile_id": str(harness_profile_id or "").strip(),
         "harness_profile_snapshot": None,  # NEW: resolved profile data
         "turn_harness_profile_snapshot": None,  # NEW: temporal profile for current turn
+        # Present ONLY while a provisioned fork binding is outstanding
+        # (see session_readiness). Carried into the FIRST write so a crash
+        # between create and the next persist cannot resurrect the session
+        # as dispatchable-but-unbound.
+        **({"fork_provisioning": dict(fork_provisioning)} if fork_provisioning else {}),
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],

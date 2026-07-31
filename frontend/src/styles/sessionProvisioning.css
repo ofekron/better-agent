@@ -1,0 +1,82 @@
+.session-provisioning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  animation: session-provisioning-in 220ms var(--md-motion-standard, ease-out);
+}
+
+.session-provisioning-mark {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: session-provisioning-pulse 1.4s ease-in-out infinite;
+}
+
+.session-provisioning.is-failed .session-provisioning-mark {
+  background: var(--error);
+  animation: none;
+}
+
+.session-provisioning-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.session-provisioning-title {
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale, 1));
+  font-weight: 600;
+}
+
+.session-provisioning.is-failed .session-provisioning-title {
+  color: var(--error);
+}
+
+.session-provisioning-detail {
+  color: var(--text-muted);
+  font-size: calc(12px * var(--app-font-scale, 1));
+}
+
+@keyframes session-provisioning-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Indeterminate on purpose — a warm has no honest progress units. */
+@keyframes session-provisioning-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-provisioning {
+    animation: none;
+  }
+  .session-provisioning-mark {
+    animation: none;
+    opacity: 1;
+  }
+}

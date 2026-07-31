@@ -500,6 +500,17 @@ async def _recover_in_flight_task() -> None:
         # The gate protects provider-run ownership: classification and every
         # alive run must be registered before rehydrated prompts can start.
         await _coordinator_ref.turn_manager.reconcile_lifecycle_projection()
+        # Before any prompt is re-enqueued: sessions whose provisioned fork
+        # binding was still in flight at shutdown have no live warm task, so
+        # a rehydrated prompt would wait at the dispatch gate on a
+        # resolution nothing would ever deliver.
+        try:
+            import file_editor
+            await file_editor.recover_pending_fork_provisioning()
+        except Exception:
+            logger.warning(
+                "file-edit provisioning recovery failed", exc_info=True,
+            )
         rehydrated_session_ids = await _re_enqueue_queued_prompts()
         for sid in sorted(rehydrated_session_ids):
             await _coordinator_ref.start_session_processor_async(sid)
