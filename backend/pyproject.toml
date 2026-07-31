@@ -1,0 +1,48 @@
+# Backend tooling config for the Better Agent backend.
+#
+# Coverage scope: the application source under backend/ EXCLUDING
+# backend/scripts/, which holds the pytest tests, test harness, and
+# operational/dev scripts (none of which the runtime application imports
+# — verified: no app module does `from scripts` / `import scripts`).
+# Source attribution and reproducible numbers live here so every run
+# measures the same scope regardless of who invokes it.
+
+[tool.pytest.ini_options]
+testpaths = ["scripts"]
+
+[tool.coverage.run]
+branch = true
+# Path-pattern includes are matched against absolute file paths, so the
+# leading `*` keeps this portable across checkout locations and CI.
+include = [
+  "*/backend/*.py",
+  "*/backend/**/*.py",
+]
+omit = [
+  # Tests, harness, and dev/operational scripts are not application source.
+  "*/backend/scripts/*",
+  # Virtualenvs live under backend/ (.venv, .venvs) and would otherwise be
+  # swept in by the backend/** include. site-packages is a catch-all so no
+  # installed dependency is ever measured as application source.
+  "*/backend/.venv/*",
+  "*/backend/.venvs/*",
+  "*/site-packages/*",
+  "*/__pycache__/*",
+]
+
+[tool.coverage.paths]
+# Map measured file paths back to repo-relative backend/ paths so coverage
+# from subprocesses (full-stack tier) and different machines combines cleanly.
+backend = ["backend/", "*/backend/"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == [\"']__main__[\"']:",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  # Abstract / Protocol / Ellipsis-only bodies.
+  "^\\s*\\.\\.\\.$",
+]

@@ -35,6 +35,40 @@ def pytest_configure(config):
     )
 
 
+def pytest_ignore_collect(collection_path, config):
+    """Skip standalone scripts mislabeled as ``test_*.py``.
+
+    A large part of this directory is dual-purpose: files runnable as
+    ``python scripts/test_<x>.py`` (standalone assertion scripts) AND named
+    to match pytest's ``test_*`` glob. The standalone ones define no
+    ``def test_*`` / ``Test*`` classes, so pytest would otherwise IMPORT them
+    purely to run their top-level code during collection. The guarded ones
+    survive that import as a no-op; the unguarded ones do real work (spawn
+    processes, mutate ``sys.modules``, call ``sys.exit``) and abort the whole
+    session with "mainloop: caught unexpected SystemExit".
+
+    These files are not pytest test modules, so do not collect them. Real
+    test modules (anything defining a collectable test function or class)
+    always pass through. A file that fails to parse is left for pytest to
+    report as a real error rather than being silently hidden here.
+    """
+    import ast
+
+    name = collection_path.name
+    if not name.startswith("test_") or not name.endswith(".py"):
+        return None
+    try:
+        tree = ast.parse(collection_path.read_text(encoding="utf-8"))
+    except (SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            return None
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            return None
+    return True
+
+
 def pytest_collection_modifyitems(config, items):
     if live_llm_tests_enabled():
         return

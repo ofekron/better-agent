@@ -37,5 +37,21 @@ export default defineConfig({
         inline: [/framer-motion/, /motion-dom/, /motion-utils/],
       },
     },
+    // Unit-tier coverage. Opt-in via `vitest run --coverage` so normal
+    // `npm test` runs stay fast. `all: true` reports every file under
+    // src/ so uncovered modules surface at 0% instead of being hidden.
+    coverage: {
+      provider: "v8",
+      all: true,
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.d.ts",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/__mocks__/**",
+        "src/**/types.ts",
+      ],
+      reporter: ["text", "json", "html"],
+      reportsDirectory: "./coverage-unit",
+    },
   },
 });

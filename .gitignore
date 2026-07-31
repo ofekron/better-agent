@@ -9,6 +9,17 @@ venv/
 /backend/.active-venv
 /backend/.dependency-plan.lock
 
+# Coverage artifacts (Coverage Grind routine; never commit raw run output)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+htmlcov-*/
+coverage-unit/
+coverage-fullstack/
+coverage_*.json
+*.covergage
+
 # Node
 node_modules/
 node_modules.retired/

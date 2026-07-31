@@ -24,10 +24,7 @@ sys.path.insert(0, str(BACKEND))
 
 from runs_dir import runs_root, salvage_complete_payload
 
-failures = []
-
-
-def check(cond, msg):
+def check(cond, msg, failures):
     print(("  PASS" if cond else "  FAIL") + f": {msg}")
     if not cond:
         failures.append(msg)
@@ -44,43 +41,46 @@ def write_complete(run_id, payload, per_turn=False):
         (d / "complete.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-# 1. successful run-level complete.json -> salvaged as success
-write_complete("r-success", {"success": True, "error": None, "session_id": "s1",
-                             "token_usage": {"input_tokens": 10}})
-p = salvage_complete_payload("r-success")
-check(p is not None and p["success"] is True and p["error"] is None,
-      "success complete.json salvaged as success=True")
+if __name__ == "__main__":
+    failures = []
 
-# 2. failed complete.json -> salvaged with the REAL error (accurate messaging)
-write_complete("r-fail", {"success": False, "error": "rate limit exceeded",
-                          "session_id": "s2", "token_usage": None})
-p = salvage_complete_payload("r-fail")
-check(p is not None and p["success"] is False and p["error"] == "rate limit exceeded",
-      "failed complete.json salvaged with accurate error")
+    # 1. successful run-level complete.json -> salvaged as success
+    write_complete("r-success", {"success": True, "error": None, "session_id": "s1",
+                                 "token_usage": {"input_tokens": 10}})
+    p = salvage_complete_payload("r-success")
+    check(p is not None and p["success"] is True and p["error"] is None,
+          "success complete.json salvaged as success=True", failures)
 
-# 3. no complete.json -> None (genuine no-output death keeps the synthetic msg)
-none_dir = runs_root() / "r-none"
-none_dir.mkdir(parents=True, exist_ok=True)
-check(salvage_complete_payload("r-none") is None,
-      "no complete.json -> None (synthetic failure still applies)")
+    # 2. failed complete.json -> salvaged with the REAL error (accurate messaging)
+    write_complete("r-fail", {"success": False, "error": "rate limit exceeded",
+                              "session_id": "s2", "token_usage": None})
+    p = salvage_complete_payload("r-fail")
+    check(p is not None and p["success"] is False and p["error"] == "rate limit exceeded",
+          "failed complete.json salvaged with accurate error", failures)
 
-# 4. only per-turn complete.json (run-level missing — the exact gap case)
-write_complete("r-turn", {"success": True, "error": None, "session_id": "s4",
-                          "token_usage": None}, per_turn=True)
-p = salvage_complete_payload("r-turn")
-check(p is not None and p["success"] is True,
-      "per-turn-only complete.json salvaged via read_best_complete fallback")
+    # 3. no complete.json -> None (genuine no-output death keeps the synthetic msg)
+    none_dir = runs_root() / "r-none"
+    none_dir.mkdir(parents=True, exist_ok=True)
+    check(salvage_complete_payload("r-none") is None,
+          "no complete.json -> None (synthetic failure still applies)", failures)
 
-# 5. missing run dir -> None
-check(salvage_complete_payload("does-not-exist") is None, "missing run dir -> None")
+    # 4. only per-turn complete.json (run-level missing — the exact gap case)
+    write_complete("r-turn", {"success": True, "error": None, "session_id": "s4",
+                              "token_usage": None}, per_turn=True)
+    p = salvage_complete_payload("r-turn")
+    check(p is not None and p["success"] is True,
+          "per-turn-only complete.json salvaged via read_best_complete fallback", failures)
 
-# 6. wiring: turn_manager's dead-runner path must call the salvage before
-#    falling back to the fabricated failure. (Fails before the fix.)
-tm_src = open(BACKEND / "turn_manager.py", encoding="utf-8").read()
-check("salvage_complete_payload(run_id)" in tm_src
-      and "runner exited without delivering a complete event" in tm_src,
-      "turn_manager dead-runner path calls salvage_complete_payload")
+    # 5. missing run dir -> None
+    check(salvage_complete_payload("does-not-exist") is None, "missing run dir -> None", failures)
 
-print(f"\n{'PASS' if not failures else 'FAIL'}: {6 - len(failures)}/6 groups, "
-      f"{len(failures)} failed checks")
-sys.exit(1 if failures else 0)
+    # 6. wiring: turn_manager's dead-runner path must call the salvage before
+    #    falling back to the fabricated failure. (Fails before the fix.)
+    tm_src = open(BACKEND / "turn_manager.py", encoding="utf-8").read()
+    check("salvage_complete_payload(run_id)" in tm_src
+          and "runner exited without delivering a complete event" in tm_src,
+          "turn_manager dead-runner path calls salvage_complete_payload", failures)
+
+    print(f"\n{'PASS' if not failures else 'FAIL'}: {6 - len(failures)}/6 groups, "
+          f"{len(failures)} failed checks")
+    sys.exit(1 if failures else 0)
