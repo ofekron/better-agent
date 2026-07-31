@@ -585,7 +585,13 @@ async def recover_pending_fork_provisioning() -> dict:
     """
     rearmed: list[str] = []
     failed: list[str] = []
-    for session in list(session_manager.iter_root_sessions()):
+    for session in session_manager.iter_root_sessions():
+        # Per-session yield so a large session store doesn't starve
+        # WS/REST handlers for the whole scan — each iteration re-migrates
+        # and re-resolves provider config, which adds up across thousands
+        # of sessions. Same idiom as run_recovery.py's per-desc yield.
+        # `sleep(0)` is the cheapest yield asyncio offers.
+        await asyncio.sleep(0)
         if session_readiness.state_of(session) != session_readiness.STATE_PENDING:
             continue
         sid = session.get("id")
