@@ -108,11 +108,31 @@ def _wait_for_server(url: str, timeout: float = 30.0) -> None:
 # Ambient-ability enumeration — from the store's own authority, not manifests
 # ---------------------------------------------------------------------------
 
+def _extension_package_dirs() -> list[Path]:
+    """All shipped extension package dirs, plus any extra package dirs passed
+    via BA_AMBIENT_E2E_EXTRA_EXTENSIONS (os.pathsep-separated) — the hook the
+    private repo's wrapper uses to route its own extensions through this same
+    harness."""
+    dirs = [
+        manifest_path.parent
+        for manifest_path in sorted((_REPO / "extensions").glob("*/better-agent-extension.json"))
+    ]
+    extra = os.environ.get("BA_AMBIENT_E2E_EXTRA_EXTENSIONS", "")
+    for raw in extra.split(os.pathsep):
+        raw = raw.strip()
+        if not raw:
+            continue
+        package_dir = Path(raw)
+        if not (package_dir / "better-agent-extension.json").is_file():
+            raise RuntimeError(f"extra extension package dir has no manifest: {package_dir}")
+        dirs.append(package_dir)
+    return dirs
+
+
 def _install_all_shipped_extensions() -> None:
     import extension_store
 
-    for manifest_path in sorted((_REPO / "extensions").glob("*/better-agent-extension.json")):
-        package_dir = manifest_path.parent
+    for package_dir in _extension_package_dirs():
         extension_store._install_from_package_dir(
             package_dir=package_dir,
             source={"kind": "path", "path": str(package_dir)},
