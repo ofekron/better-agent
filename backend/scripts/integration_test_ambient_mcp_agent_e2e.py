@@ -2,24 +2,27 @@
 """E2e proof that ambient_native MCPs are actually served and callable.
 
 Three layers against ONE self-booted real backend in an isolated test home.
-Every shipped extension declaring an ambient_native MCP entrypoint is
-discovered from `extensions/*/better-agent-extension.json`, installed, and
-granted globally — a newly shipped ambient-eligible extension is covered
-automatically, with no test change.
+ALL shipped extensions are installed, and ambient-ABILITY is enumerated from
+the store's own predicate (`_native_harness_eligible`) — not from manifest
+scanning — so the test covers every able and can never drift from what the
+backend itself considers able. A newly shipped ambient-able extension is
+covered automatically, with no test change.
 
-1. Ambient (session-less) serving for ALL shipped eligibles — always runs,
-   no LLM cost. Each eligible must resolve through the production
+1. Ambient (session-less) serving for ALL ables — always runs, no LLM cost.
+   Each able must resolve through the production
    `native_mcp_launcher_server_configs` funnel with ambient inputs (empty
    app_session_id) and answer a real `initialize` + `tools/list` as a
-   spawned MCP subprocess. The coordination server additionally completes a
-   real `tools/call` lock_ops acquire+release round trip. Unlike
-   test_ambient_mcp_local_dispatch.py this never skips for lack of a
-   backend — it boots its own.
+   spawned MCP subprocess; each NON-able must be ungrantable and stay
+   excluded from ambient resolution (fail-closed). The coordination server
+   additionally completes a real `tools/call` lock_ops acquire+release
+   round trip. Unlike test_ambient_mcp_local_dispatch.py this never skips
+   for lack of a backend — it boots its own.
 
-2. Core ambient servers (`capabilities`, `ui`) via
-   `core_ambient_mcp_launcher.py` — always runs. capabilities completes a
-   real `tools/call list_capabilities` against a real session; ui's ambient
-   tool list must stay narrowed to open_file_panel.
+2. Core ambient servers, enumerated from core_ambient_mcp_launcher's own
+   `_AMBIENT_ELIGIBLE_SERVERS` able-list — always runs. capabilities
+   completes a real `tools/call list_capabilities` against a real session;
+   ui's ambient tool list must stay narrowed to open_file_panel; the
+   deliberately excluded open-config-panel must fail closed.
 
 3. Real agent turns — opt-in via RUN_LLM_TESTS=1 (cheap models only). For
    each installed provider CLI (claude / codex / agy) a real orchestrated
@@ -102,37 +105,50 @@ def _wait_for_server(url: str, timeout: float = 30.0) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Eligible discovery + install
+# Ambient-ability enumeration — from the store's own authority, not manifests
 # ---------------------------------------------------------------------------
 
-def _shipped_ambient_entrypoints() -> list[dict]:
-    """Every mcp entrypoint declaring ambient_native across shipped extensions."""
-    found: list[dict] = []
-    for manifest_path in sorted((_REPO / "extensions").glob("*/better-agent-extension.json")):
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
-            if not item.get("ambient_native"):
-                continue
-            found.append({
-                "package_dir": manifest_path.parent,
-                "extension_id": manifest["id"],
-                "server_name": item["name"],
-                "server_id": item.get("replaces_builtin") or item["name"],
-            })
-    return found
-
-
-def _install_and_grant(eligibles: list[dict]) -> None:
+def _install_all_shipped_extensions() -> None:
     import extension_store
 
-    for entry in {e["extension_id"]: e for e in eligibles}.values():
+    for manifest_path in sorted((_REPO / "extensions").glob("*/better-agent-extension.json")):
+        package_dir = manifest_path.parent
         extension_store._install_from_package_dir(
-            package_dir=entry["package_dir"],
-            source={"kind": "path", "path": str(entry["package_dir"])},
+            package_dir=package_dir,
+            source={"kind": "path", "path": str(package_dir)},
             force_enabled=True,
             persist=True,
         )
-    for entry in eligibles:
+
+
+def _classify_installed_mcp_entrypoints() -> tuple[list[dict], list[dict]]:
+    """Split every installed extension's MCP entrypoints into ambient-ABLE and
+    not-able, using `_native_harness_eligible` — the store's single
+    ambient-ability predicate — so this test can never drift from what the
+    backend itself considers able."""
+    import extension_store
+
+    ables: list[dict] = []
+    not_ables: list[dict] = []
+    for record in extension_store.list_extensions(include_hidden=True):
+        manifest = record.get("manifest") or {}
+        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
+            entry = {
+                "extension_id": manifest["id"],
+                "server_name": item["name"],
+                "server_id": extension_store._native_mcp_server_id(item),
+            }
+            if extension_store._native_harness_eligible(record, "mcp", item["name"]):
+                ables.append(entry)
+            else:
+                not_ables.append(entry)
+    return ables, not_ables
+
+
+def _grant_all_ables(ables: list[dict]) -> None:
+    import extension_store
+
+    for entry in ables:
         extension_store.grant_native_mcp_server(
             entry["extension_id"], entry["server_id"], "global"
         )
@@ -219,15 +235,15 @@ def _ambient_launcher_configs(backend_url: str) -> dict:
     )
 
 
-def test_all_shipped_eligibles_serve_ambiently(backend_url: str, eligibles: list[dict]) -> bool:
+def test_all_ables_serve_ambiently(backend_url: str, ables: list[dict]) -> bool:
     configs = _ambient_launcher_configs(backend_url)
     all_ok = True
-    for entry in eligibles:
+    for entry in ables:
         server_id = entry["server_id"]
         item = configs.get(server_id)
         if item is None:
-            print(f"{FAIL} {server_id}: declared ambient_native but ambient resolution "
-                  f"did not admit it (got {sorted(configs)})")
+            print(f"{FAIL} {server_id}: ambient-able per _native_harness_eligible but "
+                  f"ambient resolution did not admit it (got {sorted(configs)})")
             all_ok = False
             continue
         command, env = _launcher_command_env(item, backend_url)
@@ -239,6 +255,31 @@ def test_all_shipped_eligibles_serve_ambiently(backend_url: str, eligibles: list
         ok = bool(tools)
         print(f"{OK if ok else FAIL} {server_id}: ambient launcher stub serves "
               f"tools/list session-less (tools={tools})")
+        all_ok = all_ok and ok
+    return all_ok
+
+
+def test_non_ables_stay_excluded_ambiently(backend_url: str, not_ables: list[dict]) -> bool:
+    """Every installed MCP entrypoint the store does NOT consider ambient-able
+    must be ungrantable AND absent from ambient resolution — the symmetric
+    fail-closed half of ambient-ability."""
+    import extension_store
+
+    configs = _ambient_launcher_configs(backend_url)
+    all_ok = True
+    for entry in not_ables:
+        server_id = entry["server_id"]
+        grant_refused = False
+        try:
+            extension_store.grant_native_mcp_server(
+                entry["extension_id"], server_id, "global"
+            )
+        except extension_store.ExtensionError:
+            grant_refused = True
+        resolved = server_id in configs
+        ok = grant_refused and not resolved
+        print(f"{OK if ok else FAIL} {server_id}: non-able stays fail-closed ambiently "
+              f"(grant_refused={grant_refused} resolved_ambiently={resolved})")
         all_ok = all_ok and ok
     return all_ok
 
@@ -284,26 +325,55 @@ def _core_ambient_session(server_name: str, backend_url: str) -> _McpSession:
     return _McpSession(command, env)
 
 
-def test_core_capabilities_ambient_call(backend_url: str, session_id: str) -> bool:
-    session = _core_ambient_session("capabilities", backend_url)
-    try:
-        ok, text = session.call("list_capabilities", {"session_id": session_id})
-    finally:
-        session.close()
-    print(f"{OK if ok else FAIL} core capabilities: ambient list_capabilities tools/call "
-          f"succeeds (response={text[:200]})")
-    return ok
+def test_all_core_ables_serve_ambiently(backend_url: str, session_id: str) -> bool:
+    """Every server in core_ambient_mcp_launcher's own able-list must serve a
+    non-empty ambient tool list; per-server deep checks on top: a real
+    capabilities tools/call against a real session, and ui staying narrowed
+    to open_file_panel."""
+    from core_ambient_mcp_launcher import _AMBIENT_ELIGIBLE_SERVERS
+
+    all_ok = True
+    for server_name in sorted(_AMBIENT_ELIGIBLE_SERVERS):
+        session = _core_ambient_session(server_name, backend_url)
+        try:
+            tools = session.list_tools()
+            deep_ok, deep_detail = True, ""
+            if server_name == "capabilities":
+                deep_ok, text = session.call(
+                    "list_capabilities", {"session_id": session_id}
+                )
+                deep_detail = f" list_capabilities={text[:120]!r}"
+            elif server_name == "ui":
+                deep_ok = tools == ["open_file_panel"]
+                deep_detail = " (must stay narrowed to open_file_panel)"
+        finally:
+            session.close()
+        ok = bool(tools) and deep_ok
+        print(f"{OK if ok else FAIL} core {server_name}: ambient serving works "
+              f"(tools={tools}{deep_detail})")
+        all_ok = all_ok and ok
+    return all_ok
 
 
-def test_core_ui_ambient_tool_list_narrowed(backend_url: str) -> bool:
-    session = _core_ambient_session("ui", backend_url)
+def test_core_non_able_fails_closed(backend_url: str) -> bool:
+    """open-config-panel is deliberately NOT in the core able-list — the
+    launcher must refuse to serve it ambiently."""
+    command = [sys.executable, str(_BACKEND / "core_ambient_mcp_launcher.py"),
+               "open-config-panel"]
+    env = {**os.environ, "BETTER_CLAUDE_BACKEND_URL": backend_url}
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, text=True,
+    )
     try:
-        tools = session.list_tools()
-    finally:
-        session.close()
-    ok = tools == ["open_file_panel"]
-    print(f"{OK if ok else FAIL} core ui: ambient tool list stays narrowed to "
-          f"open_file_panel (got {tools})")
+        proc.communicate(input="", timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+    ok = proc.returncode not in (None, 0)
+    print(f"{OK if ok else FAIL} core open-config-panel: ambient launch fails closed "
+          f"(returncode={proc.returncode})")
     return ok
 
 
@@ -424,10 +494,11 @@ async def _main(home: Path) -> bool:
     _test_installation.activate(
         home, provider=profile_provider, launcher_path=clis[profile_provider]
     )
-    eligibles = _shipped_ambient_entrypoints()
-    if not eligibles:
-        raise RuntimeError("no shipped extension declares an ambient_native MCP entrypoint")
-    _install_and_grant(eligibles)
+    _install_all_shipped_extensions()
+    ables, not_ables = _classify_installed_mcp_entrypoints()
+    if not ables:
+        raise RuntimeError("no installed extension MCP entrypoint is ambient-able")
+    _grant_all_ables(ables)
 
     port = _free_port()
     server = uvicorn.Server(
@@ -454,10 +525,11 @@ async def _main(home: Path) -> bool:
         )
 
         results = [
-            test_all_shipped_eligibles_serve_ambiently(backend_url, eligibles),
+            test_all_ables_serve_ambiently(backend_url, ables),
+            test_non_ables_stay_excluded_ambiently(backend_url, not_ables),
             test_coordination_ambient_lock_roundtrip(backend_url),
-            test_core_capabilities_ambient_call(backend_url, core_session["id"]),
-            test_core_ui_ambient_tool_list_narrowed(backend_url),
+            test_all_core_ables_serve_ambiently(backend_url, core_session["id"]),
+            test_core_non_able_fails_closed(backend_url),
         ]
 
         from live_llm_test_guard import require_live_llm_tests
