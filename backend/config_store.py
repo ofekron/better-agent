@@ -2966,9 +2966,12 @@ def runtime_profile_is_deleted(profile: dict | None) -> bool:
 
 
 def _default_runtime_profile_name(provider: dict, runner: str) -> str:
-    label = str(
-        provider.get("nickname") or provider.get("name") or provider.get("kind") or "Provider"
-    ).strip()
+    # Mirror frontend providerDisplayName(): base provider/company name, plus
+    # the account (nickname) dimension when set, so profiles on providers
+    # with multiple accounts of the same kind stay distinguishable.
+    base = str(provider.get("name") or provider.get("kind") or "Provider").strip()
+    nickname = str(provider.get("nickname") or "").strip()
+    label = f"{base} · {nickname}" if nickname else base
     return f"{label} ({runner})"
 
 

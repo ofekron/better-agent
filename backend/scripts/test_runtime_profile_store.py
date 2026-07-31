@@ -533,6 +533,38 @@ def test_add_provider_seeds_profile() -> None:
     assert seeded_profile["default_reasoning_effort"], "effort is populated"
 
 
+def test_default_profile_name_includes_account_and_provider() -> None:
+    # Regression: _default_runtime_profile_name previously picked
+    # nickname OR name, dropping the provider/company name whenever an
+    # account nickname was set. A profile name must carry both dimensions
+    # so two accounts of the same provider kind stay distinguishable.
+    created = config_store.add_provider(
+        {
+            "kind": "claude",
+            "name": "Claude",
+            "nickname": "Work",
+            "mode": "subscription",
+        }
+    )
+    profile = next(
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == created["id"]
+    )
+    assert profile["name"].startswith("Claude · Work ("), profile["name"]
+
+    no_nickname = config_store.add_provider(
+        {"kind": "claude", "name": "Claude", "mode": "subscription"}
+    )
+    plain_profile = next(
+        p
+        for p in config_store.list_runtime_profiles()
+        if p["provider_id"] == no_nickname["id"]
+    )
+    assert plain_profile["name"].startswith("Claude ("), plain_profile["name"]
+    assert "·" not in plain_profile["name"]
+
+
 def test_provision_catalog_seeds_profiles() -> None:
     import uuid as _uuid
 
@@ -657,6 +689,7 @@ def main() -> int:
         test_deleting_deleted_tombstone_activation_fails,
         test_provider_deletion_cascade_and_graveyard,
         test_add_provider_seeds_profile,
+        test_default_profile_name_includes_account_and_provider,
         test_provision_catalog_seeds_profiles,
         test_sync_import_seeds_profiles,
         test_installation_selection_seeds_profile,
