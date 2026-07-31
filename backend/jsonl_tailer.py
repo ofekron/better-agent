@@ -1748,9 +1748,6 @@ class BetterAgentJsonlTailer:
         if not lst:
             self._subscribers.pop(sub.app_session_id, None)
 
-    def has_subscribers(self) -> bool:
-        return any(self._subscribers.values())
-
     async def run(self) -> None:
         from event_journal import event_journal_reader
 

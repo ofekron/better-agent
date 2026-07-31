@@ -622,14 +622,6 @@ def _queue_total_count(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM native_full_scan_queue").fetchone()[0])
 
 
-def _queue_seed(conn: sqlite3.Connection, on_disk: list[tuple[Path, str, float, int]]) -> None:
-    conn.execute("DELETE FROM native_full_scan_queue")
-    conn.executemany(
-        "INSERT INTO native_full_scan_queue(path, tag, mtime, size, processed) VALUES (?,?,?,?,0)",
-        [(str(path), tag, mt, sz) for path, tag, mt, sz in on_disk],
-    )
-
-
 def _queue_batch(conn: sqlite3.Connection, limit: int) -> list[tuple[Path, str, float, int]]:
     return [
         (Path(path), tag, float(mtime), int(size))
@@ -853,11 +845,6 @@ def _scan_full_batch(
     return len(discovered), bool(state.get("complete"))
 
 
-def _full_scan_complete(conn: sqlite3.Connection) -> bool:
-    state = _full_scan_state(conn)
-    return bool(state and state.get("complete"))
-
-
 def _deleted_after_full_scan_batch(conn: sqlite3.Connection) -> list[str]:
     return [
         row[0] for row in conn.execute(
@@ -1056,15 +1043,6 @@ _normalize_repeated_text = transcript_text_collapse.normalize_repeated_text
 _raw_index_after_normalized_prefix_checked = (
     transcript_text_collapse.raw_index_after_normalized_prefix_checked
 )
-_raw_index_after_normalized_prefix = transcript_text_collapse.raw_index_after_normalized_prefix
-_common_prefix_len = transcript_text_collapse.common_prefix_len
-
-
-def _shared_prefix_len(left: str, right: str, minimum: int) -> int:
-    common_len = _common_prefix_len(left, right)
-    if common_len > minimum and left[common_len - 1].isspace():
-        common_len -= 1
-    return common_len
 
 
 def _text_collapse_signature(text: str) -> tuple[Any, ...]:
@@ -1878,27 +1856,6 @@ def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True
         conn.execute("DELETE FROM native_element_meta WHERE path = ?", (path,))
     if file_state:
         conn.execute("DELETE FROM native_file_state WHERE path = ?", (path,))
-
-
-def _compute_changes() -> tuple[list[tuple[Path, str, float, int]], set[str]]:
-    """Return (on_disk_files, indexed_paths) so the caller can diff. on_disk is
-    the cheap stat-walk; indexed_paths comes from native_file_state."""
-    on_disk = _stat_walk()
-    conn = _readonly_connection()
-    try:
-        indexed = {r[0] for r in conn.execute("SELECT path FROM native_file_state")}
-    except sqlite3.OperationalError:
-        indexed = set()
-    return on_disk, indexed
-
-
-def _indexed_file_states(conn: sqlite3.Connection) -> list[tuple[str, str, float, int]]:
-    return [
-        (str(path), str(tag), float(mtime), int(size))
-        for path, tag, mtime, size in conn.execute(
-            "SELECT path, tag, mtime, size FROM native_file_state"
-        )
-    ]
 
 
 def _indexed_file_state_batch(
