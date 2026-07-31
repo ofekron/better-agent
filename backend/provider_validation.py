@@ -118,6 +118,16 @@ def is_authorized_provisioned_tool_profile(body: dict | None, profile: str) -> b
     return is_authorized_tool_profile_dispatch(client_delegation_id, profile)
 
 
+def _resolved_provider_record(provider_id: str | None) -> dict | None:
+    """Resolve provider_id to its record, falling back to the active default
+    provider when id is absent or the named provider is not found."""
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if record is None:
+        active = config_store.get_default_provider()
+        record = config_store.get_provider(active["id"]) if active else None
+    return record
+
+
 def provider_reasoning_effort(
     provider_id: str | None,
     effort: str | None,
@@ -128,10 +138,7 @@ def provider_reasoning_effort(
         return None
     if not effort:
         return ""
-    record = config_store.get_provider(provider_id) if provider_id else None
-    if record is None:
-        active = config_store.get_default_provider()
-        record = config_store.get_provider(active["id"]) if active else None
+    record = _resolved_provider_record(provider_id)
     options = runtime_profile.reasoning_efforts(
         record or {}, runner, model=model,
     )
@@ -156,18 +163,12 @@ def inherited_reasoning_effort(
     caller asking for an unsupported value gets a 400 instead of a silent
     downgrade.
     """
-    record = config_store.get_provider(provider_id) if provider_id else None
-    if record is None:
-        active = config_store.get_default_provider()
-        record = config_store.get_provider(active["id"]) if active else None
+    record = _resolved_provider_record(provider_id)
     return runtime_profile.fit_reasoning_effort(record, effort, runner, model=model)
 
 
 def provider_runner(provider_id: str | None, runner: object = None) -> str:
-    record = config_store.get_provider(provider_id) if provider_id else None
-    if record is None:
-        active = config_store.get_default_provider()
-        record = config_store.get_provider(active["id"]) if active else None
+    record = _resolved_provider_record(provider_id)
     if record is None:
         raise HTTPException(status_code=400, detail="provider does not exist")
     try:
@@ -200,10 +201,7 @@ def provider_permission(
         return None
     if not value:
         return {}
-    record = config_store.get_provider(provider_id) if provider_id else None
-    if record is None:
-        active = config_store.get_default_provider()
-        record = config_store.get_provider(active["id"]) if active else None
+    record = _resolved_provider_record(provider_id)
     name = (record or {}).get("name") or provider_id or "active provider"
     from permission import permission_axes_for_kind
     runtime_kind = runtime_profile.runtime_kind(record or {}, runner)
