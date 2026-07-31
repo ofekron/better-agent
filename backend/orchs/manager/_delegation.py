@@ -660,7 +660,9 @@ async def run_delegation(
             session_cwd_candidates,
             worker_session_id,
         )
-        _safe_delete_forks(stale_forks, "delete orphan delegate-fork BC %s failed")
+        await _safe_delete_forks(
+            coordinator, stale_forks, "delete orphan delegate-fork BC %s failed",
+        )
         await coordinator.broadcast_workers_changed(None)
         return delegate_error_payload(
             worker_session_id, worker_description,

@@ -21,7 +21,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _safe_delete_forks(fbsids: list[str], log_fmt: str) -> None:
+async def _safe_delete_forks(
+    coordinator: "Coordinator",
+    fbsids: list[str],
+    log_fmt: str,
+) -> None:
     """Delete each fork Better Agent session, logging per-failure without raising.
     `log_fmt` must include exactly one `%s` slot for `fbsid` so each
     call site keeps its diagnostic phrasing.
@@ -29,6 +33,15 @@ def _safe_delete_forks(fbsids: list[str], log_fmt: str) -> None:
     happy path.
     """
     for fbsid in fbsids:
+        try:
+            # Cancel BEFORE delete: a fork being rewound-away can still
+            # have an active turn (a rewind that races a still-running
+            # delegation). Without this the fork's runner is orphaned
+            # exactly like the other three delegate-fork paths fixed
+            # earlier today (29d01d58e, 4d003508a, d2b2d64ab).
+            await coordinator.cancel_session(fbsid)
+        except Exception:
+            logger.exception(log_fmt, fbsid)
         try:
             session_manager.delete(fbsid)
         except Exception:
@@ -102,11 +115,16 @@ async def rewind_workers_for_turn(
             # this turn, so "rewind" means "make it never have
             # existed."
             worker_store.remove_worker("", wsid)
-            _safe_delete_forks(
+            await _safe_delete_forks(
+                coordinator,
                 worker_store.clear_forks_for_worker_everywhere(wsid),
                 "delete delegate-fork BC %s failed",
             )
             if worker_session is not None:
+                try:
+                    await coordinator.cancel_session(wsid)
+                except Exception:
+                    logger.exception("cancel worker BC %s failed", wsid)
                 session_manager.delete(wsid)
             deleted += 1
             continue
@@ -117,7 +135,8 @@ async def rewind_workers_for_turn(
             # Delegation produced no anchor — nothing to rewind on
             # claude's side. Just clear forks so the next delegation
             # re-forks fresh.
-            _safe_delete_forks(
+            await _safe_delete_forks(
+                coordinator,
                 worker_store.clear_forks_for_worker_everywhere(wsid),
                 "delete delegate-fork BC %s failed",
             )
@@ -128,7 +147,8 @@ async def rewind_workers_for_turn(
             await coordinator.rewind_session(wsid, fork_sid, anchor_uuid)
         except RuntimeError as e:
             logger.warning("worker rewind failed for %s: %s", wsid, e)
-            _safe_delete_forks(
+            await _safe_delete_forks(
+                coordinator,
                 worker_store.clear_forks_for_worker_everywhere(wsid),
                 "delete fork BC %s on rewind failure failed",
             )
@@ -136,14 +156,16 @@ async def rewind_workers_for_turn(
             continue
         except Exception:
             logger.exception("worker rewind crashed for %s", wsid)
-            _safe_delete_forks(
+            await _safe_delete_forks(
+                coordinator,
                 worker_store.clear_forks_for_worker_everywhere(wsid),
                 "delete fork BC %s on rewind failure failed",
             )
             skipped += 1
             continue
 
-        _safe_delete_forks(
+        await _safe_delete_forks(
+            coordinator,
             worker_store.clear_forks_for_worker_everywhere(wsid),
             "delete fork BC %s post-rewind failed",
         )
