@@ -4790,14 +4790,19 @@ def list_extensions_with_reconciliation(*, include_hidden: bool = False) -> tupl
 
 
 def _list_extensions_from_data(data: dict[str, Any], *, include_hidden: bool = False) -> list[dict[str, Any]]:
-    return sorted(
-        (
-            record
-            for extension_id, record in data["extensions"].items()
-            if include_hidden or extension_id not in PUBLIC_EXTENSION_LIST_HIDDEN_IDS
-        ),
-        key=lambda item: item["manifest"]["id"],
-    )
+    # Sort by the canonical dict key (the authoritative extension id), not the
+    # denormalized `manifest["id"]`: every write path keys the record by its
+    # manifest id, so the two are equal for valid records, but the dict key is
+    # guaranteed to be a string. Sorting by manifest id crashes the whole
+    # projection (and every consumer such as `default_session_model`) the
+    # moment a single record carries a null/missing manifest id.
+    extensions = data["extensions"]
+    visible_ids = [
+        extension_id
+        for extension_id in extensions
+        if include_hidden or extension_id not in PUBLIC_EXTENSION_LIST_HIDDEN_IDS
+    ]
+    return [extensions[extension_id] for extension_id in sorted(visible_ids)]
 
 
 def _active_records() -> list[dict[str, Any]]:
