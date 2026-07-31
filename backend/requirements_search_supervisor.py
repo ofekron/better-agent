@@ -275,7 +275,10 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], windows_job: int |
     if process.poll() is not None:
         return
     if os.name == "posix":
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
         return
     if windows_job is not None:
         import ctypes

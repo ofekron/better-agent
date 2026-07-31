@@ -234,6 +234,23 @@ def test_background_projection_shutdown_quiesces_managed_worker() -> None:
     assert stopped.is_set()
 
 
+def test_terminate_process_tree_swallows_killpg_race_errors() -> None:
+    if os.name != "posix":
+        return
+    for exc_type in (ProcessLookupError, PermissionError):
+        fake_process = SimpleNamespace(poll=lambda: None, pid=999999)
+        original_killpg = supervisor.os.killpg
+
+        def raising_killpg(pid, sig, _exc=exc_type):
+            raise _exc()
+
+        supervisor.os.killpg = raising_killpg
+        try:
+            supervisor._terminate_process_tree(fake_process, None)
+        finally:
+            supervisor.os.killpg = original_killpg
+
+
 def test_windows_worker_uses_job_memory_and_cpu_limits() -> None:
     supervisor = (ROOT / "requirements_search_supervisor.py").read_text(encoding="utf-8")
     assert "CreateJobObjectW" in supervisor
