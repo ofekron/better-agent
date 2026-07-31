@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   CredentialConsent,
   FileDiscussion,
   ModelCatalog,
@@ -9,6 +10,7 @@ import type {
   Trace,
   UserInteractionRequest,
   WorkerInfo,
+  WSEvent,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
 
@@ -229,6 +231,37 @@ export class MockBackend {
 
   seed(partial: Partial<BackendState>): void {
     this.state = { ...this.state, ...partial };
+  }
+
+  /** Keep `state.sessions[].messages` in sync with `messages_replay` /
+   *  `messages_delta` WS frames pushed through the harness. The real
+   *  backend persists a message before it is ever broadcast over WS, so
+   *  REST and WS always agree; here the two are separate mock surfaces
+   *  and WS delivery alone never touched `state.sessions`, so a message
+   *  that only ever arrived via `emit`/`emitMany` was invisible to `GET
+   *  /api/sessions/:id` and silently dropped by any reconcile-style
+   *  refetch (e.g. after `turn_complete`). Called by the harness's
+   *  `emit`/`emitMany` before delivering the frame to the mock socket. */
+  applyWsEvent(event: WSEvent): void {
+    if (event.type !== "messages_replay" && event.type !== "messages_delta") return;
+    const d = event.data as { app_session_id?: string; messages?: ChatMessage[] };
+    if (!d.app_session_id || !Array.isArray(d.messages) || d.messages.length === 0) return;
+    for (const root of this.state.sessions) {
+      const node = findNodeInTree(root, d.app_session_id);
+      if (!node) continue;
+      const byId = new Map((node.messages ?? []).map((m, i) => [m.id, i]));
+      const merged = [...(node.messages ?? [])];
+      for (const m of d.messages) {
+        const idx = byId.get(m.id);
+        if (idx !== undefined) merged[idx] = m;
+        else {
+          byId.set(m.id, merged.length);
+          merged.push(m);
+        }
+      }
+      node.messages = merged;
+      return;
+    }
   }
 
   reset(): void {

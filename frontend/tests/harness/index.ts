@@ -138,8 +138,14 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       }
       return id;
     },
-    emit: (event) => wsController.emit(event),
-    emitMany: (events) => wsController.emitMany(events),
+    emit: (event) => {
+      backend.applyWsEvent(event);
+      wsController.emit(event);
+    },
+    emitMany: (events) => {
+      for (const event of events) backend.applyWsEvent(event);
+      wsController.emitMany(events);
+    },
     typeAndSend: async (text: string) => {
       const ta = result.container.querySelector(
         '[data-testid="input-textarea"]',

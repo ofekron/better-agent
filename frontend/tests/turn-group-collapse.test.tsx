@@ -456,13 +456,10 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       events: undefined,
     };
     // `turn_complete` also fires a background `session_reconciled` REST
-    // refetch (see App.tsx's `onTurnTerminal`). The mock backend's REST
-    // store is separate from what `emitMany` injects over WS, so it must
-    // be kept in sync here or the refetch's canonical (empty) response
-    // wins the reconcile merge and silently drops messages the WS side
-    // already applied.
-    const backendSession = h.backend.state.sessions.find((s) => s.id === session.id)!;
-    backendSession.messages = [userMessage, finalAssistantMessage];
+    // refetch (see App.tsx's `onTurnTerminal`). The harness's emitMany
+    // keeps the mock backend's REST store in sync with WS-delivered
+    // `messages_delta` frames, so that refetch converges on what WS
+    // already applied instead of dropping it.
     h.emitMany([
       { type: "messages_delta", data: { app_session_id: session.id, messages: [finalAssistantMessage] } },
       { type: "turn_complete", data: { app_session_id: session.id, session_id: "agent-1", success: true } },
