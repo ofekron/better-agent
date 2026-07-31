@@ -17364,65 +17364,6 @@ pre .inline-tag-highlight {
   cursor: not-allowed;
 }
 
-/* ───── Supervisor split view ───────────────────────────────────────── */
-
-.supervisor-split {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-.supervisor-split-header {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-  border-bottom: 1px solid var(--border);
-}
-.supervisor-split-label {
-  padding: 6px 12px;
-  font-size: calc(11px * var(--app-font-scale));
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-muted, #888);
-  text-align: center;
-  background: rgba(255, 255, 255, 0.03);
-}
-.supervisor-split-label + .supervisor-split-label {
-  border-inline-start: 1px solid var(--border);
-}
-.supervisor-timeline {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-.supervisor-timeline-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-}
-.supervisor-timeline-row + .supervisor-timeline-row {
-  border-top: 1px solid var(--border);
-}
-.supervisor-timeline-cell {
-  padding: 8px;
-  min-height: 0;
-}
-.supervisor-timeline-cell + .supervisor-timeline-cell {
-  border-inline-start: 1px solid var(--border);
-}
-.supervisor-timeline-spacer {
-  /* Empty cell that still participates in row height */
-}
-.supervisor-pane-empty {
-  color: var(--text-muted, #888);
-  font-style: italic;
-  font-size: calc(12px * var(--app-font-scale));
-  padding: 24px 12px;
-  text-align: center;
-}
-
 /* ─────────────────────────────────────────────────────────────────────
  * Supervisor banner — surfaces `supervisor_event` WS frames
  * (verdict_failed / verdict_capped). Auto-dismisses after 8s; click ×
@@ -21039,20 +20980,6 @@ button.progress-inflight {
 .sidebar-logout-btn:hover {
   color: var(--text-primary);
   border-color: var(--accent);
-}
-
-/* SupervisorSplitView uses two side-by-side panes on desktop and
-   stacks them vertically on mobile / tablet. */
-@media (max-width: 1024px) {
-  .supervisor-split-header,
-  .supervisor-timeline-row {
-    grid-template-columns: 1fr !important;
-  }
-  .supervisor-split-label + .supervisor-split-label,
-  .supervisor-timeline-cell + .supervisor-timeline-cell {
-    border-inline-start: none !important;
-    border-top: 1px solid var(--border);
-  }
 }
 
 /* ── Unified context menu (desktop right-click) ─────────────── */
