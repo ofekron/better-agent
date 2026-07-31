@@ -165,10 +165,6 @@ def _get_provisioned_spec(key: str, module_name: str):
         raise RuntimeError(f"provisioned spec {key!r} was not registered") from exc
 
 
-def _get_requirements_processor_spec():
-    return get_requirements_processor_spec()
-
-
 def get_requirements_processor_spec():
     return _get_provisioned_spec(
         GET_REQUIREMENTS_PROCESSOR_KEY,
@@ -237,23 +233,6 @@ GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
     GET_REQUIREMENTS_PROCESSOR_KEY,
     "requirement_analysis.processor_spec",
 )
-
-
-def _processor_search_hints(query: str) -> list[str]:
-    normalized = (query or "").lower()
-    if not any(term in normalized for term in ("delayed", "confirmation", "confirms", "proposal", "adopts")):
-        return []
-    if not any(term in normalized for term in ("assistant", "transcript", "requirement")):
-        return []
-    return [
-        "lag between assistant proposition and user confirmation",
-        "assistant proposition",
-        "user confirmation",
-        "user's confirmation",
-        "assistant defines requirements",
-        "user confirms requirements",
-        "non-user transcript rows",
-    ]
 
 
 def _processor_tool_unavailable(text: str) -> bool:
