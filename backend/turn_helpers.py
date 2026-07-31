@@ -114,6 +114,14 @@ _TRANSIENT_MAX_WAIT_S = 60.0
 # quota must terminate at the cap with the real error instead of
 # sleep-looping forever (the rate-limit branch has no per-provider cap).
 _RATE_LIMIT_MAX_ATTEMPTS = 5
+# Selector-change preemption (turn_manager's drive loop restarts the
+# provider subprocess whenever session.model/provider_id/runner drifts from
+# the last-spawned subprocess's identity) must also be bounded: an external
+# writer (e.g. two clients racing PATCH /selectors on the same session) can
+# keep flipping session.model faster than a fresh subprocess's sid-discovery
+# stamps last_active_model, which would otherwise restart the turn forever
+# with status stuck at "Running...".
+_SELECTOR_CHANGE_MAX_ATTEMPTS = 20
 
 
 def _is_transient_error(error: Optional[str], events: list[dict]) -> bool:

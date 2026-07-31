@@ -77,6 +77,7 @@ from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
 from turn_helpers import (
     _RATE_LIMIT_MAX_ATTEMPTS,
+    _SELECTOR_CHANGE_MAX_ATTEMPTS,
     _TRANSIENT_BASE_WAIT_S,
     _TRANSIENT_MAX_WAIT_S,
     _append_todo_reminder,
@@ -2685,6 +2686,8 @@ class TurnManager:
             }
         transient_attempt = 0
         rate_limit_attempt = 0
+        selector_change_attempt = 0
+        selector_change_capped = False
         moved_project_wrap_done = False
         in_flight_msg = self.current_assistant_msgs.get(app_session_id)
         if in_flight_msg:
@@ -2977,18 +2980,34 @@ class TurnManager:
                     (old_provider_sid or "none")[:8],
                 )
                 continue
-            if await _should_preempt_selector_change_continuation():
-                old_provider_sid = current_session_id
-                chain_depth = await _start_selector_change_continuation(old_provider_sid)
-                logger.info(
-                    "continuation: preempting due to provider/model change for %s "
-                    "(provider=%s chain depth %d, old sid %s)",
-                    app_session_id[:8],
-                    provider_kind or "unknown",
-                    chain_depth,
-                    (old_provider_sid or "none")[:8],
-                )
-                continue
+            if (
+                not selector_change_capped
+                and await _should_preempt_selector_change_continuation()
+            ):
+                selector_change_attempt += 1
+                if selector_change_attempt > _SELECTOR_CHANGE_MAX_ATTEMPTS:
+                    selector_change_capped = True
+                    logger.warning(
+                        "continuation: selector-change preemption cap (%d) hit "
+                        "for %s — session.model/provider_id/runner is flapping "
+                        "(e.g. concurrent selector writers); proceeding with the "
+                        "current selectors instead of restarting again",
+                        _SELECTOR_CHANGE_MAX_ATTEMPTS, app_session_id[:8],
+                    )
+                else:
+                    old_provider_sid = current_session_id
+                    chain_depth = await _start_selector_change_continuation(old_provider_sid)
+                    logger.info(
+                        "continuation: preempting due to provider/model change for %s "
+                        "(provider=%s chain depth %d, old sid %s, attempt %d/%d)",
+                        app_session_id[:8],
+                        provider_kind or "unknown",
+                        chain_depth,
+                        (old_provider_sid or "none")[:8],
+                        selector_change_attempt,
+                        _SELECTOR_CHANGE_MAX_ATTEMPTS,
+                    )
+                    continue
             if (
                 not moved_project_wrap_done
                 and await _should_wrap_moved_project_continuation()
