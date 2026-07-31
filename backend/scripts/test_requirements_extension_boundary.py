@@ -7,14 +7,22 @@ Run with:
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 
 
 BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+import paths  # noqa: E402
+
+_TEST_HOME = tempfile.mkdtemp(prefix="ba-ext-boundary-")
+paths.engage_test_home(_TEST_HOME)
+
 import extension_store as es  # noqa: E402
+import requirement_context as rc  # noqa: E402
 
 RUNNER = BACKEND / "runner.py"
 EXTENSION_STORE = BACKEND / "extension_store.py"
@@ -27,13 +35,29 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+# Attributes the private requirements extension resolves off
+# requirement_context at runtime. Callers live outside this repo, so a
+# static usage scan sees zero references — deleting one as "dead code"
+# breaks every get_requirements job with AttributeError.
+EXTENSION_FACING_ATTRS = (
+    "GET_REQUIREMENTS_PROCESSOR_KEY",
+    "_processor_search_hints",
+)
+
+
 def _run() -> bool:
+    missing = [name for name in EXTENSION_FACING_ATTRS if not hasattr(rc, name)]
     runner = RUNNER.read_text(encoding="utf-8")
     extension_store = EXTENSION_STORE.read_text(encoding="utf-8")
     extension_package_loader = EXTENSION_PACKAGE_LOADER.read_text(encoding="utf-8")
     requirement_context = REQUIREMENT_CONTEXT.read_text(encoding="utf-8")
     processor_worker_name = "worker:" + "requirements:" + "query-processor"
     results = [
+        (
+            "requirement_context keeps every extension-facing attribute",
+            not missing,
+            "missing: " + ", ".join(missing),
+        ),
         (
             "runner has no in-process get-requirements builder",
             "_build_get_requirements_tool" not in runner
@@ -98,4 +122,8 @@ def _run() -> bool:
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if _run() else 1)
+    try:
+        ok = _run()
+    finally:
+        shutil.rmtree(_TEST_HOME, ignore_errors=True)
+    raise SystemExit(0 if ok else 1)

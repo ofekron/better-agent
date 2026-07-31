@@ -235,6 +235,31 @@ GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
 )
 
 
+def _processor_search_hints(query: str) -> list[str]:
+    # Extension-facing contract: requirement_analysis.processor_spec
+    # (ofek-dev.requirements) resolves this off the module at prompt-build
+    # time. Callers live outside this repo, so static usage scans see none.
+    normalized = (query or "").lower()
+    if not any(
+        term in normalized
+        for term in ("delayed", "confirmation", "confirms", "proposal", "adopts")
+    ):
+        return []
+    if not any(
+        term in normalized for term in ("assistant", "transcript", "requirement")
+    ):
+        return []
+    return [
+        "lag between assistant proposition and user confirmation",
+        "assistant proposition",
+        "user confirmation",
+        "user's confirmation",
+        "assistant defines requirements",
+        "user confirms requirements",
+        "non-user transcript rows",
+    ]
+
+
 def _processor_tool_unavailable(text: str) -> bool:
     return bool(_processor_tool_unavailable_reason(text))
 
