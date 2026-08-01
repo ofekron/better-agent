@@ -202,6 +202,48 @@ def tools_to_anthropic(tool_schemas: list[dict]) -> list[dict]:
     return tools
 
 
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _with_cache_control(block: dict) -> dict:
+    return {**block, "cache_control": _CACHE_CONTROL}
+
+
+def _apply_cache_breakpoints(
+    system: str, anthropic_messages: list[dict], tools: list[dict],
+) -> tuple[Optional[list[dict]], list[dict], list[dict]]:
+    """Mark the stable, turn-to-turn-repeated parts of the request cacheable
+    via Anthropic prompt caching (`cache_control: {"type": "ephemeral"}`).
+
+    Without these breakpoints the full system prompt (base + per-turn
+    harness-profile/capability-context block) and the tool schema list are
+    byte-identical on nearly every turn of a session, and the growing
+    conversation history is identical up through the previous turn — but
+    all of it is billed as fresh input tokens every single call, since
+    Anthropic only caches when a breakpoint is explicitly placed. Three
+    breakpoints (system / tools / last stable message) is within
+    Anthropic's 4-breakpoint-per-request limit and covers the dominant
+    turn-over-turn repeated content:
+
+    - `system`: single text block, marked cacheable whenever non-empty.
+    - `tools`: schema is fixed for the life of a session; mark the last
+      entry (Anthropic caches everything up to and including a
+      breakpoint).
+    - conversation history: mark the last content block of the
+      second-to-last message so everything through the prior turn is
+      served from cache; only the newest turn's content prices fresh.
+    """
+    system_blocks = [_with_cache_control({"type": "text", "text": system})] if system else None
+    cached_tools = list(tools)
+    if cached_tools:
+        cached_tools[-1] = _with_cache_control(cached_tools[-1])
+    if len(anthropic_messages) >= 2:
+        stable_content = anthropic_messages[-2].get("content")
+        if isinstance(stable_content, list) and stable_content:
+            stable_content[-1] = _with_cache_control(stable_content[-1])
+    return system_blocks, anthropic_messages, cached_tools
+
+
 def _anthropic_usage_to_chat_completions_usage(usage: dict, previous: Optional[dict]) -> dict:
     """Anthropic splits usage across `message_start` (input/cache tokens)
     and `message_delta` (cumulative output tokens) instead of Chat
@@ -221,7 +263,7 @@ def _anthropic_usage_to_chat_completions_usage(usage: dict, previous: Optional[d
 
 
 async def _stream_messages(
-    base_url: str, model: str, system: str, messages: list[dict],
+    base_url: str, model: str, system: Optional[list[dict]], messages: list[dict],
     tools: list[dict],
 ) -> AsyncIterator[dict]:
     """Yield parsed Anthropic Messages API SSE event dicts."""
@@ -306,9 +348,12 @@ async def one_round_claude_subscription(
     del api_key, reasoning_effort, codex_home, app_session_id
     system, anthropic_messages = messages_to_anthropic(messages)
     tools = tools_to_anthropic(tool_schemas)
+    system_blocks, anthropic_messages, tools = _apply_cache_breakpoints(
+        system, anthropic_messages, tools
+    )
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for event in _stream_messages(base_url, model, system, anthropic_messages, tools):
+    async for event in _stream_messages(base_url, model, system_blocks, anthropic_messages, tools):
         if (run_dir / "cancel").exists():
             break
         etype = event.get("type")

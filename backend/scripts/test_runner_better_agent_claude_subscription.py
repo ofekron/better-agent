@@ -141,6 +141,46 @@ def test_tools_to_anthropic() -> bool:
     return True
 
 
+def test_cache_breakpoints_mark_stable_content_only() -> bool:
+    """Regression test for the missing-cache_control bug: the harness-profile
+    system block and the tool schema list are byte-identical on nearly every
+    turn of a session, and prior conversation turns never change once
+    written — but before this fix nothing marked any of it cacheable, so
+    Anthropic billed it as fresh input tokens every single call. This locks
+    that a breakpoint lands on `system`, on the last tool schema, and on the
+    last stable (i.e. not-newest) message — and, just as importantly, that
+    the newest turn's content is NOT marked (it genuinely is new)."""
+    openai_messages = [
+        {"role": "system", "content": "base system prompt"},
+        {"role": "system", "content": "harness profile block"},
+        {"role": "user", "content": "turn 1"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "turn 2 (newest)"},
+    ]
+    system, anthropic_messages = backend.messages_to_anthropic(openai_messages)
+    tools = backend.tools_to_anthropic([
+        {"type": "function", "function": {"name": "Bash", "description": "d",
+                                           "parameters": {"type": "object", "properties": {}}}},
+    ])
+    system_blocks, msgs, cached_tools = backend._apply_cache_breakpoints(system, anthropic_messages, tools)
+
+    if system_blocks != [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]:
+        print(f"  system_blocks: {system_blocks}")
+        return False
+    if cached_tools[-1].get("cache_control") != {"type": "ephemeral"}:
+        print(f"  tools[-1]: {cached_tools[-1]}")
+        return False
+    # second-to-last message ("reply 1") is the last STABLE turn -> cached.
+    if msgs[-2]["content"][-1].get("cache_control") != {"type": "ephemeral"}:
+        print(f"  second-to-last message not cache-marked: {msgs[-2]}")
+        return False
+    # last message ("turn 2 (newest)") must stay unmarked -> it is new content.
+    if "cache_control" in msgs[-1]["content"][-1]:
+        print(f"  newest message was incorrectly cache-marked: {msgs[-1]}")
+        return False
+    return True
+
+
 class _FakeAsyncStreamResponse:
     def __init__(self, status_code: int, lines: list[str], body: bytes = b""):
         self.status_code = status_code
@@ -168,6 +208,7 @@ class _FakeStreamCtx:
 
 class _FakeAsyncClient:
     captured_headers: list[dict] = []
+    captured_payloads: list[dict] = []
 
     def __init__(self, *a, **k):
         pass
@@ -180,6 +221,7 @@ class _FakeAsyncClient:
 
     def stream(self, method: str, url: str, *, json: dict, headers: dict):
         _FakeAsyncClient.captured_headers.append(dict(headers))
+        _FakeAsyncClient.captured_payloads.append(json)
         sse_lines = [
             'event: message_start',
             'data: ' + __import__("json").dumps({
@@ -293,6 +335,20 @@ def test_one_round_streams_text_and_tool_call() -> bool:
         print(f"  anthropic-beta header: {headers.get('anthropic-beta')}")
         return False
 
+    # The outbound payload actually carries the cache breakpoints: `system`
+    # is a block array with an ephemeral marker, and the single tool schema
+    # (also the last one) is marked too.
+    payload = _FakeAsyncClient.captured_payloads[-1]
+    system_payload = payload.get("system")
+    if not (isinstance(system_payload, list) and system_payload
+            and system_payload[-1].get("cache_control") == {"type": "ephemeral"}):
+        print(f"  outbound system payload not cache-marked: {system_payload}")
+        return False
+    tools_payload = payload.get("tools") or []
+    if not (tools_payload and tools_payload[-1].get("cache_control") == {"type": "ephemeral"}):
+        print(f"  outbound tools payload not cache-marked: {tools_payload}")
+        return False
+
     # No emitted session_events.jsonl line contains the token value.
     raw = events_path.read_text(encoding="utf-8")
     if FAKE_TOKEN in raw:
@@ -364,6 +420,8 @@ TESTS = [
     ("messages_to_anthropic translates a full turn round trip", test_messages_to_anthropic_round_trip),
     ("parallel tool results merge into one Anthropic user message", test_parallel_tool_results_merge_into_one_message),
     ("tools_to_anthropic converts function schemas to input_schema", test_tools_to_anthropic),
+    ("cache breakpoints mark system/tools/stable-history, not the newest turn",
+     test_cache_breakpoints_mark_stable_content_only),
     ("one_round_claude_subscription streams text + tool call + usage", test_one_round_streams_text_and_tool_call),
     ("missing Keychain token fails closed (no network call)", test_missing_token_fails_closed),
     ("HTTP 401 fails closed without silent retry", test_401_fails_closed_without_retry),
