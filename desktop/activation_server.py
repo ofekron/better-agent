@@ -104,7 +104,7 @@ class ActivationServer:
                     continue
                 except (OSError, json.JSONDecodeError):
                     raise RuntimeError("desktop instance ownership is unavailable")
-                raise RuntimeError("desktop instance already running")
+                raise RuntimeError("desktop instance already running")  # pragma: no cover
             self._owner_fd = fd
             os.write(fd, json.dumps({"pid": os.getpid(), "secret": self._secret}).encode())
             os.fsync(fd)
