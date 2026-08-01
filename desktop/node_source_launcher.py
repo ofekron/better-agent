@@ -66,5 +66,5 @@ def main(argv: list[str] | None = None) -> int:
     return run(args.port)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - entry-point guard; runs the real node supervisor + backend socket
     raise SystemExit(main())
