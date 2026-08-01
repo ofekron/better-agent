@@ -10,7 +10,9 @@ Pins `session_migrate.migrate_session_content`:
   4. Fork/worker sids (distinct UUIDs) are left untouched.
   5. native_paths is NOT carried (new session spawns a fresh provider sid).
 
-Run with:
+Pytest-collectable (each ``test_*`` self-isolates via _wipe_sessions +
+_setup_source). Also runnable standalone:
+
     cd backend && .venv/bin/python scripts/test_session_migrate.py
 """
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -51,6 +54,12 @@ def _write(sid: str, name: str, text: str) -> None:
 
 def _read(sid: str, name: str) -> str:
     return (_sessions_dir() / sid / name).read_text(encoding="utf-8")
+
+
+def _wipe_sessions() -> None:
+    sd = _sessions_dir()
+    if sd.exists():
+        shutil.rmtree(sd)
 
 
 def _setup_source() -> None:
@@ -95,65 +104,123 @@ def _setup_source() -> None:
     _write(SRC, "native_paths", json.dumps([{"owning_session": SRC}]))
 
 
-def main() -> int:
-    failures: list[str] = []
-
+def test_rewrites_root_sid_everywhere_and_preserves_fork_sids() -> None:
+    _wipe_sessions()
     _setup_source()
     session_migrate.migrate_session_content(SRC, DST)
 
-    # 1. events.jsonl: root sid rewritten everywhere, fork sid preserved.
     ev_text = _read(DST, "events.jsonl")
-    if SRC in ev_text:
-        failures.append("events.jsonl still contains source root sid")
-    if DST not in ev_text:
-        failures.append("events.jsonl missing dest root sid")
-    if FORK not in ev_text:
-        failures.append("events.jsonl dropped the fork sid (should be preserved)")
-    if f"/api/sessions/{DST}/opened" not in ev_text:
-        failures.append("events.jsonl path substring was not rewritten to dest sid")
-    ev_lines = [json.loads(l) for l in ev_text.splitlines() if l.strip()]
-    if ev_lines[0]["data"]["sid"] != DST:
-        failures.append("nested data.sid was not rewritten")
-    if ev_lines[1]["data"]["fork_sid"] != FORK:
-        failures.append("fork sid inside data was corrupted")
+    assert SRC not in ev_text, "events.jsonl still contains source root sid"
+    assert DST in ev_text, "events.jsonl missing dest root sid"
+    assert FORK in ev_text, "events.jsonl dropped the fork sid (should be preserved)"
+    assert f"/api/sessions/{DST}/opened" in ev_text, "path substring not rewritten to dest sid"
+    ev_lines = [json.loads(line) for line in ev_text.splitlines() if line.strip()]
+    assert ev_lines[0]["data"]["sid"] == DST, "nested data.sid was not rewritten"
+    assert ev_lines[1]["data"]["fork_sid"] == FORK, "fork sid inside data was corrupted"
 
-    # 2. event_summaries.json: root_id/sid for root messages rewritten,
-    #    fork-owned summary keeps fork sid but root_id becomes DST.
+
+def test_rewrites_event_summaries() -> None:
+    _wipe_sessions()
+    _setup_source()
+    session_migrate.migrate_session_content(SRC, DST)
+
     summ = json.loads(_read(DST, "event_summaries.json"))
-    if summ["summaries"]["m1"]["root_id"] != DST or summ["summaries"]["m1"]["sid"] != DST:
-        failures.append("event_summaries root-owned sid not rewritten")
-    if summ["summaries"]["m2"]["sid"] != FORK:
-        failures.append("event_summaries fork-owned sid corrupted")
-    if summ["summaries"]["m2"]["root_id"] != DST:
-        failures.append("event_summaries fork-owned root_id not rewritten")
+    assert summ["summaries"]["m1"]["root_id"] == DST
+    assert summ["summaries"]["m1"]["sid"] == DST, "root-owned sid not rewritten"
+    assert summ["summaries"]["m2"]["sid"] == FORK, "fork-owned sid corrupted"
+    assert summ["summaries"]["m2"]["root_id"] == DST, "fork-owned root_id not rewritten"
 
-    # 3. message_frontend_cache copied verbatim.
+
+def test_copies_frontend_cache_verbatim() -> None:
+    _wipe_sessions()
+    _setup_source()
+    session_migrate.migrate_session_content(SRC, DST)
+
     cache_file = _sessions_dir() / DST / "message_frontend_cache" / "abc123.json"
-    if not cache_file.is_file() or cache_file.read_text() != '{"rendered": true}':
-        failures.append("message_frontend_cache not copied verbatim")
+    assert cache_file.is_file()
+    assert cache_file.read_text(encoding="utf-8") == '{"rendered": true}'
 
-    # 4. native_paths NOT carried.
-    if (_sessions_dir() / DST / "native_paths").exists():
-        failures.append("native_paths was carried (must not be)")
 
-    # 5. event_meta rewritten.
+def test_omits_native_paths() -> None:
+    _wipe_sessions()
+    _setup_source()
+    session_migrate.migrate_session_content(SRC, DST)
+
+    assert not (_sessions_dir() / DST / "native_paths").exists(), "native_paths was carried"
+
+
+def test_rewrites_event_meta() -> None:
+    _wipe_sessions()
+    _setup_source()
+    session_migrate.migrate_session_content(SRC, DST)
+
     meta = json.loads(_read(DST, "event_meta.json"))
-    if SRC in meta["max_seq_by_sid"] or DST not in meta["max_seq_by_sid"]:
-        failures.append("event_meta root sid key not rewritten")
+    assert SRC not in meta["max_seq_by_sid"]
+    assert DST in meta["max_seq_by_sid"]
 
-    # 6. Idempotent re-run reproduces identical dst events.jsonl.
+
+def test_idempotent_rerun_reproduces_identical_dst() -> None:
+    _wipe_sessions()
+    _setup_source()
+    session_migrate.migrate_session_content(SRC, DST)
     first = _read(DST, "events.jsonl")
     session_migrate.migrate_session_content(SRC, DST)
-    if _read(DST, "events.jsonl") != first:
-        failures.append("re-run is not idempotent")
+    assert _read(DST, "events.jsonl") == first, "re-run is not idempotent"
 
-    # 7. Validation: rejects equal/empty sids.
-    try:
-        session_migrate.migrate_session_content(SRC, SRC)
-        failures.append("equal sids should raise ValueError")
-    except ValueError:
-        pass
 
+def test_rejects_equal_or_empty_sids() -> None:
+    _wipe_sessions()
+    _setup_source()
+    for src, dst in [(SRC, SRC), ("", DST), (SRC, "")]:
+        try:
+            session_migrate.migrate_session_content(src, dst)
+        except ValueError:
+            continue
+        raise AssertionError(f"({src!r}, {dst!r}) should raise ValueError")
+
+
+def test_skips_missing_render_files() -> None:
+    # A source missing one render file migrates the rest and skips the gap.
+    _wipe_sessions()
+    _setup_source()
+    (_sessions_dir() / SRC / "event_meta.json").unlink()
+    session_migrate.migrate_session_content(SRC, DST)
+
+    assert (_sessions_dir() / DST / "events.jsonl").is_file()
+    assert (_sessions_dir() / DST / "event_summaries.json").is_file()
+    assert not (_sessions_dir() / DST / "event_meta.json").exists()
+
+
+def test_skips_when_source_has_no_frontend_cache_dir() -> None:
+    # No message_frontend_cache on source -> dst gets none, no error.
+    _wipe_sessions()
+    _setup_source()
+    shutil.rmtree(_sessions_dir() / SRC / "message_frontend_cache")
+    session_migrate.migrate_session_content(SRC, DST)
+
+    assert not (_sessions_dir() / DST / "message_frontend_cache").exists()
+
+
+_TESTS = [
+    test_rewrites_root_sid_everywhere_and_preserves_fork_sids,
+    test_rewrites_event_summaries,
+    test_copies_frontend_cache_verbatim,
+    test_omits_native_paths,
+    test_rewrites_event_meta,
+    test_idempotent_rerun_reproduces_identical_dst,
+    test_rejects_equal_or_empty_sids,
+    test_skips_missing_render_files,
+    test_skips_when_source_has_no_frontend_cache_dir,
+]
+
+
+def main() -> int:
+    failures: list[str] = []
+    for test in _TESTS:
+        try:
+            test()
+        except AssertionError as exc:
+            failures.append(f"{test.__name__}: {exc}")
     if failures:
         print("FAIL:")
         for f in failures:
