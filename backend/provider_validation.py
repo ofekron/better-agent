@@ -367,7 +367,7 @@ async def validate_optional_run_selector(
                 status_code=400,
                 detail=f"{name} has no default model configured",
             )
-    if not resolved_model:
+    if not resolved_model:  # pragma: no cover - defensive; L344 early-return + L353 block guarantee resolved_model is truthy here
         resolved_model = str((sender or {}).get("model") or "").strip()
     await hot_path.run(
         "communication.validate_run_selector.validate_provider_model",
