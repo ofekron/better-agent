@@ -27,8 +27,6 @@ def raw_index_after_normalized_prefix_checked(text: str, prefix_len: int) -> tup
     for index, char in enumerate(text):
         if char.isspace():
             if emitted_any and not in_whitespace:
-                if normalized_len >= prefix_len:
-                    return index, True
                 normalized_len += 1
                 in_whitespace = True
             continue
