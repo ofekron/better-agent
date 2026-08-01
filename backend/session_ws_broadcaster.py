@@ -485,6 +485,11 @@ class SessionWSBroadcaster:
                 patch["provider_id"] = change["provider_id"]
             if not patch:
                 return
+            # Lets every tab tell "the session's selector state advanced
+            # since I last looked" (adopt) apart from "my own local pick
+            # hasn't round-tripped yet" (persist) — see
+            # `_bump_selectors_seq` / `resolveModelDriftAction`.
+            patch["selectors_seq"] = change.get("selectors_seq") or 0
             self._dispatch({
                 "type": "session_metadata_updated",
                 "data": {

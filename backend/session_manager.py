@@ -3710,6 +3710,21 @@ class SessionManager:
 
         return session_queue_projection.project_session(session)
 
+    @staticmethod
+    def _bump_selectors_seq(sess: dict) -> int:
+        """Monotonic per-session counter bumped whenever `set_selectors`
+        actually changes `model`/`provider_id`/`reasoning_effort`. Stamped
+        onto the `selectors_set` change so multi-tab clients can tell "the
+        session's selector state advanced" (adopt it) apart from "my own
+        local pick hasn't round-tripped yet" (persist it) — without this,
+        two tabs on the same session PATCH each other's now-stale value
+        back and forth forever. See `resolveModelDriftAction` in
+        frontend/src/utils/modelDrift.ts, the consumer of this seq.
+        """
+        seq = int(sess.get("selectors_seq") or 0) + 1
+        sess["selectors_seq"] = seq
+        return seq
+
     def _queue_projection_enricher(
         self, holder: dict[str, Optional[dict]], *, include_queued_prompts: bool,
     ) -> Callable[[dict], dict]:
@@ -4982,7 +4997,15 @@ class SessionManager:
                 )
         def _do(s: dict) -> None:
             # Inside the per-root lock.
-            pass
+            # Bump `selectors_seq` iff a field that drives frontend drift
+            # resolution actually changes value — not on every call (a
+            # PATCH that resends the current value must stay a no-op for
+            # ordering purposes).
+            selector_changed = (
+                (model is not None and s.get("model") != model)
+                or (provider_id is not None and s.get("provider_id") != provider_id)
+                or (reasoning_effort is not None and s.get("reasoning_effort") != reasoning_effort)
+            )
             if model is not None:
                 s["model"] = model
             if runner is not None:
@@ -5001,6 +5024,8 @@ class SessionManager:
                 s["runtime_profile_id"] = runtime_profile_id
             if harness_profile_id is not None:
                 s["harness_profile_id"] = str(harness_profile_id or "").strip()
+            if selector_changed:
+                self._bump_selectors_seq(s)
         return self._run(
             sid, _do,
             {
@@ -5019,6 +5044,7 @@ class SessionManager:
                 "harness_profile_id": harness_profile_id,
                 "client_id": client_id,
             },
+            enrich=lambda sess: {"selectors_seq": sess.get("selectors_seq") or 0},
         )
 
     def set_agent_sid(

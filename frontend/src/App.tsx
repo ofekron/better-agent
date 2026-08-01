@@ -130,7 +130,7 @@ import type { ChatMessage, FileAttachment, FileDiscussion, FileFocus, Orchestrat
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
-import { isLeakedProfileMirror } from "./utils/modelDrift";
+import { isLeakedProfileMirror, resolveModelDriftAction, filterStaleSelectorsPatch } from "./utils/modelDrift";
 import { useRuntimeProfiles } from "./hooks/useRuntimeProfiles";
 import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
@@ -1761,10 +1761,18 @@ function AppMain({
       // it would resurrect just-sent text into the composer.
       const existingNode = getNode(sessionId);
       const storedSeq = existingNode?.draft_input_seq;
-      const toApply = filterStaleDraftPatch(
+      const draftFiltered = filterStaleDraftPatch(
         patch,
         storedSeq,
         draftDebounceRef.current.has(sessionId),
+      );
+      // Same staleness guard for model/provider_id/reasoning_effort: a
+      // `selectors_set` broadcast that travels out of order must not
+      // regress `currentSession.model` to an already-superseded value —
+      // see `resolveModelDriftAction`, the effect that consumes this.
+      const toApply = filterStaleSelectorsPatch(
+        draftFiltered,
+        existingNode?.selectors_seq,
       );
       applySessionMetadata(sessionId, toApply);
       setOpenSessionRecords((prev) => {
@@ -4557,6 +4565,14 @@ function AppMain({
   // below sees the *stale* model on the same render (React batches the
   // state update). This flag tells it to skip one cycle.
   const skipDriftRef = useRef(false);
+  // Tracks `selectors_seq` as of the drift effect's last run. Lets it tell
+  // "the session's selector state advanced since I last looked" (another
+  // tab/pane PATCHed it, or the backend reconciled it — adopt) apart from
+  // "nothing new arrived, so a local/session mismatch is a fresh user pick"
+  // (persist). Without this a plain value comparison can't tell the two
+  // apart, and two tabs on the same session ping-pong the model forever —
+  // see `resolveModelDriftAction`.
+  const lastAppliedSelectorsSeqRef = useRef(0);
   useEffect(() => {
     if (!currentSession) {
       lastSyncedSessionIdRef.current = null;
@@ -4572,17 +4588,27 @@ function AppMain({
       // session — corrupting its model while provider_id stayed put.
       setModel(currentSession.model || "");
       skipDriftRef.current = true;
+      lastAppliedSelectorsSeqRef.current = currentSession.selectors_seq || 0;
       if (currentSession.cwd) setCwd(currentSession.cwd);
     }
   }, [currentSession]);
 
-  // Persist `model` changes to the current session record. cwd is NOT
-  // patched (immutable after creation) and orchestration_mode is NOT
-  // patched (frozen at creation; the selector is a global preference for
-  // *new* sessions). Skip the very first sync after a session switch so
-  // we don't echo values we just READ from the session back as writes.
+  // Reconcile `model` against the current session record: adopt the
+  // session's value when its `selectors_seq` advanced remotely, or persist
+  // the local value when the user picked a new one and nothing new arrived
+  // from the backend. cwd is NOT patched (immutable after creation) and
+  // orchestration_mode is NOT patched (frozen at creation; the selector is
+  // a global preference for *new* sessions). Skip the very first sync
+  // after a session switch so we don't echo values we just READ from the
+  // session back as writes.
   useEffect(() => {
     if (!currentSession) return;
+    // Record the seq we're observing THIS run before any early return, so a
+    // skipped cycle still keeps this in sync (otherwise the next real cycle
+    // would compare against a stale baseline and misfire).
+    const sessionSeqAtRunStart = currentSession.selectors_seq || 0;
+    const lastAppliedSeq = lastAppliedSelectorsSeqRef.current;
+    lastAppliedSelectorsSeqRef.current = sessionSeqAtRunStart;
     if (skipDriftRef.current) {
       skipDriftRef.current = false;
       return;
@@ -4603,9 +4629,25 @@ function AppMain({
     // default_model is pulled from /api/providers, local `model` is "" —
     // comparing against the session's stored model would always look
     // like drift and fire a spurious PATCH that echoes empty back.
-    const drift =
-      model && currentSession.model && currentSession.model !== model;
-    if (!drift) return;
+    if (!model) return;
+    const action = resolveModelDriftAction({
+      model,
+      sessionModel: currentSession.model,
+      sessionSelectorsSeq: sessionSeqAtRunStart,
+      lastAppliedSelectorsSeq: lastAppliedSeq,
+    });
+    if (action.kind === "none") return;
+    if (action.kind === "adopt") {
+      // The session's selector state changed out from under us — another
+      // tab/pane on the same session PATCHed it, or the backend reconciled
+      // it. Adopt it locally instead of treating our now-stale `model` as
+      // user intent and PATCHing it back: that's exactly what caused two
+      // tabs to ping-pong the model forever (each one "corrected" the
+      // other's broadcast, ad infinitum).
+      skipDriftRef.current = true;
+      setModel(action.model);
+      return;
+    }
     progressTrackedFetch(
       `selectors:save:${currentSession.id}`,
       `${API}/api/sessions/${currentSession.id}/selectors`,
@@ -4615,7 +4657,7 @@ function AppMain({
         // `client_id` plumbs through to the WS `session_metadata_updated`
         // frame's `originated_by` so this tab skips its own echo and
         // doesn't fight the in-flight optimistic selector value (DIV-4).
-        body: JSON.stringify({ model, client_id: clientId }),
+        body: JSON.stringify({ model: action.model, client_id: clientId }),
       },
       { silent: true },
     ).then(() => refreshSessions()).catch(() => {});

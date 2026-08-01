@@ -1033,6 +1033,13 @@ export interface Session {
   name: string;
   model: string;
   model_history?: string[];
+  /** Monotonic seq bumped whenever the backend actually changes `model`/
+   * `provider_id`/`reasoning_effort` (not on every PATCH — a no-op resend
+   * doesn't bump it). Lets the frontend tell "the session's selector state
+   * advanced remotely" (another tab/pane wrote it) apart from "my local
+   * pick hasn't round-tripped yet" — see `resolveModelDriftAction` in
+   * frontend/src/utils/modelDrift.ts. */
+  selectors_seq?: number;
   reasoning_effort?: ReasoningEffort | "";
   runner?: ProviderRunner;
   permission?: Permission;

@@ -301,7 +301,9 @@ class TestLifecycle:
 
 class TestSelectorsSet:
     def test_single_field_patch(self):
-        assert _fire("selectors_set", model="sonnet") == [_meta("s1", {"model": "sonnet"})]
+        assert _fire("selectors_set", model="sonnet") == [
+            _meta("s1", {"model": "sonnet", "selectors_seq": 0})
+        ]
 
     def test_all_fields_patch(self):
         captured = _fire(
@@ -314,12 +316,26 @@ class TestSelectorsSet:
         )
         assert captured == [_meta(
             "s1",
-            {"model": "m", "reasoning_effort": "high", "cwd": "/x", "provider_id": "p"},
+            {
+                "model": "m", "reasoning_effort": "high", "cwd": "/x",
+                "provider_id": "p", "selectors_seq": 0,
+            },
             client_id="tab-A",
         )]
 
     def test_empty_change_is_noop(self):
         assert _fire("selectors_set") == []
+
+    def test_selectors_seq_propagates_from_change_dict(self):
+        # `selectors_seq` lets multi-tab clients tell "the session's
+        # selector state advanced since I last looked" (adopt) apart from
+        # "my own local pick hasn't round-tripped yet" (persist) — see
+        # `SessionManager._bump_selectors_seq` / `resolveModelDriftAction`.
+        # The broadcaster must forward whatever seq SessionManager fired,
+        # not just default to 0.
+        assert _fire("selectors_set", model="opus", selectors_seq=7) == [
+            _meta("s1", {"model": "opus", "selectors_seq": 7})
+        ]
 
 
 # --------------------------------------------------------------------------- #

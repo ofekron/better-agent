@@ -66,6 +66,7 @@ export type SessionMetadataPatch = {
   draft_input_seq?: number;
   fork_closed?: boolean;
   model?: string;
+  selectors_seq?: number;
   reasoning_effort?: string;
   cwd?: string;
   provider_id?: string;
