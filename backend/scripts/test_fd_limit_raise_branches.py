@@ -16,7 +16,6 @@ sys.path.insert(0, str(REPO / "backend"))
 
 import resource  # noqa: E402
 
-import fd_limits  # noqa: E402
 from fd_limits import raise_fd_limit  # noqa: E402
 
 

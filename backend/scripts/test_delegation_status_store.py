@@ -9,7 +9,6 @@ merge, atomic-write, async wrapper, and every read failure branch.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
