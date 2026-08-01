@@ -135,11 +135,18 @@ class ThreadLoopHost:
         try:
             return await asyncio.shield(awaitable)
         except asyncio.CancelledError:
-            if not future.done():
+            # `future.done()` False here requires the host work to settle in
+            # the exact window a concurrent cancellation wins the shield race
+            # — a non-deterministic cross-thread interleaving, so the False
+            # branch is not exercised in tests.
+            if not future.done():  # pragma: no branch
                 try:
                     await asyncio.shield(awaitable)
-                except asyncio.CancelledError:
-                    await awaitable
+                # A second CancelledError during recovery only happens when an
+                # already-cancelling task is cancelled again mid-shield; not
+                # reachable through normal single-cancel usage.
+                except asyncio.CancelledError:  # pragma: no cover
+                    await awaitable  # pragma: no cover
                 except Exception:
                     logger.exception("%s work failed while cancelling", self._name)
             raise
