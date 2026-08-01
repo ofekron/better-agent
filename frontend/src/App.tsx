@@ -130,9 +130,9 @@ import type { ChatMessage, FileAttachment, FileDiscussion, FileFocus, Orchestrat
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
-import { isLeakedProfileMirror } from "./utils/modelDrift";
+import { isLeakedProfileMirror, resolveModelDriftAction } from "./utils/modelDrift";
 import { useRuntimeProfiles } from "./hooks/useRuntimeProfiles";
-import { nextDraftSeq, filterStaleDraftPatch } from "./utils/draftSeq";
+import { nextDraftSeq, filterStaleDraftPatch, isStaleSeq } from "./utils/draftSeq";
 import type { FileAnchor } from "./types/inlineTag";
 import type { PromptEngState } from "./types/promptEng";
 import type { FileEditingState } from "./types/fileEditing";
@@ -157,7 +157,7 @@ import {
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { planSessionCreateFailure } from "src/utils/sessionCreateFailure";
 import { isDeletedProfileCreateError, outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
-import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
+import { visibleQueuedPromptBanners, filterStaleQueuedPromptsPatch, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
 import {
@@ -1573,7 +1573,7 @@ function AppMain({
     [setPendingForSession],
   );
   const handleUserMessagePersisted = useCallback(
-    (sessionId: string, userMessage: ChatMessage) => {
+    (sessionId: string, userMessage: ChatMessage, queuedPromptsSeq?: number) => {
       const userTimestamp = userMessage.timestamp || new Date().toISOString();
       if (ackedRef.current.has(userMessage.id)) return;
       logPromptSend("user_message_persisted", {
@@ -1584,6 +1584,19 @@ function AppMain({
       });
       ackedRef.current.add(userMessage.id);
       applySessionMetadata(sessionId, (session) => ({
+        // Establish a staleness floor for queued_prompts even on the very
+        // first queue snapshot this session ever sees: this ack is a
+        // DIRECT, awaited callback from the same turn coroutine that just
+        // dequeued the prompt (if it came off the queue), so its seq is
+        // never older than the dequeue that just happened. Without this,
+        // a `queued_prompts_updated` broadcast captured BEFORE the dequeue
+        // (fire-and-forget, independently scheduled) could still arrive
+        // after this ack and resurrect the just-served prompt, since
+        // `existingNode.queued_prompts_seq` would still be undefined.
+        queued_prompts_seq: Math.max(
+          session.queued_prompts_seq ?? 0,
+          queuedPromptsSeq ?? 0,
+        ),
         // The backend sidebar summary derives these fields from persisted
         // messages, but the local sidebar/tabs need the same sort keys before
         // the follow-up refetch/WS projection arrives.
@@ -1761,10 +1774,13 @@ function AppMain({
       // it would resurrect just-sent text into the composer.
       const existingNode = getNode(sessionId);
       const storedSeq = existingNode?.draft_input_seq;
-      const toApply = filterStaleDraftPatch(
-        patch,
-        storedSeq,
-        draftDebounceRef.current.has(sessionId),
+      const toApply = filterStaleQueuedPromptsPatch(
+        filterStaleDraftPatch(
+          patch,
+          storedSeq,
+          draftDebounceRef.current.has(sessionId),
+        ),
+        existingNode?.queued_prompts_seq,
       );
       applySessionMetadata(sessionId, toApply);
       setOpenSessionRecords((prev) => {
@@ -1803,8 +1819,8 @@ function AppMain({
         });
         if (nextPinned && !session) refreshTopbarPinnedSessions();
       }
-      if ("queued_prompts" in patch) {
-        const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
+      if ("queued_prompts" in toApply) {
+        const queuedPrompts = (toApply.queued_prompts ?? []) as QueuedPrompt[];
         setQueuedForSession(
           sessionId,
           (prev) => mergeQueuedSnapshotForSession(sessionId, prev, queuedPrompts),
@@ -4557,6 +4573,12 @@ function AppMain({
   // below sees the *stale* model on the same render (React batches the
   // state update). This flag tells it to skip one cycle.
   const skipDriftRef = useRef(false);
+  // Tracks currentSession.model as of the drift effect's last run, so it can
+  // tell "the session's model moved" (another tab/pane PATCHed it, or the
+  // backend reconciled it) apart from "the user moved the local selector".
+  // Without this distinction two tabs on the same session ping-pong the
+  // model forever — see resolveModelDriftAction.
+  const prevSessionModelForDriftRef = useRef<string | null>(null);
   useEffect(() => {
     if (!currentSession) {
       lastSyncedSessionIdRef.current = null;
@@ -4572,6 +4594,7 @@ function AppMain({
       // session — corrupting its model while provider_id stayed put.
       setModel(currentSession.model || "");
       skipDriftRef.current = true;
+      prevSessionModelForDriftRef.current = currentSession.model || null;
       if (currentSession.cwd) setCwd(currentSession.cwd);
     }
   }, [currentSession]);
@@ -4583,6 +4606,13 @@ function AppMain({
   // we don't echo values we just READ from the session back as writes.
   useEffect(() => {
     if (!currentSession) return;
+    // Record whether the session's own model moved since our last run
+    // BEFORE any early return, so a skipped cycle still keeps this in sync
+    // (otherwise the next real cycle would compare against a stale value
+    // and misfire an "adopt").
+    const sessionModelAtRunStart = currentSession.model || null;
+    const prevSessionModel = prevSessionModelForDriftRef.current;
+    prevSessionModelForDriftRef.current = sessionModelAtRunStart;
     if (skipDriftRef.current) {
       skipDriftRef.current = false;
       return;
@@ -4603,9 +4633,24 @@ function AppMain({
     // default_model is pulled from /api/providers, local `model` is "" —
     // comparing against the session's stored model would always look
     // like drift and fire a spurious PATCH that echoes empty back.
-    const drift =
-      model && currentSession.model && currentSession.model !== model;
-    if (!drift) return;
+    if (!model) return;
+    const action = resolveModelDriftAction({
+      model,
+      sessionModel: sessionModelAtRunStart,
+      prevSessionModel,
+    });
+    if (action.kind === "none") return;
+    if (action.kind === "adopt") {
+      // The session's model changed out from under us — another tab/pane
+      // on the same session PATCHed it, or the backend reconciled it. Adopt
+      // it locally instead of treating our now-stale `model` as user intent
+      // and PATCHing it back: that direction is exactly what caused two
+      // tabs to ping-pong the model forever (each one "corrected" the
+      // other's broadcast, ad infinitum).
+      skipDriftRef.current = true;
+      setModel(action.model);
+      return;
+    }
     progressTrackedFetch(
       `selectors:save:${currentSession.id}`,
       `${API}/api/sessions/${currentSession.id}/selectors`,
@@ -4615,7 +4660,7 @@ function AppMain({
         // `client_id` plumbs through to the WS `session_metadata_updated`
         // frame's `originated_by` so this tab skips its own echo and
         // doesn't fight the in-flight optimistic selector value (DIV-4).
-        body: JSON.stringify({ model, client_id: clientId }),
+        body: JSON.stringify({ model: action.model, client_id: clientId }),
       },
       { silent: true },
     ).then(() => refreshSessions()).catch(() => {});
