@@ -41,6 +41,7 @@ _METADATA_KINDS = {
     "tag_updated",
     "tags_cleared",
     "open_panels_set",
+    "open_config_panels_set",
     "draft_set",
     "fork_closed_set",
     "supervisor_enabled_set",

@@ -5,7 +5,7 @@ import sys
 
 import _test_home
 
-_test_home.isolate("bc-test-ws-active-capability-")
+_test_home.isolate_installed("bc-test-ws-active-capability-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -15,18 +15,7 @@ if _BACKEND not in sys.path:
 from session_manager import manager as session_manager  # noqa: E402
 import session_ws_broadcaster  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
-
-
-class StubCoordinator:
-    def __init__(self, captured: list[dict]) -> None:
-        self._captured = captured
-
-    async def noop(self) -> None:
-        return None
-
-    def broadcast_global(self, type_: str, data: dict):
-        self._captured.append({"type": type_, "data": data})
-        return self.noop()
+from _ws_bcast_support import CapturingCoordinator as StubCoordinator, drive  # noqa: E402
 
 
 def test_active_capability_changes_emit_metadata_patch() -> None:
@@ -37,7 +26,7 @@ def test_active_capability_changes_emit_metadata_patch() -> None:
     session_manager.add_active_capability(sid, "ofek.testape:testape")
 
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
-    broadcaster.on_change(sid, {
+    drive(broadcaster, sid, {
         "kind": "active_capability_added",
         "capability_id": "ofek.testape:testape",
     })
@@ -56,7 +45,7 @@ def test_last_opened_emits_metadata_patch() -> None:
     captured: list[dict] = []
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
 
-    broadcaster.on_change("sid-1", {
+    drive(broadcaster, "sid-1", {
         "kind": "last_opened_set",
         "at": "2026-06-29T11:22:33Z",
     })
@@ -76,7 +65,7 @@ def test_journal_event_projected_emits_messages_delta() -> None:
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
     msg = {"id": "msg-1", "content": "updated"}
 
-    broadcaster.on_change("sid-1", {
+    drive(broadcaster, "sid-1", {
         "kind": "journal_event_projected",
         "msg_id": "msg-1",
         "msg": msg,
@@ -108,7 +97,7 @@ def test_journal_event_projected_compacts_render_events() -> None:
         ],
     }
 
-    broadcaster.on_change("sid-1", {
+    drive(broadcaster, "sid-1", {
         "kind": "journal_event_projected",
         "msg_id": "msg-1",
         "msg": msg,
@@ -134,7 +123,7 @@ def test_message_ownership_resolved_keeps_render_events() -> None:
         "events": [{"type": "agent_message", "data": {"uuid": "ev-1"}}],
     }
 
-    broadcaster.on_change("sid-1", {
+    drive(broadcaster, "sid-1", {
         "kind": "message_ownership_resolved",
         "msg": msg,
     })
@@ -156,8 +145,8 @@ def test_internal_worker_changes_do_not_warn_or_dispatch() -> None:
     session_ws_broadcaster.logger.warning = lambda *args, **kwargs: seen.append(args)
     try:
         broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
-        broadcaster.on_change("sid-1", {"kind": "worker_panel_event"})
-        broadcaster.on_change("sid-1", {"kind": "delegate_fork_created"})
+        drive(broadcaster, "sid-1", {"kind": "worker_panel_event"})
+        drive(broadcaster, "sid-1", {"kind": "delegate_fork_created"})
     finally:
         session_ws_broadcaster.logger.warning = original_warning
 
