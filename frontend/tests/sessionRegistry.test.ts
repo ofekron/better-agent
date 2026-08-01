@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 import { eventBus } from "../src/lib/eventBus";
 import {
@@ -692,6 +692,60 @@ describe("sessionRegistry — bootstrap mechanics", () => {
     expect(a).toBe(b); // same promise — dedup
     await a;
     expect(resolved).toBe(1); // fetch called exactly once
+  });
+
+  it("re-bootstraps on a WS reconnect, recovering a running/monitoring ping dropped during the outage (regression)", async () => {
+    // `session_running_changed` / `session_monitoring_changed` ride
+    // `broadcast_global` (session_ws_broadcaster.on_change → schedule_global):
+    // fire-and-forget, no events.jsonl persistence, no replay — unlike
+    // `run_state`. A ping dropped while this tab's socket was briefly
+    // disconnected is gone forever. Before this fix, the only self-heal
+    // was `bootstrap()` on `visibilitychange` — a tab that stays
+    // continuously focused through a reconnect (network blip, backend
+    // restart) never fires that and is stuck showing stale running
+    // state until an unrelated action (new prompt, tab switch) happens
+    // to trigger a resync as a side effect.
+    const sid = "reconnect-stuck";
+    await bootstrapWith([
+      { id: sid, cwd: "/p", node_id: "primary", is_running: false },
+    ]);
+    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
+
+    // Initial handshake — already covered by the mount-time bootstrap
+    // above, so this alone must NOT trigger a second fetch.
+    eventBus.publish("ws_connection_changed", { connected: true });
+
+    // Server-side truth flipped (the session started running) while
+    // disconnected — the corresponding delta never arrived, so the only
+    // way this client learns about it is a fresh `/api/sessions` read.
+    stubSessionsResponse([
+      { id: sid, cwd: "/p", node_id: "primary", is_running: true },
+    ]);
+
+    // The reconnect — a SECOND `connected: true`.
+    eventBus.publish("ws_connection_changed", { connected: true });
+
+    // Only the reconnect handler itself is allowed to trigger the
+    // re-fetch — poll on its effect instead of calling bootstrap()
+    // directly, or the assertion would pass even with no handler wired.
+    await waitFor(() => {
+      expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    });
+  });
+
+  it("the initial WS handshake (first connected: true) does not duplicate the mount-time bootstrap", async () => {
+    const fetchMock = stubSessionsResponse([]);
+    fetchMock.mockClear();
+    eventBus.publish("ws_connection_changed", { connected: true });
+    // No await needed — a synchronous handler either calls fetch or not.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a WS disconnect (connected: false) does not trigger a re-bootstrap", async () => {
+    const fetchMock = stubSessionsResponse([]);
+    fetchMock.mockClear();
+    eventBus.publish("ws_connection_changed", { connected: false });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("failed bootstrap keeps _bootstrapped=false; buffer survives until success", async () => {

@@ -367,6 +367,16 @@ class SessionRegistry {
   private _bootstrapInFlight: Promise<void> | null = null;
   private _deltaBuffer: BufferedDelta[] = [];
 
+  // Tracks whether the WS has connected at least once since `bind()`.
+  // The FIRST `connected: true` is the initial handshake — the
+  // mount-time `bootstrap()` call already covers it, so re-bootstrapping
+  // there would duplicate the `/api/sessions` fetch. Only a SUBSEQUENT
+  // `connected: true` (an actual reconnect) needs the resync, since
+  // that's when a `running_changed`/`monitoring_changed` ping could have
+  // been dropped during the gap. See the `ws_connection_changed`
+  // subscription in `bind()`.
+  private _wsConnectedOnce = false;
+
   // Monotonic clock over per-session mutations, plus each sid's last
   // tick. A `/api/sessions` page is a snapshot taken when the request was
   // dispatched; any sid mutated after that watermark has a newer truth
@@ -397,6 +407,7 @@ class SessionRegistry {
    * twice detaches the prior wire-up first. */
   bind() {
     this.unbind();
+    this._wsConnectedOnce = false;
 
     this.busUnsub = subscribeMany([
       ["session_running_changed", (p) => {
@@ -434,6 +445,28 @@ class SessionRegistry {
       }],
       ["testape_session_state", (p) => {
         this.dispatch("testape_session_state", p as { session_id: string; active: boolean });
+      }],
+      // Drift recovery for a reconnect gap. `session_running_changed` /
+      // `session_monitoring_changed` ride `broadcast_global` — a
+      // fire-and-forget ping to every connected socket with no
+      // events.jsonl persistence and no replay (unlike `run_state`).
+      // A ping dropped while this tab's socket was briefly disconnected
+      // (network blip, backend restart) is gone forever: nothing else
+      // re-derives it, and a tab that stays continuously focused never
+      // fires `visibilitychange` to trigger the resume-bootstrap below.
+      // Without this, a session can render stuck on stale running/
+      // monitoring state indefinitely, until an unrelated action (new
+      // prompt, tab switch) happens to trigger a resync as a side
+      // effect. The FIRST `connected: true` is the initial handshake,
+      // already covered by the mount-time bootstrap — only a later one
+      // (an actual reconnect) triggers this.
+      ["ws_connection_changed", (p) => {
+        if (!(p as { connected?: boolean }).connected) return;
+        if (!this._wsConnectedOnce) {
+          this._wsConnectedOnce = true;
+          return;
+        }
+        void this.bootstrap();
       }],
     ]);
 
