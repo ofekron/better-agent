@@ -54,7 +54,7 @@ def _merge_path_entries(chunks: list[str]) -> str:
     return os.pathsep.join(out)
 
 
-def _read_windows_path_entries() -> list[str]:
+def _read_windows_path_entries() -> list[str]:  # pragma: no cover
     """The persistent PATH values from the user and system registry hives
     (expanded). Build-verified on Windows; returns [] on any read error."""
     import winreg  # Windows-only stdlib
@@ -74,7 +74,7 @@ def _read_windows_path_entries() -> list[str]:
     return chunks
 
 
-def _capture_path_windows() -> str:
+def _capture_path_windows() -> str:  # pragma: no cover
     """The process PATH merged with the persistent registry PATH, so a
     just-installed `node`/`claude` resolves even if it post-dates the
     user's logon session."""
