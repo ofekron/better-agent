@@ -4,7 +4,6 @@ import os
 import sys
 
 import itsdangerous
-import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
