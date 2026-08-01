@@ -1495,9 +1495,22 @@ class TurnManager:
         return copy.deepcopy(self._run_state)
 
     async def reconcile_lifecycle_projection(self) -> None:
+        import startup_recovery_gate
         for session_id, requirements in (
             self.lifecycle.reconciliation_requirements().items()
         ):
+            # A session still `is_session_pending` has been classified
+            # alive by startup recovery but hasn't had its run/pid
+            # re-registered into `_run_state`/`active_run_ids` yet —
+            # `integrate_recovered_runs` for its batch is still in
+            # flight. `live_run_ids` for it would read empty NOT because
+            # the run is dead, but because recovery hasn't written it
+            # yet. The one-shot startup call (recovery.py) only ever ran
+            # after every batch finished, so this window never mattered;
+            # the periodic background tick has no such ordering guarantee
+            # and must not treat "not yet re-registered" as "orphaned".
+            if startup_recovery_gate.is_session_pending(session_id):
+                continue
             queued_message_ids: set[str] = set()
             completed_message_ids: set[str] = set()
             if requirements["prompt_message_ids"]:
