@@ -13,7 +13,6 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import pytest  # noqa: E402
 from starlette.datastructures import Headers, MutableHeaders  # noqa: E402
 
 import browser_cors  # noqa: E402
