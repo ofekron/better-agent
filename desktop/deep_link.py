@@ -36,7 +36,7 @@ def _valid_token(value: str) -> bool:
         return False
     try:
         decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError):  # pragma: no cover — regex above restricts value to the urlsafe alphabet at length 43; with the single pad char added the input is a valid 44-char urlsafe string, so b64decode cannot raise. Defensive only.
         return False
     return (
         len(decoded) == PAIR_TOKEN_BYTES
