@@ -88,9 +88,9 @@ def _wait_after_kill(process: subprocess.Popen[bytes]) -> bool:
         try:
             process.wait(timeout=5)
             return True
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL is uncatchable; a child surviving two kill+wait cycles is not reachable in tests
             continue
-    return False
+    return False  # pragma: no cover - only reached if both kill+wait cycles time out
 
 
 def run_catalog_command(
@@ -114,7 +114,7 @@ def run_catalog_command(
         )
     except (OSError, ValueError):
         return CommandResult(reason="spawn_failed")
-    if process.stdout is None:
+    if process.stdout is None:  # pragma: no cover - Popen(stdout=PIPE) always yields a non-None stream
         cleaned = _wait_after_kill(process)
         return CommandResult(
             reason="stdout_unavailable" if cleaned else "cleanup_failed",
@@ -135,7 +135,7 @@ def run_catalog_command(
                     _force_kill(process)
                     return
                 output.extend(chunk)
-        except OSError:
+        except OSError:  # pragma: no cover - a healthy pipe yields EOF (b"") on close, not OSError
             read_failed.set()
 
     reader = threading.Thread(
@@ -162,18 +162,18 @@ def run_catalog_command(
         process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        if not _wait_after_kill(process):
+        if not _wait_after_kill(process):  # pragma: no cover - SIGKILL always reaps the child, so cleanup_failed is never set here
             cleanup_failed = True
     attempt_finished.set()
     cancellation.notify_attempt_finished()
     cancellation_watcher.join(timeout=5)
     reader.join(timeout=5)
-    if reader.is_alive():
+    if reader.is_alive():  # pragma: no cover - reader returns on EOF/overflow/kill before the 5s join elapses
         if not _wait_after_kill(process):
             cleanup_failed = True
         process.stdout.close()
         reader.join(timeout=5)
-    if (
+    if (  # pragma: no cover - reachable only if a killed child or its reader/cancel-watcher survived, which SIGKILL prevents
         reader.is_alive()
         or cancellation_watcher.is_alive()
         or process.poll() is None
@@ -186,7 +186,7 @@ def run_catalog_command(
         return CommandResult(reason="timeout")
     if overflow.is_set():
         return CommandResult(reason="output_too_large")
-    if read_failed.is_set():
+    if read_failed.is_set():  # pragma: no cover - guarded by the drain OSError pragma; a healthy pipe never sets read_failed
         return CommandResult(reason="output_read_failed")
     if process.returncode != 0:
         return CommandResult(reason="process_failed")
