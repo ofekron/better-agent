@@ -31,5 +31,5 @@ def main() -> int:
     run_locked(Path(sys.argv[1]), sys.argv[2:])
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - entry-point guard; execs a real subprocess
     raise SystemExit(main())
