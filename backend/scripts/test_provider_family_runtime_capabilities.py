@@ -41,6 +41,23 @@ import provider_runtime_payload_store  # noqa: E402
 import provider_runtime_resolver  # noqa: E402
 import provider  # noqa: E402
 
+import dataclasses  # noqa: E402
+
+import provider_runtime_capability_snapshot as _snapshot_module  # noqa: E402
+from codex_execution_identity import FileIdentity  # noqa: E402
+from provider_runtime_capability_model import (  # noqa: E402
+    MAX_FILE_BYTES,
+    MAX_PAYLOAD_BYTES,
+    MAX_TOTAL_FILE_BYTES,
+)
+from provider_runtime_capability_snapshot import (  # noqa: E402
+    _agent_entries,
+    _package_payload,
+    _read_identity,
+    _skill_entries,
+    _tree_files,
+)
+
 
 def _write(path: Path, contents: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -794,6 +811,239 @@ def test_legacy_staging_root_migrates_only_on_write() -> None:
                 os.environ.pop("BETTER_AGENT_HOME", None)
             else:
                 os.environ["BETTER_AGENT_HOME"] = previous
+
+
+def _expect_reject(callable_, *args, **kwargs) -> None:
+    try:
+        callable_(*args, **kwargs)
+    except ExecutionContractError:
+        return
+    raise AssertionError("invalid runtime capability input was accepted")
+
+
+def test_read_identity_rejects_tampered_sha256() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "f"
+        path.write_bytes(b"hello")
+        identity = dataclasses.replace(FileIdentity.capture(path), sha256="0" * 64)
+        _expect_reject(_read_identity, identity)
+
+
+def test_read_identity_rejects_unavailable_source() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "f"
+        path.write_bytes(b"hello")
+        identity = dataclasses.replace(
+            FileIdentity.capture(path),
+            resolved_path=str(Path(raw) / "missing"),
+        )
+        _expect_reject(_read_identity, identity)
+
+
+def test_read_identity_rejects_change_during_read(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "f"
+        path.write_bytes(b"hello")
+        identity = FileIdentity.capture(path)
+        real_read = os.read
+        # For a small file, sha256_fd does exactly one non-empty os.read at the
+        # identity-match check; the snapshot read loop does the second. Mutate
+        # the file during that second read so the after-read fstat diverges.
+        data_reads = {"n": 0}
+
+        def reading(fd, n):
+            data = real_read(fd, n)
+            if data:
+                data_reads["n"] += 1
+                if data_reads["n"] == 2:
+                    os.truncate(str(path), 0)
+            return data
+
+        monkeypatch.setattr(os, "read", reading)
+        _expect_reject(_read_identity, identity)
+
+
+def test_tree_files_rejects_non_absolute_root() -> None:
+    _expect_reject(_tree_files, Path("relative"))
+
+
+def test_tree_files_rejects_unresolvable_root() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        blocker = Path(raw) / "file"
+        blocker.write_text("x")
+        _expect_reject(_tree_files, blocker / "skill")
+
+
+def test_tree_files_rejects_file_root() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        file_root = Path(raw) / "file"
+        file_root.write_text("x")
+        _expect_reject(_tree_files, file_root)
+
+
+def test_tree_files_rejects_non_regular_entry() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "SKILL.md").write_text("x")
+        os.mkfifo(str(root / "pipe"))
+        _expect_reject(_tree_files, root)
+
+
+def test_tree_files_rejects_missing_skill_md() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "other.md").write_text("x")
+        _expect_reject(_tree_files, root)
+
+
+def test_agent_entry_rejects_symlink_source() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "real.md"
+        target.write_text("real")
+        link = root / "link.md"
+        link.symlink_to(target)
+        _expect_reject(
+            snapshot_family_runtime_capabilities,
+            family="claude",
+            skill_sources={},
+            agent_sources={"link.md": link},
+            resolved_plan=_plan(),
+            extension_state={},
+            installation_decisions={},
+        )
+
+
+def test_skill_entries_rejects_non_dict_selection() -> None:
+    _expect_reject(_skill_entries, ["not", "a", "dict"])
+
+
+def test_skill_entries_rejects_invalid_name() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "SKILL.md").write_text("x")
+        _expect_reject(_skill_entries, {"bad name!": root})
+
+
+def test_skill_entries_rejects_change_during_snapshot(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "SKILL.md").write_text("x")
+        original = _snapshot_module._tree_files
+        calls = {"n": 0}
+
+        def mutating(root_arg):
+            result = original(root_arg)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (root_arg / "added").write_text("x")
+            return result
+
+        monkeypatch.setattr(_snapshot_module, "_tree_files", mutating)
+        _expect_reject(_skill_entries, {"skill": root})
+
+
+def test_agent_entries_rejects_non_dict_selection() -> None:
+    _expect_reject(_agent_entries, ("not", "dict"))
+
+
+def test_agent_entries_rejects_invalid_name() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        src = Path(raw) / "a.md"
+        src.write_text("x")
+        _expect_reject(_agent_entries, {"bad/name": src})
+
+
+def test_agent_entries_rejects_unavailable_source() -> None:
+    _expect_reject(_agent_entries, {"agent.md": Path("/nonexistent/agent.md")})
+
+
+def test_package_payload_rejects_non_identity_entry() -> None:
+    _expect_reject(_package_payload, ("not-an-identity",))
+
+
+def test_package_payload_rejects_duplicate_package() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        proot = Path(raw) / "pkg"
+        proot.mkdir()
+        (proot / "__init__.py").write_text("V=1")
+        pkg = capture_critical_package(
+            package_name="pkg",
+            package_root=proot,
+            relative_paths=("__init__.py",),
+        )
+        _expect_reject(_package_payload, (pkg, pkg))
+
+
+def test_snapshot_rejects_unsupported_family() -> None:
+    _expect_reject(
+        snapshot_family_runtime_capabilities,
+        family="nope",
+        skill_sources={},
+        agent_sources={},
+        resolved_plan=_plan(),
+        extension_state={},
+        installation_decisions={},
+    )
+
+
+def test_snapshot_rejects_agy_agent_surface() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        agent = Path(raw) / "a.md"
+        agent.write_text("x")
+        _expect_reject(
+            snapshot_family_runtime_capabilities,
+            family="agy",
+            skill_sources={},
+            agent_sources={"a.md": agent},
+            resolved_plan=_plan(),
+            extension_state={},
+            installation_decisions={},
+        )
+
+
+def test_snapshot_rejects_non_dict_capability_state() -> None:
+    _expect_reject(
+        snapshot_family_runtime_capabilities,
+        family="claude",
+        skill_sources={},
+        agent_sources={},
+        resolved_plan=_plan(),
+        extension_state=["not", "dict"],
+        installation_decisions={},
+    )
+
+
+def test_snapshot_rejects_oversize_files() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        skill = Path(raw) / "skill"
+        _write(skill / "SKILL.md", b"x")
+        blob = b"x" * MAX_FILE_BYTES
+        count = (MAX_TOTAL_FILE_BYTES // MAX_FILE_BYTES) + 1
+        for index in range(count):
+            _write(skill / f"f{index}", blob)
+        _expect_reject(
+            snapshot_family_runtime_capabilities,
+            family="claude",
+            skill_sources={"skill": skill},
+            agent_sources={},
+            resolved_plan=_plan(),
+            extension_state={},
+            installation_decisions={},
+        )
+
+
+def test_snapshot_rejects_oversize_payload() -> None:
+    huge = "x" * (MAX_PAYLOAD_BYTES + 1)
+    _expect_reject(
+        snapshot_family_runtime_capabilities,
+        family="claude",
+        skill_sources={},
+        agent_sources={},
+        resolved_plan=_plan(),
+        extension_state={"blob": huge},
+        installation_decisions={},
+    )
 
 
 TESTS = (

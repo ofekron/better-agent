@@ -116,7 +116,10 @@ def _tree_files(root: Path) -> tuple[tuple[str, int], ...]:
                 raise ExecutionContractError("runtime skill entry is invalid")
             entries.append((relative.as_posix(), observed.st_mode))
     except OSError as exc:
-        raise ExecutionContractError("runtime skill is unreadable") from exc
+        # Defensive: pathlib rglob swallows PermissionError and returns empty
+        # rather than raising, so this is only hit by a genuine OS error or a
+        # lost race between is_dir() and the walk.
+        raise ExecutionContractError("runtime skill is unreadable") from exc  # pragma: no cover
     if not any(path == "SKILL.md" for path, _mode in entries):
         raise ExecutionContractError("runtime skill lacks SKILL.md")
     return tuple(entries)
