@@ -1,0 +1,108 @@
+# syntax=docker/dockerfile:1
+# Better Agent — canonical full-stack (Playwright) test-runner image.
+#
+# Containerizes frontend/tests/fullstack (npm run test:fullstack): each spec
+# spawns its own real backend subprocess (frontend/tests/fullstack/harness/
+# backend.ts) on its own port/home, driving a real Chromium via Playwright,
+# and — for specs that exercise agent turns — a real provider CLI subprocess.
+# See scripts/run-fullstack-tests.sh for the wrapper that builds and runs
+# this image. Mirrors docker/Dockerfile.test's structure (two-stage
+# deps/full, BuildKit cache mounts, deps-only image + bind mount for the
+# working-tree path) — see that file's header for the rationale, which
+# applies identically here.
+#
+# Unlike docker/Dockerfile (the real, runnable app image), this never
+# serves the app — it builds the frontend once (npm run build, required by
+# package.json's test:fullstack script) and runs Playwright against
+# ephemeral backend subprocesses the specs spawn themselves.
+#
+# Needs BOTH runtimes: Python (backend subprocess each spec spawns, via
+# backend/dependency_plan.py's uv-managed venv — resolveVenvPython() in
+# frontend/tests/fullstack/harness/venv.ts insists on that exact mechanism,
+# not a generic pip install) and Node (frontend build + Playwright).
+FROM python:3.13-slim AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# git: backend paths + install.py shell out to it.
+# curl/ca-certificates/gnupg: uv installer + NodeSource setup script.
+# build-essential/libffi-dev: argon2-cffi's cffi backend if no wheel matches.
+# Playwright's own --with-deps (below) covers Chromium's OS-level libs.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git \
+      curl \
+      ca-certificates \
+      gnupg \
+      build-essential \
+      libffi-dev \
+ && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Real provider CLI (not a stub) — chat-turn.spec.ts and friends spawn real
+# agent turns via backend.ts's `install.py --provider claude --adopt`,
+# which needs `claude` already on PATH to adopt. Same install docker/
+# Dockerfile uses for the production image.
+RUN npm install -g @anthropic-ai/claude-code
+
+WORKDIR /repo
+
+# Copy only what's needed to resolve dependencies before the rest of the
+# tree, so installs cache across source-only changes (same reasoning as
+# Dockerfile.test's COPY ordering).
+COPY sdk/runtime-requirements.txt sdk/runtime-requirements.txt
+COPY vendor/ vendor/
+# frontend/scripts/ is needed too: package.json's postinstall hook
+# (detect-ips.mjs) runs as part of `npm ci` itself, before source is copied.
+COPY frontend/package.json frontend/package-lock.json frontend/
+COPY frontend/scripts/ frontend/scripts/
+
+# No build-time pre-warm of the backend venv here: dependency_plan.py pulls
+# in the rest of backend/ (installation_capabilities, provider_manifest,
+# etc.), which isn't present in this deps-only layer (see header comment —
+# the whole point is no baked-in source for the working-tree path). Instead
+# backend.ts's resolveVenvPython() lazily calls `dependency_plan.py
+# activate` itself on the first spec's backend spawn, once the working tree
+# is bind-mounted at `docker run` time — scripts/run-fullstack-tests.sh
+# mounts a named volume at /root/.cache/uv so that resolve is fast on every
+# run after the first, not just within one `docker build`.
+
+# npm cache mount, same rationale as docker/Dockerfile's frontend build
+# layer. NOT mounting a cache for /root/.cache/ms-playwright (Playwright's
+# browser install dir): a BuildKit cache mount's contents are ephemeral to
+# the RUN step and never land in the image's filesystem layer — mounting
+# one there means `playwright install` "succeeds" but the browsers vanish
+# the moment the layer is committed, so every container run fails with
+# "Executable doesn't exist" (reproduced while validating this script).
+# The browsers must be written directly into the image layer.
+RUN --mount=type=cache,target=/root/.npm \
+    cd frontend && npm ci && npx playwright install --with-deps chromium
+
+# Isolated from any real Better Agent state — belt-and-suspenders alongside
+# each spec's own mkdtemp'd homeDir (frontend/tests/fullstack/harness/
+# backend.ts already isolates per-spec state; this covers anything that
+# runs outside a spec's own homeDir).
+ENV BETTER_AGENT_HOME=/root/.better-agent-test-home
+
+COPY docker/fullstack-test-entrypoint.sh /usr/local/bin/fullstack-test-entrypoint.sh
+RUN chmod +x /usr/local/bin/fullstack-test-entrypoint.sh
+
+# No RUN_LLM_TESTS gate here: frontend/tests/fullstack specs are not gated
+# by it today (unlike backend/scripts/*_test.py) — this image reproduces
+# that existing native behavior exactly, it does not introduce a new one.
+# scripts/run-fullstack-tests.sh still never runs this image on your
+# behalf without you invoking it, same as the native `npm run test:fullstack`.
+ENTRYPOINT ["fullstack-test-entrypoint.sh"]
+CMD []
+
+# ---- full: deps + baked-in source, for the --ref (pinned-commit) path ----
+FROM deps AS full
+
+WORKDIR /repo
+COPY . /repo
