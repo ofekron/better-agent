@@ -103,7 +103,9 @@ def _load_or_create_seed(directory: Path) -> bytes:
             os.link(temporary, path)
         except FileExistsError:
             pass
-        if os.name != "nt":
+        # Directory fsync is POSIX-only; Windows skips it. pathlib binds Path
+        # flavour to os.name, so the Windows branch cannot run on a POSIX host.
+        if os.name != "nt":  # pragma: no branch
             directory_descriptor = os.open(directory, os.O_RDONLY)
             try:
                 os.fsync(directory_descriptor)
