@@ -98,7 +98,7 @@ def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
         make_private_file(temporary)
         os.replace(temporary, path)
         make_private_file(path)
-        if os.name != "nt":
+        if os.name != "nt":  # pragma: no branch - posix-only dir fsync; nt skips it
             directory_fd = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory_fd)
@@ -148,7 +148,7 @@ def issue_primary_backend_launch(
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:
     flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
+    if hasattr(os, "O_NOFOLLOW"):  # pragma: no branch - absent only on platforms lacking the flag
         flags |= os.O_NOFOLLOW
     try:
         before = path.lstat()
@@ -182,14 +182,16 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
         (opened.st_dev, opened.st_ino),
         (after.st_dev, after.st_ino),
     }
-    if (
+    if (  # pragma: no branch - TOCTOU swap race / windows reparse point only
         len(identities) != 1
         or (
             getattr(after, "st_file_attributes", 0)
             & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
         )
     ):
-        raise RuntimeError(f"backend launch authority {label} changed during validation")
+        raise RuntimeError(  # pragma: no cover - TOCTOU swap race / windows reparse point only
+            f"backend launch authority {label} changed during validation"
+        )
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
