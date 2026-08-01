@@ -7,7 +7,6 @@ vi.mock("../src/hooks/useBackButtonDismiss", () => ({
 }));
 
 import { ExtensionPaymentModal } from "../src/components/ExtensionPaymentModal";
-import type { ExtensionPaymentResult } from "../src/components/ExtensionPaymentModal";
 
 // Component's real Paddle.js URL; keep in sync if it changes.
 const REAL_PADDLE_SRC = "https://cdn.paddle.com/paddle/v2/paddle.js";
