@@ -671,6 +671,12 @@ ws_broadcaster = SessionWSBroadcaster(coordinator)
 from event_bus_subscribers import bind_session_ws_broadcaster
 bind_session_ws_broadcaster(ws_broadcaster)
 
+# Project-level running/unread/waiting_for_user/errored badge counters
+# invalidate on the same session mutation events the WS broadcaster
+# fans out, so they never freeze stale between project CRUD events.
+from event_bus_subscribers import bind_project_aggregates_invalidation
+bind_project_aggregates_invalidation()
+
 from event_bus_subscribers import (
     bind_post_turn_hooks,
     bind_pre_turn_hooks,

@@ -5026,7 +5026,7 @@ class SessionManager:
                 s["harness_profile_id"] = str(harness_profile_id or "").strip()
             if selector_changed:
                 self._bump_selectors_seq(s)
-        return self._run(
+        result = self._run(
             sid, _do,
             {
                 "kind": "selectors_set",
@@ -5046,6 +5046,23 @@ class SessionManager:
             },
             enrich=lambda sess: {"selectors_seq": sess.get("selectors_seq") or 0},
         )
+        # `_project_aggregates` (projects_api.py) and the sidebar list
+        # both bucket sessions by the SUMMARY snapshot's `cwd`
+        # (`session_manager.list()`), not this in-memory dict — `_run`'s
+        # persist is debounced and never touches the summary index.
+        # Refresh it synchronously (same established pattern as
+        # set_pinned/set_topbar_pinned/set_current_todos/
+        # set_current_tasks/set_unseen_error) so a session moved to a
+        # different project's cwd is immediately re-bucketed instead of
+        # lingering under its old project until an unrelated rebuild.
+        if result is not None and cwd is not None:
+            if not session_store._replace_summary_projection_field(sid, "cwd", cwd):
+                rid = self._root_id_for(sid)
+                if rid is not None:
+                    root = self.get(rid)
+                    if root is not None:
+                        session_store._upsert_summary(root)
+        return result
 
     def set_agent_sid(
         self,
@@ -6295,6 +6312,18 @@ class SessionManager:
                 sid,
                 {"kind": "error_changed", "has_error": True, "error": text},
             )
+        # `_persist_root`'s disk write is debounced (up to
+        # `PERSIST_DEBOUNCE_S`); the sidebar list and project aggregates
+        # both read `session_store`'s summary index, not this in-memory
+        # dict, via `session_manager.list()`. Refresh the summary
+        # projection synchronously so a listing read immediately after
+        # this call sees the error instead of racing the debounced flush
+        # — matches the established pattern in set_pinned/
+        # set_topbar_pinned/set_current_todos/set_current_tasks.
+        if not session_store._replace_summary_projection_field(sid, "unseen_error", text):
+            root = self.get(rid)
+            if root is not None:
+                session_store._upsert_summary(root)
 
     def clear_unseen_error(self, sid: str) -> None:
         """Retire the unseen-error dot. Called when the session resumes work
@@ -6312,6 +6341,12 @@ class SessionManager:
             if rid not in self._batches:
                 self._persist_root(rid, bump=False)
             self._fire(sid, {"kind": "error_changed", "has_error": False})
+        # See set_unseen_error: refresh the summary projection
+        # synchronously so it doesn't lag the debounced persist.
+        if not session_store._replace_summary_projection_field(sid, "unseen_error", None):
+            root = self.get(rid)
+            if root is not None:
+                session_store._upsert_summary(root)
 
     def has_unseen_error(self, sid: str) -> bool:
         """Cheap (stale-tolerant) read of whether this session currently

@@ -1047,8 +1047,12 @@ async def on_shutdown():
             await _ns.stop_offset_flush_loop()
         except Exception:
             logger.exception("node_store: offset flush loop stop failed")
-    from event_bus_subscribers import unbind_session_ws_broadcaster
+    from event_bus_subscribers import (
+        unbind_session_ws_broadcaster,
+        unbind_project_aggregates_invalidation,
+    )
     unbind_session_ws_broadcaster()
+    unbind_project_aggregates_invalidation()
     try:
         await _coordinator_ref.turn_manager.lifecycle.close()
     except Exception:

@@ -15,6 +15,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -240,12 +241,180 @@ def test_session_list_enrichment() -> None:
     print(f"{PASS} session_list_enrichment")
 
 
+def test_aggregates_invalidate_without_manual_call() -> None:
+    """Regression: every OTHER test in this file manually calls
+    `projects_api.invalidate_project_aggregates()` after each mutation —
+    that was papering over a real gap. In production nothing called it
+    except project CRUD (`main.py:_broadcast_projects_changed`); no
+    session-level mutation (running/unread/error/marker) ever did, so
+    once `/api/projects` was read once, the badges froze stale for the
+    life of the process. `main.py` now wires
+    `event_bus_subscribers.bind_project_aggregates_invalidation()`
+    alongside the WS broadcaster bind, so a `session.error_changed` bus
+    event (fired by `set_unseen_error`) must invalidate the cache with
+    NO manual `invalidate_project_aggregates()` call in this test.
+
+    `session_manager._fire`'s bus-publish path only activates once
+    `session_manager.bind_loop` has run (real app startup does this in
+    `app_lifecycle.py`; this standalone script never starts the ASGI
+    lifespan, so it's bound here) — and the publish is scheduled via
+    `create_task`, landing on the loop's NEXT tick, not synchronously
+    inside `set_unseen_error`. `asyncio.sleep(0)` yields once to let
+    that scheduled subscriber actually run before asserting."""
+    async def _scenario() -> None:
+        session_manager.bind_loop(asyncio.get_running_loop())
+        sid = _mk_session()
+        key = (CWD, "primary")
+
+        aggs = projects_api._project_aggregates()
+        assert aggs.get(key, {"errored_count": 0})["errored_count"] == 0, (
+            "setup: session must start with no error"
+        )
+
+        session_manager.set_unseen_error(sid, "boom")
+        await asyncio.sleep(0)
+
+        # No `invalidate_project_aggregates()` call here — the bus
+        # subscription wired by `bind_project_aggregates_invalidation`
+        # in main.py must have already invalidated the cache reactively.
+        aggs = projects_api._project_aggregates()
+        ec = aggs[key]["errored_count"]
+        assert ec == 1, (
+            f"project errored_count did not update after set_unseen_error "
+            f"with no manual invalidate call — the aggregate cache is "
+            f"stale/frozen; expected 1, got {ec}"
+        )
+
+        session_manager.clear_unseen_error(sid)
+        await asyncio.sleep(0)
+        aggs = projects_api._project_aggregates()
+        ec = aggs[key]["errored_count"]
+        assert ec == 0, (
+            f"project errored_count did not clear after clear_unseen_error "
+            f"with no manual invalidate call; expected 0, got {ec}"
+        )
+
+    asyncio.run(_scenario())
+    print(f"{PASS} aggregates_invalidate_without_manual_call")
+
+
+def test_waiting_for_user_marker_reflected_without_summary_rebuild() -> None:
+    """Coverage lock: `session_status.compute`'s waiting_for_user reads
+    `session["markers"]` off the SUMMARY snapshot (what
+    `session_manager.list()` returns). `set_marker`/`clear_marker` route
+    through `session_store.set_marker_projection`, which ALREADY
+    refreshes that summary field synchronously
+    (`_replace_summary_projection_field(sid, "markers", ...)` at
+    session_store.py:1422) — so, unlike the errored-dimension case
+    above, this path was never actually stale. This test locks that in
+    and additionally proves the project aggregate's
+    `waiting_for_user_count` reacts through the
+    `bind_project_aggregates_invalidation` bus wiring with no manual
+    `invalidate_project_aggregates()` call, same as the errored case."""
+    from session_status import MARKER_TAG_NEEDS_DECISION
+
+    async def _scenario() -> None:
+        # Rebind: a prior test's `asyncio.run` closed its loop, so
+        # `session_manager._loop` (bound once, module-singleton) may be
+        # stale/closed here — same reasoning as
+        # `test_aggregates_invalidate_without_manual_call` above.
+        session_manager.bind_loop(asyncio.get_running_loop())
+        sid = _mk_session()
+        key = (CWD, "primary")
+
+        aggs = projects_api._project_aggregates()
+        assert aggs.get(key, {"waiting_for_user_count": 0})["waiting_for_user_count"] == 0, (
+            "setup: session must start with no pending marker"
+        )
+
+        session_manager.set_marker(
+            sid, "ofek-dev.user-attention",
+            {"tag": MARKER_TAG_NEEDS_DECISION, "color": "#f97316"},
+        )
+        await asyncio.sleep(0)
+        # No manual invalidate_project_aggregates() call — relies on the
+        # same bus-driven invalidation as the errored-dimension test above.
+        aggs = projects_api._project_aggregates()
+        wc = aggs[key]["waiting_for_user_count"]
+        assert wc == 1, (
+            f"project waiting_for_user_count did not update after set_marker "
+            f"with no summary rebuild in between; expected 1, got {wc}"
+        )
+
+        session_manager.clear_marker(sid, "ofek-dev.user-attention")
+        await asyncio.sleep(0)
+        aggs = projects_api._project_aggregates()
+        wc = aggs[key]["waiting_for_user_count"]
+        assert wc == 0, (
+            f"project waiting_for_user_count did not clear after clear_marker "
+            f"with no summary rebuild in between; expected 0, got {wc}"
+        )
+
+    asyncio.run(_scenario())
+    print(f"{PASS} waiting_for_user_marker_reflected_without_summary_rebuild")
+
+
+def test_aggregates_rebalance_after_cwd_move_without_manual_call() -> None:
+    """Regression: `set_selectors` is the only mutator of a session's
+    `cwd` (fires kind `selectors_set`), and `_project_aggregates` buckets
+    counters by `(cwd, node_id)` — moving a session to a different
+    project's cwd must invalidate BOTH the old bucket (losing a member)
+    and the new one (gaining it) with no manual
+    `invalidate_project_aggregates()` call. `selectors_set` was missing
+    from `_PROJECT_AGGREGATE_INVALIDATING_KINDS` until this fix — without
+    it, a moved session's `running_count` would keep counting it under
+    the OLD project and never appear under the new one until some
+    unrelated event happened to fire for it."""
+    other_cwd = "/tmp/test-projagg-other"
+
+    async def _scenario() -> None:
+        session_manager.bind_loop(asyncio.get_running_loop())
+        sid = _mk_session()
+        old_key = (CWD, "primary")
+        new_key = (other_cwd, "primary")
+
+        coord = backend_main.coordinator
+        coord.active_run_ids[sid] = ["rmove"]
+        coord.run_state_add(sid, run_id="rmove", kind="native", target_message_id=None)
+        coord.turn_manager._refresh_cache()
+        projects_api.invalidate_project_aggregates()
+
+        aggs = projects_api._project_aggregates()
+        assert aggs[old_key]["running_count"] >= 1, (
+            "setup: session must be counted running under its original cwd"
+        )
+
+        session_manager.set_selectors(sid, cwd=other_cwd)
+        await asyncio.sleep(0)
+
+        # No manual invalidate_project_aggregates() call here.
+        aggs = projects_api._project_aggregates()
+        assert sid not in [
+            s.get("id") for s in session_manager.list()
+            if (s.get("cwd") or "") == CWD
+        ], "setup: session must no longer report the original cwd"
+        new_rc = aggs.get(new_key, {"running_count": 0})["running_count"]
+        assert new_rc >= 1, (
+            f"project running_count did not pick up the session under its "
+            f"NEW cwd after set_selectors with no manual invalidate call; "
+            f"got {new_rc}"
+        )
+
+        coord.run_state_remove(sid, "rmove")
+
+    asyncio.run(_scenario())
+    print(f"{PASS} aggregates_rebalance_after_cwd_move_without_manual_call")
+
+
 def main() -> int:
     try:
         test_running_count_aggregation()
         test_unread_session_count_aggregation()
         test_worker_fork_excluded_from_aggregates()
         test_session_list_enrichment()
+        test_aggregates_invalidate_without_manual_call()
+        test_waiting_for_user_marker_reflected_without_summary_rebuild()
+        test_aggregates_rebalance_after_cwd_move_without_manual_call()
         print("ALL PASSED")
         return 0
     except AssertionError as e:
