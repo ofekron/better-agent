@@ -17,6 +17,7 @@ import _test_home
 
 _TMP_HOME = _test_home.isolate("bc-test-canonical-narrow-copy-")
 
+import paths  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 import file_ref_resolver  # noqa: E402
 
@@ -171,7 +172,11 @@ def test_persisted_row_has_rewrite() -> bool:
         root_id, sid, "agent_message", data,
         source="test", msg_id=str(uuid.uuid4()), cwd_override=_CWD,
     )
-    rows_path = Path(_TMP_HOME) / "sessions" / root_id / "events.jsonl"
+    # Read from the live home — `ingest` resolves its write path through
+    # `ba_home()` at call time, so in a multi-module pytest batch the active
+    # home is whichever module's `isolate()` ran last, not this module's
+    # captured `_TMP_HOME`. Assert on the actual write location.
+    rows_path = paths.ba_home() / "sessions" / root_id / "events.jsonl"
     rows = [json.loads(ln) for ln in rows_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if not rows or "bcfile:" not in json.dumps(rows[-1]):
         print(f"{FAIL} persisted row missing rewritten file ref")
