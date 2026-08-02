@@ -12,11 +12,8 @@ import sys
 import threading
 import types
 import urllib.error
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-import pytest
 
 import paths
 import shell
