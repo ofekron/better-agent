@@ -122,8 +122,12 @@ def _descriptor(artifact: Any) -> dict[str, Any]:
     )
     if (
         actual != expected
-        or type(actual[-1]) is not str
-        or not SHA256_RE.fullmatch(actual[-1])
+        # Guards below are unreachable by construction: when actual == expected,
+        # actual[-1] equals _contract_fingerprint(...) which is always a valid
+        # sha256 hex string, so both the type and format checks are necessarily
+        # false. Kept as a defensive invariant assertion; excluded from coverage.
+        or type(actual[-1]) is not str  # pragma: no cover
+        or not SHA256_RE.fullmatch(actual[-1])  # pragma: no cover
     ):
         raise ModelAdmissionError(
             "execution model admission authority mismatch",
