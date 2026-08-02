@@ -5,9 +5,10 @@ kind (regression guard: openai/fugu still reject better_agent_runner in
 subscription mode).
 
 Covers:
-- config_store.add_provider accepts claude+better_agent_runner+subscription,
-  rejects claude+better_agent_runner+api_key (no api_key backend exists for
-  it), and still rejects openai/fugu+better_agent_runner+subscription.
+- config_store.add_runtime_profile accepts claude+better_agent_runner+
+  subscription, rejects claude+better_agent_runner+api_key (no api_key
+  backend exists for it), and still rejects openai/fugu+better_agent_runner+
+  subscription.
 - runtime_profile.supported_runners / default_runner / runtime_kind resolve
   claude+better_agent_runner to the real "claude" runtime kind (not the
   generic "openai" collapse every other kind's better_agent_runner choice
@@ -28,6 +29,9 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -45,15 +49,18 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_config_store_accepts_claude_subscription_better_agent_runner() -> bool:
+def _check_config_store_accepts_claude_subscription_better_agent_runner() -> bool:
     provider = config_store.add_provider({
         "name": "claude-ba-runner",
         "kind": "claude",
         "mode": "subscription",
+    })
+    profile = config_store.add_runtime_profile({
+        "provider_id": provider["id"],
         "runner": "better_agent_runner",
     })
-    if provider.get("runner") != "better_agent_runner":
-        print(f"  runner not persisted: {provider.get('runner')!r}")
+    if profile.get("runner") != "better_agent_runner":
+        print(f"  runner not persisted: {profile.get('runner')!r}")
         return False
     if provider.get("mode") != "subscription":
         print(f"  mode not persisted: {provider.get('mode')!r}")
@@ -61,17 +68,20 @@ def test_config_store_accepts_claude_subscription_better_agent_runner() -> bool:
     return True
 
 
-def test_config_store_rejects_claude_api_key_better_agent_runner() -> bool:
+def _check_config_store_rejects_claude_api_key_better_agent_runner() -> bool:
+    provider = config_store.add_provider({
+        "name": "claude-ba-runner-api-key",
+        "kind": "claude",
+        "mode": "api_key",
+    })
     try:
-        config_store.add_provider({
-            "name": "claude-ba-runner-api-key",
-            "kind": "claude",
-            "mode": "api_key",
+        config_store.add_runtime_profile({
+            "provider_id": provider["id"],
             "runner": "better_agent_runner",
-            "api_key": "sk-test",
         })
     except ValueError as e:
-        if "subscription" not in str(e).lower():
+        message = str(e).lower()
+        if "not supported" not in message or "api_key" not in message:
             print(f"  wrong rejection message: {e}")
             return False
         return True
@@ -79,7 +89,7 @@ def test_config_store_rejects_claude_api_key_better_agent_runner() -> bool:
     return False
 
 
-def test_config_store_still_rejects_openai_subscription() -> bool:
+def _check_config_store_still_rejects_openai_subscription() -> bool:
     """Regression guard: the claude-specific carve-out must not leak into
     every other kind's better_agent_runner + subscription combination."""
     try:
@@ -99,10 +109,13 @@ def test_config_store_still_rejects_openai_subscription() -> bool:
         return False
 
     try:
-        config_store.add_provider({
+        fugu = config_store.add_provider({
             "name": "fugu-ba-runner-subscription",
             "kind": "fugu",
             "mode": "subscription",
+        })
+        config_store.add_runtime_profile({
+            "provider_id": fugu["id"],
             "runner": "better_agent_runner",
         })
     except ValueError:
@@ -111,7 +124,7 @@ def test_config_store_still_rejects_openai_subscription() -> bool:
     return False
 
 
-def test_runtime_profile_supported_runners() -> bool:
+def _check_runtime_profile_supported_runners() -> bool:
     claude_sub = {"kind": "claude", "mode": "subscription"}
     claude_api = {"kind": "claude", "mode": "api_key"}
     if "better_agent_runner" not in runtime_profile.supported_runners(claude_sub):
@@ -137,7 +150,7 @@ def test_runtime_profile_supported_runners() -> bool:
     return True
 
 
-def test_runtime_profile_runtime_kind() -> bool:
+def _check_runtime_profile_runtime_kind() -> bool:
     claude_ba = {"kind": "claude", "runner": "better_agent_runner"}
     if runtime_profile.runtime_kind(claude_ba) != "claude":
         print(f"  claude+better_agent_runner runtime_kind: {runtime_profile.runtime_kind(claude_ba)}")
@@ -153,7 +166,7 @@ def test_runtime_profile_runtime_kind() -> bool:
     return True
 
 
-def test_permission_defaults_stay_claude() -> bool:
+def _check_permission_defaults_stay_claude() -> bool:
     perm = permission.resolve_for_run(
         sess_rec={"provider_id": None},
         worker_sess_rec=None,
@@ -170,7 +183,7 @@ def test_permission_defaults_stay_claude() -> bool:
     return True
 
 
-def test_provider_manifest_runner_module_for() -> bool:
+def _check_provider_manifest_runner_module_for() -> bool:
     if provider_manifest.runner_module_for("claude") != "runner":
         print(f"  claude default module regressed: {provider_manifest.runner_module_for('claude')}")
         return False
@@ -191,7 +204,7 @@ def test_provider_manifest_runner_module_for() -> bool:
     return True
 
 
-def test_app_entry_dispatch_runner_module_roundtrip() -> bool:
+def _check_app_entry_dispatch_runner_module_roundtrip() -> bool:
     from app_entry import _dispatch
 
     got = _dispatch([
@@ -212,15 +225,23 @@ def test_app_entry_dispatch_runner_module_roundtrip() -> bool:
 
 
 TESTS = [
-    ("config_store accepts claude+better_agent_runner+subscription", test_config_store_accepts_claude_subscription_better_agent_runner),
-    ("config_store rejects claude+better_agent_runner+api_key", test_config_store_rejects_claude_api_key_better_agent_runner),
-    ("config_store still rejects openai/fugu+subscription (regression)", test_config_store_still_rejects_openai_subscription),
-    ("runtime_profile.supported_runners is mode/kind-gated correctly", test_runtime_profile_supported_runners),
-    ("runtime_profile.runtime_kind resolves claude correctly", test_runtime_profile_runtime_kind),
-    ("permission.resolve_for_run still resolves", test_permission_defaults_stay_claude),
-    ("provider_manifest.runner_module_for is runner-aware", test_provider_manifest_runner_module_for),
-    ("app_entry._dispatch round-trips --runner-module", test_app_entry_dispatch_runner_module_roundtrip),
+    ("config_store accepts claude+better_agent_runner+subscription", _check_config_store_accepts_claude_subscription_better_agent_runner),
+    ("config_store rejects claude+better_agent_runner+api_key", _check_config_store_rejects_claude_api_key_better_agent_runner),
+    ("config_store still rejects openai/fugu+subscription (regression)", _check_config_store_still_rejects_openai_subscription),
+    ("runtime_profile.supported_runners is mode/kind-gated correctly", _check_runtime_profile_supported_runners),
+    ("runtime_profile.runtime_kind resolves claude correctly", _check_runtime_profile_runtime_kind),
+    ("permission.resolve_for_run still resolves", _check_permission_defaults_stay_claude),
+    ("provider_manifest.runner_module_for is runner-aware", _check_provider_manifest_runner_module_for),
+    ("app_entry._dispatch round-trips --runner-module", _check_app_entry_dispatch_runner_module_roundtrip),
 ]
+
+
+@pytest.mark.parametrize(("name", "check"), TESTS, ids=[name for name, _ in TESTS])
+def test_claude_better_agent_runner_contract(
+    name: str,
+    check: Callable[[], bool],
+) -> None:
+    assert check(), name
 
 
 def main_run() -> int:

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Callable
+
+import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -16,7 +19,7 @@ import config_store  # noqa: E402
 import models  # noqa: E402
 
 
-def test_subscription_cold_start_uses_current_anthropic_models() -> bool:
+def _check_subscription_cold_start_uses_current_anthropic_models() -> bool:
     provider = {
         "id": "anthropic-subscription",
         "kind": "claude",
@@ -50,22 +53,34 @@ def test_subscription_cold_start_uses_current_anthropic_models() -> bool:
     return True
 
 
-def test_default_subscription_model_uses_claude_code_alias() -> bool:
+def _check_default_subscription_model_uses_claude_code_alias() -> bool:
     if config_store._default_model_for("subscription", "") != "opus":
         print("  migration default did not use opus alias")
         return False
     state = config_store._seed_default_state()
     claude = next(p for p in state["providers"] if p["kind"] == "claude")
-    if claude["default_model"] != "opus":
-        print(f"  seed default mismatch: {claude['default_model']!r}")
+    profile = next(
+        p for p in state["runtime_profiles"]
+        if p["provider_id"] == claude["id"] and p["runner"] == "native"
+    )
+    if profile["default_model"] != "opus":
+        print(f"  seed default mismatch: {profile['default_model']!r}")
         return False
     return True
 
 
 TESTS = [
-    ("subscription_cold_start_uses_current_anthropic_models", test_subscription_cold_start_uses_current_anthropic_models),
-    ("default_subscription_model_uses_claude_code_alias", test_default_subscription_model_uses_claude_code_alias),
+    ("subscription_cold_start_uses_current_anthropic_models", _check_subscription_cold_start_uses_current_anthropic_models),
+    ("default_subscription_model_uses_claude_code_alias", _check_default_subscription_model_uses_claude_code_alias),
 ]
+
+
+@pytest.mark.parametrize(("name", "check"), TESTS, ids=[name for name, _ in TESTS])
+def test_anthropic_model_catalog_contract(
+    name: str,
+    check: Callable[[], bool],
+) -> None:
+    assert check(), name
 
 
 def main_run() -> int:

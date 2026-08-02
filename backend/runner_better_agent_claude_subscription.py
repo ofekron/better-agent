@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -71,6 +72,14 @@ def _require_token() -> str:
 
 
 _DATA_URL_RE = re.compile(r"^data:(?P<media_type>[^;]+);base64,(?P<data>.+)$", re.DOTALL)
+_CLAUDE_CODE_1M_MODEL_RE = re.compile(
+    r"^(?P<model>claude-[a-z0-9]+(?:-[a-z0-9]+)+)\[1m\]$"
+)
+
+
+def model_id_for_anthropic_api(selector: str) -> str:
+    match = _CLAUDE_CODE_1M_MODEL_RE.fullmatch(selector)
+    return match.group("model") if match else selector
 
 
 def _openai_content_part_to_anthropic(part: dict) -> Optional[dict]:
@@ -270,7 +279,7 @@ async def _stream_messages(
     token = _require_token()
     url = base_url.rstrip("/") + "/v1/messages"
     payload: dict[str, Any] = {
-        "model": model,
+        "model": model_id_for_anthropic_api(model),
         "max_tokens": DEFAULT_MAX_TOKENS,
         "messages": messages,
         "stream": True,
@@ -353,42 +362,44 @@ async def one_round_claude_subscription(
     )
     finish_reason: Optional[str] = None
     usage: Optional[dict] = None
-    async for event in _stream_messages(base_url, model, system_blocks, anthropic_messages, tools):
-        if (run_dir / "cancel").exists():
-            break
-        etype = event.get("type")
-        if etype == "message_start":
-            msg_usage = (event.get("message") or {}).get("usage")
-            if msg_usage:
-                usage = _anthropic_usage_to_chat_completions_usage(msg_usage, usage)
-        elif etype == "content_block_start":
-            idx = event.get("index", 0)
-            block = event.get("content_block") or {}
-            if block.get("type") == "tool_use":
-                emitter.feed_tool_call_delta(idx, block.get("id"), block.get("name"), None)
-        elif etype == "content_block_delta":
-            idx = event.get("index", 0)
-            delta = event.get("delta") or {}
-            dtype = delta.get("type")
-            if dtype == "text_delta":
-                emitter.feed_text_delta(delta.get("text") or "")
-            elif dtype == "thinking_delta":
-                emitter.feed_thinking_delta(delta.get("thinking") or "")
-            elif dtype == "input_json_delta":
-                emitter.feed_tool_call_delta(idx, None, None, delta.get("partial_json") or "")
-        elif etype == "message_delta":
-            delta = event.get("delta") or {}
-            stop_reason = delta.get("stop_reason")
-            if stop_reason:
-                finish_reason = "tool_calls" if stop_reason == "tool_use" else "stop"
-            delta_usage = event.get("usage")
-            if delta_usage:
-                usage = _anthropic_usage_to_chat_completions_usage(delta_usage, usage)
-        elif etype == "message_stop":
-            break
-        elif etype == "error":
-            err = event.get("error") or {}
-            raise RuntimeError(f"Anthropic stream error: {err.get('type')}: {err.get('message')}")
+    stream = _stream_messages(base_url, model, system_blocks, anthropic_messages, tools)
+    async with aclosing(stream):
+        async for event in stream:
+            if (run_dir / "cancel").exists():
+                break
+            etype = event.get("type")
+            if etype == "message_start":
+                msg_usage = (event.get("message") or {}).get("usage")
+                if msg_usage:
+                    usage = _anthropic_usage_to_chat_completions_usage(msg_usage, usage)
+            elif etype == "content_block_start":
+                idx = event.get("index", 0)
+                block = event.get("content_block") or {}
+                if block.get("type") == "tool_use":
+                    emitter.feed_tool_call_delta(idx, block.get("id"), block.get("name"), None)
+            elif etype == "content_block_delta":
+                idx = event.get("index", 0)
+                delta = event.get("delta") or {}
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    emitter.feed_text_delta(delta.get("text") or "")
+                elif dtype == "thinking_delta":
+                    emitter.feed_thinking_delta(delta.get("thinking") or "")
+                elif dtype == "input_json_delta":
+                    emitter.feed_tool_call_delta(idx, None, None, delta.get("partial_json") or "")
+            elif etype == "message_delta":
+                delta = event.get("delta") or {}
+                stop_reason = delta.get("stop_reason")
+                if stop_reason:
+                    finish_reason = "tool_calls" if stop_reason == "tool_use" else "stop"
+                delta_usage = event.get("usage")
+                if delta_usage:
+                    usage = _anthropic_usage_to_chat_completions_usage(delta_usage, usage)
+            elif etype == "message_stop":
+                break
+            elif etype == "error":
+                err = event.get("error") or {}
+                raise RuntimeError(f"Anthropic stream error: {err.get('type')}: {err.get('message')}")
 
     thinking = emitter.close_thinking()
     text = emitter.close_text()

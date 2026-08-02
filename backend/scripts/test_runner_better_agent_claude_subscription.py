@@ -33,8 +33,10 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 from unittest import mock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -53,7 +55,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 FAKE_TOKEN = "sk-ant-oat-super-secret-test-token-do-not-leak"  # nosec - test fixture only
 
 
-def test_messages_to_anthropic_round_trip() -> bool:
+def _check_messages_to_anthropic_round_trip() -> bool:
     messages = [
         {"role": "system", "content": "base system prompt"},
         {"role": "user", "content": "please run ls"},
@@ -105,7 +107,7 @@ def test_messages_to_anthropic_round_trip() -> bool:
     return True
 
 
-def test_parallel_tool_results_merge_into_one_message() -> bool:
+def _check_parallel_tool_results_merge_into_one_message() -> bool:
     messages = [
         {"role": "tool", "tool_call_id": "a", "content": "result a"},
         {"role": "tool", "tool_call_id": "b", "content": "result b"},
@@ -121,7 +123,7 @@ def test_parallel_tool_results_merge_into_one_message() -> bool:
     return True
 
 
-def test_tools_to_anthropic() -> bool:
+def _check_tools_to_anthropic() -> bool:
     openai_tools = [
         {"type": "function", "function": {
             "name": "Bash", "description": "Run a shell command.",
@@ -141,7 +143,7 @@ def test_tools_to_anthropic() -> bool:
     return True
 
 
-def test_cache_breakpoints_mark_stable_content_only() -> bool:
+def _check_cache_breakpoints_mark_stable_content_only() -> bool:
     """Regression test for the missing-cache_control bug: the harness-profile
     system block and the tool schema list are byte-identical on nearly every
     turn of a session, and prior conversation turns never change once
@@ -187,12 +189,25 @@ class _FakeAsyncStreamResponse:
         self._lines = lines
         self._body = body
 
-    async def aiter_lines(self) -> AsyncIterator[str]:
-        for line in self._lines:
-            yield line
+    def aiter_lines(self) -> AsyncIterator[str]:
+        return _FakeAsyncLineIterator(self._lines)
 
     async def aread(self) -> bytes:
         return self._body
+
+
+class _FakeAsyncLineIterator:
+    def __init__(self, lines: list[str]):
+        self._lines = iter(lines)
+
+    def __aiter__(self) -> "_FakeAsyncLineIterator":
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return next(self._lines)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 class _FakeStreamCtx:
@@ -278,7 +293,40 @@ def _run(coro):
         loop.close()
 
 
-def test_one_round_streams_text_and_tool_call() -> bool:
+async def _capture_outbound_model(model: str) -> str:
+    _FakeAsyncClient.captured_payloads.clear()
+    with mock.patch.object(
+        claude_subscription_credential,
+        "read_claude_subscription_token",
+        return_value=FAKE_TOKEN,
+    ), mock.patch("httpx.AsyncClient", _FakeAsyncClient):
+        async for _event in backend._stream_messages(
+            "https://api.anthropic.com",
+            model,
+            None,
+            [{"role": "user", "content": "hi"}],
+            [],
+        ):
+            pass
+    return str(_FakeAsyncClient.captured_payloads[-1]["model"])
+
+
+def _check_http_model_selector_cases() -> bool:
+    cases = {
+        "claude-opus-5[1m]": "claude-opus-5",
+        "claude-opus-5": "claude-opus-5",
+        "claude-opus-5[1m]junk": "claude-opus-5[1m]junk",
+        "opus[1m]": "opus[1m]",
+        "claude-opus-5[2m]": "claude-opus-5[2m]",
+    }
+    actual = {selector: _run(_capture_outbound_model(selector)) for selector in cases}
+    if actual != cases:
+        print(f"  outbound model selectors: {actual!r}")
+        return False
+    return True
+
+
+def _check_one_round_streams_text_and_tool_call() -> bool:
     events_path = Path(_TMP) / "events.jsonl"
     emitter = EventEmitter(events_path)
     emitter.set_model("claude-opus-test")
@@ -357,7 +405,7 @@ def test_one_round_streams_text_and_tool_call() -> bool:
     return True
 
 
-def test_missing_token_fails_closed() -> bool:
+def _check_missing_token_fails_closed() -> bool:
     events_path = Path(_TMP) / "events_missing_token.jsonl"
     emitter = EventEmitter(events_path)
     emitter.set_model("claude-opus-test")
@@ -385,7 +433,7 @@ def test_missing_token_fails_closed() -> bool:
     return False
 
 
-def test_401_fails_closed_without_retry() -> bool:
+def _check_401_fails_closed_without_retry() -> bool:
     class _Fake401Client(_FakeAsyncClient):
         def stream(self, method, url, *, json, headers):
             return _FakeStreamCtx(_FakeAsyncStreamResponse(401, [], b'{"error":"invalid token"}'))
@@ -417,15 +465,22 @@ def test_401_fails_closed_without_retry() -> bool:
 
 
 TESTS = [
-    ("messages_to_anthropic translates a full turn round trip", test_messages_to_anthropic_round_trip),
-    ("parallel tool results merge into one Anthropic user message", test_parallel_tool_results_merge_into_one_message),
-    ("tools_to_anthropic converts function schemas to input_schema", test_tools_to_anthropic),
+    ("messages_to_anthropic translates a full turn round trip", _check_messages_to_anthropic_round_trip),
+    ("parallel tool results merge into one Anthropic user message", _check_parallel_tool_results_merge_into_one_message),
+    ("tools_to_anthropic converts function schemas to input_schema", _check_tools_to_anthropic),
     ("cache breakpoints mark system/tools/stable-history, not the newest turn",
-     test_cache_breakpoints_mark_stable_content_only),
-    ("one_round_claude_subscription streams text + tool call + usage", test_one_round_streams_text_and_tool_call),
-    ("missing Keychain token fails closed (no network call)", test_missing_token_fails_closed),
-    ("HTTP 401 fails closed without silent retry", test_401_fails_closed_without_retry),
+     _check_cache_breakpoints_mark_stable_content_only),
+    ("Claude Code 1m model selector is canonicalized at the HTTP wire boundary",
+     _check_http_model_selector_cases),
+    ("one_round_claude_subscription streams text + tool call + usage", _check_one_round_streams_text_and_tool_call),
+    ("missing Keychain token fails closed (no network call)", _check_missing_token_fails_closed),
+    ("HTTP 401 fails closed without silent retry", _check_401_fails_closed_without_retry),
 ]
+
+
+@pytest.mark.parametrize(("name", "check"), TESTS, ids=[name for name, _ in TESTS])
+def test_wire_translation_contract(name: str, check: Callable[[], bool]) -> None:
+    assert check(), name
 
 
 def main_run() -> int:
