@@ -12,7 +12,6 @@ The user can confirm, reject, or manually reassign groups via the UI.
 """
 
 import copy
-import json
 import logging
 import re
 import uuid

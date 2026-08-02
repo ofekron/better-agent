@@ -34,7 +34,6 @@ import json
 import logging
 import os
 import re
-import signal
 import shutil
 import subprocess
 import sys

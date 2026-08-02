@@ -34,7 +34,6 @@ import ntpath
 import os
 import posixpath
 import re
-import signal
 import shutil
 import subprocess
 import sys
