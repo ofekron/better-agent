@@ -325,5 +325,5 @@ def main(initial_activation: ActivationEvent | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
