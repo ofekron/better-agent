@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-import operation_authority
 import operation_catalog
 import scoped_runtime_client
 
