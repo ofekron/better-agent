@@ -82,9 +82,12 @@ def test_home_suffix_default_home_empty(monkeypatch):
 
 
 def test_home_suffix_slug_folding(monkeypatch):
-    _patch_home(monkeypatch, "/tmp/bc!!!weird path", "/different")
-    # "/tmp/bc!!!weird path" -> non-[alnum-dash] to "-" -> strip -> collapse
-    assert kn.home_suffix() == "tmp-bc-weird-path"
+    # Non-existent root-level path so `.resolve()` (called by home_suffix) is a
+    # no-op on every platform — `/tmp` resolves to `/private/tmp` on macOS,
+    # which would prepend "private-" and make the expectation host-dependent.
+    _patch_home(monkeypatch, "/bc!!!weird path", "/different")
+    # "/bc!!!weird path" -> non-[alnum-dash] to "-" -> strip -> collapse
+    assert kn.home_suffix() == "bc-weird-path"
 
 
 def test_home_suffix_all_symbols_empty(monkeypatch):

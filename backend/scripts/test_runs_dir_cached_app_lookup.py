@@ -30,7 +30,8 @@ def _seed(root: Path, run_id: str, app_session_id: str) -> Path:
 
 def test_cached_lookup_is_scoped_and_never_backfills() -> None:
     root = runs_dir.runs_root()
-    root.mkdir(parents=True)
+    # The pytest conftest autouse fixture pre-creates <home>/runs; tolerate it.
+    root.mkdir(parents=True, exist_ok=True)
     target = "target-session"
     expected = {_seed(root, f"target-{index}", target) for index in range(3)}
     for index in range(2_000):
