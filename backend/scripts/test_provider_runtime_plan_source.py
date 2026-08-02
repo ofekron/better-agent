@@ -24,6 +24,7 @@ from provider_runtime_plan_source import (  # noqa: E402
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
 )
+from provider_session_events_runner import effective_mcp_servers  # noqa: E402
 from codex_execution_common import ExecutionContractError  # noqa: E402
 
 
@@ -529,6 +530,82 @@ def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> N
         assert env["BETTER_CLAUDE_RUNTIME_BROKER"] == (
             "unix:/tmp/runtime-broker.sock"
         )
+
+
+def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() -> None:
+    """Regression: a claude-kind provider running under the better_agent_runner
+    runner (e.g. a claude subscription runtime profile with
+    runner=better_agent_runner) crashed with
+    ExecutionContractError("frozen MCP delivery is invalid") because the
+    claude branch of _structural_provider_runtime_plan only built the
+    explicit/runtime/native/launcher delivery variants, never the merged
+    "effective" variant that runner_better_agent.effective_mcp_servers()
+    (the sole consumer for every better_agent_runner execution, regardless
+    of the record's kind) requires. Reproduced from real failed runs
+    2745a093-e645-44a2-9b94-79b88a831d4f and
+    1fc12b0e-c779-4c66-9400-3ac5117f6a9e under ~/.better-claude/runs/."""
+    inputs = {
+        "app_session_id": "session-id",
+        "backend_url": "http://127.0.0.1:8000",
+        "cwd": "/tmp",
+        "model": "claude-opus-4-7[1m]",
+        "provider_id": "claude-provider",
+        "provider_kind": "claude",
+        "runner": "better_agent_runner",
+        "user_facing": True,
+        "bare_config": False,
+        "working_mode": "file_editing",
+        "provider_run_config": {"mcp_servers": {}},
+        "resolved_harness_run_config": {},
+    }
+    with (
+        patch("installation_profile.integrations_enabled", return_value=True),
+        patch("installation_profile.load", return_value={}),
+        patch(
+            "installation_profile.capabilities",
+            return_value={"integrations_enabled": True},
+        ),
+        # A granted runtime MCP server (e.g. an extension's server) is what
+        # actually reproduces the crash: with zero servers in the plan,
+        # effective_mcp_servers() iterates nothing and the missing
+        # "effective" variant never gets looked up.
+        patch(
+            "extension_store.runtime_mcp_server_configs",
+            return_value={
+                "example-runtime": {
+                    "command": "/bin/echo",
+                    "args": ["ready"],
+                    "env": {},
+                },
+            },
+        ),
+        patch("extension_store.native_mcp_server_configs", return_value={}),
+        patch(
+            "extension_store.native_mcp_launcher_server_configs",
+            return_value={},
+        ),
+        patch("extension_store.list_extensions", return_value=[]),
+        patch("extension_store.store_fingerprint", return_value=(1, 2)),
+        patch(
+            "extension_store.extension_settings_fingerprint",
+            return_value=(3, 4),
+        ),
+        patch(
+            "extension_store.resolve_native_mcp_servers_for_context",
+            return_value={},
+        ),
+    ):
+        prepared = structural_provider_runtime_plan(inputs, "claude")
+
+    resolved_plan = prepared["resolved_plan"]
+    assert resolved_plan["mcp_servers"], "test must exercise at least one server"
+    for server in resolved_plan["mcp_servers"]:
+        assert "effective" in server["config"], server["name"]
+    # The exact call runner_better_agent.py makes every round; must not raise.
+    effective = effective_mcp_servers(resolved_plan)
+    assert set(effective) == {
+        server["name"] for server in resolved_plan["mcp_servers"]
+    }
 
 
 def test_reject_secrets_does_not_flag_non_secret_auth_mode_settings() -> None:

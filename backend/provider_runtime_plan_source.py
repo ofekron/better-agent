@@ -418,6 +418,8 @@ def _structural_provider_runtime_plan(
         )["mcp_servers"]
         delivery_maps = {"effective": effective}
     else:
+        from builtin_mcp_config import with_builtin_mcp_servers
+
         runtime = extension_store.runtime_mcp_server_configs(
             frozen_inputs,
             user_facing=user_facing,
@@ -433,11 +435,27 @@ def _structural_provider_runtime_plan(
             user_facing=user_facing,
             bare=bare,
         )
+        # The native claude runner consumes the "native" variant directly
+        # (runner.py reads variants["native"]); runner_better_agent.py always
+        # consumes the single merged "effective" variant regardless of the
+        # record's kind (effective_mcp_servers), so a claude-kind record
+        # running under the better_agent_runner runner needs it too — built
+        # the same way every non-claude kind's "effective" variant is.
+        effective = with_builtin_mcp_servers(
+            frozen_inputs,
+            {"mcp_servers": explicit},
+            runtime_broker=_RUNNER_OPERATION_BROKER_REF,
+            integrations_enabled=installation_profile.integrations_enabled(),
+            runtime_mcp_servers=runtime,
+            launcher_mcp_servers=launcher,
+            include_tool_metadata=True,
+        )["mcp_servers"]
         delivery_maps = {
             "explicit": explicit,
             "runtime": runtime,
             "native": native,
             "launcher": launcher,
+            "effective": effective,
         }
     names = sorted({
         name
