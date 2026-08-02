@@ -6402,11 +6402,21 @@ def _message_text(value: object) -> str:
 
 
 def _last_user_prompt_timestamp(root: dict) -> str:
-    """Timestamp of the most recent user-role message in the root.
+    """Timestamp of the most recent manually-typed web-UI user prompt.
     Distinct from `updated_at`, which any write (fork, rename, agent
-    activity) bumps; this only moves when the user sends a prompt."""
+    activity) bumps; this only moves when a human sends a prompt from
+    the web UI. Messages tagged with a `source` (delegate_task,
+    supervisor, cli, worker_delegation, extension, ...) are turn-manager-
+    originated, not manually typed, and must not bump this — see
+    `_init_turn_messages` in orchestrator.py, which only sets `source`
+    when the caller passes a non-empty value; the untagged web send path
+    leaves it unset."""
     for message in reversed(root.get("messages") or []):
-        if isinstance(message, dict) and message.get("role") == "user":
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and not message.get("source")
+        ):
             return message.get("timestamp", "") or ""
     return ""
 

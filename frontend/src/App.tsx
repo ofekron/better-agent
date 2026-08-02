@@ -1588,7 +1588,11 @@ function AppMain({
         // messages, but the local sidebar/tabs need the same sort keys before
         // the follow-up refetch/WS projection arrives.
         updated_at: userTimestamp,
-        last_user_prompt_at: userTimestamp,
+        // Only a manually-typed web-UI prompt bumps the sort key — mirrors
+        // backend `_last_user_prompt_timestamp` in session_store.py, which
+        // excludes messages tagged with a `source` (delegate_task, cli,
+        // supervisor, ...).
+        ...(userMessage.source ? {} : { last_user_prompt_at: userTimestamp }),
         message_count: Math.max(
           (session.message_count ?? session.messages?.length ?? 0) + 1,
           session.messages?.length ?? 0,
