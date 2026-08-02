@@ -260,6 +260,78 @@ def test_fold_revision_changes_with_each_new_event_and_is_deterministic() -> boo
     return ok
 
 
+def test_non_dict_worker_entry_is_passed_through() -> bool:
+    """A malformed (non-dict) worker entry is forwarded verbatim instead of
+    crashing the compaction loop; legitimate dict workers are unaffected."""
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "workers": [
+            "not-a-dict",
+            {"delegation_id": "d1", "worker_session_id": "w1"},
+        ],
+    })
+
+    ok = (
+        payload["workers"][0] == "not-a-dict"
+        and payload["workers"][1]["worker_session_id"] == "w1"
+    )
+    print(
+        f"{PASS if ok else FAIL} non-dict worker entry passed through verbatim",
+    )
+    return ok
+
+
+def test_no_omitted_marker_when_nothing_stripped() -> bool:
+    """With no `events` key on msg or any worker, events_key_removed stays
+    False, so no omitted_payloads marker is emitted and the payload is the
+    message minus internal bookkeeping keys."""
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "content": "final",
+        "workers": [{"delegation_id": "d1", "worker_session_id": "w1"}],
+    })
+
+    ok = "omitted_payloads" not in payload and payload["content"] == "final"
+    print(
+        f"{PASS if ok else FAIL} no omitted marker when no events were stripped",
+    )
+    return ok
+
+
+def test_non_list_events_value_contributes_nothing() -> bool:
+    """A non-list `events` value is stripped (key removed) but contributes
+    nothing to omitted_events; own_events_present stays False, so the
+    precomputed revision is never trusted for it."""
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "events": "not-a-list",
+    })
+
+    ok = (
+        "events" not in payload
+        and payload["omitted_payloads"]["events"]["count"] == 0
+    )
+    print(
+        f"{PASS if ok else FAIL} non-list events value stripped but not collected",
+    )
+    return ok
+
+
+def test_no_href_when_message_id_absent() -> bool:
+    """Without a usable message id the events ref carries only revision and
+    count — never an href."""
+    payload = compact_message_delta_payload({
+        "events": [{"type": "agent_message", "data": {"uuid": "e1"}}],
+    })
+
+    ref = payload["omitted_payloads"]["events"]
+    ok = "href" not in ref and isinstance(ref["revision"], str) and ref["count"] == 1
+    print(
+        f"{PASS if ok else FAIL} events ref omits href when message id is absent",
+    )
+    return ok
+
+
 def main() -> int:
     try:
         tests = [
@@ -273,6 +345,10 @@ def main() -> int:
             test_missing_precomputed_falls_back_to_full_recompute,
             test_empty_events_still_reported_as_omitted,
             test_internal_bookkeeping_keys_never_reach_the_wire,
+            test_non_dict_worker_entry_is_passed_through,
+            test_no_omitted_marker_when_nothing_stripped,
+            test_non_list_events_value_contributes_nothing,
+            test_no_href_when_message_id_absent,
             test_fold_revision_changes_with_each_new_event_and_is_deterministic,
         ]
         return 0 if all(test() for test in tests) else 1
