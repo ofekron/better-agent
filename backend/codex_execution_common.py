@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, TypeVar
 
 
-CONTRACT_SCHEMA = 2
+CONTRACT_SCHEMA = 3
 SECRET_NAMES = (
     "api_key",
     "apikey",

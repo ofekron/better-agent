@@ -267,6 +267,42 @@ def test_pinned_launch_executes_original_after_path_replacement() -> None:
         assert not chain.attest_metadata()
 
 
+def test_pinned_launch_stages_code_mode_host_sibling() -> None:
+    if os.name == "nt":
+        return
+    executable_source = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        executable = root / "codex"
+        sibling = root / "codex-code-mode-host"
+        os.link(executable_source, executable)
+        write_executable(sibling, b"code-mode-host-binary")
+        chain = resolve_codex_launch_chain(str(executable))
+
+        assert len(chain.sibling_components) == 1
+        assert (
+            Path(chain.sibling_components[0].resolved_path).name
+            == "codex-code-mode-host"
+        )
+
+        with pinned_launch(chain) as pinned:
+            staged_dir = Path(pinned.argv_prefix[0]).parent
+            staged_sibling = staged_dir / "codex-code-mode-host"
+            assert staged_sibling.is_file()
+            assert staged_sibling.read_bytes() == b"code-mode-host-binary"
+
+
+def test_resolve_launch_chain_without_sibling_leaves_it_empty() -> None:
+    executable_source = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        executable = root / "codex"
+        os.link(executable_source, executable)
+        chain = resolve_codex_launch_chain(str(executable))
+
+        assert chain.sibling_components == ()
+
+
 def test_windows_pinned_launch_denies_component_replacement() -> None:
     if os.name != "nt":
         return
@@ -312,6 +348,8 @@ LAUNCH_TESTS = (
     test_identity_capture_ignores_access_time_updates,
     test_shebang_resolution_ignores_access_time_updates,
     test_pinned_launch_executes_original_after_path_replacement,
+    test_pinned_launch_stages_code_mode_host_sibling,
+    test_resolve_launch_chain_without_sibling_leaves_it_empty,
     test_windows_pinned_launch_denies_component_replacement,
 )
 

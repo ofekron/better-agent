@@ -97,6 +97,10 @@ class CodexExecutionContract:
                 "component_argv_indexes": (
                     self.launch_chain.component_argv_indexes
                 ),
+                "sibling_components": tuple(
+                    _catalog_file_identity(identity)
+                    for identity in self.launch_chain.sibling_components
+                ),
             },
         }
         return hashlib.sha256(canonical_json(payload)).hexdigest()
@@ -134,6 +138,7 @@ class CodexExecutionContract:
                 "argv_prefix",
                 "components",
                 "component_argv_indexes",
+                "sibling_components",
             }:
                 raise ExecutionContractError("invalid launch chain")
             launcher = file_identity_from_dict(launch_raw["launcher"])
@@ -146,6 +151,13 @@ class CodexExecutionContract:
             components = tuple(
                 file_identity_from_dict(component)
                 for component in components_raw
+            )
+            sibling_components_raw = launch_raw.get("sibling_components")
+            if type(sibling_components_raw) is not list:
+                raise ExecutionContractError("invalid launch sibling components")
+            sibling_components = tuple(
+                file_identity_from_dict(component)
+                for component in sibling_components_raw
             )
             component_indexes_raw = launch_raw.get("component_argv_indexes")
             if (
@@ -160,6 +172,7 @@ class CodexExecutionContract:
                 argv_prefix=argv_prefix,
                 components=components,
                 component_argv_indexes=tuple(component_indexes_raw),
+                sibling_components=sibling_components,
             )
             config_raw = raw.get("config")
             if type(config_raw) is not list:

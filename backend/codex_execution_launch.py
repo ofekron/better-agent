@@ -26,6 +26,47 @@ from codex_execution_common import (
 )
 from codex_execution_identity import FileIdentity
 
+# codex spawns this companion binary via a path relative to its own
+# executable's directory (never through argv), so it never appears in
+# argv_prefix and is structurally excluded from `components`. It must still
+# be pinned and co-located wherever the main codex binary is staged, or
+# "code mode" tool execution fails with `failed to spawn code-mode host
+# ...: No such file or directory` once the main binary runs from an
+# isolated copy or fd.
+CODE_MODE_HOST_BASENAME = "codex-code-mode-host"
+
+
+@contextmanager
+def _open_attested(identities: tuple[FileIdentity, ...]) -> Iterator[tuple[int, ...]]:
+    handles: list[int] = []
+    try:
+        for identity in identities:
+            flags = binary_open_flags(
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(identity.resolved_path, flags)
+            handles.append(fd)
+            stat_result = os.fstat(fd)
+            if (
+                stat_result.st_dev != identity.device
+                or stat_result.st_ino != identity.inode
+                or stat_result.st_size != identity.size
+                or stat_result.st_mtime_ns != identity.mtime_ns
+                or stat_result.st_ctime_ns != identity.ctime_ns
+                or cached_sha256_fd(
+                    fd,
+                    (identity.resolved_path, stable_stat_identity(stat_result)),
+                ) != identity.sha256
+            ):
+                raise ExecutionContractError(
+                    "execution component identity mismatch",
+                )
+        yield tuple(handles)
+    finally:
+        for fd in handles:
+            os.close(fd)
+
 
 @dataclass(frozen=True)
 class LaunchChain:
@@ -35,6 +76,7 @@ class LaunchChain:
     argv_prefix: tuple[str, ...]
     components: tuple[FileIdentity, ...]
     component_argv_indexes: tuple[int, ...]
+    sibling_components: tuple[FileIdentity, ...] = ()
 
     def attest(self) -> bool:
         # Identical FileIdentity values assert identical expectations, so
@@ -42,45 +84,24 @@ class LaunchChain:
         return all(
             parallel_map(
                 FileIdentity.attest,
-                {self.launcher, *self.components},
+                {self.launcher, *self.components, *self.sibling_components},
             ),
         )
 
     def attest_metadata(self) -> bool:
-        return self.launcher.attest_metadata() and all(
-            component.attest_metadata() for component in self.components
+        return (
+            self.launcher.attest_metadata()
+            and all(component.attest_metadata() for component in self.components)
+            and all(
+                sibling.attest_metadata() for sibling in self.sibling_components
+            )
         )
 
-    @contextmanager
-    def open_attested_components(self) -> Iterator[tuple[int, ...]]:
-        handles: list[int] = []
-        try:
-            for component in self.components:
-                flags = binary_open_flags(
-                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
-                )
-                flags |= getattr(os, "O_NOFOLLOW", 0)
-                fd = os.open(component.resolved_path, flags)
-                handles.append(fd)
-                stat_result = os.fstat(fd)
-                if (
-                    stat_result.st_dev != component.device
-                    or stat_result.st_ino != component.inode
-                    or stat_result.st_size != component.size
-                    or stat_result.st_mtime_ns != component.mtime_ns
-                    or stat_result.st_ctime_ns != component.ctime_ns
-                    or cached_sha256_fd(
-                        fd,
-                        (component.resolved_path, stable_stat_identity(stat_result)),
-                    ) != component.sha256
-                ):
-                    raise ExecutionContractError(
-                        "execution component identity mismatch",
-                    )
-            yield tuple(handles)
-        finally:
-            for fd in handles:
-                os.close(fd)
+    def open_attested_components(self) -> "Iterator[tuple[int, ...]]":
+        return _open_attested(self.components)
+
+    def open_attested_siblings(self) -> "Iterator[tuple[int, ...]]":
+        return _open_attested(self.sibling_components)
 
 
 @dataclass(frozen=True)
@@ -173,11 +194,21 @@ def _open_windows_locked_components(
 def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
     validate_launch_chain(chain)
     if os.name == "nt":
+        # Windows locks the components in place and launches argv unchanged
+        # (see _open_windows_locked_components), so any sibling binary stays
+        # next to the original executable with no copy/relocation involved.
         with _open_windows_locked_components(chain.components):
             yield PinnedLaunch(chain.argv_prefix, ())
         return
-    with chain.open_attested_components() as handles:
-        if Path("/proc/self/fd").is_dir():
+    with (
+        chain.open_attested_components() as handles,
+        chain.open_attested_siblings() as sibling_handles,
+    ):
+        # The /proc/self/fd fast path launches argv[0] with no real parent
+        # directory, so a sibling binary resolved by codex relative to its
+        # own executable's directory could never be found there. Only take
+        # this path when there is no sibling to co-locate.
+        if not chain.sibling_components and Path("/proc/self/fd").is_dir():
             argv = list(chain.argv_prefix)
             for index, fd in zip(chain.component_argv_indexes, handles):
                 argv[index] = f"/proc/self/fd/{fd}"
@@ -213,6 +244,14 @@ def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
                     chain.components[position],
                 )
                 argv[index] = str(target)
+            for sibling, fd in zip(chain.sibling_components, sibling_handles):
+                from provider_pinned_launch import _copy_descriptor
+
+                # Staged under its original basename (not index-prefixed) in
+                # the same directory as the pinned binary, since codex looks
+                # it up by that fixed relative name next to its own exe.
+                sibling_target = root / Path(sibling.resolved_path).name
+                _copy_descriptor(fd, sibling_target, sibling)
             yield PinnedLaunch(tuple(argv), ())
 
 
@@ -246,6 +285,17 @@ def validate_launch_chain(chain: LaunchChain) -> None:
             marker in value.lower() for marker in SECRET_NAMES
         ):
             raise ExecutionContractError("secret launch argument is not allowed")
+    if len(chain.sibling_components) > 1:
+        raise ExecutionContractError("incoherent launch chain siblings")
+    if chain.sibling_components:
+        (sibling,) = chain.sibling_components
+        expected_directory = Path(chain.components[-1].resolved_path).parent
+        if (
+            Path(sibling.resolved_path).name
+            not in {CODE_MODE_HOST_BASENAME, f"{CODE_MODE_HOST_BASENAME}.exe"}
+            or Path(sibling.resolved_path).parent != expected_directory
+        ):
+            raise ExecutionContractError("incoherent launch chain siblings")
     if chain.mode in {"native", "vendor"}:
         if (
             len(chain.components) != 1
@@ -474,6 +524,21 @@ def resolve_codex_launch_chain(
         for index, value in enumerate(argv_prefix)
         if Path(value).is_absolute() and Path(value).is_file()
     ]
+    sibling_name = (
+        f"{CODE_MODE_HOST_BASENAME}.exe"
+        if effective_platform.lower().startswith("win")
+        else CODE_MODE_HOST_BASENAME
+    )
+    sibling_candidate = (
+        component_entries[-1][1].parent / sibling_name
+        if component_entries
+        else None
+    )
+    sibling_components = (
+        (FileIdentity.capture(sibling_candidate),)
+        if sibling_candidate is not None and sibling_candidate.is_file()
+        else ()
+    )
     chain = LaunchChain(
         logical_command="codex",
         mode=launch_mode,
@@ -485,6 +550,7 @@ def resolve_codex_launch_chain(
         component_argv_indexes=tuple(
             index for index, _path in component_entries
         ),
+        sibling_components=sibling_components,
     )
     validate_launch_chain(chain)
     return chain
