@@ -104,13 +104,27 @@ def _wait_for_summaries(sid: str, msg_ids: list[str], timeout: float = 2.0) -> N
     raise AssertionError(f"journal summaries not ready for {msg_ids}: {summaries}")
 
 
+def _create_manager_session(*, name: str) -> dict:
+    """Create a manager session in the isolated test home.
+
+    The orchestration-mode capability gate requires a provisioned
+    installation, which an isolated unit home does not have; the gate is
+    covered by the installation-profile suite, so it is stubbed here only
+    for the duration of the create call."""
+    with patch(
+        "installation_profile.assert_orchestration_mode_allowed",
+        lambda _mode: None,
+    ):
+        return session_manager.create(
+            name=name, model="sonnet", cwd="/tmp",
+            orchestration_mode="manager", source="cli",
+        )
+
+
 def _mk_two_turn_session() -> tuple[str, str, str]:
     """Manager session with two completed turns. Turn 1 (asst1) has 3
     renderable events; turn 2 (asst2, the latest) has 2."""
-    sess = session_manager.create(
-        name="t", model="sonnet", cwd="/tmp",
-        orchestration_mode="manager", source="cli",
-    )
+    sess = _create_manager_session(name="t")
     sid = sess["id"]
     strategy = get_strategy("manager")
 
@@ -136,10 +150,7 @@ def _mk_two_turn_session() -> tuple[str, str, str]:
 
 
 def _mk_two_turn_session_with_worker() -> tuple[str, str, str]:
-    sess = session_manager.create(
-        name="tw", model="sonnet", cwd="/tmp",
-        orchestration_mode="manager", source="cli",
-    )
+    sess = _create_manager_session(name="tw")
     sid = sess["id"]
     strategy = get_strategy("manager")
 
@@ -495,10 +506,7 @@ def test_get_message_full_count_matches_stub() -> bool:
 
 
 def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
-    sess = session_manager.create(
-        name="streaming-summary", model="sonnet", cwd="/tmp",
-        orchestration_mode="manager", source="cli",
-    )
+    sess = _create_manager_session(name="streaming-summary")
     sid = sess["id"]
     strategy = get_strategy("manager")
 
@@ -554,10 +562,7 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
 
 
 def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
-    sess = session_manager.create(
-        name="journal-steer-summary", model="sonnet", cwd="/tmp",
-        orchestration_mode="manager", source="cli",
-    )
+    sess = _create_manager_session(name="journal-steer-summary")
     sid = sess["id"]
     strategy = get_strategy("manager")
 
