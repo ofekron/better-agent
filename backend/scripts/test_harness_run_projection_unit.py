@@ -40,7 +40,6 @@ if _BACKEND not in sys.path:
 
 import pytest  # noqa: E402
 
-import harness_run_projection as hrp  # noqa: E402
 from harness_run_projection import (  # noqa: E402
     _merge_names,
     apply_to_inputs,

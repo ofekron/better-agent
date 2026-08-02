@@ -25,8 +25,6 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import pytest  # noqa: E402
-
 from claude_jsonl_enrich import (  # noqa: E402
     _SubagentRegistry,
     enrich_jsonl_line,

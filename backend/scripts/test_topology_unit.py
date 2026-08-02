@@ -46,7 +46,7 @@ import pytest
 import yaml
 
 import topology
-from topology import NodeSpec, SCHEMA_VERSION, Topology, TopologyError
+from topology import NodeSpec, SCHEMA_VERSION, TopologyError
 
 ENV_PATH = "BETTER_AGENT_TOPOLOGY_PATH"
 ENV_NODE = "BETTER_AGENT_NODE_ID"

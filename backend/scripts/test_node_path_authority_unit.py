@@ -43,7 +43,6 @@ if _BACKEND not in sys.path:
 
 import pytest  # noqa: E402
 
-import node_path_authority as npa  # noqa: E402
 from node_path_authority import (  # noqa: E402
     NodePathError,
     absolute_node_path,

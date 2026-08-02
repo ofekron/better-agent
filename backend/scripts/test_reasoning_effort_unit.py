@@ -31,7 +31,6 @@ if _BACKEND not in sys.path:
 
 import pytest  # noqa: E402
 
-import reasoning_effort as reff  # noqa: E402
 from reasoning_effort import (  # noqa: E402
     ALL_REASONING_EFFORTS,
     CLAUDE_REASONING_EFFORTS,
