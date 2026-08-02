@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,15 @@ from urllib.request import url2pathname
 
 from paths import ba_home
 from json_store import read_json, write_json
+
+# `daemonhost` lives at the repo root, a sibling of `backend/`, not on
+# sys.path by default. Entrypoints that import `extension_daemons` get it
+# for free as a side effect of that module's own guard, but `main_node.py`
+# (node-side handshake) never imports it, so this module needs its own
+# guard wherever it reaches for `daemonhost` below.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 PUBLIC_ROLE = "app_public"
