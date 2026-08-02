@@ -83,7 +83,7 @@ class ToolApprovalRegistry:
             return False
         try:
             rec.future.set_result(bool(approved))
-        except asyncio.InvalidStateError:
+        except asyncio.InvalidStateError:  # pragma: no cover - sync decide cannot be preempted between the done() pre-check above and set_result, so a real Future cannot land here
             return False
         return True
 
