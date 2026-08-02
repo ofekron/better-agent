@@ -169,6 +169,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
         storage_scope=spec.storage_scope,
+        harness_profile_id=(spec.harness_profile_id or None),
     )
     working_mode.mark_working_mode(
         sess["id"],
@@ -259,6 +260,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
         storage_scope=spec.storage_scope,
+        harness_profile_id=(spec.harness_profile_id or None),
     )
     working_mode.mark_working_mode(
         sess["id"],
