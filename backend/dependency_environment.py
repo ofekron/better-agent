@@ -14,7 +14,9 @@ class DependencyEnvironmentError(RuntimeError):
 
 
 def python_in(env_dir: Path) -> Path:
-    return env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if os.name == "nt":  # pragma: no cover - Windows-only path flavour; flipping os.name corrupts the POSIX Path factory
+        return env_dir / "Scripts/python.exe"
+    return env_dir / "bin/python"
 
 
 def active_env(backend_dir: Path) -> Path:
