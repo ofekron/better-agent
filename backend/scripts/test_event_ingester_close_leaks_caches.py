@@ -70,13 +70,16 @@ def _run() -> bool:
 
     ing.close(ROOT)
 
-    # Desired contract: close() removes the root from EVERY per-root
-    # cache. The three leaked dicts make this FAIL on current code.
+    # Contract: close() removes the root from EVERY per-root cache EXCEPT
+    # `_locks`. `_locks[root_id]` is deliberately retained: every entry
+    # point takes the lock via `_locks.setdefault(root_id, Lock())`, so
+    # popping it here would hand a concurrent ingest a brand-new lock and
+    # let it enter the critical section while teardown still runs.
     still_present = [d for d in _PER_ROOT_DICTS if ROOT in getattr(ing, d)]
     results.append((
-        "close() removes ROOT from every per-root cache",
-        still_present == [],
-        f"leaked (ROOT still present in): {still_present}",
+        "close() removes ROOT from every per-root cache except _locks",
+        still_present == ["_locks"],
+        f"unexpected (ROOT still present in): {still_present}",
     ))
 
     # Pin the exact leak set so a partial fix is still caught.

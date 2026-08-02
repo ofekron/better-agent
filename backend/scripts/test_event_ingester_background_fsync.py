@@ -83,7 +83,7 @@ def _run() -> bool:
             "root-a", sid="root-a", event_type="agent_message",
             data=_event("uid-a"), source="test", msg_id="msg-a",
         )
-        during = [c for c in calls[before:] if c != FSYNC_THREAD_NAME]
+        during = [c for c in calls[before:] if c == main_name]
         ok = _check(seq == 1, "ingest returns seq 1", f"{seq=}") and ok
         ok = _check(
             len(_read_lines("root-a")) == 1,
@@ -103,7 +103,10 @@ def _run() -> bool:
             [("root-b", "agent_message", _event("uid-b1"), "test", None, "msg-b1"),
              ("root-b", "agent_message", _event("uid-b2"), "test", None, "msg-b2")],
         )
-        during = [c for c in calls[before:] if c != FSYNC_THREAD_NAME]
+        # Only fsync on the CALLING thread violates the off-main-loop
+        # contract; background durability threads from other modules
+        # (e.g. session-store-durability) legitimately call os.fsync.
+        during = [c for c in calls[before:] if c == main_name]
         ok = _check(seqs == [1, 2], "ingest_batch returns seqs [1,2]", f"{seqs=}") and ok
         ok = _check(
             len(_read_lines("root-b")) == 2,
