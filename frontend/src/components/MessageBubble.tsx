@@ -240,6 +240,10 @@ function extendedSummary(text: string): string {
   return text.trim();
 }
 
+function containsMarkdownSyntax(text: string): boolean {
+  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|```)|\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\([^\n)]+\)/.test(text);
+}
+
 function TeamMessageFrom({ message }: { message: ChatMessage }) {
   const { t } = useTranslation();
   const senderSessionId = message.team_message?.metadata?.sender_session_id?.trim();
@@ -3285,6 +3289,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
   }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
+  const summaryIsContentFallback = useMemo(() => {
+    if (!summary || typeof effectiveResponse?.content !== "string") return false;
+    const events = previewEventsForMessage(effectiveResponse, orchestrationMode);
+    return events.length === 0 && cleanOutput(effectiveResponse.content) === summary && containsMarkdownSyntax(summary);
+  }, [summary, effectiveResponse, orchestrationMode]);
 
   // Render the last event fully for collapsed display
   const collapsedLastEvent = useMemo(() => {
@@ -3669,6 +3678,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               <div className="collapse-ellipsis">{COLLAPSE_ELLIPSIS}</div>
               {collapsedLastEvent}
             </>
+          ) : summaryIsContentFallback ? (
+            <div className="collapse-summary">
+              <OutputEvent text={summary} onFileClick={onFileClick} />
+            </div>
           ) : summary ? (
             <div className="collapse-summary">{linkifyFilePaths(summary, onFileClick)}</div>
           ) : null}

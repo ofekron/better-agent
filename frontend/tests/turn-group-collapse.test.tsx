@@ -725,6 +725,40 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(markdown?.textContent).toContain("runtime-requirements.txt");
   });
 
+  it("renders Markdown when a finalized response has no event preview", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u-md-fallback", content: "show result" })}
+        responseMessage={makeAssistantMsg({
+          id: "a-md-fallback",
+          content: [
+            "## Executive summary",
+            "",
+            "**Goal:** keep the result readable",
+            "",
+            "```text",
+            "8f2323bb9",
+            "```",
+            "",
+            "[MessageBubble.tsx](bcfile:%2Ftmp%2FMessageBubble.tsx)",
+          ].join("\\n"),
+          events: [],
+        })}
+        initialExpanded={false}
+        orchestrationMode="native"
+      />,
+    );
+
+    const summary = container.querySelector(".collapse-summary");
+    expect(summary).not.toBeNull();
+    const markdown = summary?.querySelector(".message-box-body [data-test-md]");
+    expect(markdown).not.toBeNull();
+    expect(markdown?.textContent).toContain("## Executive summary");
+    expect(markdown?.textContent).toContain("**Goal:** keep the result readable");
+    expect(markdown?.textContent).toContain("8f2323bb9");
+    expect(markdown?.textContent).toContain("MessageBubble.tsx");
+  });
+
   it("keeps finalized assistant content when output events carry the same text", () => {
     const { container } = render(
       <TurnGroup
