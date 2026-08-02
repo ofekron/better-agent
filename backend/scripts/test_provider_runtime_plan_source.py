@@ -26,6 +26,7 @@ from provider_runtime_plan_source import (  # noqa: E402
 )
 from provider_session_events_runner import effective_mcp_servers  # noqa: E402
 from codex_execution_common import ExecutionContractError  # noqa: E402
+from runner import _claude_mcp_variants  # noqa: E402
 
 
 def _assert_contract_rejected(callable_) -> None:
@@ -532,18 +533,7 @@ def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> N
         )
 
 
-def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() -> None:
-    """Regression: a claude-kind provider running under the better_agent_runner
-    runner (e.g. a claude subscription runtime profile with
-    runner=better_agent_runner) crashed with
-    ExecutionContractError("frozen MCP delivery is invalid") because the
-    claude branch of _structural_provider_runtime_plan only built the
-    explicit/runtime/native/launcher delivery variants, never the merged
-    "effective" variant that runner_better_agent.effective_mcp_servers()
-    (the sole consumer for every better_agent_runner execution, regardless
-    of the record's kind) requires. Reproduced from real failed runs
-    2745a093-e645-44a2-9b94-79b88a831d4f and
-    1fc12b0e-c779-4c66-9400-3ac5117f6a9e under ~/.better-claude/runs/."""
+def _claude_plan(runner: str | None) -> dict:
     inputs = {
         "app_session_id": "session-id",
         "backend_url": "http://127.0.0.1:8000",
@@ -551,13 +541,14 @@ def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() ->
         "model": "claude-opus-4-7[1m]",
         "provider_id": "claude-provider",
         "provider_kind": "claude",
-        "runner": "better_agent_runner",
         "user_facing": True,
         "bare_config": False,
         "working_mode": "file_editing",
         "provider_run_config": {"mcp_servers": {}},
         "resolved_harness_run_config": {},
     }
+    if runner is not None:
+        inputs["runner"] = runner
     with (
         patch("installation_profile.integrations_enabled", return_value=True),
         patch("installation_profile.load", return_value={}),
@@ -565,10 +556,6 @@ def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() ->
             "installation_profile.capabilities",
             return_value={"integrations_enabled": True},
         ),
-        # A granted runtime MCP server (e.g. an extension's server) is what
-        # actually reproduces the crash: with zero servers in the plan,
-        # effective_mcp_servers() iterates nothing and the missing
-        # "effective" variant never gets looked up.
         patch(
             "extension_store.runtime_mcp_server_configs",
             return_value={
@@ -579,7 +566,16 @@ def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() ->
                 },
             },
         ),
-        patch("extension_store.native_mcp_server_configs", return_value={}),
+        patch(
+            "extension_store.native_mcp_server_configs",
+            return_value={
+                "native-only": {
+                    "command": "/bin/echo",
+                    "args": ["native"],
+                    "env": {},
+                },
+            },
+        ),
         patch(
             "extension_store.native_mcp_launcher_server_configs",
             return_value={},
@@ -595,17 +591,37 @@ def test_claude_kind_plan_carries_effective_variant_for_better_agent_runner() ->
             return_value={},
         ),
     ):
-        prepared = structural_provider_runtime_plan(inputs, "claude")
+        return structural_provider_runtime_plan(inputs, "claude")[
+            "resolved_plan"
+        ]
 
-    resolved_plan = prepared["resolved_plan"]
+
+def test_claude_kind_plan_matches_better_agent_runner_delivery() -> None:
+    resolved_plan = _claude_plan("better_agent_runner")
+
     assert resolved_plan["mcp_servers"], "test must exercise at least one server"
     for server in resolved_plan["mcp_servers"]:
-        assert "effective" in server["config"], server["name"]
-    # The exact call runner_better_agent.py makes every round; must not raise.
+        assert set(server["config"]) == {"effective"}, server["name"]
     effective = effective_mcp_servers(resolved_plan)
+    assert "native-only" not in effective
     assert set(effective) == {
         server["name"] for server in resolved_plan["mcp_servers"]
     }
+
+
+def test_claude_kind_plan_matches_native_runner_delivery() -> None:
+    resolved_plan = _claude_plan(None)
+
+    assert resolved_plan["mcp_servers"], "test must exercise at least one server"
+    variants = _claude_mcp_variants(resolved_plan)
+    assert "native-only" in variants
+    assert set(variants) == {
+        server["name"] for server in resolved_plan["mcp_servers"]
+    }
+
+
+def test_claude_kind_plan_rejects_unknown_runner() -> None:
+    _assert_contract_rejected(lambda: _claude_plan("unknown"))
 
 
 def test_reject_secrets_does_not_flag_non_secret_auth_mode_settings() -> None:

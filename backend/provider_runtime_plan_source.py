@@ -373,6 +373,37 @@ def _explicit_mcp_configs(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]
     }
 
 
+def _effective_mcp_configs(
+    inputs: dict[str, Any],
+    *,
+    explicit: dict[str, dict[str, Any]],
+    runtime: dict[str, dict[str, Any]],
+    launcher: dict[str, dict[str, Any]],
+    integrations_enabled: bool,
+) -> dict[str, dict[str, Any]]:
+    from builtin_mcp_config import with_builtin_mcp_servers
+
+    return with_builtin_mcp_servers(
+        inputs,
+        {"mcp_servers": explicit},
+        runtime_broker=_RUNNER_OPERATION_BROKER_REF,
+        integrations_enabled=integrations_enabled,
+        runtime_mcp_servers=runtime,
+        launcher_mcp_servers=launcher,
+        include_tool_metadata=True,
+    )["mcp_servers"]
+
+
+def _provider_runner(inputs: Mapping[str, Any], provider_kind: str) -> str:
+    from provider_manifest import default_runner_for, runner_choices_for
+
+    raw = inputs.get("runner")
+    runner = default_runner_for(provider_kind) if raw in (None, "") else raw
+    if type(runner) is not str or runner not in runner_choices_for(provider_kind):
+        raise ExecutionContractError("invalid provider runtime runner")
+    return runner
+
+
 def _structural_provider_runtime_plan(
     inputs: dict[str, Any],
     provider_kind: str,
@@ -394,9 +425,12 @@ def _structural_provider_runtime_plan(
     import installation_profile
 
     explicit = _explicit_mcp_configs(frozen_inputs)
+    runner = (
+        _provider_runner(frozen_inputs, provider_kind)
+        if provider_kind == "claude"
+        else None
+    )
     if provider_kind != "claude":
-        from builtin_mcp_config import with_builtin_mcp_servers
-
         runtime = extension_store.runtime_mcp_server_configs(
             frozen_inputs,
             user_facing=user_facing,
@@ -407,25 +441,16 @@ def _structural_provider_runtime_plan(
             user_facing=user_facing,
             bare=bare,
         )
-        effective = with_builtin_mcp_servers(
+        effective = _effective_mcp_configs(
             frozen_inputs,
-            {"mcp_servers": explicit},
-            runtime_broker=_RUNNER_OPERATION_BROKER_REF,
+            explicit=explicit,
+            runtime=runtime,
+            launcher=launcher,
             integrations_enabled=installation_profile.integrations_enabled(),
-            runtime_mcp_servers=runtime,
-            launcher_mcp_servers=launcher,
-            include_tool_metadata=True,
-        )["mcp_servers"]
+        )
         delivery_maps = {"effective": effective}
     else:
-        from builtin_mcp_config import with_builtin_mcp_servers
-
         runtime = extension_store.runtime_mcp_server_configs(
-            frozen_inputs,
-            user_facing=user_facing,
-            bare=bare,
-        )
-        native = extension_store.native_mcp_server_configs(
             frozen_inputs,
             user_facing=user_facing,
             bare=bare,
@@ -435,28 +460,29 @@ def _structural_provider_runtime_plan(
             user_facing=user_facing,
             bare=bare,
         )
-        # The native claude runner consumes the "native" variant directly
-        # (runner.py reads variants["native"]); runner_better_agent.py always
-        # consumes the single merged "effective" variant regardless of the
-        # record's kind (effective_mcp_servers), so a claude-kind record
-        # running under the better_agent_runner runner needs it too — built
-        # the same way every non-claude kind's "effective" variant is.
-        effective = with_builtin_mcp_servers(
-            frozen_inputs,
-            {"mcp_servers": explicit},
-            runtime_broker=_RUNNER_OPERATION_BROKER_REF,
-            integrations_enabled=installation_profile.integrations_enabled(),
-            runtime_mcp_servers=runtime,
-            launcher_mcp_servers=launcher,
-            include_tool_metadata=True,
-        )["mcp_servers"]
-        delivery_maps = {
-            "explicit": explicit,
-            "runtime": runtime,
-            "native": native,
-            "launcher": launcher,
-            "effective": effective,
-        }
+        if runner == "better_agent_runner":
+            effective = _effective_mcp_configs(
+                frozen_inputs,
+                explicit=explicit,
+                runtime=runtime,
+                launcher=launcher,
+                integrations_enabled=(
+                    installation_profile.integrations_enabled()
+                ),
+            )
+            delivery_maps = {"effective": effective}
+        else:
+            native = extension_store.native_mcp_server_configs(
+                frozen_inputs,
+                user_facing=user_facing,
+                bare=bare,
+            )
+            delivery_maps = {
+                "explicit": explicit,
+                "runtime": runtime,
+                "native": native,
+                "launcher": launcher,
+            }
     names = sorted({
         name
         for configs in delivery_maps.values()
