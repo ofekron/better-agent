@@ -11,7 +11,14 @@ sys.path.insert(0, str(ROOT))
 
 _tmp_home = tempfile.mkdtemp(prefix="ba-windsurf-native-")
 os.environ["HOME"] = _tmp_home
-os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-windsurf-state-")
+
+import paths  # noqa: E402
+
+paths.engage_test_home(tempfile.mkdtemp(prefix="ba-windsurf-state-"))
+# user_home() reads the passwd db (not $HOME) so it can't be spoofed by
+# accident; the windsurf fixture below is written under the spoofed HOME,
+# so point user_home() at the same dir or discovery would never find it.
+paths._USER_HOME = Path(_tmp_home)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 

@@ -24,6 +24,8 @@ import shutil
 import socket
 import sys
 
+from live_llm_test_guard import require_live_llm_tests
+
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-terminal-asid-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
@@ -109,12 +111,14 @@ async def _run() -> bool:
     sid = session["id"]
 
     terminals: list[tuple[str, object]] = []
+    terminal_frame_received = asyncio.Event()
 
     async def ws_callback(event: dict) -> None:
         et = event.get("type", "")
         if et in ("turn_complete", "turn_stopped", "turn_detached", "error"):
             d = event.get("data", {}) if isinstance(event.get("data"), dict) else {}
             terminals.append((et, d.get("app_session_id")))
+            terminal_frame_received.set()
 
     main.coordinator.register_ws(sid, ws_callback)
     await asyncio.sleep(0.2)
@@ -124,7 +128,11 @@ async def _run() -> bool:
         model=_MODEL, cwd=cwd, ws_callback=ws_callback,
         images=None, orchestration_mode="native",
     )
-    await asyncio.sleep(1.0)
+    if not terminal_frame_received.is_set():
+        try:
+            await asyncio.wait_for(terminal_frame_received.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
 
     server.should_exit = True
     try:
@@ -149,10 +157,13 @@ def main() -> int:
     static_ok = _assert_all_terminal_emits_stamped()
 
     print("\nLive: real native turn emits turn_complete with app_session_id")
-    try:
-        live_ok = asyncio.run(_run())
-    finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    if not require_live_llm_tests("terminal frame app_session_id live test"):
+        live_ok = True
+    else:
+        try:
+            live_ok = asyncio.run(_run())
+        finally:
+            shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
     ok = static_ok and live_ok
     print(f"\n{PASS if ok else FAIL} terminal frames carry app_session_id")

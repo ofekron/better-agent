@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
-import tempfile
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -12,8 +10,8 @@ import pytest
 
 pytestmark = pytest.mark.anyio
 
-os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-recovery-quanta-")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _test_home
+_test_home.isolate("ba-recovery-quanta-")
 
 import perf
 import recovery_priority

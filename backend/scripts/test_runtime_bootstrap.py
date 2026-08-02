@@ -7,8 +7,10 @@ import shutil
 import tempfile
 import time
 
+import paths
+
 _STATE_HOME = tempfile.mkdtemp(prefix="better-agent-runtime-bootstrap-")
-os.environ["BETTER_AGENT_HOME"] = _STATE_HOME
+paths.engage_test_home(_STATE_HOME)
 
 from better_agent_sdk.runtime_transport import RuntimeTransport
 import provider

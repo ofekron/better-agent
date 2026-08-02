@@ -9,13 +9,14 @@ import time
 import urllib.error
 from pathlib import Path
 
-_TMP_HOME = tempfile.mkdtemp(prefix="ba-test-runner-watchdog-")
-os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
-
 _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import paths  # noqa: E402
+
+_TMP_HOME = paths.engage_test_home(tempfile.mkdtemp(prefix="ba-test-runner-watchdog-"))
 
 import runner  # noqa: E402
 import proc_control  # noqa: E402

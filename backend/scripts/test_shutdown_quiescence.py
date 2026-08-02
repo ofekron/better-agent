@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import os
 import shutil
 import sys
 import tempfile
@@ -13,8 +12,11 @@ from pathlib import Path
 
 _TEST_HOME = tempfile.mkdtemp(prefix="ba-shutdown-test-")
 atexit.register(shutil.rmtree, _TEST_HOME, True)
-os.environ["BETTER_AGENT_HOME"] = _TEST_HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import paths  # noqa: E402
+
+paths.engage_test_home(_TEST_HOME)
 
 
 async def _provider_barriers() -> None:

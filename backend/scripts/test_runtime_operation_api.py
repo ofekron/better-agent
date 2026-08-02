@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import shutil
 import tempfile
 
 from pydantic import BaseModel
 
+import paths
+
 _STATE_HOME = tempfile.mkdtemp(prefix="better-agent-runtime-api-")
-os.environ["BETTER_AGENT_HOME"] = _STATE_HOME
+paths.engage_test_home(_STATE_HOME)
 
 import operation_catalog
 import node_store

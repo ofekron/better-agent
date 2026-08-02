@@ -6,14 +6,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-_TMP_HOME = tempfile.mkdtemp(prefix="bc-test-snapshot-warming-")
-os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
-os.environ.pop("BETTER_CLAUDE_HOME", None)
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+from paths import engage_test_home  # noqa: E402
+
+_TMP_HOME = engage_test_home(tempfile.mkdtemp(prefix="bc-test-snapshot-warming-"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 

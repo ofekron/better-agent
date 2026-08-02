@@ -152,8 +152,13 @@ def test_runner_bg_sweep_semantics() -> None:
     bg_analogue = pids["c2"]
     leader_pid = pids["leader"]
 
-    # Wait for children to actually start
-    time.sleep(0.3)
+    # Poll until both children are observed alive (bounded, event-driven
+    # on the actual readiness condition, not a blind fixed sleep).
+    start_deadline = time.monotonic() + 5.0
+    while time.monotonic() < start_deadline and not (
+        _pid_alive(cli_analogue) and _pid_alive(bg_analogue)
+    ):
+        time.sleep(0.05)
     _check(_pid_alive(cli_analogue), "T6 setup: same-group child alive")
     _check(_pid_alive(bg_analogue), "T6 setup: setsid'd bg child alive")
 

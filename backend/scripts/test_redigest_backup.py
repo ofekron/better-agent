@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import _test_home
@@ -141,10 +140,12 @@ def test_same_root_transactions_serialize_and_rollback_is_isolated() -> None:
     first = RedigestBackup(ROOT_ID).capture()
     _write_root_json({"version": "committed"})
     acquired = threading.Event()
+    attempting = threading.Event()
     errors: list[BaseException] = []
 
     def second_transaction() -> None:
         try:
+            attempting.set()
             second = RedigestBackup(ROOT_ID).capture()
             acquired.set()
             _write_root_json({"version": "failed"})
@@ -154,8 +155,8 @@ def test_same_root_transactions_serialize_and_rollback_is_isolated() -> None:
 
     thread = threading.Thread(target=second_transaction)
     thread.start()
-    time.sleep(0.1)
-    assert not acquired.is_set(), "same-root capture must wait for the active transaction"
+    assert attempting.wait(2.0), "second transaction never reached capture()"
+    assert not acquired.wait(0.2), "same-root capture must wait for the active transaction"
     first.commit()
     assert acquired.wait(2.0)
     thread.join(2.0)

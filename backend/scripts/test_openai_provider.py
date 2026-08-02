@@ -29,16 +29,16 @@ from pathlib import Path
 import pytest
 from live_llm_test_guard import require_live_llm_tests
 
-# Set BETTER_AGENT_HOME BEFORE importing backend modules.
-_TMP_HOME = tempfile.mkdtemp(prefix="openai_test_home_")
-atexit.register(shutil.rmtree, _TMP_HOME, ignore_errors=True)
-os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
-os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
-
 _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
 import importlib  # noqa: E402
+import paths  # noqa: E402
+
+# Set BETTER_AGENT_HOME BEFORE importing any other backend module.
+_TMP_HOME = tempfile.mkdtemp(prefix="openai_test_home_")
+atexit.register(shutil.rmtree, _TMP_HOME, ignore_errors=True)
+paths.engage_test_home(_TMP_HOME)
 
 
 def _mod(name):

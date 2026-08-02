@@ -14,10 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 _HOME = tempfile.mkdtemp(prefix="ba-shortcut-gate-")
-os.environ["BETTER_AGENT_HOME"] = _HOME
 _BACKEND = str(Path(__file__).resolve().parents[1])
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+from paths import engage_test_home
+
+engage_test_home(_HOME)
 
 import shortcut_rate_limit as gate
 
@@ -44,9 +47,8 @@ class _ProviderHandler(BaseHTTPRequestHandler):
 
 
 def _claim_worker(home: str, provider_base: str, start, results) -> None:
-    os.environ["BETTER_AGENT_HOME"] = home
-    from paths import reset_home_cache
-    reset_home_cache()
+    from paths import engage_test_home
+    engage_test_home(home)
     import shortcut_rate_limit
     scope = shortcut_rate_limit.scope_key(
         provider_id="provider",

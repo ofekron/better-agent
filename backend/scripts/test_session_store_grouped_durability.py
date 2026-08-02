@@ -8,12 +8,14 @@ import tempfile
 import threading
 from pathlib import Path
 
-os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="session-store-durability-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from paths import ba_home, engage_test_home
+
+engage_test_home(tempfile.mkdtemp(prefix="session-store-durability-"))
 
 from grouped_durability_writer import BatchSnapshot, GroupedDurabilityWriter
 import session_store
-from paths import ba_home
 
 
 class AckBarrier:

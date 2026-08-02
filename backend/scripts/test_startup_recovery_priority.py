@@ -12,8 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-HOME = tempfile.mkdtemp(prefix="bc-test-startup-recovery-priority-")
-os.environ["BETTER_AGENT_HOME"] = HOME
+from paths import engage_test_home  # noqa: E402
+
+HOME = engage_test_home(tempfile.mkdtemp(prefix="bc-test-startup-recovery-priority-"))
 
 import main  # noqa: E402
 import installation_profile  # noqa: E402

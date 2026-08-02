@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,6 +16,12 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
+
+import paths  # noqa: E402
+
+_TEST_HOME = tempfile.mkdtemp(prefix="run_execution_payload_manifest_test_")
+atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
+paths.engage_test_home(_TEST_HOME)
 
 from codex_execution_common import ExecutionContractError  # noqa: E402
 from codex_execution_identity import FileIdentity  # noqa: E402
@@ -525,21 +533,19 @@ def _missing_manifest_rejected(root: Path) -> None:
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary)
-        os.environ["BETTER_AGENT_HOME"] = str(root)
-        _round_trip_and_idempotency(root)
-        _concurrent_publication(root)
-        _closed_root_and_identity_rejections(root)
-        _different_publication_rejected(root)
-        _immutable_and_strict_reader(root)
-        _manifest_path_swap_rejected(root)
-        _payload_path_swap_rejected(root)
-        _retry_hashes_large_payload_once(root)
-        _windows_directory_flush_failure_rejected(root)
-        _windows_acl_and_reparse_integration(root)
-        _replacement_run_rejected(root)
-        _missing_manifest_rejected(root)
+    root = Path(_TEST_HOME)
+    _round_trip_and_idempotency(root)
+    _concurrent_publication(root)
+    _closed_root_and_identity_rejections(root)
+    _different_publication_rejected(root)
+    _immutable_and_strict_reader(root)
+    _manifest_path_swap_rejected(root)
+    _payload_path_swap_rejected(root)
+    _retry_hashes_large_payload_once(root)
+    _windows_directory_flush_failure_rejected(root)
+    _windows_acl_and_reparse_integration(root)
+    _replacement_run_rejected(root)
+    _missing_manifest_rejected(root)
     print("run execution payload manifest tests passed")
 
 

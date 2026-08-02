@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import tempfile
@@ -10,11 +9,13 @@ from unittest import mock
 from pathlib import Path
 
 
-HOME = tempfile.mkdtemp(prefix="ba-owner-lifecycle-")
-os.environ["BETTER_AGENT_HOME"] = HOME
 BACKEND = Path(__file__).parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+
+from paths import engage_test_home
+
+HOME = engage_test_home(tempfile.mkdtemp(prefix="ba-owner-lifecycle-"))
 
 from ingestion_versions import current_ingestion_version
 from run_recovery import _drain_recovered_live_queue, _mark_reconciled_terminal

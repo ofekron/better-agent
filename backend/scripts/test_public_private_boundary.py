@@ -23,6 +23,8 @@ def test_public_core_imports_without_private_sibling() -> None:
         env = {
             **os.environ,
             "BETTER_AGENT_HOME": home,
+            "BETTER_CLAUDE_HOME": home,
+            "BETTER_AGENT_TEST_MODE": "1",
             "BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE": "1",
             "PYTHONPATH": os.pathsep.join((str(isolated_root / "backend"), str(isolated_root / "sdk"))),
         }
@@ -141,7 +143,13 @@ def test_manifest_rejects_unknown_core_role() -> None:
 
 def test_first_marker_purge_does_not_deadlock() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-marker-lock-") as home:
-        env = {**os.environ, "BETTER_AGENT_HOME": home, "PYTHONPATH": str(ROOT / "backend")}
+        env = {
+            **os.environ,
+            "BETTER_AGENT_HOME": home,
+            "BETTER_CLAUDE_HOME": home,
+            "BETTER_AGENT_TEST_MODE": "1",
+            "PYTHONPATH": str(ROOT / "backend"),
+        }
         subprocess.run(
             [sys.executable, "-c", "import session_store; session_store.markers_for_extension_purge('fixture.extension')"],
             cwd=ROOT,
