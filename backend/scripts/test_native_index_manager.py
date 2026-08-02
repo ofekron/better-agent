@@ -15,8 +15,6 @@ import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 import native_index_manager as nim
 from thread_loop_host import ThreadLoopHost
 
