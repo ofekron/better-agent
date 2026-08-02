@@ -12,7 +12,11 @@ import type {
 import type { InlineTag } from "../types/inlineTag";
 import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { startOp, completeOp, failOp } from "../progress/store";
-import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
+import {
+  DEFAULT_OFFLINE_REQUEST_TIMEOUT_MS,
+  fetchWithTimeout,
+  responseError,
+} from "src/utils/offlineRequest";
 
 import { API } from "../api";
 import { extBackendBase } from "../extensionIds";
@@ -26,6 +30,10 @@ import {
 } from "../lib/messagePagination";
 import { SingleFlight } from "../lib/singleFlight";
 import { wireHarnessProfileId } from "../lib/harnessProfile";
+import {
+  requestBackendWithTimeout,
+  type BackendAccessError,
+} from "../lib/backendAccess";
 import { sameProjectPath } from "../utils/projectPath";
 
 export { sortSessionsForList };
@@ -929,8 +937,8 @@ export function useSession(authStatus?: string) {
   // a terminal failure; incomplete snapshots remain pending while retried.
   const [sessionsInitialAttemptSettled, setSessionsInitialAttemptSettled] =
     useState(false);
-  const [sessionInventoryUnavailable, setSessionInventoryUnavailable] =
-    useState(false);
+  const [sessionInventoryError, setSessionInventoryError] =
+    useState<BackendAccessError | null>(null);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
@@ -1332,6 +1340,7 @@ export function useSession(authStatus?: string) {
       if (replace && !silent && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
       let outcome: "success" | "incomplete" | "failure" = "failure";
+      let failure: BackendAccessError = { kind: "unreachable" };
       try {
         const params = new URLSearchParams({
           offset: String(offset),
@@ -1359,10 +1368,20 @@ export function useSession(authStatus?: string) {
           params.set("exclude_statuses", filters.excludeStatuses.join(","));
         }
         if (filters.sortBy) params.set("sort_by", filters.sortBy);
-        const res = await fetchWithTimeout(`${API}/api/sessions?${params}`, {
-          credentials: "include",
-        });
+        const request = await requestBackendWithTimeout(
+          API,
+          `/api/sessions?${params}`,
+          { credentials: "include" },
+          DEFAULT_OFFLINE_REQUEST_TIMEOUT_MS,
+        );
+        if (request.kind === "browser_access_blocked") {
+          failure = request;
+          return;
+        }
+        if (request.kind !== "http_response") return;
+        const res = request.response;
         if (!res.ok) {
+          failure = { kind: "http_error", scope: "sessions", status: res.status };
           if (res.status === 401) {
             window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
           }
@@ -1416,7 +1435,7 @@ export function useSession(authStatus?: string) {
             if (outcome === "success") {
               setSessionsLoaded(true);
               setSessionsInitialAttemptSettled(true);
-              setSessionInventoryUnavailable(false);
+              setSessionInventoryError(null);
               if (
                 sameSessionListFilters(
                   pendingSessionListFiltersRef.current,
@@ -1427,7 +1446,7 @@ export function useSession(authStatus?: string) {
               }
             } else if (outcome === "failure") {
               setSessionsInitialAttemptSettled(true);
-              setSessionInventoryUnavailable(true);
+              setSessionInventoryError(failure);
             }
           }
           sessionsLoadingPageRef.current = false;
@@ -3076,7 +3095,7 @@ export function useSession(authStatus?: string) {
     sessions,
     sessionsLoaded,
     sessionsInitialAttemptSettled,
-    sessionInventoryUnavailable,
+    sessionInventoryError,
     sessionsHasMore,
     sessionsLoadingMore,
     sessionsSearching,

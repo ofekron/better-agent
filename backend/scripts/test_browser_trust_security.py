@@ -38,8 +38,19 @@ def _bearer_client() -> TestClient:
 
 
 def test_malicious_origin_rejected_for_cookie_read() -> tuple[bool, str]:
-    res = _client().get("/api/sessions", headers={"Origin": "http://evil.test", "Host": "localhost:8000"})
-    return res.status_code == 403, f"expected 403, got {res.status_code}: {res.text[:120]}"
+    headers = {"Origin": "http://evil.test", "Host": "localhost:8000"}
+    res = _client().get("/api/sessions", headers=headers)
+    allowed_origin = res.headers.get("access-control-allow-origin")
+    ok = res.status_code == 403 and allowed_origin is None
+    return ok, f"expected 403 without ACAO, got {res.status_code} origin={allowed_origin!r}"
+
+
+def test_untrusted_origin_health_probe_answers_without_cors_access() -> tuple[bool, str]:
+    headers = {"Origin": "http://evil.test", "Host": "localhost:8000"}
+    res = _client().get("/healthz", headers=headers)
+    allowed_origin = res.headers.get("access-control-allow-origin")
+    ok = res.status_code == 200 and res.json() == {"ok": True} and allowed_origin is None
+    return ok, f"expected health 200 without ACAO, got {res.status_code} origin={allowed_origin!r}"
 
 
 def test_loopback_origin_allowed_for_cookie_read() -> tuple[bool, str]:
@@ -298,6 +309,7 @@ def test_lan_mode_still_rejects_untrusted_hostname() -> tuple[bool, str]:
 
 TESTS = [
     ("malicious Origin rejected for cookie-auth read", test_malicious_origin_rejected_for_cookie_read),
+    ("untrusted Origin health probe answers without CORS access", test_untrusted_origin_health_probe_answers_without_cors_access),
     ("loopback Origin allowed for cookie-auth read", test_loopback_origin_allowed_for_cookie_read),
     ("native bearer without cookie bypasses browser Origin gate", test_native_bearer_origin_exempt_without_cookie),
     ("malicious websocket Origin rejected", test_websocket_malicious_origin_rejected),

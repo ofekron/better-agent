@@ -1,6 +1,33 @@
 import type { ChildProcess } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
 import { REPO_ROOT } from "./paths";
+
+export function allocateLoopbackPort(excluded: ReadonlySet<number> = new Set()): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address !== "object") {
+        server.close(() => reject(new Error("failed to allocate a loopback port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (excluded.has(port)) {
+          void allocateLoopbackPort(excluded).then(resolve, reject);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
 
 /** Polls `${baseURL}/api/auth/needs_setup` (always-reachable per the
  * installation-bootstrap gate) until it responds OK, or throws if the

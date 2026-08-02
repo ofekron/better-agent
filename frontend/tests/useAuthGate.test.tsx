@@ -125,6 +125,29 @@ describe("useAuthGate", () => {
     await act(async () => vi.advanceTimersByTimeAsync(6_100));
 
     expect(result.current.status).toBe("unreachable");
+    expect(result.current.error).toEqual({ kind: "unreachable" });
+  });
+
+  it("distinguishes browser-blocked access from failed reachability", async () => {
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({ type: "opaque" } as Response);
+    const { result } = renderHook(() => useAuthGate("https://backend.test"));
+
+    await flush();
+
+    expect(result.current.status).toBe("unreachable");
+    expect(result.current.error).toEqual({ kind: "browser_access_blocked" });
+  });
+
+  it("does not mislabel a readable 403 as an origin rejection", async () => {
+    vi.mocked(fetch).mockResolvedValue(response(403));
+    const { result } = renderHook(() => useAuthGate("https://backend.test"));
+
+    await flush();
+
+    expect(result.current.status).toBe("unreachable");
+    expect(result.current.error).toEqual({ kind: "http_error", scope: "auth", status: 403 });
   });
 
   it("keeps an already-authed session instead of wiping it on a transient re-check failure", async () => {

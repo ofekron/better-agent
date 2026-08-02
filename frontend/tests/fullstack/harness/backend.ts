@@ -1,12 +1,16 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
-import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { BACKEND_DIR, FRONTEND_DIST_DIR, REPO_ROOT } from "./paths";
 import { provisionHeadlessCredentials } from "./credentials";
 import { resolveVenvPython } from "./venv";
-import { buildBackendEnv, makeGroupKiller, waitUntilHealthyOrExit } from "./process-utils";
+import {
+  allocateLoopbackPort,
+  buildBackendEnv,
+  makeGroupKiller,
+  waitUntilHealthyOrExit,
+} from "./process-utils";
 
 export interface FullStackBackend {
   baseURL: string;
@@ -54,22 +58,6 @@ function removeHomeDir(homeDir: string): void {
   rmSync(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address !== "object") {
-        server.close(() => reject(new Error("failed to allocate a free port")));
-        return;
-      }
-      const { port } = address;
-      server.close((err) => (err ? reject(err) : resolve(port)));
-    });
-  });
-}
-
 /**
  * Spawns a REAL Better Agent backend as a subprocess (uvicorn, no --reload,
  * matching run.sh's production topology) with:
@@ -98,7 +86,7 @@ export async function startFullStackBackend(
 
   const python = resolveVenvPython();
   const homeDir = mkdtempSync(path.join(tmpdir(), "ba-fullstack-"));
-  const port = await freePort();
+  const port = await allocateLoopbackPort();
   const provider = options.provider ?? "claude";
 
   let credentials;

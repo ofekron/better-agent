@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterStaleDraftPatch, nextDraftSeq } from "../src/utils/draftSeq";
+import { filterStaleDraftPatch, isStaleSeq, nextDraftSeq } from "../src/utils/draftSeq";
 import type { SessionMetadataPatch } from "../src/hooks/useSession";
 
 describe("filterStaleDraftPatch", () => {
@@ -59,5 +59,18 @@ describe("nextDraftSeq", () => {
     nextDraftSeq(5000);
     expect(nextDraftSeq(5000)).toBe(5001);
     expect(nextDraftSeq(4000)).toBe(5002);
+  });
+});
+
+describe("isStaleSeq", () => {
+  it("treats older and equal sequence numbers as stale", () => {
+    expect(isStaleSeq(4, 5)).toBe(true);
+    expect(isStaleSeq(5, 5)).toBe(true);
+  });
+
+  it("accepts newer and legacy sequence values", () => {
+    expect(isStaleSeq(6, 5)).toBe(false);
+    expect(isStaleSeq(undefined, 5)).toBe(false);
+    expect(isStaleSeq(5, undefined)).toBe(false);
   });
 });

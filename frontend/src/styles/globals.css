@@ -4662,6 +4662,29 @@ select:focus-visible,
   background: #e67e22;
 }
 
+.backend-availability-banner,
+.backend-unavailable-card {
+  animation: backend-availability-enter 240ms ease-out both;
+}
+
+@keyframes backend-availability-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backend-availability-banner,
+  .backend-unavailable-card {
+    animation: none;
+  }
+}
+
 .error-block {
   display: flex;
   flex-direction: column;

@@ -18,6 +18,13 @@ export function nextDraftSeq(now: number): number {
 
 const DRAFT_FIELDS = ["draft_input", "draft_images", "draft_input_seq"] as const;
 
+export function isStaleSeq(
+  incoming: number | undefined,
+  stored: number | undefined,
+): boolean {
+  return incoming !== undefined && stored !== undefined && incoming <= stored;
+}
+
 function stripDraftFields(patch: SessionMetadataPatch): SessionMetadataPatch {
   const rest = { ...patch } as Record<string, unknown>;
   for (const f of DRAFT_FIELDS) delete rest[f];
@@ -42,7 +49,7 @@ export function filterStaleDraftPatch(
   }
   if (hasPendingDebounce) return stripDraftFields(patch);
   const incoming = patch.draft_input_seq;
-  if (incoming !== undefined && storedSeq !== undefined && incoming <= storedSeq) {
+  if (isStaleSeq(incoming, storedSeq)) {
     return stripDraftFields(patch);
   }
   return patch;

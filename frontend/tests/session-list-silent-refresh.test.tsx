@@ -33,6 +33,7 @@ function installFetchStub() {
         : input instanceof URL
         ? input.toString()
         : input.url;
+    if (url.endsWith("/healthz")) return { type: "opaque" } as Response;
     return new Promise<Response>((res, reject) => {
       init?.signal?.addEventListener(
         "abort",
@@ -91,7 +92,7 @@ describe("sessions list background refresh is silent", () => {
 
     expect(result.current.sessionsInitialAttemptSettled).toBe(true);
     expect(result.current.sessionsLoaded).toBe(false);
-    expect(result.current.sessionInventoryUnavailable).toBe(true);
+    expect(result.current.sessionInventoryError).toEqual({ kind: "browser_access_blocked" });
   });
 
   it("settles the initial attempt when the sessions request hangs", async () => {
@@ -105,7 +106,7 @@ describe("sessions list background refresh is silent", () => {
 
     expect(result.current.sessionsInitialAttemptSettled).toBe(true);
     expect(result.current.sessionsLoaded).toBe(false);
-    expect(result.current.sessionInventoryUnavailable).toBe(true);
+    expect(result.current.sessionInventoryError).toEqual({ kind: "unreachable" });
   });
 
   it("keeps an incomplete snapshot pending until its retry succeeds", async () => {
@@ -120,7 +121,7 @@ describe("sessions list background refresh is silent", () => {
     });
     expect(result.current.sessionsInitialAttemptSettled).toBe(false);
     expect(result.current.sessionsLoaded).toBe(false);
-    expect(result.current.sessionInventoryUnavailable).toBe(false);
+    expect(result.current.sessionInventoryError).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
@@ -129,7 +130,7 @@ describe("sessions list background refresh is silent", () => {
 
     expect(result.current.sessionsInitialAttemptSettled).toBe(true);
     expect(result.current.sessionsLoaded).toBe(true);
-    expect(result.current.sessionInventoryUnavailable).toBe(false);
+    expect(result.current.sessionInventoryError).toBeNull();
   });
 
   it("preserves loaded sessions while exposing and clearing refresh failure", async () => {
@@ -154,7 +155,7 @@ describe("sessions list background refresh is silent", () => {
     });
 
     expect(result.current.sessionsLoaded).toBe(true);
-    expect(result.current.sessionInventoryUnavailable).toBe(true);
+    expect(result.current.sessionInventoryError).toEqual({ kind: "browser_access_blocked" });
     expect(result.current.sessions.map((item) => item.id)).toEqual(["s1"]);
 
     let recoveredRefresh!: Promise<void>;
@@ -169,7 +170,7 @@ describe("sessions list background refresh is silent", () => {
     await act(async () => {
       await recoveredRefresh;
     });
-    expect(result.current.sessionInventoryUnavailable).toBe(false);
+    expect(result.current.sessionInventoryError).toBeNull();
   });
 
   it("ignores a stale failure after a newer replacement succeeds", async () => {
@@ -194,7 +195,7 @@ describe("sessions list background refresh is silent", () => {
     });
 
     expect(result.current.sessionsLoaded).toBe(true);
-    expect(result.current.sessionInventoryUnavailable).toBe(false);
+    expect(result.current.sessionInventoryError).toBeNull();
   });
 
   it("keeps search loading visible while the server is offline", async () => {

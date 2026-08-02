@@ -94,6 +94,7 @@ import { UpdatePopup } from "./components/UpdatePopup";
 import { useDesktopInstallOffer } from "./hooks/useDesktopInstallOffer";
 import { useNativeAppUpdate } from "./hooks/useNativeAppUpdate";
 import { useAuthGate } from "./hooks/useAuthGate";
+import type { BackendAccessError } from "./lib/backendAccess";
 import { Setup } from "./components/Setup";
 import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
@@ -335,17 +336,18 @@ function BackendUnavailable({
   onRetry,
   onChangeServer,
 }: {
-  error: string;
+  error: BackendAccessError | null;
   onRetry: () => void;
   onChangeServer?: () => void;
 }) {
   const { t } = useTranslation();
+  const errorText = backendAccessErrorText(t, error);
   return (
     <div className="login-shell">
-      <div className="login-card">
+      <div className="login-card backend-unavailable-card">
         <h1 className="login-title">{t("backendUnavailable.title")}</h1>
         <p className="login-subtitle">
-          {error || t("backendUnavailable.subtitle")}
+          {errorText}
         </p>
         <button className="login-submit" type="button" onClick={onRetry}>
           {t("backendUnavailable.retry")}
@@ -364,6 +366,19 @@ function BackendUnavailable({
       </div>
     </div>
   );
+}
+
+function backendAccessErrorText(
+  t: ReturnType<typeof useTranslation>["t"],
+  error: BackendAccessError | null,
+): string {
+  if (error?.kind === "browser_access_blocked") {
+    return t("backendUnavailable.browserAccessBlocked");
+  }
+  if (error?.kind === "http_error") {
+    return t("backendUnavailable.httpError", { status: error.status });
+  }
+  return t("backendUnavailable.unreachable");
 }
 
 function LazySurfaceFallback() {
@@ -718,7 +733,7 @@ function AppMain({
     sessions,
     sessionsLoaded,
     sessionsInitialAttemptSettled,
-    sessionInventoryUnavailable,
+    sessionInventoryError,
     sessionsHasMore,
     sessionsLoadingMore,
     sessionsSearching,
@@ -1952,16 +1967,16 @@ function AppMain({
     const connectionOpened = connected && !previous.connected;
     const inventoryBecameUnavailable =
       connected &&
-      sessionInventoryUnavailable &&
+      sessionInventoryError !== null &&
       !previous.inventoryUnavailable;
     const isFirstConnection = connectionOpened && !previous.hasConnected;
     sessionConnectionStateRef.current = {
       connected,
-      inventoryUnavailable: sessionInventoryUnavailable,
+      inventoryUnavailable: sessionInventoryError !== null,
       hasConnected: previous.hasConnected || connectionOpened,
     };
     if (!connected) return;
-    if (connectionOpened && (!isFirstConnection || sessionInventoryUnavailable)) {
+    if (connectionOpened && (!isFirstConnection || sessionInventoryError !== null)) {
       refreshSessionInventory();
       return;
     }
@@ -1971,7 +1986,7 @@ function AppMain({
   }, [
     connected,
     refreshSessionInventory,
-    sessionInventoryUnavailable,
+    sessionInventoryError,
   ]);
 
   useEffect(() => {
@@ -6630,10 +6645,10 @@ function AppMain({
           )}
         </div>
       )}
-      {sessionInventoryUnavailable && (
-        <div className="offline-banner offline-banner--warn" role="alert">
+      {sessionInventoryError && (
+        <div className="offline-banner offline-banner--warn backend-availability-banner" role="alert">
           <span className="offline-banner-dot" />
-          <span>{t("backendUnavailable.subtitle")}</span>
+          <span>{backendAccessErrorText(t, sessionInventoryError)}</span>
           <button
             className="restart-error-banner-close"
             type="button"

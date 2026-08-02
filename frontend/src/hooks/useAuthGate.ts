@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { App as CapApp, type AppState } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { logDurableImmediate } from "../lib/frontendLogger";
+import { requestBackend, type BackendAccessError } from "../lib/backendAccess";
 
 export type AuthStatus = "loading" | "anon" | "authed" | "setup" | "unreachable";
 
@@ -11,7 +12,7 @@ interface AuthedUser {
 
 interface AuthGateState {
   status: AuthStatus;
-  error: string;
+  error: BackendAccessError | null;
   user: AuthedUser | null;
 }
 
@@ -20,11 +21,6 @@ const REQUEST_TIMEOUT_MS = 5_000;
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
-}
-
-function unreachableError(scope: "auth" | "setup", status: number): string {
-  if (status === 403) return "Backend rejected this browser origin.";
-  return `Backend ${scope} probe failed with status ${status}.`;
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -39,10 +35,11 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function fetchWithTimeout(
-  input: RequestInfo | URL,
+  api: string,
+  path: string,
   init: RequestInit,
   generationSignal: AbortSignal,
-): Promise<Response> {
+): ReturnType<typeof requestBackend> {
   const requestController = new AbortController();
   const abortRequest = () => requestController.abort(generationSignal.reason);
   generationSignal.addEventListener("abort", abortRequest, { once: true });
@@ -51,7 +48,7 @@ async function fetchWithTimeout(
     REQUEST_TIMEOUT_MS,
   );
   try {
-    return await fetch(input, { ...init, signal: requestController.signal });
+    return await requestBackend(api, path, init, requestController.signal);
   } finally {
     window.clearTimeout(timeout);
     generationSignal.removeEventListener("abort", abortRequest);
@@ -59,40 +56,54 @@ async function fetchWithTimeout(
 }
 
 async function probeAuth(api: string, signal: AbortSignal): Promise<AuthGateState> {
-  const authResponse = await fetchWithTimeout(
-    `${api}/api/auth/me`,
+  const authResult = await fetchWithTimeout(
+    api,
+    "/api/auth/me",
     { credentials: "include" },
     signal,
   );
+  if (authResult.kind === "aborted") throw authResult.error;
+  if (authResult.kind === "unreachable") throw authResult.error;
+  if (authResult.kind === "browser_access_blocked") {
+    return { status: "unreachable", error: authResult, user: null };
+  }
+  const authResponse = authResult.response;
   if (authResponse.status === 200) {
-    return { status: "authed", error: "", user: await authResponse.json() };
+    return { status: "authed", error: null, user: await authResponse.json() };
   }
   if (authResponse.status !== 401) {
     if (isRetryableStatus(authResponse.status)) throw new Error("Transient auth response");
     return {
       status: "unreachable",
-      error: unreachableError("auth", authResponse.status),
+      error: { kind: "http_error", scope: "auth", status: authResponse.status },
       user: null,
     };
   }
 
-  const setupResponse = await fetchWithTimeout(
-    `${api}/api/auth/needs_setup`,
+  const setupResult = await fetchWithTimeout(
+    api,
+    "/api/auth/needs_setup",
     { credentials: "include" },
     signal,
   );
+  if (setupResult.kind === "aborted") throw setupResult.error;
+  if (setupResult.kind === "unreachable") throw setupResult.error;
+  if (setupResult.kind === "browser_access_blocked") {
+    return { status: "unreachable", error: setupResult, user: null };
+  }
+  const setupResponse = setupResult.response;
   if (!setupResponse.ok) {
     if (isRetryableStatus(setupResponse.status)) throw new Error("Transient setup response");
     return {
       status: "unreachable",
-      error: unreachableError("setup", setupResponse.status),
+      error: { kind: "http_error", scope: "setup", status: setupResponse.status },
       user: null,
     };
   }
   const setup = await setupResponse.json();
   return {
     status: setup.needs_setup ? "setup" : "anon",
-    error: "",
+    error: null,
     user: null,
   };
 }
@@ -100,7 +111,7 @@ async function probeAuth(api: string, signal: AbortSignal): Promise<AuthGateStat
 export function useAuthGate(api: string): AuthGateState & { checkAuth: () => void } {
   const [state, setState] = useState<AuthGateState>({
     status: "loading",
-    error: "",
+    error: null,
     user: null,
   });
   const activeGeneration = useRef<AbortController | null>(null);
@@ -149,14 +160,10 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
           // logDurable's deferred setTimeout(0) send would lose the line
           // entirely — this is precisely the moment under investigation.
           logDurableImmediate("auth-gate", "check_resolved", {
-            // `result.status` is the DECIDED auth state (authed/anon/setup/
-            // unreachable), not an HTTP code — every non-401 non-retryable
-            // response collapses into "unreachable" here. `result.error`
-            // (set by unreachableError()) is what actually carries the
-            // distinguishing detail: "Backend rejected this browser origin."
-            // (403) vs "Backend {scope} probe failed with status {N}."
+            // The typed error preserves readable HTTP failures separately
+            // from browser-blocked access and failed reachability.
             probe_result: result.status,
-            probe_error: result.error || null,
+            probe_error: result.error,
             suppressed_unreachable: suppressed,
             attempt,
             elapsed_ms: Date.now() - startedAt,
@@ -186,7 +193,7 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
       setState((cur) =>
         cur.status === "authed"
           ? cur
-          : { status: "unreachable", error: "Could not reach the backend.", user: null },
+          : { status: "unreachable", error: { kind: "unreachable" }, user: null },
       );
     })();
   }, [api]);
