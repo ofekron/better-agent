@@ -28,6 +28,70 @@ test("sends a prompt and receives a real assistant response", async ({ authedPag
   await expect(assistantMessage).toContainText("PONG", { timeout: 120_000 });
 });
 
+// Full-stack regression for the exact production failure: a finalized
+// assistant message with no event preview fell through to the plain summary
+// linkifier, leaving Markdown markers visible while file references became
+// chips. The backend, auth flow, production bundle, browser, and session API
+// are real; only the persisted response payload is shaped deterministically
+// at the network boundary so this proof does not spend an LLM turn.
+test("renders Markdown in a finalized response with no event preview", async ({
+  authedPage: page,
+  backend,
+}) => {
+  const create = await page.request.post(`${backend.baseURL}/api/sessions`, {
+    data: { name: "Markdown fallback regression", cwd: "/tmp" },
+  });
+  expect(create.ok()).toBe(true);
+  const session = (await create.json()) as { id: string };
+  const sessionUrl = new URL(`/s/${session.id}`, backend.baseURL).toString();
+
+  await page.route(`**/api/sessions/${encodeURIComponent(session.id)}*`, async (route) => {
+    const response = await route.fetch();
+    const tree = (await response.json()) as Record<string, unknown>;
+    tree.messages = [
+      {
+        id: "u-markdown-fallback",
+        role: "user",
+        content: "show result",
+        events: [],
+        timestamp: "2026-08-02T20:00:00.000Z",
+        isStreaming: false,
+      },
+      {
+        id: "a-markdown-fallback",
+        role: "assistant",
+        content: [
+          "## Executive summary",
+          "",
+          "**Goal:** keep the result readable",
+          "",
+          "```text",
+          "a75a133a6",
+          "```",
+          "",
+          "[MessageBubble.tsx](bcfile:%2Ftmp%2FMessageBubble.tsx)",
+        ].join("\n"),
+        events: [],
+        timestamp: "2026-08-02T20:00:01.000Z",
+        isStreaming: false,
+      },
+    ];
+    tree.total_messages = 2;
+    await route.fulfill({ response, body: JSON.stringify(tree) });
+  });
+
+  await page.goto(sessionUrl);
+  await expect(page.getByTestId("user-message")).toBeVisible();
+  const summary = page.locator(".collapse-summary");
+  await expect(summary).toBeVisible();
+  await expect(summary.locator("h2")).toHaveText("Executive summary");
+  await expect(summary.locator("strong")).toHaveText("Goal:");
+  await expect(summary.locator("code")).toHaveText("a75a133a6");
+  await expect(summary).not.toContainText("## Executive summary");
+  await expect(summary).not.toContainText("**Goal:**");
+  await expect(summary).not.toContainText("```text");
+});
+
 // Validates the real interrupt path: a long-running turn against the real
 // `claude` CLI subprocess can be stopped mid-stream via the real InputArea
 // stop control, and the UI reflects the interruption rather than silently

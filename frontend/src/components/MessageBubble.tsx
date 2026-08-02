@@ -3680,7 +3680,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             </>
           ) : summaryIsContentFallback ? (
             <div className="collapse-summary">
-              <OutputEvent text={summary} onFileClick={onFileClick} />
+              <OutputEvent text={summary ?? ""} onFileClick={onFileClick} />
             </div>
           ) : summary ? (
             <div className="collapse-summary">{linkifyFilePaths(summary, onFileClick)}</div>
