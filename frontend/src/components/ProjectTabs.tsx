@@ -162,7 +162,7 @@ export function ProjectTabs({
                   : `${projNode} — ${p.path}`
               }
             >
-              <span className="project-tab-label">{label} · {projNode}</span>
+              <span className="project-tab-label">{label}</span>
               <span className="project-tab-status">
                 <ProjectStatusBadge path={p.path} nodeId={projNode} />
                 {(() => {
