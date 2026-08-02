@@ -93,9 +93,69 @@ def _assert_nested_worktrees_excluded() -> None:
         assert operation_catalog._artifact_digest(root) == first
 
 
+def _assert_stale_error_names_invoked_operation() -> None:
+    """Regression test: verify_artifacts() must name the operation the caller
+    actually invoked, not an arbitrary co-located operation that happens to be
+    first in registration order. Reproduces the reported bug where calling
+    search_sessions raised an error naming the unrelated ask_sessions_search
+    operation, because both share one coarse artifact root and the first-
+    registered descriptor was reported regardless of what was invoked."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "AGENTS.md").touch()
+        backend = root / "backend"
+        backend.mkdir()
+        (backend / "requirements.txt").write_text("", encoding="utf-8")
+        source = backend / "handlers.py"
+        source.write_text(
+            "def handle_first(request):\n    return {'value': request.value}\n"
+            "def handle_second(request):\n    return {'value': request.value}\n",
+            encoding="utf-8",
+        )
+        spec = importlib.util.spec_from_file_location("catalog_fixture_shared", source)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        manager = operation_catalog.CatalogManager()
+        first_descriptor = manager.register_capability(
+            "alpha", "read", Request, module.handle_first
+        )
+        second_descriptor = manager.register_capability(
+            "beta", "read", Request, module.handle_second
+        )
+        assert first_descriptor.artifact_root == second_descriptor.artifact_root
+
+        state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
+        previous_home = os.environ.get("BETTER_AGENT_HOME")
+        os.environ["BETTER_AGENT_HOME"] = str(state_root)
+        try:
+            published = manager.publish()
+            source.write_text(
+                "def handle_first(request):\n    return {'value': 'tampered'}\n"
+                "def handle_second(request):\n    return {'value': 'tampered'}\n",
+                encoding="utf-8",
+            )
+            try:
+                manager.pin(published.generation, operation=second_descriptor.key)
+            except operation_catalog.OperationArtifactError as exc:
+                message = str(exc)
+                assert second_descriptor.key in message, message
+                assert f"requested operation: {second_descriptor.key}" in message, message
+            else:
+                raise AssertionError("artifact tampering was accepted")
+        finally:
+            if previous_home is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous_home
+            shutil.rmtree(state_root)
+
+
 def main() -> None:
     _assert_generated_runtime_files_excluded()
     _assert_nested_worktrees_excluded()
+    _assert_stale_error_names_invoked_operation()
     state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
     with tempfile.TemporaryDirectory() as raw:
         os.environ["BETTER_AGENT_HOME"] = str(state_root)

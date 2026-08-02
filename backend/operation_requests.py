@@ -127,7 +127,7 @@ def admit(
     with _ADMISSION_LOCK:
         existing = extension_jobs.read_record_strict(_OWNER, namespace, idempotency_key)
         if existing is None:
-            operation_catalog.manager().pin(client.execution_generation)
+            operation_catalog.manager().pin(client.execution_generation, operation=operation)
         try:
             result = extension_jobs.get_or_fire_idempotent(
                 _OWNER,

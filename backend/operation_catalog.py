@@ -134,18 +134,24 @@ class PublishedCatalog:
     def capability_descriptor(self, capability: str, action: str) -> OperationDescriptor:
         return self.descriptor(operation_key(capability, action))
 
-    def verify_artifacts(self) -> None:
+    def verify_artifacts(self, invoked: str | None = None) -> None:
         verified: dict[str, str] = {}
+        stale_keys: list[str] = []
         for descriptor in self.descriptors.values():
             actual = verified.get(descriptor.artifact_root)
             if actual is None:
                 actual = _artifact_digest(Path(descriptor.artifact_root))
                 verified[descriptor.artifact_root] = actual
             if actual != descriptor.artifact_digest:
-                raise OperationArtifactError(
-                    f"operation artifact changed on disk since catalog publish: "
-                    f"{descriptor.key}; restart the backend to load current code"
-                )
+                stale_keys.append(descriptor.key)
+        if not stale_keys:
+            return
+        requested = f" requested operation: {invoked};" if invoked else ""
+        raise OperationArtifactError(
+            "operation catalog is stale since publish (backend code changed on disk);"
+            f"{requested} stale artifact(s): {', '.join(stale_keys)}; "
+            "restart the backend to load current code"
+        )
 
 
 class _CatalogExecutor:
@@ -330,9 +336,9 @@ class CatalogManager:
             except KeyError as exc:
                 raise KeyError(f"unknown execution generation: {generation}") from exc
 
-    def pin(self, generation: str) -> None:
+    def pin(self, generation: str, operation: str | None = None) -> None:
         with self._lock:
-            self.get(generation).verify_artifacts()
+            self.get(generation).verify_artifacts(invoked=operation)
             self._pins[generation] = self._pins.get(generation, 0) + 1
 
     def unpin(self, generation: str) -> None:
