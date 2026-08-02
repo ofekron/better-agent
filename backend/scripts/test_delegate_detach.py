@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc-test-delegate-detach-")
+_test_home.isolate_installed("bc-test-delegate-detach-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator import Coordinator
@@ -23,7 +23,7 @@ def _make_coord():
     sender = session_manager.create(name="sender", cwd="/repo", orchestration_mode="manager")
     target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")
     coord = Coordinator()
-    coord.submit_prompt = lambda sid, params: params["_queued_id"]  # type: ignore
+    coord.submit_prompt = lambda sid, params, **_kwargs: params["_queued_id"]  # type: ignore
     coord.turn_manager.has_active_turn = lambda sid: True  # type: ignore
     registrations: list[dict] = []
     coord.register_mssg_turn_waiter = lambda **kw: registrations.append(kw)  # type: ignore

@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-team-bootstrap-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-team-bootstrap-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

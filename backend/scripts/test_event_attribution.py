@@ -31,7 +31,7 @@ import _test_home
 import pytest
 
 pytestmark = pytest.mark.anyio
-_TMP_HOME = _test_home.isolate("bc-test-event-attribution-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-event-attribution-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

@@ -28,7 +28,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-stub-inval-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-stub-inval-")
 
 import render_stub  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402

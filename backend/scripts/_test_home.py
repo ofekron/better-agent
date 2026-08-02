@@ -216,28 +216,6 @@ def isolate_installed(prefix: str = "ba-test-", lock: bool = False, **kwargs) ->
     return home
 
 
-def _activate_installation(home: str, **kwargs) -> None:
-    # Imported lazily: `_test_installation` touches backend modules, which are
-    # only importable after `engage()` put backend/ on sys.path.
-    import _test_installation
-
-    _test_installation.activate(Path(home), **kwargs)
-
-
-def isolate_installed(prefix: str = "ba-test-", lock: bool = False, **kwargs) -> str:
-    """`isolate()` plus a committed installation profile inside that home.
-
-    Any test that drives the ASGI app needs this: the installation admission
-    middleware answers every gated route with 503 until a profile is active,
-    so a bare `isolate()` home silently turns whole-app coverage into
-    assertions against error responses. Extra kwargs go to
-    `_test_installation.activate` (mode/provider/launcher_path).
-    """
-    home = isolate(prefix, lock=lock)
-    _activate_installation(home, **kwargs)
-    return home
-
-
 class TestHome:
     """Owned test home. `release()` is the sole structured cleanup path.
 

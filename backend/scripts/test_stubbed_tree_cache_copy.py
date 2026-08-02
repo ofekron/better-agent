@@ -8,7 +8,7 @@ import sys
 
 import _test_home
 
-_TMP_HOME = _test_home.isolate("bc-test-stub-tree-copy-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-stub-tree-copy-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
