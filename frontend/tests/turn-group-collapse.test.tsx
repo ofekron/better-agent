@@ -692,6 +692,39 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("Action output should not be the collapsed preview");
   });
 
+  it("renders Markdown in finalized content when collapsed event data is stubbed", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u-md", content: "show result" })}
+        responseMessage={makeAssistantMsg({
+          id: "a-md",
+          content: [
+            "## Executive summary",
+            "",
+            "**Goal:** keep the result readable",
+            "",
+            "Use `runtime-requirements.txt`.",
+            "",
+            "[runtime-requirements.txt](bcfile:%2Ftmp%2Fruntime-requirements.txt)",
+          ].join("\\n"),
+          stub: {
+            event_count: 1,
+            last_events: [{ type: "turn_complete", data: {} }],
+          },
+        })}
+        initialExpanded={false}
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.querySelector(".collapse-summary")).toBeNull();
+    const markdown = container.querySelector(".turn-group-children .message-box-body [data-test-md]");
+    expect(markdown).not.toBeNull();
+    expect(markdown?.textContent).toContain("## Executive summary");
+    expect(markdown?.textContent).toContain("**Goal:** keep the result readable");
+    expect(markdown?.textContent).toContain("runtime-requirements.txt");
+  });
+
   it("keeps finalized assistant content when output events carry the same text", () => {
     const { container } = render(
       <TurnGroup

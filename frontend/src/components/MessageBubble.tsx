@@ -215,10 +215,6 @@ function previewEventsForMessage(message: ChatMessage | undefined, mode?: Orches
   return liveEvents;
 }
 
-function hasStubPreviewEvents(message: ChatMessage | undefined): boolean {
-  return (message?.stub?.last_events?.length ?? 0) > 0;
-}
-
 function decodeEscapedUnicodeForDisplay(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => {
     const codePoint = Number.parseInt(hex, 16);
@@ -3301,7 +3297,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       !isEffectivelyEmpty(content) &&
       events.length > 0 &&
       !src?.isStreaming &&
-      !hasStubPreviewEvents(src)
+      !src?.error
     ) {
       return wrapWithTs(
         <OutputEvent text={content} onFileClick={onFileClick} />,
