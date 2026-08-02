@@ -24,6 +24,10 @@ import paths  # noqa: E402
 
 paths.engage_test_home(_TMP_HOME)
 
+import _test_installation  # noqa: E402
+
+_test_installation.activate(Path(_TMP_HOME), provider="claude")
+
 import extension_jobs as jobs  # noqa: E402
 import delegation_status_store  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
