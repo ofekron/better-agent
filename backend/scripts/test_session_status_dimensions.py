@@ -152,6 +152,16 @@ check(
         {"id": "s", "pending_user_input_count": 2}, {"s": "idle"}, {}
     ).waiting_for_user,
 )
+# A corrupt pending count (non-int string, or a non-numeric container) is
+# defended against: it reads as 0 rather than crashing compute.
+check(
+    "dimensions.corrupt_pending_snapshot_reads_zero",
+    session_status._pending_input_count({"id": "s"}, {"s": "not-a-number"}) == 0,
+)
+check(
+    "dimensions.non_int_pending_type_reads_zero",
+    session_status._pending_input_count({"id": "s"}, {"s": [1, 2]}) == 0,
+)
 check(
     "dimensions.remote_row_monitoring_fallback",
     session_status.compute(
