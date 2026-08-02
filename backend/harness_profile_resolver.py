@@ -291,7 +291,7 @@ def _compute_default_profile_uncached() -> dict[str, Any]:
         "extension_instances": extension_instances,
         "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
         "disabled_builtin_extensions": config_store.get_disabled_builtin_extensions(),
-        "disabled_runtime_skills": [],
+        "disabled_runtime_skills": config_store.get_disabled_runtime_skills(),
         "instruction_sources": instruction_sources,
     }
 

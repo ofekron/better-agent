@@ -51,6 +51,8 @@ DOCKERFILE="$REPO_ROOT/docker/Dockerfile.fullstack-test"
 # version of this wrapper).
 # shellcheck source=lib/docker-platform.sh
 source "$HERE/lib/docker-platform.sh"
+# shellcheck source=lib/docker-test-lifecycle.sh
+source "$HERE/lib/docker-test-lifecycle.sh"
 
 REF=""
 PLAYWRIGHT_ARGS=()
@@ -91,19 +93,24 @@ if [ ! -f "$DOCKERFILE" ]; then
 fi
 
 docker_platform_detect
+docker_test_lifecycle_init fullstack
+docker_test_reap_orphans
+docker_test_cleanup
 
 BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
   IMAGE_TAG="better-agent-fullstack-tests:${COMMIT_SHA}"
   echo "run-fullstack-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
+  DOCKER_TEST_IMAGE_KIND=ref
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.fullstack-test --target full -t "$IMAGE_TAG" -
+    | docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.fullstack-test --target full -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-fullstack-tests:deps"
   BIND_MOUNT_REPO=1
   echo "run-fullstack-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
-  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  DOCKER_TEST_IMAGE_KIND=deps
+  docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
 RUN_ARGS=(--rm "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
@@ -141,4 +148,7 @@ RUN_ARGS+=(-v "$ARTIFACTS_DIR:/repo/frontend/test-results")
 RUN_ARGS+=(-v "$REPORT_DIR:/repo/frontend/playwright-report")
 
 echo "run-fullstack-tests: running tests in $IMAGE_TAG"
-docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PLAYWRIGHT_ARGS[@]}"
+TEST_STATUS=0
+docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PLAYWRIGHT_ARGS[@]}" || TEST_STATUS=$?
+docker_test_cleanup
+exit "$TEST_STATUS"

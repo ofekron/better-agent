@@ -58,6 +58,8 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.test"
 # shellcheck source=lib/docker-platform.sh
 source "$HERE/lib/docker-platform.sh"
+# shellcheck source=lib/docker-test-lifecycle.sh
+source "$HERE/lib/docker-test-lifecycle.sh"
 
 REF=""
 COVERAGE_DIR=""
@@ -122,19 +124,24 @@ if [ ! -f "$DOCKERFILE" ]; then
 fi
 
 docker_platform_detect
+docker_test_lifecycle_init backend
+docker_test_reap_orphans
+docker_test_cleanup
 
 BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
   IMAGE_TAG="better-agent-backend-tests:${COMMIT_SHA}"
   echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
+  DOCKER_TEST_IMAGE_KIND=ref
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
+    | docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-backend-tests:deps"
   BIND_MOUNT_REPO=1
   echo "run-backend-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
-  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  DOCKER_TEST_IMAGE_KIND=deps
+  docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
 # ${arr[@]+"${arr[@]}"} (not plain "${arr[@]}") because macOS's default
@@ -191,4 +198,7 @@ if [ -n "$PARALLEL_WORKERS" ]; then
 fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
-docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}"
+TEST_STATUS=0
+docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}" || TEST_STATUS=$?
+docker_test_cleanup
+exit "$TEST_STATUS"

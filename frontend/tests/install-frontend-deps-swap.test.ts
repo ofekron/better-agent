@@ -14,6 +14,7 @@ const scriptPath = join(
   "scripts",
   "install-frontend-deps.mjs",
 );
+const frontendPath = dirname(dirname(scriptPath));
 
 describe("frontend dependency install swap slot", () => {
   it("gives every concurrent install its own retired slot", () => {
@@ -50,6 +51,22 @@ describe("frontend dependency install swap slot", () => {
       dependencies: { react: "^19.0.0" },
     });
     expect(source.scripts.postinstall).toBe("node scripts/detect-ips.mjs");
+  });
+
+  it("keeps the mobile lock aligned with the merged install manifest", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(frontendPath, "package.json"), "utf8"),
+    );
+    const mobileDependencies = JSON.parse(
+      readFileSync(join(frontendPath, "mobile-dependencies.json"), "utf8"),
+    );
+    const lock = JSON.parse(
+      readFileSync(join(frontendPath, "package-lock.mobile.json"), "utf8"),
+    );
+
+    const merged = prepareInstallManifest(manifest, mobileDependencies);
+    expect(lock.packages[""]?.dependencies).toEqual(merged.dependencies);
+    expect(lock.packages[""]?.devDependencies).toEqual(merged.devDependencies);
   });
 
   it("retries transient recursive cleanup failures", () => {

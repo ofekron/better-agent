@@ -92,7 +92,7 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
-CONFIG_SCHEMA_VERSION = 3
+CONFIG_SCHEMA_VERSION = 4
 MIN_SUPPORTED_CONFIG_SCHEMA_VERSION = 1
 
 _state_cache_lock = threading.RLock()
@@ -964,7 +964,7 @@ def _migrate_unversioned_provider_state(raw: dict) -> dict:
         })
     # No pre-migration authority: _migrate_schema_2_to_3 mints a fresh one
     # over the final (field-stripped) provider set at revision 0.
-    return _migrate_schema_2_to_3({
+    return _advance_to_current_schema({
         **raw,
         "schema_version": 2,
         "providers": migrated,
@@ -1042,6 +1042,9 @@ def _normalize_loaded_state(raw: dict) -> dict:
         ),
         "disabled_builtin_extensions": _normalize_disabled_builtin_extensions(
             raw.get("disabled_builtin_extensions")
+        ),
+        "disabled_runtime_skills": _normalize_disabled_runtime_skills(
+            raw.get("disabled_runtime_skills")
         ),
         "internal_llm": _normalize_internal_llm(raw.get("internal_llm")),
     }
@@ -1241,12 +1244,22 @@ def _migrate_schema_2_to_3(raw: dict) -> dict:
             state.get("default_provider_id"),
             providers,
         )
+    return state
+
+
+def _migrate_schema_3_to_4(raw: dict) -> dict:
+    if raw.get("schema_version") != 3 or "disabled_runtime_skills" in raw:
+        raise RuntimeError("unsupported provider config schema")
+    state = copy.deepcopy(raw)
+    state["schema_version"] = 4
+    state["disabled_runtime_skills"] = []
     return _normalize_loaded_state(state)
 
 
 _CONFIG_SCHEMA_MIGRATIONS: dict[int, Callable[[dict], dict]] = {
     1: _migrate_schema_1_to_2,
     2: _migrate_schema_2_to_3,
+    3: _migrate_schema_3_to_4,
 }
 
 
@@ -1258,8 +1271,7 @@ def _validate_config_schema_migrations() -> None:
         raise RuntimeError("provider config schema migration chain is incomplete")
 
 
-def _migrate_versioned_state(raw: dict) -> dict:
-    _validate_config_schema_migrations()
+def _advance_to_current_schema(raw: dict) -> dict:
     version = raw.get("schema_version")
     if (
         not isinstance(version, int)
@@ -1278,6 +1290,11 @@ def _migrate_versioned_state(raw: dict) -> dict:
             raise RuntimeError("provider config schema migration edge is invalid")
         version = next_version
     return _normalize_loaded_state(state)
+
+
+def _migrate_versioned_state(raw: dict) -> dict:
+    _validate_config_schema_migrations()
+    return _advance_to_current_schema(raw)
 
 
 def _clean_config_dir(value) -> str:
@@ -1591,6 +1608,9 @@ def _save_state(
         "disabled_builtin_extensions": _normalize_disabled_builtin_extensions(
             state.get("disabled_builtin_extensions")
         ),
+        "disabled_runtime_skills": _normalize_disabled_runtime_skills(
+            state.get("disabled_runtime_skills")
+        ),
         "internal_llm": _normalize_internal_llm(state.get("internal_llm")),
     }
     _validate_state_for_save(payload)
@@ -1694,8 +1714,33 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
     return normalized
 
 
-def disabled_builtins_fingerprint() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Content fingerprint of just the two fields harness_profile_resolver's
+def _normalize_disabled_runtime_skills(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({
+        str(item).strip()
+        for item in value
+        if str(item or "").strip()
+    })
+
+
+def get_disabled_runtime_skills() -> list[str]:
+    return _normalize_disabled_runtime_skills(
+        _load_state().get("disabled_runtime_skills")
+    )
+
+
+@_serialized_provider_mutation
+def set_disabled_runtime_skills(skill_names: list[str]) -> list[str]:
+    normalized = _normalize_disabled_runtime_skills(skill_names)
+    state = _load_state()
+    state["disabled_runtime_skills"] = normalized
+    _save_state(state)
+    return normalized
+
+
+def disabled_builtins_fingerprint() -> tuple[tuple[str, ...], ...]:
+    """Content fingerprint of just the fields harness_profile_resolver's
     default-profile synthesis reads from this store. Narrower than
     ``config_fingerprint()`` (whole-file mtime/size) on purpose: config.json
     also holds provider/session state that changes far more often than
@@ -1705,6 +1750,7 @@ def disabled_builtins_fingerprint() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return (
         tuple(get_disabled_builtin_tools()),
         tuple(get_disabled_builtin_extensions()),
+        tuple(get_disabled_runtime_skills()),
     )
 
 
