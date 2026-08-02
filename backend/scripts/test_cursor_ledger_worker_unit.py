@@ -22,8 +22,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 _TEST_HOME = tempfile.mkdtemp(prefix="ba-clw-unit-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import paths  # noqa: E402

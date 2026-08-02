@@ -9,7 +9,6 @@ to a fresh tmp dir. No real home is ever touched.
 from __future__ import annotations
 
 import json
-import os
 import stat
 
 import pytest
