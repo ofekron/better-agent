@@ -42,6 +42,13 @@ _REPO = os.path.dirname(_BACKEND)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+# Manager/team-mode session creation is gated behind the PROVIDER_CONVERSATIONS
+# capability, which requires a committed active installation profile (see
+# installation_profile.assert_orchestration_mode_allowed). Activate one in the
+# isolated home so `_mk_session("manager")` doesn't raise InstallationProfileError.
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import extension_store  # noqa: E402
