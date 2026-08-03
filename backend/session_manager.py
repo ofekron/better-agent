@@ -884,25 +884,19 @@ class SessionManager:
                 running = bool(self._compute_is_running(sid))
 
             with self._projected_state_lock:
-                last_run = self._last_broadcast_running.get(sid)
-                running_changed = not (
-                    last_run is not None and last_run == running
+                running_changed = (
+                    sid not in self._last_broadcast_running
+                    or self._last_broadcast_running[sid] != running
                 )
                 monitoring_changed = (
                     state is not None
                     and self._last_broadcast_monitoring.get(sid) != state
                 )
                 if running_changed:
-                    if running:
-                        self._last_broadcast_running[sid] = True
-                    else:
-                        self._last_broadcast_running.pop(sid, None)
+                    self._last_broadcast_running[sid] = running
 
                 if monitoring_changed:
-                    if state == "stopped":
-                        self._last_broadcast_monitoring.pop(sid, None)
-                    else:
-                        self._last_broadcast_monitoring[sid] = state
+                    self._last_broadcast_monitoring[sid] = state
 
                 if running_changed or monitoring_changed:
                     self._projected_state_version += 1
@@ -1735,6 +1729,7 @@ class SessionManager:
             except Exception:
                 logger.exception("draft note_root_dropped failed for %s", rid)
         self._last_broadcast_running.pop(rid, None)
+        self._last_broadcast_monitoring.pop(rid, None)
         self._unread_counts.pop(rid, None)
         self._unread_counts_version += 1
         self._unread_hydrated.discard(rid)
@@ -1746,6 +1741,7 @@ class SessionManager:
             self._drop_since_cache_entry(fid)
             self._drop_window_cache_for_sids({fid})
             self._last_broadcast_running.pop(fid, None)
+            self._last_broadcast_monitoring.pop(fid, None)
             self._unread_counts.pop(fid, None)
             self._unread_counts_version += 1
             self._unread_hydrated.discard(fid)
@@ -4791,6 +4787,7 @@ class SessionManager:
                 self._node_root_id.pop(deleted_sid, None)
                 self._kind_by_sid.pop(deleted_sid, None)
                 self._last_broadcast_running.pop(deleted_sid, None)
+                self._last_broadcast_monitoring.pop(deleted_sid, None)
                 self._unread_counts.pop(deleted_sid, None)
                 self._unread_hydrated.discard(deleted_sid)
                 revocations.append((

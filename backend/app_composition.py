@@ -196,6 +196,8 @@ def wire(
     user_prefs_api.configure(coordinator.broadcast_global, invalidate_session_list_cache)
     app.include_router(user_prefs_api.router)
 
+    from session_manager import manager as session_manager
+
     import projects_api
     projects_api.configure(
         notify_projects_changed,

@@ -92,12 +92,14 @@ def test_running_count_aggregation() -> None:
     rc = aggs[key]["running_count"]
     assert rc == 2, f"expected running_count=2 ({s1},{s2} running; {s3} idle), got {rc}"
 
+    coord.active_run_ids.pop(s1, None)
     coord.run_state_remove(s1, "r1")
     coord.turn_manager._refresh_cache()
     projects_api.invalidate_project_aggregates()
     aggs = projects_api._project_aggregates()
     rc = aggs[key]["running_count"]
     assert rc == 1, f"after one completes expected 1, got {rc}"
+    coord.active_run_ids.pop(s2, None)
     coord.run_state_remove(s2, "r2")
     print(f"{PASS} running_count_aggregation")
 
@@ -159,6 +161,7 @@ def test_worker_fork_excluded_from_aggregates() -> None:
     assert rc == 0, (
         f"worker fork must not inflate project running_count; got {rc}"
     )
+    coord.active_run_ids.pop(fork["id"], None)
     coord.run_state_remove(fork["id"], "rw")
     print(f"{PASS} worker_fork_excluded_from_aggregates")
 
@@ -237,6 +240,7 @@ def test_session_list_enrichment() -> None:
             f"enrichment for accept-encoding={accept_encoding} expected "
             f"{expected}, got {_enrichment(row)}"
         )
+    coord.active_run_ids.pop(sid, None)
     coord.run_state_remove(sid, "rr")
     print(f"{PASS} session_list_enrichment")
 
@@ -273,6 +277,7 @@ def test_projection_snapshot_changes_without_tick_refresh() -> None:
     assert row.get("monitoring_state") == "active", row
 
     version_running = session_manager.projected_state_version()
+    coord.active_run_ids.pop(sid, None)
     coord.run_state_remove(sid, "projection-run")
     running, monitoring = session_manager.projected_state_snapshot()
     assert monitoring.get(sid, "stopped") == "stopped", monitoring
@@ -283,6 +288,9 @@ def test_projection_snapshot_changes_without_tick_refresh() -> None:
     )["running_count"] == running_before
     row = _enriched_row(_sessions_page("identity"), sid)
     assert row.get("monitoring_state") == "stopped", row
+    version_stopped = session_manager.projected_state_version()
+    session_manager.recompute_state(sid)
+    assert session_manager.projected_state_version() == version_stopped
     print(f"{PASS} projection_snapshot_changes_without_tick_refresh")
 
 
@@ -445,6 +453,7 @@ def test_aggregates_rebalance_after_cwd_move_without_manual_call() -> None:
             f"got {new_rc}"
         )
 
+        coord.active_run_ids.pop(sid, None)
         coord.run_state_remove(sid, "rmove")
 
     asyncio.run(_scenario())

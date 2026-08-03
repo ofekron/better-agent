@@ -1,6 +1,6 @@
 """Project CRUD/touch and project-mapping group routes.
 
-Depends on the coordinator only through the three capabilities it
+Depends on the coordinator only through the four capabilities it
 actually needs, bound by the composition root (see `configure`). The
 `projects_changed` fan-out itself (which also rebuilds project
 mappings) is triggered from session-mutation paths outside this
@@ -45,7 +45,10 @@ def configure(
 
 
 def _require_configured() -> tuple[
-    Callable[[], Awaitable[None]], Callable[[str, dict], Any], Callable[[], tuple],
+    Callable[[], Awaitable[None]],
+    Callable[[str, dict], Any],
+    Callable[[], tuple],
+    Callable[[], int],
 ]:
     if (
         _notify_projects_changed is None

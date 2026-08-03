@@ -446,10 +446,10 @@ def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int],
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
     snapshot = running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
-    _sidebar_state_snapshot_cache = (
-        session_list_cache._sessions_list_transient_state_version(),
-        snapshot,
-    )
+    # Tag the snapshot with the version read before it. If state advances
+    # during collection, the next caller observes the mismatch and rebuilds;
+    # stale data can never be labeled with a newer version.
+    _sidebar_state_snapshot_cache = (version, snapshot)
     return snapshot
 
 
