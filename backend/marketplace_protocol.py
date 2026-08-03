@@ -26,7 +26,9 @@ PROTOCOL_HASH = hashlib.sha256(_artifact_bytes()).hexdigest()
 PROTOCOL = json.loads(_artifact_bytes())
 
 if PROTOCOL.get("name") != "better-agent-marketplace" or PROTOCOL.get("version") != 1:
-    raise RuntimeError("unsupported Marketplace protocol artifact")
+    # Static fail-fast against a corrupted shipped artifact; unreachable at
+    # runtime through the public API. Excluded, not faked with a reload.
+    raise RuntimeError("unsupported Marketplace protocol artifact")  # pragma: no cover
 
 PATTERNS = {
     name: re.compile(pattern)
