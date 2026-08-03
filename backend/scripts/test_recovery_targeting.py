@@ -446,13 +446,14 @@ def test_missing_target_completed_startup_marks_reconciled() -> None:
     check("reconciled marker written", (run_dir / "reconciled.marker").exists())
 
 
-def test_retry_recovered_run_uses_passed_coordinator() -> None:
-    print("T7 recovered retry registers via passed coordinator")
+def test_retry_recovered_run_preserves_artifact_resume_sid() -> None:
+    print("T7 recovered retry preserves artifact resume sid")
     run_id = "retry-needs-coordinator"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     input_payload = {
         "prompt": "retry me",
+        "session_id": "artifact-provider-sid",
         "source": "mssg",
         "cwd": "/tmp",
         "backend_url": "http://127.0.0.1:8000",
@@ -466,7 +467,6 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     }
     _write_execution_artifact(run_dir, run_id, input_payload, kind="remote")
     fake_sm = _FakeSessionManager({
-        "agent_session_id": "provider-sid",
         "messages": [
             {"id": "msg-1", "role": "assistant", "events": [], "transient_attempt": 0},
         ],
@@ -554,7 +554,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
                 "app_session_id": "sid",
                 "persist_to": "sid",
                 "mode": "native",
-                "session_id": "provider-sid",
+                "session_id": None,
             },
             run_dir=run_dir,
             app_sid="sid",
@@ -578,6 +578,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     )
     check("retry-pending and submitted state emitted", coordinator.turn_manager.emitted == ["sid", "sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
+    assert provider.kwargs.get("session_id") == "artifact-provider-sid"
     check(
         "retry preserves resolved harness snapshot",
         provider.kwargs.get("resolved_harness_run_config", {}).get("profile_id")
@@ -1274,7 +1275,7 @@ def main() -> int:
         test_openai_live_orphan_returns_live_descriptor_without_complete_json()
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()
-        test_retry_recovered_run_uses_passed_coordinator()
+        test_retry_recovered_run_preserves_artifact_resume_sid()
         test_unbound_recovered_input_is_terminal()
         test_family_retry_clones_exact_runtime_capabilities()
         test_recovered_retry_cancelled_during_backoff_does_not_spawn()

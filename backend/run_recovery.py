@@ -4258,12 +4258,18 @@ async def _retry_recovered_run(
             return
 
     # Re-read session to pick up the resume sid (set by
-    # _integrate_one's replay or the prior run's session_discovered).
+    # _integrate_one's replay or the prior run's session_discovered). A
+    # provider-start failure may leave both mutable projections empty, so
+    # retain the validated execution artifact's original resume target.
     fresh_sess = session_manager.get(persist_sid) or {}
     if fresh_continuation_reason is not None:
         resume_sid = desc.get("session_id")
     else:
-        resume_sid = fresh_sess.get("agent_session_id") or desc.get("session_id")
+        resume_sid = (
+            fresh_sess.get("agent_session_id")
+            or desc.get("session_id")
+            or original_arguments["session_id"]
+        )
     prompt = original_arguments["prompt"]
     continuation_chain = original_arguments["continuation_chain"]
     if fresh_continuation_reason is not None:
