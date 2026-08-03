@@ -150,6 +150,45 @@ def test_cancelled_wait_prunes_graph() -> None:
     asyncio.run(run())
 
 
+def test_waiting_requires_non_empty_session_ids() -> None:
+    graph = SyncWaitGraph()
+    # caller and target are stripped before validation, so whitespace-only is
+    # treated as empty and rejected before any edge is recorded.
+    for caller, target in [("", "B"), ("A", ""), ("  ", "B"), ("A", "\t")]:
+        with pytest.raises(ValueError, match="caller and target session ids"):
+            with graph.waiting(caller, target):
+                raise AssertionError("empty-id wait entered")
+    assert graph.snapshot() == {}
+
+
+def test_path_search_revisits_already_visited_node() -> None:
+    graph = SyncWaitGraph()
+    # Diamond topology: Y -> P1 ; P1 -> {P2, Z} (P2 recorded first) ; P2 -> Z.
+    # _path's DFS pushes Z twice (once from P1, once from P2) before Z is
+    # popped, so the second pop hits the visited-guard `continue` instead of
+    # re-expanding Z. DEST is absent from the graph, so _path(Y, DEST) returns
+    # None (no false cycle) and the wait succeeds.
+    with graph.waiting("Y", "P1"), \
+            graph.waiting("P1", "P2"), \
+            graph.waiting("P1", "Z"), \
+            graph.waiting("P2", "Z"):
+        with graph.waiting("DEST", "Y"):
+            # Reaching here proves _path(Y, DEST) returned None (no false
+            # cycle) despite the diamond traversal; the edge is active.
+            assert graph.snapshot()["DEST"] == {"Y": 1}
+
+
+def test_finally_tolerates_caller_entry_pruned_during_wait() -> None:
+    graph = SyncWaitGraph()
+    # The teardown re-reads the caller's entry instead of assuming it survives:
+    # a concurrent prune (or direct removal) between yield and exit must not
+    # crash the contextmanager. Removing the `if targets:` guard would make
+    # this exit raise AttributeError on None.
+    with graph.waiting("A", "B"):
+        graph._edges.pop("A", None)
+    assert graph.snapshot() == {}
+
+
 def test_direct_ask_rejects_cycle_but_cached_result_does_not_wait() -> None:
     async def run() -> None:
         coordinator = Coordinator()
