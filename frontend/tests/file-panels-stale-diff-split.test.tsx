@@ -1,10 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 
 vi.mock("../src/hooks/useViewport", () => ({
   useViewport: () => ({ mode: "desktop" }),
 }));
+
+vi.mock("../src/api", () => ({ API: "" }));
 
 // Stub Monaco DiffEditor so the diff view renders without a real worker.
 // FileViewer itself is mocked below, so only DiffEditor (imported directly
@@ -28,27 +31,61 @@ vi.mock("../src/components/FileViewer", async (importOriginal) => {
     // The stub exposes the FilePanels→FileViewer wiring (onClose,
     // onEditorReady) through buttons so those callback bodies can be
     // exercised without a real Monaco editor.
-    FileViewer: (props: {
+    FileViewer: function MockFileViewer(props: {
       filePath: string;
+      initialViewState?: {
+        monacoViewState?: { mockValue?: string } | null;
+      } | null;
+      onViewStateChange?: (state: {
+        monacoViewState: { mockValue: string };
+        renderedScroll: null;
+        markdownEditing: boolean;
+        video: null;
+      }) => void;
       onClose?: () => void;
       onEditorReady?: (h: unknown) => void;
-    }) => (
-      <div data-testid="mock-file-viewer" data-path={props.filePath}>
-        source:{props.filePath}
-        <button data-testid="stub-close" onClick={props.onClose} />
-        <button
-          data-testid="stub-editor-ready"
-          onClick={() => props.onEditorReady?.({ snapshot: true })}
-        />
-      </div>
-    ),
+    }) {
+      const [viewState, setViewState] = useState(
+        () => props.initialViewState?.monacoViewState?.mockValue ?? "",
+      );
+      const viewStateRef = useRef(viewState);
+      viewStateRef.current = viewState;
+      const onViewStateChangeRef = useRef(props.onViewStateChange);
+      onViewStateChangeRef.current = props.onViewStateChange;
+      useEffect(() => () => {
+        onViewStateChangeRef.current?.({
+          monacoViewState: { mockValue: viewStateRef.current },
+          renderedScroll: null,
+          markdownEditing: false,
+          video: null,
+        });
+      }, [props.filePath]);
+      return (
+        <div
+          data-testid="mock-file-viewer"
+          data-path={props.filePath}
+        >
+          source:{props.filePath}
+          <input
+            aria-label={`state-${props.filePath}`}
+            value={viewState}
+            onChange={(event) => setViewState(event.currentTarget.value)}
+          />
+          <button data-testid="stub-close" onClick={props.onClose} />
+          <button
+            data-testid="stub-editor-ready"
+            onClick={() => props.onEditorReady?.({ snapshot: true })}
+          />
+        </div>
+      );
+    },
   };
 });
 
 const { FilePanels } = await import("../src/components/FilePanels");
 const { fetchHtmlPreviewUrl } = await import("../src/components/FilePanels");
 
-const SIGNED_PATH = "/api/file/preview/SIG/primary/x/index.html";
+const SIGNED_PATH = "about:blank";
 
 type Route = { match: RegExp; body: (url: string) => unknown };
 
@@ -62,6 +99,22 @@ function routeFetch(routes: Route[]) {
     }
     throw new Error("unrouted fetch: " + u);
   });
+}
+
+function viewerFor(path: string): HTMLElement {
+  const viewer = screen.getAllByTestId("mock-file-viewer").find(
+    (candidate) => candidate.getAttribute("data-path") === path,
+  );
+  if (!viewer) throw new Error(`Missing viewer for ${path}`);
+  return viewer;
+}
+
+function visibleViewer(): HTMLElement {
+  const viewer = screen.getAllByTestId("mock-file-viewer").find(
+    (candidate) => !candidate.closest(".file-panels-pane")?.hasAttribute("hidden"),
+  );
+  if (!viewer) throw new Error("Missing visible viewer");
+  return viewer;
 }
 
 // Identity {mtime_ns:1} on the initial text load, {mtime_ns:2} on every disk
@@ -90,6 +143,7 @@ function staleRoutes(textContent = "<html>one</html>", latestContent = "<html>tw
 }
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
@@ -199,13 +253,13 @@ describe("FilePanels tab + split container logic", () => {
     renderTwo();
     // Active defaults to the last panel (p2 → other.ts).
     expect(screen.getAllByTestId("mock-file-viewer").length).toBe(1);
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/other.ts");
+    expect(visibleViewer().textContent).toContain("/repo/src/other.ts");
 
     fireEvent.click(screen.getByTitle("Previous file (Ctrl/Cmd+Tab)"));
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+    expect(visibleViewer().textContent).toContain("/repo/src/App.tsx");
 
     fireEvent.click(screen.getByTitle("Next file (Ctrl/Cmd+Tab)"));
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/other.ts");
+    expect(visibleViewer().textContent).toContain("/repo/src/other.ts");
 
     // Keyboard: Shift+Ctrl+Tab reverses.
     fireEvent.keyDown(window, {
@@ -213,11 +267,91 @@ describe("FilePanels tab + split container logic", () => {
       ctrlKey: true,
       shiftKey: true,
     });
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+    expect(visibleViewer().textContent).toContain("/repo/src/App.tsx");
 
     // Keyboard: Ctrl+Tab advances.
     fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/other.ts");
+    expect(visibleViewer().textContent).toContain("/repo/src/other.ts");
+  });
+
+  it("restores each tab's captured viewer state after switching", () => {
+    renderTwo();
+    const otherViewer = viewerFor("/repo/src/other.ts");
+    fireEvent.change(screen.getByRole("textbox", { name: "state-/repo/src/other.ts" }), {
+      target: { value: "kept position" },
+    });
+
+    fireEvent.click(screen.getByText("App.tsx"));
+    expect(screen.getAllByTestId("mock-file-viewer")).toHaveLength(1);
+    expect(otherViewer.isConnected).toBe(false);
+
+    fireEvent.click(screen.getByText("other.ts"));
+    expect(viewerFor("/repo/src/other.ts")).not.toBe(otherViewer);
+    expect(
+      (screen.getByRole("textbox", {
+        name: "state-/repo/src/other.ts",
+      }) as HTMLInputElement).value,
+    ).toBe("kept position");
+  });
+
+  it("unmounts retained viewer state when the backend closes its panel", () => {
+    const { rerender } = renderTwo();
+    fireEvent.click(screen.getByText("App.tsx"));
+    fireEvent.change(screen.getByRole("textbox", { name: "state-/repo/src/App.tsx" }), {
+      target: { value: "discarded position" },
+    });
+    fireEvent.click(screen.getByText("other.ts"));
+
+    rerender(
+      <FilePanels
+        panels={[twoPanels[1]]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("textbox", { name: "state-/repo/src/App.tsx" })).toBeNull();
+    expect(screen.getAllByTestId("mock-file-viewer")).toHaveLength(1);
+
+    rerender(
+      <FilePanels
+        panels={[twoPanels[1], twoPanels[0]]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    expect(
+      (screen.getByRole("textbox", {
+        name: "state-/repo/src/App.tsx",
+      }) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("lets a changed explicit focus override cached viewer state", () => {
+    const { rerender } = renderTwo();
+    fireEvent.change(screen.getByRole("textbox", { name: "state-/repo/src/other.ts" }), {
+      target: { value: "stale position" },
+    });
+    fireEvent.click(screen.getByText("App.tsx"));
+
+    rerender(
+      <FilePanels
+        panels={[
+          twoPanels[0],
+          { ...twoPanels[1], focus: { startLine: 7, endLine: 7 } },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByText("other.ts"));
+
+    expect(
+      (screen.getByRole("textbox", {
+        name: "state-/repo/src/other.ts",
+      }) as HTMLInputElement).value,
+    ).toBe("");
   });
 
   it("calls onClosePanel from a tab close button", () => {
@@ -231,15 +365,19 @@ describe("FilePanels tab + split container logic", () => {
   it("splits panes side by side, unsets split on tab click, and re-merges", () => {
     renderTwo();
     expect(screen.getAllByTestId("mock-file-viewer").length).toBe(1);
+    const otherViewer = viewerFor("/repo/src/other.ts");
 
     fireEvent.click(screen.getByRole("button", { name: "Split" }));
     expect(screen.getAllByTestId("mock-file-viewer").length).toBe(2);
     expect(screen.getByRole("button", { name: "Unsplit" })).toBeTruthy();
+    expect(viewerFor("/repo/src/other.ts")).toBe(otherViewer);
+    const appViewer = viewerFor("/repo/src/App.tsx");
 
     // Clicking a tab while split unsets split and focuses that tab.
     fireEvent.click(screen.getByText("App.tsx"));
     expect(screen.getAllByTestId("mock-file-viewer").length).toBe(1);
-    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+    expect(viewerFor("/repo/src/App.tsx")).toBe(appViewer);
+    expect(visibleViewer().textContent).toContain("/repo/src/App.tsx");
 
     // Split again and toggle back via the button.
     fireEvent.click(screen.getByRole("button", { name: "Split" }));
@@ -300,7 +438,7 @@ describe("FilePanels tab + split container logic", () => {
         registerEditor={() => {}}
       />,
     );
-    expect(screen.getByTestId("mock-file-viewer")).toBeTruthy();
+    expect(visibleViewer()).toBeTruthy();
 
     // Remove p1 entirely — the orphaned view-mode entry must be dropped so
     // p1 (if it ever reappears) defaults back to source.
@@ -312,7 +450,7 @@ describe("FilePanels tab + split container logic", () => {
       />,
     );
     expect(screen.queryByTestId("file-browser-preview")).toBeNull();
-    expect(screen.getByTestId("mock-file-viewer")).toBeTruthy();
+    expect(visibleViewer()).toBeTruthy();
 
     // Re-add p1: it should start in source mode (no browser toggle active).
     rerender(
@@ -325,7 +463,7 @@ describe("FilePanels tab + split container logic", () => {
         registerEditor={() => {}}
       />,
     );
-    expect(screen.getByTestId("mock-file-viewer")).toBeTruthy();
+    expect(visibleViewer()).toBeTruthy();
   });
 });
 

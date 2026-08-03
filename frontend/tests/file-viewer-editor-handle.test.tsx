@@ -1,6 +1,7 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { useEffect, useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { editor } from "monaco-editor";
 import "../src/i18n";
 import type { FileEditorHandle } from "../src/components/FileViewer";
 
@@ -24,8 +25,16 @@ type MockEditor = {
   onContextMenu: ReturnType<typeof vi.fn>;
   onDidChangeCursorSelection: ReturnType<typeof vi.fn>;
   revealLinesInCenter: ReturnType<typeof vi.fn>;
+  restoreViewState: ReturnType<typeof vi.fn>;
+  saveViewState: ReturnType<typeof vi.fn>;
   setSelection: ReturnType<typeof vi.fn>;
 };
+
+const CAPTURED_VIEW_STATE = {
+  cursorState: [],
+  viewState: { scrollTop: 240, scrollLeft: 12 },
+  contributionsState: {},
+} as unknown as editor.ICodeEditorViewState;
 
 function lineMaxColumn(value: string, line: number): number {
   return (value.split("\n")[line - 1] ?? "").length + 1;
@@ -66,6 +75,8 @@ function createMockEditor(valueRef: { current: string }): MockEditor {
     onContextMenu: vi.fn(() => ({ dispose })),
     onDidChangeCursorSelection: vi.fn(() => ({ dispose })),
     revealLinesInCenter: vi.fn(),
+    restoreViewState: vi.fn(),
+    saveViewState: vi.fn(() => CAPTURED_VIEW_STATE),
     setSelection: vi.fn(),
   };
 }
@@ -107,18 +118,26 @@ afterEach(() => {
   editorInstances.length = 0;
 });
 
-function mockFetch() {
+function mockFetch({
+  content = "one\ntwo\nthree",
+  language = "typescript",
+  path = "/p/a.ts",
+}: {
+  content?: string;
+  language?: string;
+  path?: string;
+} = {}) {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => ({
     ok: true,
     json: async () =>
       String(url).includes("/api/file/draft")
         ? { exists: false }
         : {
-            content: "one\ntwo\nthree",
-            language: "typescript",
-            path: "/p/a.ts",
+            content,
+            language,
+            path,
             mtime_ns: 1,
-            size: 13,
+            size: content.length,
           },
   }) as Response);
 }
@@ -145,6 +164,89 @@ describe("FileViewer onEditorReady handle", () => {
       startColumn: 1,
       endLine: 1,
       endColumn: 4,
+    });
+  });
+
+  it("restores Monaco view state and captures the latest state on unmount", async () => {
+    mockFetch();
+    const restoredState = {
+      cursorState: [],
+      viewState: { scrollTop: 120, scrollLeft: 4 },
+      contributionsState: {},
+    } as unknown as editor.ICodeEditorViewState;
+    const onViewStateChange = vi.fn();
+    const { unmount } = render(
+      <FileViewer
+        filePath="/p/a.ts"
+        onClose={() => {}}
+        initialViewState={{
+          monacoViewState: restoredState,
+          renderedScroll: null,
+          markdownEditing: false,
+          video: null,
+        }}
+        onViewStateChange={onViewStateChange}
+      />,
+    );
+
+    await waitFor(() => expect(editorInstances).toHaveLength(1));
+    const mountedEditor = editorInstances[0];
+    await waitFor(() => {
+      expect(mountedEditor.restoreViewState).toHaveBeenCalledWith(restoredState);
+    });
+
+    unmount();
+
+    expect(onViewStateChange).toHaveBeenCalledWith({
+      monacoViewState: CAPTURED_VIEW_STATE,
+      renderedScroll: null,
+      markdownEditing: false,
+      video: null,
+    });
+    expect(editorInstances).toHaveLength(1);
+  });
+
+  it("restores and captures rendered-file scroll position", async () => {
+    mockFetch({
+      content: "name,count\none,1\ntwo,2",
+      language: "csv",
+      path: "/p/data.csv",
+    });
+    const onViewStateChange = vi.fn();
+    const { container, unmount } = render(
+      <FileViewer
+        filePath="/p/data.csv"
+        onClose={() => {}}
+        initialViewState={{
+          monacoViewState: null,
+          renderedScroll: { top: 90, left: 30 },
+          markdownEditing: false,
+          video: null,
+        }}
+        onViewStateChange={onViewStateChange}
+      />,
+    );
+
+    const rendered = container.querySelector<HTMLDivElement>(".file-viewer-rendered-wrap");
+    expect(rendered).toBeTruthy();
+    Object.defineProperties(rendered!, {
+      scrollTop: { configurable: true, value: 0, writable: true },
+      scrollLeft: { configurable: true, value: 0, writable: true },
+    });
+    await waitFor(() => {
+      expect(rendered?.scrollTop).toBe(90);
+      expect(rendered?.scrollLeft).toBe(30);
+    });
+    rendered!.scrollTop = 210;
+    rendered!.scrollLeft = 17;
+
+    unmount();
+
+    expect(onViewStateChange).toHaveBeenCalledWith({
+      monacoViewState: null,
+      renderedScroll: { top: 210, left: 17 },
+      markdownEditing: false,
+      video: null,
     });
   });
 });

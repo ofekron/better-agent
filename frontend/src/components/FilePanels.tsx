@@ -11,6 +11,7 @@ import {
   type FileEditorHandle,
   type FileIdentity,
   type FileTagAnchor,
+  type FileViewerViewState,
 } from "./FileViewer";
 import { useViewport } from "../hooks/useViewport";
 
@@ -34,6 +35,30 @@ interface Props {
 }
 
 type PanelViewMode = "source" | "browser";
+type CachedPanelViewState = {
+  navigationKey: string;
+  state: FileViewerViewState;
+};
+
+function panelNavigationKey(panel: OpenFilePanel): string {
+  const focus = panel.focus ?? panel.selection;
+  const selection = panel.selection;
+  return [
+    focus?.startLine ?? "",
+    focus?.endLine ?? "",
+    selection?.startLine ?? "",
+    selection?.startColumn ?? "",
+    selection?.endLine ?? "",
+    selection?.endColumn ?? "",
+  ].join(":");
+}
+
+function retainPanelKeys<T>(state: Record<string, T>, ids: Set<string>): Record<string, T> {
+  const next = Object.fromEntries(
+    Object.entries(state).filter(([id]) => ids.has(id)),
+  ) as Record<string, T>;
+  return Object.keys(next).length === Object.keys(state).length ? state : next;
+}
 
 function isHtmlPanel(path: string): boolean {
   const lower = path.toLowerCase();
@@ -220,8 +245,8 @@ function BrowserFilePreview({ filePath, nodeId }: { filePath: string; nodeId: st
  *
  * Pure projection of backend `open_file_panels`. Only the active tab,
  * split toggle, and per-tab source/browser preview mode are local
- * transient UI (allowed). In tab mode only the active panel's viewer is
- * mounted; in split mode every panel is mounted side-by-side. */
+ * transient UI (allowed). Per-tab viewer state is captured before an
+ * inactive viewer unmounts and restored when that tab mounts again. */
 export function FilePanels({
   panels,
   nodeId = "primary",
@@ -236,6 +261,9 @@ export function FilePanels({
   const [activeId, setActiveId] = useState<string | null>(null);
   const previousPanelIdsRef = useRef<string[]>([]);
   const [viewModes, setViewModes] = useState<Record<string, PanelViewMode>>({});
+  const [viewStates, setViewStates] = useState<Record<string, CachedPanelViewState>>(
+    {},
+  );
   // Split mode is desktop-only. On mobile/tablet the side-by-side
   // layout doesn't fit; the toggle is hidden in the toolbar below
   // and `split` is forced to false.
@@ -271,18 +299,8 @@ export function FilePanels({
 
   useEffect(() => {
     const ids = new Set(panels.map((p) => p.id));
-    setViewModes((prev) => {
-      let changed = false;
-      const next: Record<string, PanelViewMode> = {};
-      for (const [id, mode] of Object.entries(prev)) {
-        if (!ids.has(id)) {
-          changed = true;
-          continue;
-        }
-        next[id] = mode;
-      }
-      return changed ? next : prev;
-    });
+    setViewModes((prev) => retainPanelKeys(prev, ids));
+    setViewStates((prev) => retainPanelKeys(prev, ids));
   }, [panels]);
 
   const cycle = useCallback(
@@ -344,6 +362,8 @@ export function FilePanels({
   }, [panels.length, split, cycle]);
 
   const currentIds = useMemo(() => new Set(panels.map((p) => p.id)), [panels]);
+  const currentIdsRef = useRef(currentIds);
+  currentIdsRef.current = currentIds;
 
   if (panels.length === 0) return null;
 
@@ -353,6 +373,8 @@ export function FilePanels({
   const renderViewer = (panel: OpenFilePanel) => {
     const canBrowserRender = isHtmlPanel(panel.path);
     const mode = canBrowserRender ? viewModes[panel.id] ?? "source" : "source";
+    const navigationKey = panelNavigationKey(panel);
+    const cachedViewState = viewStates[panel.id];
 
     return (
       <div className="file-panels-viewer-shell">
@@ -391,12 +413,24 @@ export function FilePanels({
             key={panel.id}
             filePath={panel.path}
             nodeId={nodeId}
+            initialViewState={
+              cachedViewState?.navigationKey === navigationKey
+                ? cachedViewState.state
+                : null
+            }
             focus={panel.focus ?? panel.selection ?? undefined}
             select={panel.selection ?? null}
             onClose={() => onClosePanel(panel.id)}
             onAddFileTag={onAddFileTag}
             onStartDiscussion={onStartDiscussion}
             pendingTagCount={pendingTagCountFor?.(panel.path) ?? 0}
+            onViewStateChange={(state) => {
+              if (!currentIdsRef.current.has(panel.id)) return;
+              setViewStates((prev) => ({
+                ...prev,
+                [panel.id]: { navigationKey, state },
+              }));
+            }}
             onEditorReady={(h) => {
               if (currentIds.has(panel.id)) registerEditor(panel.path, h);
             }}
@@ -468,15 +502,14 @@ export function FilePanels({
       </div>
 
       <div className={`file-panels-body${split ? " split" : ""}`}>
-        {split ? (
-          panels.map((p) => (
-            <div key={p.id} className="file-panels-pane">
-              {renderViewer(p)}
-            </div>
-          ))
-        ) : (
-          <div className="file-panels-pane">{renderViewer(active)}</div>
-        )}
+        {(split ? panels : [active]).map((panel) => (
+          <div
+            key={panel.id}
+            className={`file-panels-pane${split ? "" : " active-tab"}`}
+          >
+            {renderViewer(panel)}
+          </div>
+        ))}
       </div>
     </div>
   );

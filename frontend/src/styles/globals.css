@@ -9563,6 +9563,21 @@ button.run-badge-clickable:focus-visible {
   border-inline-end: 1px solid var(--border);
 }
 
+.file-panels-pane.active-tab {
+  animation: file-panel-tab-in 0.14s ease-out;
+}
+
+@keyframes file-panel-tab-in {
+  from { opacity: 0.88; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-panels-pane.active-tab {
+    animation: none;
+  }
+}
+
 .file-panels-body.split .file-panels-pane:last-child {
   border-inline-end: none;
 }

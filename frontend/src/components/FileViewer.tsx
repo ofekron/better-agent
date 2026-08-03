@@ -1,4 +1,11 @@
-import { useCallback, useState, useEffect, useMemo, useRef } from "react";
+import {
+  useCallback,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { DiffEditor, Editor } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
@@ -43,8 +50,22 @@ export interface FileEditorHandle {
   getSelection: () => FileFocus | null;
 }
 
+export interface FileViewerViewState {
+  monacoViewState: editor.ICodeEditorViewState | null;
+  renderedScroll: { top: number; left: number } | null;
+  markdownEditing: boolean;
+  video: {
+    currentTime: number;
+    volume: number;
+    muted: boolean;
+    playbackRate: number;
+  } | null;
+}
+
 interface Props {
   filePath: string | null;
+  initialViewState?: FileViewerViewState | null;
+  onViewStateChange?: (state: FileViewerViewState) => void;
   diffBefore?: string;
   diffAfter?: string;
   focus?: FileFocus;
@@ -231,6 +252,8 @@ function selectionHtmlWithInlineStyles(container: HTMLElement, range: Range): st
 
 export function FileViewer({
   filePath,
+  initialViewState = null,
+  onViewStateChange,
   diffBefore,
   diffAfter,
   focus,
@@ -245,6 +268,8 @@ export function FileViewer({
   const { t } = useTranslation();
   const monacoFontSize = useScaledMonacoFontSize(13);
   const [content, setContent] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const loadedRef = useRef(loaded);
   const [language, setLanguage] = useState("plaintext");
   const [dirty, setDirty] = useState(false);
   const [loadedIdentity, setLoadedIdentity] = useState<FileIdentity | null>(null);
@@ -271,6 +296,11 @@ export function FileViewer({
     useState<editor.IStandaloneCodeEditor | null>(null);
   const decorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
   const appliedRevealKeyRef = useRef<string | null>(null);
+  const suppressInitialRevealRef = useRef(Boolean(initialViewState?.monacoViewState));
+  const restoredMonacoViewRef = useRef(false);
+  const restoredRenderedScrollRef = useRef(false);
+  const initialViewStateRef = useRef(initialViewState);
+  const onViewStateChangeRef = useRef(onViewStateChange);
   const contextMenuLineRef = useRef<number | null>(null);
   // Editor readiness is a React state (not just a ref) so mounting the
   // Monaco editor re-triggers the decoration effect below — otherwise, on
@@ -283,9 +313,13 @@ export function FileViewer({
   // TSV views (those don't go through Monaco).
   const renderedContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   // Md edit-view: when the user double-clicks the rendered markdown,
   // we switch into a raw Monaco editor. Edits auto-save after 1s of idle.
-  const [mdEditing, setMdEditing] = useState(false);
+  const [mdEditing, setMdEditing] = useState(
+    () => initialViewState?.markdownEditing ?? false,
+  );
+  const mdEditingRef = useRef(mdEditing);
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyResetRef = useRef<number | null>(null);
   const contentRef = useRef(content);
@@ -302,11 +336,43 @@ export function FileViewer({
   const loadedIdentityRef = useRef<FileIdentity | null>(loadedIdentity);
   loadedIdentityRef.current = loadedIdentity;
 
+  useLayoutEffect(() => {
+    loadedRef.current = loaded;
+    mdEditingRef.current = mdEditing;
+    onViewStateChangeRef.current = onViewStateChange;
+  }, [loaded, mdEditing, onViewStateChange]);
+
   useEffect(() => {
     return () => {
       if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
     };
   }, []);
+
+  const captureViewState = useCallback(() => {
+    if (!loadedRef.current) return;
+    const ed = editorRef.current;
+    const rendered = renderedContainerRef.current;
+    const video = videoRef.current;
+    onViewStateChangeRef.current?.({
+      monacoViewState: ed?.getModel()
+        ? ed.saveViewState()
+        : initialViewStateRef.current?.monacoViewState ?? null,
+      renderedScroll: rendered
+        ? { top: rendered.scrollTop, left: rendered.scrollLeft }
+        : initialViewStateRef.current?.renderedScroll ?? null,
+      markdownEditing: mdEditingRef.current,
+      video: video
+        ? {
+            currentTime: video.currentTime,
+            volume: video.volume,
+            muted: video.muted,
+            playbackRate: video.playbackRate,
+          }
+        : initialViewStateRef.current?.video ?? null,
+    });
+  }, []);
+
+  useLayoutEffect(() => () => captureViewState(), [captureViewState, filePath]);
 
   const flushDraftAt = useCallback(async (path: string) => {
     try {
@@ -338,12 +404,13 @@ export function FileViewer({
     // decoration effect briefly runs with the previous file's content and
     // clamps the range against the wrong line count.
     setContent("");
+    setLoaded(false);
     setDirty(false);
     setLoadedIdentity(null);
     setCurrentIdentity(null);
     setLatestPreview(null);
     setHasDraft(false);
-    setMdEditing(false);
+    setMdEditing(initialViewStateRef.current?.markdownEditing ?? false);
     setActiveEditor(null);
     setEditorReady(false);
     // Media files are served via /api/file/raw — no text fetch needed.
@@ -355,11 +422,13 @@ export function FileViewer({
           if (cancelled) return;
           setLoadedIdentity(identity);
           setCurrentIdentity(identity);
+          setLoaded(true);
         })
         .catch(() => {
           if (cancelled) return;
           setLoadedIdentity(null);
           setCurrentIdentity(null);
+          setLoaded(true);
         });
       return () => {
         cancelled = true;
@@ -374,9 +443,13 @@ export function FileViewer({
         setLoadedIdentity(loaded.identity);
         setCurrentIdentity(loaded.diskIdentity);
         setHasDraft(loaded.hasDraft);
+        setLoaded(true);
       })
       .catch(() => {
-        if (!cancelled) setContent(t("fileViewer.failedToLoad"));
+        if (!cancelled) {
+          setContent(t("fileViewer.failedToLoad"));
+          setLoaded(true);
+        }
       });
     // Cleanup runs on filePath change (and unmount). Flush any pending
     // save for the OLD path BEFORE the next effect run swaps content,
@@ -538,6 +611,7 @@ export function FileViewer({
         selEndColumn ?? "",
       ].join(":");
       const shouldApplyReveal = appliedRevealKeyRef.current !== revealKey;
+      const restoringSavedView = suppressInitialRevealRef.current;
 
       // Decoration is safe to apply even when the editor has zero size —
       // it just isn't visible yet. Scrolling into a zero-size viewport, on
@@ -572,7 +646,12 @@ export function FileViewer({
       // Agent-/user-requested real Monaco selection (separate from the
       // focus highlight decoration). Applied once when the file loads;
       // not re-applied on scroll (deps are primitive selStart/selEnd).
-      if (shouldApplyReveal && selStart !== undefined && selEnd !== undefined) {
+      if (
+        !restoringSavedView &&
+        shouldApplyReveal &&
+        selStart !== undefined &&
+        selEnd !== undefined
+      ) {
         const ss = Math.max(1, Math.min(selStart, maxLine));
         const se = Math.max(ss, Math.min(selEnd, maxLine));
         const ssMaxColumn = model.getLineMaxColumn(ss);
@@ -585,6 +664,10 @@ export function FileViewer({
         });
       }
 
+      if (restoringSavedView) {
+        appliedRevealKeyRef.current = revealKey;
+        return;
+      }
       if (!shouldApplyReveal) return;
       appliedRevealKeyRef.current = revealKey;
 
@@ -671,10 +754,42 @@ export function FileViewer({
     return () => onEditorReady(null);
   }, [onEditorReady, editorReady, filePath]);
 
+  useEffect(() => {
+    if (restoredMonacoViewRef.current || !loaded || !editorReady) return;
+    const ed = editorRef.current;
+    if (!ed) return;
+    const saved = initialViewStateRef.current?.monacoViewState;
+    if (!saved) {
+      restoredMonacoViewRef.current = true;
+      suppressInitialRevealRef.current = false;
+      return;
+    }
+    const rafId = requestAnimationFrame(() => {
+      ed.restoreViewState(saved);
+      const container = ed.getDomNode()?.parentElement;
+      if (container && container.offsetHeight > 0 && container.offsetWidth > 0) {
+        ed.layout({ width: container.offsetWidth, height: container.offsetHeight });
+      }
+      restoredMonacoViewRef.current = true;
+      suppressInitialRevealRef.current = false;
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [editorReady, loaded]);
+
   const kind: ViewerKind = useMemo(
     () => (filePath ? categorize(filePath, language) : "code"),
     [filePath, language],
   );
+
+  useLayoutEffect(() => {
+    if (restoredRenderedScrollRef.current || !loaded || mdEditing) return;
+    const saved = initialViewStateRef.current?.renderedScroll;
+    const container = renderedContainerRef.current;
+    if (!saved || !container) return;
+    container.scrollTop = saved.top;
+    container.scrollLeft = saved.left;
+    restoredRenderedScrollRef.current = true;
+  }, [kind, loaded, mdEditing]);
 
   // Reset any pending selection whenever the user navigates to a
   // different file — line numbers and rendered-DOM identities aren't
@@ -1096,10 +1211,20 @@ export function FileViewer({
       ) : kind === "video" ? (
         <div className="file-viewer-video">
           <video
+            ref={videoRef}
             src={rawUrl}
             controls
             preload="metadata"
             className="file-viewer-video-player"
+            onLoadedMetadata={(event) => {
+              const saved = initialViewStateRef.current?.video;
+              if (!saved) return;
+              const video = event.currentTarget;
+              video.currentTime = saved.currentTime;
+              video.volume = saved.volume;
+              video.muted = saved.muted;
+              video.playbackRate = saved.playbackRate;
+            }}
           >
             {t("fileViewer.videoNotSupported")}
           </video>
