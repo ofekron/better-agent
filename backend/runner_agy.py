@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 from env_compat import get_env
+from file_attachment_prompt import prepend_file_attachments
 from provider_run_config import symlink_home_overlay, write_skill_tree
 from provider_family_execution_runtime import (
     FamilyExecutionRuntime,
@@ -331,24 +332,6 @@ def _apply_image_attachments(run_dir: Path, prompt: str, images: list) -> tuple[
     paths = _materialize_attachments(run_dir, images)
     refs = "\n".join(f"@{path}" for path in paths)
     return (f"{prompt}\n\n{refs}" if prompt else refs), paths[0].parent
-
-
-def _apply_file_attachments(prompt: str, files: list) -> str:
-    if not files:
-        return prompt
-    file_sections: list[str] = []
-    for item in files:
-        raw = base64.b64decode(item.get("data", ""))
-        name = item.get("name", "unknown")
-        try:
-            text = raw.decode("utf-8")
-            file_sections.append(f"<file name=\"{name}\">\n{text}\n</file>")
-        except UnicodeDecodeError:
-            file_sections.append(
-                f"<file name=\"{name}\">[binary file, {item.get('size', len(raw))} bytes]</file>"
-            )
-    preamble = "\n\n".join(file_sections)
-    return f"{preamble}\n\n{prompt}" if prompt else preamble
 
 
 def _conversation_exists(home: Path, conversation_id: Optional[str]) -> bool:
@@ -1301,7 +1284,7 @@ async def _run(
 
     prompt = str(inputs.get("prompt") or "")
     prompt = _prepend_capability_context(prompt, inputs)
-    prompt = _apply_file_attachments(prompt, inputs.get("files") or [])
+    prompt = prepend_file_attachments(prompt, inputs.get("files") or [])
     prompt, attachment_dir = _apply_image_attachments(run_dir, prompt, inputs.get("images") or [])
     model = str(inputs.get("model") or "").strip()
     cwd = str(inputs.get("cwd") or os.getcwd())

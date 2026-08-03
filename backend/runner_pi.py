@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
+from file_attachment_prompt import prepend_file_attachments
 import harness_run_projection
 from proc_control import process_control as _process_control
 from runner_errors import resume_session_mismatch, stderr_error
@@ -319,27 +320,6 @@ def _materialize_attachments(run_dir: Path, images: list) -> list[Path]:
     return paths
 
 
-def _inline_file_attachments(prompt: str, files: list, log: logging.Logger) -> str:
-    sections: list[str] = []
-    for f in files:
-        try:
-            raw = base64.b64decode(f.get("data", ""))
-            name = f.get("name", "unknown")
-        except Exception:
-            log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
-            continue
-        try:
-            sections.append(f"<file name=\"{name}\">\n{raw.decode('utf-8')}\n</file>")
-        except UnicodeDecodeError:
-            sections.append(
-                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-            )
-    if not sections:
-        return prompt
-    preamble = "\n\n".join(sections)
-    return f"{preamble}\n\n{prompt}" if prompt else preamble
-
-
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_pi fatal: %s", error)
     try:
@@ -377,7 +357,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
 
     prompt = prepend_capability_context(prompt, inputs)
-    prompt = _inline_file_attachments(prompt, files, log)
+    prompt = prepend_file_attachments(prompt, files)
 
     model = str(inputs.get("model") or "").strip()
     reasoning_effort = str(inputs.get("reasoning_effort") or "").strip()

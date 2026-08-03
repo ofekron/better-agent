@@ -113,6 +113,7 @@ from communication_modes import (
     normalize_ask_execution,
 )
 from env_compat import get_env
+from file_attachment_prompt import prepend_file_attachments
 from loopback_http import raise_loopback_http_error
 from provider_completion import classify_completion_after_progress
 from process_identity import process_identity_to_dict
@@ -2557,32 +2558,6 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
 # ============================================================================
 
 
-def _compose_prompt_text(prompt: str, files: list, log: logging.Logger) -> str:
-    """Final prompt text sent to the CLI: file-attachment preamble + prompt."""
-    if not files:
-        return prompt
-    file_sections: list[str] = []
-    for f in files:
-        try:
-            raw = base64.b64decode(f.get("data", ""))
-            name = f.get("name", "unknown")
-        except Exception:
-            log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
-            continue
-        try:
-            text = raw.decode("utf-8")
-            file_sections.append(
-                f"<file name=\"{name}\">\n{text}\n</file>"
-            )
-        except UnicodeDecodeError:
-            file_sections.append(
-                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-            )
-    file_preamble = "\n\n".join(file_sections)
-    return f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
-
-
-
 # ============================================================================
 # Runner lifecycle primitives — heartbeat
 # ============================================================================
@@ -2924,7 +2899,7 @@ async def _run_one_turn(
         if current_turn_holder is not None:
             current_turn_holder[0] = turn_id
         # Inject file contents into the prompt for non-image attachments.
-        prompt = _compose_prompt_text(prompt, files, log)
+        prompt = prepend_file_attachments(prompt, files)
 
         if images:
             content: list[dict] = []

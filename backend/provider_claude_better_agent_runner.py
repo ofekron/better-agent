@@ -136,10 +136,21 @@ class ClaudeBetterAgentRunnerProvider(SessionEventsProvider):
     # change scoped to Claude; a follow-up could promote this to
     # SessionEventsProvider for every in-process-runner kind.
     # ------------------------------------------------------------------
-    def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
+    def steer_run(
+        self,
+        run_id: str,
+        prompt: str,
+        images: Optional[list] = None,
+        files: Optional[list] = None,
+    ) -> bool:
         rs = self._runs.get(run_id)
         images = images or []
-        if rs is None or rs.popen.poll() is not None or (not prompt.strip() and not images):
+        files = files or []
+        if (
+            rs is None
+            or rs.popen.poll() is not None
+            or (not prompt.strip() and not images and not files)
+        ):
             return False
         state_path = rs.run_dir / "state.json"
         try:
@@ -151,7 +162,11 @@ class ClaudeBetterAgentRunnerProvider(SessionEventsProvider):
         inbox = rs.run_dir / "steer.jsonl"
         try:
             with inbox.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"prompt": prompt, "images": images}) + "\n")
+                f.write(json.dumps({
+                    "prompt": prompt,
+                    "images": images,
+                    "files": files,
+                }) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
             return True

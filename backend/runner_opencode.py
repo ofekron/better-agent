@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
+from file_attachment_prompt import prepend_file_attachments
 from proc_control import process_control as _process_control
 from runner_errors import classify, resume_session_mismatch
 from provider_session_events_runner import restore_session_events_runner
@@ -377,28 +378,6 @@ def _materialize_images(run_dir: Path, images: list) -> list[Path]:
     return paths
 
 
-def _inline_file_attachments(prompt: str, files: list) -> str:
-    sections: list[str] = []
-    for f in files:
-        try:
-            raw = base64.b64decode(f.get("data", ""))
-            name = f.get("name", "unknown")
-        except Exception:
-            logger.warning("skipping malformed file attachment: %s", f.get("name", "?"))
-            continue
-        try:
-            text = raw.decode("utf-8")
-            sections.append(f"<file name=\"{name}\">\n{text}\n</file>")
-        except UnicodeDecodeError:
-            sections.append(
-                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-            )
-    if not sections:
-        return prompt
-    preamble = "\n\n".join(sections)
-    return f"{preamble}\n\n{prompt}" if prompt else preamble
-
-
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
     return prepend_capability_context(prompt, inputs)
 
@@ -439,7 +418,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
 
     prompt = _prepend_capability_context(prompt, inputs)
-    prompt = _inline_file_attachments(prompt, files)
+    prompt = prepend_file_attachments(prompt, files)
     attachment_paths = _materialize_images(run_dir, images) if images else []
 
     opencode_bin = inputs.pop("_provider_executable", None)

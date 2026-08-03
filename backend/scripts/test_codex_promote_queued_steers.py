@@ -93,11 +93,17 @@ class _Provider:
 
     def __init__(self, transient_failures: int = 0) -> None:
         self._runs = {"run-1": object()}
-        self.steered: list[tuple[str, str, list | None]] = []
+        self.steered: list[tuple[str, str, list | None, list | None]] = []
         self.transient_failures = transient_failures
 
-    def steer_run(self, run_id: str, prompt: str, images: list | None = None) -> bool:
-        self.steered.append((run_id, prompt, images))
+    def steer_run(
+        self,
+        run_id: str,
+        prompt: str,
+        images: list | None = None,
+        files: list | None = None,
+    ) -> bool:
+        self.steered.append((run_id, prompt, images, files))
         if self.transient_failures > 0:
             self.transient_failures -= 1
             return False
@@ -136,6 +142,12 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
             "data": base64.b64encode(b"png-bytes").decode("ascii"),
             "media_type": "image/png",
         }],
+        files=[{
+            "name": "notes.txt",
+            "media_type": "text/plain",
+            "size": 5,
+            "data": base64.b64encode(b"notes").decode("ascii"),
+        }],
         client_id="client-1",
         lifecycle_msg_id="life-1",
     ) is True
@@ -143,6 +155,11 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
     assert provider.steered == [("run-1", "model prompt", [{
         "data": base64.b64encode(b"png-bytes").decode("ascii"),
         "media_type": "image/png",
+    }], [{
+        "name": "notes.txt",
+        "media_type": "text/plain",
+        "size": 5,
+        "data": base64.b64encode(b"notes").decode("ascii"),
     }])]
     assert saved[0]["type"] == "steer_prompt"
     assert saved[0]["data"]["prompt"] == "visible prompt"
@@ -152,6 +169,12 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
         "filename": f"{saved[0]['data']['uuid']}_0.png",
         "media_type": "image/png",
     }]
+    assert saved[0]["data"]["files"] == [{
+        "name": "notes.txt",
+        "media_type": "text/plain",
+        "size": 5,
+    }]
+    assert "data" not in saved[0]["data"]["files"][0]
     image_path = (
         Path(TMP_HOME)
         / "sessions"
@@ -176,6 +199,48 @@ async def _test_steer_active_turn_saves_in_turn_event() -> None:
         "lifecycle.steer_accepted",
         "lifecycle.steer_persisted",
     ]
+
+
+def test_steer_active_turn_preserves_file_payload_and_metadata() -> None:
+    async def run() -> None:
+        coord = _new_coord()
+        saved: list[dict] = []
+        provider = _Provider()
+
+        async def save_callback(event: dict) -> None:
+            saved.append(event)
+
+        async def dispatch_raw(_sid: str, _event: dict) -> None:
+            return None
+
+        coord.turn_manager = _TurnManager(save_callback)
+        coord.provider_for_session = lambda _sid: provider  # type: ignore[method-assign]
+        coord.dispatch_raw = dispatch_raw  # type: ignore[method-assign]
+        attachment = {
+            "name": "notes.txt",
+            "media_type": "text/plain",
+            "size": 5,
+            "data": base64.b64encode(b"notes").decode("ascii"),
+        }
+
+        assert await coord.steer_active_turn(
+            app_session_id="sid",
+            prompt="",
+            display_prompt="",
+            images=None,
+            files=[attachment],
+            client_id="client-1",
+            lifecycle_msg_id="life-1",
+        ) is True
+        assert provider.steered == [("run-1", "", None, [attachment])]
+        assert saved[0]["data"]["files"] == [{
+            "name": "notes.txt",
+            "media_type": "text/plain",
+            "size": 5,
+        }]
+        assert "data" not in saved[0]["data"]["files"][0]
+
+    asyncio.run(run())
 
 
 async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:
@@ -206,6 +271,7 @@ async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:
             prompt="model prompt",
             display_prompt="visible prompt",
             images=None,
+            files=None,
             client_id="client-1",
             lifecycle_msg_id="life-1",
         ) is True
@@ -213,8 +279,8 @@ async def _test_steer_active_turn_waits_for_codex_turn_id() -> None:
         orchestrator._STEER_READY_RETRY_INTERVAL_SECONDS = original_interval
 
     assert provider.steered == [
-        ("run-1", "model prompt", None),
-        ("run-1", "model prompt", None),
+        ("run-1", "model prompt", None, None),
+        ("run-1", "model prompt", None, None),
     ]
     assert saved[0]["type"] == "steer_prompt"
     assert dispatched[0][1]["type"] == "steer_prompt_persisted"

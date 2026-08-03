@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
+from file_attachment_prompt import prepend_file_attachments
 from proc_control import process_control as _process_control
 from runner_errors import (
     CATEGORY_AUTH,
@@ -403,30 +404,6 @@ def _prepend_capability_context(prompt: str, inputs: dict[str, Any]) -> str:
     return prepend_capability_context(prompt, inputs)
 
 
-def _inject_file_attachments(prompt: str, files: list) -> str:
-    """Inline text-file attachments into the prompt (cursor-agent headless
-    accepts prompt text only)."""
-    import base64
-    sections: list[str] = []
-    for f in files:
-        try:
-            raw = base64.b64decode(f.get("data", ""))
-            name = f.get("name", "unknown")
-        except Exception:
-            logger.warning("skipping malformed file attachment: %s", f.get("name", "?"))
-            continue
-        try:
-            sections.append(f"<file name=\"{name}\">\n{raw.decode('utf-8')}\n</file>")
-        except UnicodeDecodeError:
-            sections.append(
-                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-            )
-    if not sections:
-        return prompt
-    preamble = "\n\n".join(sections)
-    return f"{preamble}\n\n{prompt}" if prompt else preamble
-
-
 def build_argv(
     *,
     cursor_bin: str,
@@ -454,7 +431,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         return 1
 
     prompt = _prepend_capability_context(str(inputs.get("prompt") or ""), inputs)
-    prompt = _inject_file_attachments(prompt, inputs.get("files") or [])
+    prompt = prepend_file_attachments(prompt, inputs.get("files") or [])
     model = str(inputs.get("model") or "").strip()
     cwd = str(inputs.get("cwd") or os.getcwd())
     session_id = str(inputs.get("session_id") or "").strip()

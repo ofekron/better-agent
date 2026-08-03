@@ -169,7 +169,13 @@ class OpenAIProvider(SessionEventsProvider):
         )
         return True
 
-    def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
+    def steer_run(
+        self,
+        run_id: str,
+        prompt: str,
+        images: Optional[list] = None,
+        files: Optional[list] = None,
+    ) -> bool:
         """Append a steering message for a live OpenAI turn.
 
         Chat Completions has no mid-token native steering primitive, but because
@@ -179,7 +185,12 @@ class OpenAIProvider(SessionEventsProvider):
         """
         rs = self._runs.get(run_id)
         images = images or []
-        if rs is None or rs.popen.poll() is not None or (not prompt.strip() and not images):
+        files = files or []
+        if (
+            rs is None
+            or rs.popen.poll() is not None
+            or (not prompt.strip() and not images and not files)
+        ):
             return False
         state_path = rs.run_dir / "state.json"
         try:
@@ -191,7 +202,11 @@ class OpenAIProvider(SessionEventsProvider):
         inbox = rs.run_dir / "steer.jsonl"
         try:
             with inbox.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"prompt": prompt, "images": images}) + "\n")
+                f.write(json.dumps({
+                    "prompt": prompt,
+                    "images": images,
+                    "files": files,
+                }) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
             return True

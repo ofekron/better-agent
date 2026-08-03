@@ -1998,7 +1998,11 @@ class ClaudeProvider(Provider):
                 pass
 
     def steer_run(
-        self, run_id: str, prompt: str, images: Optional[list] = None,
+        self,
+        run_id: str,
+        prompt: str,
+        images: Optional[list] = None,
+        files: Optional[list] = None,
     ) -> bool:
         """Native claude has no mid-turn steering primitive (unchanged —
         base `Provider.steer_run` always returned False here).
@@ -2006,7 +2010,7 @@ class ClaudeProvider(Provider):
         openai/fugu-ba-runner do (see
         ClaudeBetterAgentRunnerProvider.steer_run)."""
         if self.record.get("runner") == "better_agent_runner":
-            return self._ba_delegate.steer_run(run_id, prompt, images)
+            return self._ba_delegate.steer_run(run_id, prompt, images, files)
         return False
 
     def attach_recovered_run(

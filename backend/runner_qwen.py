@@ -21,16 +21,15 @@ Reused from `runner_session_events` (single source of truth, no copies):
 `_sum_usage`, `_extract_error_message`, `_normalize_unknown`,
 `_new_uuid`. Stderr/error classification goes through `runner_errors`.
 
-DUPLICATED-PENDING-SEAM: the stderr-drain / cancel-watcher /
-file-preamble blocks below are duplicated across the family's runners,
-which keep them inside their `_run` closures. Proposed refactor (see
+DUPLICATED-PENDING-SEAM: the stderr-drain and cancel-watcher blocks below
+are duplicated across the family's runners, which keep them inside their
+`_run` closures. Proposed refactor (see
 provider_qwen module docstring): extract them into a shared
 `runner_stream_common.py` and have every family runner import it.
 """
 
 import argparse
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -41,6 +40,7 @@ from typing import Any, Optional
 
 from builtin_mcp_config import native_mcp_runtime_env
 from capability_contexts import prepend_capability_context
+from file_attachment_prompt import prepend_file_attachments
 import harness_run_projection
 from continuation import normalize_context_overflow_error
 from proc_control import process_control as _process_control
@@ -255,26 +255,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
     prompt = prepend_capability_context(prompt or "", inputs)
 
-    # DUPLICATED-PENDING-SEAM (family file preamble): inline
-    # non-image attachments into the prompt.
-    if files:
-        file_sections: list[str] = []
-        for f in files:
-            try:
-                raw = base64.b64decode(f.get("data", ""))
-                name = f.get("name", "unknown")
-            except Exception:
-                log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
-                continue
-            try:
-                text = raw.decode("utf-8")
-                file_sections.append(f"<file name=\"{name}\">\n{text}\n</file>")
-            except UnicodeDecodeError:
-                file_sections.append(
-                    f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-                )
-        file_preamble = "\n\n".join(file_sections)
-        prompt = f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+    prompt = prepend_file_attachments(prompt, files)
 
     # Image attachments: qwen keeps the headless @path resolution
     # (handleAtCommand → read_many_files inlineData), so the shared

@@ -45,6 +45,7 @@ from typing import Awaitable, Callable, Literal, Optional
 from typing import NamedTuple
 
 from i18n import t
+from file_attachment_prompt import file_attachment_metadata
 from communication_modes import (
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     append_ask_response_contract,
@@ -211,28 +212,6 @@ def _save_message_images(app_session_id: str, owner_id: str, images: list) -> li
         (img_dir / fname).write_bytes(base64.b64decode(img["data"], validate=True))
         saved_images.append({"filename": fname, "media_type": media_type})
     return saved_images
-
-
-def _message_file_metadata(files: list) -> list[dict]:
-    metadata = []
-    for f in files:
-        if not isinstance(f, dict):
-            raise ValueError("malformed file attachment")
-        name = f.get("name")
-        media_type = f.get("media_type")
-        size = f.get("size")
-        if not isinstance(name, str) or not name:
-            raise ValueError("file attachment missing name")
-        if not isinstance(media_type, str):
-            raise ValueError("file attachment missing media_type")
-        if not isinstance(size, int) or size < 0:
-            raise ValueError("file attachment missing size")
-        metadata.append({
-            "name": name,
-            "media_type": media_type,
-            "size": size,
-        })
-    return metadata
 
 
 # Safety cap for the turn-join wait (sender turn held open while its mssg
@@ -1213,6 +1192,7 @@ class Coordinator:
         images: Optional[list],
         client_id: Optional[str],
         lifecycle_msg_id: str,
+        files: Optional[list] = None,
     ) -> bool:
         # Resolve which provider owns the in-flight run. The common case
         # (and the path the steer tests exercise) is the session's current
@@ -1304,7 +1284,7 @@ class Coordinator:
             return True
         deadline = _time.monotonic() + _STEER_READY_RETRY_SECONDS
         while True:
-            if provider.steer_run(run_id, prompt, images):
+            if provider.steer_run(run_id, prompt, images, files):
                 break
             if _time.monotonic() >= deadline:
                 await publish_steer_fact(
@@ -1328,6 +1308,8 @@ class Coordinator:
                 event_data["uuid"],
                 images,
             )
+        if files:
+            event_data["files"] = file_attachment_metadata(files)
         await save_callback({
             "type": "steer_prompt",
             "data": event_data,
@@ -3417,6 +3399,7 @@ class Coordinator:
                 prompt=first.get("cli_prompt") or first.get("prompt") or "",
                 display_prompt=first.get("prompt"),
                 images=first.get("images"),
+                files=first.get("files"),
                 client_id=first.get("client_id"),
                 lifecycle_msg_id=first.get("lifecycle_msg_id") or str(uuid.uuid4()),
             ):
@@ -5462,7 +5445,7 @@ class Coordinator:
                 images,
             )
         if files:
-            user_msg["files"] = _message_file_metadata(files)
+            user_msg["files"] = file_attachment_metadata(files)
 
         # strict: a prompt whose persist silently no-ops becomes an
         # unrecoverable turn loss with a false persisted-ack to the UI.

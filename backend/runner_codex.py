@@ -39,6 +39,7 @@ from i18n import t
 import runner_errors
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
+from file_attachment_prompt import prepend_file_attachments
 import harness_run_projection
 from continuation import normalize_context_overflow_error
 from codex_normalize import (
@@ -2941,8 +2942,14 @@ def _materialize_image_attachments(run_dir: Path, images: list) -> list[Path]:
     return paths
 
 
-def build_codex_turn_input(run_dir: Path, prompt: str, images: list) -> list[dict]:
+def build_codex_turn_input(
+    run_dir: Path,
+    prompt: str,
+    images: list,
+    files: Optional[list] = None,
+) -> list[dict]:
     turn_input: list[dict] = []
+    prompt = prepend_file_attachments(prompt, files or [])
     if prompt:
         turn_input.append({"type": "text", "text": prompt, "text_elements": []})
     for path in _materialize_image_attachments(run_dir, images) if images else []:
@@ -3326,6 +3333,7 @@ def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:
         run_dir,
         payload.get("prompt") or "",
         payload.get("images") or [],
+        payload.get("files") or [],
     )
 
 
@@ -3419,12 +3427,13 @@ async def _run(run_dir: Path, inputs: dict, execution_contract, launch) -> int:
         return 1
     prompt = inputs.get("prompt") or ""
     images = inputs.get("images") or []
+    files = inputs.get("files") or []
     bare_config = bool(inputs.get("bare_config"))
     cwd = inputs.get("cwd")
     if not cwd:
         _fail(run_dir, "missing required field: cwd")
         return 1
-    if not prompt and not images:
+    if not prompt and not images and not files:
         _fail(run_dir, "missing required field: prompt")
         return 1
     prompt = _prepend_capability_context(prompt, inputs)
@@ -3490,7 +3499,7 @@ async def _run(run_dir: Path, inputs: dict, execution_contract, launch) -> int:
         _fail(run_dir, str(exc))
         return 1
 
-    turn_input = build_codex_turn_input(run_dir, prompt, images)
+    turn_input = build_codex_turn_input(run_dir, prompt, images, files)
     from codex_native import resolve_rollout_path, resolve_rollout_path_polled
     initial_rollout_path = resolve_rollout_path(session_id or "")
     if session_id and initial_rollout_path is None:

@@ -1667,7 +1667,13 @@ class Provider(ABC):
                     )
         return True
 
-    def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
+    def steer_run(
+        self,
+        run_id: str,
+        prompt: str,
+        images: Optional[list] = None,
+        files: Optional[list] = None,
+    ) -> bool:
         return False
 
     # ------------------------------------------------------------------

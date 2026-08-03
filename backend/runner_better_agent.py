@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import contextlib
 import copy
 import http.client
@@ -51,6 +50,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 import mcp_stdio_bridge
+from file_attachment_prompt import prepend_file_attachments
 from mcp_tool_discovery import tool_discovery
 
 from communication_modes import (
@@ -318,31 +318,6 @@ def _prepend_capability_context(prompt: str, inputs: dict) -> str:
     return prepend_capability_context(prompt, inputs)
 
 
-def _prepend_file_attachments(prompt: str, files: list) -> str:
-    if not files:
-        return prompt
-    sections: list[str] = []
-    for f in files:
-        if not isinstance(f, dict):
-            continue
-        name = str(f.get("name") or "unknown")
-        try:
-            raw = base64.b64decode(str(f.get("data") or ""))
-        except Exception:
-            logger.warning("Skipping malformed file attachment: %s", name)
-            continue
-        try:
-            text = raw.decode("utf-8")
-            sections.append(f"<file name=\"{name}\">\n{text}\n</file>")
-        except UnicodeDecodeError:
-            size = f.get("size") if isinstance(f.get("size"), int) else len(raw)
-            sections.append(f"<file name=\"{name}\">[binary file, {size} bytes]</file>")
-    if not sections:
-        return prompt
-    preamble = "\n\n".join(sections)
-    return f"{preamble}\n\n{prompt}" if prompt else preamble
-
-
 def _image_part(img: dict) -> Optional[dict]:
     if not isinstance(img, dict):
         return None
@@ -398,6 +373,8 @@ def _drain_steer_messages(run_dir: Path, offset: int, messages: list[dict]) -> t
                     continue
                 prompt = _steer_prompt(str(payload.get("prompt") or ""))
                 images = payload.get("images") if isinstance(payload.get("images"), list) else []
+                files = payload.get("files") if isinstance(payload.get("files"), list) else []
+                prompt = prepend_file_attachments(prompt, files)
                 messages.append({"role": "user", "content": _build_user_content(prompt, images)})
                 appended += 1
             return f.tell(), appended
@@ -2433,7 +2410,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     resume_sid = inputs.get("session_id")
 
     capability_context = render_capability_context(inputs.get("capability_contexts") or [])
-    prompt = _prepend_file_attachments(prompt, inputs.get("files") or [])
+    prompt = prepend_file_attachments(prompt, inputs.get("files") or [])
     session_id, messages = _load_history_for_run(resume_sid, fork=bool(inputs.get("fork")))
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})

@@ -368,9 +368,15 @@ def test_images_files_and_reasoning_are_sent(monkeypatch):
         tmp = Path(tempfile.mkdtemp(prefix="openai_mm_"))
         _run_turn(
             None, tmp, "sid-app-mm", None, "describe",
-            files=[{"name": "a.txt", "data": file_payload, "size": 10}],
+            files=[{
+                "name": "a.txt",
+                "media_type": "text/plain",
+                "data": file_payload,
+                "size": 10,
+            }],
             images=[{"media_type": "image/png", "data": img_payload}],
             reasoning_effort="medium",
+            _capability_plan={"mcp_servers": []},
         )
         with stub.lock:
             payload = stub.payloads[0]
@@ -399,7 +405,16 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
         # running. The next model round should include this as a user message.
         run_dir = Path(os.environ["OPENAI_TEST_RUN_DIR"])
         (run_dir / "steer.jsonl").write_text(
-            json.dumps({"prompt": "please adjust", "images": []}) + "\n",
+            json.dumps({
+                "prompt": "please adjust",
+                "images": [],
+                "files": [{
+                    "name": "steer.txt",
+                    "media_type": "text/plain",
+                    "size": len(b"steer content"),
+                    "data": base64.b64encode(b"steer content").decode("ascii"),
+                }],
+            }) + "\n",
             encoding="utf-8",
         )
         return "tool-output"
@@ -413,11 +428,12 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
             "permission": {"mode": "bypassPermissions"}, "session_id": None,
             "mode": "native", "app_session_id": "sid-app-steer",
             "backend_url": "", "internal_token": "",
+            "_capability_plan": {"mcp_servers": []},
         }
         rd = _make_run_dir(tmp, inputs)
         monkeypatch.setenv("OPENAI_TEST_RUN_DIR", str(rd))
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
-        assert rc == 0
+        assert rc == 0, (rd / "complete.json").read_text(encoding="utf-8")
         with stub.lock:
             second_messages = stub.requests[1]
     finally:
@@ -425,6 +441,7 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
 
     texts = [m.get("content") for m in second_messages if m.get("role") == "user"]
     assert any("please adjust" in str(t) for t in texts), texts
+    assert any("steer content" in str(t) for t in texts), texts
 
 
 def test_zai_incremental_deltas_concatenated_verbatim(monkeypatch):

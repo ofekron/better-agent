@@ -27,6 +27,7 @@ import user_prefs
 import virtual_session_prompt_handlers
 from capability_contexts import normalize_capability_contexts
 from env_compat import dual_env
+from file_attachment_prompt import MAX_FILE_SIZE_BYTES, validate_file_attachment
 from i18n import t
 from offline_actions_api import _start_prompt_handoff
 from orchestrator import build_semantic_alter_prompt
@@ -890,22 +891,16 @@ async def websocket_chat(websocket: WebSocket):
                     continue
 
                 # Validate file attachments — reject oversized or malformed entries.
-                MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
                 _file_error = None
-                for f in files:
-                    if (
-                        not isinstance(f, dict)
-                        or not isinstance(f.get("data"), str)
-                        or not isinstance(f.get("name"), str)
-                        or not f.get("name")
-                        or not isinstance(f.get("media_type"), str)
-                        or not isinstance(f.get("size"), int)
-                        or f.get("size") < 0
-                    ):
-                        _file_error = "Malformed file attachment"
-                        break
-                    if f["size"] > MAX_FILE_SIZE:
-                        _file_error = f"File \"{f.get('name', '?')}\" exceeds 10 MB limit"
+                for index, f in enumerate(files):
+                    try:
+                        validate_file_attachment(
+                            f,
+                            index,
+                            max_size=MAX_FILE_SIZE_BYTES,
+                        )
+                    except ValueError as exc:
+                        _file_error = str(exc)
                         break
                 if _file_error:
                     await _send_message_error(_file_error)
@@ -1294,6 +1289,7 @@ async def websocket_chat(websocket: WebSocket):
                             prompt=cli_prompt or prompt,
                             display_prompt=prompt,
                             images=images if images else None,
+                            files=files if files else None,
                             client_id=msg.get("client_id"),
                             lifecycle_msg_id=lifecycle_msg_id,
                         )

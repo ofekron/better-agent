@@ -218,19 +218,20 @@ def test_steer_run_success_appends_multiple_in_order(tmp_path):
 
 
 def test_steer_run_write_failure_returns_false(tmp_path):
-    """run_dir is read-only after a valid state.json is in place, so the
-    state read succeeds but creating steer.jsonl raises PermissionError
-    (an OSError), which steer_run swallows and reports as False."""
     provider = _make_provider()
     run_dir = _register_run(provider, tmp_path, run_id="ro")
     (run_dir / "state.json").write_text(
         json.dumps({"session_id": "sess-ro"}), encoding="utf-8",
     )
-    os.chmod(run_dir, 0o500)  # r-x: owner cannot create files
-    try:
+    original_open = Path.open
+
+    def fail_steer_open(path, *args, **kwargs):
+        if path.name == "steer.jsonl":
+            raise PermissionError("simulated write failure")
+        return original_open(path, *args, **kwargs)
+
+    with mock.patch.object(Path, "open", fail_steer_open):
         assert provider.steer_run("ro", "do something") is False
-    finally:
-        os.chmod(run_dir, 0o755)  # restore so tmp cleanup can rm
 
 
 # ---------------------------------------------------------------------------

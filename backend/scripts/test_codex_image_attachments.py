@@ -21,6 +21,39 @@ def _img(media_type: str = "image/png") -> dict:
     return {"media_type": media_type, "data": _PNG_B64}
 
 
+def _file(name: str = "notes.txt", data: bytes = b"attachment text") -> dict:
+    return {
+        "name": name,
+        "media_type": "text/plain",
+        "size": len(data),
+        "data": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def test_codex_turn_and_steer_preserve_files(tmp_path):
+    file_attachment = _file()
+    turn_input = build_codex_turn_input(
+        tmp_path, "inspect both", [_img()], [file_attachment],
+    )
+    assert turn_input[0] == {
+        "type": "text",
+        "text": '<file name="notes.txt">\nattachment text\n</file>\n\ninspect both',
+        "text_elements": [],
+    }
+    assert turn_input[1]["type"] == "localImage"
+
+    steer_input = build_codex_steer_input(tmp_path, {
+        "prompt": "adjust",
+        "images": [],
+        "files": [file_attachment],
+    })
+    assert steer_input == [{
+        "type": "text",
+        "text": '<file name="notes.txt">\nattachment text\n</file>\n\nadjust',
+        "text_elements": [],
+    }]
+
+
 def main() -> int:
     failures: list[str] = []
 
