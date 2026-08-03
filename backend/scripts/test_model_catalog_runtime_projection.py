@@ -86,10 +86,16 @@ async def _scenario(root: Path) -> None:
 
 
 def test_fugu_cold_start_does_not_project_configured_default() -> None:
+    from provider_fugu import FUGU_MODELS
+
     record = provider(Path(TEST_HOME.path), kind="fugu")
-    config_store.update_provider(record["id"], {"default_model": "fugu"})
-    assert models.models_catalog(record["id"])["models"] == []
-    assert models.available_models(record["id"]) == []
+    config_store.update_provider(
+        record["id"], {"default_model": "fugu-configured-default"}
+    )
+    catalog = models.models_catalog(record["id"])
+    assert catalog["models"] == list(FUGU_MODELS)
+    assert "fugu-configured-default" not in catalog["models"]
+    assert models.available_models(record["id"]) == list(FUGU_MODELS)
 
 
 def test_runtime_reads_project_d3_dynamic_and_lkg_catalogs() -> None:

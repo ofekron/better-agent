@@ -62,7 +62,7 @@ def write_executable(
         else f"print(json.dumps({models!r}))\n"
     )
     source = (
-        "#!/usr/bin/python3\n"
+        f"#!{sys.executable}\n"
         "import json\n"
         "import os\n"
         "import sys\n"
