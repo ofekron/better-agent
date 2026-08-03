@@ -46,6 +46,7 @@ BASE_MODE = "file_editing_base"
 # Prevents a retried create or a post-failure re-arm from running two
 # warms against the same session.
 _PROVISIONING_TASKS: dict[str, "asyncio.Task"] = {}
+_ROOT_SESSION_SCAN_DONE = object()
 
 _META_PROMPT = render_prompt("file_editor/bootstrap.md")
 _PROVISION_PROMPT = render_prompt("file_editor/provision.md")
@@ -585,13 +586,14 @@ async def recover_pending_fork_provisioning() -> dict:
     """
     rearmed: list[str] = []
     failed: list[str] = []
-    for session in session_manager.iter_root_sessions():
-        # Per-session yield so a large session store doesn't starve
-        # WS/REST handlers for the whole scan — each iteration re-migrates
-        # and re-resolves provider config, which adds up across thousands
-        # of sessions. Same idiom as run_recovery.py's per-desc yield.
-        # `sleep(0)` is the cheapest yield asyncio offers.
-        await asyncio.sleep(0)
+    sessions = session_manager.iter_root_sessions()
+    while True:
+        session = await asyncio.to_thread(
+            next, sessions, _ROOT_SESSION_SCAN_DONE,
+        )
+        if session is _ROOT_SESSION_SCAN_DONE:
+            break
+        assert isinstance(session, dict)
         if session_readiness.state_of(session) != session_readiness.STATE_PENDING:
             continue
         sid = session.get("id")
