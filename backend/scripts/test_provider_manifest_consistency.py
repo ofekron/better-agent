@@ -117,97 +117,110 @@ def test_runner_choices_are_valid():
     assert pm.default_runner_for("claude") == "native"
     assert pm.default_runner_for("openai") == "better_agent_runner"
     assert pm.runner_choices_for("fugu") == ("native", "better_agent_runner")
+    # The better_agent_runner override selects the in-process runner module
+    # regardless of the kind's own default (claude's default is the native
+    # "runner"; the override routes it to runner_better_agent).
+    assert pm.runner_module_for("claude", runner="better_agent_runner") == "runner_better_agent"
+    assert set(pm.all_kinds()) == set(pm.SPECS)
 
 
-def test_provider_runner_round_trips():
+def test_provider_runner_options_and_default_profile(monkeypatch):
+    # Runner selection lives on runtime profiles, not the provider record
+    # (see the v3 config-store migration and the frontend FormPayload, which
+    # carries no `runner` field). `add_provider` therefore seeds exactly one
+    # runtime profile carrying the kind's DEFAULT runner, and the provider
+    # view surfaces the runners supported for that kind+mode plus the
+    # per-runner profile projections. This locks that contract end to end.
     import config_store
-    config_store._keyring_blocked = True
-    openai = config_store.add_provider({
-        "name": "OpenAI-compatible",
-        "kind": "openai",
-        "mode": "api_key",
-        "base_url": "https://example.test/v1",
-        "default_model": "model",
-        "runner": "better_agent_runner",
-    })
-    assert openai["runner"] == "better_agent_runner"
-    assert openai["runner_options"] == ["better_agent_runner"]
-
-    claude_native = config_store.add_provider({
-        "name": "Claude native",
-        "kind": "claude",
-        "mode": "subscription",
-    })
-    assert claude_native["runner"] == "native"
-    assert claude_native["runner_options"] == ["native", "better_agent_runner"]
-
-    # kind=="claude" is the one kind whose better_agent_runner choice keeps
-    # the real "claude" runtime kind (it speaks Anthropic's own wire format
-    # via the subscription OAuth token) instead of collapsing to "openai"
-    # like every other kind's better_agent_runner choice does.
-    claude_ba = config_store.add_provider({
-        "name": "Claude BA",
-        "kind": "claude",
-        "mode": "subscription",
-        "runner": "better_agent_runner",
-    })
-    assert claude_ba["runner"] == "better_agent_runner"
-    assert claude_ba["runner_options"] == ["native", "better_agent_runner"]
     import provider as _provider
-    assert _provider._provider_runtime_kind({"kind": "claude", "runner": "better_agent_runner"}) == "claude"
+    import pytest
+    import runtime_profile
 
-    # api_key mode has no better_agent_runner backend for claude — the
-    # config layer rejects it outright (a dead-end configuration) rather
-    # than silently persisting or silently falling back.
-    try:
-        config_store.add_provider({
-            "name": "Claude API key BA",
-            "kind": "claude",
-            "mode": "api_key",
-            "api_key": "sk-test",
-            "runner": "better_agent_runner",
-        })
-        raise AssertionError("claude api_key + better_agent_runner should be rejected")
-    except ValueError:
-        pass
+    # api_key-mode providers persist their key through the desktop credential
+    # session, which is absent under pytest. Stub an in-memory store (same
+    # pattern as test_codex_model_discovery) so credential transactions
+    # succeed without touching a real keychain.
+    credentials: dict[str, str] = {}
 
-    fugu_native = config_store.add_provider({
-        "name": "Fugu native",
-        "kind": "fugu",
-        "mode": "subscription",
-        "default_model": "fugu",
-    })
-    assert fugu_native["runner"] == "native"
-    assert fugu_native["runner_options"] == ["native"]
+    def _request(action: str, provider_id: str, **kwargs) -> dict:
+        current = credentials.get(provider_id, "")
+        if action == "status":
+            return {"status": "available" if current else "missing"}
+        if action == "read":
+            return {"status": "available" if current else "missing",
+                    **({"value": current} if current else {})}
+        if action == "compare_set":
+            if current != kwargs["expected_value"]:
+                return {"status": "available", "applied": False}
+            value = kwargs["value"]
+            if value:
+                credentials[provider_id] = value
+            else:
+                credentials.pop(provider_id, None)
+            return {"status": "available" if value else "missing", "applied": True}
+        raise AssertionError(f"unexpected credential action: {action}")
 
-    fugu_ba = config_store.add_provider({
-        "name": "Fugu BA",
-        "kind": "fugu",
-        "mode": "api_key",
-        "base_url": "https://api.sakana.ai/v1",
-        "default_model": "fugu",
-        "runner": "better_agent_runner",
-    })
-    assert fugu_ba["kind"] == "fugu"
-    assert fugu_ba["runner"] == "better_agent_runner"
-    assert fugu_ba["runner_options"] == ["native", "better_agent_runner"]
-    assert fugu_ba["permission_options"] == {"mode": ["default", "bypassPermissions"]}
-    assert fugu_ba["reasoning_effort_options"] == ["high", "xhigh"]
+    monkeypatch.setattr(config_store.credential_session_client, "available", lambda: True)
+    monkeypatch.setattr(config_store.credential_session_client, "request", _request)
 
-    import provider
-    assert provider._provider_runtime_kind({"kind": "fugu", "runner": "better_agent_runner"}) == "openai"
+    def _add(kind: str, mode: str, **extra):
+        payload = {"name": f"{kind}-{mode}", "kind": kind, "mode": mode}
+        payload.update(extra)
+        return config_store.add_provider(payload)
 
-    try:
-        config_store.add_provider({
-            "name": "Invalid Fugu BA",
-            "kind": "fugu",
-            "mode": "subscription",
-            "runner": "better_agent_runner",
-        })
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("fugu Better Agent runner must require api_key mode")
+    def _assert_options(view, kind, mode):
+        expected = list(runtime_profile.supported_runners({"kind": kind, "mode": mode}))
+        assert view["runner_options"] == expected, (kind, mode, view["runner_options"])
+        # runner_profiles mirrors supported_runners 1:1; the first is the
+        # default runner — the one add_provider seeds a profile for.
+        assert [p["runner"] for p in view["runner_profiles"]] == expected, (kind, mode)
+        return expected
+
+    # openai has only the better_agent_runner choice, so that is both its
+    # only offered runner and its seeded default.
+    openai = _add("openai", "api_key", base_url="https://example.test/v1",
+                  default_model="model")
+    assert _assert_options(openai, "openai", "api_key") == ["better_agent_runner"]
+
+    # claude subscription offers both runners; the seeded default is native.
+    claude_sub = _add("claude", "subscription")
+    assert _assert_options(claude_sub, "claude", "subscription") == [
+        "native", "better_agent_runner"
+    ]
+
+    # claude api_key has no better_agent_runner backend (it exists only to
+    # speak the subscription OAuth wire format), so the choice is withheld at
+    # the options layer — a dead-end config cannot be reached rather than
+    # being silently persisted or falling back.
+    claude_key = _add("claude", "api_key", api_key="sk-test")
+    assert _assert_options(claude_key, "claude", "api_key") == ["native"]
+
+    # fugu subscription collapses to native-only; api_key re-enables the
+    # better_agent_runner choice (OpenAI-compatible key auth).
+    fugu_sub = _add("fugu", "subscription", default_model="fugu")
+    assert _assert_options(fugu_sub, "fugu", "subscription") == ["native"]
+    fugu_key = _add("fugu", "api_key", base_url="https://api.sakana.ai/v1",
+                    default_model="fugu")
+    assert _assert_options(fugu_key, "fugu", "api_key") == [
+        "native", "better_agent_runner"
+    ]
+
+    # claude is the one kind whose better_agent_runner choice keeps the real
+    # "claude" runtime kind (Anthropic's own wire format via the OAuth token)
+    # instead of collapsing to "openai" like every other kind does.
+    assert _provider._provider_runtime_kind(
+        {"kind": "claude", "runner": "better_agent_runner"}) == "claude"
+    assert _provider._provider_runtime_kind(
+        {"kind": "fugu", "runner": "better_agent_runner"}) == "openai"
+
+    # resolve_runner is the strict gate behind runner selection: an
+    # unsupported runner for the kind+mode is rejected outright.
+    with pytest.raises(ValueError):
+        runtime_profile.resolve_runner(
+            {"kind": "claude", "mode": "api_key"}, "better_agent_runner")
+    with pytest.raises(ValueError):
+        runtime_profile.resolve_runner(
+            {"kind": "fugu", "mode": "subscription"}, "better_agent_runner")
 
 
 if __name__ == "__main__":
@@ -219,5 +232,5 @@ if __name__ == "__main__":
     test_uses_claude_env_matches()
     test_codex_only_gates()
     test_runner_choices_are_valid()
-    test_provider_runner_round_trips()
+    test_provider_runner_options_and_default_profile()
     print("ok")
