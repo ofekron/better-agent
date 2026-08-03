@@ -953,11 +953,31 @@ class TestManualRefreshInternal:
         with pytest.raises(RuntimeError, match="provider changed"):
             await eng._manual_refresh("p1")
 
-    # NOTE: _manual_refresh line 248 (`raise RuntimeError("catalog projection
-    # unavailable")`) is defensive dead code: reconcile_provider always stores
-    # a pending projection for a live, matching-generation provider before
-    # returning, so self._projections[provider_id] cannot be None afterwards.
-    # Excluded rather than faked.
+    async def test_projection_unavailable_after_concurrent_retire(self, eng, monkeypatch):
+        # Line 248 guard: a concurrent reconcile() can retire the provider at
+        # the `await inspect_catalog_source` yield inside
+        # _reconcile_provider_locked — it pops the projection and clears the
+        # live generation, so the post-inspect `not _is_live` check returns
+        # without re-projecting. _manual_refresh then sees no projection.
+        _live(eng)
+        eng._projections["p1"] = CatalogProjection(
+            provider_id="p1", provider_generation="g1", status="current",
+            models=(), models_current=False, retired=(), last_refreshed_at=0.0,
+            reason="", authority_fingerprint="",
+        )
+
+        def retire_mid_inspect(pid):
+            # Simulate the concurrent retire happening at the await point.
+            eng._projections.pop(pid, None)
+            eng._live_generations = {}
+
+        _wire(
+            monkeypatch,
+            list_providers=lambda: {"providers": [_provider()]},
+            inspect=retire_mid_inspect,
+        )
+        with pytest.raises(RuntimeError, match="catalog projection unavailable"):
+            await eng._manual_refresh("p1")
 
 
 # ===========================================================================
