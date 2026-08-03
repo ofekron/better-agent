@@ -100,7 +100,10 @@ _RESPONSE_VALUE_VALIDATORS = {
     },
 }
 
-if set(_RESPONSE_VALUE_VALIDATORS) != set(PROTOCOL["http"]) or any(
+# Static fail-fast against an inconsistent shipped artifact; the validator map
+# is built from PROTOCOL so a mismatch is unreachable through any runtime path.
+# Excluded, not faked with a reload.
+if set(_RESPONSE_VALUE_VALIDATORS) != set(PROTOCOL["http"]) or any(  # pragma: no cover
     set(_RESPONSE_VALUE_VALIDATORS[operation]) != set(spec["response"])
     for operation, spec in PROTOCOL["http"].items()
 ):
@@ -239,7 +242,11 @@ def request(
             detail="Marketplace protocol request has an invalid shape",
         )
     signed = operation in _SIGNED_OPERATIONS
-    if signed != ({"challenge", "signature"} <= set(body)):
+    # Defensive invariant: the shape check above guarantees set(body) ==
+    # request_fields, and every signed operation lists challenge+signature in
+    # its request fields while no unsigned one does, so signed always equals the
+    # proof-subset here. Unreachable for the shipped protocol.
+    if signed != ({"challenge", "signature"} <= set(body)):  # pragma: no cover
         raise HTTPException(
             status_code=400,
             detail="Marketplace device proof has an invalid shape",
