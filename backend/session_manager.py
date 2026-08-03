@@ -922,6 +922,12 @@ class SessionManager:
         with self._projected_state_lock:
             return self._projected_state_version
 
+    def _drop_projected_state(self, sid: str) -> None:
+        """Remove one session from both state projections atomically."""
+        with self._projected_state_lock:
+            self._last_broadcast_running.pop(sid, None)
+            self._last_broadcast_monitoring.pop(sid, None)
+
     def latest_assistant_finalized(self, sid: str) -> bool:
         """True iff `sid` has an assistant message AND the most recent
         one is finalized (not streaming). Used by the session-projection
@@ -1251,8 +1257,9 @@ class SessionManager:
         with self._queued_prompt_counts_guard:
             self._queued_prompt_counts_by_sid.clear()
         self._recovering_msg_ids.clear()
-        self._last_broadcast_running.clear()
-        self._last_broadcast_monitoring.clear()
+        with self._projected_state_lock:
+            self._last_broadcast_running.clear()
+            self._last_broadcast_monitoring.clear()
         self._project_key_cache.clear()
         self._unread_counts.clear()
         self._unread_counts_version += 1
@@ -1728,8 +1735,7 @@ class SessionManager:
                 ds.note_root_dropped(rid)
             except Exception:
                 logger.exception("draft note_root_dropped failed for %s", rid)
-        self._last_broadcast_running.pop(rid, None)
-        self._last_broadcast_monitoring.pop(rid, None)
+        self._drop_projected_state(rid)
         self._unread_counts.pop(rid, None)
         self._unread_counts_version += 1
         self._unread_hydrated.discard(rid)
@@ -1740,8 +1746,7 @@ class SessionManager:
             self._node_root_id.pop(fid, None)
             self._drop_since_cache_entry(fid)
             self._drop_window_cache_for_sids({fid})
-            self._last_broadcast_running.pop(fid, None)
-            self._last_broadcast_monitoring.pop(fid, None)
+            self._drop_projected_state(fid)
             self._unread_counts.pop(fid, None)
             self._unread_counts_version += 1
             self._unread_hydrated.discard(fid)
@@ -4786,8 +4791,7 @@ class SessionManager:
             for deleted_sid in deleted_sids:
                 self._node_root_id.pop(deleted_sid, None)
                 self._kind_by_sid.pop(deleted_sid, None)
-                self._last_broadcast_running.pop(deleted_sid, None)
-                self._last_broadcast_monitoring.pop(deleted_sid, None)
+                self._drop_projected_state(deleted_sid)
                 self._unread_counts.pop(deleted_sid, None)
                 self._unread_hydrated.discard(deleted_sid)
                 revocations.append((
