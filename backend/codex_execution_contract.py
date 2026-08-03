@@ -223,7 +223,11 @@ class CodexExecutionContract:
             )
         except ExecutionContractError:
             raise
-        except (IndexError, KeyError, TypeError, ValueError) as exc:
+        # Defense-in-depth: every operation above is either type-guarded or
+        # funnels through the required_*/identity_from_dict helpers, which
+        # raise ExecutionContractError (caught by the clause above). This
+        # catches a future helper regression; it is unreachable today.
+        except (IndexError, KeyError, TypeError, ValueError) as exc:  # pragma: no cover
             raise ExecutionContractError("invalid execution contract") from exc
         if (
             contract.schema != CONTRACT_SCHEMA
