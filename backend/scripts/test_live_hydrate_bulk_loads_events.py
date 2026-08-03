@@ -87,6 +87,87 @@ def test_live_tree_lease_serializes_fork_and_survives_reload() -> None:
     assert _topology(after) == before_topology
 
 
+def test_prepared_hydration_does_not_reenter_cache_loader() -> None:
+    session = session_manager.create(
+        name="prepared-authority", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    msg_id = "msg-prepared-authority"
+    session_manager.append_assistant_msg(
+        sid,
+        {
+            "id": msg_id,
+            "role": "assistant",
+            "content": "",
+            "events": [],
+            "timestamp": "2026-06-19T00:00:00",
+            "isStreaming": False,
+            "workers": [],
+        },
+    )
+    snapshot_uuid = str(uuid.uuid4())
+    for index in range(100):
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": snapshot_uuid,
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": f"snapshot {index}"},
+                    ],
+                },
+            },
+            source="prepared-authority-test",
+            msg_id=msg_id,
+        )
+    event_ingester.close_all()
+
+    root_before = session_manager.get_ref(sid)
+    assert root_before is not None
+    live_msg = next(m for m in root_before["messages"] if m["id"] == msg_id)
+    live_msg["events"] = []
+    live_msg.pop("_uid_idx", None)
+    session_manager._event_hydrated_roots.discard(sid)
+
+    strategy = get_strategy("native")
+    original_apply = strategy.apply_event
+    original_stale = session_manager._cached_root_is_stale
+    apply_calls = 0
+    stale_checks = 0
+
+    def counted_apply(*args, **kwargs):
+        nonlocal apply_calls
+        apply_calls += 1
+        return original_apply(*args, **kwargs)
+
+    def force_first_stale(root_id: str) -> bool:
+        nonlocal stale_checks
+        stale_checks += 1
+        return stale_checks == 1 and root_id == sid
+
+    strategy.apply_event = counted_apply
+    session_manager._cached_root_is_stale = force_first_stale
+    try:
+        assert session_manager.hydrate_root_prepared(sid)
+    finally:
+        session_manager._cached_root_is_stale = original_stale
+        strategy.apply_event = original_apply
+
+    root_after = session_manager.get_ref(sid)
+    assert root_after is root_before
+    assert stale_checks == 0, stale_checks
+    assert apply_calls == 0, apply_calls
+    hydrated_msg = next(m for m in root_after["messages"] if m["id"] == msg_id)
+    assert len(hydrated_msg["events"]) == 1, hydrated_msg["events"]
+    assert hydrated_msg["events"][0]["data"]["message"]["content"] == [
+        {"type": "text", "text": "snapshot 99"},
+    ]
+
+
 def main() -> int:
     try:
         session = session_manager.create(
@@ -374,6 +455,7 @@ def main() -> int:
         assert scan_starts and scan_starts[0] > 0, scan_starts
         assert project_calls == 1, project_calls
         assert len(tail_msg["events"]) == 1, tail_msg
+        test_prepared_hydration_does_not_reenter_cache_loader()
         test_live_tree_lease_serializes_fork_and_survives_reload()
         print("PASS: live hydrate bulk-loads ordinary render events")
         return 0

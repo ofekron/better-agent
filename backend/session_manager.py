@@ -1879,6 +1879,7 @@ class SessionManager:
                                 current, prepared, decoded,
                                 on_historical_change=on_historical_change,
                                 ownership_validated=True,
+                                caller_owns_live_tree=True,
                             )
                             if not success:
                                 continue
@@ -5893,23 +5894,26 @@ class SessionManager:
 
         return _find_worker_panel_message_id(session, delegation_id)
 
+    @staticmethod
+    def apply_running_content_projection(msg: dict, content: str) -> None:
+        from render_stub import mark_message_content_dirty
+
+        msg["content"] = content
+        if any(
+            isinstance(panel, dict) and panel.get("events")
+            for panel in msg.get("workers") or []
+        ):
+            mark_message_content_dirty(msg)
+        else:
+            msg["_content_dirty"] = False
+
     def update_running_content(
         self, sid: str, msg_id: str, content: str,
     ) -> Optional[dict]:
         def _do(s: dict) -> None:
-            from render_stub import mark_message_content_dirty
-
             m = _find_message(s, msg_id)
-            if m is None:
-                return
-            m["content"] = content
-            if any(
-                isinstance(panel, dict) and panel.get("events")
-                for panel in m.get("workers") or []
-            ):
-                mark_message_content_dirty(m)
-            else:
-                m["_content_dirty"] = False
+            if m is not None:
+                self.apply_running_content_projection(m, content)
         return self._run(
             sid, _do,
             {"kind": "running_content_updated", "msg_id": msg_id, "content": content},

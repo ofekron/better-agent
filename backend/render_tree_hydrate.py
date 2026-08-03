@@ -126,6 +126,7 @@ def apply_prepared_hydration(
     *,
     on_historical_change: Optional[Callable[[str, str, dict], None]] = None,
     ownership_validated: bool = False,
+    caller_owns_live_tree: bool = False,
 ) -> bool:
     def ids(node: dict) -> list[str]:
         result = [node.get("id")]
@@ -147,6 +148,7 @@ def apply_prepared_hydration(
     _hydrate_msg_events_from_jsonl(
         tree, after_seq=prepared.after_seq, prepared_rows=decoded_rows,
         on_historical_change=on_historical_change,
+        caller_owns_live_tree=caller_owns_live_tree,
     )
     return True
 
@@ -480,6 +482,7 @@ def _hydrate_msg_events_from_jsonl(
     after_seq: int = 0,
     on_historical_change: Optional[Callable[[str, str, dict], None]] = None,
     prepared_rows=None,
+    caller_owns_live_tree: bool = False,
 ) -> None:
     """For each assistant message whose persisted events lag events.jsonl,
     apply the missing entries via strategy.apply_event(source_is_provider_stream=False).
@@ -500,7 +503,9 @@ def _hydrate_msg_events_from_jsonl(
     root_id = tree.get("id")
     if not root_id:
         return
-    bulk_live_root = session_manager.get_ref(root_id) is tree
+    bulk_live_root = (
+        caller_owns_live_tree or session_manager.get_ref(root_id) is tree
+    )
     rows_cache: Optional[dict[str, tuple[dict[str, list[dict]], list[dict]]]] = None
     tree_sids: set[str] = set()
 
@@ -708,16 +713,24 @@ def _hydrate_msg_events_from_jsonl(
                 strategy._events_list(live_m), live_m.get("content"),
             )
             if extracted != (live_m.get("content") or ""):
-                session_manager.update_running_content(sid, msg_id, extracted)
+                if caller_owns_live_tree:
+                    session_manager.apply_running_content_projection(
+                        live_m, extracted,
+                    )
+                else:
+                    session_manager.update_running_content(sid, msg_id, extracted)
 
         for f in node.get("forks", []):
             _visit(f, parent_sid=sid)
 
-    # bump_updated_at=False: reconcile re-projects durable journal facts
-    # into the render tree (apply_event + content re-derivation). It is
-    # not user activity, so it must not bump `updated_at` and reorder the
-    # session in the sidebar. Re-entrant batch: a no-op when cold-load's
-    # phantom batch (or any outer batch) already owns this root.
+    # Prepared hydration already holds the root lock and installs a phantom
+    # batch. Re-entering session_manager here can evict the validated tree if
+    # a completed durability write changed its file fingerprint.
+    if caller_owns_live_tree:
+        _visit(tree)
+        return
+
+    # Reconcile re-projects durable journal facts, not user activity.
     with session_manager.batch(root_id, bump_updated_at=False):
         _visit(tree)
 
