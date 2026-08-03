@@ -41,19 +41,19 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _broadcast_global: Optional[Callable[[str, dict], Any]] = None
-_cached_state_snapshot: Optional[Callable[[], tuple]] = None
+_projected_state_snapshot: Optional[Callable[[], tuple]] = None
 _delete_session_tree: Optional[Callable[[str], Awaitable[bool]]] = None
 
 
 def configure(
     broadcast_global: Callable[[str, dict], Any],
-    cached_state_snapshot: Callable[[], tuple],
+    projected_state_snapshot: Callable[[], tuple],
     delete_session_tree: Callable[[str], Awaitable[bool]],
 ) -> None:
     """Bind the coordinator capabilities this router needs."""
-    global _broadcast_global, _cached_state_snapshot, _delete_session_tree
+    global _broadcast_global, _projected_state_snapshot, _delete_session_tree
     _broadcast_global = broadcast_global
-    _cached_state_snapshot = cached_state_snapshot
+    _projected_state_snapshot = projected_state_snapshot
     _delete_session_tree = delete_session_tree
 
 
@@ -64,11 +64,11 @@ def _require_configured() -> tuple[
 ]:
     if (
         _broadcast_global is None
-        or _cached_state_snapshot is None
+        or _projected_state_snapshot is None
         or _delete_session_tree is None
     ):
         raise HTTPException(status_code=503, detail="session listing API is not configured")
-    return _broadcast_global, _cached_state_snapshot, _delete_session_tree
+    return _broadcast_global, _projected_state_snapshot, _delete_session_tree
 
 
 # ── Sidebar/session-organization broadcast + initial-organization helpers ──
@@ -437,12 +437,12 @@ def _sidebar_session_payload(session: dict) -> dict:
 
 def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int]]:
     global _sidebar_state_snapshot_cache
-    _, cached_state_snapshot, _ = _require_configured()
+    _, projected_state_snapshot, _ = _require_configured()
     version = session_list_cache._sessions_list_transient_state_version()
     cached = _sidebar_state_snapshot_cache
     if cached is not None and cached[0] == version:
         return cached[1]
-    running_sids, monitoring_by_sid = cached_state_snapshot()
+    running_sids, monitoring_by_sid = projected_state_snapshot()
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
     snapshot = running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
@@ -506,10 +506,8 @@ def _decorate_local_sidebar_sessions(
             # Enrich with transient running flag + lazy-hydrated unread.
             # `peek_unread_count` returns None on cache miss — we surface
             # 0 in that case so the sidebar renders immediately.
-            # `is_running_cached` / `monitoring_state_cached` read from
-            # the background-tick cache — no os.kill PID probing on the
-            # event loop. Cache is refreshed every 2 s by the background
-            # tick thread; stale by up to 2 s, acceptable for badges.
+            # The state projection is the same snapshot that drives the
+            # monitoring WS event; no PID probing occurs on the event loop.
             decorated = {
                 **sidebar_session,
                 "is_running": running,

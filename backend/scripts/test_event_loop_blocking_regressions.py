@@ -3011,7 +3011,7 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     # The turn-state version reaches session_list_cache as an injected
     # callable, so the composition root is where the owner is named.
     composition = (ROOT / "app_composition.py").read_text(encoding="utf-8")
-    assert "session_list_cache.configure(coordinator.turn_manager.cached_state_version)" in composition
+    assert "session_list_cache.configure(session_manager.projected_state_version)" in composition
     assert "session_manager.unread_counts_version()" in source
     assert "user_input_store.pending_counts_version_loaded()" in source
     assert "cached[2] != _sessions_list_transient_state_version()" in cache_source

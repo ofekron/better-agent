@@ -2,9 +2,8 @@
 gzip negotiation, TTL response caches, and the session-event-meta /
 machine-nodes-enabled memoizations that back them.
 
-Depends on the coordinator only through the turn-manager state-version
-capability it actually needs, bound by the composition root (see
-`configure`).
+Depends on the backend state projection only through its invalidation
+version capability, bound by the composition root (see `configure`).
 """
 from __future__ import annotations
 
@@ -30,19 +29,19 @@ from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
 
-_cached_state_version: Optional[Callable[[], int]] = None
+_projected_state_version: Optional[Callable[[], int]] = None
 
 
-def configure(cached_state_version: Callable[[], int]) -> None:
+def configure(projected_state_version: Callable[[], int]) -> None:
     """Bind the coordinator capability this module needs."""
-    global _cached_state_version
-    _cached_state_version = cached_state_version
+    global _projected_state_version
+    _projected_state_version = projected_state_version
 
 
 def _require_configured() -> Callable[[], int]:
-    if _cached_state_version is None:
+    if _projected_state_version is None:
         raise RuntimeError("session_list_cache is not configured")
-    return _cached_state_version
+    return _projected_state_version
 
 
 _session_event_meta_cache: dict[

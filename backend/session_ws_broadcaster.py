@@ -140,10 +140,10 @@ class SessionWSBroadcaster:
             # `_run_state[sid]` + checks pid liveness); this is the
             # WS ping that tells the frontend to re-render the badge.
             # INVARIANT: payload carries `cwd` + `node_id` so the
-            # frontend can update the per-project running_count locally
-            # without a `/api/projects` refetch. Backend MUST NOT fire
-            # `projects_changed` here — that was the refetch-storm
-            # culprit (~132 calls/min under load).
+            # Legacy compatibility projection for consumers that only need
+            # process liveness. The session registry consumes the richer
+            # monitoring event below. Backend MUST NOT fire projects_changed
+            # here — that caused the old refetch storm.
             cwd, node_id = self._project_key_for(sid)
             self._dispatch({
                 "type": "session_running_changed",
@@ -168,9 +168,9 @@ class SessionWSBroadcaster:
             # Per-session monitoring-state transition (active / idle /
             # blocked_on_user / waiting_on_background / stopped). Authoritative
             # state is computed live by `coordinator.monitoring_state(sid)`.
-            # This is the SINGLE state event the frontend registry consumes:
-            # `is_running` is derived client-side as `state != "stopped"`, so
-            # the payload carries `cwd` + `node_id` (like running_changed) to
+            # This is the SINGLE state event the frontend registry consumes.
+            # It derives Running from active/waiting_on_background and Waiting
+            # from blocked_on_user, so the payload carries `cwd` + `node_id` to
             # route the per-project running_count aggregate + materialize a
             # not-yet-seen session — no separate running event needed.
             cwd, node_id = self._project_key_for(sid)

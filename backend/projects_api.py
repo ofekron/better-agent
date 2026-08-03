@@ -25,19 +25,23 @@ router = APIRouter()
 
 _notify_projects_changed: Optional[Callable[[], Awaitable[None]]] = None
 _broadcast_global: Optional[Callable[[str, dict], Any]] = None
-_cached_state_snapshot: Optional[Callable[[], tuple]] = None
+_projected_state_snapshot: Optional[Callable[[], tuple]] = None
+_projected_state_version: Optional[Callable[[], int]] = None
 
 
 def configure(
     notify_projects_changed: Callable[[], Awaitable[None]],
     broadcast_global: Callable[[str, dict], Any],
-    cached_state_snapshot: Callable[[], tuple],
+    projected_state_snapshot: Callable[[], tuple],
+    projected_state_version: Callable[[], int],
 ) -> None:
     """Bind the coordinator capabilities this router needs."""
-    global _notify_projects_changed, _broadcast_global, _cached_state_snapshot
+    global _notify_projects_changed, _broadcast_global
+    global _projected_state_snapshot, _projected_state_version
     _notify_projects_changed = notify_projects_changed
     _broadcast_global = broadcast_global
-    _cached_state_snapshot = cached_state_snapshot
+    _projected_state_snapshot = projected_state_snapshot
+    _projected_state_version = projected_state_version
 
 
 def _require_configured() -> tuple[
@@ -46,19 +50,26 @@ def _require_configured() -> tuple[
     if (
         _notify_projects_changed is None
         or _broadcast_global is None
-        or _cached_state_snapshot is None
+        or _projected_state_snapshot is None
+        or _projected_state_version is None
     ):
         raise HTTPException(status_code=503, detail="projects API is not configured")
-    return _notify_projects_changed, _broadcast_global, _cached_state_snapshot
+    return (
+        _notify_projects_changed,
+        _broadcast_global,
+        _projected_state_snapshot,
+        _projected_state_version,
+    )
 
 
 async def _broadcast_mappings_changed() -> None:
-    _, broadcast_global, _ = _require_configured()
+    _, broadcast_global, _, _ = _require_configured()
     await broadcast_global("project_mappings_changed", {})
 
 
 _project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
 _project_aggregates_gen = 0
+_project_aggregates_state_version = -1
 
 
 def empty_aggregate() -> dict[str, int]:
@@ -81,16 +92,22 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
     Dimensions do not mask each other: one errored, unread session
     increments both counters.
 
-    Cached: recompute only when the generation counter bumps (set by
-    session mutation events via `invalidate_project_aggregates`).
-    Reads from the background-tick monitoring cache — no PID probing on
-    the event loop."""
+    Cached: recompute when a session-dimension invalidation fires or the
+    authoritative monitoring projection version advances.
+    Reads from the same monitoring projection published to WS consumers;
+    no PID probing occurs on the event loop."""
     global _project_aggregates_cache, _project_aggregates_gen
-    if _project_aggregates_gen > 0 and _project_aggregates_cache:
+    global _project_aggregates_state_version
+    _, _, projected_state_snapshot, projected_state_version = _require_configured()
+    state_version = projected_state_version()
+    if (
+        _project_aggregates_gen > 0
+        and _project_aggregates_cache
+        and _project_aggregates_state_version == state_version
+    ):
         return _project_aggregates_cache
     import working_mode as _wm
-    _, _, cached_state_snapshot = _require_configured()
-    _, monitoring_by_sid = cached_state_snapshot()
+    _, monitoring_by_sid = projected_state_snapshot()
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
     agg: dict[tuple[str, str], dict[str, int]] = {}
@@ -115,6 +132,7 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
             slot["errored_count"] += 1
     _project_aggregates_cache = agg
     _project_aggregates_gen += 1
+    _project_aggregates_state_version = state_version
     return agg
 
 
@@ -137,7 +155,7 @@ async def get_projects():
 
 @router.post("/api/projects")
 async def create_project(body: dict):
-    notify_projects_changed, _, _ = _require_configured()
+    notify_projects_changed, _, _, _ = _require_configured()
     record = await asyncio.to_thread(
         project_store.add_project,
         path=body.get("path", ""),
@@ -155,7 +173,7 @@ async def delete_project(
     path: str = Query(...),
     node_id: str = Query("primary"),
 ):
-    notify_projects_changed, _, _ = _require_configured()
+    notify_projects_changed, _, _, _ = _require_configured()
     deleted = await asyncio.to_thread(
         project_store.remove_project,
         path,
@@ -168,7 +186,7 @@ async def delete_project(
 
 @router.post("/api/projects/touch")
 async def touch_project(body: dict):
-    notify_projects_changed, _, _ = _require_configured()
+    notify_projects_changed, _, _, _ = _require_configured()
     await asyncio.to_thread(
         project_store.touch_project,
         body.get("path", ""),

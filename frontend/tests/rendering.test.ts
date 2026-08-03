@@ -514,6 +514,15 @@ describe("message rendering", () => {
 
     h.emit({ type: "turn_start", data: { session_id: session.id } });
     h.emit({
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "active",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    });
+    h.emit({
       type: "messages_delta",
       data: {
         app_session_id: session.id,
@@ -527,16 +536,20 @@ describe("message rendering", () => {
       type: "error",
       data: { error: "Backend exploded", session_id: session.id },
     });
-    // The backend's terminal-turn path also clears the session's live
-    // run-state registry entry (turn_manager.run_state_remove +
-    // emit_run_state) alongside the "error" WS frame — sessionRegistry's
-    // onTurnStart already flipped monitoring_state to "active" on the
-    // earlier turn_start, and only a run_state/session_running_changed/
-    // session_monitoring_changed event clears it back. Without this,
+    // The backend's terminal-turn path publishes authoritative stopped
+    // monitoring state alongside the error frame. Without this,
     // `isRunning` stays true forever and MessageStatus permanently
     // suppresses the error chrome (TurnGroupImpl passes
     // `status={isRunning ? undefined : initiatorMessage.status}`).
-    h.emit({ type: "run_state", data: { app_session_id: session.id, runs: [] } });
+    h.emit({
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "stopped",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    });
     // Poll for the actual DOM chrome — Chat.tsx also throttles turn-group
     // re-renders to at most one commit per 140ms while the session is
     // running (see fix-playbook.md's render-throttle-race note).

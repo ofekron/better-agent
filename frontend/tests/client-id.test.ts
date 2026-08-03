@@ -327,13 +327,17 @@ describe("client_id matching + per-session pending", () => {
           error: "offline",
         },
       },
-      // A real backend always pairs turn-termination with a run_state
-      // update (see turn-group-collapse.test.tsx) — without it `is_running`
-      // (src/lib/sessionRegistry.ts, driven ONLY by `run_state` frames)
-      // stays stuck at its optimistic "true" from the original send, which
-      // keeps the turn group's `isRunning` true and suppresses the failed
-      // message's Retry button (MessageBubble.tsx TurnGroupImpl).
-      { type: "run_state", data: { app_session_id: session.id, runs: [] } },
+      // A real backend publishes terminal monitoring state with the error,
+      // allowing the failed message's Retry button to render.
+      {
+        type: "session_monitoring_changed",
+        data: {
+          session_id: session.id,
+          monitoring_state: "stopped",
+          cwd: session.cwd,
+          node_id: session.node_id ?? "primary",
+        },
+      },
     ]);
     await h.flush();
     h.dropConnection();

@@ -38,6 +38,7 @@ type SessionRow = {
   cwd?: string;
   node_id?: string;
   is_running?: boolean;
+  monitoring_state?: string;
   unread_count?: number;
   pending_user_input_count?: number;
 };
@@ -77,37 +78,48 @@ describe("sessionRegistry — per-session deltas", () => {
     await resetRegistry();
   });
 
-  it("session_running_changed flips is_running for the matching sid", () => {
+  it("legacy running and run-list frames cannot overwrite monitoring state", () => {
     const sid = "sess-running-1";
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/p", node_id: "primary" },
     });
-    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "blocked_on_user",
+      cwd: "/p",
+      node_id: "primary",
+    });
     eventBus.publish("session_running_changed", {
       session_id: sid,
       value: true,
       cwd: "/p",
       node_id: "primary",
     });
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    eventBus.publish("session_running_changed", {
-      session_id: sid,
-      value: false,
-      cwd: "/p",
-      node_id: "primary",
-    });
+    eventBus.publish("run_state", { app_session_id: sid, runs: [{ run_id: "legacy" }] });
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("blocked_on_user");
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
+    expect(sessionRegistry.getProject("/p", "primary")).toMatchObject({
+      running_count: 0,
+      waiting_for_user_count: 1,
+    });
   });
 
-  it("turn_start marks a seeded file-editing session running before run_state", () => {
+  it("turn_start cannot overwrite authoritative monitoring state", () => {
     const sid = "file-edit-running";
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/p", node_id: "primary" },
     });
 
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "waiting_on_background",
+      cwd: "/p",
+      node_id: "primary",
+    });
     eventBus.publish("turn_start", { app_session_id: sid });
 
     expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("waiting_on_background");
     expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
   });
 
@@ -173,7 +185,7 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(0);
   });
 
-  it("turn_start clears the live error indication for that session", () => {
+  it("only session_error_changed clears the live error indication", () => {
     const sid = "sess-error-clear";
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/p", node_id: "primary" },
@@ -189,9 +201,14 @@ describe("sessionRegistry — per-session deltas", () => {
 
     eventBus.publish("turn_start", { app_session_id: sid });
 
+    expect(sessionRegistry.getSession(sid).has_error).toBe(true);
+    eventBus.publish("session_error_changed", {
+      session_id: sid,
+      has_error: false,
+      cwd: "/p",
+      node_id: "primary",
+    });
     expect(sessionRegistry.getSession(sid).has_error).toBe(false);
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
-    eventBus.publish("run_state", { app_session_id: sid, runs: [] });
     expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
   });
 
@@ -282,9 +299,9 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
   });
 
   it("hidden delta (cwd === '') for an unknown sid is dropped (no phantom)", () => {
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "hidden-ghost",
-      value: true,
+      monitoring_state: "active",
       cwd: "",
       node_id: "primary",
     });
@@ -297,11 +314,11 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
     // Backend's `session_created` is gated on working_mode — so a
     // session that's created WITH working_mode, then later flipped
     // to visible, never fires `session_created`. Its first
-    // visible-mode signal is a `running_changed` with real cwd; we
+    // visible-mode signal is a `monitoring_changed` with real cwd; we
     // materialize from the payload.
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "late-arriver",
-      value: true,
+      monitoring_state: "active",
       cwd: "/p",
       node_id: "primary",
     });
@@ -392,16 +409,16 @@ describe("sessionRegistry — project aggregates", () => {
     });
   });
 
-  it("running delta with cwd=='' updates per-session but not aggregate", async () => {
+  it("monitoring delta with cwd=='' updates per-session but not aggregate", async () => {
     await bootstrapWith([
       { id: "shown", cwd: "/p", is_running: true, unread_count: 0 },
       { id: "hidden", cwd: "", is_running: false, unread_count: 0 },
     ]);
     expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
     // Hidden session flips running. cwd:"" signals "skip aggregate".
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "hidden",
-      value: true,
+      monitoring_state: "active",
       cwd: "",
       node_id: "primary",
     });
@@ -546,14 +563,15 @@ describe("sessionRegistry — per-dimension project counters", () => {
     expect(agg().errored_count).toBe(0);
   });
 
-  it("errored_count clears when a new turn starts on the session", async () => {
+  it("errored_count clears only on the backend error-state delta", async () => {
     const agg = await seedOne();
     eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
     expect(agg().errored_count).toBe(1);
     eventBus.publish("turn_start", { app_session_id: "s1" });
+    expect(agg().errored_count).toBe(1);
+    eventBus.publish("session_error_changed", { session_id: "s1", has_error: false });
     expect(agg().errored_count).toBe(0);
-    // …and the same turn_start makes it running.
-    expect(agg().running_count).toBe(1);
+    expect(agg().running_count).toBe(0);
   });
 
   it("waiting_for_user_count moves on a pending user-input request", async () => {
@@ -667,6 +685,38 @@ describe("sessionRegistry — bootstrap mechanics", () => {
     await bootstrapWith([]);
     expect(sessionRegistry.getSession("buf-1").unread_count).toBe(9);
     expect(sessionRegistry.getProject("/p", "primary").unread_session_count).toBe(1);
+  });
+
+  it("buffered legacy frames cannot supersede buffered monitoring state", async () => {
+    eventBus.publish("session_created", {
+      session: { id: "buffered-authority", cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: "buffered-authority",
+      monitoring_state: "blocked_on_user",
+      cwd: "/p",
+      node_id: "primary",
+    });
+    eventBus.publish("session_running_changed", {
+      session_id: "buffered-authority",
+      value: true,
+      cwd: "/p",
+      node_id: "primary",
+    });
+    eventBus.publish("run_state", {
+      app_session_id: "buffered-authority",
+      runs: [{ run_id: "legacy" }],
+    });
+    eventBus.publish("turn_start", { app_session_id: "buffered-authority" });
+
+    await bootstrapWith([]);
+
+    expect(sessionRegistry.getSession("buffered-authority").monitoring_state)
+      .toBe("blocked_on_user");
+    expect(sessionRegistry.getProject("/p", "primary")).toMatchObject({
+      running_count: 0,
+      waiting_for_user_count: 1,
+    });
   });
 
   it("concurrent bootstrap calls share one in-flight promise", async () => {

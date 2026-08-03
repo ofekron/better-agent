@@ -28,6 +28,7 @@ type SessionRow = {
   cwd?: string;
   node_id?: string;
   is_running?: boolean;
+  monitoring_state?: string;
   unread_count?: number;
 };
 
@@ -59,9 +60,9 @@ describe("sessionRegistry — a listing page is not a complete snapshot", () => 
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/repo", node_id: "primary" },
     });
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: sid,
-      value: true,
+      monitoring_state: "active",
       cwd: "/repo",
       node_id: "primary",
     });
@@ -91,11 +92,11 @@ describe("sessionRegistry — a listing page is not a complete snapshot", () => 
     // The page was built while the session was idle; the turn starts
     // while the request is in flight.
     stubSessionsResponse(
-      [{ id: sid, cwd: "/repo", node_id: "primary", is_running: false }],
+      [{ id: sid, cwd: "/repo", node_id: "primary", monitoring_state: "stopped" }],
       () => {
-        eventBus.publish("session_running_changed", {
+        eventBus.publish("session_monitoring_changed", {
           session_id: sid,
-          value: true,
+          monitoring_state: "active",
           cwd: "/repo",
           node_id: "primary",
         });

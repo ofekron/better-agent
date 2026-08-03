@@ -251,7 +251,8 @@ projects_api.configure(
     # (running_sids, monitoring_by_sid) — running_sids is process
     # liveness and deliberately WRONG here: every session looks alive.
     # The aggregation must ignore it and read monitoring instead.
-    cached_state_snapshot=lambda: (set(MONITORING), dict(MONITORING)),
+    projected_state_snapshot=lambda: (set(MONITORING), dict(MONITORING)),
+    projected_state_version=lambda: 1,
 )
 try:
     projects_api.invalidate_project_aggregates()

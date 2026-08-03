@@ -76,9 +76,9 @@ export interface BusEventMap {
       sound_setting?: string;
     } | null;
   };
-  // Finer per-session monitoring state (active / idle / blocked_on_user /
-  // waiting_on_background / stopped). Fires on transitions that don't flip
-  // the running boolean. Consumed by the registry + status badge.
+  // Authoritative per-session monitoring state (active / idle /
+  // blocked_on_user / waiting_on_background / stopped). The registry derives
+  // the Running and Waiting dimensions from this one backend-owned fact.
   session_monitoring_changed: {
     session_id: string;
     monitoring_state: string;

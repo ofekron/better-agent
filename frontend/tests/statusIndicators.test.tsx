@@ -212,9 +212,21 @@ describe("SessionStatusBadge — every status dimension reaches the screen", () 
     await settle();
     expect(indicators(container)).toContain("session-error-dot");
 
-    // Cleared by the next turn — the indicator must disappear, not stick.
+    // A framing event cannot clear backend-owned error state.
     await act(async () => {
       eventBus.publish("turn_start", { app_session_id: "push" });
+    });
+    await settle();
+    expect(indicators(container)).toContain("session-error-dot");
+
+    await act(async () => {
+      eventBus.publish("session_error_changed", { session_id: "push", has_error: false });
+      eventBus.publish("session_monitoring_changed", {
+        session_id: "push",
+        monitoring_state: "active",
+        cwd: PROJECT,
+        node_id: "primary",
+      });
     });
     await settle();
     expect(indicators(container)).not.toContain("session-error-dot");

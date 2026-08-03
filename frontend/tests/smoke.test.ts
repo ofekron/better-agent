@@ -231,13 +231,16 @@ describe("harness smoke", () => {
 
     h.emit({ type: "turn_start", data: { session_id: session.id } });
     h.emit({ type: "error", data: { error: "boom", session_id: session.id } });
-    // `is_running` is a backend-owned projection driven only by
-    // run_state/session_running_changed/session_monitoring_changed events
-    // (src/lib/sessionRegistry.ts) — the real backend emits an empty
-    // run_state alongside the error to signal the turn ended.
+    // The backend publishes authoritative stopped monitoring state with the
+    // terminal error so the registry and failed-message chrome converge.
     h.emit({
-      type: "run_state",
-      data: { app_session_id: session.id, runs: [] },
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "stopped",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
     });
     await h.flush();
 

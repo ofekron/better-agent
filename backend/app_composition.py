@@ -200,17 +200,18 @@ def wire(
     projects_api.configure(
         notify_projects_changed,
         coordinator.broadcast_global,
-        coordinator.turn_manager.cached_state_snapshot,
+        session_manager.projected_state_snapshot,
+        session_manager.projected_state_version,
     )
     app.include_router(projects_api.router)
 
     import session_list_cache
-    session_list_cache.configure(coordinator.turn_manager.cached_state_version)
+    session_list_cache.configure(session_manager.projected_state_version)
 
     import session_listing_api
     session_listing_api.configure(
         coordinator.broadcast_global,
-        coordinator.turn_manager.cached_state_snapshot,
+        session_manager.projected_state_snapshot,
         delete_session_tree,
     )
     app.include_router(session_listing_api.router)

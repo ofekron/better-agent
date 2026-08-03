@@ -659,6 +659,8 @@ class SessionManager:
         # `recompute_monitoring` fires only on change. Computed live by the
         # bound `_compute_monitoring` (injected via `bind_monitoring_check`).
         self._last_broadcast_monitoring: dict[str, str] = {}
+        self._projected_state_version = 0
+        self._projected_state_lock = threading.Lock()
         self._compute_monitoring: Optional[Callable[[str], str]] = None
         self._project_key_cache: dict[str, tuple[str, str]] = {}
         self._unread_counts: dict[str, set[str]] = {}
@@ -833,21 +835,21 @@ class SessionManager:
         """Last WS-broadcast running/monitoring values per sid — what the
         frontend currently believes. Read-only diagnostic surface for the
         running-state discrepancy audit."""
-        return (
-            dict(self._last_broadcast_running),
-            dict(self._last_broadcast_monitoring),
-        )
+        with self._projected_state_lock:
+            return (
+                dict(self._last_broadcast_running),
+                dict(self._last_broadcast_monitoring),
+            )
 
     def recompute_state(self, sid: str) -> None:
         """Recompute a session's state and broadcast the deltas.
 
         There is ONE state — the monitoring state (active / idle /
-        blocked_on_user / waiting_on_background / stopped). "Running" is just
-        the projection `state != "stopped"`, NOT an independent flag. This
-        computes the monitoring state ONCE and fires `running_changed` and/or
-        `monitoring_changed`, each only when its value changed since the last
-        broadcast. Replaces the old paired recompute_running +
-        recompute_monitoring.
+        blocked_on_user / waiting_on_background / stopped). The legacy
+        `running_changed` compatibility flag means a live process exists
+        (`state != "stopped"`); UI Running is derived from active/background
+        monitoring states. This computes monitoring ONCE and publishes both
+        projections only when their values change.
 
         Cheap for stopped sessions: `monitoring_state` short-circuits to
         "stopped" right after the same `_run_state` walk `is_running` does, so
@@ -881,20 +883,50 @@ class SessionManager:
                 state = None
                 running = bool(self._compute_is_running(sid))
 
-            last_run = self._last_broadcast_running.get(sid)
-            if not (last_run is not None and last_run == running):
-                if running:
-                    self._last_broadcast_running[sid] = True
-                else:
-                    self._last_broadcast_running.pop(sid, None)
-                self._fire(sid, {"kind": "running_changed", "value": running})
+            with self._projected_state_lock:
+                last_run = self._last_broadcast_running.get(sid)
+                running_changed = not (
+                    last_run is not None and last_run == running
+                )
+                monitoring_changed = (
+                    state is not None
+                    and self._last_broadcast_monitoring.get(sid) != state
+                )
+                if running_changed:
+                    if running:
+                        self._last_broadcast_running[sid] = True
+                    else:
+                        self._last_broadcast_running.pop(sid, None)
 
-            if state is not None and self._last_broadcast_monitoring.get(sid) != state:
-                if state == "stopped":
-                    self._last_broadcast_monitoring.pop(sid, None)
-                else:
-                    self._last_broadcast_monitoring[sid] = state
+                if monitoring_changed:
+                    if state == "stopped":
+                        self._last_broadcast_monitoring.pop(sid, None)
+                    else:
+                        self._last_broadcast_monitoring[sid] = state
+
+                if running_changed or monitoring_changed:
+                    self._projected_state_version += 1
+            if running_changed:
+                self._fire(sid, {"kind": "running_changed", "value": running})
+            if monitoring_changed:
                 self._fire(sid, {"kind": "monitoring_changed", "value": state})
+
+    def projected_state_snapshot(self) -> tuple[set[str], dict[str, str]]:
+        """Current state projection shared by WS and REST consumers."""
+        with self._projected_state_lock:
+            return (
+                {
+                    sid
+                    for sid, running in self._last_broadcast_running.items()
+                    if running
+                },
+                dict(self._last_broadcast_monitoring),
+            )
+
+    def projected_state_version(self) -> int:
+        """Monotonic invalidation version for the current state projection."""
+        with self._projected_state_lock:
+            return self._projected_state_version
 
     def latest_assistant_finalized(self, sid: str) -> bool:
         """True iff `sid` has an assistant message AND the most recent

@@ -4,9 +4,9 @@
  *
  * Architecture (per CLAUDE.md state-ownership rule):
  *
- *   • Backend owns per-session state: `is_running`, `unread_count`,
+ *   • Backend owns per-session state: `monitoring_state`, `unread_count`,
  *     `pending_user_input_count`, `cwd`, `node_id`. We snapshot from
- *     `GET /api/sessions` at bootstrap, then apply WS deltas.
+ *     `GET /api/sessions` at bootstrap, then apply authoritative WS deltas.
  *
  *   • Per-project aggregates are PURE DERIVATIONS from the per-session
  *     state — we derive locally instead of re-fetching `/api/projects`.
@@ -249,12 +249,9 @@ function isEmptyAggregate(agg: ProjectAggregate): boolean {
 
 type Listener = () => void;
 type BufferedDelta =
-  | { type: "session_running_changed"; payload: SessionRunningPayload }
   | { type: "session_monitoring_changed"; payload: SessionMonitoringPayload }
-  | { type: "run_state"; payload: RunStatePayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
   | { type: "session_error_changed"; payload: SessionErrorPayload }
-  | { type: "turn_start"; payload: SessionTurnStartPayload }
   | { type: "session_user_input_changed"; payload: SessionUserInputPayload }
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
@@ -262,12 +259,6 @@ type BufferedDelta =
   | { type: "session_metadata_updated"; payload: SessionMetadataPayload }
   | { type: "testape_session_state"; payload: { session_id: string; active: boolean } };
 
-interface SessionRunningPayload {
-  session_id: string;
-  value: boolean;
-  cwd?: string;
-  node_id?: string;
-}
 // Carries (cwd, node_id) so it can route the project aggregate +
 // materialize a not-yet-seen session.
 interface SessionMonitoringPayload {
@@ -275,10 +266,6 @@ interface SessionMonitoringPayload {
   monitoring_state: MonitoringState;
   cwd?: string;
   node_id?: string;
-}
-interface RunStatePayload {
-  app_session_id: string;
-  runs: unknown[];
 }
 interface SessionUnreadPayload {
   session_id: string;
@@ -291,10 +278,6 @@ interface SessionErrorPayload {
   has_error: boolean;
   cwd?: string;
   node_id?: string;
-}
-interface SessionTurnStartPayload {
-  app_session_id?: string;
-  session_id?: string;
 }
 interface SessionUserInputPayload {
   session_id?: string;
@@ -309,17 +292,18 @@ interface SessionMarkerPayload {
   marker: MarkerInfo | null;
 }
 interface SessionCreatedPayload {
-    session: {
-      id: string;
-      cwd?: string;
-      node_id?: string;
-      is_running?: boolean;
-      unread_count?: number;
-      pending_user_input_count?: number;
-      current_todos?: TodoItem[];
-      current_tasks?: TaskItem[];
-    };
-  }
+  session: {
+    id: string;
+    cwd?: string;
+    node_id?: string;
+    is_running?: boolean;
+    monitoring_state?: string;
+    unread_count?: number;
+    pending_user_input_count?: number;
+    current_todos?: TodoItem[];
+    current_tasks?: TaskItem[];
+  };
+}
 interface SessionDeletedPayload {
   session_id?: string;
 }
@@ -410,23 +394,14 @@ class SessionRegistry {
     this._wsConnectedOnce = false;
 
     this.busUnsub = subscribeMany([
-      ["session_running_changed", (p) => {
-        this.dispatch("session_running_changed", p as SessionRunningPayload);
-      }],
       ["session_monitoring_changed", (p) => {
         this.dispatch("session_monitoring_changed", p as SessionMonitoringPayload);
-      }],
-      ["run_state", (p) => {
-        this.dispatch("run_state", p as RunStatePayload);
       }],
       ["session_unread_changed", (p) => {
         this.dispatch("session_unread_changed", p as SessionUnreadPayload);
       }],
       ["session_error_changed", (p) => {
         this.dispatch("session_error_changed", p as SessionErrorPayload);
-      }],
-      ["turn_start", (p) => {
-        this.dispatch("turn_start", p as SessionTurnStartPayload);
       }],
       ["session_user_input_changed", (p) => {
         this.dispatch("session_user_input_changed", p as SessionUserInputPayload);
@@ -446,10 +421,9 @@ class SessionRegistry {
       ["testape_session_state", (p) => {
         this.dispatch("testape_session_state", p as { session_id: string; active: boolean });
       }],
-      // Drift recovery for a reconnect gap. `session_running_changed` /
-      // `session_monitoring_changed` ride `broadcast_global` — a
-      // fire-and-forget ping to every connected socket with no
-      // events.jsonl persistence and no replay (unlike `run_state`).
+      // Drift recovery for a reconnect gap. `session_monitoring_changed`
+      // rides `broadcast_global` — a fire-and-forget ping to every connected
+      // socket with no events.jsonl persistence and no replay.
       // A ping dropped while this tab's socket was briefly disconnected
       // (network blip, backend restart) is gone forever: nothing else
       // re-derives it, and a tab that stays continuously focused never
@@ -607,18 +581,12 @@ class SessionRegistry {
 
   private applyDelta(ev: BufferedDelta) {
     switch (ev.type) {
-      case "session_running_changed":
-        return this.onRunning(ev.payload);
       case "session_monitoring_changed":
         return this.onMonitoring(ev.payload);
-      case "run_state":
-        return this.onRunState(ev.payload);
       case "session_unread_changed":
         return this.onUnread(ev.payload);
       case "session_error_changed":
         return this.onError(ev.payload);
-      case "turn_start":
-        return this.onTurnStart(ev.payload);
       case "session_user_input_changed":
         return this.onUserInput(ev.payload);
       case "session_marker_changed":
@@ -636,26 +604,10 @@ class SessionRegistry {
 
   // ── Per-event handlers ───────────────────────────────────────────
 
-  private onRunning(d: SessionRunningPayload) {
-    if (!d.session_id) return;
-    this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
-      monitoring_state: d.value ? "active" : "stopped",
-    });
-  }
-
   private onMonitoring(d: SessionMonitoringPayload) {
     if (!d.session_id) return;
     this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
       monitoring_state: d.monitoring_state,
-    });
-  }
-
-  private onRunState(d: RunStatePayload) {
-    if (!d.app_session_id || !Array.isArray(d.runs)) return;
-    const prev = this.sessions.get(d.app_session_id);
-    if (!prev) return;
-    this.applyRoutedDelta(d.app_session_id, prev.cwd, prev.node_id, {
-      monitoring_state: d.runs.length > 0 ? "active" : "stopped",
     });
   }
 
@@ -687,19 +639,6 @@ class SessionRegistry {
     const next = !!d.has_error;
     if (prev.has_error === next) return;
     this.commitEntry(d.session_id, prev, { ...prev, has_error: next });
-  }
-
-  private onTurnStart(d: SessionTurnStartPayload) {
-    const sid = d.app_session_id || d.session_id || "";
-    if (!sid) return;
-    const prev = this.sessions.get(sid);
-    if (!prev) return;
-    if (!prev.has_error && prev.monitoring_state === "active") return;
-    this.commitEntry(sid, prev, {
-      ...prev,
-      has_error: false,
-      monitoring_state: "active",
-    });
   }
 
   private onUserInput(d: SessionUserInputPayload) {
@@ -840,7 +779,8 @@ class SessionRegistry {
     const entry: SessionEntry = {
       unread_count: Math.max(0, Number(sess.unread_count) || 0),
       pending_user_input_count: Math.max(0, Number(sess.pending_user_input_count) || 0),
-      monitoring_state: sess.is_running ? "active" : "stopped",
+      monitoring_state: (sess.monitoring_state as MonitoringState)
+        || (sess.is_running ? "active" : "stopped"),
       cwd: sess.cwd ?? "",
       node_id: sess.node_id || "primary",
       markers: {},

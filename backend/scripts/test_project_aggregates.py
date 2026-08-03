@@ -241,6 +241,51 @@ def test_session_list_enrichment() -> None:
     print(f"{PASS} session_list_enrichment")
 
 
+def test_projection_snapshot_changes_without_tick_refresh() -> None:
+    """Run admission/removal must immediately update the REST projection.
+
+    Reconnect snapshots cannot depend on the two-second diagnostic cache:
+    a client can miss the non-replayable monitoring frame and reconnect
+    before that cache refreshes.
+    """
+    sid = _mk_session()
+    coord = backend_main.coordinator
+    version_before = session_manager.projected_state_version()
+    projects_api.invalidate_project_aggregates()
+    key = (CWD, "primary")
+    running_before = projects_api._project_aggregates().get(
+        key, {"running_count": 0}
+    )["running_count"]
+
+    coord.active_run_ids[sid] = ["projection-run"]
+    coord.run_state_add(
+        sid,
+        run_id="projection-run",
+        kind="native",
+        target_message_id=None,
+    )
+    running, monitoring = session_manager.projected_state_snapshot()
+    assert monitoring.get(sid) == "active", monitoring
+    assert sid in running
+    assert session_manager.projected_state_version() > version_before
+    assert projects_api._project_aggregates()[key]["running_count"] == running_before + 1
+    row = _enriched_row(_sessions_page("identity"), sid)
+    assert row.get("monitoring_state") == "active", row
+
+    version_running = session_manager.projected_state_version()
+    coord.run_state_remove(sid, "projection-run")
+    running, monitoring = session_manager.projected_state_snapshot()
+    assert monitoring.get(sid, "stopped") == "stopped", monitoring
+    assert sid not in running
+    assert session_manager.projected_state_version() > version_running
+    assert projects_api._project_aggregates().get(
+        key, {"running_count": 0}
+    )["running_count"] == running_before
+    row = _enriched_row(_sessions_page("identity"), sid)
+    assert row.get("monitoring_state") == "stopped", row
+    print(f"{PASS} projection_snapshot_changes_without_tick_refresh")
+
+
 def test_aggregates_invalidate_without_manual_call() -> None:
     """Regression: every OTHER test in this file manually calls
     `projects_api.invalidate_project_aggregates()` after each mutation —
@@ -412,6 +457,7 @@ def main() -> int:
         test_unread_session_count_aggregation()
         test_worker_fork_excluded_from_aggregates()
         test_session_list_enrichment()
+        test_projection_snapshot_changes_without_tick_refresh()
         test_aggregates_invalidate_without_manual_call()
         test_waiting_for_user_marker_reflected_without_summary_rebuild()
         test_aggregates_rebalance_after_cwd_move_without_manual_call()

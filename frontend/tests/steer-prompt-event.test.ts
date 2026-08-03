@@ -482,7 +482,7 @@ describe("steer prompt events", () => {
     h.unmount();
   });
 
-  it("treats turn_start as active before run_state arrives", async () => {
+  it("treats authoritative monitoring as active before run detail arrives", async () => {
     const session = makeSession({
       provider_id: "codex",
       messages: [
@@ -494,6 +494,15 @@ describe("steer prompt events", () => {
     await h.selectSession(session.id);
 
     h.emit({ type: "turn_start", data: { app_session_id: session.id } });
+    h.emit({
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "active",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    });
     await h.flush();
     await typeAndSteer(h, "steer before run_state");
 
