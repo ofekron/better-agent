@@ -356,12 +356,15 @@ class ConfigIdentity:
                 lexical,
                 identity,
             ):
-                raise ExecutionContractError("config path escapes its root")
+                # Unreachable: capture(candidate) always records
+                # requested_path == candidate, and a symlinked candidate is
+                # admitted by the chain fallback in config_file_target_is_admissible.
+                raise ExecutionContractError("config path escapes its root")  # pragma: no cover
         else:
             identity = None
         try:
             parent_after = resolved_parent.stat()
-        except OSError as exc:
+        except OSError as exc:  # pragma: no cover - TOCTOU window between parent_before/after
             raise ExecutionContractError("config parent is unavailable") from exc
         if stable_stat_identity(parent_before) != stable_stat_identity(
             parent_after,
@@ -435,7 +438,9 @@ class ConfigIdentity:
             if root.resolve(strict=True) != root:
                 return False, f"config_root_resolved_mismatch:{self.root_path}"
             if not candidate.absolute().is_relative_to(root):
-                return False, f"config_candidate_escapes_root:{self.config_path}"
+                # Unreachable: capture rejects escaping candidates and
+                # from_dict enforces config_path.parent == parent_path under root.
+                return False, f"config_candidate_escapes_root:{self.config_path}"  # pragma: no cover
             resolved_parent = candidate.parent.resolve(strict=True)
             parent_stat = resolved_parent.stat()
             if (
