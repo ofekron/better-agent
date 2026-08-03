@@ -43,6 +43,10 @@ exclude_lines = [
   "if __name__ == [\"']__main__[\"']:",
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
-  # Abstract / Protocol / Ellipsis-only bodies.
+  # Abstract / Protocol / Ellipsis-only bodies. The standalone-`...` rule
+  # covers multi-line declarations (signature on one line, `...` on the
+  # next); the `def ...: ...` rule covers the inline form on one line, so a
+  # Protocol method is excluded consistently regardless of formatting.
   "^\\s*\\.\\.\\.$",
+  "^\\s*def\\s.*:\\s*\\.\\.\\.\\s*$",
 ]
