@@ -34,10 +34,15 @@ test("sends a prompt and receives a real assistant response", async ({ authedPag
 // chips. The backend, auth flow, production bundle, browser, and session API
 // are real; only the persisted response payload is shaped deterministically
 // at the network boundary so this proof does not spend an LLM turn.
-test("renders Markdown in a finalized response with no event preview", async ({
+test("renders and wraps Markdown in a finalized mobile response with no event preview", async ({
   authedPage: page,
   backend,
 }) => {
+  await page.setViewportSize({ width: 412, height: 915 });
+  const paragraph =
+    "This completed response must keep every word visible by wrapping normally inside the narrow mobile chat panel.";
+  const callout =
+    "Use the in-app Refresh action so I can resume, implement the fix, and complete the verification without hidden text.";
   const create = await page.request.post(`${backend.baseURL}/api/sessions`, {
     data: { name: "Markdown fallback regression", cwd: "/tmp" },
   });
@@ -65,6 +70,10 @@ test("renders Markdown in a finalized response with no event preview", async ({
           "",
           "**Goal:** keep the result readable",
           "",
+          paragraph,
+          "",
+          `\u2063[[bcstyle:b=1;s=1.3;bg=#5b527a;a=0.7]]${callout}[[/bcstyle]]\u2063`,
+          "",
           "```text",
           "a75a133a6",
           "```",
@@ -82,7 +91,7 @@ test("renders Markdown in a finalized response with no event preview", async ({
 
   await page.goto(sessionUrl);
   await expect(page.getByTestId("user-message")).toBeVisible();
-  const summary = page.locator(".collapse-summary");
+  const summary = page.locator(".collapse-summary-rich");
   await expect(summary).toBeVisible();
   await expect(summary.locator("h2")).toHaveText("Executive summary");
   await expect(summary.locator("strong")).toHaveText("Goal:");
@@ -90,6 +99,42 @@ test("renders Markdown in a finalized response with no event preview", async ({
   await expect(summary).not.toContainText("## Executive summary");
   await expect(summary).not.toContainText("**Goal:**");
   await expect(summary).not.toContainText("```text");
+  const prose = summary.locator(".wmde-markdown > p").filter({ hasText: paragraph });
+  const styled = summary.locator(".bc-font-scaled");
+  const styledProse = styled.locator(".wmde-markdown > p");
+  await expect(prose).toHaveText(paragraph);
+  await expect(styledProse).toHaveText(callout);
+
+  const layout = await summary.evaluate((element) => {
+    const paragraphElement = Array.from(element.querySelectorAll<HTMLElement>(".wmde-markdown > p"))
+      .find((candidate) => candidate.textContent?.startsWith("This completed response"));
+    const styledElement = element.querySelector<HTMLElement>(".bc-font-scaled");
+    const styledParagraph = styledElement?.querySelector<HTMLElement>(".wmde-markdown > p");
+    if (!paragraphElement || !styledElement || !styledParagraph) return null;
+    const lineCount = (node: HTMLElement) => {
+      const style = getComputedStyle(node);
+      return node.getBoundingClientRect().height / Number.parseFloat(style.lineHeight);
+    };
+    const summaryStyle = getComputedStyle(element);
+    const styledStyle = getComputedStyle(styledElement);
+    return {
+      overflow: element.scrollWidth - element.clientWidth,
+      proseLines: lineCount(paragraphElement),
+      calloutLines: lineCount(styledParagraph),
+      calloutRight: styledElement.getBoundingClientRect().right,
+      summaryRight: element.getBoundingClientRect().right,
+      background: styledStyle.backgroundColor,
+      fontScale: Number.parseFloat(styledStyle.fontSize) / Number.parseFloat(summaryStyle.fontSize),
+    };
+  });
+
+  expect(layout).not.toBeNull();
+  expect(layout?.overflow).toBeLessThanOrEqual(1);
+  expect(layout?.proseLines).toBeGreaterThan(1.5);
+  expect(layout?.calloutLines).toBeGreaterThan(1.5);
+  expect(layout?.calloutRight).toBeLessThanOrEqual((layout?.summaryRight ?? 0) + 1);
+  expect(layout?.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(layout?.fontScale).toBeGreaterThan(1);
 });
 
 // Validates the real interrupt path: a long-running turn against the real

@@ -10193,6 +10193,13 @@ button.run-badge-clickable:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.collapse-summary-rich {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .turn-group-children > .collapse-summary {
   padding: 4px 0 8px;
 }

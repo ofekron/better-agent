@@ -3684,7 +3684,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               {collapsedLastEvent}
             </>
           ) : summaryIsContentFallback ? (
-            <div className="collapse-summary">
+            <div className="collapse-summary collapse-summary-rich">
               <OutputEvent text={summary ?? ""} onFileClick={onFileClick} />
             </div>
           ) : summary ? (
