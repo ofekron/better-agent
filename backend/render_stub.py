@@ -263,7 +263,7 @@ def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:
 def message_output_text(msg: dict) -> str:
     from event_shape import extract_output_text, strip_synthetic_events
 
-    return extract_output_text(strip_synthetic_events(timeline_events(msg)))
+    return extract_output_text(strip_synthetic_events(_renderable(primary_events(msg))))
 
 
 def mark_message_content_dirty(msg: dict) -> None:
@@ -276,7 +276,7 @@ def materialize_message_content(msg: dict) -> str:
     from event_shape import project_content_snapshot
 
     msg["content"] = project_content_snapshot(
-        timeline_events(msg),
+        _renderable(primary_events(msg)),
         msg.get("content"),
     )
     msg["_content_dirty"] = False

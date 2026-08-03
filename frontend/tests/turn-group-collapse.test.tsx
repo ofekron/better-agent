@@ -1216,7 +1216,34 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).toContain("final answer after steer");
   });
 
-  it("uses nested child output as the collapsed final preview", () => {
+  it("keeps the collapsed final preview owned by the parent response", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "delegate work" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "parent final text",
+        })}
+        childTurnGroups={[
+          {
+            initiator: makeUserMsg({ id: "child-u1", content: "review the work" }),
+            response: makeAssistantMsg({
+              id: "child-a1",
+              content: "child final text",
+            }),
+          },
+        ]}
+        initialExpanded={false}
+        orchestrationMode="manager"
+      />,
+    );
+
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.textContent).toContain("parent final text");
+    expect(container.textContent).not.toContain("child final text");
+  });
+
+  it("does not promote nested child output when the parent has no final text", () => {
     const { container } = render(
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "delegate work" })}
@@ -1252,8 +1279,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     );
 
     expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
-    expect(container.textContent).toContain("nested final text chunk");
+    expect(container.textContent).not.toContain("nested final text chunk");
     expect(container.textContent).not.toContain("outer setup");
+    expect(container.textContent).toContain("delegate");
   });
 
   it("hydrates stubbed historical events immediately while expanded", async () => {

@@ -348,6 +348,21 @@ def test_message_output_text_extracts_primary_text():
     assert render_stub.message_output_text(msg) == "hello world"
 
 
+def test_parent_content_projection_excludes_worker_panel_output():
+    parent_event = _text_event("parent", "parent final text")
+    worker_event = _text_event("worker", "worker final text")
+    msg = {
+        "events": [parent_event],
+        "workers": [_worker("d1", events=[worker_event])],
+    }
+
+    assert render_stub.timeline_events(msg) == [parent_event, worker_event]
+    assert render_stub.message_output_text(msg) == "parent final text"
+
+    render_stub.mark_message_content_dirty(msg)
+    assert render_stub.materialize_message_content(msg) == "parent final text"
+
+
 # --- mark_message_content_dirty / materialize_message_content -------------
 
 def test_materialize_returns_existing_content_when_not_dirty():

@@ -751,6 +751,7 @@ function renderLastEventPreviewFromLevel(
   onFileClick?: (p: string, focus?: FileFocus) => void,
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
   sessionId?: string,
+  includeDescendantEvents = true,
 ): ReactNode {
   const renderable = events.filter((e) =>
     !COLLAPSED_PREVIEW_NON_USER_FACING.has(e.type) && e.type !== "diagnostic"
@@ -761,7 +762,7 @@ function renderLastEventPreviewFromLevel(
     if (last.kind === "tool") {
       const toolUseId = last.event.data.tool_use_id as string | undefined;
       const childEvents = toolUseId ? children.get(toolUseId) : undefined;
-      if (childEvents && childEvents.length > 0) {
+      if (includeDescendantEvents && childEvents && childEvents.length > 0) {
         const childPreview = renderLastEventPreviewFromLevel(
           childEvents,
           children,
@@ -769,6 +770,7 @@ function renderLastEventPreviewFromLevel(
           onFileClick,
           onViewDiff,
           sessionId,
+          includeDescendantEvents,
         );
         if (childPreview) return childPreview;
       }
@@ -798,6 +800,7 @@ function renderLastEventPreview(
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
   outerToolResultById?: Map<string, string>,
   sessionId?: string,
+  includeDescendantEvents = true,
 ): ReactNode {
   const { flat, toolResultById } = flattenClaudeMessages(events);
   // Pre-flattened child streams (SubAgentBlock) have no tool_result
@@ -817,6 +820,7 @@ function renderLastEventPreview(
     onFileClick,
     onViewDiff,
     sessionId,
+    includeDescendantEvents,
   );
 }
 
@@ -1941,8 +1945,11 @@ function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, content
   // output / thinking counts and previews work on both pre- and
   // post-refactor persisted sessions.
   const { flat } = flattenClaudeMessages(managerEvents);
-  const toolCalls = flat.filter((e) => e.type === "tool_call");
-  const outputs = flat.filter((e) => e.type === "output" || e.type === "thinking");
+  // A whole-turn summary belongs to the parent. Descendant prose remains
+  // visible only inside the child container that owns it.
+  const { topLevel } = partitionEventsByParent(flat);
+  const toolCalls = topLevel.filter((e) => e.type === "tool_call");
+  const outputs = topLevel.filter((e) => e.type === "output" || e.type === "thinking");
 
   // Per docs/chat-panel.md's renderCollapsedTurn: the process (tool
   // calls/actions) collapses behind a count, but the Result text itself
@@ -3253,24 +3260,18 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     responseMessage.ask_result.purpose !== "delegate_approval";
   const canExpand = hasResponse && !isAskFlowTurn;
 
-  // The last assistant message that carries meaningful content — may be a
-  // supervisor sub-group response rather than the initial responseMessage.
-  const effectiveResponse = useMemo(() => {
-    if (childTurnGroups) {
-      for (let i = childTurnGroups.length - 1; i >= 0; i--) {
-        if (childTurnGroups[i].response) return childTurnGroups[i].response!;
-      }
-    }
-    return responseMessage;
-  }, [responseMessage, childTurnGroups]);
+  // The whole-turn result is owned by the parent response. Child responses
+  // stay inside their labeled sub-groups and never replace the parent's
+  // collapsed final preview.
+  const collapsedResponse = responseMessage;
   const initiatorErrorRendersWithResponse =
-    initiatorMessage.status === "error" && hasResponse && !effectiveResponse?.error;
+    initiatorMessage.status === "error" && hasResponse && !collapsedResponse?.error;
 
   // Only build the summary when we're actually going to render it.
   // On expanded groups this saves a full events walk per render.
   const summary = useMemo(() => {
     if (!responseCollapsed || !hasResponse) return null;
-    const src = effectiveResponse;
+    const src = collapsedResponse;
     // Ask-flow turns with no text are represented entirely by their picker
     // footer (error notice / Create-new / Never-mind). Don't render the
     // generic "No output" summary for them.
@@ -3288,17 +3289,17 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
-  }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
+  }, [responseCollapsed, hasResponse, collapsedResponse, orchestrationMode]);
   const summaryIsContentFallback = useMemo(() => {
-    if (!summary || typeof effectiveResponse?.content !== "string") return false;
-    const events = previewEventsForMessage(effectiveResponse, orchestrationMode);
-    return events.length === 0 && cleanOutput(effectiveResponse.content) === summary && containsMarkdownSyntax(summary);
-  }, [summary, effectiveResponse, orchestrationMode]);
+    if (!summary || typeof collapsedResponse?.content !== "string") return false;
+    const events = previewEventsForMessage(collapsedResponse, orchestrationMode);
+    return events.length === 0 && cleanOutput(collapsedResponse.content) === summary && containsMarkdownSyntax(summary);
+  }, [summary, collapsedResponse, orchestrationMode]);
 
   // Render the last event fully for collapsed display
   const collapsedLastEvent = useMemo(() => {
     if (!responseCollapsed || !hasResponse) return null;
-    const src = effectiveResponse;
+    const src = collapsedResponse;
     const content = src?.content;
     const events = previewEventsForMessage(src, orchestrationMode);
     if (
@@ -3316,15 +3317,19 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     if (events.length === 0) {
       return null;
     }
-    const preview = renderLastEventPreview(events, onFileClick, onViewDiff, undefined, sessionId);
-    return preview ?? (() => {
-      return null;
-    })();
-  }, [responseCollapsed, hasResponse, effectiveResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+    return renderLastEventPreview(
+      events,
+      onFileClick,
+      onViewDiff,
+      undefined,
+      sessionId,
+      false,
+    );
+  }, [responseCollapsed, hasResponse, collapsedResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const collapsedSteerPrompts = useMemo(() => {
     if (!responseCollapsed || !hasResponse) return [];
-    const src = effectiveResponse;
+    const src = collapsedResponse;
     const events = previewEventsForMessage(src, orchestrationMode);
     return events
       .filter((event) => event.type === "steer_prompt")
@@ -3336,7 +3341,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         )
       )
       .filter(Boolean);
-  }, [responseCollapsed, hasResponse, effectiveResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
+  }, [responseCollapsed, hasResponse, collapsedResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const responseTags = useMemo(
     () => (responseMessage ? tags?.filter((t) => t.messageId === responseMessage.id) ?? [] : []),
@@ -3362,8 +3367,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     ? runsByTargetId.get(responseMessage.id) ?? EMPTY_RUNS
     : EMPTY_RUNS;
   const collapsedResponseErrorText =
-    responseCollapsed && effectiveResponse?.error
-      ? effectiveResponse.errorText ?? effectiveResponse.content
+    responseCollapsed && collapsedResponse?.error
+      ? collapsedResponse.errorText ?? collapsedResponse.content
       : undefined;
   const rawInitiatorContent =
     typeof initiatorMessage.content === "string" ? initiatorMessage.content : "";
@@ -3643,10 +3648,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         })()}
       </div>
       )}
-      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at || effectiveResponse?.isDetached || effectiveResponse?.retrying_until) && (
+      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || collapsedResponse?.stopped_at || collapsedResponse?.isDetached || collapsedResponse?.retrying_until) && (
         <div
           className="turn-group-children"
-          data-message-id={effectiveResponse?.id ?? initiatorMessage.id}
+          data-message-id={collapsedResponse?.id ?? initiatorMessage.id}
         >
           {collapsedResponseErrorText && (
             <>
@@ -3654,15 +3659,15 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                 status="error"
                 errorText={collapsedResponseErrorText}
                 onRetry={
-                  effectiveResponse && onRetryStopped
-                    ? () => onRetryStopped(effectiveResponse)
+                  collapsedResponse && onRetryStopped
+                    ? () => onRetryStopped(collapsedResponse)
                     : onRetry
                       ? () => onRetry(initiatorMessage)
                       : undefined
                 }
               />
               {(() => {
-                const ts = fmtTime(effectiveResponse?.timestamp);
+                const ts = fmtTime(collapsedResponse?.timestamp);
                 if (!ts) return null;
                 return (
                   <div className="message-box-footer">
@@ -3685,18 +3690,18 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
           ) : summary ? (
             <div className="collapse-summary">{linkifyFilePaths(summary, onFileClick)}</div>
           ) : null}
-          {effectiveResponse?.stopped_at && (
+          {collapsedResponse?.stopped_at && (
             <StoppedIndicator
-              stoppedAt={effectiveResponse.stopped_at}
-              interrupted={!!effectiveResponse.interrupted_by_msg_id}
+              stoppedAt={collapsedResponse.stopped_at}
+              interrupted={!!collapsedResponse.interrupted_by_msg_id}
               onRetry={
-                onRetryStopped ? () => onRetryStopped(effectiveResponse) : undefined
+                onRetryStopped ? () => onRetryStopped(collapsedResponse) : undefined
               }
             />
           )}
-          {effectiveResponse?.isDetached && <DetachedPill />}
-          {effectiveResponse?.retrying_until && (
-            <RetryingPill retryAt={effectiveResponse.retrying_until} />
+          {collapsedResponse?.isDetached && <DetachedPill />}
+          {collapsedResponse?.retrying_until && (
+            <RetryingPill retryAt={collapsedResponse.retrying_until} />
           )}
           {initiatorErrorRendersWithResponse && (
             <MessageStatus

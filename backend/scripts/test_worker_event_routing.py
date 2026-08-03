@@ -121,6 +121,17 @@ def _worker_event(delegation_id: str, uuid: str, text: str) -> dict:
     }
 
 
+def _primary_event(uuid: str, text: str) -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "uuid": uuid,
+            "type": "assistant",
+            "message": {"content": text},
+        },
+    }
+
+
 def _mgr_events(sid: str, msg_id: str) -> list:
     sess = session_manager.get(sid) or {}
     for m in sess.get("messages") or []:
@@ -352,8 +363,15 @@ def test_g_reconcile_roundtrip_rehydrates_panel_events() -> bool:
     return ok
 
 
-def test_g3_worker_event_updates_raw_session_content() -> bool:
+def test_g3_worker_event_does_not_replace_raw_parent_content() -> bool:
     sid, root_id, msg_id, _ = _mk_session_with_panel("del_G3")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _primary_event("uuid-G3-parent", "parent final text"),
+        source_is_provider_stream=True,
+    )
     _apply(
         sid,
         msg_id,
@@ -369,12 +387,12 @@ def test_g3_worker_event_updates_raw_session_content() -> bool:
     workers = msg.get("workers") or []
     worker_events_present = any("events" in w for w in workers if isinstance(w, dict))
     ok = (
-        msg.get("content") == "worker final text"
+        msg.get("content") == "parent final text"
         and "events" not in msg
         and not worker_events_present
     )
     print(
-        f"{PASS if ok else FAIL} G3: raw session content follows worker timeline — "
+        f"{PASS if ok else FAIL} G3: raw parent content excludes worker output — "
         f"content={msg.get('content')!r} worker_events_present={worker_events_present}",
     )
     return ok
@@ -382,6 +400,13 @@ def test_g3_worker_event_updates_raw_session_content() -> bool:
 
 def test_g4_worker_event_defers_full_timeline_projection() -> bool:
     sid, root_id, msg_id, _ = _mk_session_with_panel("del_G4")
+    _apply(
+        sid,
+        msg_id,
+        root_id,
+        _primary_event("uuid-G4-parent", "parent deferred output"),
+        source_is_provider_stream=False,
+    )
     original = render_stub.message_output_text
     eager_projection = False
 
@@ -418,7 +443,7 @@ def test_g4_worker_event_defers_full_timeline_projection() -> bool:
         not eager_projection
         and dirty_before_persist is True
         and live_msg.get("_content_dirty") is False
-        and persisted_msg.get("content") == "deferred worker output"
+        and persisted_msg.get("content") == "parent deferred output"
         and "_content_dirty" not in persisted_msg
     )
     print(
