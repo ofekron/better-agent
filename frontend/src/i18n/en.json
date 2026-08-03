@@ -487,6 +487,7 @@
   "settings.extensionsDisabled": "Disabled",
   "settings.extensionsPermissions": "Permissions",
   "settings.extensionsPermissionsHelp": "What this extension can access. Required permissions are always on; optional ones are controlled here.",
+  "settings.extensionsWarmPoolNotice": "Faster tool startup: keeps {{tools}} running in a separate background process between calls.",
   "settings.extensionsPermissionMode.required": "Required",
   "settings.extensionsPermissionMode.scoped": "Limited",
   "settings.extensionsPermissionMode.optionalOn": "Allowed",

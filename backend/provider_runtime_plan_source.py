@@ -424,6 +424,13 @@ def _structural_provider_runtime_plan(
     import harness_run_projection
     import installation_profile
 
+    ready_map = frozen_inputs.get("_mcp_prewarm_ready")
+    warm_pool_names = (
+        set(ready_map)
+        if isinstance(ready_map, dict)
+        else extension_store.runtime_mcp_warm_pool_server_names(frozen_inputs)
+    )
+
     explicit = _explicit_mcp_configs(frozen_inputs)
     runner = (
         _provider_runner(frozen_inputs, provider_kind)
@@ -514,8 +521,8 @@ def _structural_provider_runtime_plan(
             },
             "tool_names": tool_names,
             "prewarm": {
-                "eligible": name in runtime,
-                "readiness_required": False,
+                "eligible": name in warm_pool_names,
+                "readiness_required": name in warm_pool_names,
             },
         })
     for key in ("resolved_tool_names", "tool_names"):

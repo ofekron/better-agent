@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -65,10 +66,12 @@ async def test_supervisor_lifecycle() -> None:
     real_config = _fixture_real_config()
 
     # 1) fresh start -> ready
+    cold_started = time.monotonic()
     result = await supervisor.ensure_daemon_ready(
         session_id, ext_id, server_name, real_config, "fp-1", bound_seconds=8.0,
     )
-    check(result.ready, "fresh daemon becomes ready")
+    cold_elapsed = time.monotonic() - cold_started
+    check(result.ready, f"fresh daemon becomes ready in {cold_elapsed * 1000:.1f}ms")
     state = supervisor._read_state(mp_paths.state_path(session_id, ext_id, server_name))
     pid_a = state["pid"] if state else None
     check(bool(pid_a) and supervisor._pid_alive(pid_a), "daemon process is alive after start")
@@ -82,7 +85,7 @@ async def test_supervisor_lifecycle() -> None:
     state2 = supervisor._read_state(mp_paths.state_path(session_id, ext_id, server_name))
     check(result2.ready, "reused daemon reports ready")
     check(state2 is not None and state2.get("pid") == pid_a, "reuse keeps the same pid (no respawn)")
-    check(reuse_elapsed < 1.0, "reuse fast path is near-instant")
+    check(reuse_elapsed < 1.0, f"reuse fast path is {reuse_elapsed * 1000:.1f}ms")
 
     # 3) fingerprint change -> old process killed, new one spawned
     result3 = await supervisor.ensure_daemon_ready(
@@ -124,6 +127,72 @@ async def test_supervisor_lifecycle() -> None:
     while time.monotonic() < deadline and supervisor._pid_alive(idle_pid):
         await asyncio.sleep(0.05)
     check(not supervisor._pid_alive(idle_pid), "daemon self-exits after idle timeout with zero connections")
+
+
+async def test_python_file_low_level_server_factory() -> None:
+    fixture = _FIXTURE_DIR / "_fixture_mcp_prewarm_module.py"
+    real_config = {
+        "command": sys.executable,
+        "args": [
+            "-m",
+            "better_agent_sdk.script_entrypoint",
+            str(_FIXTURE_DIR),
+            str(fixture),
+        ],
+        "env": {
+            "PYTHONPATH": os.pathsep.join((str(_FIXTURE_DIR), str(ROOT.parent / "sdk"))),
+            "MCP_PREWARM_FIXTURE_LOW_LEVEL": "1",
+        },
+    }
+    result = await supervisor.ensure_daemon_ready(
+        "sess-low-level-script",
+        "fixture-ext-low-level",
+        "fixture-server-low-level",
+        real_config,
+        "fp-low-level-script",
+        bound_seconds=8.0,
+    )
+    log_path = mp_paths.log_path(
+        "sess-low-level-script",
+        "fixture-ext-low-level",
+        "fixture-server-low-level",
+    )
+    detail = log_path.read_text(encoding="utf-8") if log_path.is_file() else "no daemon log"
+    assert result.ready, (
+        "python-file build_server() may return a low-level MCP Server\n" + detail
+    )
+
+
+def test_manifest_drives_prewarm_independently_of_user_facing() -> None:
+    record = {
+        "manifest": {
+            "id": "fixture-extension",
+            "entrypoints": {"mcp": [{
+                "name": "fixture-server",
+                "python": "mcp/server.py",
+                "execution": "warm_pool",
+                "user_facing": False,
+                "requires_backend_auth": False,
+            }]},
+        },
+        "source": {"install_path": str(_FIXTURE_DIR)},
+    }
+    real_config = _fixture_real_config()
+    with (
+        patch.object(extension_store, "_active_records", return_value=[record]),
+        patch.object(extension_store, "_record_runtime_ready", return_value=True),
+        patch.object(extension_store, "runtime_package_root_for_record", return_value=_FIXTURE_DIR),
+        patch.object(extension_store, "is_mcp_server_enabled", return_value=True),
+        patch.object(extension_store, "_runtime_mcp_server_config_for_item", return_value=real_config),
+    ):
+        targets = extension_store.runtime_mcp_prewarm_targets({
+            "app_session_id": "sess-non-user-facing",
+            "user_facing": False,
+            "bare_config": False,
+        })
+    assert [target["server_name"] for target in targets] == ["fixture-server"], (
+        "warm_pool selection is driven by execution mode, not user_facing"
+    )
 
 
 _INITIALIZE_REQUEST = (
@@ -433,17 +502,7 @@ async def test_concurrent_latency_win() -> None:
     check(elapsed < 6.5, f"9 concurrent daemons ready in {elapsed:.2f}s (< 6.5s bound)")
 
 
-async def test_codex_provider_prewarm_wiring() -> None:
-    """Locks the Codex-side mitigation added alongside Claude's: proves
-    `CodexProvider._prewarm_extension_mcp_ready` (called from
-    `CodexProvider.start_run`, mirroring `ClaudeProvider._spawn_run`)
-    actually readies a daemon and returns its socket, that gating
-    (bare_config / non-user-facing) short-circuits without touching the
-    event loop, and that the resulting `_mcp_prewarm_ready` map changes
-    the server config `extension_store` hands to the codex runner --
-    the same substitution `with_builtin_mcp_servers` /
-    `extension_store.runtime_mcp_server_configs` apply in
-    `runner_codex.py`."""
+async def test_shared_provider_prewarm_wiring() -> None:
     server_name = "fixture-server-codex"
     ext_id = "fixture-ext-codex"
     real_config = _fixture_real_config()
@@ -456,47 +515,65 @@ async def test_codex_provider_prewarm_wiring() -> None:
     original = extension_store.runtime_mcp_prewarm_targets
     extension_store.runtime_mcp_prewarm_targets = lambda inputs: [target]
     try:
-        from provider_codex import CodexProvider
+        from mcp_prewarm.preparation import prepare_runtime_mcp_prewarm
 
-        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
         input_payload = {
-            "user_facing": True,
+            "user_facing": False,
             "bare_config": False,
             "app_session_id": "sess-codex-wiring",
         }
-        # `start_run` (and thus this method) only ever runs off the
-        # backend's event-loop thread via turn_manager._to_turn_dispatch_thread;
-        # asyncio.to_thread reproduces that so _run_coro_blocking's
-        # no-running-loop assertion holds exactly as it would in production.
-        ready_map = await asyncio.to_thread(
-            provider._prewarm_extension_mcp_ready, input_payload, "sess-codex-wiring",
+        prepared = await asyncio.to_thread(
+            prepare_runtime_mcp_prewarm,
+            input_payload,
+            "sess-codex-wiring",
+            bound_seconds=8.0,
         )
-        check(
-            ready_map.get(server_name) is not None,
-            "CodexProvider._prewarm_extension_mcp_ready readies the daemon and returns its socket",
-        )
-
-        gated = provider._prewarm_extension_mcp_ready(
-            {"bare_config": True, "user_facing": True}, "sess-x",
-        )
-        check(gated == {}, "bare_config turns skip Codex prewarm entirely")
-        gated2 = provider._prewarm_extension_mcp_ready(
-            {"bare_config": False, "user_facing": False}, "sess-x",
-        )
-        check(gated2 == {}, "non-user-facing turns skip Codex prewarm entirely")
+        assert prepared.ready_map.get(server_name) is not None
+        assert prepared.status == {
+            server_name: {"status": "ready", "error": None},
+        }
+        for provider_file in (
+            "provider_claude.py",
+            "provider_claude_better_agent_runner.py",
+            "provider_codex.py",
+            "provider_agy.py",
+        ):
+            source = (ROOT / provider_file).read_text(encoding="utf-8")
+            assert "prepare_runtime_mcp_prewarm(" in source, (
+                f"{provider_file} bypasses the shared warm_pool preparation"
+            )
 
         real_server_config = {"command": "irrelevant-cold-spawn", "args": [], "env": {}}
         substituted = extension_store._apply_mcp_prewarm_daemon(
-            real_server_config, server_name, {"_mcp_prewarm_ready": ready_map},
+            real_server_config,
+            server_name,
+            {"_mcp_prewarm_ready": prepared.ready_map},
         )
-        check(
-            substituted is not None
-            and substituted["command"] == sys.executable
-            and substituted["args"] == ["-m", "mcp_prewarm.stub"],
-            "a ready Codex-prewarmed daemon substitutes the stub command in the server config codex would receive",
-        )
+        assert substituted is not None
+        assert substituted["command"] == sys.executable
+        assert substituted["args"] == ["-m", "mcp_prewarm.stub"]
     finally:
         extension_store.runtime_mcp_prewarm_targets = original
+
+
+def test_agent_board_declares_warm_pool_without_user_facing() -> None:
+    manifest_path = (
+        ROOT.parent
+        / "better-agent-private"
+        / "extensions"
+        / "agent-board"
+        / "better-agent-extension.json"
+    )
+    if not manifest_path.is_file():
+        return
+    import json
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    item = manifest["entrypoints"]["mcp"][0]
+    assert item["execution"] == "warm_pool"
+    assert item["user_facing"] is False
+    adapter = manifest_path.parent / item["python"]
+    assert "def build_server(" in adapter.read_text(encoding="utf-8")
 
 
 def _cleanup_all_sessions() -> None:
@@ -511,12 +588,15 @@ def _cleanup_all_sessions() -> None:
 
 async def main_async() -> None:
     await test_supervisor_lifecycle()
+    await test_python_file_low_level_server_factory()
+    test_manifest_drives_prewarm_independently_of_user_facing()
     test_stub_forwarding()
     await test_tcp_daemon_secret_gate()
     test_stub_tcp_forwarding()
     await test_readiness_gate_fail_closed()
     await test_concurrent_latency_win()
-    await test_codex_provider_prewarm_wiring()
+    await test_shared_provider_prewarm_wiring()
+    test_agent_board_declares_warm_pool_without_user_facing()
 
 
 def main() -> int:

@@ -98,6 +98,7 @@ _NATIVE_HARNESS_KINDS = frozenset({"instructions", "skill", "mcp"})
 # extension-scoped token at connect time.
 _AMBIENT_AUTH_LAUNCHER = "launcher"
 _AMBIENT_AUTH_MODES = frozenset({"", _AMBIENT_AUTH_LAUNCHER})
+_MCP_EXECUTION_MODES = frozenset({"subprocess", "warm_pool"})
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RUNTIME_READY_PROJECTION: dict[str, bool] = {}
 _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
@@ -2312,12 +2313,23 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         default_enabled = item.get("default_enabled", True)
         if not isinstance(default_enabled, bool):
             raise ExtensionError("entrypoints.mcp.default_enabled must be a boolean")
+        execution = str(item.get("execution") or "subprocess").strip()
+        if execution not in _MCP_EXECUTION_MODES:
+            raise ExtensionError(
+                "entrypoints.mcp.execution must be one of: "
+                + ", ".join(sorted(_MCP_EXECUTION_MODES))
+            )
+        if execution == "warm_pool" and command:
+            raise ExtensionError(
+                "entrypoints.mcp.execution=warm_pool requires python or module"
+            )
         items.append(
             {
                 "name": name,
                 "label": label,
                 "description": description,
                 "default_enabled": default_enabled,
+                **({"execution": execution} if execution != "subprocess" else {}),
                 "python": python_path,
                 "module": module,
                 "command": command,
@@ -5025,10 +5037,28 @@ def is_first_party(record: dict[str, Any]) -> bool:
 
 
 def permission_consent_fingerprint(record: dict[str, Any]) -> str:
-    """Stable hash of the declared permission set. Re-consent is required when
-    this changes (an update that asks for new permissions)."""
+    """Stable hash of permissions and non-default MCP execution choices."""
     declared = declared_permissions(record)
-    payload = json.dumps({k: declared[k] for k in sorted(declared)}, sort_keys=True)
+    manifest = record.get("manifest") or {}
+    execution = sorted(
+        [
+            {
+                "name": str(item.get("name") or ""),
+                "execution": str(item.get("execution") or "subprocess"),
+            }
+            for item in ((manifest.get("entrypoints") or {}).get("mcp") or [])
+            if isinstance(item, dict)
+            and str(item.get("execution") or "subprocess") != "subprocess"
+        ],
+        key=lambda value: (value["name"], value["execution"]),
+    )
+    permission_payload = {key: declared[key] for key in sorted(declared)}
+    payload = json.dumps(
+        permission_payload
+        if not execution
+        else {"permissions": permission_payload, "mcp_execution": execution},
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -6442,7 +6472,10 @@ def _mcp_server_configs_for_delivery(
                 }
             else:
                 config = _runtime_mcp_server_config_for_item(record, item, resolved_inputs)
-                if delivery == _HARNESS_DELIVERY_RUNTIME and item.get("user_facing"):
+                if (
+                    delivery == _HARNESS_DELIVERY_RUNTIME
+                    and item.get("execution", "subprocess") == "warm_pool"
+                ):
                     config = _apply_mcp_prewarm_daemon(config, server_name, resolved_inputs)
             if config:
                 configs[server_name] = config
@@ -6503,23 +6536,11 @@ def _apply_mcp_prewarm_daemon(
 
 
 def runtime_mcp_prewarm_targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
-    """Enumerates the user-facing runtime MCP items eligible for
-    pre-warming for this turn's `inputs` -- same gating
-    (`_mcp_item_available_for_inputs`, `user_facing`, module-based
-    entrypoint) as `_mcp_server_configs_for_delivery`'s runtime path,
-    single source of truth for which items get built each turn. Only
-    module entrypoints resolving to a module that declares
-    `build_server()` are eligible -- checked via a cheap source-text
-    scan (no import) so an extension that doesn't follow the
-    convention is silently left on the cold-spawn path instead of
-    being wrongly gated to fail-closed unavailable.
-    """
+    """Resolve manifest-declared warm-pool servers for one turn."""
     resolved_inputs = {
         **inputs,
-        "user_facing": True,
-        "bare_config": False,
-        # Called from `ClaudeProvider._spawn_run`, BEFORE the runner
-        # subprocess's own `hydrate_runner_inputs` bootstrap RPC mints
+        # Called during provider preparation, BEFORE the runner subprocess's
+        # own `hydrate_runner_inputs` bootstrap RPC mints
         # the real session `internal_token` -- at this point in the
         # backend process it is always blank by construction. Only
         # `_mcp_item_available_for_inputs`'s `requires_backend_auth`
@@ -6544,19 +6565,13 @@ def runtime_mcp_prewarm_targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
         if manifest["id"] in disabled_extension_ids:
             continue
         for item in _stored_mcp_entrypoints(record):
-            if not item.get("user_facing"):
+            if item.get("execution", "subprocess") != "warm_pool":
                 continue
             server_name = item.get("replaces_builtin") or item["name"]
             if not _mcp_item_available_for_inputs(record, item, resolved_inputs):
                 continue
             real_config = _runtime_mcp_server_config_for_item(record, item, resolved_inputs)
             if not real_config:
-                continue
-            args = list(real_config.get("args") or [])
-            if real_config.get("command") != sys.executable or len(args) < 2 or args[0] != "-m":
-                continue
-            module_name = args[1]
-            if not _module_declares_build_server(module_name):
                 continue
             targets.append({
                 "extension_id": manifest["id"],
@@ -6567,21 +6582,11 @@ def runtime_mcp_prewarm_targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
     return targets
 
 
-def _module_declares_build_server(module_name: str) -> bool:
-    import importlib.util
-
-    try:
-        spec = importlib.util.find_spec(module_name)
-    except (ImportError, ValueError):
-        return False
-    origin = getattr(spec, "origin", None) if spec else None
-    if not origin or not os.path.isfile(origin):
-        return False
-    try:
-        source = Path(origin).read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return "def build_server(" in source
+def runtime_mcp_warm_pool_server_names(inputs: dict[str, Any]) -> set[str]:
+    return {
+        str(target["server_name"])
+        for target in runtime_mcp_prewarm_targets(inputs)
+    }
 
 
 def _runtime_broker_value(inputs: dict[str, Any]) -> Any:

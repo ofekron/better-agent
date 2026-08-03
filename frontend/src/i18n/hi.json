@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "बंद",
   "settings.extensionsPermissions": "अनुमतियाँ",
   "settings.extensionsPermissionsHelp": "इस एक्सटेंशन क्या एक्सेस कर सकता है। आवश्यक अनुमतियाँ हमेशा चालू होती हैं; वैकल्पिक यहाँ नियंत्रित होती हैं।",
+  "settings.extensionsWarmPoolNotice": "तेज़ टूल स्टार्टअप: कॉल के बीच {{tools}} को एक अलग बैकग्राउंड प्रोसेस में चालू रखता है।",
   "settings.extensionsPermissionMode.required": "आवश्यक",
   "settings.extensionsPermissionMode.scoped": "सीमित",
   "settings.extensionsPermissionMode.optionalOn": "अनुमत",

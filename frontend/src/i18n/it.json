@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "Disattiva",
   "settings.extensionsPermissions": "Permessi",
   "settings.extensionsPermissionsHelp": "A cosa può accedere questa estensione. I permessi obbligatori sono sempre attivi; quelli facoltativi sono controllati qui.",
+  "settings.extensionsWarmPoolNotice": "Avvio degli strumenti più rapido: mantiene {{tools}} in esecuzione in un processo in background separato tra le chiamate.",
   "settings.extensionsPermissionMode.required": "Obbligatorio",
   "settings.extensionsPermissionMode.scoped": "Limitato",
   "settings.extensionsPermissionMode.optionalOn": "Consentito",

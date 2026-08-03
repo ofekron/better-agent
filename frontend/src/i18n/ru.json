@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "Отключено",
   "settings.extensionsPermissions": "Разрешения",
   "settings.extensionsPermissionsHelp": "К чему это расширение имеет доступ. Обязательные разрешения всегда включены; опциональные управляются здесь.",
+  "settings.extensionsWarmPoolNotice": "Более быстрый запуск инструментов: {{tools}} продолжает работать в отдельном фоновом процессе между вызовами.",
   "settings.extensionsPermissionMode.required": "Обязательно",
   "settings.extensionsPermissionMode.scoped": "Ограничено",
   "settings.extensionsPermissionMode.optionalOn": "Разрешено",

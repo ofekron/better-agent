@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "已停用",
   "settings.extensionsPermissions": "权限",
   "settings.extensionsPermissionsHelp": "此扩展可以访问什么。必需权限始终开启；可选权限在此控制。",
+  "settings.extensionsWarmPoolNotice": "工具启动更快：在调用之间让 {{tools}} 持续运行于独立的后台进程中。",
   "settings.extensionsPermissionMode.required": "必需",
   "settings.extensionsPermissionMode.scoped": "受限",
   "settings.extensionsPermissionMode.optionalOn": "允许",

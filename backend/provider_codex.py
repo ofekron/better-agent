@@ -73,6 +73,7 @@ from execution_template import (
     prepare_execution,
     validate_recovery_sessions,
 )
+from mcp_prewarm.preparation import prepare_runtime_mcp_prewarm
 
 logger = logging.getLogger(__name__)
 
@@ -540,66 +541,6 @@ class CodexProvider(Provider):
         cleanup_staged_codex_runtime_agent_payload(run_id)
         cleanup_installed_codex_runtime_agent_payload(run_dir)
 
-    def _prewarm_extension_mcp_ready(
-        self, input_payload: dict[str, Any], app_session_id: str,
-    ) -> dict[str, str | dict[str, Any] | None]:
-        """Codex-equivalent of `ClaudeProvider._prewarm_extension_mcp_ready`
-        (see provider_claude.py). The codex CLI's Rust binary defaults
-        `startup_timeout_sec` to 10s per MCP server on a cold spawn --
-        an even wider unmitigated window than Claude's ~2-6s snapshot
-        wait -- so a user-facing turn's first (cold-daemon) MCP server
-        is just as likely to time out here. Bounded above 10s so this
-        turn's worst-case added latency (the wait below) never exceeds
-        what the CLI itself would already have blocked for once it
-        tries to spawn that server cold; 9.5s instead of Claude's 8.0s
-        because Codex's own ceiling is higher (10s vs Claude's 2-6s),
-        so the bound can afford to sit closer to it while still
-        leaving daylight before the CLI's own timeout fires.
-
-        Runs in `start_run`'s own worker thread -- `provider.start_run`
-        is only ever invoked via `turn_manager._to_turn_dispatch_thread`
-        (see turn_manager.py), never on the backend's event-loop thread,
-        so `_run_coro_blocking`'s no-running-loop assertion holds here
-        exactly as it does for Claude's `_spawn_run`.
-        """
-        if input_payload.get("bare_config") or not input_payload.get("user_facing"):
-            return {}
-        from extension_store import runtime_mcp_prewarm_targets
-
-        targets = runtime_mcp_prewarm_targets(input_payload)
-        if not targets:
-            return {}
-
-        async def _one(target: dict[str, Any]) -> tuple[str, str | dict[str, Any] | None]:
-            from mcp_prewarm import supervisor as mcp_prewarm_supervisor
-
-            fingerprint = mcp_prewarm_supervisor.compute_fingerprint(
-                target["real_config"], target["extension_record"],
-            )
-            try:
-                result = await mcp_prewarm_supervisor.ensure_daemon_ready(
-                    app_session_id,
-                    target["extension_id"],
-                    target["server_name"],
-                    target["real_config"],
-                    fingerprint,
-                    bound_seconds=9.5,
-                )
-            except Exception:
-                logger.exception(
-                    "mcp_prewarm: daemon-ready check raised for %s/%s",
-                    target["extension_id"], target["server_name"],
-                )
-                return target["server_name"], None
-            return target["server_name"], result.ready_map_value()
-
-        async def _gather() -> dict[str, str | dict[str, Any] | None]:
-            pairs = await asyncio.gather(*(_one(t) for t in targets))
-            return dict(pairs)
-
-        from provider_claude import _run_coro_blocking
-        return _run_coro_blocking(_gather())
-
     # ------------------------------------------------------------------
     # Env — minimal for Codex (subscription mode, no API keys)
     # ------------------------------------------------------------------
@@ -736,9 +677,12 @@ class CodexProvider(Provider):
             ],
         }
         input_payload.update(run_policy)
-        input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
-            input_payload, app_session_id,
+        prewarm = prepare_runtime_mcp_prewarm(
+            input_payload,
+            app_session_id,
+            bound_seconds=9.5,
         )
+        input_payload["_mcp_prewarm_ready"] = prewarm.ready_map
         from execution_artifact_io import bind_execution_input
 
         _atomic_write_json(

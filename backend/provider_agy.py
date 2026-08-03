@@ -40,6 +40,7 @@ from provider_runtime_plan_source import (
 from provider_family_runtime_capabilities import (
     snapshot_family_runtime_capabilities,
 )
+from mcp_prewarm.preparation import prepare_runtime_mcp_prewarm
 from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
@@ -182,6 +183,12 @@ class AgyProvider(SessionEventsProvider):
             logger.error("AGY launch authority attestation failed during preparation: reason=%s", attest_reason)
             raise RuntimeError(f"AGY launch authority changed during preparation (reason: {attest_reason})")
 
+        prewarm = prepare_runtime_mcp_prewarm(
+            runner_input,
+            str(start_arguments["app_session_id"]),
+            bound_seconds=8.0,
+        )
+        runner_input["_mcp_prewarm_ready"] = prewarm.ready_map
         projection = structural_provider_runtime_plan(
             runner_input,
             self.KIND,
@@ -197,6 +204,7 @@ class AgyProvider(SessionEventsProvider):
             resolved_plan=projection["resolved_plan"],
             extension_state=projection["extension_state"],
             installation_decisions=projection["installation_decisions"],
+            prewarm_results=prewarm.status,
         )
         runner_input["agy_config_root"] = str(config_root)
         runner_input["agy_settings"] = agy_settings

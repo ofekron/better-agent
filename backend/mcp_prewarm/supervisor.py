@@ -208,8 +208,11 @@ def _spawn(
             kwargs["start_new_session"] = True
         else:  # pragma: no cover - Windows detach
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        python = str(real_config.get("command") or "").strip()
+        if not python:
+            raise RuntimeError("warm_pool target has no Python interpreter")
         popen = subprocess.Popen(
-            [sys.executable, str(_DAEMON_MODULE), str(spawn_config_file)],
+            [python, str(_DAEMON_MODULE), str(spawn_config_file)],
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
             stderr=log_fp,

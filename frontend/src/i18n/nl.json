@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "Uitgeschakeld",
   "settings.extensionsPermissions": "Machtigingen",
   "settings.extensionsPermissionsHelp": "Waar deze extensie toegang toe heeft. Vereiste machtigingen staan altijd aan; optionele worden hier bestuurd.",
+  "settings.extensionsWarmPoolNotice": "Snellere toolstart: houdt {{tools}} tussen aanroepen actief in een afzonderlijk achtergrondproces.",
   "settings.extensionsPermissionMode.required": "Vereist",
   "settings.extensionsPermissionMode.scoped": "Beperkt",
   "settings.extensionsPermissionMode.optionalOn": "Toegestaan",

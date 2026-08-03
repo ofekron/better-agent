@@ -91,6 +91,7 @@ from provider_family_launch_attestation import (
 from provider_family_runtime_capabilities import (
     snapshot_family_runtime_capabilities,
 )
+from mcp_prewarm.preparation import prepare_runtime_mcp_prewarm
 from codex_execution_identity import file_identity_to_dict
 from provider_runtime_plan_source import (
     hydrate_frozen_provider_runtime_plan,
@@ -523,6 +524,12 @@ class ClaudeProvider(Provider):
                 f"Claude launch authority changed during preparation (reason: {attest_reason})",
             )
 
+        prewarm = prepare_runtime_mcp_prewarm(
+            runner_input,
+            str(start_arguments["app_session_id"]),
+            bound_seconds=8.0,
+        )
+        runner_input["_mcp_prewarm_ready"] = prewarm.ready_map
         projection = structural_provider_runtime_plan(
             runner_input,
             self.KIND,
@@ -542,6 +549,7 @@ class ClaudeProvider(Provider):
             extension_state=projection["extension_state"],
             installation_decisions=projection["installation_decisions"],
             package_identities=(sdk_authority,),
+            prewarm_results=prewarm.status,
         )
         return prepare_family_execution(
             authority,

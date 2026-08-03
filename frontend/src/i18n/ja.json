@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "無効",
   "settings.extensionsPermissions": "権限",
   "settings.extensionsPermissionsHelp": "この拡張機能がアクセスできるもの。必須の権限は常にオン、オプションの権限はここで制御します。",
+  "settings.extensionsWarmPoolNotice": "ツールの起動を高速化：呼び出しの間も {{tools}} を別のバックグラウンドプロセスで実行し続けます。",
   "settings.extensionsPermissionMode.required": "必須",
   "settings.extensionsPermissionMode.scoped": "限定",
   "settings.extensionsPermissionMode.optionalOn": "許可",

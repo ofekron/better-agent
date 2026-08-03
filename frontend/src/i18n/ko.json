@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "사용 안 함",
   "settings.extensionsPermissions": "권한",
   "settings.extensionsPermissionsHelp": "이 확장이 접근할 수 있는 항목입니다. 필수 권한은 항상 켜져 있으며, 선택 권한은 여기서 제어합니다.",
+  "settings.extensionsWarmPoolNotice": "더 빠른 도구 시작: 호출 사이에도 {{tools}}를 별도의 백그라운드 프로세스에서 계속 실행합니다.",
   "settings.extensionsPermissionMode.required": "필수",
   "settings.extensionsPermissionMode.scoped": "제한됨",
   "settings.extensionsPermissionMode.optionalOn": "허용됨",

@@ -6,12 +6,11 @@ instead of paying cold interpreter/import startup on every turn.
 Invoked as: `python3 daemon_process.py <spawn_config.json path>`.
 Never invoked directly by a user -- only by `supervisor._spawn`.
 
-Imports the extension's own module via the SAME module/args
-`_runtime_mcp_server_config_for_item` already resolved (passed in via
-spawn_config, not hardcoded), calls its `build_server()` convention
-function to obtain the FastMCP instance, then drives its low-level
-`Server` (`FastMCP._mcp_server`, confirmed via installed `mcp` source)
-directly against each accepted connection with an independent
+Loads the extension's module or package-confined Python file via the SAME
+command/args `_runtime_mcp_server_config_for_item` already resolved, calls
+its `build_server()` factory, and drives either its FastMCP wrapper's
+low-level server or a returned low-level `Server` directly against each
+accepted connection with an independent
 `initialize` handshake per connection -- this is what makes the
 daemon safely multi-tenant across turns/sessions that reuse it,
 unlike FastMCP's own 1:1 `.run("stdio")`.
@@ -54,10 +53,35 @@ def _load_spawn_config(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _resolve_module(args: list[str]) -> tuple[str, list[str]]:
-    if len(args) >= 2 and args[0] == "-m":
-        return args[1], args[2:]
-    raise RuntimeError(f"mcp_prewarm daemon only supports '-m module' entrypoints, got {args!r}")
+def _load_entrypoint(args: list[str]) -> tuple[Any, list[str]]:
+    if len(args) < 2 or args[0] != "-m":
+        raise RuntimeError("warm_pool requires a Python module or script entrypoint")
+    if args[1] != "better_agent_sdk.script_entrypoint":
+        return importlib.import_module(args[1]), args[2:]
+    if len(args) < 4:
+        raise RuntimeError("warm_pool script entrypoint is incomplete")
+    from better_agent_sdk.script_entrypoint import load_script_module
+
+    return load_script_module(args[2], args[3], args[4:]), args[4:]
+
+
+def _build_mcp_server(args: list[str]) -> Any:
+    module, extra_args = _load_entrypoint(args)
+    build_server = getattr(module, "build_server", None)
+    if not callable(build_server):
+        raise RuntimeError("warm_pool entrypoint must expose build_server()")
+    previous_argv = sys.argv
+    try:
+        sys.argv = [str(getattr(module, "__file__", "mcp-server")), *extra_args]
+        built = build_server()
+    finally:
+        sys.argv = previous_argv
+    server = getattr(built, "_mcp_server", built)
+    if not callable(getattr(server, "run", None)) or not callable(
+        getattr(server, "create_initialization_options", None)
+    ):
+        raise RuntimeError("build_server() must return FastMCP or mcp.server.Server")
+    return server
 
 
 def _write_state(state_path: Path, payload: dict[str, Any]) -> None:
@@ -192,13 +216,7 @@ async def _idle_reaper(activity: _Activity, idle_timeout_seconds: float, session
 
 
 async def _serve(config: dict[str, Any]) -> None:
-    module_name, _extra_args = _resolve_module(list(config["args"]))
-    module = importlib.import_module(module_name)
-    build_server = getattr(module, "build_server", None)
-    if build_server is None:
-        raise RuntimeError(f"module {module_name!r} has no build_server() -- cannot prewarm")
-    fastmcp = build_server()
-    mcp_server = fastmcp._mcp_server
+    mcp_server = _build_mcp_server(list(config["args"]))
     init_options = mcp_server.create_initialization_options()
 
     state_path = Path(config["state_path"])

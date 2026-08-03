@@ -300,6 +300,7 @@ def main_test() -> int:
             python="mcp/server.py",
             args=("--stdio",),
             env={"PRIVATE_TOOL": "1"},
+            execution="warm_pool",
             predicate=predicate,
         ).to_dict()
         check(
@@ -308,7 +309,8 @@ def main_test() -> int:
                 "nonempty": ["app_session_id"],
             }
             and mcp["args"] == ["--stdio"]
-            and mcp["env"] == {"PRIVATE_TOOL": "1"},
+            and mcp["env"] == {"PRIVATE_TOOL": "1"}
+            and mcp["execution"] == "warm_pool",
             "McpServer emits predicate/args/env manifest shape",
         )
         check(
@@ -341,6 +343,10 @@ def main_test() -> int:
         return 1
     print("OK: extension sdk generic-core + delegation wrappers")
     return 0
+
+
+def test_extension_sdk_wrappers() -> None:
+    assert main_test() == 0
 
 
 if __name__ == "__main__":

@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "Désactivée",
   "settings.extensionsPermissions": "Permissions",
   "settings.extensionsPermissionsHelp": "Ce à quoi cette extension peut accéder. Les permissions requises sont toujours actives ; les optionnelles sont contrôlées ici.",
+  "settings.extensionsWarmPoolNotice": "Démarrage des outils plus rapide : maintient {{tools}} actif dans un processus d’arrière-plan distinct entre les appels.",
   "settings.extensionsPermissionMode.required": "Requise",
   "settings.extensionsPermissionMode.scoped": "Limitée",
   "settings.extensionsPermissionMode.optionalOn": "Autorisée",

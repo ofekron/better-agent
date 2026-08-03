@@ -1347,6 +1347,45 @@ def test_manifest_rejects_string_only_mcp_entrypoints() -> None:
         raise AssertionError("string-only MCP entrypoint was accepted")
 
 
+def test_manifest_mcp_execution_modes() -> None:
+    base = {
+        "kind": "better-agent-extension",
+        "id": "ofek-dev.execution-mode",
+        "name": "Execution mode",
+        "version": "1.0.0",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [{"name": "mode-test", "python": "mcp/server.py"}],
+        },
+        "permissions": {},
+    }
+    defaulted = _validate_manifest(base)
+    if defaulted["entrypoints"]["mcp"][0].get("execution", "subprocess") != "subprocess":
+        raise AssertionError(defaulted["entrypoints"]["mcp"][0])
+
+    warm = json.loads(json.dumps(base))
+    warm["entrypoints"]["mcp"][0]["execution"] = "warm_pool"
+    validated = _validate_manifest(warm)
+    if validated["entrypoints"]["mcp"][0]["execution"] != "warm_pool":
+        raise AssertionError(validated["entrypoints"]["mcp"][0])
+
+    invalid = json.loads(json.dumps(base))
+    invalid["entrypoints"]["mcp"][0]["execution"] = "shared_magic"
+    try:
+        _validate_manifest(invalid)
+    except extension_store.ExtensionError as exc:
+        if "entrypoints.mcp.execution" not in str(exc):
+            raise
+    else:
+        raise AssertionError("unknown MCP execution mode was accepted")
+
+    if (
+        extension_store.permission_consent_fingerprint({"manifest": defaulted})
+        == extension_store.permission_consent_fingerprint({"manifest": validated})
+    ):
+        raise AssertionError("warm_pool declaration did not change consent fingerprint")
+
+
 def test_manifest_rejects_reserved_mcp_server_names() -> None:
     try:
         _validate_manifest(

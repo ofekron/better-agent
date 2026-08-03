@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "معطّل",
   "settings.extensionsPermissions": "الأذونات",
   "settings.extensionsPermissionsHelp": "ما يمكن لهذا الامتداد الوصول إليه. الأذونات المطلوبة مشغّلة دائمًا؛ والأذونات الاختيارية تتحكّم بها هنا.",
+  "settings.extensionsWarmPoolNotice": "بدء أسرع للأدوات: يُبقي {{tools}} قيد التشغيل في عملية خلفية منفصلة بين الاستدعاءات.",
   "settings.extensionsPermissionMode.required": "مطلوب",
   "settings.extensionsPermissionMode.scoped": "محدود",
   "settings.extensionsPermissionMode.optionalOn": "مسموح",

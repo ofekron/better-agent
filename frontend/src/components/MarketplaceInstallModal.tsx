@@ -10,6 +10,9 @@ export interface MarketplaceInstallManifest {
   name: string;
   version: string;
   permissions?: Record<string, PermissionValue>;
+  entrypoints?: {
+    mcp?: Array<{ name?: string; label?: string; execution?: "subprocess" | "warm_pool" }>;
+  };
 }
 
 interface Props {
@@ -36,6 +39,13 @@ export function MarketplaceInstallModal({
       .sort(([left], [right]) => left.localeCompare(right)),
     [manifest.permissions],
   );
+  const warmPoolServers = useMemo(
+    () => (manifest.entrypoints?.mcp ?? [])
+      .filter((server) => server.execution === "warm_pool")
+      .map((server) => server.label || server.name)
+      .filter((name): name is string => Boolean(name)),
+    [manifest.entrypoints?.mcp],
+  );
   return (
     <MarketplaceConfirmationModal
       open={open}
@@ -49,6 +59,13 @@ export function MarketplaceInstallModal({
             <strong>{t("settings.extensionsPermissions")}</strong>
             <p style={{ color: "var(--text-secondary)" }}>{t("settings.extensionsPermissionsHelp")}</p>
           </div>
+          {warmPoolServers.length > 0 && (
+            <div className="extension-ui-settings-permission">
+              <div className="extension-ui-settings-permission-risk">
+                {t("settings.extensionsWarmPoolNotice", { tools: warmPoolServers.join(", ") })}
+              </div>
+            </div>
+          )}
           {permissions.map(([permission, value]) => (
             <div className="extension-ui-settings-permission" key={permission}>
               <div className="extension-ui-settings-permission-main">

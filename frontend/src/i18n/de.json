@@ -479,6 +479,7 @@
   "settings.extensionsDisabled": "Deaktiviert",
   "settings.extensionsPermissions": "Berechtigungen",
   "settings.extensionsPermissionsHelp": "Worauf diese Erweiterung zugreifen darf. Erforderliche Berechtigungen sind immer aktiv; optionale werden hier gesteuert.",
+  "settings.extensionsWarmPoolNotice": "Schnellerer Werkzeugstart: {{tools}} bleibt zwischen Aufrufen in einem separaten Hintergrundprozess aktiv.",
   "settings.extensionsPermissionMode.required": "Erforderlich",
   "settings.extensionsPermissionMode.scoped": "Eingeschränkt",
   "settings.extensionsPermissionMode.optionalOn": "Erlaubt",

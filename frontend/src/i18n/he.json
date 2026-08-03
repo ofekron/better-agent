@@ -478,6 +478,7 @@
   "settings.extensionsDisabled": "כבוי",
   "settings.extensionsPermissions": "הרשאות",
   "settings.extensionsPermissionsHelp": "מה התוסף יכול לגשת אליו. הרשאות חובה תמיד פעילות; הרשאות אופציונליות נשלטות כאן.",
+  "settings.extensionsWarmPoolNotice": "הפעלה מהירה יותר של כלים: משאיר את {{tools}} פועל בתהליך רקע נפרד בין קריאות.",
   "settings.extensionsPermissionMode.required": "חובה",
   "settings.extensionsPermissionMode.scoped": "מוגבל",
   "settings.extensionsPermissionMode.optionalOn": "מורשה",

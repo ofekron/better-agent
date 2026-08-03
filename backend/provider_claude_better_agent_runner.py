@@ -230,6 +230,7 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         snapshot_family_runtime_capabilities,
     )
     from provider_manifest import runner_module_for
+    from mcp_prewarm.preparation import prepare_runtime_mcp_prewarm
     from provider_runtime_plan_source import (
         selected_runtime_agent_sources,
         selected_runtime_skill_sources,
@@ -297,6 +298,12 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
             f"during preparation (reason: {attest_reason})",
         )
 
+    prewarm = prepare_runtime_mcp_prewarm(
+        runner_input,
+        str(start_arguments["app_session_id"]),
+        bound_seconds=8.0,
+    )
+    runner_input["_mcp_prewarm_ready"] = prewarm.ready_map
     projection = structural_provider_runtime_plan(runner_input, provider.KIND)
     capabilities = snapshot_family_runtime_capabilities(
         family=provider.KIND,
@@ -312,6 +319,7 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         resolved_plan=projection["resolved_plan"],
         extension_state=projection["extension_state"],
         installation_decisions=projection["installation_decisions"],
+        prewarm_results=prewarm.status,
     )
     return prepare_family_execution(
         authority,

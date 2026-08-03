@@ -18,6 +18,11 @@ def build_server():
     if delay:
         time.sleep(delay)
 
+    if os.environ.get("MCP_PREWARM_FIXTURE_LOW_LEVEL") == "1":
+        from mcp.server import Server
+
+        return Server("mcp-prewarm-low-level-fixture")
+
     from mcp.server.fastmcp import FastMCP
 
     server = FastMCP("mcp-prewarm-fixture")

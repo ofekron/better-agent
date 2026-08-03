@@ -37,6 +37,7 @@ from typing import Any, Literal
 HookActionType = Literal["navigate", "ensure", "module"]
 InstructionLevel = Literal["global", "project"]
 FrontendModuleKind = Literal["module", "iframe"]
+McpExecution = Literal["subprocess", "warm_pool"]
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,7 @@ class McpServer:
     user_facing: bool = True
     bare_allowed: bool = False
     requires_backend_auth: bool = True
+    execution: McpExecution = "subprocess"
     replaces_builtin: str | None = None
     predicate: McpPredicate | None = None
 
@@ -290,6 +292,8 @@ class McpServer:
             data["args"] = list(self.args)
         if self.env:
             data["env"] = dict(self.env)
+        if self.execution != "subprocess":
+            data["execution"] = self.execution
         if self.replaces_builtin:
             data["replaces_builtin"] = self.replaces_builtin
         if self.predicate is not None:
