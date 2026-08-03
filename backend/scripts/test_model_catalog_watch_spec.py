@@ -14,13 +14,65 @@ TEST_HOME = _test_home.TestHome.acquire("ba-test-watch-spec-")
 import pytest  # noqa: E402
 
 import model_catalog_watch_spec as watch_spec  # noqa: E402
+from codex_execution import build_codex_execution_contract  # noqa: E402
+from model_catalog_authority import (  # noqa: E402
+    CatalogAuthority,
+    build_catalog_authority,
+)
+from model_catalog_source_watcher import (  # noqa: E402
+    _normalized_directory,
+    _normalized_path,
+)
 from model_catalog_watch_spec import (  # noqa: E402
+    _identity_directories,
+    _identity_paths,
     _nearest_existing_directory,
     _provider_config_paths,
     _provider_config_root,
     _search_paths,
     build_source_watch_spec,
 )
+from scripts.codex_execution_test_support import write_executable  # noqa: E402
+
+_PROVIDER_GENERATION = "9b5a6f36-d44c-4c3c-b54f-39554003065d"
+_STATE_AUTHORITY = {
+    "generation": "778b9bea-b654-4e4b-8799-496d34445062",
+    "revision": 11,
+    "digest": "a" * 64,
+}
+
+
+def _build_authority(root: Path, provider_id: str, *, with_config_file: bool) -> CatalogAuthority:
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    if with_config_file:
+        (config_dir / "config.toml").write_text('profile = "work"\n', encoding="utf-8")
+    executable = root / "runtime" / "codex"
+    write_executable(executable, b"native")
+    provider = {
+        "id": provider_id,
+        "kind": "codex",
+        "generation": _PROVIDER_GENERATION,
+        "revision": 7,
+        "config_dir": str(config_dir),
+        "base_url": "",
+        "mode": "subscription",
+        "api_key": "must-never-persist",
+    }
+    contract = build_codex_execution_contract(
+        provider,
+        launcher_path=str(executable),
+        profile="work",
+    )
+    return build_catalog_authority(
+        provider_id=provider["id"],
+        provider_generation=provider["generation"],
+        provider_revision=provider["revision"],
+        provider_state_authority=_STATE_AUTHORITY,
+        execution_contract=contract,
+        discovery_method="codex.debug_models",
+        discovery_version=1,
+    )
 
 
 # --- _provider_config_root -------------------------------------------------
@@ -183,6 +235,70 @@ def test_build_source_watch_spec_skips_config_path_with_no_directory(
         authorities={},
     )
     assert str(tmp_path / "auth.json") in spec.exact_paths
+
+
+# --- identity paths (authority-present branch) -----------------------------
+
+
+def test_identity_paths_collects_launcher_components_and_config_file(
+    tmp_path: Path,
+) -> None:
+    authority = _build_authority(tmp_path, "codex-with-file", with_config_file=True)
+    paths = _identity_paths(authority)
+    contract = authority.execution_contract
+    expected: set[Path] = set()
+    for identity in {contract.launch_chain.launcher, *contract.launch_chain.components}:
+        expected.add(Path(identity.requested_path))
+        expected.add(Path(identity.resolved_path))
+    for config in contract.config:
+        expected.add(Path(config.config_path))
+        expected.add(Path(config.root_path))
+        assert config.config_file is not None
+        expected.add(Path(config.config_file.requested_path))
+        expected.add(Path(config.config_file.resolved_path))
+    assert paths == expected
+
+
+def test_identity_paths_skips_absent_config_file(tmp_path: Path) -> None:
+    # config.toml absent -> ConfigIdentity.config_file is None, exercising the
+    # false branch of the config_file guard inside _identity_paths.
+    authority = _build_authority(tmp_path, "codex-no-file", with_config_file=False)
+    assert any(c.config_file is None for c in authority.execution_contract.config)
+    paths = _identity_paths(authority)
+    for config in authority.execution_contract.config:
+        assert Path(config.config_path) in paths
+        assert Path(config.root_path) in paths
+
+
+def test_identity_directories_collects_config_parents(tmp_path: Path) -> None:
+    authority = _build_authority(tmp_path, "codex-dirs", with_config_file=True)
+    expected = {
+        Path(config.parent_path) for config in authority.execution_contract.config
+    }
+    assert _identity_directories(authority) == expected
+
+
+def test_build_source_watch_spec_attaches_authority_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Provider carries a matching authority but NO config_dir/CODEX_HOME, so the
+    # config_root guard takes its None branch while identity paths are attached.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    authority = _build_authority(
+        tmp_path / "a", "codex-attach", with_config_file=True
+    )
+    spec = build_source_watch_spec(
+        providers=[{"id": "codex-attach"}],
+        authorities={"codex-attach": authority},
+    )
+    launcher = authority.execution_contract.launch_chain.launcher
+    assert _normalized_path(Path(launcher.requested_path)) in set(spec.exact_paths)
+    identity_dirs = set(spec.identity_directories)
+    assert all(
+        _normalized_directory(Path(config.parent_path)) in identity_dirs
+        for config in authority.execution_contract.config
+    )
 
 
 if __name__ == "__main__":
