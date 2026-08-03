@@ -83,8 +83,17 @@ def _valid_provider_ids() -> tuple[str, str]:
         for p in config_store.list_providers().get("providers", [])
         if isinstance(p.get("id"), str) and p.get("id")
     ]
-    if len(providers) < 2:
-        raise RuntimeError("session search filter tests require at least two providers")
+    # The installation fixture seeds a single provider; the filter tests need
+    # at least two distinct ids. Seed extra subscription-mode providers (no
+    # credential session required) until that holds. Idempotent: providers
+    # persist across tests since _reset_home only wipes sessions.
+    while len(providers) < 2:
+        extra = config_store.add_provider({
+            "name": f"extra-provider-{len(providers)}",
+            "kind": "claude",
+            "mode": "subscription",
+        })
+        providers.append(extra["id"])
     return providers[0], providers[1]
 
 
@@ -576,6 +585,7 @@ def test_rest_endpoint_rejects_empty_query() -> bool:
     import main  # noqa: F401
     import config_store
     import extension_store
+    import _test_installation
     from fastapi.testclient import TestClient
     from auth_test_helpers import authenticate_client
     data = extension_store._load()  # type: ignore[attr-defined]
@@ -589,11 +599,12 @@ def test_rest_endpoint_rejects_empty_query() -> bool:
     providers = config_store.list_providers()["providers"]
     provider = providers[0]
     assignments = config_store.get_internal_llm_assignments()
-    assignments["session_search_worker"] = {
-        "provider_id": provider["id"],
-        "model": provider["default_model"],
-        "reasoning_effort": provider.get("default_reasoning_effort") or "",
-    }
+    # default_model/default_reasoning_effort live on the runtime profile, not
+    # the provider record (v3 config schema) — read them through the canonical
+    # test-side helper instead of provider["default_model"].
+    assignments["session_search_worker"] = _test_installation.default_llm_assignment(
+        provider["id"]
+    )
     config_store.set_internal_llm_assignments(assignments)
     client = TestClient(main.app)
     authenticate_client(client)
