@@ -5,8 +5,6 @@ import resource
 import sys
 from unittest.mock import patch
 
-import pytest
-
 import _test_home
 
 _test_home.isolate("bc-test-fd-limits-")
