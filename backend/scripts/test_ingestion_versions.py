@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
@@ -15,8 +16,13 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
 from ingestion_versions import (  # noqa: E402
-    CODEX_INGESTION_VERSION,
+    AGY_INGESTION_VERSION,
     CLAUDE_INGESTION_VERSION,
+    CODEX_INGESTION_VERSION,
+    COPILOT_INGESTION_VERSION,
+    OPENAI_INGESTION_VERSION,
+    current_ingestion_version,
+    marker_data_matches_current,
     marker_matches_current,
     write_marker,
 )
@@ -83,8 +89,58 @@ def test_old_version_missing_source_tombstones_marker() -> None:
     assert (run_dir / "reconciled.marker").exists()
 
 
+def test_current_ingestion_version_per_provider() -> None:
+    assert current_ingestion_version("codex") == CODEX_INGESTION_VERSION
+    assert current_ingestion_version("claude") == CLAUDE_INGESTION_VERSION
+    assert current_ingestion_version("agy") == AGY_INGESTION_VERSION
+    assert current_ingestion_version("copilot") == COPILOT_INGESTION_VERSION
+    assert current_ingestion_version("openai") == OPENAI_INGESTION_VERSION
+    # Unknown / unset provider kinds never re-digest: they stay at version 1.
+    assert current_ingestion_version("unknown-provider") == 1
+    assert current_ingestion_version(None) == 1
+
+
+def test_marker_data_matches_current_truth_table() -> None:
+    assert marker_data_matches_current(
+        {"provider_kind": "claude", "ingestion_version": CLAUDE_INGESTION_VERSION},
+        "claude",
+    )
+    # Provider mismatch fails even at the right version.
+    assert not marker_data_matches_current(
+        {"provider_kind": "claude", "ingestion_version": CLAUDE_INGESTION_VERSION},
+        "codex",
+    )
+    # Stale version for the right provider fails.
+    assert not marker_data_matches_current(
+        {"provider_kind": "claude", "ingestion_version": 1}, "claude"
+    )
+
+
+def test_marker_matches_current_rejects_non_file() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp) / "isdir"
+        directory.mkdir()
+        # A directory fails the file guard before any JSON is parsed.
+        assert not marker_matches_current(directory, "codex")
+
+
+def test_marker_matches_current_oserror_is_a_mismatch() -> None:
+    # The stat guard exists for platforms where is_symlink/is_file raises
+    # OSError (ELOOP, EACCES). That OS condition is not reproducible on the
+    # macOS/Docker test host (pathlib turns it into False), so simulate the
+    # exact OSError the guard is written for and assert it is treated as a
+    # mismatch rather than propagating out of marker_matches_current.
+    marker = Path("irrelevant")
+    with patch.object(Path, "is_symlink", side_effect=OSError("simulated ELOOP")):
+        assert not marker_matches_current(marker, "codex")
+
+
 def main() -> int:
     test_marker_requires_current_version()
+    test_current_ingestion_version_per_provider()
+    test_marker_data_matches_current_truth_table()
+    test_marker_matches_current_rejects_non_file()
+    test_marker_matches_current_oserror_is_a_mismatch()
     test_old_version_requires_native_source_before_reingest()
     test_old_version_missing_source_tombstones_marker()
     print("PASS: ingestion version markers")
