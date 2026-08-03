@@ -14,11 +14,13 @@ test_model_catalog_cache_schema3.py uses for os.open/os.read/os.fstat.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,7 +35,6 @@ if _BACKEND not in sys.path:
 
 import model_catalog_cache as catalog_cache  # noqa: E402
 from model_catalog_cache import (  # noqa: E402
-    MAX_CACHE_BYTES,
     MAX_MODELS,
     MAX_RETIRED,
     CatalogCacheError,
@@ -229,19 +230,47 @@ class TestFileReadToctou:
         assert result.status == "missing"
 
     def test_lstat_oserror_returns_invalid(self, monkeypatch):
-        # path.lstat() resolves through os.lstat; a non-FileNotFoundError
-        # OSError surfaces as an invalid cache (not missing).
+        # path.lstat() holds its own accessor, so patch Path.lstat directly.
+        # A non-FileNotFoundError OSError surfaces as an invalid cache.
         with _authority_ctx() as (root, authority):
             path = root / "models.json"
             write_catalog_cache(path, _snapshot(authority))
-            real_lstat = catalog_cache.os.lstat
+            real_lstat = Path.lstat
 
-            def raising_lstat(p, *args, **kwargs):
-                if Path(p) == path:
+            def raising_lstat(self):
+                if self == path:
                     raise OSError("lstat boom")
-                return real_lstat(p, *args, **kwargs)
+                return real_lstat(self)
 
-            monkeypatch.setattr(catalog_cache.os, "lstat", raising_lstat)
+            monkeypatch.setattr(Path, "lstat", raising_lstat)
+            result = read_catalog_cache(path, expected_authority=authority)
+        assert result.status == "invalid"
+
+    def test_stat_identity_changed_during_read_returns_invalid(self, monkeypatch):
+        # os.fstat's second call (the post-read `after` identity check)
+        # reports a shifted mtime -> stable identity mismatch -> rejected.
+        with _authority_ctx() as (root, authority):
+            path = root / "models.json"
+            write_catalog_cache(path, _snapshot(authority))
+            real_fstat = catalog_cache.os.fstat
+            calls = {"n": 0}
+
+            def shifting_fstat(fd):
+                observed = real_fstat(fd)
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    return SimpleNamespace(
+                        st_mode=observed.st_mode,
+                        st_size=observed.st_size,
+                        st_dev=observed.st_dev,
+                        st_ino=observed.st_ino,
+                        st_mtime_ns=observed.st_mtime_ns + 1,
+                        st_ctime_ns=observed.st_ctime_ns,
+                        st_atime_ns=observed.st_atime_ns,
+                    )
+                return observed
+
+            monkeypatch.setattr(catalog_cache.os, "fstat", shifting_fstat)
             result = read_catalog_cache(path, expected_authority=authority)
         assert result.status == "invalid"
 
@@ -270,8 +299,8 @@ class TestFileReadToctou:
 
             monkeypatch.setattr(catalog_cache.os, "read", growing_read)
             result = read_catalog_cache(path, expected_authority=authority)
+            assert not path.exists()  # poisoned cache removed
         assert result.status == "invalid"
-        assert not path.exists()  # poisoned cache removed
 
     def test_post_parse_identity_loss_returns_invalid(self, monkeypatch):
         # File parses, but path.lstat() raises OSError during the final
@@ -279,17 +308,17 @@ class TestFileReadToctou:
         with _authority_ctx() as (root, authority):
             path = root / "models.json"
             write_catalog_cache(path, _snapshot(authority))
-            real_lstat = catalog_cache.os.lstat
+            real_lstat = Path.lstat
             calls = {"n": 0}
 
-            def flaky_lstat(p, *args, **kwargs):
-                if Path(p) == path:
+            def flaky_lstat(self):
+                if self == path:
                     calls["n"] += 1
                     if calls["n"] >= 2:
                         raise OSError("flaky")
-                return real_lstat(p, *args, **kwargs)
+                return real_lstat(self)
 
-            monkeypatch.setattr(catalog_cache.os, "lstat", flaky_lstat)
+            monkeypatch.setattr(Path, "lstat", flaky_lstat)
             result = read_catalog_cache(path, expected_authority=authority)
         assert result.status == "invalid"
 
@@ -302,17 +331,16 @@ class TestFileReadToctou:
             # _parse_snapshot raises CatalogCacheError after a clean read.
             payload = _snapshot(authority).to_dict()
             payload["digest"] = "a" * 64  # wrong digest, keeps SHA256 shape
-            import json as _json
-            path.write_text(_json.dumps(payload), encoding="utf-8")
+            path.write_text(json.dumps(payload), encoding="utf-8")
 
-            real_unlink = catalog_cache.os.unlink
+            real_unlink = Path.unlink
 
-            def raising_unlink(p, *args, **kwargs):
-                if Path(p) == path:
+            def raising_unlink(self, *args, **kwargs):
+                if self == path:
                     raise OSError("unlink boom")
-                return real_unlink(p, *args, **kwargs)
+                return real_unlink(self, *args, **kwargs)
 
-            monkeypatch.setattr(catalog_cache.os, "unlink", raising_unlink)
+            monkeypatch.setattr(Path, "unlink", raising_unlink)
             result = read_catalog_cache(path, expected_authority=authority)
+            assert path.exists()  # unlink was swallowed, file remains
         assert result.status == "invalid"
-        assert path.exists()  # unlink was swallowed, file remains
