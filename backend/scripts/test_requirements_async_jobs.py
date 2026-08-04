@@ -624,6 +624,11 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
         )
         requirements_api._persist_requirements_processor_milestone(
             request_id,
+            "base_session_warming",
+            {"base_session_id": "base-1"},
+        )
+        requirements_api._persist_requirements_processor_milestone(
+            request_id,
             "runner_started",
             {"provider_id": "zai", "provider_run_id": "run-1", "worker_pid": 123},
         )
@@ -640,10 +645,12 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
         assert [item["phase"] for item in record["progress"]["phases"]] == [
             "created",
             "processor_started",
+            "base_session_warming",
             "runner_started",
             "native_session_started",
         ]
         assert record["provider_id"] == "zai"
+        assert record["base_session_id"] == "base-1"
         assert record["provider_run_id"] == "run-1"
         assert record["native_session_id"] == "native-1"
         assert record["native_session_file_paths"] == ["/native/session.jsonl"]
@@ -654,6 +661,7 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
         assert [item["phase"] for item in persisted["progress"]["phases"]] == [
             "created",
             "processor_started",
+            "base_session_warming",
             "runner_started",
             "native_session_started",
         ]

@@ -42,6 +42,11 @@ def delegation_milestone(status: dict[str, Any]) -> tuple[str, dict[str, Any]] |
     worker_pid = status.get("worker_pid")
     if isinstance(worker_pid, int) and not isinstance(worker_pid, bool) and worker_pid > 0:
         return "runner_started", fields
+    stage = status.get("stage")
+    if stage == "delegation_lock_acquired":
+        return "delegation_lock_acquired", fields
+    if stage == "delegation_lock_waiting":
+        return "delegation_lock_waiting", fields
     phase = status.get("status")
     if phase == "queued":
         return "delegation_queued", fields

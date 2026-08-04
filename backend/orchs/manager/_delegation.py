@@ -871,9 +871,17 @@ async def run_delegation(
         lock = lock_for_delegation(
             coordinator, app_session_id, worker_session_id, run_mode, ephemeral,
         )
+        await delegation_status_store.write_status_async(
+            delegation_id,
+            stage="delegation_lock_waiting",
+        )
         wait_started = perf.stamp_enq()
         async with lock:
             perf.record_lag("delegate.lock_wait", wait_started)
+            await delegation_status_store.write_status_async(
+                delegation_id,
+                stage="delegation_lock_acquired",
+            )
             return await run_delegation_locked(
                 coordinator,
                 app_session_id=app_session_id,

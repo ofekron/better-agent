@@ -57,7 +57,9 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-async def _ready_base_without_provider(spec, cfg, _ctx):
+async def _ready_base_without_provider(
+    spec, cfg, _ctx, *, milestone_callback=None,
+):
     return await asyncio.to_thread(prov_manager.ensure_session, spec, cfg)
 
 
@@ -681,6 +683,7 @@ def test_ensure_warm_base_initializes_once() -> bool:
     original_main = sys.modules.get("main")
     calls = 0
     sessions = {"base": {"id": "base", "agent_session_id": None}}
+    milestones: list[str] = []
 
     class FakeSessionManager:
         def get(self, sid):
@@ -711,8 +714,18 @@ def test_ensure_warm_base_initializes_once() -> bool:
         prov_manager.ensure_session = lambda _spec, _cfg: "base"
         sys.modules["session_manager"] = fake_sm_mod
         sys.modules["main"] = fake_main_mod
-        first = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
-        second = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
+        first = asyncio.run(prov_manager.ensure_warm_base(
+            spec,
+            cfg,
+            {},
+            milestone_callback=lambda name, _fields: milestones.append(name),
+        ))
+        second = asyncio.run(prov_manager.ensure_warm_base(
+            spec,
+            cfg,
+            {},
+            milestone_callback=lambda name, _fields: milestones.append(name),
+        ))
     finally:
         prov_manager.ensure_session = original_ensure_session
         if original_session_manager is not None:
@@ -732,6 +745,24 @@ def test_ensure_warm_base_initializes_once() -> bool:
         return False
     if sessions["base"].get("agent_session_id") != "agent-sid":
         print(f"{FAIL} warm_base: sid not persisted")
+        return False
+    expected = [
+        "lifecycle_lock_waiting",
+        "lifecycle_lock_acquired",
+        "base_session_resolving",
+        "base_session_resolved",
+        "base_session_warming",
+        "base_session_warmed",
+        "base_session_persisting",
+        "base_session_ready",
+        "lifecycle_lock_waiting",
+        "lifecycle_lock_acquired",
+        "base_session_resolving",
+        "base_session_resolved",
+        "base_session_ready",
+    ]
+    if milestones != expected:
+        print(f"{FAIL} warm_base milestones: {milestones!r}")
         return False
     print(f"{PASS} ensure_warm_base initializes only unwarmed bases")
     return True
@@ -991,6 +1022,10 @@ def test_run_emits_provider_neutral_milestones() -> None:
         "provisioning_started",
         "configuration_resolved",
         "lifecycle_started",
+        "lifecycle_lock_waiting",
+        "lifecycle_lock_acquired",
+        "caller_session_resolving",
+        "caller_session_ready",
         "lifecycle_ready",
         "dispatch_started",
         "delegation_resolving",
@@ -999,7 +1034,7 @@ def test_run_emits_provider_neutral_milestones() -> None:
         "result_parsed",
     ]
     assert observed[1][1]["provider_id"] == spec.build_config().provider_id
-    assert observed[3][1] == {
+    assert observed[7][1] == {
         "base_session_id": "base",
         "caller_session_id": "caller",
     }
@@ -1051,6 +1086,14 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
             delegation_status_store.write_status(delegation_id, status="queued")
             delegation_status_store.write_status(
                 delegation_id,
+                stage="delegation_lock_waiting",
+            )
+            delegation_status_store.write_status(
+                delegation_id,
+                stage="delegation_lock_acquired",
+            )
+            delegation_status_store.write_status(
+                delegation_id,
                 status="running",
                 provider_id="zai",
                 provider_run_id="run-1",
@@ -1085,6 +1128,8 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
+        "delegation_lock_waiting",
+        "delegation_lock_acquired",
         "runner_started",
         "native_session_started",
     ]
@@ -1104,6 +1149,14 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
         delegation_id = payload["client_delegation_id"]
         delegation_status_store.write_status(delegation_id, status="resolving")
         delegation_status_store.write_status(delegation_id, status="queued")
+        delegation_status_store.write_status(
+            delegation_id,
+            stage="delegation_lock_waiting",
+        )
+        delegation_status_store.write_status(
+            delegation_id,
+            stage="delegation_lock_acquired",
+        )
         delegation_status_store.write_status(
             delegation_id,
             status="running",
@@ -1130,6 +1183,8 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
+        "delegation_lock_waiting",
+        "delegation_lock_acquired",
         "runner_started",
     ]
     assert "milestone-http-dispatch" not in delegation_status_store._LISTENERS

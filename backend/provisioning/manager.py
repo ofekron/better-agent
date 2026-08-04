@@ -49,6 +49,8 @@ async def ensure_warm_base(
     spec: ProvisionedSessionSpec,
     cfg: ProvisionedConfig,
     ctx: dict | None = None,
+    *,
+    milestone_callback: MilestoneCallback | None = None,
 ) -> str:
     """Return a provisioned base session whose provider sid is initialized.
 
@@ -58,8 +60,15 @@ async def ensure_warm_base(
     the spec's one-time provision prompt through the normal target-init path.
     """
     ctx = dict(ctx or {})
+    emit_milestone(milestone_callback, "lifecycle_lock_waiting")
     async with _async_acquired_lifecycle_lock(spec, cfg):
-        return await _ensure_ready_base_locked(spec, cfg, ctx)
+        emit_milestone(milestone_callback, "lifecycle_lock_acquired")
+        return await _ensure_ready_base_locked(
+            spec,
+            cfg,
+            ctx,
+            milestone_callback=milestone_callback,
+        )
 
 
 async def run(
@@ -91,7 +100,10 @@ async def run(
     phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.ensure_lifecycle"):
         base_session_id, caller_session_id = await _ensure_ready_lifecycle(
-            spec, cfg, ctx,
+            spec,
+            cfg,
+            ctx,
+            milestone_callback=milestone_callback,
         )
     timings_ms["ensure_lifecycle_ms"] = _elapsed_ms(phase_started)
     emit_milestone(
@@ -223,11 +235,26 @@ async def _ensure_ready_lifecycle(
     spec: ProvisionedSessionSpec,
     cfg: ProvisionedConfig,
     ctx: dict,
+    *,
+    milestone_callback: MilestoneCallback | None = None,
 ) -> tuple[str, str]:
+    emit_milestone(milestone_callback, "lifecycle_lock_waiting")
     async with _async_acquired_lifecycle_lock(spec, cfg):
-        base_session_id = await _ensure_ready_base_locked(spec, cfg, ctx)
+        emit_milestone(milestone_callback, "lifecycle_lock_acquired")
+        base_session_id = await _ensure_ready_base_locked(
+            spec,
+            cfg,
+            ctx,
+            milestone_callback=milestone_callback,
+        )
+        emit_milestone(milestone_callback, "caller_session_resolving")
         with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
             caller_session_id = await asyncio.to_thread(ensure_caller, spec, cfg)
+        emit_milestone(
+            milestone_callback,
+            "caller_session_ready",
+            {"caller_session_id": caller_session_id},
+        )
     return base_session_id, caller_session_id
 
 
@@ -235,17 +262,38 @@ async def _ensure_ready_base_locked(
     spec: ProvisionedSessionSpec,
     cfg: ProvisionedConfig,
     ctx: dict,
+    *,
+    milestone_callback: MilestoneCallback | None = None,
 ) -> str:
+    emit_milestone(milestone_callback, "base_session_resolving")
     with perf.timed(f"provisioning.{spec.key}.ensure_session"):
         base_session_id = await asyncio.to_thread(ensure_session, spec, cfg)
+    emit_milestone(
+        milestone_callback,
+        "base_session_resolved",
+        {"base_session_id": base_session_id},
+    )
     try:
         from session_manager import manager as session_manager
     except Exception as exc:
         raise RuntimeError("provisioning cannot load base session") from exc
     base = await asyncio.to_thread(session_manager.get, base_session_id) or {}
     if base.get("agent_session_id"):
+        emit_milestone(
+            milestone_callback,
+            "base_session_ready",
+            {
+                "base_session_id": base_session_id,
+                "native_session_id": base["agent_session_id"],
+            },
+        )
         return base_session_id
 
+    emit_milestone(
+        milestone_callback,
+        "base_session_warming",
+        {"base_session_id": base_session_id},
+    )
     with perf.timed(f"provisioning.{spec.key}.warm_base"):
         from main import coordinator as _coordinator
 
@@ -268,11 +316,32 @@ async def _ensure_ready_base_locked(
             _coordinator.init_cancel_events.pop(base_session_id, None)
     if not agent_sid:
         raise RuntimeError(f"{spec.key} base did not initialize")
+    emit_milestone(
+        milestone_callback,
+        "base_session_warmed",
+        {
+            "base_session_id": base_session_id,
+            "native_session_id": agent_sid,
+        },
+    )
 
     current = await asyncio.to_thread(session_manager.get, base_session_id) or {}
     current_sid = str(current.get("agent_session_id") or "").strip()
     if current_sid:
+        emit_milestone(
+            milestone_callback,
+            "base_session_ready",
+            {
+                "base_session_id": base_session_id,
+                "native_session_id": current_sid,
+            },
+        )
         return base_session_id
+    emit_milestone(
+        milestone_callback,
+        "base_session_persisting",
+        {"base_session_id": base_session_id},
+    )
     persist_task = asyncio.create_task(asyncio.to_thread(
         session_manager.set_agent_sid,
         base_session_id,
@@ -289,6 +358,14 @@ async def _ensure_ready_base_locked(
     persisted = await asyncio.to_thread(session_manager.get, base_session_id) or {}
     if str(persisted.get("agent_session_id") or "").strip() != agent_sid:
         raise RuntimeError(f"{spec.key} base provider session was not persisted")
+    emit_milestone(
+        milestone_callback,
+        "base_session_ready",
+        {
+            "base_session_id": base_session_id,
+            "native_session_id": agent_sid,
+        },
+    )
     return base_session_id
 
 
