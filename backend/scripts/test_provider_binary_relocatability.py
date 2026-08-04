@@ -402,7 +402,9 @@ def _build_pe(
 
 
 def test_pe_accepts_known_system_dlls() -> None:
-    _assert_accepted(_build_pe(imports=("KERNEL32.dll", "ntdll.dll")))
+    _assert_accepted(_build_pe(imports=(
+        "KERNEL32.dll", "ntdll.dll", "fwpuclnt.dll", "WSOCK32.dll",
+    )))
 
 
 def test_pe_accepts_api_set_prefix() -> None:
