@@ -155,7 +155,10 @@ export function DirPickerModal({
   };
 
   const pickSelected = () => {
+    /* c8 ignore start -- defensive: footer Select button is disabled while
+       `selected` is empty, so this guard is unreachable through the UI. */
     if (!selected) return;
+    /* c8 ignore stop */
     if (allowCreate && data && !data.exists && !query) {
       createDirectory(selected, true);
       return;
