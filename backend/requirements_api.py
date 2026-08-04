@@ -63,14 +63,13 @@ _PROCESSOR_MILESTONE_MESSAGES = {
     "dispatch_started": "Dispatching requirements processor turn",
     "delegation_resolving": "Resolving requirements processor delegation",
     "delegation_queued": "Requirements processor runner queued",
-    "delegation_run_state_persisting": "Persisting requirements processor run state",
-    "delegation_run_state_broadcasting": "Broadcasting requirements processor run state",
+    "delegation_run_state_registering": "Registering requirements processor run state",
     "delegation_lock_waiting": "Waiting for requirements delegation ownership",
     "delegation_lock_acquired": "Requirements delegation ownership acquired",
     "delegation_fork_resolving": "Resolving requirements processor fork",
     "delegation_provider_resolving": "Resolving requirements processor provider",
     "delegation_recovery_waiting": "Waiting for provider recovery readiness",
-    "delegation_pending_persists_flushing": "Flushing pending session state",
+    "delegation_root_persist_flushing": "Persisting requirements processor session state",
     "delegation_runner_starting": "Starting requirements processor runner",
     "runner_started": "Requirements processor runner started",
     "native_session_started": "Requirements processor native session started",
@@ -133,15 +132,17 @@ def _requirements_query_debug_fields(payload: dict[str, Any]) -> dict[str, Any]:
 async def _cancel_requirements_processor_delegation(request_id: str, delegation_id: str) -> None:
     if not delegation_id:
         return
-    from provisioning.dispatch import request_delegation_cancel
+    from provisioning.dispatch import cancel_delegation_and_wait
 
-    signalled = await asyncio.to_thread(request_delegation_cancel, delegation_id)
+    terminated = await cancel_delegation_and_wait(delegation_id)
     logger.info(
-        "requirements_processor_caller_cancel_stop request_id=%s delegation_id=%s signalled=%s",
+        "requirements_processor_cancel_stop request_id=%s delegation_id=%s terminated=%s",
         request_id,
         delegation_id,
-        signalled,
+        terminated,
     )
+    if not terminated:
+        raise TimeoutError("requirements processor cancellation was not acknowledged")
 
 
 async def _run_processed_requirements_payload(

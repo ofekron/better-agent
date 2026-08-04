@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -38,6 +39,7 @@ import _test_home  # noqa: E402
 _test_home.isolate(prefix="attestation-hash-reuse-")
 
 import codex_execution_common  # noqa: E402
+import provider_frozen_bundle  # noqa: E402
 from codex_execution_common import ExecutionContractError  # noqa: E402
 from codex_execution_identity import FileIdentity  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
@@ -345,6 +347,101 @@ def test_frozen_bundle_materialization_skips_rehash_on_warm_adoption() -> None:
             raise AssertionError("tampered frozen bundle destination was adopted")
 
 
+def test_frozen_bundle_identity_windows_shares_only_inflight_capture() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        executable = root / "bin" / "python"
+        sidecar = root / "lib"
+        sidecar.mkdir(parents=True)
+        _write_executable(executable, b"python-runtime")
+        for index in range(520):
+            (sidecar / f"module-{index:04d}.py").write_text(
+                f"VALUE = {index}\n",
+                encoding="utf-8",
+            )
+
+        provider_frozen_bundle._reset_bundle_identity_cache_for_tests()
+        scans: list[int] = []
+        original_map = provider_frozen_bundle.parallel_map_processes
+        original_frozen = getattr(sys, "frozen", None)
+        original_os = provider_frozen_bundle.os
+
+        class WindowsOsProxy:
+            name = "nt"
+
+            def __getattr__(self, name):
+                return getattr(original_os, name)
+
+        def counting_map(fn, items):
+            scans.append(1)
+            return original_map(fn, items)
+
+        provider_frozen_bundle.parallel_map_processes = counting_map
+        provider_frozen_bundle.os = WindowsOsProxy()
+        sys.frozen = True
+        try:
+            barrier = threading.Barrier(4)
+            captures: list[FrozenBundleIdentity] = []
+
+            def capture() -> None:
+                barrier.wait()
+                captures.append(FrozenBundleIdentity.capture(
+                    executable_path=executable,
+                    bundle_root=root,
+                    sidecar_root=sidecar,
+                ))
+
+            threads = [threading.Thread(target=capture) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+            assert all(not thread.is_alive() for thread in threads)
+            assert len(captures) == 4
+            first = captures[0]
+            assert all(captured is first for captured in captures)
+            assert first.attest()
+            assert scans == [1, 1], (
+                "Windows reused a completed bundle capture instead of "
+                "limiting reuse to concurrent waiters"
+            )
+
+            changed = sidecar / "module-0000.py"
+            changed.write_text("VALUE = 'changed'\n", encoding="utf-8")
+            assert not first.attest()
+            assert len(scans) == 3, "bundle drift did not force one fresh full scan"
+        finally:
+            provider_frozen_bundle.parallel_map_processes = original_map
+            provider_frozen_bundle.os = original_os
+            if original_frozen is None:
+                delattr(sys, "frozen")
+            else:
+                sys.frozen = original_frozen
+            provider_frozen_bundle._reset_bundle_identity_cache_for_tests()
+
+
+def test_frozen_bundle_identity_cache_is_bounded() -> None:
+    provider_frozen_bundle._reset_bundle_identity_cache_for_tests()
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw)
+            for index in range(provider_frozen_bundle._BUNDLE_IDENTITY_CACHE_MAX + 3):
+                root = parent / f"bundle-{index}"
+                executable = root / "bin" / "python"
+                sidecar = root / "lib"
+                sidecar.mkdir(parents=True)
+                _write_executable(executable, f"runtime-{index}".encode())
+                FrozenBundleIdentity.capture(
+                    executable_path=executable,
+                    bundle_root=root,
+                    sidecar_root=sidecar,
+                )
+        assert len(provider_frozen_bundle._bundle_identity_cache) <= 8
+        assert not provider_frozen_bundle._bundle_identity_inflight
+    finally:
+        provider_frozen_bundle._reset_bundle_identity_cache_for_tests()
+
+
 def test_claude_sdk_package_cached_reuses_materialized_copy() -> None:
     from provider_family_launch_attestation import CriticalPackageIdentity
 
@@ -385,6 +482,8 @@ TESTS = (
     test_stat_drift_after_full_attest_fails_closed_without_rehash,
     test_family_attestation_open_downstream_reuses_one_full_hash,
     test_frozen_bundle_materialization_skips_rehash_on_warm_adoption,
+    test_frozen_bundle_identity_windows_shares_only_inflight_capture,
+    test_frozen_bundle_identity_cache_is_bounded,
     test_claude_sdk_package_cached_reuses_materialized_copy,
 )
 

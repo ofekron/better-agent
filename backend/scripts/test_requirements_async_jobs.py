@@ -533,7 +533,7 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
     strict JSON object. Regression against the parse_failed re-dispatch that
     discarded a full turn's work."""
     original_get_spec = requirement_context.get_requirements_processor_spec
-    original_run_sync = requirement_context.provisioning.run_sync
+    original_run = requirement_context.provisioning.run
 
     class Spec:
         pass
@@ -541,7 +541,7 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
     fork_text = "keep responses short — and here is some prose, not strict JSON."
     dispatches = {"count": 0}
 
-    def _run_sync(_spec, _query, _ctx):
+    async def _run(_spec, _query, _ctx):
         dispatches["count"] += 1
         return SimpleNamespace(
             text=fork_text,
@@ -553,7 +553,7 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
 
     try:
         requirement_context.get_requirements_processor_spec = lambda: Spec()
-        requirement_context.provisioning.run_sync = _run_sync
+        requirement_context.provisioning.run = _run
         processed = requirement_context._run_requirements_processor(
             query="q",
             cwd="/repo",
@@ -561,7 +561,7 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
         )
     finally:
         requirement_context.get_requirements_processor_spec = original_get_spec
-        requirement_context.provisioning.run_sync = original_run_sync
+        requirement_context.provisioning.run = original_run
     assert processed.get("error") is None
     assert processed["text"] == fork_text
     assert dispatches["count"] == 1, "unparseable text must not trigger a re-dispatch"
@@ -569,13 +569,13 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
 
 def test_processor_forwards_milestone_callback_to_provisioning() -> None:
     original_get_spec = requirement_context.get_requirements_processor_spec
-    original_run_sync = requirement_context.provisioning.run_sync
+    original_run = requirement_context.provisioning.run
     observed: list[tuple[str, dict]] = []
 
     class Spec:
         pass
 
-    def _run_sync(_spec, _query, _ctx, *, milestone_callback=None):
+    async def _run(_spec, _query, _ctx, *, milestone_callback=None):
         assert milestone_callback is not None
         milestone_callback("provisioning_started", {})
         return SimpleNamespace(
@@ -588,7 +588,7 @@ def test_processor_forwards_milestone_callback_to_provisioning() -> None:
 
     try:
         requirement_context.get_requirements_processor_spec = lambda: Spec()
-        requirement_context.provisioning.run_sync = _run_sync
+        requirement_context.provisioning.run = _run
         processed = requirement_context._run_requirements_processor(
             query="q",
             cwd="/repo",
@@ -597,7 +597,7 @@ def test_processor_forwards_milestone_callback_to_provisioning() -> None:
         )
     finally:
         requirement_context.get_requirements_processor_spec = original_get_spec
-        requirement_context.provisioning.run_sync = original_run_sync
+        requirement_context.provisioning.run = original_run
 
     assert processed.get("error") is None
     assert [name for name, _fields in observed] == [
@@ -742,7 +742,7 @@ def test_processed_requirements_job_wires_milestones_end_to_end() -> None:
 
 def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
     original_get_spec = requirement_context.get_requirements_processor_spec
-    original_run_sync = requirement_context.provisioning.run_sync
+    original_run = requirement_context.provisioning.run
 
     class ProcessorSpec:
         key = requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY
@@ -755,7 +755,7 @@ def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
     processor_spec = ProcessorSpec()
     seen: list[object] = []
 
-    def _run_sync(spec, _query, _ctx):
+    async def _run(spec, _query, _ctx):
         seen.append(spec)
         return SimpleNamespace(
             text="ok",
@@ -767,7 +767,7 @@ def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
 
     try:
         requirement_context.get_requirements_processor_spec = lambda: processor_spec
-        requirement_context.provisioning.run_sync = _run_sync
+        requirement_context.provisioning.run = _run
         processed = requirement_context._run_requirements_processor(
             query="q",
             cwd="/repo",
@@ -775,7 +775,7 @@ def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
         )
     finally:
         requirement_context.get_requirements_processor_spec = original_get_spec
-        requirement_context.provisioning.run_sync = original_run_sync
+        requirement_context.provisioning.run = original_run
 
     assert processed.get("error") is None
     assert seen and seen[0] is not processor_spec

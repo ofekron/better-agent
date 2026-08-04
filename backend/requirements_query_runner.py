@@ -1,7 +1,7 @@
 """Bounded executors for the requirements query endpoints.
 
 The public ``/api/internal/get-requirements`` handler runs a long-lived fork
-processor (``provisioning.run_sync``) that calls back into
+processor on its dedicated executor thread and calls back into
 ``/api/internal/get-requirements/search`` via processor-only evidence tools.
 Sharing one bounded pool between both endpoints self-deadlocks under
 two or more concurrent public calls: every worker is consumed by a long-running
@@ -32,9 +32,8 @@ import perf
 logger = logging.getLogger(__name__)
 
 PROCESSOR_ADMISSION_TIMEOUT_SECONDS = 30.0
-# Longer than the requirements processor's run_sync budget (1320.5s). The public
-# MCP client timeout stays higher, so processor completion/timeout owns the
-# result instead of the public wrapper masking it first.
+# The public MCP client timeout stays higher, so processor completion/timeout
+# owns the result instead of the public wrapper masking it first.
 PROCESSOR_RESULT_TIMEOUT_SECONDS = 1350.0
 PROCESSOR_CAPACITY = 10
 
@@ -269,6 +268,14 @@ async def run_requirements_processor_query(
     except asyncio.TimeoutError as exc:
         perf.record(f"{name}.result_timeout", result_timeout_seconds * 1000)
         _log_processor_lifecycle("request_outcome", "provider_timeout", attribution, _admission_state())
+        if on_caller_cancelled is not None:
+            try:
+                await on_caller_cancelled()
+            except Exception as cancel_exc:
+                raise RequirementsProviderTimeout(
+                    "get-requirements processor timed out and cancellation "
+                    "was not acknowledged"
+                ) from cancel_exc
         raise RequirementsProviderTimeout(
             "get-requirements processor timed out before returning requirements"
         ) from exc

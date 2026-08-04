@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import importlib.util
@@ -478,7 +479,7 @@ def _run_requirements_processor(
     )
     for _attempt in range(PROCESSOR_ATTEMPTS):
         try:
-            result = provisioning.run_sync(spec, query, ctx, **run_kwargs)
+            result = asyncio.run(provisioning.run(spec, query, ctx, **run_kwargs))
         except Exception as exc:
             recovered = recover_processed_requirements_from_delegation(
                 request_id=debug_request_id,

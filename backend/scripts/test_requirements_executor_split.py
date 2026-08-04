@@ -408,7 +408,7 @@ def test_cancelled_processor_waiter_runs_cancel_callback_after_admission() -> No
     print("PASS cancelled processor waiter runs cancel callback after admission")
 
 
-def test_processor_timeouts_do_not_run_cancel_callback() -> None:
+def test_provider_timeout_runs_cancel_callback_but_admission_timeout_does_not() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,
         PROCESSOR_CAPACITY,
@@ -446,8 +446,8 @@ def test_processor_timeouts_do_not_run_cancel_callback() -> None:
             pass
         else:
             return False, "provider timeout did not raise"
-        if callback_calls != 0:
-            return False, "provider timeout ran cancel callback"
+        if callback_calls != 1:
+            return False, "provider timeout did not run cancel callback exactly once"
         hold.set()
         await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=2)
         try:
@@ -485,11 +485,11 @@ def test_processor_timeouts_do_not_run_cancel_callback() -> None:
         finally:
             for _ in range(acquired):
                 _REQUIREMENTS_PROCESSOR_ADMISSION.release()
-        return callback_calls == 0, "admission timeout ran cancel callback"
+        return callback_calls == 1, "admission timeout ran cancel callback"
 
     passed, reason = asyncio.run(_main())
     assert passed, reason
-    print("PASS processor timeouts do not run cancel callback")
+    print("PASS provider timeout cancels work while admission timeout does not")
 
 
 def test_delegation_cancel_marks_and_stops_only_exact_run_dir() -> None:
@@ -559,6 +559,116 @@ def test_delegation_cancel_marks_and_stops_only_exact_run_dir() -> None:
                 os.environ["BETTER_AGENT_TEST_MODE"] = old_test_mode
 
     print("PASS delegation cancel stops only exact run dir")
+
+
+def test_delegation_cancel_waits_for_terminal_without_losing_request() -> None:
+    old_home = os.environ.get("BETTER_AGENT_HOME")
+    with tempfile.TemporaryDirectory() as home:
+        try:
+            os.environ["BETTER_AGENT_HOME"] = home
+            from delegation_status_store import begin_status, read_status, write_status
+            from provisioning.dispatch import cancel_delegation_and_wait
+
+            delegation_id = "delegation-pre-run-cancel"
+            begin_status(delegation_id, status="queued")
+
+            async def exercise() -> None:
+                task = asyncio.create_task(cancel_delegation_and_wait(
+                    delegation_id,
+                    timeout_seconds=2,
+                ))
+                for _ in range(100):
+                    status = await asyncio.to_thread(read_status, delegation_id)
+                    if isinstance(status, dict) and status.get("cancel_requested") is True:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("cancel request was not persisted")
+                begin_status(delegation_id, status="queued", stage="before_spawn")
+                status = read_status(delegation_id) or {}
+                assert status.get("cancel_requested") is True
+                write_status(
+                    delegation_id,
+                    status="complete",
+                    result={"success": False, "error": "cancelled"},
+                )
+                assert await task is True
+
+            asyncio.run(exercise())
+        finally:
+            if old_home is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = old_home
+
+    print("PASS delegation cancellation persists until terminal acknowledgement")
+
+
+def test_delegation_start_and_terminal_transitions_are_atomic() -> None:
+    old_home = os.environ.get("BETTER_AGENT_HOME")
+    with tempfile.TemporaryDirectory() as home:
+        try:
+            os.environ["BETTER_AGENT_HOME"] = home
+            from delegation_status_store import (
+                begin_status,
+                complete_status,
+                read_status,
+                start_unless_cancelled,
+                write_status,
+            )
+
+            delegation_id = "delegation-atomic-start"
+            begin_status(delegation_id, status="queued")
+            entered = threading.Event()
+            release = threading.Event()
+
+            def operation() -> dict[str, object]:
+                entered.set()
+                assert release.wait(2)
+                return {"status": "running", "provider_run_id": "run-atomic"}
+
+            started: list[bool] = []
+            start_thread = threading.Thread(
+                target=lambda: started.append(
+                    start_unless_cancelled(delegation_id, operation),
+                ),
+            )
+            start_thread.start()
+            assert entered.wait(2)
+            cancel_entered = threading.Event()
+
+            def cancel() -> None:
+                cancel_entered.set()
+                write_status(delegation_id, cancel_requested=True)
+
+            cancel_thread = threading.Thread(
+                target=cancel,
+            )
+            cancel_thread.start()
+            assert cancel_entered.wait(2)
+            assert cancel_thread.is_alive(), "cancel write crossed the atomic start claim"
+            release.set()
+            start_thread.join(timeout=2)
+            cancel_thread.join(timeout=2)
+            assert started == [True]
+            status = read_status(delegation_id) or {}
+            assert status.get("provider_run_id") == "run-atomic"
+            assert status.get("cancel_requested") is True
+
+            committed = complete_status(
+                delegation_id,
+                {"success": True},
+                {"success": False, "error": "cancelled"},
+            )
+            assert committed == {"success": False, "error": "cancelled"}
+            assert (read_status(delegation_id) or {}).get("result") == committed
+        finally:
+            if old_home is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = old_home
+
+    print("PASS delegation start and terminal transitions are atomic")
 
 
 def test_shared_bounded_pool_self_deadlocks_under_saturation() -> None:

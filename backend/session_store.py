@@ -442,6 +442,10 @@ def _publish_dir_fingerprint_cache(
 _summary_index: dict[str, dict] = {}
 _summary_index_lock = threading.Lock()
 _summary_index_loaded = False
+_WORKING_SESSION_INDEX_VERSION = 1
+_working_session_index: dict[str, dict[str, dict]] = {}
+_working_session_index_lock = threading.RLock()
+_working_session_index_loaded = False
 # Bumped by `_reset_home_scoped_caches` under `_summary_index_lock`. A
 # `_do_build_summary_index_unsafe` run started before a reset captures this
 # value and re-checks it at every publish point — if it no longer matches,
@@ -911,6 +915,7 @@ def _reset_home_scoped_caches() -> None:
     global _summary_index_loaded, _summary_index_version, _summary_order_version
     global _summary_metadata_version, _summary_sorted_cache_version
     global _metadata_trigram_index_version, _summary_index_reset_epoch
+    global _working_session_index_loaded
 
     with _index_lock:
         _fork_index.clear()
@@ -934,6 +939,9 @@ def _reset_home_scoped_caches() -> None:
         _summary_sorted_id_cache.clear()
         _summary_sorted_id_caches.clear()
         _summary_index_reset_epoch += 1
+    with _working_session_index_lock:
+        _working_session_index.clear()
+        _working_session_index_loaded = False
     with _requirement_tags_lock:
         _requirement_tags_by_session.clear()
     global _markers_loaded
@@ -1676,6 +1684,7 @@ def _upsert_summary(
                 summary_changed = True
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
+    _upsert_working_session_projection(summary, storage_identity=storage_identity)
     # Write lightweight summary file AFTER the in-memory update. Uses
     # atomic write (tmpfile + os.replace) so a crash mid-write leaves the
     # previous file intact. Non-fatal — in-memory index is authoritative.
@@ -2024,11 +2033,239 @@ def _remove_summary(root_id: str) -> None:
             _summary_index_version += 1
             _summary_order_version += 1
             _summary_metadata_version += 1
+    _remove_working_session_projection(root_id)
     try:
         sp = _root_file_path(root_id).with_name(f"{root_id}.summary.json")
         sp.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _working_session_index_path(storage_identity: Path) -> Path:
+    return storage_identity / ".working-session-index.json"
+
+
+def _working_session_projection(summary: dict) -> dict | None:
+    session_id = summary.get("id")
+    mode = summary.get("working_mode")
+    meta = summary.get("working_mode_meta")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(mode, str) or not mode:
+        return None
+    return {
+        "id": session_id,
+        "working_mode": mode,
+        "working_mode_meta": dict(meta) if isinstance(meta, dict) else {},
+    }
+
+
+def _persist_working_session_index_locked(storage_identity: Path) -> None:
+    path = _working_session_index_path(storage_identity)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=".working-session-index.",
+        suffix=".json.tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": _WORKING_SESSION_INDEX_VERSION,
+                    "modes": _working_session_index,
+                },
+                f,
+                separators=(",", ":"),
+            )
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _load_working_session_index_locked(
+    storage_identity: Path,
+    storage_dirs: tuple[Path, ...],
+) -> None:
+    global _working_session_index_loaded
+    if _working_session_index_loaded:
+        return
+    loaded: dict[str, dict[str, dict]] = {}
+    index_path = _working_session_index_path(storage_identity)
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+        index_mtime_ns = index_path.stat().st_mtime_ns
+    except (OSError, json.JSONDecodeError):
+        raw = None
+        index_mtime_ns = -1
+    modes = (
+        raw.get("modes")
+        if isinstance(raw, dict)
+        and raw.get("version") == _WORKING_SESSION_INDEX_VERSION
+        else None
+    )
+    if isinstance(modes, dict):
+        for mode, entries in modes.items():
+            if not isinstance(mode, str) or not isinstance(entries, dict):
+                continue
+            clean = {
+                sid: projection
+                for sid, projection in entries.items()
+                if isinstance(sid, str)
+                and isinstance(projection, dict)
+                and projection.get("id") == sid
+                and projection.get("working_mode") == mode
+                and isinstance(projection.get("working_mode_meta"), dict)
+            }
+            if clean:
+                loaded[mode] = clean
+        reconciled = False
+        for storage_dir in storage_dirs:
+            for root_path in storage_dir.glob("*.json"):
+                if _is_sidecar_json(root_path.name):
+                    continue
+                try:
+                    root_stat = root_path.stat()
+                except OSError:
+                    continue
+                if max(root_stat.st_mtime_ns, root_stat.st_ctime_ns) <= index_mtime_ns:
+                    continue
+                sid = root_path.stem
+                summary_path = root_path.with_name(f"{sid}.summary.json")
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    summary = None
+                current_signature = _session_file_signature(root_path)
+                if (
+                    isinstance(summary, dict)
+                    and _signature_from_summary(summary) == current_signature
+                ):
+                    source = summary
+                else:
+                    try:
+                        source = json.loads(root_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                for entries in loaded.values():
+                    entries.pop(sid, None)
+                projection = (
+                    _working_session_projection(source)
+                    if isinstance(source, dict)
+                    else None
+                )
+                if projection is not None:
+                    loaded.setdefault(projection["working_mode"], {})[sid] = projection
+                reconciled = True
+        loaded = {mode: entries for mode, entries in loaded.items() if entries}
+    else:
+        reconciled = False
+        for storage_dir in storage_dirs:
+            for root_path in storage_dir.glob("*.json"):
+                if _is_sidecar_json(root_path.name):
+                    continue
+                sid = root_path.stem
+                summary_path = root_path.with_name(f"{sid}.summary.json")
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    summary = None
+                current_signature = _session_file_signature(root_path)
+                if (
+                    isinstance(summary, dict)
+                    and _signature_from_summary(summary) == current_signature
+                ):
+                    source = summary
+                else:
+                    try:
+                        source = json.loads(root_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                projection = _working_session_projection(source)
+                if projection is None:
+                    continue
+                if projection["id"] != sid:
+                    continue
+                loaded.setdefault(projection["working_mode"], {})[sid] = projection
+    _working_session_index.clear()
+    _working_session_index.update(loaded)
+    _working_session_index_loaded = True
+    if modes is None or reconciled:
+        _persist_working_session_index_locked(storage_identity)
+
+
+def _upsert_working_session_projection(
+    summary: dict,
+    *,
+    storage_identity: Path | None = None,
+) -> None:
+    projection = _working_session_projection(summary)
+    session_id = summary.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    storage_identity = storage_identity or _sessions_dir().resolve()
+    storage_dirs = tuple(_session_storage_dirs())
+    with _working_session_index_lock:
+        _load_working_session_index_locked(storage_identity, storage_dirs)
+        changed = False
+        for mode in list(_working_session_index):
+            entries = _working_session_index[mode]
+            if session_id not in entries:
+                continue
+            if projection is not None and mode == projection["working_mode"]:
+                continue
+            entries.pop(session_id, None)
+            changed = True
+            if not entries:
+                _working_session_index.pop(mode, None)
+        if projection is not None:
+            entries = _working_session_index.setdefault(
+                projection["working_mode"], {},
+            )
+            if entries.get(session_id) != projection:
+                entries[session_id] = projection
+                changed = True
+        if changed:
+            _persist_working_session_index_locked(storage_identity)
+
+
+def _remove_working_session_projection(session_id: str) -> None:
+    storage_identity = _sessions_dir().resolve()
+    storage_dirs = tuple(_session_storage_dirs())
+    with _working_session_index_lock:
+        _load_working_session_index_locked(storage_identity, storage_dirs)
+        changed = False
+        for mode in list(_working_session_index):
+            entries = _working_session_index[mode]
+            if entries.pop(session_id, None) is not None:
+                changed = True
+            if not entries:
+                _working_session_index.pop(mode, None)
+        if changed:
+            _persist_working_session_index_locked(storage_identity)
+
+
+def find_root_working_session_summaries(
+    mode: str,
+    match: dict[str, object],
+) -> list[dict]:
+    storage_identity = _sessions_dir().resolve()
+    storage_dirs = tuple(_session_storage_dirs())
+    with _working_session_index_lock:
+        _load_working_session_index_locked(storage_identity, storage_dirs)
+        entries = tuple((_working_session_index.get(mode) or {}).values())
+    return [
+        dict(entry)
+        for entry in entries
+        if all(
+            (entry.get("working_mode_meta") or {}).get(key) == value
+            for key, value in match.items()
+        )
+    ]
 
 
 def _write_summary_file(
@@ -2916,6 +3153,7 @@ _SIDECAR_JSON_SUFFIXES = (
     ".opened.json",
     ".fork-index.json",
     ".summary-index.json",
+    ".working-session-index.json",
     "attention_markers.json",
     ".missing.json",
 )

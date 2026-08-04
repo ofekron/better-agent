@@ -37,6 +37,7 @@ if _BACKEND not in sys.path:
 
 import provisioning  # noqa: E402
 import delegation_status_store  # noqa: E402
+import session_store  # noqa: E402
 import provisioning.config as prov_config  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.inline_spec as inline_spec  # noqa: E402
@@ -1128,11 +1129,7 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
             delegation_status_store.write_status(delegation_id, status="queued")
             delegation_status_store.write_status(
                 delegation_id,
-                stage="delegation_run_state_persisting",
-            )
-            delegation_status_store.write_status(
-                delegation_id,
-                stage="delegation_run_state_broadcasting",
+                stage="delegation_run_state_registering",
             )
             delegation_status_store.write_status(
                 delegation_id,
@@ -1146,7 +1143,7 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
                 "delegation_fork_resolving",
                 "delegation_provider_resolving",
                 "delegation_recovery_waiting",
-                "delegation_pending_persists_flushing",
+                "delegation_root_persist_flushing",
                 "delegation_runner_starting",
             ):
                 delegation_status_store.write_status(delegation_id, stage=stage)
@@ -1186,14 +1183,13 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
-        "delegation_run_state_persisting",
-        "delegation_run_state_broadcasting",
+        "delegation_run_state_registering",
         "delegation_lock_waiting",
         "delegation_lock_acquired",
         "delegation_fork_resolving",
         "delegation_provider_resolving",
         "delegation_recovery_waiting",
-        "delegation_pending_persists_flushing",
+        "delegation_root_persist_flushing",
         "delegation_runner_starting",
         "runner_started",
         "native_session_started",
@@ -1216,11 +1212,7 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
         delegation_status_store.write_status(delegation_id, status="queued")
         delegation_status_store.write_status(
             delegation_id,
-            stage="delegation_run_state_persisting",
-        )
-        delegation_status_store.write_status(
-            delegation_id,
-            stage="delegation_run_state_broadcasting",
+            stage="delegation_run_state_registering",
         )
         delegation_status_store.write_status(
             delegation_id,
@@ -1234,7 +1226,7 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
             "delegation_fork_resolving",
             "delegation_provider_resolving",
             "delegation_recovery_waiting",
-            "delegation_pending_persists_flushing",
+            "delegation_root_persist_flushing",
             "delegation_runner_starting",
         ):
             delegation_status_store.write_status(delegation_id, stage=stage)
@@ -1264,14 +1256,13 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
-        "delegation_run_state_persisting",
-        "delegation_run_state_broadcasting",
+        "delegation_run_state_registering",
         "delegation_lock_waiting",
         "delegation_lock_acquired",
         "delegation_fork_resolving",
         "delegation_provider_resolving",
         "delegation_recovery_waiting",
-        "delegation_pending_persists_flushing",
+        "delegation_root_persist_flushing",
         "delegation_runner_starting",
         "runner_started",
     ]
@@ -1462,21 +1453,53 @@ def test_working_mode_lookup_uses_explicit_entity_scopes() -> bool:
     class _FakeSessionManager:
         def __init__(self) -> None:
             self.root_calls = 0
+            self.full_root_calls = 0
+            self.get_calls: list[str] = []
             self.fork_calls = 0
             self.any_calls = 0
 
         def list(self) -> list[dict]:
             return []
 
-        def iter_root_sessions(self) -> list[dict]:
+        def find_root_working_session_summaries(
+            self, mode: str, match: dict[str, object],
+        ) -> list[dict]:
             self.root_calls += 1
+            if mode != "target_mode" or match != {"cwd": "/repo", "model": "root"}:
+                return []
             return [
+                {
+                    "id": "root-stale",
+                    "working_mode": "target_mode",
+                    "working_mode_meta": {"cwd": "/repo", "model": "root"},
+                },
                 {
                     "id": "root-target",
                     "working_mode": "target_mode",
                     "working_mode_meta": {"cwd": "/repo", "model": "root"},
                 }
             ]
+
+        def iter_root_sessions(self) -> list[dict]:
+            self.full_root_calls += 1
+            raise AssertionError("root lookup must not enumerate full session trees")
+
+        def get(self, session_id: str) -> dict | None:
+            self.get_calls.append(session_id)
+            if session_id == "root-stale":
+                return {
+                    "id": "root-stale",
+                    "working_mode": "other_mode",
+                    "working_mode_meta": {"cwd": "/repo", "model": "root"},
+                }
+            if session_id != "root-target":
+                return None
+            return {
+                "id": "root-target",
+                "working_mode": "target_mode",
+                "working_mode_meta": {"cwd": "/repo", "model": "root"},
+                "messages": [],
+            }
 
         def iter_fork_sessions(self) -> list[dict]:
             self.fork_calls += 1
@@ -1531,13 +1554,97 @@ def test_working_mode_lookup_uses_explicit_entity_scopes() -> bool:
     if not any_entity or any_entity.get("id") != "any-target":
         print(f"{FAIL} working-mode lookup: did not return any-entity target")
         return False
-    if (fake.root_calls, fake.fork_calls, fake.any_calls) != (1, 1, 1):
+    if (
+        fake.root_calls,
+        fake.full_root_calls,
+        fake.get_calls,
+        fake.fork_calls,
+        fake.any_calls,
+    ) != (1, 0, ["root-stale", "root-target"], 1, 1):
         print(
             f"{FAIL} working-mode lookup: calls "
-            f"{(fake.root_calls, fake.fork_calls, fake.any_calls)!r}"
+            f"{(fake.root_calls, fake.full_root_calls, fake.get_calls, fake.fork_calls, fake.any_calls)!r}"
         )
         return False
     print(f"{PASS} working-mode lookup uses explicit entity scopes")
+    return True
+
+
+def test_working_mode_index_stays_compact_across_restart_update_and_delete() -> bool:
+    sessions_dir = session_store._sessions_dir()
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    sid = "working-index-test"
+    root_path = sessions_dir / f"{sid}.json"
+    summary_path = sessions_dir / f"{sid}.summary.json"
+    index_path = sessions_dir / ".working-session-index.json"
+    if not session_store._is_sidecar_json(index_path.name):
+        print(f"{FAIL} working-mode index: cache is visible as a session root")
+        return False
+    root_path.write_text(json.dumps({
+        "id": sid,
+        "working_mode": "target_mode",
+        "working_mode_meta": {"cwd": "/old"},
+    }), encoding="utf-8")
+    summary_path.write_text(json.dumps({
+        "id": sid,
+        "working_mode": "target_mode",
+        "working_mode_meta": {"cwd": "/old"},
+    }), encoding="utf-8")
+    index_path.unlink(missing_ok=True)
+    session_store._reset_home_scoped_caches()
+    original_builder = session_store._do_build_summary_index_unsafe
+
+    def forbidden_summary_build() -> None:
+        raise AssertionError("working-mode lookup built the full summary index")
+
+    session_store._do_build_summary_index_unsafe = forbidden_summary_build
+    try:
+        cold = session_store.find_root_working_session_summaries(
+            "target_mode", {"cwd": "/old"},
+        )
+        root_path.write_text(json.dumps({
+            "id": sid,
+            "working_mode": "target_mode",
+            "working_mode_meta": {"cwd": "/new"},
+        }), encoding="utf-8")
+        os.utime(index_path, ns=(1, 1))
+        session_store._reset_home_scoped_caches()
+        restarted = session_store.find_root_working_session_summaries(
+            "target_mode", {"cwd": "/new"},
+        )
+        session_store._upsert_working_session_projection({
+            "id": sid,
+            "working_mode": "target_mode",
+            "working_mode_meta": {"cwd": "/new"},
+        })
+        updated = session_store.find_root_working_session_summaries(
+            "target_mode", {"cwd": "/new"},
+        )
+        stale = session_store.find_root_working_session_summaries(
+            "target_mode", {"cwd": "/old"},
+        )
+        session_store._remove_working_session_projection(sid)
+        deleted = session_store.find_root_working_session_summaries(
+            "target_mode", {"cwd": "/new"},
+        )
+    finally:
+        session_store._do_build_summary_index_unsafe = original_builder
+        root_path.unlink(missing_ok=True)
+        summary_path.unlink(missing_ok=True)
+        index_path.unlink(missing_ok=True)
+        session_store._reset_home_scoped_caches()
+    if [entry.get("id") for entry in cold] != [sid]:
+        print(f"{FAIL} working-mode index: cold sidecar projection missing")
+        return False
+    if (
+        [entry.get("id") for entry in restarted] != [sid]
+        or [entry.get("id") for entry in updated] != [sid]
+        or stale
+        or deleted
+    ):
+        print(f"{FAIL} working-mode index: update/delete projection drifted")
+        return False
+    print(f"{PASS} working-mode index avoids full-tree hydration")
     return True
 
 
@@ -1568,6 +1675,7 @@ def main_run() -> int:
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,
         test_working_mode_lookup_uses_explicit_entity_scopes,
+        test_working_mode_index_stays_compact_across_restart_update_and_delete,
     ]
     results = []
     for fn in tests:

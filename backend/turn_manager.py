@@ -35,6 +35,7 @@ ingestion paths converge through that same funnel by construction.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import copy
 import json
@@ -47,7 +48,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Awaitable, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 from continuation import (
     PROVIDER_CAPABILITIES_CHANGED_ERROR,
@@ -340,6 +341,7 @@ class TurnManager:
         # Event loop captured in start_background_tick(); used to hand a
         # pruned-session emit_run_state back from the background thread.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._run_state_projection_tails: dict[str, asyncio.Task[None]] = {}
 
     # ======================================================================
     # (ii) Single bus-emitter for lifecycle.turn_* facts.
@@ -790,6 +792,8 @@ class TurnManager:
         delegation_id: Optional[str] = None,
         pid: Optional[int] = None,
         started_at: Optional[str] = None,
+        recompute: bool = True,
+        project_streaming: bool = True,
     ) -> dict:
         if kind != "worker" and target_message_id:
             current = self._run_state.get(app_session_id) or []
@@ -814,10 +818,12 @@ class TurnManager:
                 "pid": pid,
                 "last_event_at": now,
             })
-            self._maybe_flip_streaming(
-                app_session_id, target_message_id, True, kind,
-            )
-            session_manager.recompute_state(app_session_id)
+            if project_streaming:
+                self._maybe_flip_streaming(
+                    app_session_id, target_message_id, True, kind,
+                )
+            if recompute:
+                session_manager.recompute_state(app_session_id)
             self._dbg_runstate(app_session_id, f"add_existing:{run_id[:8]}:{kind}")
             return entry
         entry = {
@@ -830,21 +836,30 @@ class TurnManager:
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)
-        self._maybe_flip_streaming(
-            app_session_id, target_message_id, True, kind,
-        )
-        session_manager.recompute_state(app_session_id)
+        if project_streaming:
+            self._maybe_flip_streaming(
+                app_session_id, target_message_id, True, kind,
+            )
+        if recompute:
+            session_manager.recompute_state(app_session_id)
         self._dbg_runstate(app_session_id, f"add:{run_id[:8]}:{kind}")
         return entry
 
-    def run_state_remove(self, app_session_id: str, run_id: str) -> None:
+    def run_state_remove(
+        self,
+        app_session_id: str,
+        run_id: str,
+        *,
+        recompute: bool = True,
+        project_streaming: bool = True,
+    ) -> list[dict]:
         runs = self._run_state.get(app_session_id)
         if not runs:
             logger.debug(
                 "RUNSTATE_DBG[remove_noop:%s] sid=%s — no entries to remove",
                 run_id[:8], app_session_id[:8],
             )
-            return
+            return []
         removed = [r for r in runs if r.get("run_id") == run_id]
         self._run_state[app_session_id] = [
             r for r in runs if r.get("run_id") != run_id
@@ -852,17 +867,143 @@ class TurnManager:
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
             self._turn_creators.pop(app_session_id, None)
-        for r in removed:
-            self._maybe_flip_streaming(
-                app_session_id,
-                r.get("target_message_id"),
-                False,
-                r.get("kind"),
-            )
-        session_manager.recompute_state(app_session_id)
+        if project_streaming:
+            for r in removed:
+                self._maybe_flip_streaming(
+                    app_session_id,
+                    r.get("target_message_id"),
+                    False,
+                    r.get("kind"),
+                )
+        if recompute:
+            session_manager.recompute_state(app_session_id)
         self._dbg_runstate(
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
+        return removed
+
+    async def _run_on_owner_loop(self, operation: Callable[[], Any]) -> Any:
+        owner_loop = self._loop
+        if owner_loop is None or owner_loop.is_closed():
+            raise RuntimeError("turn manager owner loop is unavailable")
+        if asyncio.get_running_loop() is owner_loop:
+            return operation()
+
+        async def invoke() -> Any:
+            return operation()
+
+        future = asyncio.run_coroutine_threadsafe(invoke(), owner_loop)
+        return await asyncio.wrap_future(future)
+
+    async def run_state_add_on_owner_loop(self, *args: Any, **kwargs: Any) -> dict:
+        return await self._run_on_owner_loop(
+            lambda: self.run_state_add(*args, **kwargs),
+        )
+
+    async def run_state_remove_on_owner_loop(
+        self, *args: Any, **kwargs: Any,
+    ) -> list[dict]:
+        return await self._run_on_owner_loop(
+            lambda: self.run_state_remove(*args, **kwargs),
+        )
+
+    async def run_state_set_pid_on_owner_loop(
+        self, *args: Any, **kwargs: Any,
+    ) -> None:
+        await self._run_on_owner_loop(
+            lambda: self.run_state_set_pid(*args, **kwargs),
+        )
+
+    async def active_run_id_add_on_owner_loop(
+        self,
+        app_session_id: str,
+        run_id: str,
+    ) -> None:
+        def add() -> None:
+            run_ids = self.active_run_ids.setdefault(app_session_id, [])
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+
+        await self._run_on_owner_loop(add)
+
+    async def active_run_id_remove_on_owner_loop(
+        self,
+        app_session_id: str,
+        run_id: str,
+    ) -> None:
+        def remove() -> None:
+            run_ids = self.active_run_ids.get(app_session_id)
+            if not run_ids or run_id not in run_ids:
+                return
+            run_ids.remove(run_id)
+            if not run_ids:
+                self.active_run_ids.pop(app_session_id, None)
+
+        await self._run_on_owner_loop(remove)
+
+    def project_run_state_entries(
+        self,
+        app_session_id: str,
+        entries: list[dict],
+        value: bool,
+    ) -> None:
+        for entry in entries:
+            self._maybe_flip_streaming(
+                app_session_id,
+                entry.get("target_message_id"),
+                value,
+                entry.get("kind"),
+            )
+        session_manager.recompute_state(app_session_id)
+
+    async def queue_run_state_projection_on_owner_loop(
+        self,
+        app_session_id: str,
+        entries: list[dict],
+        value: bool,
+    ) -> None:
+        async def enqueue() -> None:
+            previous = self._run_state_projection_tails.get(app_session_id)
+
+            async def apply() -> None:
+                if previous is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await previous
+                await asyncio.to_thread(
+                    self.project_run_state_entries,
+                    app_session_id,
+                    entries,
+                    value,
+                )
+                await self.emit_run_state(app_session_id)
+
+            task = asyncio.create_task(
+                apply(),
+                name=f"run-state-projection-{app_session_id[:8]}",
+            )
+            self._run_state_projection_tails[app_session_id] = task
+
+            def discard(done: asyncio.Task[None]) -> None:
+                if self._run_state_projection_tails.get(app_session_id) is done:
+                    self._run_state_projection_tails.pop(app_session_id, None)
+                if not done.cancelled() and done.exception() is not None:
+                    exc = done.exception()
+                    logger.error(
+                        "run-state projection failed for %s",
+                        app_session_id,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+            task.add_done_callback(discard)
+
+        owner_loop = self._loop
+        if owner_loop is None or owner_loop.is_closed():
+            raise RuntimeError("turn manager owner loop is unavailable")
+        if asyncio.get_running_loop() is owner_loop:
+            await enqueue()
+            return
+        future = asyncio.run_coroutine_threadsafe(enqueue(), owner_loop)
+        await asyncio.wrap_future(future)
 
     def _entry_owned_by_live_turn(self, sid: str, entry: dict) -> bool:
         """True while the turn coroutine still owns this run entry.

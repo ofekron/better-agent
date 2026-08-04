@@ -1913,8 +1913,10 @@ def prepare_and_start_run(provider: Provider, **start_arguments: Any) -> Prepare
         queue = start_arguments.pop("queue")
     except KeyError as exc:
         raise TypeError("loop and queue are required") from exc
-    execution = provider.prepare_run(**start_arguments)
-    provider.start_run(execution=execution, loop=loop, queue=queue)
+    with perf.timed("provider.prepare_run"):
+        execution = provider.prepare_run(**start_arguments)
+    with perf.timed("provider.start_run"):
+        provider.start_run(execution=execution, loop=loop, queue=queue)
     return execution
 
 

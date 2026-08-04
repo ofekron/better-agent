@@ -449,6 +449,53 @@ def request_delegation_cancel(client_delegation_id: str) -> bool:
     return _cancel_delegation_status_run(status)
 
 
+async def cancel_delegation_and_wait(
+    client_delegation_id: str,
+    *,
+    timeout_seconds: float = 10.0,
+) -> bool:
+    delegation_id = str(client_delegation_id or "").strip()
+    if not delegation_id:
+        return False
+    loop = asyncio.get_running_loop()
+    terminal = asyncio.Event()
+
+    def on_status(status: dict[str, Any]) -> None:
+        if _delegation_status_terminal(status):
+            loop.call_soon_threadsafe(terminal.set)
+
+    unsubscribe = delegation_status_store.subscribe_status(
+        delegation_id,
+        on_status,
+        replay=True,
+    )
+    try:
+        await asyncio.to_thread(request_delegation_cancel, delegation_id)
+        current = await asyncio.to_thread(
+            delegation_status_store.read_status,
+            delegation_id,
+        )
+        if isinstance(current, dict) and _delegation_status_terminal(current):
+            return True
+        try:
+            await asyncio.wait_for(
+                terminal.wait(),
+                timeout=max(0.0, timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            return False
+        current = await asyncio.to_thread(
+            delegation_status_store.read_status,
+            delegation_id,
+        )
+        return bool(
+            isinstance(current, dict)
+            and _delegation_status_terminal(current)
+        )
+    finally:
+        unsubscribe()
+
+
 def _delegation_status_terminal(status: dict[str, Any]) -> bool:
     return status.get("status") == "complete" or isinstance(status.get("result"), dict)
 

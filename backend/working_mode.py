@@ -103,6 +103,16 @@ def find_working_session(
     """Return the first live working session whose mode matches and whose
     ``working_mode_meta`` contains all ``**match`` key-value pairs, or
     ``None``."""
+    if scope == "roots":
+        summaries = session_manager.find_root_working_session_summaries(mode, match)
+        for summary in summaries:
+            session_id = summary.get("id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            session = session_manager.get(session_id)
+            if session is not None and _matches_working_mode(session, mode, match):
+                return session
+        return None
     for session in _iter_lookup_sessions(scope):
         if _matches_working_mode(session, mode, match):
             return session
@@ -110,8 +120,6 @@ def find_working_session(
 
 
 def _iter_lookup_sessions(scope: WorkingSessionLookupScope):
-    if scope == "roots":
-        return session_manager.iter_root_sessions()
     if scope == "forks":
         return session_manager.iter_fork_sessions()
     if scope == "any":

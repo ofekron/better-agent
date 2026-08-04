@@ -3695,6 +3695,13 @@ class SessionManager:
         for root in session_store.iter_root_sessions():
             yield copy.deepcopy(root)
 
+    def find_root_working_session_summaries(
+        self,
+        mode: str,
+        match: dict[str, object],
+    ) -> list[dict]:
+        return session_store.find_root_working_session_summaries(mode, match)
+
     def iter_fork_sessions(self):
         """Yield every embedded fork session record as deep copies."""
         for fork in session_store.iter_fork_sessions():

@@ -40,7 +40,7 @@ from orchs.manager._approval import (
     spawn_approved_worker,
 )
 from orchs.manager._rewind import _safe_delete_forks
-from provider import StreamEvent, prepare_and_start_run
+from provider import StreamEvent
 from event_shape import is_metadata_event as _is_metadata_event
 from event_shape import is_synthetic_event as _is_synthetic_event
 from event_shape import extract_output_text, strip_synthetic_events
@@ -524,6 +524,16 @@ async def run_delegation(
     # existing pending_approvals record (if any). Fall back to a
     # server-minted id when called without one (legacy callers).
     delegation_id = client_delegation_id or f"del_{uuid.uuid4().hex[:10]}"
+    existing_status = await asyncio.to_thread(
+        delegation_status_store.read_status,
+        delegation_id,
+    )
+    if (
+        isinstance(existing_status, dict)
+        and existing_status.get("status") == "complete"
+        and isinstance(existing_status.get("result"), dict)
+    ):
+        return dict(existing_status["result"])
     instructions_preview = instructions[:2000]
     await delegation_status_store.begin_status_async(
         delegation_id,
@@ -860,21 +870,17 @@ async def run_delegation(
     )
     await delegation_status_store.write_status_async(
         delegation_id,
-        stage="delegation_run_state_persisting",
+        stage="delegation_run_state_registering",
     )
-    await asyncio.to_thread(
-        coordinator.turn_manager.run_state_add,
+    await coordinator.turn_manager.run_state_add_on_owner_loop(
         app_session_id,
         run_id=worker_run_id,
         kind="worker",
         target_message_id=(in_flight_aid or {}).get("id"),
         delegation_id=delegation_id,
+        recompute=False,
+        project_streaming=False,
     )
-    await delegation_status_store.write_status_async(
-        delegation_id,
-        stage="delegation_run_state_broadcasting",
-    )
-    await coordinator.turn_manager.emit_run_state(app_session_id)
     try:
         lock = lock_for_delegation(
             coordinator, app_session_id, worker_session_id, run_mode, ephemeral,
@@ -925,15 +931,18 @@ async def run_delegation(
             coordinator.active_delegations.pop(app_session_id, None)
         else:
             coordinator.active_delegations[app_session_id] = new_depth
-        await asyncio.to_thread(
-            coordinator.turn_manager.run_state_remove,
+        removed_entries = await coordinator.turn_manager.run_state_remove_on_owner_loop(
             app_session_id,
             worker_run_id,
+            recompute=False,
+            project_streaming=False,
         )
-        try:
-            await coordinator.turn_manager.emit_run_state(app_session_id)
-        except Exception:
-            pass
+        if removed_entries:
+            await coordinator.turn_manager.queue_run_state_projection_on_owner_loop(
+                app_session_id,
+                removed_entries,
+                False,
+            )
 
 
 async def _run_with_sync_wait(
@@ -1208,7 +1217,10 @@ async def run_delegation_locked(
                 stage="delegation_recovery_waiting",
             )
             with perf.timed("delegate.provider_start_run.recovery_gate"):
-                await startup_recovery_gate.wait_for_recovery_ready()
+                await startup_recovery_gate.wait_for_session_recovery_ready(
+                    app_session_id,
+                    timeout=None,
+                )
             if getattr(provider, "suspended", False):
                 raise RuntimeError("provider is suspended")
             # Offload the synchronous spawn body (session-manager reads in
@@ -1219,88 +1231,146 @@ async def run_delegation_locked(
             # the whole app during worker delegations.
             await delegation_status_store.write_status_async(
                 delegation_id,
-                stage="delegation_pending_persists_flushing",
+                stage="delegation_root_persist_flushing",
             )
-            with perf.timed("delegate.provider_start_run.flush_pending_persists"):
-                await asyncio.to_thread(session_manager.flush_pending_persists)
+            root_id = await asyncio.to_thread(
+                session_manager.root_id_for,
+                app_session_id,
+            )
+            if not root_id:
+                raise RuntimeError("delegation caller lost its root identity")
+            with perf.timed("delegate.provider_start_run.flush_root_persist"):
+                await asyncio.to_thread(session_manager.flush_root_persist, root_id)
+            current_status = await asyncio.to_thread(
+                delegation_status_store.read_status,
+                delegation_id,
+            )
+            if isinstance(current_status, dict) and current_status.get("cancel_requested") is True:
+                result = delegate_error_payload(
+                    worker_agent_session_id,
+                    worker_description,
+                    t("delegation.cancelled"),
+                )
+                await delegation_status_store.write_status_async(
+                    delegation_id,
+                    status="complete",
+                    result=result,
+                )
+                return result
             await delegation_status_store.write_status_async(
                 delegation_id,
                 stage="delegation_runner_starting",
             )
             with perf.timed("delegate.provider_start_run.provider_call"):
-                await asyncio.to_thread(
-                    prepare_and_start_run,
-                    provider,
-                    run_id=run_id,
-                    prompt=worker_prompt,
-                    cwd=cwd,
-                    loop=loop,
-                    queue=queue,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    session_id=resume_sid,
-                    mode=worker_orchestration_mode,
-                    app_session_id=app_session_id,
-                    backend_url=worker_backend_url,
-                    internal_token=worker_internal_token,
-                    fork=needs_fork,
-                    worker_agent_session_id=(
-                        worker_agent_session_id if run_mode == "direct" else None
-                    ),
-                    mssg_sender_session_id=(
-                        None if machine_completion else worker_agent_session_id
-                    ),
-                    is_worker=True,
-                    provider_run_config=provider_run_config,
-                    capability_contexts=capability_contexts,
-                    target_message_id=target_message_id,
-                    provisioned_tool_profile=provisioned_tool_profile,
+                with perf.timed("provider.prepare_run"):
+                    execution = await asyncio.to_thread(
+                        provider.prepare_run,
+                        run_id=run_id,
+                        prompt=worker_prompt,
+                        cwd=cwd,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        session_id=resume_sid,
+                        mode=worker_orchestration_mode,
+                        app_session_id=app_session_id,
+                        backend_url=worker_backend_url,
+                        internal_token=worker_internal_token,
+                        fork=needs_fork,
+                        worker_agent_session_id=(
+                            worker_agent_session_id if run_mode == "direct" else None
+                        ),
+                        mssg_sender_session_id=(
+                            None if machine_completion else worker_agent_session_id
+                        ),
+                        is_worker=True,
+                        provider_run_config=provider_run_config,
+                        capability_contexts=capability_contexts,
+                        target_message_id=target_message_id,
+                        provisioned_tool_profile=provisioned_tool_profile,
+                    )
+
+                def start_provider() -> dict[str, Any]:
+                    with perf.timed("provider.start_run"):
+                        provider.start_run(
+                            execution=execution,
+                            loop=loop,
+                            queue=queue,
+                        )
+                    registered = provider._runs.get(run_id)
+                    if registered is None or not registered.popen.pid:
+                        raise RuntimeError("delegation provider run was not registered")
+                    return {
+                        "status": "running",
+                        "worker_run_id": worker_run_id,
+                        "provider_run_id": run_id,
+                        "provider_run_dir": str(registered.run_dir),
+                        "provider_id": provider.id,
+                        "worker_pid": registered.popen.pid,
+                        "worker_agent_session_id": worker_agent_session_id,
+                        "run_mode": run_mode,
+                        "cwd": cwd,
+                        "pre_run_fork_bytes": pre_run_fork_bytes,
+                    }
+
+                started = await asyncio.to_thread(
+                    delegation_status_store.start_unless_cancelled,
+                    delegation_id,
+                    start_provider,
                 )
+                if not started:
+                    result = delegate_error_payload(
+                        worker_agent_session_id,
+                        worker_description,
+                        t("delegation.cancelled"),
+                    )
+                    await delegation_status_store.write_status_async(
+                        delegation_id,
+                        status="complete",
+                        result=result,
+                    )
+                    return result
     except Exception:
-        # start_run failed — no runner to cancel, no run_id to track.
+        if provider._runs.get(run_id) is not None:
+            provider.cancel_turn(run_id)
         raise
-    coordinator.turn_manager.active_run_ids.setdefault(app_session_id, []).append(run_id)
+    await coordinator.turn_manager.active_run_id_add_on_owner_loop(
+        app_session_id,
+        run_id,
+    )
 
     # Stamp the runner's OS PID on the worker's run_state entry so
     # consumers can verify liveness.
     provider_rs = provider._runs.get(run_id)
     if provider_rs and provider_rs.popen.pid:
-        await delegation_status_store.write_status_async(
-            delegation_id,
-            status="running",
-            worker_run_id=worker_run_id,
-            provider_run_id=run_id,
-            provider_run_dir=str(provider_rs.run_dir),
-            provider_id=provider.id,
-            worker_pid=provider_rs.popen.pid,
-            worker_agent_session_id=worker_agent_session_id,
-            run_mode=run_mode,
-            cwd=cwd,
-            pre_run_fork_bytes=pre_run_fork_bytes,
-        )
-        await asyncio.to_thread(
-            coordinator.turn_manager.run_state_set_pid,
-            app_session_id,
-            worker_run_id,
-            provider_rs.popen.pid,
-        )
-        await coordinator.turn_manager.emit_run_state(app_session_id)
         current_status = await asyncio.to_thread(
             delegation_status_store.read_status,
             delegation_id,
         )
         if isinstance(current_status, dict) and current_status.get("cancel_requested") is True:
             cancel_event.set()
+            provider.cancel_turn(run_id)
+        await coordinator.turn_manager.run_state_set_pid_on_owner_loop(
+            app_session_id,
+            worker_run_id,
+            provider_rs.popen.pid,
+        )
+        await coordinator.turn_manager.queue_run_state_projection_on_owner_loop(
+            app_session_id,
+            [{
+                "target_message_id": target_message_id,
+                "kind": "worker",
+            }],
+            True,
+        )
 
-    def _remove_run_id() -> None:
+    async def _remove_run_id() -> None:
         """Remove `run_id` from the per-session active list; drop the
         per-session entry entirely once the last id leaves. Called both
         on success and from the unexpected-error path."""
-        run_ids = coordinator.turn_manager.active_run_ids.get(app_session_id)
-        if run_ids and run_id in run_ids:
-            run_ids.remove(run_id)
-            if not run_ids:
-                coordinator.turn_manager.active_run_ids.pop(app_session_id, None)
+        await coordinator.turn_manager.active_run_id_remove_on_owner_loop(
+            app_session_id,
+            run_id,
+        )
 
     collected: list[dict] = []
     fork_agent_sid: Optional[str] = None if needs_fork else resume_sid
@@ -1544,7 +1614,7 @@ async def run_delegation_locked(
         # Never-kill: a backend-side read error must NOT terminate the
         # runner. Drop our tracking ref and re-raise; the runner's own
         # watcher reaps it when its process exits.
-        _remove_run_id()
+        await _remove_run_id()
         raise
     finally:
         if durable_complete_task is not None and not durable_complete_task.done():
@@ -1554,6 +1624,12 @@ async def run_delegation_locked(
 
     # ---- Result assembly ---------------------------------------
     with perf.timed("delegate.result_assembly"):
+        current_status = await asyncio.to_thread(
+            delegation_status_store.read_status,
+            delegation_id,
+        )
+        if isinstance(current_status, dict) and current_status.get("cancel_requested") is True:
+            cancelled = True
         complete = next((e for e in collected if e["type"] == "complete"), None)
         complete_data = (complete.get("data") or {}) if complete else {}
         success = bool(complete_data.get("success")) and not cancelled
@@ -1666,11 +1742,18 @@ async def run_delegation_locked(
         )
     except Exception:
         logger.exception("failed to append worker llm call log")
-    await delegation_status_store.write_status_async(
+    cancelled_result = {
+        **result_payload,
+        "success": False,
+        "error": t("delegation.cancelled"),
+    }
+    result_payload = await asyncio.to_thread(
+        delegation_status_store.complete_status,
         delegation_id,
-        status="complete",
-        result=result_payload,
+        result_payload,
+        cancelled_result,
     )
+    success = bool(result_payload.get("success"))
 
     await ws_callback({"type": "worker_complete", "data": {
         "delegation_id": delegation_id,
@@ -1710,6 +1793,6 @@ async def run_delegation_locked(
     )
 
     # Clean up run_id from active list now that the worker completed.
-    _remove_run_id()
+    await _remove_run_id()
 
     return result_payload

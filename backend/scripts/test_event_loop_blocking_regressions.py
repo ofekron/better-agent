@@ -554,7 +554,7 @@ def test_provisioning_run_lifecycle_runs_off_loop() -> None:
     helper_end = source.index("@asynccontextmanager", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "async with _async_acquired_lifecycle_lock(spec, cfg):" in helper_source
-    assert "await _ensure_ready_base_locked(spec, cfg, ctx)" in helper_source
+    assert "base_session_id = await _ensure_ready_base_locked(" in helper_source
     assert "await asyncio.to_thread(ensure_caller, spec, cfg)" in helper_source
 
 
@@ -4246,19 +4246,73 @@ def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
 
 
-def test_delegation_run_state_mutations_run_off_loop() -> None:
+def test_delegation_run_state_mutations_use_owner_loop() -> None:
     source = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
     start = source.index("async def run_delegation(")
     locked_start = source.index("async def run_delegation_locked(", start)
     delegation_source = source[start:locked_start]
-    locked_end = source.index("def _remove_run_id() -> None:", locked_start)
+    locked_end = source.index("    collected: list[dict]", locked_start)
     locked_source = source[locked_start:locked_end]
-    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in delegation_source
-    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_remove" in delegation_source
-    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_set_pid" in locked_source
-    assert "\n    coordinator.turn_manager.run_state_add(" not in delegation_source
+    assert "await coordinator.turn_manager.run_state_add_on_owner_loop(" in delegation_source
+    assert "recompute=False" in delegation_source
+    assert "project_streaming=False" in delegation_source
+    assert "await coordinator.turn_manager.run_state_remove_on_owner_loop(" in delegation_source
+    assert "await coordinator.turn_manager.run_state_set_pid_on_owner_loop(" in locked_source
+    assert "queue_run_state_projection_on_owner_loop" in delegation_source
+    assert "queue_run_state_projection_on_owner_loop" in locked_source
+    assert "active_run_id_add_on_owner_loop" in locked_source
+    assert "active_run_id_remove_on_owner_loop" in locked_source
     assert "\n        coordinator.turn_manager.run_state_remove(" not in delegation_source
     assert "\n        coordinator.turn_manager.run_state_set_pid(" not in locked_source
+
+
+def test_turn_manager_owner_loop_serializes_run_state_projections() -> None:
+    from types import SimpleNamespace
+    from turn_manager import TurnManager
+
+    async def scenario() -> None:
+        manager = TurnManager(SimpleNamespace())
+        manager._loop = asyncio.get_running_loop()
+        owner_thread = threading.get_ident()
+        mutation_threads: list[int] = []
+
+        def set_pid(*_args, **_kwargs) -> None:
+            mutation_threads.append(threading.get_ident())
+
+        manager.run_state_set_pid = set_pid  # type: ignore[method-assign]
+
+        def mutate_from_private_loop() -> None:
+            asyncio.run(manager.run_state_set_pid_on_owner_loop("sid", "run", 7))
+
+        await asyncio.to_thread(mutate_from_private_loop)
+        assert mutation_threads == [owner_thread]
+
+        entered = threading.Event()
+        release = threading.Event()
+        projections: list[bool] = []
+        emissions: list[str] = []
+
+        def project(_sid: str, _entries: list[dict], value: bool) -> None:
+            projections.append(value)
+            if value:
+                entered.set()
+                assert release.wait(2)
+
+        async def emit(sid: str) -> None:
+            emissions.append(sid)
+
+        manager.project_run_state_entries = project  # type: ignore[method-assign]
+        manager.emit_run_state = emit  # type: ignore[method-assign]
+        await manager.queue_run_state_projection_on_owner_loop("sid", [], True)
+        assert await asyncio.to_thread(entered.wait, 2)
+        await manager.queue_run_state_projection_on_owner_loop("sid", [], False)
+        release.set()
+        tail = manager._run_state_projection_tails["sid"]
+        await asyncio.wait_for(tail, timeout=2)
+        assert projections == [True, False]
+        assert emissions == ["sid", "sid"]
+
+    asyncio.run(scenario())
 
 
 def test_run_recovery_summarizes_repeated_skip_logs() -> None:
@@ -4279,9 +4333,21 @@ def test_provider_start_run_is_off_loop_everywhere() -> None:
     remote-node runs. Every call site MUST offload it via asyncio.to_thread
     — parity with turn_manager's top-level spawn path."""
     delegation = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                    prepare_and_start_run," in delegation
-    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in delegation
+    assert "execution = await asyncio.to_thread(\n                        provider.prepare_run," in delegation
+    assert "delegation_status_store.start_unless_cancelled" in delegation
+    assert "delegation_status_store.complete_status" in delegation
+    assert "await asyncio.to_thread(session_manager.flush_root_persist, root_id)" in delegation
+    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" not in delegation
+    assert "wait_for_session_recovery_ready(\n                    app_session_id," in delegation
+    assert "wait_for_recovery_ready(" not in delegation
     assert "\n            provider.start_run(" not in delegation
+
+    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    prepare_start = provider_source.index("def prepare_and_start_run(")
+    prepare_end = provider_source.index("\ndef start_prepared_run(", prepare_start)
+    prepare_source = provider_source[prepare_start:prepare_end]
+    assert 'with perf.timed("provider.prepare_run"):' in prepare_source
+    assert 'with perf.timed("provider.start_run"):' in prepare_source
 
     recovery = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n            start_prepared_run," in recovery

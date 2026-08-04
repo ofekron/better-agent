@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any, Mapping
@@ -32,6 +33,14 @@ from paths import ba_home, make_private_directory, windows_path_has_private_acl
 
 
 _ENTRY_KINDS = frozenset({"directory", "file", "symlink"})
+_BundleCaptureKey = tuple[str, str, str, str, tuple[str, ...]]
+_BUNDLE_IDENTITY_CACHE_MAX = 8
+_bundle_identity_cache_guard = threading.Lock()
+_bundle_identity_cache: dict[_BundleCaptureKey, "FrozenBundleIdentity"] = {}
+_bundle_identity_inflight: dict[
+    _BundleCaptureKey,
+    Future["FrozenBundleIdentity"],
+] = {}
 
 
 def _relative_path(raw: str, label: str) -> Path:
@@ -308,12 +317,53 @@ class FrozenBundleIdentity:
         excluded_relative_paths: tuple[str, ...] = (),
     ) -> FrozenBundleIdentity:
         with timed_contract_step("provider.frozen_bundle.capture"):
-            return cls._capture(
+            key = _bundle_capture_key(
                 executable_path=executable_path,
                 bundle_root=bundle_root,
                 sidecar_root=sidecar_root,
                 excluded_relative_paths=excluded_relative_paths,
             )
+            with _bundle_identity_cache_guard:
+                cached = (
+                    _bundle_identity_cache.pop(key, None)
+                    if os.name != "nt"
+                    else None
+                )
+                if cached is not None:
+                    _bundle_identity_cache[key] = cached
+            if cached is not None and cached.attest_metadata():
+                return cached
+
+            with _bundle_identity_cache_guard:
+                capture_future = _bundle_identity_inflight.get(key)
+                owns_capture = capture_future is None
+                if capture_future is None:
+                    capture_future = Future()
+                    _bundle_identity_inflight[key] = capture_future
+            if not owns_capture:
+                return capture_future.result()
+
+            try:
+                captured = cls._capture(
+                    executable_path=executable_path,
+                    bundle_root=bundle_root,
+                    sidecar_root=sidecar_root,
+                    excluded_relative_paths=excluded_relative_paths,
+                )
+                with _bundle_identity_cache_guard:
+                    _bundle_identity_cache.pop(key, None)
+                    _bundle_identity_cache[key] = captured
+                    while len(_bundle_identity_cache) > _BUNDLE_IDENTITY_CACHE_MAX:
+                        oldest = next(iter(_bundle_identity_cache))
+                        _bundle_identity_cache.pop(oldest, None)
+                    _bundle_identity_inflight.pop(key, None)
+                    capture_future.set_result(captured)
+                return captured
+            except BaseException as exc:
+                with _bundle_identity_cache_guard:
+                    _bundle_identity_inflight.pop(key, None)
+                    capture_future.set_exception(exc)
+                raise
 
     @classmethod
     def _capture(
@@ -540,6 +590,41 @@ def _bundle_paths(
     ):
         raise ExecutionContractError("frozen bundle layout is invalid")
     return root, sidecar
+
+
+def _bundle_capture_key(
+    *,
+    executable_path: str | Path,
+    bundle_root: str | Path | None,
+    sidecar_root: str | Path | None,
+    excluded_relative_paths: tuple[str, ...],
+) -> _BundleCaptureKey:
+    executable = Path(executable_path)
+    if not executable.is_absolute():
+        raise ExecutionContractError("frozen bundle executable must be absolute")
+    root, sidecar = _bundle_paths(
+        executable=executable,
+        bundle_root=bundle_root,
+        sidecar_root=sidecar_root,
+    )
+    resolved_root = root.resolve(strict=True)
+    excluded = tuple(sorted(
+        _relative_path(path, "excluded path").as_posix()
+        for path in excluded_relative_paths
+    ))
+    return (
+        str(root.absolute()),
+        str(resolved_root),
+        executable.resolve(strict=True).relative_to(resolved_root).as_posix(),
+        sidecar.resolve(strict=True).relative_to(resolved_root).as_posix(),
+        excluded,
+    )
+
+
+def _reset_bundle_identity_cache_for_tests() -> None:
+    with _bundle_identity_cache_guard:
+        _bundle_identity_cache.clear()
+        _bundle_identity_inflight.clear()
 
 
 def _validate_bundle(bundle: FrozenBundleIdentity) -> None:

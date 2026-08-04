@@ -8,14 +8,13 @@ logger = logging.getLogger(__name__)
 MilestoneCallback = Callable[[str, dict[str, Any]], None]
 
 _DELEGATION_STAGE_MILESTONES = frozenset({
-    "delegation_run_state_persisting",
-    "delegation_run_state_broadcasting",
+    "delegation_run_state_registering",
     "delegation_lock_waiting",
     "delegation_lock_acquired",
     "delegation_fork_resolving",
     "delegation_provider_resolving",
     "delegation_recovery_waiting",
-    "delegation_pending_persists_flushing",
+    "delegation_root_persist_flushing",
     "delegation_runner_starting",
 })
 
