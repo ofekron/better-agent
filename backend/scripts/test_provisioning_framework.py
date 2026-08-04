@@ -40,6 +40,7 @@ import delegation_status_store  # noqa: E402
 import provisioning.config as prov_config  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.inline_spec as inline_spec  # noqa: E402
+import provisioning.lifecycle as prov_lifecycle  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
 import working_mode  # noqa: E402
 from provisioning import (  # noqa: E402
@@ -470,7 +471,7 @@ def test_run_serializes_lifecycle_creation() -> bool:
     max_active = 0
     guard = threading.Lock()
 
-    def fake_ensure_session(spec, cfg):
+    def fake_ensure_session(spec, cfg, **_kwargs):
         nonlocal active, max_active
         with guard:
             active += 1
@@ -555,7 +556,7 @@ def test_run_lifecycle_runs_off_event_loop() -> bool:
     lifecycle_threads: list[tuple[str, int]] = []
     dispatch_thread: list[int] = []
 
-    def fake_ensure_session(spec, cfg):
+    def fake_ensure_session(spec, cfg, **_kwargs):
         lifecycle_threads.append(("base", threading.get_ident()))
         return "base"
 
@@ -711,7 +712,7 @@ def test_ensure_warm_base_initializes_once() -> bool:
     fake_main_mod.coordinator = FakeCoordinator()
 
     try:
-        prov_manager.ensure_session = lambda _spec, _cfg: "base"
+        prov_manager.ensure_session = lambda _spec, _cfg, **_kwargs: "base"
         sys.modules["session_manager"] = fake_sm_mod
         sys.modules["main"] = fake_main_mod
         first = asyncio.run(prov_manager.ensure_warm_base(
@@ -809,7 +810,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         return {"success": True, "sdk_output": "late"}
 
     try:
-        prov_manager.ensure_session = lambda spec, cfg: "base"
+        prov_manager.ensure_session = lambda spec, cfg, **_kwargs: "base"
         prov_manager.ensure_caller = lambda spec, cfg: "caller"
         prov_manager.dispatch = stuck_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
@@ -963,7 +964,7 @@ def test_run_honors_client_delegation_id_from_ctx() -> bool:
         return {"success": True, "sdk_output": "ok"}
 
     try:
-        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_session = lambda spec_, cfg_, **_kwargs: "base"
         prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
         prov_manager.dispatch = fake_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
@@ -1002,7 +1003,7 @@ def test_run_emits_provider_neutral_milestones() -> None:
         return {"success": True, "sdk_output": "ok"}
 
     try:
-        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_session = lambda spec_, cfg_, **_kwargs: "base"
         prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
         prov_manager.dispatch = fake_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
@@ -1040,6 +1041,47 @@ def test_run_emits_provider_neutral_milestones() -> None:
     }
 
 
+def test_ensure_session_emits_registry_milestones() -> None:
+    spec = _budget_spec(55.0, 7.0)
+    cfg = spec.build_config()
+    existing = {
+        "id": "base",
+        "provider_id": cfg.provider_id,
+        "model": cfg.model,
+        "runner": cfg.runner,
+        "node_id": cfg.node_id,
+        "storage_scope": spec.storage_scope,
+        "working_mode_meta": {"provisioned_at": time.time()},
+    }
+    observed: list[str] = []
+    original_find = prov_lifecycle._find
+    original_dirty_reason = prov_lifecycle.dirty_reason
+    original_expired_reason = prov_lifecycle.expired_reason
+    original_upsert_worker = prov_lifecycle._upsert_worker
+    try:
+        prov_lifecycle._find = lambda _spec, _cfg: existing
+        prov_lifecycle.dirty_reason = lambda _session, _policy, _cwd: ""
+        prov_lifecycle.expired_reason = lambda _session, _spec: ""
+        prov_lifecycle._upsert_worker = lambda _cwd, _session: None
+        session_id = prov_lifecycle.ensure_session(
+            spec,
+            cfg,
+            milestone_callback=lambda name, _fields: observed.append(name),
+        )
+    finally:
+        prov_lifecycle._find = original_find
+        prov_lifecycle.dirty_reason = original_dirty_reason
+        prov_lifecycle.expired_reason = original_expired_reason
+        prov_lifecycle._upsert_worker = original_upsert_worker
+
+    assert session_id == "base"
+    assert observed == [
+        "base_registry_lookup",
+        "base_cleanliness_check",
+        "base_worker_projection_sync",
+    ]
+
+
 def test_run_ignores_milestone_callback_failures() -> None:
     spec = _budget_spec(55.0, 7.0)
     original_ensure_session = prov_manager.ensure_session
@@ -1054,7 +1096,7 @@ def test_run_ignores_milestone_callback_failures() -> None:
         raise RuntimeError("milestone sink unavailable")
 
     try:
-        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_session = lambda spec_, cfg_, **_kwargs: "base"
         prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
         prov_manager.dispatch = fake_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
@@ -1086,12 +1128,28 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
             delegation_status_store.write_status(delegation_id, status="queued")
             delegation_status_store.write_status(
                 delegation_id,
+                stage="delegation_run_state_persisting",
+            )
+            delegation_status_store.write_status(
+                delegation_id,
+                stage="delegation_run_state_broadcasting",
+            )
+            delegation_status_store.write_status(
+                delegation_id,
                 stage="delegation_lock_waiting",
             )
             delegation_status_store.write_status(
                 delegation_id,
                 stage="delegation_lock_acquired",
             )
+            for stage in (
+                "delegation_fork_resolving",
+                "delegation_provider_resolving",
+                "delegation_recovery_waiting",
+                "delegation_pending_persists_flushing",
+                "delegation_runner_starting",
+            ):
+                delegation_status_store.write_status(delegation_id, stage=stage)
             delegation_status_store.write_status(
                 delegation_id,
                 status="running",
@@ -1128,8 +1186,15 @@ def test_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
+        "delegation_run_state_persisting",
+        "delegation_run_state_broadcasting",
         "delegation_lock_waiting",
         "delegation_lock_acquired",
+        "delegation_fork_resolving",
+        "delegation_provider_resolving",
+        "delegation_recovery_waiting",
+        "delegation_pending_persists_flushing",
+        "delegation_runner_starting",
         "runner_started",
         "native_session_started",
     ]
@@ -1151,12 +1216,28 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
         delegation_status_store.write_status(delegation_id, status="queued")
         delegation_status_store.write_status(
             delegation_id,
+            stage="delegation_run_state_persisting",
+        )
+        delegation_status_store.write_status(
+            delegation_id,
+            stage="delegation_run_state_broadcasting",
+        )
+        delegation_status_store.write_status(
+            delegation_id,
             stage="delegation_lock_waiting",
         )
         delegation_status_store.write_status(
             delegation_id,
             stage="delegation_lock_acquired",
         )
+        for stage in (
+            "delegation_fork_resolving",
+            "delegation_provider_resolving",
+            "delegation_recovery_waiting",
+            "delegation_pending_persists_flushing",
+            "delegation_runner_starting",
+        ):
+            delegation_status_store.write_status(delegation_id, stage=stage)
         delegation_status_store.write_status(
             delegation_id,
             status="running",
@@ -1183,8 +1264,15 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
     assert [name for name, _fields in observed] == [
         "delegation_resolving",
         "delegation_queued",
+        "delegation_run_state_persisting",
+        "delegation_run_state_broadcasting",
         "delegation_lock_waiting",
         "delegation_lock_acquired",
+        "delegation_fork_resolving",
+        "delegation_provider_resolving",
+        "delegation_recovery_waiting",
+        "delegation_pending_persists_flushing",
+        "delegation_runner_starting",
         "runner_started",
     ]
     assert "milestone-http-dispatch" not in delegation_status_store._LISTENERS
@@ -1216,7 +1304,7 @@ def test_run_logs_phase_timings_for_debug_requests() -> bool:
         captured.append((str(message), args))
 
     try:
-        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_session = lambda spec_, cfg_, **_kwargs: "base"
         prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
         prov_manager.dispatch = fake_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
@@ -1285,7 +1373,7 @@ def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
     above the old provision_timeout+0.5 total — must succeed post-fix."""
     spec = _budget_spec(1.0, 1.0)
 
-    def slow_ensure_session(spec_, cfg_):
+    def slow_ensure_session(spec_, cfg_, **_kwargs):
         time.sleep(0.9)
         return "base"
 

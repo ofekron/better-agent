@@ -7,6 +7,18 @@ logger = logging.getLogger(__name__)
 
 MilestoneCallback = Callable[[str, dict[str, Any]], None]
 
+_DELEGATION_STAGE_MILESTONES = frozenset({
+    "delegation_run_state_persisting",
+    "delegation_run_state_broadcasting",
+    "delegation_lock_waiting",
+    "delegation_lock_acquired",
+    "delegation_fork_resolving",
+    "delegation_provider_resolving",
+    "delegation_recovery_waiting",
+    "delegation_pending_persists_flushing",
+    "delegation_runner_starting",
+})
+
 
 def emit_milestone(
     callback: MilestoneCallback | None,
@@ -43,10 +55,8 @@ def delegation_milestone(status: dict[str, Any]) -> tuple[str, dict[str, Any]] |
     if isinstance(worker_pid, int) and not isinstance(worker_pid, bool) and worker_pid > 0:
         return "runner_started", fields
     stage = status.get("stage")
-    if stage == "delegation_lock_acquired":
-        return "delegation_lock_acquired", fields
-    if stage == "delegation_lock_waiting":
-        return "delegation_lock_waiting", fields
+    if isinstance(stage, str) and stage in _DELEGATION_STAGE_MILESTONES:
+        return stage, fields
     phase = status.get("status")
     if phase == "queued":
         return "delegation_queued", fields

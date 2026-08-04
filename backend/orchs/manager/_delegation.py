@@ -525,7 +525,7 @@ async def run_delegation(
     # server-minted id when called without one (legacy callers).
     delegation_id = client_delegation_id or f"del_{uuid.uuid4().hex[:10]}"
     instructions_preview = instructions[:2000]
-    await delegation_status_store.write_status_async(
+    await delegation_status_store.begin_status_async(
         delegation_id,
         status="resolving",
         app_session_id=app_session_id,
@@ -858,6 +858,10 @@ async def run_delegation(
         run_mode=run_mode,
         cwd=worker_cwd,
     )
+    await delegation_status_store.write_status_async(
+        delegation_id,
+        stage="delegation_run_state_persisting",
+    )
     await asyncio.to_thread(
         coordinator.turn_manager.run_state_add,
         app_session_id,
@@ -865,6 +869,10 @@ async def run_delegation(
         kind="worker",
         target_message_id=(in_flight_aid or {}).get("id"),
         delegation_id=delegation_id,
+    )
+    await delegation_status_store.write_status_async(
+        delegation_id,
+        stage="delegation_run_state_broadcasting",
     )
     await coordinator.turn_manager.emit_run_state(app_session_id)
     try:
@@ -1021,6 +1029,10 @@ async def run_delegation_locked(
     the jsonl path/offset for the manager's Read pattern, and
     bumps usage counters on success.
     """
+    await delegation_status_store.write_status_async(
+        delegation_id,
+        stage="delegation_fork_resolving",
+    )
     # ---- Fork/direct resolution + invalidation ------------------
     # Each (caller, worker) pair owns a delegate-fork Better Agent session: an
     # internal-only side branch off the worker, with its own claude_sid.
@@ -1149,6 +1161,10 @@ async def run_delegation_locked(
     worker_backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
     worker_internal_token = coordinator.internal_token
 
+    await delegation_status_store.write_status_async(
+        delegation_id,
+        stage="delegation_provider_resolving",
+    )
     provider = await asyncio.to_thread(
         coordinator.provider_for_run,
         worker_agent_session_id,
@@ -1187,6 +1203,10 @@ async def run_delegation_locked(
     try:
         with perf.timed("delegate.provider_start_run"):
             import startup_recovery_gate
+            await delegation_status_store.write_status_async(
+                delegation_id,
+                stage="delegation_recovery_waiting",
+            )
             with perf.timed("delegate.provider_start_run.recovery_gate"):
                 await startup_recovery_gate.wait_for_recovery_ready()
             if getattr(provider, "suspended", False):
@@ -1197,8 +1217,16 @@ async def run_delegation_locked(
             # Without this, get_fields blocks on the per-root lock and
             # freezes the asyncio event loop for tens of seconds, hanging
             # the whole app during worker delegations.
+            await delegation_status_store.write_status_async(
+                delegation_id,
+                stage="delegation_pending_persists_flushing",
+            )
             with perf.timed("delegate.provider_start_run.flush_pending_persists"):
                 await asyncio.to_thread(session_manager.flush_pending_persists)
+            await delegation_status_store.write_status_async(
+                delegation_id,
+                stage="delegation_runner_starting",
+            )
             with perf.timed("delegate.provider_start_run.provider_call"):
                 await asyncio.to_thread(
                     prepare_and_start_run,

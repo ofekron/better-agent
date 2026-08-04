@@ -75,6 +75,21 @@ def test_write_status_merges_into_existing_fields():
     assert data == {"state": "running", "count": 5, "extra": "x"}
 
 
+def test_begin_status_replaces_stale_runtime_fields():
+    store.write_status(
+        "d-retry",
+        status="running",
+        stage="delegation_runner_starting",
+        worker_pid=123,
+        fork_agent_sid="native-old",
+    )
+    store.begin_status("d-retry", status="resolving", app_session_id="caller")
+    assert store.read_status("d-retry") == {
+        "status": "resolving",
+        "app_session_id": "caller",
+    }
+
+
 def test_write_status_creates_parent_directory():
     # A fresh delegation id has no parent dir; write must mkdir it.
     store.write_status("d3", state="done")

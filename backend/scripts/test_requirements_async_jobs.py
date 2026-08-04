@@ -629,6 +629,11 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
         )
         requirements_api._persist_requirements_processor_milestone(
             request_id,
+            "delegation_runner_starting",
+            {},
+        )
+        requirements_api._persist_requirements_processor_milestone(
+            request_id,
             "runner_started",
             {"provider_id": "zai", "provider_run_id": "run-1", "worker_pid": 123},
         )
@@ -646,6 +651,7 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
             "created",
             "processor_started",
             "base_session_warming",
+            "delegation_runner_starting",
             "runner_started",
             "native_session_started",
         ]
@@ -662,6 +668,7 @@ def test_processor_milestones_persist_and_survive_restart() -> None:
             "created",
             "processor_started",
             "base_session_warming",
+            "delegation_runner_starting",
             "runner_started",
             "native_session_started",
         ]

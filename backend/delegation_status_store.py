@@ -26,16 +26,28 @@ def status_path(delegation_id: str) -> Path:
 
 
 def write_status(delegation_id: str, **fields: Any) -> None:
-    path = status_path(delegation_id)
     current = read_status(delegation_id) or {}
     current.update(fields)
+    _persist_status(delegation_id, current)
+
+
+def begin_status(delegation_id: str, **fields: Any) -> None:
+    _persist_status(delegation_id, dict(fields))
+
+
+def _persist_status(delegation_id: str, status: dict[str, Any]) -> None:
+    path = status_path(delegation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, current)
-    _notify_status(delegation_id, current)
+    atomic_write_json(path, status)
+    _notify_status(delegation_id, status)
 
 
 async def write_status_async(delegation_id: str, **fields: Any) -> None:
     await asyncio.to_thread(write_status, delegation_id, **fields)
+
+
+async def begin_status_async(delegation_id: str, **fields: Any) -> None:
+    await asyncio.to_thread(begin_status, delegation_id, **fields)
 
 
 def read_status(delegation_id: str) -> dict[str, Any] | None:

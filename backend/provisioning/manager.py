@@ -267,7 +267,12 @@ async def _ensure_ready_base_locked(
 ) -> str:
     emit_milestone(milestone_callback, "base_session_resolving")
     with perf.timed(f"provisioning.{spec.key}.ensure_session"):
-        base_session_id = await asyncio.to_thread(ensure_session, spec, cfg)
+        base_session_id = await asyncio.to_thread(
+            ensure_session,
+            spec,
+            cfg,
+            milestone_callback=milestone_callback,
+        )
     emit_milestone(
         milestone_callback,
         "base_session_resolved",

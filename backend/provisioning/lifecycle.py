@@ -12,6 +12,7 @@ import time
 from typing import Optional
 
 from provisioning.config import ProvisionedConfig
+from provisioning.progress import MilestoneCallback, emit_milestone
 from provisioning.spec import DirtyPolicy, ProvisionedSessionSpec
 
 
@@ -108,35 +109,47 @@ def _storage_scope_matches(session: dict, spec: ProvisionedSessionSpec) -> bool:
     return (session.get("storage_scope") or None) == (spec.storage_scope or None)
 
 
-def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
+def ensure_session(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+    *,
+    milestone_callback: MilestoneCallback | None = None,
+) -> str:
     """Return a clean provisioned base bc-session id for `spec`."""
     pinned = cfg.provisioned_session_id
     if pinned:
+        emit_milestone(milestone_callback, "base_registry_lookup")
         session = _session(pinned)
         if session is None:
             raise RuntimeError(f"provisioned session not found: {pinned}")
+        emit_milestone(milestone_callback, "base_cleanliness_check")
         _validate_provider(session, cfg)
         if not _storage_scope_matches(session, spec):
             raise RuntimeError(f"{spec.env_prefix} pinned session storage scope mismatch")
         reason = dirty_reason(session, spec.dirty_policy, cfg.cwd) or expired_reason(session, spec)
         if reason:
             raise RuntimeError(f"{spec.env_prefix} pinned session is not clean: {reason}")
+        emit_milestone(milestone_callback, "base_worker_projection_sync")
         _upsert_worker(cfg.cwd, session)
         return pinned
 
+    emit_milestone(milestone_callback, "base_registry_lookup")
     existing = _find(spec, cfg)
     if existing and existing.get("id"):
+        emit_milestone(milestone_callback, "base_cleanliness_check")
         _validate_provider(existing, cfg)
         reason = (
             "" if _storage_scope_matches(existing, spec) else "storage scope mismatch"
         ) or dirty_reason(existing, spec.dirty_policy, cfg.cwd) or expired_reason(existing, spec)
         if not reason:
+            emit_milestone(milestone_callback, "base_worker_projection_sync")
             _upsert_worker(cfg.cwd, existing)
             return str(existing["id"])
         # Discard the stale base (polluted or expired) and mint a fresh one.
+        emit_milestone(milestone_callback, "base_session_recycling")
         _delete_session(str(existing["id"]))
 
-    return _create_session(spec, cfg)
+    return _create_session(spec, cfg, milestone_callback=milestone_callback)
 
 
 def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
@@ -241,12 +254,18 @@ def _validate_provider(session: dict, cfg: ProvisionedConfig) -> None:
         )
 
 
-def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
+def _create_session(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+    *,
+    milestone_callback: MilestoneCallback | None = None,
+) -> str:
     try:
         import working_mode
         from session_manager import manager as session_manager
     except Exception as exc:
         raise RuntimeError(f"provisioning cannot create {spec.key} session") from exc
+    emit_milestone(milestone_callback, "base_session_record_creating")
     sess = session_manager.create(
         name=spec.name,
         orchestration_mode=spec.orchestration_mode,
@@ -262,6 +281,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
         storage_scope=spec.storage_scope,
         harness_profile_id=(spec.harness_profile_id or None),
     )
+    emit_milestone(milestone_callback, "base_registry_registering")
     working_mode.mark_working_mode(
         sess["id"],
         mode=spec.key,
@@ -276,6 +296,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
             "provisioned_at": time.time(),
         },
     )
+    emit_milestone(milestone_callback, "base_worker_projection_sync")
     _upsert_worker(cfg.cwd, sess)
     return str(sess["id"])
 

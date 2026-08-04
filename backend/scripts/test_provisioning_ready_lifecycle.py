@@ -114,7 +114,7 @@ async def _run_tests() -> None:
     try:
         sys.modules["session_manager"] = fake_session_module
         sys.modules["main"] = fake_main_module
-        manager.ensure_session = lambda _spec, _cfg: "base"
+        manager.ensure_session = lambda _spec, _cfg, **_kwargs: "base"
         manager.ensure_caller = lambda _spec, _cfg: "caller"
         manager.dispatch = _dispatch
         spec = _Spec()
@@ -181,7 +181,7 @@ async def _run_tests() -> None:
         lifecycle_threads: list[int] = []
         sessions.base["agent_session_id"] = "provider-sid"
 
-        def _threaded_base(_spec, _cfg):
+        def _threaded_base(_spec, _cfg, **_kwargs):
             lifecycle_threads.append(threading.get_ident())
             return "base"
 
