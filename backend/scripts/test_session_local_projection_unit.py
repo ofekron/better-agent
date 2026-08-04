@@ -16,8 +16,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent
 if str(_BACKEND) not in sys.path:
