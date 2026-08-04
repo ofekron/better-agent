@@ -97,6 +97,11 @@ const shared = vi.hoisted(() => {
     commentBar: null as {
       onSubmit: (c: { selection: { kind: string }; comment: string }) => Promise<void>;
     } | null,
+    // Number of times MarkdownFileEditor has fired its deferred onMount.
+    // The mock defers onMount to a setTimeout(0) macrotask (the real Monaco
+    // onMount is async too); this counter is the event-driven signal the
+    // editor has actually mounted after a view-mode remount.
+    onMountGen: 0,
   };
 });
 
@@ -117,7 +122,10 @@ vi.mock("../src/components/FileEditorPrimitives", () => ({
     // resets activeEditor to null. A synchronous child-effect onMount would
     // run before that reset and get clobbered to null.
     useEffect(() => {
-      const id = setTimeout(() => props.onMount(shared.editor as unknown as editor.IStandaloneCodeEditor), 0);
+      const id = setTimeout(() => {
+        shared.onMountGen++;
+        props.onMount(shared.editor as unknown as editor.IStandaloneCodeEditor);
+      }, 0);
       return () => clearTimeout(id);
     }, []);
     return (
@@ -350,9 +358,17 @@ describe("FileEditor context menu + comment submission", () => {
 
     await waitFor(() => expect(shared.editor!._action).not.toBeNull());
 
-    // Toggle diff → file to exercise both view-mode tab handlers.
+    // Toggle diff → file to exercise both view-mode tab handlers. The view-mode
+    // effect resets activeEditor to null on each switch; the editor is only
+    // repopulated when MarkdownFileEditor's deferred onMount macrotask fires
+    // again after the remount. Wait for that onMount before proceeding, else
+    // handleSubmit below reads a stale activeEditor=null and skips the collapse.
+    const onMountGenBeforeToggle = shared.onMountGen;
     fireEvent.click(container.querySelector('[data-testid="eng-view-diff"]')!);
     fireEvent.click(container.querySelector('[data-testid="eng-view-file"]')!);
+    await waitFor(() =>
+      expect(shared.onMountGen).toBeGreaterThan(onMountGenBeforeToggle),
+    );
 
     // Context-menu: event without an inline position → getTargetAtClientPoint fallback.
     shared.editor!._onContextMenu!({
@@ -372,8 +388,12 @@ describe("FileEditor context menu + comment submission", () => {
         expect.objectContaining({ filePath: "/tmp/example.md", startLine: 1, endLine: 2, comment: "hi" }),
       ),
     );
-    // handleSubmit collapses the editor selection back to the caret.
-    expect(shared.editor!._selection?.startLineNumber).toBe(shared.editor!._selection?.endLineNumber);
+    // handleSubmit collapses the selection only AFTER `await onSubmitComment`
+    // resolves — the call assertion above proves the call fired but not the
+    // post-await collapse, so wait for the collapse itself rather than racing it.
+    await waitFor(() =>
+      expect(shared.editor!._selection?.startLineNumber).toBe(shared.editor!._selection?.endLineNumber),
+    );
   });
 
   it("ignores a non-monaco comment submission and cancels a pending selection", async () => {
