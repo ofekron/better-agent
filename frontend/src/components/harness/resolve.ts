@@ -135,7 +135,12 @@ export function clearAllWrites(
   for (const { group, extensionId } of groups) {
     if (groupOverrideCount(profile, group, extensionId) === 0) continue;
     if (extensionId === null) {
+      /* c8 ignore start -- a non-extension group only reaches here when
+       * groupOverrideCount > 0, which for a top-level list group requires a
+       * non-empty items list; group.items[0]?.name is therefore always
+       * defined and the `?? ""` fallback is statically unreachable. */
       writes.push({ path: [group.id, group.items[0]?.name ?? ""], clear: true });
+      /* c8 ignore stop */
       continue;
     }
     if (group.id === GROUP_SETTINGS) {
