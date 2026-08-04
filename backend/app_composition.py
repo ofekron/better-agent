@@ -64,6 +64,7 @@ def wire(
         request_principal_async=coordinator.request_principal_async,
         require_builtin_extension=require_builtin_extension,
         resolve_selector_updates=resolve_selector_updates,
+        transition_selectors=coordinator.lifecycle_commands.transition_selectors,
         record_model_switched_event=record_model_switched_event,
         record_last_model=record_last_model,
         record_last_reasoning_effort=record_last_reasoning_effort,

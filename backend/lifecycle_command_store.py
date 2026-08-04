@@ -12,6 +12,9 @@ from lifecycle_command_model import (
     LifecycleCommand,
     LifecycleEffect,
     LifecycleSnapshot,
+    SelectorAttemptDecision,
+    SelectorAuthoritySnapshot,
+    SelectorIdentity,
     TransitionPlan,
     materialize_json,
     validate_identifier,
@@ -20,7 +23,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -177,11 +180,18 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY (session_id, request_id)
                     REFERENCES transitions(session_id, request_id)
             ) STRICT;
+            CREATE TABLE selector_authorities (
+                session_id TEXT PRIMARY KEY,
+                snapshot_json TEXT NOT NULL,
+                pending_projection_json TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            ) STRICT;
             """
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 5")
+            connection.execute("PRAGMA user_version = 6")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
@@ -193,6 +203,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
             version = 4
         if version == 4:
             _migrate_v4_to_v5(connection)
+            version = 5
+        if version == 5:
+            _migrate_v5_to_v6(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -361,6 +374,21 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 5")
 
 
+def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE selector_authorities (
+            session_id TEXT PRIMARY KEY,
+            snapshot_json TEXT NOT NULL,
+            pending_projection_json TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        ) STRICT
+        """
+    )
+    connection.execute("PRAGMA user_version = 6")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -387,6 +415,456 @@ def session_snapshot(session_id: str) -> LifecycleSnapshot:
             (session_id,),
         ).fetchone()
     return _snapshot_from_row(row) if row is not None else LifecycleSnapshot()
+
+
+def selector_authority_snapshot(
+    session_id: str,
+) -> SelectorAuthoritySnapshot | None:
+    validate_identifier(session_id, "session_id")
+    with connection() as database:
+        row = database.execute(
+            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return SelectorAuthoritySnapshot.from_dict(
+        _load_object(row["snapshot_json"], "selector authority snapshot")
+    )
+
+
+def persist_selector_transition(
+    session_id: str,
+    *,
+    target: SelectorIdentity,
+    projection_updates: dict[str, Any],
+    primary_native_sid: str | None,
+    supervisor_native_sid: str | None,
+    primary_legacy_native_sid_compatibility: dict[str, Any] | None,
+    supervisor_legacy_native_sid_compatibility: dict[str, Any] | None,
+) -> SelectorAuthoritySnapshot:
+    validate_identifier(session_id, "session_id")
+    if type(projection_updates) is not dict:
+        raise ValueError("selector projection updates must be an object")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        session = database.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            database.rollback()
+            raise TransitionConflict("selector authority requires a lifecycle session")
+        row = database.execute(
+            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            current = SelectorAuthoritySnapshot(
+                primary_native_sid=primary_native_sid,
+                supervisor_native_sid=supervisor_native_sid,
+                primary_native_sid_compatibility=(
+                    primary_legacy_native_sid_compatibility
+                ),
+                supervisor_native_sid_compatibility=(
+                    supervisor_legacy_native_sid_compatibility
+                ),
+            )
+        else:
+            current = SelectorAuthoritySnapshot.from_dict(
+                _load_object(row["snapshot_json"], "selector authority snapshot")
+            )
+            current = current.merge_missing_native_sid_evidence(
+                primary_native_sid=primary_native_sid,
+                supervisor_native_sid=supervisor_native_sid,
+                primary_native_sid_compatibility=(
+                    primary_legacy_native_sid_compatibility
+                ),
+                supervisor_native_sid_compatibility=(
+                    supervisor_legacy_native_sid_compatibility
+                ),
+            )
+        next_snapshot = current.transition(target)
+        projection_json = _dump({
+            "updates": projection_updates,
+            "target": target.to_dict(),
+            "clear_native_sids": current.identity != target,
+        })
+        database.execute(
+            """
+            INSERT INTO selector_authorities(
+                session_id, snapshot_json, pending_projection_json
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                snapshot_json = excluded.snapshot_json,
+                pending_projection_json = excluded.pending_projection_json
+            """,
+            (session_id, _dump(next_snapshot.to_dict()), projection_json),
+        )
+        database.commit()
+    return next_snapshot
+
+
+def pending_selector_projections() -> tuple[tuple[str, dict[str, Any]], ...]:
+    with connection() as database:
+        rows = database.execute(
+            """
+            SELECT session_id, pending_projection_json
+            FROM selector_authorities
+            WHERE pending_projection_json IS NOT NULL
+            ORDER BY session_id
+            """
+        ).fetchall()
+    return tuple(
+        (
+            row["session_id"],
+            _load_object(row["pending_projection_json"], "selector projection"),
+        )
+        for row in rows
+    )
+
+
+def persist_admitted_selector_attempt(
+    session_id: str,
+    *,
+    target: SelectorIdentity,
+    native_sid_compatibility: dict[str, Any] | None,
+    primary_native_sid: str | None,
+    supervisor_native_sid: str | None,
+    primary_native_sid_compatibility: dict[str, Any] | None,
+    supervisor_native_sid_compatibility: dict[str, Any] | None,
+) -> tuple[SelectorAuthoritySnapshot, SelectorAttemptDecision]:
+    validate_identifier(session_id, "session_id")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            current = SelectorAuthoritySnapshot()
+        else:
+            current = SelectorAuthoritySnapshot.from_dict(
+                _load_object(row["snapshot_json"], "selector authority snapshot")
+            )
+        next_snapshot, decision = current.admit_attempt(
+            target,
+            native_sid_compatibility,
+            primary_native_sid=primary_native_sid,
+            supervisor_native_sid=supervisor_native_sid,
+            primary_native_sid_compatibility=(
+                primary_native_sid_compatibility
+            ),
+            supervisor_native_sid_compatibility=(
+                supervisor_native_sid_compatibility
+            ),
+        )
+        if decision == "stale":
+            database.rollback()
+            return current, decision
+        database.execute(
+            """
+            INSERT INTO selector_authorities(
+                session_id, snapshot_json, pending_projection_json
+            ) VALUES (?, ?, NULL)
+            ON CONFLICT(session_id) DO UPDATE SET
+                snapshot_json = excluded.snapshot_json
+            """,
+            (session_id, _dump(next_snapshot.to_dict())),
+        )
+        database.commit()
+    return next_snapshot, decision
+
+
+def acknowledge_selector_projection(
+    session_id: str,
+    target: SelectorIdentity,
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            """
+            SELECT pending_projection_json
+            FROM selector_authorities
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None or row["pending_projection_json"] is None:
+            database.rollback()
+            return False
+        pending = _load_object(
+            row["pending_projection_json"],
+            "selector projection",
+        )
+        if pending.get("target") != target.to_dict():
+            database.rollback()
+            return False
+        database.execute(
+            """
+            UPDATE selector_authorities
+            SET pending_projection_json = NULL
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        database.commit()
+    return True
+
+
+def consume_selector_handoff(
+    session_id: str,
+    *,
+    role: str,
+    source_sid: str,
+    target: SelectorIdentity,
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(source_sid, "source_sid")
+    if role not in {"primary", "supervisor"}:
+        raise ValueError("selector handoff role is invalid")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            database.rollback()
+            return False
+        snapshot = SelectorAuthoritySnapshot.from_dict(
+            _load_object(row["snapshot_json"], "selector authority snapshot")
+        )
+        handoff = snapshot.handoff
+        if handoff is None or handoff.target != target:
+            database.rollback()
+            return False
+        expected = (
+            handoff.supervisor_source_sid
+            if role == "supervisor"
+            else handoff.primary_source_sid
+        )
+        if expected != source_sid:
+            database.rollback()
+            return False
+        primary_source = (
+            handoff.primary_source_sid if role == "supervisor" else None
+        )
+        supervisor_source = (
+            handoff.supervisor_source_sid if role == "primary" else None
+        )
+        remaining = (
+            type(handoff)(
+                primary_source_sid=primary_source,
+                supervisor_source_sid=supervisor_source,
+                target=handoff.target,
+                primary_source_native_sid_compatibility=(
+                    handoff.primary_source_native_sid_compatibility
+                    if primary_source is not None
+                    else None
+                ),
+                supervisor_source_native_sid_compatibility=(
+                    handoff.supervisor_source_native_sid_compatibility
+                    if supervisor_source is not None
+                    else None
+                ),
+            )
+            if primary_source is not None or supervisor_source is not None
+            else None
+        )
+        updated = SelectorAuthoritySnapshot(
+            generation=snapshot.generation,
+            identity=snapshot.identity,
+            native_sid_compatibility=snapshot.native_sid_compatibility,
+            primary_native_sid=snapshot.primary_native_sid,
+            supervisor_native_sid=snapshot.supervisor_native_sid,
+            primary_native_sid_compatibility=(
+                snapshot.primary_native_sid_compatibility
+            ),
+            supervisor_native_sid_compatibility=(
+                snapshot.supervisor_native_sid_compatibility
+            ),
+            handoff=remaining,
+        )
+        database.execute(
+            """
+            UPDATE selector_authorities
+            SET snapshot_json = ?
+            WHERE session_id = ?
+            """,
+            (_dump(updated.to_dict()), session_id),
+        )
+        database.commit()
+    return True
+
+
+def attach_selector_native_sid(
+    session_id: str,
+    *,
+    expected_generation: int,
+    role: str,
+    native_sid: str,
+) -> tuple[SelectorAuthoritySnapshot, dict[str, Any]] | None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(native_sid, "native_sid")
+    return _persist_selector_native_sid(
+        session_id,
+        expected_generation=expected_generation,
+        role=role,
+        native_sid=native_sid,
+        expected_native_sid=None,
+        require_expected_native_sid=False,
+    )
+
+
+def clear_selector_native_sid(
+    session_id: str,
+    *,
+    expected_generation: int,
+    role: str,
+    expected_native_sid: str,
+) -> tuple[SelectorAuthoritySnapshot, dict[str, Any]] | None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(expected_native_sid, "expected_native_sid")
+    return _persist_selector_native_sid(
+        session_id,
+        expected_generation=expected_generation,
+        role=role,
+        native_sid=None,
+        expected_native_sid=expected_native_sid,
+        require_expected_native_sid=True,
+    )
+
+
+def _persist_selector_native_sid(
+    session_id: str,
+    *,
+    expected_generation: int,
+    role: str,
+    native_sid: str | None,
+    expected_native_sid: str | None,
+    require_expected_native_sid: bool,
+) -> tuple[SelectorAuthoritySnapshot, dict[str, Any]] | None:
+    if type(expected_generation) is not int or expected_generation < 0:
+        raise ValueError("selector generation is invalid")
+    if role not in {"primary", "supervisor"}:
+        raise ValueError("selector native SID role is invalid")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            database.rollback()
+            return None
+        snapshot = SelectorAuthoritySnapshot.from_dict(
+            _load_object(row["snapshot_json"], "selector authority snapshot")
+        )
+        if (
+            snapshot.generation != expected_generation
+            or snapshot.identity is None
+            or snapshot.native_sid_compatibility is None
+        ):
+            database.rollback()
+            return None
+        current_native_sid = (
+            snapshot.supervisor_native_sid
+            if role == "supervisor"
+            else snapshot.primary_native_sid
+        )
+        if require_expected_native_sid and current_native_sid != expected_native_sid:
+            database.rollback()
+            return None
+        updated = SelectorAuthoritySnapshot(
+            generation=snapshot.generation,
+            identity=snapshot.identity,
+            native_sid_compatibility=snapshot.native_sid_compatibility,
+            primary_native_sid=(
+                native_sid if role == "primary" else snapshot.primary_native_sid
+            ),
+            supervisor_native_sid=(
+                native_sid
+                if role == "supervisor"
+                else snapshot.supervisor_native_sid
+            ),
+            primary_native_sid_compatibility=(
+                (
+                    snapshot.native_sid_compatibility
+                    if native_sid is not None
+                    else None
+                )
+                if role == "primary"
+                else snapshot.primary_native_sid_compatibility
+            ),
+            supervisor_native_sid_compatibility=(
+                (
+                    snapshot.native_sid_compatibility
+                    if native_sid is not None
+                    else None
+                )
+                if role == "supervisor"
+                else snapshot.supervisor_native_sid_compatibility
+            ),
+            handoff=snapshot.handoff,
+        )
+        projection = {
+            "kind": "native_sid",
+            "generation": updated.generation,
+            "identity": updated.identity.to_dict(),
+            "role": role,
+            "native_sid": native_sid,
+        }
+        database.execute(
+            """
+            UPDATE selector_authorities
+            SET snapshot_json = ?, pending_projection_json = ?
+            WHERE session_id = ?
+            """,
+            (_dump(updated.to_dict()), _dump(projection), session_id),
+        )
+        database.commit()
+    return updated, projection
+
+
+def acknowledge_native_sid_projection(
+    session_id: str,
+    projection: dict[str, Any],
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    if type(projection) is not dict or projection.get("kind") != "native_sid":
+        raise ValueError("native SID projection is invalid")
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            """
+            SELECT pending_projection_json
+            FROM selector_authorities
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None or row["pending_projection_json"] is None:
+            database.rollback()
+            return False
+        pending = _load_object(
+            row["pending_projection_json"],
+            "native SID projection",
+        )
+        if pending != projection:
+            database.rollback()
+            return False
+        database.execute(
+            """
+            UPDATE selector_authorities
+            SET pending_projection_json = NULL
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        database.commit()
+    return True
 
 
 def active_session_snapshots() -> list[tuple[str, LifecycleSnapshot]]:

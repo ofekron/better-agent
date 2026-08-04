@@ -444,6 +444,20 @@ def prepare_session_events_execution(
         extension_state=projection["extension_state"],
         installation_decisions=projection["installation_decisions"],
     )
+    native_sid_compatibility = None
+    if runner_input.get("runner") == "better_agent_runner":
+        from native_sid_compatibility import (
+            derive_better_agent_runner_native_sid_compatibility,
+        )
+
+        native_sid_compatibility = (
+            derive_better_agent_runner_native_sid_compatibility(
+                app_session_id=str(start_arguments["app_session_id"]),
+                worker_session_id=start_arguments.get(
+                    "worker_agent_session_id"
+                ),
+            )
+        )
     return prepare_family_execution(
         authority,
         # The execution template's frozen "model" argument must match what
@@ -455,6 +469,7 @@ def prepare_session_events_execution(
         runner_input=runner_input,
         launch=launch,
         capabilities=capabilities,
+        native_sid_compatibility=native_sid_compatibility,
     )
 
 

@@ -31,11 +31,14 @@ from lifecycle_command_engine import (  # noqa: E402
     LifecycleCommandEngine,
 )
 from lifecycle_command_model import (  # noqa: E402
+    ContinuationHandoff,
     ExecutionTurnIdentity,
     ExecutionTurnSnapshot,
     LifecycleCommand,
     LifecycleEffect,
     LifecycleSnapshot,
+    SelectorAuthoritySnapshot,
+    SelectorIdentity,
     UserTurnIdentity,
 )
 from lifecycle_command_states import (  # noqa: E402
@@ -44,6 +47,7 @@ from lifecycle_command_states import (  # noqa: E402
     effect_id_for,
 )
 import lifecycle_command_store  # noqa: E402
+import session_manager  # noqa: E402
 
 
 def identity(suffix: str) -> UserTurnIdentity:
@@ -76,6 +80,433 @@ def test_corrupt_serialized_snapshot_fails_closed() -> None:
         pass
     else:
         raise AssertionError("corrupt serialized execution was accepted")
+
+
+def test_selector_authority_transition_contract() -> None:
+    source = SelectorIdentity("provider-a", "model-a", "runner-a")
+    target_b = SelectorIdentity("provider-b", "model-b", "runner-b")
+    target_c = SelectorIdentity("provider-c", "model-c", "runner-c")
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    initial = SelectorAuthoritySnapshot(
+        generation=0,
+        identity=source,
+        native_sid_compatibility=compatibility,
+        primary_native_sid="native-a",
+        supervisor_native_sid="supervisor-a",
+        primary_native_sid_compatibility=compatibility,
+        supervisor_native_sid_compatibility=compatibility,
+    )
+    first = initial.transition(target_b)
+    assert first.generation == 1
+    assert first.identity == target_b
+    assert first.primary_native_sid is None
+    assert first.supervisor_native_sid is None
+    assert first.native_sid_compatibility is None
+    assert first.handoff == ContinuationHandoff(
+        primary_source_sid="native-a",
+        supervisor_source_sid="supervisor-a",
+        target=target_b,
+        primary_source_native_sid_compatibility=compatibility,
+        supervisor_source_native_sid_compatibility=compatibility,
+    )
+
+    flapped = first.transition(target_c)
+    assert flapped.generation == 2
+    assert flapped.handoff is not None
+    assert flapped.handoff.primary_source_sid == "native-a"
+    assert flapped.handoff.supervisor_source_sid == "supervisor-a"
+    assert flapped.handoff.target == target_c
+
+    repeated = flapped.transition(target_c)
+    assert repeated == flapped
+    assert SelectorAuthoritySnapshot.from_dict(repeated.to_dict()) == repeated
+
+    legacy = SelectorAuthoritySnapshot()
+    admitted, decision = legacy.admit_attempt(
+        source,
+        compatibility,
+        primary_native_sid="native-a",
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=compatibility,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    assert admitted.identity == source
+    assert admitted.primary_native_sid == "native-a"
+
+    unresolved, decision = SelectorAuthoritySnapshot().admit_attempt(
+        source,
+        compatibility,
+        primary_native_sid="native-a",
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "restart"
+    assert unresolved.primary_native_sid is None
+    assert unresolved.handoff is not None
+    assert unresolved.handoff.primary_source_sid == "native-a"
+    assert unresolved.native_sid_compatibility == compatibility
+
+    admitted_after_handoff, decision = flapped.admit_attempt(
+        target_c,
+        compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    assert admitted_after_handoff.handoff == flapped.handoff
+    assert admitted_after_handoff.native_sid_compatibility == compatibility
+
+    stale_without_handoff, decision = initial.admit_attempt(
+        target_b,
+        compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "stale"
+    assert stale_without_handoff is initial
+    stale_with_handoff, decision = flapped.admit_attempt(
+        target_b,
+        compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "stale"
+    assert stale_with_handoff is flapped
+
+    for primary_proof, supervisor_proof in (
+        (compatibility, None),
+        (None, compatibility),
+    ):
+        asymmetric, decision = SelectorAuthoritySnapshot().admit_attempt(
+            source,
+            compatibility,
+            primary_native_sid="native-a",
+            supervisor_native_sid="supervisor-a",
+            primary_native_sid_compatibility=primary_proof,
+            supervisor_native_sid_compatibility=supervisor_proof,
+        )
+        assert decision == "restart"
+        assert asymmetric.primary_native_sid is None
+        assert asymmetric.supervisor_native_sid is None
+
+    assert SelectorIdentity("provider", "m" * 512, "runner").model == "m" * 512
+    with pytest.raises(ValueError):
+        SelectorIdentity("provider", "m" * 513, "runner")
+
+
+async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
+    session_id = "selector-attachment-fences"
+    projected: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: (
+            {"orchestration_mode": "native"}
+            if requested_id == session_id
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda requested_id, mode, native_sid, **_metadata: (
+            projected.append((requested_id, mode, native_sid))
+            or {"id": requested_id}
+        ),
+    )
+    engine = LifecycleCommandEngine(EventBus())
+    await engine.begin_turn(
+        request_id=f"{session_id}:begin",
+        session_id=session_id,
+        identity=identity(session_id),
+        execution_policy="single",
+    )
+    execution = ExecutionTurnIdentity(
+        "selector-attachment-execution",
+        "selector-attachment-assistant",
+        "native",
+    )
+    await engine.start_execution(session_id, execution_identity=execution)
+    await engine.bind_execution_run(
+        session_id,
+        execution_identity=execution,
+        provider_run_id="selector-current-attempt",
+    )
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    authority, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+        session_id,
+        target=SelectorIdentity("provider-a", "model-a", "runner-a"),
+        native_sid_compatibility=compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    assert not await engine.attach_selector_native_sid(
+        session_id,
+        selector_generation=authority.generation,
+        provider_run_id="selector-stale-attempt",
+        role="primary",
+        native_sid="native-stale-attempt",
+    )
+    assert not await engine.attach_selector_native_sid(
+        session_id,
+        selector_generation=authority.generation + 1,
+        provider_run_id="selector-current-attempt",
+        role="primary",
+        native_sid="native-stale-generation",
+    )
+    assert await engine.attach_selector_native_sid(
+        session_id,
+        selector_generation=authority.generation,
+        provider_run_id="selector-current-attempt",
+        role="primary",
+        native_sid="native-current",
+    )
+    attached = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert attached is not None
+    assert attached.primary_native_sid == "native-current"
+    assert projected == [(session_id, "native", "native-current")]
+    await engine.close()
+
+
+async def test_native_sid_projection_replays_after_crash(monkeypatch) -> None:
+    projected: list[tuple[str, str, str | None]] = []
+    session_ids = {
+        "primary": "selector-crash-primary",
+        "supervisor": "selector-crash-supervisor",
+    }
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: (
+            {"orchestration_mode": "native"}
+            if requested_id in session_ids.values()
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda requested_id, mode, native_sid, **_metadata: (
+            projected.append((requested_id, mode, native_sid))
+            or {"id": requested_id}
+        ),
+    )
+    engine = LifecycleCommandEngine(EventBus())
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    for role, session_id in session_ids.items():
+        execution = ExecutionTurnIdentity(
+            f"selector-crash-execution-{role}",
+            f"selector-crash-assistant-{role}",
+            "native",
+        )
+        await engine.begin_turn(
+            request_id=f"{session_id}:begin",
+            session_id=session_id,
+            identity=identity(session_id),
+            execution_policy="single",
+        )
+        await engine.start_execution(session_id, execution_identity=execution)
+        await engine.bind_execution_run(
+            session_id,
+            execution_identity=execution,
+            provider_run_id=f"selector-crash-run-{role}",
+        )
+        authority, decision = (
+            lifecycle_command_store.persist_admitted_selector_attempt(
+                session_id,
+                target=SelectorIdentity("provider-a", "model-a", "runner-a"),
+                native_sid_compatibility=compatibility,
+                primary_native_sid=None,
+                supervisor_native_sid=None,
+                primary_native_sid_compatibility=None,
+                supervisor_native_sid_compatibility=None,
+            )
+        )
+        assert decision == "admitted"
+        persisted = lifecycle_command_store.attach_selector_native_sid(
+            session_id,
+            expected_generation=authority.generation,
+            role=role,
+            native_sid=f"native-crash-{role}",
+        )
+        assert persisted is not None
+    assert len(lifecycle_command_store.pending_selector_projections()) == 2
+    await engine.close()
+
+    recovered = LifecycleCommandEngine(EventBus())
+    await recovered.bind()
+    assert projected == [
+        (session_ids["primary"], "native", "native-crash-primary"),
+        (session_ids["supervisor"], "supervisor", "native-crash-supervisor"),
+    ]
+    assert lifecycle_command_store.pending_selector_projections() == ()
+    await recovered.close()
+
+
+async def test_late_prepared_selector_attempt_cannot_rewind_authority() -> None:
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    selector_a = SelectorIdentity("provider-a", "model-a", "runner-a")
+    selector_b = SelectorIdentity("provider-b", "model-b", "runner-b")
+    selector_c = SelectorIdentity("provider-c", "model-c", "runner-c")
+    engine = LifecycleCommandEngine(EventBus())
+    for suffix, with_handoff in (("plain", False), ("handoff", True)):
+        session_id = f"late-selector-{suffix}"
+        await engine.begin_turn(
+            request_id=f"{session_id}:begin",
+            session_id=session_id,
+            identity=identity(session_id),
+            execution_policy="single",
+        )
+        admitted, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+            session_id,
+            target=selector_a,
+            native_sid_compatibility=compatibility,
+            primary_native_sid="native-a" if with_handoff else None,
+            supervisor_native_sid=None,
+            primary_native_sid_compatibility=(
+                compatibility if with_handoff else None
+            ),
+            supervisor_native_sid_compatibility=None,
+        )
+        assert decision == "admitted"
+        assert admitted.identity == selector_a
+        lifecycle_command_store.persist_selector_transition(
+            session_id,
+            target=selector_b,
+            projection_updates=selector_b.to_dict(),
+            primary_native_sid=None,
+            supervisor_native_sid=None,
+            primary_legacy_native_sid_compatibility=None,
+            supervisor_legacy_native_sid_compatibility=None,
+        )
+        expected = lifecycle_command_store.persist_selector_transition(
+            session_id,
+            target=selector_c,
+            projection_updates=selector_c.to_dict(),
+            primary_native_sid=None,
+            supervisor_native_sid=None,
+            primary_legacy_native_sid_compatibility=None,
+            supervisor_legacy_native_sid_compatibility=None,
+        )
+        actual, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+            session_id,
+            target=selector_b,
+            native_sid_compatibility=compatibility,
+            primary_native_sid=None,
+            supervisor_native_sid=None,
+            primary_native_sid_compatibility=None,
+            supervisor_native_sid_compatibility=None,
+        )
+        assert decision == "stale"
+        assert actual == expected
+        assert lifecycle_command_store.selector_authority_snapshot(session_id) == expected
+        assert (expected.handoff is not None) is with_handoff
+        assert lifecycle_command_store.acknowledge_selector_projection(
+            session_id,
+            selector_c,
+        )
+    await engine.close()
+
+
+async def test_selector_transition_merges_missing_role_evidence_before_clear() -> None:
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    selector_a = SelectorIdentity("provider-a", "model-a", "runner-a")
+    selector_b = SelectorIdentity("provider-b", "model-b", "runner-b")
+    selector_c = SelectorIdentity("provider-c", "model-c", "runner-c")
+    session_id = "selector-role-evidence-merge"
+    engine = LifecycleCommandEngine(EventBus())
+    await engine.begin_turn(
+        request_id=f"{session_id}:begin",
+        session_id=session_id,
+        identity=identity(session_id),
+        execution_policy="single",
+    )
+    admitted, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+        session_id,
+        target=selector_a,
+        native_sid_compatibility=compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    assert admitted.primary_native_sid is None
+
+    first = lifecycle_command_store.persist_selector_transition(
+        session_id,
+        target=selector_b,
+        projection_updates=selector_b.to_dict(),
+        primary_native_sid="primary-a",
+        supervisor_native_sid=None,
+        primary_legacy_native_sid_compatibility=compatibility,
+        supervisor_legacy_native_sid_compatibility=None,
+    )
+    assert first.handoff is not None
+    assert first.handoff.primary_source_sid == "primary-a"
+    assert first.handoff.primary_source_native_sid_compatibility == compatibility
+
+    newest = lifecycle_command_store.persist_selector_transition(
+        session_id,
+        target=selector_c,
+        projection_updates=selector_c.to_dict(),
+        primary_native_sid=None,
+        supervisor_native_sid="supervisor-a",
+        primary_legacy_native_sid_compatibility=None,
+        supervisor_legacy_native_sid_compatibility=compatibility,
+    )
+    assert newest.handoff is not None
+    assert newest.handoff.primary_source_sid == "primary-a"
+    assert newest.handoff.supervisor_source_sid == "supervisor-a"
+    assert newest.handoff.primary_source_native_sid_compatibility == compatibility
+    assert newest.handoff.supervisor_source_native_sid_compatibility == compatibility
+    assert newest.handoff.target == selector_c
+    assert lifecycle_command_store.acknowledge_selector_projection(
+        session_id,
+        selector_c,
+    )
+    await engine.close()
 
 
 def test_reachable_snapshot_matrix() -> None:
@@ -1143,7 +1574,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
     session_columns = {
         row[1]
         for row in migrated.execute("PRAGMA table_info(sessions)").fetchall()
@@ -1283,7 +1714,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 5
+        assert type(version) is int and version == 6
 
 
 async def test_terminal_render_reconciliation_inbox() -> None:
@@ -1383,6 +1814,7 @@ async def test_terminal_render_reconciliation_inbox() -> None:
 
 async def main() -> None:
     test_corrupt_serialized_snapshot_fails_closed()
+    test_selector_authority_transition_contract()
     test_reachable_snapshot_matrix()
     await test_state_contract_idempotency_and_reload()
     await test_concurrent_bind_waits_for_one_recovery()

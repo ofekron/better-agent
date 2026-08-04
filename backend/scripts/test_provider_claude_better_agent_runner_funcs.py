@@ -397,6 +397,7 @@ class TestPrepareBetterAgentRunnerRun:
              mock.patch("provider_runtime_plan_source.selected_runtime_skill_sources") as sel_skills, \
              mock.patch("provider_runtime_plan_source.selected_runtime_agent_sources") as sel_agents, \
              mock.patch("provider_family_runtime_capabilities.snapshot_family_runtime_capabilities") as snap_caps, \
+             mock.patch("native_sid_compatibility.derive_better_agent_runner_native_sid_compatibility") as derive_compatibility, \
              mock.patch("provider_family_execution_runtime.prepare_family_execution") as prep_exec:
             FLA.capture.return_value = launch
             plan.return_value = {"resolved_plan": "PLAN", "extension_state": "EXT",
@@ -460,3 +461,10 @@ class TestPrepareBetterAgentRunnerRun:
         assert prep_kwargs["runner_input"] is runner_input
         assert prep_kwargs["launch"] is launch
         assert prep_kwargs["capabilities"] is snap_caps.return_value
+        derive_compatibility.assert_called_once_with(
+            app_session_id="sess-123",
+            worker_session_id=None,
+        )
+        assert prep_kwargs["native_sid_compatibility"] is (
+            derive_compatibility.return_value
+        )

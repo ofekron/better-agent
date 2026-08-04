@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from event_bus import BusEvent, EventBus
@@ -17,6 +19,8 @@ from lifecycle_command_model import (
     LifecycleEffect,
     LifecycleSnapshot,
     ExecutionTurnIdentity,
+    SelectorAttemptDecision,
+    SelectorIdentity,
     UserTurnIdentity,
     freeze_json,
     materialize_json,
@@ -152,6 +156,11 @@ class LifecycleCommandEngine:
             for session_id, request_id in pending:
                 async with self._lock_for(session_id):
                     await self._resume_transition(session_id, request_id)
+            for session_id, projection in await asyncio.to_thread(
+                lifecycle_command_store.pending_selector_projections,
+            ):
+                async with self._lock_for(session_id):
+                    await self._apply_selector_projection(session_id, projection)
         except BaseException:
             self._bus.unsubscribe(self._subscriber_name)
             await self._release_lease()
@@ -347,6 +356,405 @@ class LifecycleCommandEngine:
             session_id,
             "start_execution",
             execution_identity,
+        )
+
+    async def transition_selectors(
+        self,
+        session_id: str,
+        *,
+        updates: Mapping[str, Any],
+        client_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        allowed = {
+            "model", "runner", "reasoning_effort", "permission", "cwd",
+            "provider_id", "runtime_profile_id", "harness_profile_id",
+        }
+        if type(updates) is not dict or set(updates) - allowed:
+            raise ValueError("selector updates have unexpected fields")
+        await self.bind()
+        async with self._lock_for(session_id):
+            await self._align_session_owner(session_id)
+            import session_manager
+
+            current = await asyncio.to_thread(session_manager.manager.get, session_id)
+            if current is None:
+                return None
+            apply_updates = dict(updates)
+            apply_updates["client_id"] = client_id
+            validated = await asyncio.to_thread(
+                session_manager.manager.set_selectors,
+                session_id,
+                _validate_only=True,
+                **apply_updates,
+            )
+            if validated is None:
+                return None
+            target = SelectorIdentity(
+                provider_id=str(
+                    updates.get("provider_id", current.get("provider_id")) or ""
+                ),
+                model=str(updates.get("model", current.get("model")) or ""),
+                runner=str(updates.get("runner", current.get("runner")) or ""),
+            )
+            current_identity = SelectorIdentity(
+                provider_id=str(current.get("provider_id") or ""),
+                model=str(current.get("model") or ""),
+                runner=str(current.get("runner") or ""),
+            )
+            if target == current_identity:
+                return await asyncio.to_thread(
+                    session_manager.manager.set_selectors,
+                    session_id,
+                    **apply_updates,
+                )
+            primary_sid = current.get("agent_session_id")
+            supervisor_sid = current.get("supervisor_agent_session_id")
+            primary_legacy_compatibility = None
+            if isinstance(primary_sid, str) and primary_sid:
+                primary_legacy_compatibility = await asyncio.to_thread(
+                    self._legacy_native_compatibility,
+                    session_id,
+                    current,
+                    primary_sid,
+                )
+            supervisor_legacy_compatibility = None
+            if isinstance(supervisor_sid, str) and supervisor_sid:
+                supervisor_legacy_compatibility = await asyncio.to_thread(
+                    self._legacy_native_compatibility,
+                    session_id,
+                    current,
+                    supervisor_sid,
+                )
+            projection_updates = {
+                **updates,
+                "provider_id": target.provider_id,
+                "model": target.model,
+                "runner": target.runner,
+            }
+            authority = await asyncio.to_thread(
+                lifecycle_command_store.persist_selector_transition,
+                session_id,
+                target=target,
+                projection_updates=projection_updates,
+                primary_native_sid=(
+                    primary_sid if isinstance(primary_sid, str) and primary_sid else None
+                ),
+                supervisor_native_sid=(
+                    supervisor_sid
+                    if isinstance(supervisor_sid, str) and supervisor_sid
+                    else None
+                ),
+                primary_legacy_native_sid_compatibility=(
+                    primary_legacy_compatibility.to_dict()
+                    if primary_legacy_compatibility
+                    else None
+                ),
+                supervisor_legacy_native_sid_compatibility=(
+                    supervisor_legacy_compatibility.to_dict()
+                    if supervisor_legacy_compatibility
+                    else None
+                ),
+            )
+            projected = await asyncio.to_thread(
+                session_manager.manager.set_selectors,
+                session_id,
+                client_id=client_id,
+                _authoritative_clear_native_sids=True,
+                **projection_updates,
+            )
+            if projected is None:
+                return None
+            await asyncio.to_thread(
+                lifecycle_command_store.acknowledge_selector_projection,
+                session_id,
+                authority.identity,
+            )
+            return projected
+
+    async def selector_handoff_source(
+        self,
+        session_id: str,
+        *,
+        role: str,
+    ) -> tuple[str, SelectorIdentity] | None:
+        await self.bind()
+        snapshot = await asyncio.to_thread(
+            lifecycle_command_store.selector_authority_snapshot,
+            session_id,
+        )
+        if snapshot is None or snapshot.handoff is None:
+            return None
+        source_sid = (
+            snapshot.handoff.supervisor_source_sid
+            if role == "supervisor"
+            else snapshot.handoff.primary_source_sid
+        )
+        if source_sid is None:
+            return None
+        return source_sid, snapshot.handoff.target
+
+    async def admit_prepared_selector_attempt(
+        self,
+        session_id: str,
+        *,
+        selector: SelectorIdentity,
+        native_sid_compatibility: Mapping[str, Any] | None,
+        role: str,
+        current_native_sid: str | None,
+    ) -> tuple[SelectorAttemptDecision, int]:
+        if role not in {"primary", "supervisor"}:
+            raise ValueError("selector attempt role is invalid")
+        await self.bind()
+        async with self._lock_for(session_id):
+            await self._align_session_owner(session_id)
+            import session_manager
+
+            session = await asyncio.to_thread(session_manager.manager.get, session_id)
+            if session is None:
+                raise LifecycleCommandRejected("selector attempt session is missing")
+            legacy_compatibility = None
+            if current_native_sid:
+                legacy_compatibility = await asyncio.to_thread(
+                    self._legacy_native_compatibility,
+                    session_id,
+                    session,
+                    current_native_sid,
+                )
+            authority, decision = await asyncio.to_thread(
+                lifecycle_command_store.persist_admitted_selector_attempt,
+                session_id,
+                target=selector,
+                native_sid_compatibility=(
+                    dict(native_sid_compatibility)
+                    if native_sid_compatibility is not None
+                    else None
+                ),
+                primary_native_sid=(
+                    current_native_sid if role == "primary" else None
+                ),
+                supervisor_native_sid=(
+                    current_native_sid if role == "supervisor" else None
+                ),
+                primary_native_sid_compatibility=(
+                    legacy_compatibility.to_dict()
+                    if role == "primary" and legacy_compatibility
+                    else None
+                ),
+                supervisor_native_sid_compatibility=(
+                    legacy_compatibility.to_dict()
+                    if role == "supervisor" and legacy_compatibility
+                    else None
+                ),
+            )
+            return decision, authority.generation
+
+    async def consume_selector_handoff(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        source_sid: str,
+        target: SelectorIdentity,
+    ) -> bool:
+        await self.bind()
+        async with self._lock_for(session_id):
+            return await asyncio.to_thread(
+                lifecycle_command_store.consume_selector_handoff,
+                session_id,
+                role=role,
+                source_sid=source_sid,
+                target=target,
+            )
+
+    async def attach_selector_native_sid(
+        self,
+        session_id: str,
+        *,
+        selector_generation: int,
+        provider_run_id: str,
+        role: str,
+        native_sid: str,
+    ) -> bool:
+        validate_identifier(native_sid, "native_sid")
+        return await self._persist_native_sid_projection(
+            session_id,
+            selector_generation=selector_generation,
+            provider_run_id=provider_run_id,
+            role=role,
+            native_sid=native_sid,
+            expected_native_sid=None,
+        )
+
+    async def clear_selector_native_sid(
+        self,
+        session_id: str,
+        *,
+        selector_generation: int,
+        provider_run_id: str,
+        role: str,
+        expected_native_sid: str,
+    ) -> bool:
+        validate_identifier(expected_native_sid, "expected_native_sid")
+        return await self._persist_native_sid_projection(
+            session_id,
+            selector_generation=selector_generation,
+            provider_run_id=provider_run_id,
+            role=role,
+            native_sid=None,
+            expected_native_sid=expected_native_sid,
+        )
+
+    async def _persist_native_sid_projection(
+        self,
+        session_id: str,
+        *,
+        selector_generation: int,
+        provider_run_id: str,
+        role: str,
+        native_sid: str | None,
+        expected_native_sid: str | None,
+    ) -> bool:
+        validate_identifier(provider_run_id, "provider_run_id")
+        await self.bind()
+        async with self._lock_for(session_id):
+            lifecycle = await asyncio.to_thread(
+                lifecycle_command_store.session_snapshot,
+                session_id,
+            )
+            execution = lifecycle.execution
+            if execution is None or execution.provider_run_id != provider_run_id:
+                return False
+            if native_sid is None:
+                persisted = await asyncio.to_thread(
+                    lifecycle_command_store.clear_selector_native_sid,
+                    session_id,
+                    expected_generation=selector_generation,
+                    role=role,
+                    expected_native_sid=expected_native_sid,
+                )
+            else:
+                persisted = await asyncio.to_thread(
+                    lifecycle_command_store.attach_selector_native_sid,
+                    session_id,
+                    expected_generation=selector_generation,
+                    role=role,
+                    native_sid=native_sid,
+                )
+            if persisted is None:
+                return False
+            _authority, projection = persisted
+            return await self._apply_selector_projection(session_id, projection)
+
+    async def _apply_selector_projection(
+        self,
+        session_id: str,
+        projection: Mapping[str, Any],
+    ) -> bool:
+        if projection.get("kind") == "native_sid":
+            if set(projection) != {
+                "kind", "generation", "identity", "role", "native_sid",
+            }:
+                raise RuntimeError("persisted native SID projection has unexpected fields")
+            identity = SelectorIdentity.from_dict(projection["identity"])
+            generation = projection["generation"]
+            role = projection["role"]
+            native_sid = projection["native_sid"]
+            if type(generation) is not int or generation < 0:
+                raise RuntimeError("persisted native SID projection generation is invalid")
+            if role not in {"primary", "supervisor"}:
+                raise RuntimeError("persisted native SID projection role is invalid")
+            if native_sid is not None and (
+                not isinstance(native_sid, str) or not native_sid
+            ):
+                raise RuntimeError("persisted native SID projection value is invalid")
+            import session_manager
+
+            session = await asyncio.to_thread(
+                session_manager.manager.get,
+                session_id,
+            )
+            if session is None:
+                return False
+            projection_mode = (
+                "supervisor"
+                if role == "supervisor"
+                else str(session.get("orchestration_mode") or "manager")
+            )
+            projected = session_manager.manager.set_agent_sid(
+                session_id,
+                projection_mode,
+                native_sid,
+                provider_id=identity.provider_id,
+                model=identity.model,
+                runner=identity.runner,
+            )
+            if projected is None:
+                return False
+            return await asyncio.to_thread(
+                lifecycle_command_store.acknowledge_native_sid_projection,
+                session_id,
+                dict(projection),
+            )
+        if set(projection) != {"updates", "target", "clear_native_sids"}:
+            raise RuntimeError("persisted selector projection has unexpected fields")
+        target = SelectorIdentity.from_dict(projection["target"])
+        updates = projection["updates"]
+        if type(updates) is not dict:
+            raise RuntimeError("persisted selector projection updates are invalid")
+        import session_manager
+
+        projected = await asyncio.to_thread(
+            session_manager.manager.set_selectors,
+            session_id,
+            _authoritative_clear_native_sids=bool(
+                projection["clear_native_sids"]
+            ),
+            **updates,
+        )
+        if projected is None:
+            return False
+        return await asyncio.to_thread(
+            lifecycle_command_store.acknowledge_selector_projection,
+            session_id,
+            target,
+        )
+
+    @staticmethod
+    def _legacy_native_compatibility(
+        session_id: str,
+        session: Mapping[str, Any],
+        native_sid: str,
+    ) -> Any:
+        import session_store
+        from native_sid_compatibility import (
+            resolve_legacy_native_sid_compatibility_projection,
+        )
+
+        root_id = str(session.get("root_session_id") or session_id)
+        path = (
+            Path(session_store.root_session_file_path(root_id)).parent
+            / root_id
+            / "native_paths"
+        )
+        artifact_paths: list[str] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if type(row) is not dict or row.get("agent_sid") != native_sid:
+                continue
+            artifact_path = row.get("jsonl_path")
+            if isinstance(artifact_path, str) and artifact_path:
+                artifact_paths.append(artifact_path)
+        return resolve_legacy_native_sid_compatibility_projection(
+            node_id=str(session.get("node_id") or "primary"),
+            native_sid=native_sid,
+            artifact_paths=artifact_paths,
         )
 
     async def bind_execution_run(

@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 
 PHASES = frozenset({"idle", "starting", "running", "stopping"})
@@ -38,6 +38,15 @@ EFFECT_KINDS = frozenset({
     "observe_execution_aborted",
 })
 MAX_IDENTIFIER_LENGTH = 256
+MAX_SELECTOR_MODEL_LENGTH = 512
+SelectorAttemptDecision = Literal["admitted", "restart", "stale"]
+_NATIVE_COMPATIBILITY_FIELDS = frozenset({
+    "schema",
+    "engine",
+    "node_id",
+    "thread_store_root",
+    "claude_project_namespace",
+})
 
 
 def freeze_json(value: Any) -> Any:
@@ -74,6 +83,395 @@ def validate_identifier(value: object, name: str) -> str:
     if any(ord(char) < 32 for char in value):
         raise ValueError(f"{name} cannot contain control characters")
     return value
+
+
+def _freeze_native_compatibility(
+    value: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _NATIVE_COMPATIBILITY_FIELDS:
+        raise ValueError("native SID compatibility has unexpected fields")
+    materialized = dict(value)
+    if materialized.get("schema") != 1:
+        raise ValueError("native SID compatibility schema is invalid")
+    if materialized.get("engine") not in {
+        "claude-native",
+        "codex-native",
+        "agy-native",
+        "better-agent-runner",
+    }:
+        raise ValueError("native SID compatibility engine is invalid")
+    validate_identifier(materialized.get("node_id"), "native compatibility node_id")
+    root = materialized.get("thread_store_root")
+    if not isinstance(root, str) or not root or "\x00" in root:
+        raise ValueError("native SID compatibility root is invalid")
+    namespace = materialized.get("claude_project_namespace")
+    if namespace is not None:
+        if (
+            not isinstance(namespace, str)
+            or not namespace
+            or len(namespace) > 4096
+            or any(ord(char) < 32 for char in namespace)
+        ):
+            raise ValueError("native SID compatibility namespace is invalid")
+    frozen = freeze_json(materialized)
+    if not isinstance(frozen, Mapping):
+        raise ValueError("native SID compatibility must be an object")
+    return frozen
+
+
+@dataclass(frozen=True)
+class SelectorIdentity:
+    provider_id: str
+    model: str
+    runner: str
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.provider_id, "selector provider_id")
+        if (
+            not isinstance(self.model, str)
+            or len(self.model) > MAX_SELECTOR_MODEL_LENGTH
+        ):
+            raise ValueError("selector model must be a bounded string")
+        if (
+            not isinstance(self.runner, str)
+            or len(self.runner) > MAX_IDENTIFIER_LENGTH
+        ):
+            raise ValueError("selector runner must be a bounded string")
+        for name, value in (("model", self.model), ("runner", self.runner)):
+            if any(ord(char) < 32 for char in value):
+                raise ValueError(f"selector {name} cannot contain control characters")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "provider_id": self.provider_id,
+            "model": self.model,
+            "runner": self.runner,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SelectorIdentity:
+        if set(value) != {"provider_id", "model", "runner"}:
+            raise ValueError("selector identity has unexpected fields")
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True)
+class ContinuationHandoff:
+    primary_source_sid: str | None
+    supervisor_source_sid: str | None
+    target: SelectorIdentity
+    primary_source_native_sid_compatibility: Mapping[str, Any] | None = None
+    supervisor_source_native_sid_compatibility: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("primary_source_sid", self.primary_source_sid),
+            ("supervisor_source_sid", self.supervisor_source_sid),
+        ):
+            if value is not None:
+                validate_identifier(value, name)
+        if self.primary_source_sid is None and self.supervisor_source_sid is None:
+            raise ValueError("continuation handoff requires a source SID")
+        for role in ("primary", "supervisor"):
+            field = f"{role}_source_native_sid_compatibility"
+            source_sid = getattr(self, f"{role}_source_sid")
+            compatibility = _freeze_native_compatibility(getattr(self, field))
+            if source_sid is None and compatibility is not None:
+                raise ValueError(f"{role} source compatibility requires a SID")
+            object.__setattr__(
+                self,
+                field,
+                compatibility,
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "primary_source_sid": self.primary_source_sid,
+            "supervisor_source_sid": self.supervisor_source_sid,
+            "target": self.target.to_dict(),
+            "primary_source_native_sid_compatibility": materialize_json(
+                self.primary_source_native_sid_compatibility
+            ),
+            "supervisor_source_native_sid_compatibility": materialize_json(
+                self.supervisor_source_native_sid_compatibility
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ContinuationHandoff:
+        expected = {
+            "primary_source_sid",
+            "supervisor_source_sid",
+            "target",
+            "primary_source_native_sid_compatibility",
+            "supervisor_source_native_sid_compatibility",
+        }
+        if set(value) != expected:
+            raise ValueError("continuation handoff has unexpected fields")
+        return cls(
+            primary_source_sid=value["primary_source_sid"],
+            supervisor_source_sid=value["supervisor_source_sid"],
+            target=SelectorIdentity.from_dict(value["target"]),
+            primary_source_native_sid_compatibility=value[
+                "primary_source_native_sid_compatibility"
+            ],
+            supervisor_source_native_sid_compatibility=value[
+                "supervisor_source_native_sid_compatibility"
+            ],
+        )
+
+
+@dataclass(frozen=True)
+class SelectorAuthoritySnapshot:
+    generation: int = 0
+    identity: SelectorIdentity | None = None
+    native_sid_compatibility: Mapping[str, Any] | None = None
+    primary_native_sid: str | None = None
+    supervisor_native_sid: str | None = None
+    primary_native_sid_compatibility: Mapping[str, Any] | None = None
+    supervisor_native_sid_compatibility: Mapping[str, Any] | None = None
+    handoff: ContinuationHandoff | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("selector generation is invalid")
+        for name, value in (
+            ("primary_native_sid", self.primary_native_sid),
+            ("supervisor_native_sid", self.supervisor_native_sid),
+        ):
+            if value is not None:
+                validate_identifier(value, name)
+        object.__setattr__(
+            self,
+            "native_sid_compatibility",
+            _freeze_native_compatibility(self.native_sid_compatibility),
+        )
+        for role in ("primary", "supervisor"):
+            field = f"{role}_native_sid_compatibility"
+            compatibility = _freeze_native_compatibility(getattr(self, field))
+            if getattr(self, f"{role}_native_sid") is None and compatibility is not None:
+                raise ValueError(f"{role} native SID compatibility requires a SID")
+            object.__setattr__(self, field, compatibility)
+        if self.handoff is not None and self.handoff.target != self.identity:
+            raise ValueError("continuation handoff target must match selector identity")
+
+    def _transition(
+        self,
+        target: SelectorIdentity,
+        *,
+        force: bool,
+    ) -> SelectorAuthoritySnapshot:
+        if not force and self.identity == target:
+            return self
+        existing = self.handoff
+        primary_source = (
+            existing.primary_source_sid if existing else None
+        ) or self.primary_native_sid
+        supervisor_source = (
+            existing.supervisor_source_sid if existing else None
+        ) or self.supervisor_native_sid
+        handoff = (
+            ContinuationHandoff(
+                primary_source_sid=primary_source,
+                supervisor_source_sid=supervisor_source,
+                target=target,
+                primary_source_native_sid_compatibility=(
+                    existing.primary_source_native_sid_compatibility
+                    if existing and existing.primary_source_sid is not None
+                    else self.primary_native_sid_compatibility
+                ),
+                supervisor_source_native_sid_compatibility=(
+                    existing.supervisor_source_native_sid_compatibility
+                    if existing and existing.supervisor_source_sid is not None
+                    else self.supervisor_native_sid_compatibility
+                ),
+            )
+            if primary_source is not None or supervisor_source is not None
+            else None
+        )
+        return SelectorAuthoritySnapshot(
+            generation=self.generation + 1,
+            identity=target,
+            native_sid_compatibility=None,
+            primary_native_sid=None,
+            supervisor_native_sid=None,
+            primary_native_sid_compatibility=None,
+            supervisor_native_sid_compatibility=None,
+            handoff=handoff,
+        )
+
+    def transition(self, target: SelectorIdentity) -> SelectorAuthoritySnapshot:
+        return self._transition(target, force=False)
+
+    def merge_missing_native_sid_evidence(
+        self,
+        *,
+        primary_native_sid: str | None,
+        supervisor_native_sid: str | None,
+        primary_native_sid_compatibility: Mapping[str, Any] | None,
+        supervisor_native_sid_compatibility: Mapping[str, Any] | None,
+    ) -> SelectorAuthoritySnapshot:
+        primary = self.primary_native_sid or primary_native_sid
+        supervisor = self.supervisor_native_sid or supervisor_native_sid
+        return SelectorAuthoritySnapshot(
+            generation=self.generation,
+            identity=self.identity,
+            native_sid_compatibility=self.native_sid_compatibility,
+            primary_native_sid=primary,
+            supervisor_native_sid=supervisor,
+            primary_native_sid_compatibility=(
+                self.primary_native_sid_compatibility
+                if self.primary_native_sid is not None
+                else primary_native_sid_compatibility
+            ),
+            supervisor_native_sid_compatibility=(
+                self.supervisor_native_sid_compatibility
+                if self.supervisor_native_sid is not None
+                else supervisor_native_sid_compatibility
+            ),
+            handoff=self.handoff,
+        )
+
+    def admit_attempt(
+        self,
+        target: SelectorIdentity,
+        native_sid_compatibility: Mapping[str, Any] | None,
+        *,
+        primary_native_sid: str | None,
+        supervisor_native_sid: str | None,
+        primary_native_sid_compatibility: Mapping[str, Any] | None,
+        supervisor_native_sid_compatibility: Mapping[str, Any] | None,
+    ) -> tuple[SelectorAuthoritySnapshot, SelectorAttemptDecision]:
+        compatibility = _freeze_native_compatibility(native_sid_compatibility)
+        if self.identity is not None and self.identity != target:
+            return self, "stale"
+        primary = self.primary_native_sid or primary_native_sid
+        supervisor = self.supervisor_native_sid or supervisor_native_sid
+        has_native_sid = primary is not None or supervisor is not None
+        primary_proof = (
+            self.primary_native_sid_compatibility
+            if self.primary_native_sid is not None
+            else _freeze_native_compatibility(primary_native_sid_compatibility)
+        )
+        supervisor_proof = (
+            self.supervisor_native_sid_compatibility
+            if self.supervisor_native_sid is not None
+            else _freeze_native_compatibility(supervisor_native_sid_compatibility)
+        )
+        current = SelectorAuthoritySnapshot(
+            generation=self.generation,
+            identity=self.identity,
+            native_sid_compatibility=self.native_sid_compatibility,
+            primary_native_sid=primary,
+            supervisor_native_sid=supervisor,
+            primary_native_sid_compatibility=primary_proof,
+            supervisor_native_sid_compatibility=supervisor_proof,
+            handoff=self.handoff,
+        )
+        native_sids_compatible = (
+            compatibility is not None
+            and (primary is None or primary_proof == compatibility)
+            and (supervisor is None or supervisor_proof == compatibility)
+        )
+        incompatible = (
+            has_native_sid
+            and (
+                not native_sids_compatible
+                or (
+                    current.native_sid_compatibility is not None
+                    and current.native_sid_compatibility != compatibility
+                )
+            )
+        )
+        if incompatible and has_native_sid:
+            invalidated = current._transition(target, force=True)
+            return (
+                SelectorAuthoritySnapshot(
+                    generation=invalidated.generation,
+                    identity=invalidated.identity,
+                    native_sid_compatibility=compatibility,
+                    primary_native_sid=None,
+                    supervisor_native_sid=None,
+                    primary_native_sid_compatibility=None,
+                    supervisor_native_sid_compatibility=None,
+                    handoff=invalidated.handoff,
+                ),
+                "restart",
+            )
+        return (
+            SelectorAuthoritySnapshot(
+                generation=current.generation,
+                identity=target,
+                native_sid_compatibility=compatibility,
+                primary_native_sid=primary,
+                supervisor_native_sid=supervisor,
+                primary_native_sid_compatibility=(
+                    compatibility if primary is not None else None
+                ),
+                supervisor_native_sid_compatibility=(
+                    compatibility if supervisor is not None else None
+                ),
+                handoff=current.handoff,
+            ),
+            "admitted",
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "generation": self.generation,
+            "identity": self.identity.to_dict() if self.identity else None,
+            "native_sid_compatibility": materialize_json(
+                self.native_sid_compatibility
+            ),
+            "primary_native_sid": self.primary_native_sid,
+            "supervisor_native_sid": self.supervisor_native_sid,
+            "primary_native_sid_compatibility": materialize_json(
+                self.primary_native_sid_compatibility
+            ),
+            "supervisor_native_sid_compatibility": materialize_json(
+                self.supervisor_native_sid_compatibility
+            ),
+            "handoff": self.handoff.to_dict() if self.handoff else None,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SelectorAuthoritySnapshot:
+        expected = {
+            "generation",
+            "identity",
+            "native_sid_compatibility",
+            "primary_native_sid",
+            "supervisor_native_sid",
+            "primary_native_sid_compatibility",
+            "supervisor_native_sid_compatibility",
+            "handoff",
+        }
+        if set(value) != expected:
+            raise ValueError("selector authority has unexpected fields")
+        return cls(
+            generation=value["generation"],
+            identity=(
+                SelectorIdentity.from_dict(value["identity"])
+                if value["identity"] is not None
+                else None
+            ),
+            native_sid_compatibility=value["native_sid_compatibility"],
+            primary_native_sid=value["primary_native_sid"],
+            supervisor_native_sid=value["supervisor_native_sid"],
+            primary_native_sid_compatibility=value[
+                "primary_native_sid_compatibility"
+            ],
+            supervisor_native_sid_compatibility=value[
+                "supervisor_native_sid_compatibility"
+            ],
+            handoff=(
+                ContinuationHandoff.from_dict(value["handoff"])
+                if value["handoff"] is not None
+                else None
+            ),
+        )
 
 
 @dataclass(frozen=True)

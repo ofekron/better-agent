@@ -53,6 +53,7 @@ _broadcast_session: Optional[Callable[..., Awaitable[Any]]] = None
 _request_principal_async: Optional[Callable[[Request, str], Any]] = None
 _require_builtin_extension: Optional[Callable[[str], None]] = None
 _resolve_selector_updates: Optional[Callable[[str, dict], Awaitable[dict]]] = None
+_transition_selectors: Optional[Callable[..., Awaitable[Optional[dict]]]] = None
 _record_model_switched_event: Optional[Callable[[str, dict, dict, dict], None]] = None
 _record_last_model: Optional[Callable[[str, str], Awaitable[None]]] = None
 _record_last_reasoning_effort: Optional[Callable[[str, str], Awaitable[None]]] = None
@@ -67,6 +68,7 @@ def configure(
     request_principal_async: Callable[[Request, str], Any],
     require_builtin_extension: Callable[[str], None],
     resolve_selector_updates: Callable[[str, dict], Awaitable[dict]],
+    transition_selectors: Callable[..., Awaitable[Optional[dict]]],
     record_model_switched_event: Callable[[str, dict, dict, dict], None],
     record_last_model: Callable[[str, str], Awaitable[None]],
     record_last_reasoning_effort: Callable[[str, str], Awaitable[None]],
@@ -76,7 +78,8 @@ def configure(
     """Bind the coordinator/main.py capabilities this router needs."""
     global _broadcast_global, _broadcast_session
     global _request_principal_async, _require_builtin_extension
-    global _resolve_selector_updates, _record_model_switched_event
+    global _resolve_selector_updates, _transition_selectors
+    global _record_model_switched_event
     global _record_last_model, _record_last_reasoning_effort
     global _request_immediate_continuation
     global _broadcast_session_organization_changed
@@ -85,6 +88,7 @@ def configure(
     _request_principal_async = request_principal_async
     _require_builtin_extension = require_builtin_extension
     _resolve_selector_updates = resolve_selector_updates
+    _transition_selectors = transition_selectors
     _record_model_switched_event = record_model_switched_event
     _record_last_model = record_last_model
     _record_last_reasoning_effort = record_last_reasoning_effort
@@ -198,33 +202,23 @@ async def internal_session_control_selectors(
     endpoint. The change takes effect on the next turn via the
     selector-change continuation (fresh provider subprocess, same session).
 
-    Model/provider switching from an agent is currently DISABLED: the
-    selector-change continuation resumes the session's existing provider
-    sid to preserve context, which can permanently pin a stale provider's
-    config (e.g. a custom model_provider override) onto a rollout the new
-    model/provider was never meant to share, causing every later turn to
-    silently ghost. reasoning_effort-only changes stay enabled (same
-    provider, no rollout identity risk)."""
+    Provider/model/runner transitions persist a continuation handoff and
+    invalidate incompatible native SID authority before the next launch."""
     internal_guards.require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
     if not internal_guards.authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sid = str((body or {}).get("app_session_id") or "").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="app_session_id is required")
-    if "model" in (body or {}) or "provider_id" in (body or {}):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Switching model/provider from an agent is not currently "
-                "supported. Ask the user to switch it from the session "
-                "settings instead."
-            ),
-        )
     resolve_selector_updates = _configured(_resolve_selector_updates, "resolve_selector_updates")
     updates = await resolve_selector_updates(sid, body or {})
     before = await asyncio.to_thread(session_manager.get, sid)
-    session = await asyncio.to_thread(
-        session_manager.set_selectors, sid, **updates,
+    session = await _configured(
+        _transition_selectors,
+        "transition_selectors",
+    )(
+        sid,
+        updates=updates,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))

@@ -212,17 +212,39 @@ def test_endpoints() -> None:
             )
             check(resp.status_code == 400, "selectors rejects missing app_session_id")
 
-            # Agent-driven model switching is currently disabled: reject with
-            # 409 instead of applying it, and leave the session's model
-            # untouched (regression for the model_provider-mismatch ghost bug).
+            session_manager.manager.set_agent_sid(
+                sid,
+                "native",
+                "legacy-native-sid",
+                provider_id=provider["id"],
+                model="model-one",
+                runner="claude",
+            )
+            session_manager.manager.set_agent_sid(
+                sid,
+                "supervisor",
+                "legacy-supervisor-sid",
+                provider_id=provider["id"],
+                model="model-one",
+                runner="claude",
+            )
+
+            # Agent-driven switching uses the same durable lifecycle authority
+            # as UI switching. Missing legacy artifact evidence means one fresh
+            # continuation, never reuse of either stale native SID.
             resp = client.post(
                 "/api/internal/session-control/selectors",
                 headers={"X-Internal-Token": internal_token},
                 json={"app_session_id": sid, "model": "model-two"},
             )
-            check(resp.status_code == 409, f"selectors rejects agent model switch ({resp.status_code})")
+            check(resp.status_code == 200, f"selectors accepts agent model switch ({resp.status_code})")
             session = session_manager.manager.get(sid) or {}
-            check(session.get("model") == "model-one", "model unchanged after rejected switch")
+            check(session.get("model") == "model-two", "model changed through lifecycle authority")
+            check(session.get("agent_session_id") is None, "model switch invalidates primary SID")
+            check(
+                session.get("supervisor_agent_session_id") is None,
+                "model switch invalidates supervisor SID",
+            )
             assistant = next(
                 (m for m in session.get("messages", []) if m.get("id") == "assistant-switch-model"),
                 {},
@@ -231,15 +253,25 @@ def test_endpoints() -> None:
                 e for e in assistant.get("events", [])
                 if e.get("type") == "model_switched"
             ]
-            check(len(switch_events) == 0, "no model_switched event appended for a rejected switch")
+            check(len(switch_events) == 1, "model_switched event appended for accepted switch")
 
-            # provider_id-only switch is rejected the same way.
+            import lifecycle_command_store
+            authority = lifecycle_command_store.selector_authority_snapshot(sid)
+            check(authority is not None, "selector authority persisted")
+            check(
+                authority is not None
+                and authority.handoff is not None
+                and authority.handoff.primary_source_sid == "legacy-native-sid",
+                "missing legacy evidence creates durable fresh handoff",
+            )
+
+            # Re-sending the same provider is a no-op, not another handoff.
             resp = client.post(
                 "/api/internal/session-control/selectors",
                 headers={"X-Internal-Token": internal_token},
                 json={"app_session_id": sid, "provider_id": provider["id"]},
             )
-            check(resp.status_code == 409, f"selectors rejects agent provider switch ({resp.status_code})")
+            check(resp.status_code == 200, f"selectors accepts agent provider selection ({resp.status_code})")
 
             # reasoning_effort-only switch still works (no provider/model
             # identity risk).
@@ -261,7 +293,7 @@ def test_endpoints() -> None:
                     "action": "selectors.set",
                     "payload": {
                         "app_session_id": sid,
-                        "reasoning_effort": "none",
+                        "reasoning_effort": "high",
                     },
                 },
             )
@@ -281,7 +313,7 @@ def test_endpoints() -> None:
                         "app_session_id": sid,
                         "model": "",
                         "provider_id": "   ",
-                        "reasoning_effort": "none",
+                        "reasoning_effort": "high",
                     },
                 },
             )
@@ -293,7 +325,7 @@ def test_endpoints() -> None:
                 raise AssertionError(resp.text)
             check(
                 (session_manager.manager.get(sid) or {}).get("reasoning_effort")
-                == "none",
+                == "high",
                 "capability transport persists reasoning effort with empty selectors",
             )
             resp = client.post(
@@ -309,10 +341,10 @@ def test_endpoints() -> None:
                 },
             )
             check(
-                resp.status_code == 409,
-                "capability transport preserves explicit forbidden model switches",
+                resp.status_code == 200,
+                "capability transport applies explicit model selectors",
             )
-            if resp.status_code != 409:
+            if resp.status_code != 200:
                 raise AssertionError(resp.text)
 
             # Bad internal token is forbidden.

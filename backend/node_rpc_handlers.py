@@ -84,12 +84,15 @@ def _prepare_node_execution(
 ) -> PreparedExecution:
     arguments = artifact.template.arguments()
     artifact.require_authority(provider.execution_authority_record(arguments))
-    execution = provider.prepare_run(
-        **arguments,
-        internal_token=internal_token,
-        extra_env=extra_env,
-        backend_url=backend_url,
-    )
+    from native_sid_compatibility import admitted_native_node
+
+    with admitted_native_node(_local_node_id()):
+        execution = provider.prepare_run(
+            **arguments,
+            internal_token=internal_token,
+            extra_env=extra_env,
+            backend_url=backend_url,
+        )
     node_artifact = execution.artifact
     if (
         node_artifact.template.arguments() != arguments
@@ -99,15 +102,62 @@ def _prepare_node_execution(
         or node_artifact.provider_execution_revision
         != artifact.provider_execution_revision
     ):
-        run_id = arguments["run_id"]
-        from runs_dir import runs_root
-
-        provider._cleanup_failed_execution_payloads(
-            execution,
-            runs_root() / run_id,
-        )
+        provider.discard_prepared_execution(execution)
         raise ValueError("node-local execution preparation changed remote authority")
+    expected_compatibility = artifact.runtime_policy.get(
+        "native_sid_compatibility"
+    )
+    if expected_compatibility is not None:
+        from native_sid_compatibility import (
+            NativeSidCompatibility,
+            NativeSidCompatibilityChanged,
+        )
+
+        try:
+            expected = NativeSidCompatibility.from_dict(expected_compatibility)
+            actual = NativeSidCompatibility.from_dict(
+                node_artifact.runtime_policy.get("native_sid_compatibility")
+            )
+        except ValueError as exc:
+            provider.discard_prepared_execution(execution)
+            raise NativeSidCompatibilityChanged(
+                "remote native SID compatibility changed"
+            ) from exc
+        if actual != expected:
+            provider.discard_prepared_execution(execution)
+            raise NativeSidCompatibilityChanged(
+                "remote native SID compatibility changed"
+            )
     return execution
+
+
+def _rpc_prepare_remote_native_sid_compatibility(params: dict) -> dict:
+    if type(params) is not dict or set(params) != {"execution_artifact"}:
+        raise ValueError("remote compatibility request is invalid")
+    artifact = ExecutionArtifact.from_dict(params["execution_artifact"])
+    provider = get_provider(artifact.provider_id)
+    import node_runtime_auth
+
+    execution = _prepare_node_execution(
+        artifact,
+        provider,
+        internal_token=node_runtime_auth.token(),
+        extra_env=None,
+        backend_url=_local_node_backend_url(),
+    )
+    try:
+        from native_sid_compatibility import NativeSidCompatibility
+
+        compatibility = NativeSidCompatibility.from_dict(
+            execution.artifact.runtime_policy.get(
+                "native_sid_compatibility"
+            )
+        )
+        if compatibility.node_id != _local_node_id():
+            raise ValueError("remote compatibility node authority changed")
+        return {"native_sid_compatibility": compatibility.to_dict()}
+    finally:
+        provider.discard_prepared_execution(execution)
 
 
 async def _dispatch_ctx_cancel(ctx: _RemoteRunCtx) -> None:
@@ -205,12 +255,18 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         _ctx_by_run.pop(str(run_id or ""), None)
         await stop_renewal()
         logger.error("node_rpc: invalid execution artifact: %s", exc)
+        from native_sid_compatibility import NativeSidCompatibilityChanged
+
         await node_client.send_run_control(
             run_id=str(run_id or ""),
             control_type="error",
             data={
                 "error": f"invalid execution artifact: {exc}",
                 "lease_token": lease_token,
+                "native_sid_compatibility_changed": isinstance(
+                    exc,
+                    NativeSidCompatibilityChanged,
+                ),
             },
         )
         return
@@ -1384,6 +1440,9 @@ _HANDLERS = {
     "pe_temp_read": _rpc_pe_temp_read,
     "pe_temp_cleanup": _rpc_pe_temp_cleanup,
     "run_admitted_headless": _rpc_run_admitted_headless,
+    "prepare_remote_native_sid_compatibility": (
+        _rpc_prepare_remote_native_sid_compatibility
+    ),
     "rewind": _rpc_rewind,
 }
 

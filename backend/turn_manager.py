@@ -72,6 +72,7 @@ from i18n import t
 import llm_call_log
 import perf
 from provider import ProviderCredentialError, StreamEvent, start_prepared_run
+from native_sid_compatibility import NativeSidCompatibilityChanged
 from lifecycle_state_machines import LifecycleStateTree
 from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
@@ -2255,6 +2256,7 @@ class TurnManager:
 
             persist_id = session["id"]
             new_sid = primary_result.get("session_id")
+            session = session_manager.get(persist_id) or session
             if is_fork_first_turn and new_sid and session_id_field != "supervisor_agent_session_id":
                 try:
                     parent_lines = int(session.get("parent_line_count_at_fork") or 0)
@@ -2271,20 +2273,12 @@ class TurnManager:
                     except Exception:
                         logger.exception("advance_processed_lines on first-turn fork failed")
             if (
-                new_sid
-                and new_sid != session.get(session_id_field)
+                isinstance(new_sid, str)
+                and new_sid == session.get(session_id_field)
                 and session_id_field != "supervisor_agent_session_id"
+                and session.get("forked_from_agent_sid")
             ):
-                provider = self._c.provider_for_run(app_session_id, provider_id, runner)
-                persist_mode = session.get("orchestration_mode") or mode
-                with session_manager.batch(persist_id):
-                    session_manager.set_agent_sid(
-                        persist_id, persist_mode, new_sid,
-                        provider_id=provider.id, model=model,
-                        runner=str(provider.record.get("runner") or ""),
-                    )
-                    if session.get("forked_from_agent_sid"):
-                        session_manager.clear_forked_from(persist_id)
+                session_manager.clear_forked_from(persist_id)
                 session = session_manager.get(persist_id) or session
 
             if (
@@ -2307,27 +2301,6 @@ class TurnManager:
             context_tokens = primary_result.get("context_tokens")
             if context_tokens:
                 session_manager.set_context_tokens(persist_id, context_tokens)
-
-            turn_error = primary_result.get("error") or ""
-            if (
-                not primary_result.get("success")
-                and turn_error
-                and session.get(session_id_field)
-                and _is_stale_session_error(turn_error)
-            ):
-                logger.warning(
-                    "clearing stale %s=%s for session %s — "
-                    "resume target not found by runner",
-                    session_id_field,
-                    session.get(session_id_field),
-                    app_session_id,
-                )
-                persist_mode = session.get("orchestration_mode") or mode
-                with session_manager.batch(persist_id):
-                    session_manager.set_agent_sid(
-                        persist_id, persist_mode, None,
-                    )
-                session = session_manager.get(persist_id) or session
 
             await trace.end_step(step)
 
@@ -2975,34 +2948,17 @@ class TurnManager:
                 continuation_active_msg_id = _msg_id
             return continuation.chain_depth
 
-        def _should_preempt_selector_change_continuation_sync() -> bool:
-            if not current_session_id:
-                return False
-            session_rec = session_manager.get(primary_session_id or app_session_id) or {}
-            if session_id_field == "supervisor_agent_session_id":
-                last_prov = session_rec.get("last_active_supervisor_provider_id")
-                last_mod = session_rec.get("last_active_supervisor_model")
-                last_runner = session_rec.get("last_active_supervisor_runner")
-            else:
-                last_prov = session_rec.get("last_active_provider_id")
-                last_mod = session_rec.get("last_active_model")
-                last_runner = session_rec.get("last_active_runner")
+        applied_selector_handoffs: set[str] = set()
 
-            current_prov_id = session_rec.get("provider_id")
-            current_model = session_rec.get("model")
-            current_runner = session_rec.get("runner")
-
-            if last_prov is not None and current_prov_id != last_prov:
-                return True
-            if last_mod is not None and current_model != last_mod:
-                return True
-            if last_runner is not None and current_runner != last_runner:
-                return True
-            return False
-
-        async def _should_preempt_selector_change_continuation() -> bool:
-            return await _to_turn_dispatch_thread(
-                _should_preempt_selector_change_continuation_sync,
+        async def _selector_change_handoff():
+            role = (
+                "supervisor"
+                if session_id_field == "supervisor_agent_session_id"
+                else "primary"
+            )
+            return await self._c.lifecycle_commands.selector_handoff_source(
+                primary_session_id or app_session_id,
+                role=role,
             )
 
         async def _context_strategy_is_continuation() -> bool:
@@ -3177,9 +3133,11 @@ class TurnManager:
                     (old_provider_sid or "none")[:8],
                 )
                 continue
+            selector_handoff = await _selector_change_handoff()
             if (
                 not selector_change_capped
-                and await _should_preempt_selector_change_continuation()
+                and selector_handoff is not None
+                and selector_handoff[0] not in applied_selector_handoffs
             ):
                 selector_change_attempt += 1
                 if selector_change_attempt > _SELECTOR_CHANGE_MAX_ATTEMPTS:
@@ -3192,8 +3150,15 @@ class TurnManager:
                         _SELECTOR_CHANGE_MAX_ATTEMPTS, app_session_id[:8],
                     )
                 else:
-                    old_provider_sid = current_session_id
-                    chain_depth = await _start_selector_change_continuation(old_provider_sid)
+                    old_provider_sid, _target_selector = selector_handoff
+                    applied_selector_handoffs.add(old_provider_sid)
+                    chain_depth = await _start_selector_change_continuation(
+                        (
+                            None
+                            if old_provider_sid in _session_rec_chain
+                            else old_provider_sid
+                        )
+                    )
                     logger.info(
                         "continuation: preempting due to provider/model change for %s "
                         "(provider=%s chain depth %d, old sid %s, attempt %d/%d)",
@@ -3288,6 +3253,65 @@ class TurnManager:
                         target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
+                    from lifecycle_command_model import SelectorIdentity
+
+                    artifact_arguments = execution.artifact.template.arguments()
+                    admitted_compatibility = execution.artifact.runtime_policy.get(
+                        "native_sid_compatibility"
+                    )
+                    selector_attempt_decision = None
+                    selector_generation = None
+                    try:
+                        selector_attempt_decision, selector_generation = await (
+                            self._c.lifecycle_commands.admit_prepared_selector_attempt(
+                                primary_session_id or app_session_id,
+                                selector=SelectorIdentity(
+                                    provider_id=execution.artifact.provider_id,
+                                    model=str(artifact_arguments.get("model") or ""),
+                                    runner=str(
+                                        (_session_rec or {}).get("runner") or ""
+                                    ),
+                                ),
+                                native_sid_compatibility=(
+                                    admitted_compatibility
+                                    if isinstance(admitted_compatibility, dict)
+                                    else None
+                                ),
+                                role=(
+                                    "supervisor"
+                                    if session_id_field
+                                    == "supervisor_agent_session_id"
+                                    else "primary"
+                                ),
+                                current_native_sid=current_session_id,
+                            )
+                        )
+                    finally:
+                        if selector_attempt_decision != "admitted":
+                            await _to_turn_dispatch_thread(
+                                provider.discard_prepared_execution,
+                                execution,
+                            )
+                    if selector_attempt_decision == "stale":
+                        continue
+                    if selector_attempt_decision == "restart":
+                        selector_handoff = await _selector_change_handoff()
+                        if selector_handoff is None:
+                            raise RuntimeError(
+                                "selector attempt restart lost its durable handoff"
+                            )
+                        old_provider_sid, _target_selector = selector_handoff
+                        applied_selector_handoffs.add(old_provider_sid)
+                        await _start_selector_change_continuation(
+                            (
+                                None
+                                if old_provider_sid in _session_rec_chain
+                                else old_provider_sid
+                            )
+                        )
+                        continue
+                    if selector_attempt_decision != "admitted":
+                        raise RuntimeError("selector attempt admission is invalid")
                     execution_handle = self.lifecycle.register_execution_handle(execution)
                     admission_identity = {
                         "user_turn_id": lifecycle_message_id,
@@ -3364,6 +3388,23 @@ class TurnManager:
                                 run_id=run_id,
                                 payload=admission_identity,
                             )
+                    except NativeSidCompatibilityChanged:
+                        await self.lifecycle.publish(
+                            "lifecycle.admission_failed",
+                            root_id=root_id,
+                            session_id=app_session_id,
+                            run_id=run_id,
+                            payload=admission_identity,
+                        )
+                        self._pop_run_id(app_session_id, run_id)
+                        selector_change_attempt += 1
+                        if selector_change_attempt > _SELECTOR_CHANGE_MAX_ATTEMPTS:
+                            raise
+                        await self.run_state_begin_retry(
+                            app_session_id,
+                            turn_run_id,
+                        )
+                        continue
                     except BaseException:
                         await self.lifecycle.publish(
                             "lifecycle.admission_failed",
@@ -3655,27 +3696,66 @@ class TurnManager:
 
                         if event.type == "session_discovered":
                             sid = event.data.get("session_id")
-                            if sid and sid != discovered_session_id:
+                            if (
+                                isinstance(sid, str)
+                                and sid
+                                and sid != discovered_session_id
+                            ):
                                 discovered_session_id = sid
-                                if session_id_field == "supervisor_agent_session_id":
-                                    discovery_mode = "supervisor"
-                                else:
-                                    discovery_mode = (
-                                        session_manager.get_field(
+                                if isinstance(selector_generation, int):
+                                    attached = await (
+                                        self._c.lifecycle_commands.attach_selector_native_sid(
                                             primary_session_id or app_session_id,
-                                            "orchestration_mode",
+                                            selector_generation=selector_generation,
+                                            provider_run_id=run_id,
+                                            role=(
+                                                "supervisor"
+                                                if session_id_field
+                                                == "supervisor_agent_session_id"
+                                                else "primary"
+                                            ),
+                                            native_sid=sid,
                                         )
-                                        or "manager"
                                     )
-                                session_manager.set_agent_sid(
-                                    primary_session_id or app_session_id,
-                                    discovery_mode, sid,
-                                    provider_id=provider.id,
-                                    model=model,
-                                    runner=str(provider.record.get("runner") or ""),
-                                )
+                                    if not attached:
+                                        logger.info(
+                                            "selector SID discovery lost its current-attempt fence "
+                                            "session=%s run=%s",
+                                            (primary_session_id or app_session_id)[:8],
+                                            run_id[:8],
+                                        )
 
                         if event.type in ("complete", "error"):
+                            terminal_sid = event.data.get("session_id")
+                            if (
+                                event.type == "complete"
+                                and isinstance(terminal_sid, str)
+                                and terminal_sid
+                                and terminal_sid != discovered_session_id
+                                and isinstance(selector_generation, int)
+                            ):
+                                discovered_session_id = terminal_sid
+                                attached = await (
+                                    self._c.lifecycle_commands.attach_selector_native_sid(
+                                        primary_session_id or app_session_id,
+                                        selector_generation=selector_generation,
+                                        provider_run_id=run_id,
+                                        role=(
+                                            "supervisor"
+                                            if session_id_field
+                                            == "supervisor_agent_session_id"
+                                            else "primary"
+                                        ),
+                                        native_sid=terminal_sid,
+                                    )
+                                )
+                                if not attached:
+                                    logger.info(
+                                        "selector terminal SID lost its current-attempt fence "
+                                        "session=%s run=%s",
+                                        (primary_session_id or app_session_id)[:8],
+                                        run_id[:8],
+                                    )
                             break
 
                         await ws_callback(_stamp_agent_type(mode, event_dict))
@@ -3949,6 +4029,36 @@ class TurnManager:
                     )
                     self._pop_run_id(app_session_id, run_id)
                     continue
+
+            stale_native_sid = new_sid or current_session_id
+            if (
+                not success
+                and error
+                and _is_stale_session_error(error)
+                and isinstance(stale_native_sid, str)
+                and stale_native_sid
+                and isinstance(selector_generation, int)
+            ):
+                cleared = await (
+                    self._c.lifecycle_commands.clear_selector_native_sid(
+                        primary_session_id or app_session_id,
+                        selector_generation=selector_generation,
+                        provider_run_id=run_id,
+                        role=(
+                            "supervisor"
+                            if session_id_field == "supervisor_agent_session_id"
+                            else "primary"
+                        ),
+                        expected_native_sid=stale_native_sid,
+                    )
+                )
+                if not cleared:
+                    logger.info(
+                        "stale selector SID clear lost its current-attempt fence "
+                        "session=%s run=%s",
+                        (primary_session_id or app_session_id)[:8],
+                        run_id[:8],
+                    )
 
             await self._emit_attempt_terminal(
                 ws_callback=ws_callback,

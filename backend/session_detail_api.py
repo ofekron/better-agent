@@ -1834,10 +1834,9 @@ async def update_session_selectors(session_id: str, body: dict):
     be changed here — flipping modes mid-session orphans the claude
     session under the old mode.
 
-    `provider_id` IS mutable at any time. If it changes while a turn is
-    in flight, the current run keeps using the provider instance that
-    already owns that run; the changed selector is applied lazily to the
-    next prompt via continuation. `set_selectors` re-validates
+    `provider_id` IS mutable at any time. The lifecycle selector authority
+    persists the target and continuation handoff before projecting the
+    change and invalidating incompatible native SID authority. `set_selectors` re-validates
     `orchestration_mode` against the new provider's capability (e.g.
     Claude→a non-manager-mode provider on a manager-mode session fails here with
     `IncompatibleOrchestrationMode` → 400)."""
@@ -1845,9 +1844,10 @@ async def update_session_selectors(session_id: str, body: dict):
     updates = await _resolve_selector_updates(session_id, body)
     client_id = body.get("client_id") if isinstance(body.get("client_id"), str) else None
     before = await asyncio.to_thread(session_manager.get, session_id)
-    session = await asyncio.to_thread(
-        session_manager.set_selectors,
-        session_id, client_id=client_id, **updates,
+    session = await _coordinator().lifecycle_commands.transition_selectors(
+        session_id,
+        updates=updates,
+        client_id=client_id,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
@@ -2451,11 +2451,14 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
 
     updates = await _resolve_selector_updates(session_id, body)
     before = await asyncio.to_thread(session_manager.get, session_id)
-    session = await asyncio.to_thread(
-        session_manager.set_selectors,
+    session = await _coordinator().lifecycle_commands.transition_selectors(
         session_id,
-        client_id=body.get("client_id") if isinstance(body.get("client_id"), str) else None,
-        **updates,
+        updates=updates,
+        client_id=(
+            body.get("client_id")
+            if isinstance(body.get("client_id"), str)
+            else None
+        ),
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))

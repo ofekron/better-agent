@@ -23,6 +23,7 @@ import asyncio
 import os
 import sys
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -37,6 +38,16 @@ from turn_helpers import _is_transient_error, _retry_attempt_limit  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
+from execution_template import prepare_execution  # noqa: E402
+from event_bus import EventBus  # noqa: E402
+from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
+from lifecycle_command_model import (  # noqa: E402
+    ExecutionTurnIdentity,
+    SelectorIdentity,
+    UserTurnIdentity,
+)
+import lifecycle_command_store  # noqa: E402
+from native_sid_compatibility import NativeSidCompatibilityChanged  # noqa: E402
 import config_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
@@ -59,6 +70,7 @@ class _StubCoordinator:
         self.fanned_out: list[str] = []
         self.hard_cancelled: list[str] = []
         self.internal_token = "test-token"
+        self.lifecycle_commands = _LifecycleCommands()
 
     def _cancel_turn_fanout(self, run_id: str) -> bool:
         self.fanned_out.append(run_id)
@@ -77,6 +89,29 @@ class _StubCoordinator:
         pass
 
 
+class _LifecycleCommands:
+    def __init__(self) -> None:
+        self.handoffs: dict[str, tuple[str, SelectorIdentity]] = {}
+        self.selector_attempt_decisions: list[str] = []
+
+    async def selector_handoff_source(self, sid: str, *, role: str):
+        return self.handoffs.get(f"{sid}:{role}")
+
+    async def admit_prepared_selector_attempt(self, *args, **kwargs):
+        if self.selector_attempt_decisions:
+            return self.selector_attempt_decisions.pop(0), 0
+        return "admitted", 0
+
+    async def attach_selector_native_sid(self, *args, **kwargs) -> bool:
+        return True
+
+    async def clear_selector_native_sid(self, *args, **kwargs) -> bool:
+        return True
+
+    async def request_active_stop(self, *args, **kwargs) -> None:
+        return None
+
+
 class _UPM:
     @staticmethod
     def get_in_flight_lifecycle_msg_id(sid):
@@ -92,6 +127,10 @@ class _RetryProvider:
         kind: str = "codex",
         emit_discovered: bool = False,
         reset_seconds: float = 0.5,
+        runner: str = "native",
+        native_sid_compatibility: dict | None = None,
+        compatibility_mismatches: int = 0,
+        before_discovery: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._runs: dict = {}
         self.outcomes = outcomes
@@ -99,13 +138,58 @@ class _RetryProvider:
         self.session_ids: list[str | None] = []
         self.continuation_chains: list[list[str] | None] = []
         self.cancelled: list[str] = []
+        self.prepared = 0
+        self.discarded = 0
         self.KIND = kind
         self.id = id
-        self.record = {"runner": "native"}
+        self.record = {
+            "id": id,
+            "kind": kind,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "revision": 1,
+            "execution_revision": 1,
+            "runner": runner,
+        }
         self._emit_discovered = emit_discovered
         self.reset_seconds = reset_seconds
+        self.native_sid_compatibility = native_sid_compatibility or {
+            "schema": 1,
+            "engine": "claude-native",
+            "node_id": "primary",
+            "thread_store_root": "/tmp/claude/projects",
+            "claude_project_namespace": "-tmp",
+        }
+        self.compatibility_mismatches = compatibility_mismatches
+        self.before_discovery = before_discovery
 
-    def start_run(self, **kw):
+    def prepare_run(self, **kw):
+        self.prepared += 1
+        return prepare_execution(
+            self.record,
+            runtime_policy={
+                "native_sid_compatibility": self.native_sid_compatibility
+            },
+            **kw,
+        )
+
+    def discard_prepared_execution(self, execution) -> bool:
+        execution._mark_cancelled()
+        self.discarded += 1
+        return True
+
+    def start_run(self, *, execution, loop, queue):
+        if self.compatibility_mismatches:
+            self.compatibility_mismatches -= 1
+            error = NativeSidCompatibilityChanged(
+                "remote native SID compatibility changed"
+            )
+            execution._mark_admission_failed(error)
+            execution._mark_spawn_failed(error)
+            raise error
+        execution._try_commit_spawn()
+        execution._mark_spawn_completed()
+        kw = execution.start_arguments()
+        kw.update({"loop": loop, "queue": queue})
         self.prompts.append(kw["prompt"])
         self.session_ids.append(kw.get("session_id"))
         self.continuation_chains.append(kw.get("continuation_chain"))
@@ -120,30 +204,33 @@ class _RetryProvider:
             {"popen": type("Popen", (), {"pid": os.getpid()})()},
         )()
 
-        if self._emit_discovered and payload.get("session_id"):
-            kw["loop"].call_soon_threadsafe(
-                queue.put_nowait,
-                type("E", (), {
-                    "type": "session_discovered",
-                    "data": {"session_id": payload["session_id"]},
-                })(),
+        async def emit_events() -> None:
+            if self.before_discovery is not None:
+                await self.before_discovery()
+            if self._emit_discovered and payload.get("session_id"):
+                queue.put_nowait(
+                    type("E", (), {
+                        "type": "session_discovered",
+                        "data": {"session_id": payload["session_id"]},
+                    })()
+                )
+            if isinstance(context_usage, dict):
+                queue.put_nowait(
+                    type("E", (), {
+                        "type": "context_usage",
+                        "data": context_usage,
+                    })()
+                )
+            complete_payload = {
+                k: v for k, v in payload.items()
+                if k != "context_usage"
+            }
+            queue.put_nowait(
+                type("E", (), {"type": "complete", "data": complete_payload})()
             )
-        if isinstance(context_usage, dict):
-            kw["loop"].call_soon_threadsafe(
-                queue.put_nowait,
-                type("E", (), {
-                    "type": "context_usage",
-                    "data": context_usage,
-                })(),
-            )
-        complete_payload = {
-            k: v for k, v in payload.items()
-            if k != "context_usage"
-        }
-        kw["loop"].call_soon_threadsafe(
-            queue.put_nowait,
-            type("E", (), {"type": "complete", "data": complete_payload})(),
-        )
+
+        asyncio.run_coroutine_threadsafe(emit_events(), loop)
+        return True
 
     def is_running(self, run_id: str) -> bool:
         return False
@@ -1039,7 +1126,7 @@ def test_lazy_selector_change_continuation() -> None:
     )
     sid = session["id"]
 
-    # Simulate a successful previous run that set last_active_provider_id and last_active_model
+    # Simulate a successful previous run before a lifecycle-owned selector handoff.
     session_manager.set_agent_sid(
         sid,
         "native",
@@ -1048,7 +1135,8 @@ def test_lazy_selector_change_continuation() -> None:
         model="sonnet",
     )
 
-    # Change session selectors (provider/model) to simulate user action
+    # Change the projected selectors; the lifecycle authority supplies the
+    # durable handoff read by TurnManager.
     session_manager.set_selectors(sid, provider_id=provider_b_id, model="haiku")
 
     provider = _RetryProvider(
@@ -1062,6 +1150,10 @@ def test_lazy_selector_change_continuation() -> None:
         emit_discovered=True,
     )
     c = _StubCoordinator()
+    c.lifecycle_commands.handoffs[f"{sid}:primary"] = (
+        "old-provider-sid",
+        SelectorIdentity(provider_b_id, "haiku", "native"),
+    )
     c.provider_for_session = lambda _sid: provider
     c.user_prompt_manager = _UPM()
     tm = TurnManager(c)
@@ -1070,19 +1162,23 @@ def test_lazy_selector_change_continuation() -> None:
         pass
 
     async def _go() -> dict:
-        return await tm._drive_cli_run(
-            prompt="continue on new model",
-            cwd="/tmp",
-            model="haiku",
-            session_id="old-provider-sid",
-            ws_callback=_ws,
-            app_session_id=sid,
-            cancel_event=asyncio.Event(),
-            session_id_field="agent_session_id",
-            mode="native",
-            turn_run_id="turn-lazy-selector",
-            lifecycle_message_id="lifecycle-lazy-selector",
-        )
+        await tm.lifecycle.bind()
+        try:
+            return await tm._drive_cli_run(
+                prompt="continue on new model",
+                cwd="/tmp",
+                model="haiku",
+                session_id="old-provider-sid",
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id="turn-lazy-selector",
+                lifecycle_message_id="lifecycle-lazy-selector",
+            )
+        finally:
+            await tm.lifecycle.close()
 
     result = asyncio.run(_go())
     fresh = session_manager.get(sid) or {}
@@ -1097,6 +1193,521 @@ def test_lazy_selector_change_continuation() -> None:
     check("last active provider updated", fresh.get("last_active_provider_id") == provider_b_id)
     check("last active model updated", fresh.get("last_active_model") == "haiku")
     check("result success", result.get("success") is True)
+
+
+def test_s1_never_consumes_selector_handoff() -> None:
+    source = (Path(__file__).resolve().parents[1] / "turn_manager.py").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "consume_selector_handoff(" not in source,
+        "S1 leaves selector handoff pending for S2 durable acceptance",
+    )
+    check(
+        "execution.artifact.runtime_policy.get(" in source
+        and "admit_prepared_selector_attempt(" in source,
+        "prepared E2 compatibility binds at provider-attempt election",
+    )
+    check(
+        "provider.discard_prepared_execution" in source,
+        "unregistered prepared attempts release provider staging",
+    )
+
+
+def test_stale_prepared_selector_attempt_is_discarded_and_retried() -> None:
+    provider_id = config_store.get_default_provider()["id"]
+    session = session_manager.create(
+        name="stale-selector-attempt",
+        cwd="/tmp",
+        model="sonnet",
+        provider_id=provider_id,
+    )
+    sid = session["id"]
+    provider = _RetryProvider(
+        [{
+            "success": True,
+            "session_id": "current-selector-sid",
+            "token_usage": {"input_tokens": 1},
+        }],
+        id=provider_id,
+        kind="claude",
+        emit_discovered=True,
+    )
+    coordinator = _StubCoordinator()
+    coordinator.lifecycle_commands.selector_attempt_decisions = [
+        "stale",
+        "admitted",
+    ]
+    coordinator.provider_for_session = lambda _sid: provider
+    coordinator.user_prompt_manager = _UPM()
+    manager = TurnManager(coordinator)
+
+    async def _ws(_event):
+        return None
+
+    async def _go() -> dict:
+        await manager.lifecycle.bind()
+        try:
+            return await manager._drive_cli_run(
+                prompt="continue",
+                cwd="/tmp",
+                model="sonnet",
+                session_id=None,
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id="turn-stale-selector",
+                lifecycle_message_id="lifecycle-stale-selector",
+            )
+        finally:
+            await manager.lifecycle.close()
+
+    result = asyncio.run(_go())
+    check("stale attempt was prepared", provider.prepared == 2)
+    check("stale attempt released provider staging", provider.discarded == 1)
+    check("only current selector attempt launched", len(provider.prompts) == 1)
+    check("stale attempt retried without crashing", result.get("success") is True)
+
+
+def test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid() -> None:
+    async def _go() -> None:
+        engine = LifecycleCommandEngine(EventBus())
+        turn_lifecycles = []
+        try:
+            for label, runner, compatibility in (
+                (
+                    "better-agent-runner",
+                    "better_agent_runner",
+                    {
+                        "schema": 1,
+                        "engine": "better-agent-runner",
+                        "node_id": "primary",
+                        "thread_store_root": "/tmp/better_agent_sessions",
+                        "claude_project_namespace": None,
+                    },
+                ),
+                (
+                    "remote-node",
+                    "native",
+                    {
+                        "schema": 1,
+                        "engine": "claude-native",
+                        "node_id": "worker-remote",
+                        "thread_store_root": r"C:\\Users\\agent\\.claude\\projects",
+                        "claude_project_namespace": "-remote-work",
+                    },
+                ),
+            ):
+                provider_id = config_store.get_default_provider()["id"]
+                session = session_manager.create(
+                    name=f"two-turn-{label}",
+                    cwd="/tmp",
+                    model="sonnet",
+                    provider_id=provider_id,
+                    orchestration_mode="native",
+                )
+                sid = session["id"]
+                session_manager.set_selectors(sid, runner=runner)
+                native_sid = f"{label}-sid"
+                provider = _RetryProvider(
+                    [
+                        {
+                            "success": True,
+                            "session_id": native_sid,
+                            "token_usage": {"input_tokens": 1},
+                        },
+                        {
+                            "success": True,
+                            "session_id": native_sid,
+                            "token_usage": {"input_tokens": 1},
+                        },
+                    ],
+                    id=provider_id,
+                    kind="claude",
+                    emit_discovered=True,
+                    runner=runner,
+                    native_sid_compatibility=compatibility,
+                    compatibility_mismatches=(1 if label == "remote-node" else 0),
+                )
+                coordinator = _StubCoordinator()
+                coordinator.lifecycle_commands = engine
+                coordinator.provider_for_session = lambda _sid, p=provider: p
+                coordinator.user_prompt_manager = _UPM()
+                manager = TurnManager(coordinator)
+                await manager.lifecycle.bind()
+                turn_lifecycles.append(manager.lifecycle)
+                turn_identity = UserTurnIdentity(
+                    f"two-turn-user-{label}",
+                    f"two-turn-message-{label}",
+                )
+                await engine.begin_turn(
+                    request_id=f"two-turn-begin-{label}",
+                    session_id=sid,
+                    identity=turn_identity,
+                    execution_policy="sequential",
+                )
+
+                async def _ws(_event):
+                    return None
+
+                for index in range(2):
+                    execution_identity = ExecutionTurnIdentity(
+                        f"two-turn-execution-{label}-{index}",
+                        f"two-turn-assistant-{label}-{index}",
+                        "native",
+                    )
+                    await engine.start_execution(
+                        sid,
+                        execution_identity=execution_identity,
+                    )
+                    current_sid = (
+                        (session_manager.get(sid) or {}).get("agent_session_id")
+                        if index
+                        else None
+                    )
+                    result = await manager._drive_cli_run(
+                        prompt="continue",
+                        cwd="/tmp",
+                        model="sonnet",
+                        session_id=current_sid,
+                        ws_callback=_ws,
+                        app_session_id=sid,
+                        cancel_event=asyncio.Event(),
+                        session_id_field="agent_session_id",
+                        mode="native",
+                        turn_run_id=f"two-turn-run-{label}-{index}",
+                        lifecycle_message_id=turn_identity.lifecycle_message_id,
+                        execution_identity=execution_identity,
+                    )
+                    check(f"{label} turn {index + 1} succeeded", result["success"])
+                    assert result["success"]
+                    execution = engine.snapshot(sid).execution
+                    assert execution is not None
+                    assert execution.provider_run_id is not None
+                    await engine.finish_execution(
+                        sid,
+                        execution_identity=execution_identity,
+                        provider_run_id=execution.provider_run_id,
+                        outcome="complete",
+                    )
+                authority = lifecycle_command_store.selector_authority_snapshot(sid)
+                check(
+                    f"{label} production discovery attached SID",
+                    authority is not None
+                    and authority.primary_native_sid == native_sid
+                    and authority.primary_native_sid_compatibility == compatibility,
+                )
+                assert authority is not None
+                assert authority.primary_native_sid == native_sid
+                assert authority.primary_native_sid_compatibility == compatibility
+                check(
+                    f"{label} second turn reused discovered SID",
+                    provider.session_ids == [None, native_sid],
+                )
+                assert provider.session_ids == [None, native_sid]
+                if label == "remote-node":
+                    assert provider.prepared == 3
+                await engine.finish_active(
+                    sid,
+                    lifecycle_message_id=turn_identity.lifecycle_message_id,
+                    outcome="complete",
+                )
+        finally:
+            for lifecycle in turn_lifecycles:
+                await lifecycle.close()
+            await engine.close()
+
+    asyncio.run(_go())
+
+
+def test_selector_changes_fence_production_sid_discovery_and_completion() -> None:
+    async def _go() -> None:
+        engine = LifecycleCommandEngine(EventBus())
+        turn_lifecycles = []
+        try:
+            for phase in ("before-discovery", "after-discovery"):
+                provider_id = config_store.get_default_provider()["id"]
+                session = session_manager.create(
+                    name=f"selector-race-{phase}",
+                    cwd="/tmp",
+                    model="sonnet",
+                    provider_id=provider_id,
+                    orchestration_mode="native",
+                )
+                sid = session["id"]
+                native_sid = f"stale-{phase}-sid"
+
+                async def switch_selector() -> None:
+                    await engine.transition_selectors(
+                        sid,
+                        updates={"model": "haiku"},
+                    )
+
+                provider = _RetryProvider(
+                    [{
+                        "success": True,
+                        "session_id": native_sid,
+                        "token_usage": {"input_tokens": 1},
+                    }],
+                    id=provider_id,
+                    kind="claude",
+                    emit_discovered=True,
+                    before_discovery=(
+                        switch_selector if phase == "before-discovery" else None
+                    ),
+                )
+                coordinator = _StubCoordinator()
+                coordinator.lifecycle_commands = engine
+                coordinator.provider_for_session = lambda _sid, p=provider: p
+                coordinator.user_prompt_manager = _UPM()
+                manager = TurnManager(coordinator)
+                await manager.lifecycle.bind()
+                turn_lifecycles.append(manager.lifecycle)
+                turn_identity = UserTurnIdentity(
+                    f"selector-race-user-{phase}",
+                    f"selector-race-message-{phase}",
+                )
+                execution_identity = ExecutionTurnIdentity(
+                    f"selector-race-execution-{phase}",
+                    f"selector-race-assistant-{phase}",
+                    "native",
+                )
+                await engine.begin_turn(
+                    request_id=f"selector-race-begin-{phase}",
+                    session_id=sid,
+                    identity=turn_identity,
+                    execution_policy="sequential",
+                )
+                await engine.start_execution(
+                    sid,
+                    execution_identity=execution_identity,
+                )
+
+                original_attach = engine.attach_selector_native_sid
+                switched_after_attach = False
+                if phase == "after-discovery":
+                    async def attach_then_switch(*args, **kwargs) -> bool:
+                        nonlocal switched_after_attach
+                        attached = await original_attach(*args, **kwargs)
+                        if attached and not switched_after_attach:
+                            switched_after_attach = True
+                            await switch_selector()
+                        return attached
+
+                    engine.attach_selector_native_sid = attach_then_switch
+
+                async def _ws(_event):
+                    return None
+
+                try:
+                    result = await manager._drive_cli_run(
+                        prompt="continue",
+                        cwd="/tmp",
+                        model="sonnet",
+                        session_id=None,
+                        ws_callback=_ws,
+                        app_session_id=sid,
+                        cancel_event=asyncio.Event(),
+                        session_id_field="agent_session_id",
+                        mode="native",
+                        turn_run_id=f"selector-race-run-{phase}",
+                        lifecycle_message_id=turn_identity.lifecycle_message_id,
+                        execution_identity=execution_identity,
+                    )
+                finally:
+                    engine.attach_selector_native_sid = original_attach
+
+                authority = lifecycle_command_store.selector_authority_snapshot(sid)
+                current = session_manager.get(sid) or {}
+                check(f"{phase} run completed", result["success"] is True)
+                check(
+                    f"{phase} stale SID absent from lifecycle authority",
+                    authority is not None and authority.primary_native_sid is None,
+                )
+                check(
+                    f"{phase} stale SID absent from session projection",
+                    current.get("agent_session_id") is None,
+                )
+                assert authority is not None
+                assert authority.primary_native_sid is None
+                assert current.get("agent_session_id") is None
+                if phase == "after-discovery":
+                    check(
+                        "selector handoff remains pending after completion",
+                        authority.handoff is not None
+                        and authority.handoff.primary_source_sid == native_sid,
+                    )
+                    assert authority.handoff is not None
+                    assert authority.handoff.primary_source_sid == native_sid
+
+                execution = engine.snapshot(sid).execution
+                assert execution is not None
+                assert execution.provider_run_id is not None
+                await engine.finish_execution(
+                    sid,
+                    execution_identity=execution_identity,
+                    provider_run_id=execution.provider_run_id,
+                    outcome="complete",
+                )
+                await engine.finish_active(
+                    sid,
+                    lifecycle_message_id=turn_identity.lifecycle_message_id,
+                    outcome="complete",
+                )
+        finally:
+            for lifecycle in turn_lifecycles:
+                await lifecycle.close()
+            await engine.close()
+
+    asyncio.run(_go())
+
+
+def test_stale_session_error_clears_authority_before_selector_switch() -> None:
+    async def _go() -> None:
+        engine = LifecycleCommandEngine(EventBus())
+        manager = None
+        try:
+            provider_id = config_store.get_default_provider()["id"]
+            session = session_manager.create(
+                name="stale-session-authority-clear",
+                cwd="/tmp",
+                model="sonnet",
+                provider_id=provider_id,
+                orchestration_mode="native",
+            )
+            sid = session["id"]
+            native_sid = "provider-proven-invalid-sid"
+            provider = _RetryProvider(
+                [
+                    {
+                        "success": True,
+                        "session_id": native_sid,
+                        "token_usage": {"input_tokens": 1},
+                    },
+                    {
+                        "success": False,
+                        "session_id": native_sid,
+                        "error": "session not found",
+                        "token_usage": None,
+                    },
+                ],
+                id=provider_id,
+                kind="claude",
+                emit_discovered=True,
+            )
+            coordinator = _StubCoordinator()
+            coordinator.lifecycle_commands = engine
+            coordinator.provider_for_session = lambda _sid: provider
+            coordinator.user_prompt_manager = _UPM()
+            manager = TurnManager(coordinator)
+            await manager.lifecycle.bind()
+            turn_identity = UserTurnIdentity(
+                "stale-session-user",
+                "stale-session-message",
+            )
+            await engine.begin_turn(
+                request_id="stale-session-begin",
+                session_id=sid,
+                identity=turn_identity,
+                execution_policy="sequential",
+            )
+
+            async def _ws(_event):
+                return None
+
+            first_execution = ExecutionTurnIdentity(
+                "stale-session-execution-1",
+                "stale-session-assistant-1",
+                "native",
+            )
+            await engine.start_execution(sid, execution_identity=first_execution)
+            first = await manager._drive_cli_run(
+                prompt="start",
+                cwd="/tmp",
+                model="sonnet",
+                session_id=None,
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id="stale-session-run-1",
+                lifecycle_message_id=turn_identity.lifecycle_message_id,
+                execution_identity=first_execution,
+            )
+            assert first["success"] is True
+            first_snapshot = engine.snapshot(sid).execution
+            assert first_snapshot is not None
+            assert first_snapshot.provider_run_id is not None
+            await engine.finish_execution(
+                sid,
+                execution_identity=first_execution,
+                provider_run_id=first_snapshot.provider_run_id,
+                outcome="complete",
+            )
+
+            second_execution = ExecutionTurnIdentity(
+                "stale-session-execution-2",
+                "stale-session-assistant-2",
+                "native",
+            )
+            await engine.start_execution(sid, execution_identity=second_execution)
+            second = await manager._drive_cli_run(
+                prompt="resume",
+                cwd="/tmp",
+                model="sonnet",
+                session_id=native_sid,
+                ws_callback=_ws,
+                app_session_id=sid,
+                cancel_event=asyncio.Event(),
+                session_id_field="agent_session_id",
+                mode="native",
+                turn_run_id="stale-session-run-2",
+                lifecycle_message_id=turn_identity.lifecycle_message_id,
+                execution_identity=second_execution,
+            )
+            assert second["success"] is False
+            cleared = lifecycle_command_store.selector_authority_snapshot(sid)
+            assert cleared is not None
+            check(
+                "stale error clears lifecycle and session SID together",
+                cleared.primary_native_sid is None
+                and (session_manager.get(sid) or {}).get("agent_session_id") is None,
+            )
+            assert cleared.primary_native_sid is None
+            assert (session_manager.get(sid) or {}).get("agent_session_id") is None
+
+            await engine.transition_selectors(sid, updates={"model": "haiku"})
+            transitioned = lifecycle_command_store.selector_authority_snapshot(sid)
+            check(
+                "selector switch cannot hand off provider-proven-invalid SID",
+                transitioned is not None and transitioned.handoff is None,
+            )
+            assert transitioned is not None
+            assert transitioned.handoff is None
+
+            second_snapshot = engine.snapshot(sid).execution
+            assert second_snapshot is not None
+            assert second_snapshot.provider_run_id is not None
+            await engine.finish_execution(
+                sid,
+                execution_identity=second_execution,
+                provider_run_id=second_snapshot.provider_run_id,
+                outcome="failed",
+            )
+            await engine.finish_active(
+                sid,
+                lifecycle_message_id=turn_identity.lifecycle_message_id,
+                outcome="failed",
+            )
+        finally:
+            if manager is not None:
+                await manager.lifecycle.close()
+            await engine.close()
+
+    asyncio.run(_go())
 
 
 def test_wait_for_clear_runs_blocks_then_releases() -> None:
@@ -1141,6 +1752,11 @@ def main() -> int:
     test_codex_context_fill_preempts_native_compaction()
     test_codex_context_usage_persists_then_preempts_next_turn()
     test_lazy_selector_change_continuation()
+    test_s1_never_consumes_selector_handoff()
+    test_stale_prepared_selector_attempt_is_discarded_and_retried()
+    test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid()
+    test_selector_changes_fence_production_sid_discovery_and_completion()
+    test_stale_session_error_clears_authority_before_selector_switch()
     test_wait_for_clear_runs_blocks_then_releases()
     print()
     if failures:

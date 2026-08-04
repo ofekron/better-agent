@@ -970,6 +970,15 @@ class Provider(ABC):
     # ------------------------------------------------------------------
     # Long-lived turn — spawn worker process, stream events onto queue.
     # ------------------------------------------------------------------
+    def discard_prepared_execution(self, execution: PreparedExecution) -> bool:
+        if type(execution) is not PreparedExecution:
+            raise TypeError("discard requires a prepared execution")
+        if not execution.admission_pending:
+            return False
+        execution._mark_cancelled()
+        self._release_execution_authority(execution)
+        return True
+
     def start_run(
         self,
         *,

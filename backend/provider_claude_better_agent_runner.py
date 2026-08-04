@@ -226,6 +226,9 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         capture_runner_launch,
     )
     from provider_family_execution_runtime import prepare_family_execution
+    from native_sid_compatibility import (
+        derive_better_agent_runner_native_sid_compatibility,
+    )
     from provider_family_runtime_capabilities import (
         snapshot_family_runtime_capabilities,
     )
@@ -327,6 +330,10 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         runner_input=runner_input,
         launch=launch,
         capabilities=capabilities,
+        native_sid_compatibility=derive_better_agent_runner_native_sid_compatibility(
+            app_session_id=start_arguments["app_session_id"],
+            worker_session_id=start_arguments.get("worker_agent_session_id"),
+        ),
     )
 
 

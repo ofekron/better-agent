@@ -4976,6 +4976,8 @@ class SessionManager:
         runtime_profile_id: object = _SELECTOR_UNSET,
         harness_profile_id: Optional[str] = None,
         client_id: Optional[str] = None,
+        _validate_only: bool = False,
+        _authoritative_clear_native_sids: bool = False,
     ) -> Optional[dict]:
         """Patch mutable per-session selectors.
 
@@ -4986,11 +4988,8 @@ class SessionManager:
         to change a session's mode it must delete + recreate so the
         capability gate re-runs.
 
-        `provider_id` IS mutable even while a turn is in flight. The
-        current run keeps using the provider instance that already owns
-        it; the changed selector is picked up lazily by the next prompt,
-        which starts a continuation if the provider/model differs from
-        the last active provider subprocess.
+        Provider/model/runner identity transitions are projected here by
+        LifecycleCommandEngine after its durable selector intent lands.
 
         When we accept a provider change, we re-validate the
         session's existing `orchestration_mode` against the NEW
@@ -5043,6 +5042,8 @@ class SessionManager:
                 raise ValueError(
                     f"runtime profile is unknown or deleted: {runtime_profile_id}"
                 )
+        if _validate_only:
+            return self.get(sid)
         def _do(s: dict) -> None:
             # Inside the per-root lock.
             # Bump `selectors_seq` iff a field that drives frontend drift
@@ -5052,6 +5053,7 @@ class SessionManager:
             selector_changed = (
                 (model is not None and s.get("model") != model)
                 or (provider_id is not None and s.get("provider_id") != provider_id)
+                or (runner is not None and s.get("runner") != runner)
                 or (reasoning_effort is not None and s.get("reasoning_effort") != reasoning_effort)
             )
             if model is not None:
@@ -5072,6 +5074,9 @@ class SessionManager:
                 s["runtime_profile_id"] = runtime_profile_id
             if harness_profile_id is not None:
                 s["harness_profile_id"] = str(harness_profile_id or "").strip()
+            if _authoritative_clear_native_sids:
+                s["agent_session_id"] = None
+                s["supervisor_agent_session_id"] = None
             if selector_changed:
                 self._bump_selectors_seq(s)
         result = self._run(

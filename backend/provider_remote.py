@@ -350,11 +350,81 @@ class RemoteProviderProxy(Provider):
         authority = self.execution_authority_record(canonical_arguments)
         from execution_template import prepare_execution
 
-        return prepare_execution(
+        provisional = prepare_execution(
             authority,
             routing_session_id=routing_session_id,
             **canonical_arguments,
         )
+        compatibility = self._node_native_sid_compatibility(provisional)
+        return prepare_execution(
+            authority,
+            routing_session_id=routing_session_id,
+            runtime_policy={
+                "native_sid_compatibility": compatibility.to_dict(),
+            },
+            **canonical_arguments,
+        )
+
+    def _node_native_sid_compatibility(self, provisional):
+        import loop_affinity
+
+        loop = loop_affinity.main_loop()
+        if loop is None or not loop.is_running():
+            raise RuntimeError("remote compatibility loop is unavailable")
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is loop:
+            raise RuntimeError(
+                "remote compatibility preparation must run off-loop"
+            )
+        future = asyncio.run_coroutine_threadsafe(
+            self._prepare_node_native_sid_compatibility(provisional),
+            loop,
+        )
+        return future.result()
+
+    async def _prepare_node_native_sid_compatibility(self, provisional):
+        provider_id = provisional.artifact.provider_id
+        import node_provider_credential_sync
+
+        while True:
+            ready_conn = await node_store.wait_for_runtime_ready(self.node_id)
+            try:
+                await node_provider_credential_sync.ensure_for_admission(
+                    self.node_id,
+                    provider_id,
+                    expected_connection=ready_conn,
+                )
+            except node_provider_credential_sync.CredentialSyncConnectionChanged:
+                continue
+            if node_store.get_connection(self.node_id) is not ready_conn:
+                continue
+            response = await node_link.rpc_call(
+                self.node_id,
+                "prepare_remote_native_sid_compatibility",
+                {"execution_artifact": provisional.artifact.to_dict()},
+                timeout=120.0,
+                version_ready_required=True,
+                expected_connection=ready_conn,
+            )
+            if type(response) is not dict or set(response) != {
+                "native_sid_compatibility"
+            }:
+                raise RuntimeError(
+                    "remote native SID compatibility response is invalid"
+                )
+            from native_sid_compatibility import NativeSidCompatibility
+
+            compatibility = NativeSidCompatibility.from_dict(
+                response["native_sid_compatibility"]
+            )
+            if compatibility.node_id != self.node_id:
+                raise RuntimeError(
+                    "remote native SID compatibility node is invalid"
+                )
+            return compatibility
 
     @contextmanager
     def _execution_authority_context(
@@ -830,11 +900,30 @@ async def _on_run_control(
                 or data.get("lease_token") != rs.admission_lease_token
             ):
                 return
+            error: RuntimeError
+            if data.get("native_sid_compatibility_changed") is True:
+                from native_sid_compatibility import (
+                    NativeSidCompatibilityChanged,
+                )
+
+                error = NativeSidCompatibilityChanged(
+                    "remote native SID compatibility changed"
+                )
+            else:
+                error = RuntimeError(
+                    str(data.get("error") or "remote admission failed")
+                )
             resolve_remote_admission(
                 rs,
-                error=RuntimeError(
-                    str(data.get("error") or "remote admission failed")
-                ),
+                error=error,
+            )
+            rs.finished = True
+            proxy._runs.pop(run_id, None)
+            conn.runs.pop(run_id, None)
+            _finalize_remote_run_dir(
+                rs.run_dir,
+                _complete_payload(control_type, data),
+                reconciled=True,
             )
             return
         rs.queue.put_nowait(StreamEvent(type=control_type, data=data))
