@@ -1288,14 +1288,24 @@ class SessionManager:
             self._node_root_id[sid] = sid
             self._node_root_missing_until.pop(sid, None)
             return sid
+        has_active_run = (
+            self._active_run_gate is not None and self._active_run_gate(sid)
+        )
         now = time.monotonic()
         if self._node_root_missing_until.get(sid, 0.0) > now:
-            return None
+            if not has_active_run:
+                return None
+            # A turn is actively writing to this sid — a session with an
+            # in-flight run cannot be genuinely missing, so a prior negative
+            # result was a transient eventual-consistency miss, not a real
+            # absence. Clear the poison and re-resolve now instead of
+            # blacking out for the rest of the TTL window.
+            self._node_root_missing_until.pop(sid, None)
         rid = self._root_repository.resolve_root_id(sid)
         if rid is not None:
             self._node_root_id[sid] = rid
             self._node_root_missing_until.pop(sid, None)
-        else:
+        elif not has_active_run:
             self._node_root_missing_until[sid] = (
                 now + _NEGATIVE_NODE_ROOT_TTL_SECONDS
             )

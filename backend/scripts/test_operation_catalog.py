@@ -152,10 +152,44 @@ def _assert_stale_error_names_invoked_operation() -> None:
             shutil.rmtree(state_root)
 
 
+def _assert_restore_pins_drops_unresolvable_generation_without_raising() -> None:
+    """Regression: a durable operation-request record can survive a
+    catalog-affecting restart while still `status="running"` (e.g. the
+    owning process died before it could persist a terminal status).
+    `recover_pins()` re-pins every non-terminal record's
+    `execution_generation`, but a fresh process's in-memory `_generations`
+    only ever contains generations it has itself published — it never
+    knows about a generation from a stale/dead process. Before the fix,
+    `restore_pins()` let `CatalogManager.get()`'s KeyError propagate,
+    aborting the whole `app_lifecycle` recovery task (including pins for
+    any OTHER, still-resolvable generation in the same batch) on every
+    single backend restart until the orphaned record was manually purged."""
+    state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
+    previous_home = os.environ.get("BETTER_AGENT_HOME")
+    os.environ["BETTER_AGENT_HOME"] = str(state_root)
+    try:
+        manager = operation_catalog.CatalogManager()
+        published = manager.publish()
+        counts = {
+            published.generation: 2,
+            "stale-generation-from-a-dead-process": 1,
+        }
+        manager.restore_pins(counts)
+        assert manager.pin_count(published.generation) == 2
+        assert manager.pin_count("stale-generation-from-a-dead-process") == 0
+    finally:
+        if previous_home is None:
+            os.environ.pop("BETTER_AGENT_HOME", None)
+        else:
+            os.environ["BETTER_AGENT_HOME"] = previous_home
+        shutil.rmtree(state_root)
+
+
 def main() -> None:
     _assert_generated_runtime_files_excluded()
     _assert_nested_worktrees_excluded()
     _assert_stale_error_names_invoked_operation()
+    _assert_restore_pins_drops_unresolvable_generation_without_raising()
     state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
     with tempfile.TemporaryDirectory() as raw:
         os.environ["BETTER_AGENT_HOME"] = str(state_root)

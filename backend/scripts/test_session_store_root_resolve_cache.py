@@ -107,6 +107,47 @@ def test_session_store_root_sid_skips_index_load() -> None:
         session_store._ensure_index = original_ensure  # type: ignore[attr-defined]
 
 
+def test_active_run_sid_is_never_negative_cached() -> None:
+    """Regression: a sid with an in-flight turn must not be blacked out by
+    the negative-cache TTL. Before the fix, a single transient
+    eventual-consistency miss during an active turn poisoned
+    `_node_root_missing_until[sid]` for `_NEGATIVE_NODE_ROOT_TTL_SECONDS`,
+    and every subsequent lookup in that window (including ones for a sid
+    that resolves successfully moments later) returned None — this is what
+    produced `RuntimeError("cannot resolve root for session ...")` and the
+    `session_manager.batch()` KeyError while a turn was actively running."""
+    _reset_index()
+    session_manager._active_run_gate = lambda sid: sid == "active-sid"  # type: ignore[attr-defined]
+    try:
+        # First miss while "active": must NOT poison the negative cache.
+        assert session_manager._root_id_for("active-sid") is None  # type: ignore[attr-defined]
+        assert "active-sid" not in session_manager._node_root_missing_until  # type: ignore[attr-defined]
+
+        # A genuinely inactive sid still gets negative-cached as before.
+        assert session_manager._root_id_for("inactive-sid") is None  # type: ignore[attr-defined]
+        assert "inactive-sid" in session_manager._node_root_missing_until  # type: ignore[attr-defined]
+
+        # Manually poison "active-sid" (simulating a stale entry written
+        # before the run started) and confirm the fix self-heals it instead
+        # of honoring the TTL blackout.
+        session_manager._node_root_missing_until["active-sid"] = (  # type: ignore[attr-defined]
+            __import__("time").monotonic() + 5.0
+        )
+        created = session_manager.create(
+            name="active-root",
+            cwd="/tmp/project",
+            orchestration_mode="native",
+        )
+        session_manager._active_run_gate = lambda sid: sid == created["id"]  # type: ignore[attr-defined]
+        session_manager._node_root_missing_until[created["id"]] = (  # type: ignore[attr-defined]
+            __import__("time").monotonic() + 5.0
+        )
+        session_manager._node_root_id.pop(created["id"], None)  # type: ignore[attr-defined]
+        assert session_manager._root_id_for(created["id"]) == created["id"]  # type: ignore[attr-defined]
+    finally:
+        session_manager._active_run_gate = None  # type: ignore[attr-defined]
+
+
 def test_loaded_fork_mapping_wins_over_stray_root_file() -> None:
     _reset_index()
     root = session_manager.create(
@@ -135,6 +176,7 @@ def test_loaded_fork_mapping_wins_over_stray_root_file() -> None:
 if __name__ == "__main__":
     test_unknown_sid_resolution_never_rescans_warm_index_on_request_path()
     test_session_manager_unknown_sid_resolution_is_negative_cached()
+    test_active_run_sid_is_never_negative_cached()
     test_session_store_root_sid_skips_index_load()
     test_loaded_fork_mapping_wins_over_stray_root_file()
     print("PASS root resolve owner projection")

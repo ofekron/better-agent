@@ -5,6 +5,7 @@ from enum import Enum
 import hashlib
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,8 @@ from api_surface_sync import Operation, OperationClient, OperationRegistry, Regi
 from pydantic import BaseModel, RootModel
 from paths import bc_home
 from json_store import write_json
+
+logger = logging.getLogger(__name__)
 
 Handler = Callable[[BaseModel], Any | Awaitable[Any]]
 RecoveryHandler = Callable[[BaseModel, str | None, str], Any | Awaitable[Any]]
@@ -359,7 +362,20 @@ class CatalogManager:
             for generation, count in counts.items():
                 if count < 1:
                     continue
-                self.get(generation).verify_artifacts()
+                try:
+                    self.get(generation).verify_artifacts()
+                except KeyError:
+                    # The pinning record's generation predates this process
+                    # (e.g. an orphaned non-terminal record survived a
+                    # restart across a catalog-affecting code change). That
+                    # generation can never be reconstructed in-memory, so it
+                    # cannot be pinned — drop it rather than aborting
+                    # recovery for every other, still-resolvable pin.
+                    logger.warning(
+                        "restore_pins: dropping unresolvable generation %s (count=%d)",
+                        generation, count,
+                    )
+                    continue
                 restored[generation] = count
             self._pins = restored
 
