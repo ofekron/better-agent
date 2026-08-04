@@ -364,16 +364,19 @@ class CatalogManager:
                     continue
                 try:
                     self.get(generation).verify_artifacts()
-                except KeyError:
+                except (KeyError, OperationArtifactError) as exc:
                     # The pinning record's generation predates this process
                     # (e.g. an orphaned non-terminal record survived a
-                    # restart across a catalog-affecting code change). That
+                    # restart across a catalog-affecting code change) — that
                     # generation can never be reconstructed in-memory, so it
-                    # cannot be pinned — drop it rather than aborting
-                    # recovery for every other, still-resolvable pin.
+                    # cannot be pinned. Or its artifacts drifted since
+                    # publish (source edited under a still-running server).
+                    # Either way it cannot be pinned — drop it rather than
+                    # aborting recovery for every other, still-resolvable
+                    # pin in the same batch.
                     logger.warning(
-                        "restore_pins: dropping unresolvable generation %s (count=%d)",
-                        generation, count,
+                        "restore_pins: dropping unresolvable generation %s (count=%d): %s",
+                        generation, count, exc,
                     )
                     continue
                 restored[generation] = count

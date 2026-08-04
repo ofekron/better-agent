@@ -293,5 +293,15 @@ def main() -> None:
     print("operation catalog tests passed")
 
 
+def test_operation_catalog_suite() -> None:
+    """pytest entry point. `main()`'s assertions were previously only
+    exercised by running this file as a script (`python
+    scripts/test_operation_catalog.py`) — none of them, including new
+    regressions added under `main()`, ran under `pytest`/CI, since
+    `pyproject.toml`'s `testpaths = ["scripts"]` only collects `test_*`
+    functions and this module had none."""
+    main()
+
+
 if __name__ == "__main__":
     main()
