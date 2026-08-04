@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import importlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -24,6 +26,7 @@ import extension_package_loader
 import extension_store
 import transcript_text_collapse
 from provisioning.progress import MilestoneCallback, emit_milestone
+from requirements_vector_contract import validate_unit_vector_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,8 @@ MATCH_FIELD_ORDER = (
     "user_seq",
     "native_hit_index",
 )
+DEFAULT_VECTOR_MATCH_FIELDS = ("source_key", *DEFAULT_MATCH_FIELDS, "vector_score")
+VECTOR_MATCH_FIELD_ORDER = (*MATCH_FIELD_ORDER, "vector_score")
 DEFAULT_THREAD_MATCH_FIELDS = ("id", "status", "reality", "project_cwds", "session_ids", "edited_files")
 THREAD_MATCH_FIELD_ORDER = (
     "id",
@@ -1627,7 +1632,9 @@ def _run_vector_query(
     id_field: str,
     query_vec,
     allowed_cwds: set[str],
-) -> tuple[list[dict[str, Any]], str | None]:
+    top_k: int | None = None,
+    min_score: float | None = None,
+) -> tuple[list[dict[str, Any]], str | None, int | None]:
     import numpy as np
 
     with np.load(db_path, allow_pickle=False) as data:
@@ -1635,11 +1642,62 @@ def _run_vector_query(
         ids = [str(key) for key in data["ids"]]
         cwds_json = [str(value) for value in data["cwds_json"]]
     if vectors.shape[0] == 0:
-        return [], None
+        return [], None, 0 if top_k is not None else None
     dim = vectors.shape[1]
     if query_vec.shape[0] != dim:
-        return [], f"embedding_dim_mismatch: query={query_vec.shape[0]} index={dim}"
+        return [], f"embedding_dim_mismatch: query={query_vec.shape[0]} index={dim}", None
     scores = vectors @ query_vec
+
+    if (top_k is None) != (min_score is None):
+        raise ValueError("top_k and min_score must be provided together")
+
+    records_by_id: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key = str(record.get(id_field) or json.dumps(record, sort_keys=True))
+        records_by_id.setdefault(key, record)
+
+    if top_k is not None and min_score is not None:
+        candidates: dict[str, tuple[float, str, dict[str, Any]]] = {}
+        for position, score_value in enumerate(scores):
+            try:
+                record_cwds = (
+                    set(json.loads(cwds_json[position]))
+                    if position < len(cwds_json)
+                    else set()
+                )
+            except (TypeError, json.JSONDecodeError):
+                record_cwds = set()
+            if allowed_cwds and not allowed_cwds & record_cwds:
+                continue
+            key = ids[position] if position < len(ids) else ""
+            record = (
+                records[position]
+                if position < len(records)
+                and str(records[position].get(id_field) or "") == key
+                else records_by_id.get(key)
+            )
+            if record is None:
+                continue
+            score = float(score_value)
+            if not math.isfinite(score) or score < min_score:
+                continue
+            dedupe = key or json.dumps(record, sort_keys=True)
+            candidate = (score, dedupe, record)
+            current = candidates.get(dedupe)
+            if current is None or score > current[0]:
+                candidates[dedupe] = candidate
+
+        selected = heapq.nsmallest(
+            top_k,
+            candidates.values(),
+            key=lambda item: (-item[0], item[1]),
+        )
+        bounded_matches: list[dict[str, Any]] = []
+        for score, _dedupe, record in selected:
+            scored_record = dict(record)
+            scored_record["vector_score"] = score
+            bounded_matches.append(scored_record)
+        return bounded_matches, None, len(candidates)
 
     scored: list[tuple[float, int]] = []
     for position, score in enumerate(scores):
@@ -1651,11 +1709,6 @@ def _run_vector_query(
             continue
         scored.append((float(score), position))
     scored.sort(key=lambda item: item[0], reverse=True)
-
-    records_by_id: dict[str, dict[str, Any]] = {}
-    for record in records:
-        key = str(record.get(id_field) or json.dumps(record, sort_keys=True))
-        records_by_id.setdefault(key, record)
 
     raw_matches: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1673,7 +1726,7 @@ def _run_vector_query(
         scored_record = dict(record)
         scored_record["vector_score"] = score
         raw_matches.append(scored_record)
-    return raw_matches, None
+    return raw_matches, None, None
 
 
 def _unit_vector_path() -> Path:
@@ -1726,6 +1779,8 @@ def search_requirement_units_vector(
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
+    top_k: int,
+    min_score: float,
     fields: list[str] | None = None,
     include_all_fields: bool = False,
     embedder=None,
@@ -1744,7 +1799,19 @@ def search_requirement_units_vector(
     normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
     if cwds_error:
         return {"success": False, "error": cwds_error, "matches": [], "count": 0}
-    normalized_fields, fields_error = _normalize_match_fields(fields, include_all_fields=include_all_fields)
+    try:
+        normalized_top_k, normalized_min_score = validate_unit_vector_bounds(
+            top_k,
+            min_score,
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc), "matches": [], "count": 0}
+    normalized_fields, fields_error = _normalize_match_fields(
+        fields,
+        include_all_fields=include_all_fields,
+        available=VECTOR_MATCH_FIELD_ORDER,
+        default=DEFAULT_VECTOR_MATCH_FIELDS,
+    )
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_unit_records()
@@ -1762,14 +1829,20 @@ def search_requirement_units_vector(
             "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
             "cwd_filters": list(normalized_cwds),
             "all_projects": all_projects,
+            "top_k": normalized_top_k,
+            "min_score": normalized_min_score,
+            "total_qualifying": 0,
+            "truncated": False,
         }
     query_vec = np.asarray(embedder([normalized_query]), dtype=np.float32).reshape(-1)
-    raw_matches, error = _run_vector_query(
+    raw_matches, error, total_qualifying = _run_vector_query(
         db_path=_unit_vector_path(),
         records=records,
         id_field="source_key",
         query_vec=query_vec,
         allowed_cwds=set(normalized_cwds),
+        top_k=normalized_top_k,
+        min_score=normalized_min_score,
     )
     if error is not None:
         return {
@@ -1780,6 +1853,8 @@ def search_requirement_units_vector(
             "count": 0,
             "query": normalized_query,
             "index": index,
+            "top_k": normalized_top_k,
+            "min_score": normalized_min_score,
         }
     matches = _project_records(raw_matches, normalized_fields)
     return {
@@ -1793,7 +1868,10 @@ def search_requirement_units_vector(
         "cwd_filters": list(normalized_cwds),
         "all_projects": all_projects,
         "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
-        "max_matches": None,
+        "top_k": normalized_top_k,
+        "min_score": normalized_min_score,
+        "total_qualifying": total_qualifying,
+        "truncated": bool(total_qualifying and total_qualifying > len(matches)),
     }
 
 
@@ -1903,7 +1981,7 @@ def search_requirement_threads_vector(
             "all_projects": all_projects,
         }
     query_vec = np.asarray(embedder([normalized_query]), dtype=np.float32).reshape(-1)
-    raw_matches, error = _run_vector_query(
+    raw_matches, error, _total_qualifying = _run_vector_query(
         db_path=_thread_vector_path(),
         records=records,
         id_field="id",

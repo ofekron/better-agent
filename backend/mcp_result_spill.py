@@ -65,9 +65,14 @@ def _compact_result(
         "returncode",
         "stderr",
         "cwd_filter",
+        "cwd_filters",
         "all_projects",
         "match_fields",
         "max_matches",
+        "top_k",
+        "min_score",
+        "total_qualifying",
+        "truncated",
     ):
         if key in result:
             compact[key] = result[key]

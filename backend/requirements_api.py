@@ -33,6 +33,7 @@ from requirements_query_runner import (
     run_requirements_query,
     run_supervised_requirements_search,
 )
+from requirements_vector_contract import validate_unit_vector_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -642,6 +643,13 @@ async def internal_requirements_unit_vector(
     include_all_fields = body.get("include_all_fields", False)
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
+    try:
+        top_k, min_score = validate_unit_vector_bounds(
+            body.get("top_k"),
+            body.get("min_score"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return await run_supervised_requirements_search(
         "requirements.unit_vector",
@@ -650,6 +658,8 @@ async def internal_requirements_unit_vector(
         cwd=payload["cwd"],
         cwds=payload["cwds"],
         all_projects=payload["all_projects"],
+        top_k=top_k,
+        min_score=min_score,
         fields=fields,
         include_all_fields=include_all_fields,
     )

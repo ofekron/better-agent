@@ -16,6 +16,11 @@ def test_large_result_spills_to_tmp_file() -> None:
     result = {
         "success": True,
         "count": 1,
+        "cwd_filters": ["/repo"],
+        "top_k": 25,
+        "min_score": 0.0,
+        "total_qualifying": 41,
+        "truncated": True,
         "rg_args": ["needle"],
         "matches": [{"text": "x" * 200}],
     }
@@ -24,6 +29,11 @@ def test_large_result_spills_to_tmp_file() -> None:
     assert compact["success"] is True
     assert compact["result_spilled_to_file"] is True
     assert compact["count"] == 1
+    assert compact["cwd_filters"] == ["/repo"]
+    assert compact["top_k"] == 25
+    assert compact["min_score"] == 0.0
+    assert compact["total_qualifying"] == 41
+    assert compact["truncated"] is True
     assert "rg_args" not in compact
     assert "matches" not in compact
     path = Path(compact["result_path"])

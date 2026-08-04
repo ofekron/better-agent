@@ -26,6 +26,7 @@ from pydantic import (
     field_validator,
 )
 from runtime_principal import compatibility_extension_principal
+from requirements_vector_contract import UNIT_VECTOR_MAX_TOP_K
 from scoped_runtime_client import ScopedRuntimeClient
 
 
@@ -158,6 +159,18 @@ class _McpJobResultsPayload(_StrictPayload):
 class _RequirementsUnitPayload(_RequirementsQueryPayload):
     fields: list[str] | None = None
     include_all_fields: bool = False
+
+
+class _RequirementsUnitVectorPayload(_RequirementsUnitPayload):
+    top_k: int = Field(strict=True, ge=1, le=UNIT_VECTOR_MAX_TOP_K)
+    min_score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("min_score", mode="before")
+    @classmethod
+    def require_numeric_min_score(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("min_score must be a number")
+        return value
 
 
 class _RequirementsRgPayload(_StrictPayload):
@@ -1056,7 +1069,10 @@ def _register_requirements() -> None:
         "processed": (_RequirementsQueryPayload, "internal_get_requirements"),
         "unit-rg": (_RequirementsRgPayload, "internal_search_requirements"),
         "unit-fts": (_RequirementsUnitPayload, "internal_requirements_unit_fts"),
-        "unit-vector": (_RequirementsUnitPayload, "internal_requirements_unit_vector"),
+        "unit-vector": (
+            _RequirementsUnitVectorPayload,
+            "internal_requirements_unit_vector",
+        ),
         "thread-fts": (_RequirementsUnitPayload, "internal_requirements_thread_fts"),
         "thread-vector": (
             _RequirementsUnitPayload,
