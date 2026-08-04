@@ -106,7 +106,11 @@ function useGlobalConfirm(needsConfirm: boolean, apply: (value: unknown) => void
     pending,
     cancel: () => setPending(null),
     confirm: () => {
+      /* c8 ignore start -- the apply button only renders while `pending` is
+       * set, so confirm() never runs with a null pending; the guard is
+       * defensive against a state that the UI cannot reach. */
       if (pending) apply(pending.value);
+      /* c8 ignore stop */
       setPending(null);
     },
     request: (value: unknown) => {
@@ -161,7 +165,10 @@ function ToggleRow({
       <ProviderScope providers={item.providers} />
       {locked && (
         <span className="harness-item-locked">
+          {/* c8 ignore start -- inside `locked &&`, item.locked_by is provably a
+             non-empty array, so the `?? []` fallback is statically unreachable. */}
           {t("harnessProfile.lockedBy", { holders: (item.locked_by ?? []).join(", ") })}
+          {/* c8 ignore stop */}
         </span>
       )}
       {isGlobal ? (
