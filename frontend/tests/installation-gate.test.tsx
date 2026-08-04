@@ -54,7 +54,10 @@ describe("installation setup gate", () => {
       mobile_enabled: false,
       integrations_enabled: false,
     };
-    h.emit({ type: "provider_changed" });
+    // The backend always broadcasts `provider_changed` WITH a payload
+    // (the provider UI state); the WS ingress rejects data-less frames,
+    // so the gate-opening trigger must carry `data` like the real wire.
+    h.emit({ type: "provider_changed", data: {} });
     await h.flush();
 
     const crashed = h

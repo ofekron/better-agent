@@ -1173,6 +1173,7 @@
       "uuid": "contract-live-uuid"
     },
     "seq": 2,
+    "session_id": "fad290fc-26c4-4073-935b-4df6954663c3",
     "type": "agent_message"
   },
   "wsMessagesReplay": {
