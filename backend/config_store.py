@@ -72,6 +72,7 @@ from typing import Callable, Optional
 
 import credential_session_client
 import dependency_plan
+import provider_runtime_facts
 import provider_sync_authority
 import runtime_profile
 from filelock import FileLock
@@ -283,6 +284,7 @@ def _notify_provider_config_committed() -> None:
 
 def _notify_provider_config_changed() -> None:
     """Publish the committed provider-config change fact outside its lock."""
+    provider_runtime_facts.notify_config_committed()
     try:
         import model_catalog_refresh
 

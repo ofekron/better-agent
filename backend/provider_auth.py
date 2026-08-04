@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional, TypeAlias
 
 import config_store
+import provider_runtime_facts
 from paths import ba_home, user_home
 from proc_control import process_control
 from process_identity import capture_process_identity
@@ -149,6 +150,7 @@ def configure_config_change_broadcast(broadcast: BroadcastFn) -> None:
 def bind_config_change_loop() -> None:
     global _config_change_loop
     _config_change_loop = asyncio.get_running_loop()
+    provider_runtime_facts.bind_loop()
     _request_config_reconcile()
 
 
@@ -765,6 +767,7 @@ async def shutdown_status_probes() -> None:
     global _config_reconcile_requested, _config_reconcile_task
     _status_shutting_down = True
     _config_change_loop = None
+    await provider_runtime_facts.shutdown()
     _config_reconcile_requested = False
     reconcile = _config_reconcile_task
     _config_reconcile_task = None
@@ -806,6 +809,7 @@ async def _commit_auth_status(
             )
             _provider_auth_fingerprints[provider_id] = fingerprint
         _notify_catalog_auth_changed(provider_id)
+        provider_runtime_facts.notify_auth_committed()
 
     committed = await asyncio.to_thread(
         config_store.apply_if_provider_matches,
