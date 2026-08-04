@@ -209,8 +209,7 @@ export function usePendingUserInteractions() {
       tickRef.current += 1;
       localTicksRef.current.set(requestId, tickRef.current);
     };
-    const onRequested = (event: Event) => {
-      const request = (event as CustomEvent<UserInteractionRequest>).detail;
+    const onRequested = (request: UserInteractionRequest) => {
       if (!request || request.status !== "pending") return;
       touch(request.request_id);
       const isNew = !knownIdsRef.current.has(request.request_id);
@@ -221,8 +220,7 @@ export function usePendingUserInteractions() {
       ].sort(byCreatedAt));
       if (isNew) notify(request);
     };
-    const onResolved = (event: Event) => {
-      const detail = (event as CustomEvent<{ request_id?: string }>).detail;
+    const onResolved = (detail: { request_id: string }) => {
       if (!detail?.request_id) return;
       touch(detail.request_id);
       knownIdsRef.current.delete(detail.request_id);
@@ -239,14 +237,14 @@ export function usePendingUserInteractions() {
     const offConnection = eventBus.subscribe("ws_connection_changed", ({ connected }) => {
       if (connected) void hydrateRef.current(true);
     });
-    window.addEventListener("user_input_requested", onRequested);
-    window.addEventListener("user_input_resolved", onResolved);
+    const offRequested = eventBus.subscribe("user_input_requested", onRequested);
+    const offResolved = eventBus.subscribe("user_input_resolved", onResolved);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       offChanged();
       offConnection();
-      window.removeEventListener("user_input_requested", onRequested);
-      window.removeEventListener("user_input_resolved", onResolved);
+      offRequested();
+      offResolved();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [commit, notify]);

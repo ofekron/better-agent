@@ -4,8 +4,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { NodeSnapshot, NodeStateChangedData } from "../src/types";
 
 // useMachines keeps its topology snapshot in module-level singleton state
-// and attaches a window listener at module load. Every test resets the
-// module registry and re-imports for an isolated store + listener set,
+// and attaches an eventBus subscription at module load. Every test resets the
+// module registry and re-imports for an isolated store + subscription set,
 // mirroring the usePendingNodeRegistrations precedent.
 type MachinesModule = typeof import("../src/hooks/useMachines");
 
@@ -36,15 +36,16 @@ function node(id = "n1", over: Partial<NodeSnapshot> = {}): NodeSnapshot {
   };
 }
 
-function dispatchNodeStateChanged(detail: unknown): void {
-  window.dispatchEvent(new CustomEvent("node_state_changed", { detail }));
+async function publishNodeStateChanged(detail: unknown): Promise<void> {
+  const { eventBus } = await import("../src/lib/eventBus");
+  eventBus.publish("node_state_changed", detail);
 }
 
 // State-mutating handlers end in _notify() → React force update, so the
 // dispatch must flush inside act() before result.current is read.
-async function fire(fn: () => void): Promise<void> {
+async function fire(fn: () => void | Promise<void>): Promise<void> {
   await act(async () => {
-    fn();
+    await fn();
   });
 }
 
@@ -66,26 +67,13 @@ function callFor(
 
 describe("useMachines", () => {
   let originalFetch: typeof globalThis.fetch;
-  // fresh() re-imports the module, which re-attaches a node_state_changed
-  // window listener. Without removal these accumulate across tests and stale
-  // modules answer every dispatch. Track every listener added during a test
-  // and tear them down in afterEach.
-  let registered: Array<{ type: string; cb: EventListenerOrEventListenerObject }>;
-  let origAddEventListener: typeof window.addEventListener;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResp([])) as unknown as typeof globalThis.fetch;
-    registered = [];
-    origAddEventListener = window.addEventListener.bind(window);
-    vi.spyOn(window, "addEventListener").mockImplementation(((type: string, cb: EventListenerOrEventListenerObject) => {
-      registered.push({ type, cb });
-      return origAddEventListener(type, cb);
-    }) as typeof window.addEventListener);
   });
 
   afterEach(() => {
-    for (const { type, cb } of registered) window.removeEventListener(type, cb);
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
   });
@@ -175,7 +163,7 @@ describe("useMachines", () => {
     // Unknown node appears live while the first GET is still pending —
     // _onNodeStateChanged routes through _refetch, which must NOT start a
     // second request (the in-flight promise is shared).
-    await fire(() => dispatchNodeStateChanged({ node_id: "ghost", state: "connected" }));
+    await fire(() => publishNodeStateChanged({ node_id: "ghost", state: "connected" }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -196,8 +184,8 @@ describe("useMachines", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     const before = result.current.machines[0];
 
-    await fire(() => dispatchNodeStateChanged(null));
-    await fire(() => dispatchNodeStateChanged({ state: "connected" } satisfies Partial<NodeStateChangedData>));
+    await fire(() => publishNodeStateChanged(null));
+    await fire(() => publishNodeStateChanged({ state: "connected" } satisfies Partial<NodeStateChangedData>));
     expect(result.current.machines[0]).toEqual(before);
   });
 
@@ -218,7 +206,7 @@ describe("useMachines", () => {
       primary_dirty: true,
       version_status: "mismatch",
     };
-    await fire(() => dispatchNodeStateChanged(full));
+    await fire(() => publishNodeStateChanged(full));
 
     const m = result.current.machines[0];
     expect(m.state).toBe("disconnected");
@@ -238,7 +226,7 @@ describe("useMachines", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     // Partial: only state + node_id, last_seen omitted, version_status omitted.
-    await fire(() => dispatchNodeStateChanged({ node_id: "n1", state: "unknown" }));
+    await fire(() => publishNodeStateChanged({ node_id: "n1", state: "unknown" }));
     let m = result.current.machines[0];
     expect(m.state).toBe("unknown");
     expect(m.last_seen).toBe(2000);
@@ -247,7 +235,7 @@ describe("useMachines", () => {
 
     // A `disconnected` transition carries last_seen: null — prior heartbeat
     // must be PRESERVED (null ?? prior === prior), not erased.
-    await fire(() => dispatchNodeStateChanged({ node_id: "n1", state: "disconnected", last_seen: null }));
+    await fire(() => publishNodeStateChanged({ node_id: "n1", state: "disconnected", last_seen: null }));
     m = result.current.machines[0];
     expect(m.state).toBe("disconnected");
     expect(m.last_seen).toBe(2000);
@@ -470,6 +458,6 @@ describe("useMachines", () => {
     unmount();
     // Cleanup deletes the force-update subscriber; a subsequent patch still
     // mutates singleton state safely (no throw) for any later consumer.
-    await fire(() => dispatchNodeStateChanged({ node_id: "n1", state: "disconnected", last_seen: null }));
+    await fire(() => publishNodeStateChanged({ node_id: "n1", state: "disconnected", last_seen: null }));
   });
 });

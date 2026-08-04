@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException
 import internal_guards
 import memory_api
 import user_input_store
+from event_bus import BusEvent, bus
 from i18n import t
 from session_helpers import session_lite as _session_lite
 from session_manager import manager as session_manager
@@ -155,6 +156,16 @@ async def _broadcast_user_input_state(app_session_id: str) -> None:
         user_input_store.pending_count_for_session,
         sid,
     )
+    await bus.publish(BusEvent(
+        type="session.user_input_changed",
+        root_id=session_manager.root_id_for(sid) or sid,
+        sid=sid,
+        payload={
+            "kind": "user_input_changed",
+            "pending_user_input_count": pending_count,
+        },
+        persist=False,
+    ))
     await _coordinator().broadcast_global("session_user_input_changed", {
         "session_id": sid,
         "app_session_id": sid,

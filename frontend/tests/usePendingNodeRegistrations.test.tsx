@@ -31,19 +31,21 @@ function rec(node_id = "n1"): PendingNodeRegistration {
   };
 }
 
-function dispatchRequested(detail: unknown): void {
-  window.dispatchEvent(new CustomEvent("node_registration_requested", { detail }));
+async function publishRequested(detail: unknown): Promise<void> {
+  const { eventBus } = await import("../src/lib/eventBus");
+  eventBus.publish("node_registration_requested", detail);
 }
-function dispatchResolved(detail: unknown): void {
-  window.dispatchEvent(new CustomEvent("node_registration_resolved", { detail }));
+async function publishResolved(detail: unknown): Promise<void> {
+  const { eventBus } = await import("../src/lib/eventBus");
+  eventBus.publish("node_registration_resolved", detail);
 }
 
 // Every state-mutating event handler ends in _notify() → React force update,
 // so dispatches must run inside act() for the new render to flush before we
 // read result.current.
-async function fire(fn: () => void): Promise<void> {
+async function fire(fn: () => void | Promise<void>): Promise<void> {
   await act(async () => {
-    fn();
+    await fn();
   });
 }
 
@@ -114,7 +116,7 @@ describe("usePendingNodeRegistrations", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    await fire(() => dispatchRequested(rec("seed")));
+    await fire(() => publishRequested(rec("seed")));
     expect(result.current).toHaveLength(1);
 
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline")) as unknown as typeof globalThis.fetch;
@@ -153,7 +155,7 @@ describe("usePendingNodeRegistrations", () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const mod = await fresh();
+    await fresh();
     const { eventBus } = await import("../src/lib/eventBus");
     // Never mount the hook → _authed stays false → reconnect is a no-op.
     eventBus.publish("ws_connection_changed", { connected: true });
@@ -165,22 +167,22 @@ describe("usePendingNodeRegistrations", () => {
 
   it("upserts a freshly requested node and replaces a re-dial by node_id", async () => {
     const mod = await fresh();
-    // Guest mount: exercise the window-event handlers without a GET that
+    // Guest mount: exercise the eventBus handlers without a GET that
     // would reset the seeded state when it resolves.
     const { result } = renderHook(() => mod.usePendingNodeRegistrations("guest"));
 
-    await fire(() => dispatchRequested(rec("n1")));
+    await fire(() => publishRequested(rec("n1")));
     expect(result.current).toHaveLength(1);
     expect(result.current[0].fingerprint).toBe("fp-n1");
 
     // A second distinct node appends.
-    await fire(() => dispatchRequested(rec("n2")));
+    await fire(() => publishRequested(rec("n2")));
     expect(result.current).toHaveLength(2);
 
     // Re-dial of n1 with a new fingerprint REPLACES the stale row, not adds.
     const reDial = rec("n1");
     reDial.fingerprint = "fp-n1-rotated";
-    await fire(() => dispatchRequested(reDial));
+    await fire(() => publishRequested(reDial));
     expect(result.current).toHaveLength(2);
     const n1 = result.current.find((p) => p.node_id === "n1");
     expect(n1?.fingerprint).toBe("fp-n1-rotated");
@@ -190,8 +192,8 @@ describe("usePendingNodeRegistrations", () => {
     const mod = await fresh();
     const { result } = renderHook(() => mod.usePendingNodeRegistrations("guest"));
 
-    await fire(() => dispatchRequested(null));
-    await fire(() => dispatchRequested({ node_id: "" }));
+    await fire(() => publishRequested(null));
+    await fire(() => publishRequested({ node_id: "" }));
     expect(result.current).toEqual([]);
   });
 
@@ -199,20 +201,20 @@ describe("usePendingNodeRegistrations", () => {
     const mod = await fresh();
     const { result } = renderHook(() => mod.usePendingNodeRegistrations("guest"));
 
-    await fire(() => dispatchRequested(rec("n1")));
-    await fire(() => dispatchRequested(rec("n2")));
+    await fire(() => publishRequested(rec("n1")));
+    await fire(() => publishRequested(rec("n2")));
     expect(result.current).toHaveLength(2);
 
     const resolved: NodeRegistrationResolvedData = { node_id: "n1", status: "approved" };
-    await fire(() => dispatchResolved(resolved));
+    await fire(() => publishResolved(resolved));
     expect(result.current).toHaveLength(1);
     expect(result.current[0].node_id).toBe("n2");
 
     // Resolving an unknown node is a no-op (no mutation, no notify).
-    await fire(() => dispatchResolved({ node_id: "ghost", status: "denied" }));
+    await fire(() => publishResolved({ node_id: "ghost", status: "denied" }));
     expect(result.current).toHaveLength(1);
     // No payload at all is also a safe no-op.
-    await fire(() => dispatchResolved(null));
+    await fire(() => publishResolved(null));
     expect(result.current).toHaveLength(1);
   });
 
@@ -236,7 +238,7 @@ describe("usePendingNodeRegistrations", () => {
     const mod = await fresh();
     // Guest mount: no GET refetch to race the seeded state.
     const { result } = renderHook(() => mod.usePendingNodeRegistrations("guest"));
-    await fire(() => dispatchRequested(rec("n1")));
+    await fire(() => publishRequested(rec("n1")));
     expect(result.current).toHaveLength(1);
 
     await act(async () => {
@@ -280,7 +282,7 @@ describe("usePendingNodeRegistrations", () => {
 
     const mod = await fresh();
     const { result } = renderHook(() => mod.usePendingNodeRegistrations("guest"));
-    await fire(() => dispatchRequested(rec("n1")));
+    await fire(() => publishRequested(rec("n1")));
     await act(async () => {
       await mod.denyNodeRegistration("n1");
     });
@@ -326,7 +328,7 @@ describe("usePendingNodeRegistrations", () => {
     // Cleanup runs the delete-from-subscribers path; no throw, and the
     // module-level handlers still update state for any remaining consumer.
     unmount();
-    await fire(() => dispatchRequested(rec("n2")));
+    await fire(() => publishRequested(rec("n2")));
     // A fresh mount observes the singleton's advanced state.
     const { result: result2 } = renderHook(() => mod.usePendingNodeRegistrations("authed"));
     expect(result2.current.some((p) => p.node_id === "n2")).toBe(true);

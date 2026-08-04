@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
+import { eventBus, type BusEventMap } from "src/lib/eventBus";
 import type { StartupTask } from "../types";
 
 /** Non-blocking banner that surfaces backend startup work (migrations,
@@ -10,8 +11,8 @@ import type { StartupTask } from "../types";
  *
  * Authoritative state lives in the backend's `startup_task_registry`;
  * this component pulls a snapshot from `GET /api/startup_tasks` on
- * mount and applies live deltas from the `startup_task_changed` window
- * event (dispatched by `useWebSocket` when the WS frame arrives).
+ * mount and applies live deltas from the `startup_task_changed` event bus
+ * fact published when the WS frame arrives.
  *
  * Convergence rule: WS is the live truth, REST is a backfill. The
  * mount-time REST merge only fills in tasks WS hasn't already
@@ -74,16 +75,13 @@ export function StartupTasksBanner() {
   }, []);
 
   useEffect(() => {
-    function onDelta(ev: Event) {
-      const detail = (ev as CustomEvent).detail as
-        | { cleared?: boolean; task?: StartupTask }
-        | undefined;
-      if (!detail) return;
-      if (detail.cleared) {
+    function onDelta(detail: BusEventMap["startup_task_changed"]) {
+      if (!detail || typeof detail !== "object") return;
+      if ("cleared" in detail && detail.cleared) {
         setTasks({});
         return;
       }
-      const task = detail.task;
+      const task = "task" in detail ? detail.task : undefined;
       // Symmetric defense-in-depth with the REST path: a malformed
       // delta (`{task: null}`, `{task: {}}`, missing id) would write
       // `[undefined]` into the map and silently corrupt the dataset.
@@ -91,8 +89,7 @@ export function StartupTasksBanner() {
       if (!task?.id) return;
       setTasks((prev) => ({ ...prev, [task.id]: task }));
     }
-    window.addEventListener("startup_task_changed", onDelta);
-    return () => window.removeEventListener("startup_task_changed", onDelta);
+    return eventBus.subscribe("startup_task_changed", onDelta);
   }, []);
 
   // Time-based eviction: every tick, drop `done` rows older than the

@@ -20,7 +20,19 @@
  * as client-local in `BusEventMap`.
  */
 
-import type { Schedule, Session } from "../types";
+import type {
+  NodeRegistrationResolvedData,
+  NodeStateChangedData,
+  PendingApproval,
+  PendingNodeRegistration,
+  ProjectAggregatesChangedData,
+  Schedule,
+  Session,
+  SessionStatusKey,
+  StartupTask,
+  ToolApproval,
+  UserInteractionRequest,
+} from "../types";
 
 // Map of event type → payload shape. Only events that have a typed
 // consumer need to be enumerated here; everything else falls back to
@@ -87,10 +99,67 @@ export interface BusEventMap {
   session_provenance_changed: {
     session_id: string;
   };
+  node_state_changed: NodeStateChangedData;
+  node_registration_requested: PendingNodeRegistration;
+  node_registration_resolved: NodeRegistrationResolvedData;
+  user_input_requested: UserInteractionRequest;
+  user_input_resolved: {
+    request_id: string;
+    app_session_id?: string;
+  };
+  tool_approval_requested: ToolApproval;
+  tool_approval_resolved: {
+    approval_id: string;
+    app_session_id?: string;
+  };
+  worker_creation_requested: PendingApproval;
+  worker_creation_approved: {
+    delegation_id: string;
+  };
+  worker_creation_failed: {
+    delegation_id: string;
+    error?: string;
+  };
+  provider_changed: Record<string, unknown>;
+  installation_capabilities_changed: Record<string, unknown>;
+  provider_install_progress:
+    | { kind: string; phase: "started" }
+    | { kind: string; stream: "stdout" | "stderr"; text: string };
+  provider_install_finished: {
+    kind: string;
+    label: string;
+    command: string;
+    state: "running" | "succeeded" | "failed";
+    lines: Array<{ s: "stdout" | "stderr"; t: string }>;
+    started_at: string | null;
+    finished_at: string | null;
+    returncode: number | null;
+    installed: boolean | null;
+    message: string | null;
+  };
+  models_catalog_changed: {
+    provider_id: string;
+    kind?: string;
+    idempotency_key?: string;
+    projection?: unknown;
+    newly_added?: string[];
+    became_active?: string[];
+    went_retired?: string[];
+    truly_removed?: string[];
+  };
+  startup_task_changed:
+    | { cleared: true }
+    | { task: StartupTask };
   // Pre-existing frames the registry cares about — listed so the
   // typed dispatch helpers in `useWebSocket` can `eventBus.publish(...)`
   // them with payload safety.
   projects_changed: Record<string, unknown>;
+  project_aggregates_changed: ProjectAggregatesChangedData;
+  session_status_changed: {
+    session_id: string;
+    status_key: SessionStatusKey;
+    status_rank: number;
+  };
   session_created: { session: Session };
   session_deleted: { session_id: string };
   session_renamed: { session_id: string; name: string };

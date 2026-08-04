@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
+import { eventBus } from "../src/lib/eventBus";
 
 describe("WebSocket event handling", () => {
   it("rewind_complete replaces the session's messages", async () => {
@@ -58,6 +59,93 @@ describe("WebSocket event handling", () => {
     ).length;
     expect(after).toBeGreaterThan(before);
     h.unmount();
+  });
+
+  it("project_aggregates_changed updates its projection without a structural refetch", async () => {
+    const h = await renderApp({ seed: { sessions: [makeSession()] } });
+    await h.flush();
+    const before = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/projects",
+    ).length;
+
+    h.emit({
+      type: "project_aggregates_changed",
+      data: {
+        epoch: "mock-projects",
+        revision: 1,
+        upserts: [{
+          path: "/repo",
+          node_id: "primary",
+          running_count: 1,
+          unread_session_count: 0,
+          waiting_for_user_count: 0,
+          errored_count: 0,
+        }],
+        tombstones: [],
+      },
+    });
+    await h.flush();
+
+    const after = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/projects",
+    ).length;
+    expect(after).toBe(before);
+    h.unmount();
+  });
+
+  it("publishes each provider and startup frame once without DOM shims", async () => {
+    const events = [
+      { type: "provider_changed", data: {} },
+      { type: "installation_capabilities_changed", data: {} },
+      {
+        type: "provider_install_progress",
+        data: { kind: "codex", stream: "stdout", text: "installed" },
+      },
+      {
+        type: "provider_install_finished",
+        data: {
+          kind: "codex",
+          label: "Codex",
+          command: "npm install",
+          state: "succeeded",
+          lines: [{ s: "stdout", t: "installed" }],
+          started_at: "2026-08-04T10:00:00Z",
+          finished_at: "2026-08-04T10:01:00Z",
+          returncode: 0,
+          installed: true,
+          message: null,
+        },
+      },
+      { type: "models_catalog_changed", data: { provider_id: "codex" } },
+      { type: "startup_task_changed", data: { cleared: true } },
+    ];
+    const received = new Map<string, unknown[]>();
+    const domEvents: string[] = [];
+    const onDomEvent = (event: Event) => domEvents.push(event.type);
+    const unsubscribes = events.map(({ type }) => {
+      received.set(type, []);
+      window.addEventListener(type, onDomEvent);
+      return eventBus.subscribe(type, (payload) => received.get(type)!.push(payload));
+    });
+    const h = await renderApp({ seed: { sessions: [makeSession()] } });
+
+    try {
+      for (const event of events) {
+        h.emit(event as Parameters<typeof h.emit>[0]);
+      }
+      await h.flush();
+
+      for (const { type, data } of events) {
+        expect(received.get(type)).toEqual([data]);
+      }
+      expect(domEvents).toEqual([]);
+    } finally {
+      for (const unsubscribe of unsubscribes) unsubscribe();
+      for (const { type } of events) {
+        window.removeEventListener(type, onDomEvent);
+      }
+      h.unmount();
+    }
   });
 
   it("loose manager_event (no active turn) appends to the last assistant message", async () => {

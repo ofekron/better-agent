@@ -23,7 +23,7 @@ import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
 import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
-import { subscribeMany } from "../lib/eventBus";
+import { eventBus } from "../lib/eventBus";
 import {
   applyOlderMessagePage,
   parseOlderMessagePage,
@@ -117,6 +117,8 @@ export type SessionMetadataPatch = {
   right_panel_todos_dismissed?: boolean;
   right_panel_auto_opened_by?: Session["right_panel_auto_opened_by"];
   sidebar_minimized?: boolean;
+  status_key?: Session["status_key"];
+  status_rank?: number;
 };
 
 type SessionMetadataUpdater =
@@ -1164,6 +1166,7 @@ export function useSession(authStatus?: string) {
   const applySessionPatchEverywhere = useCallback((
     sessionId: string,
     patchOrUpdater: SessionMetadataUpdater,
+    preserveListOrder = false,
   ) => {
     const apply = (session: Session): Session => {
       const patch =
@@ -1224,6 +1227,8 @@ export function useSession(authStatus?: string) {
         next.right_panel_auto_opened_by = patch.right_panel_auto_opened_by;
       if (patch.sidebar_minimized !== undefined)
         next.sidebar_minimized = patch.sidebar_minimized;
+      if (patch.status_key !== undefined) next.status_key = patch.status_key;
+      if (patch.status_rank !== undefined) next.status_rank = patch.status_rank;
       const keys = Object.keys(patch) as (keyof SessionMetadataPatch)[];
       return keys.some(
         (key) =>
@@ -1243,7 +1248,7 @@ export function useSession(authStatus?: string) {
         })
         .filter(isSidebarVisibleSession);
       if (!changed && patched.length === prev.length) return prev;
-      const sorted = sortForList(patched);
+      const sorted = preserveListOrder ? patched : sortForList(patched);
       if (
         sorted.length === prev.length &&
         sorted.every((session, index) => session === prev[index])
@@ -1402,8 +1407,7 @@ export function useSession(authStatus?: string) {
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
         if (replace && offset === 0 && isGlobalUnfilteredFetch(filters)) {
           // Only a full, unfiltered global page may refresh existing
-          // registry entries (the ALL-projects aggregate source of
-          // truth). A project- or otherwise-narrowed page describes a
+          // registry entries. A project- or otherwise-narrowed page describes a
           // subset, so its rows must not restate global state. See
           // isGlobalUnfilteredFetch. Neither path evicts: `/api/sessions`
           // is paginated, so absence from a page is not removal.
@@ -1480,39 +1484,25 @@ export function useSession(authStatus?: string) {
     void fetchSessionPage(0, true, sessionListFiltersRef.current, span, true);
   }, [fetchSessionPage]);
 
-  // Status sort only: keep the list fresh against live status churn. On any
-  // status-affecting delta, (a) re-sort loaded rows off the live registry
-  // (immediate, authoritative interim view) and (b) debounce a full-span
-  // re-pagination so sessions on unloaded/deeper pages bubble in. The
-  // refetch debounce (2.5s) clears the backend's 2s monitoring-snapshot
-  // tick so the live re-sort and the refetch don't fight.
   useEffect(() => {
-    if (!sessionListFilters.statusSort) return;
-    let resortTimer: number | undefined;
     let refetchTimer: number | undefined;
-    const onDelta = () => {
-      window.clearTimeout(resortTimer);
-      resortTimer = window.setTimeout(() => {
-        setSessions((prev) => sortForList([...prev]));
-      }, 60);
+    const unsub = eventBus.subscribe("session_status_changed", (status) => {
+      applySessionPatchEverywhere(
+        status.session_id,
+        { status_key: status.status_key, status_rank: status.status_rank },
+        Boolean(sessionListFiltersRef.current.search?.trim()),
+      );
+      if (!sessionListFiltersRef.current.statusSort) return;
       window.clearTimeout(refetchTimer);
       refetchTimer = window.setTimeout(() => {
         refetchLoadedSpan();
       }, 2500);
-    };
-    const unsub = subscribeMany([
-      ["session_monitoring_changed", onDelta],
-      ["session_running_changed", onDelta],
-      ["session_unread_changed", onDelta],
-      ["session_user_input_changed", onDelta],
-      ["session_marker_changed", onDelta],
-    ]);
+    });
     return () => {
       unsub();
-      window.clearTimeout(resortTimer);
       window.clearTimeout(refetchTimer);
     };
-  }, [sessionListFilters.statusSort, sortForList, refetchLoadedSpan]);
+  }, [applySessionPatchEverywhere, refetchLoadedSpan]);
 
   useEffect(() => {
     // Fire on mount + whenever we transition to 'authed'. If the mount-time

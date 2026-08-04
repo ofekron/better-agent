@@ -8,7 +8,7 @@ const EMPTY_EVENTS: readonly WSEvent[] = Object.freeze([]);
  * referentially-stable array holding only the single most-recent event
  * whose `type` is one of `types` (empty when none matched this turn).
  *
- * The raw buffer in `useWebSocket` grows on every streamed frame, so
+ * The raw buffer in `useAppWebSocket` grows on every streamed frame, so
  * passing it by identity into a React context makes that context churn
  * once per token. Consumers that only need discrete domain signals
  * (extension sidebars/panels reading `events[events.length - 1]`) then

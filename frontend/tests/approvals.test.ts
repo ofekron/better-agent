@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
-import type { PendingApproval } from "../src/types";
+import type { PendingApproval, ToolApproval, WSEvent } from "../src/types";
 
 function makeApproval(overrides: Partial<PendingApproval> = {}): PendingApproval {
   return {
@@ -75,16 +75,10 @@ describe("worker approval cards", () => {
     await h.flush();
     expect(h.toJSON().chat.approvals).toHaveLength(1);
 
-    // The Chat component only ingests WS approval events from the
-    // streamingEvents prop, which is gated on streamingAppSessionId.
-    // Send a message to bind streamingAppSessionId, then emit the
-    // approved event so it lands on streamingEvents.
-    await h.typeAndSend("trigger");
-    h.emit({ type: "turn_start", data: { session_id: session.id } });
     h.emit({
       type: "worker_creation_approved",
       data: { delegation_id: "d-ws" },
-    });
+    } as WSEvent);
     await h.flush();
 
     expect(h.toJSON().chat.approvals).toHaveLength(0);
@@ -100,15 +94,54 @@ describe("worker approval cards", () => {
       },
     });
     await h.selectSession(session.id);
-    await h.typeAndSend("trigger");
-    h.emit({ type: "turn_start", data: { session_id: session.id } });
     h.emit({
       type: "worker_creation_failed",
       data: { delegation_id: "d-fail", error: "spawn failed" },
-    });
+    } as WSEvent);
     await h.flush();
 
     expect(h.toJSON().chat.approvals).toHaveLength(0);
+    h.unmount();
+  });
+
+  it("worker_creation_requested WS event adds a matching project card", async () => {
+    const session = makeSession();
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "worker_creation_requested",
+      data: makeApproval({ delegation_id: "d-live", cwd: session.cwd }),
+    } as WSEvent);
+    await h.flush();
+
+    expect(h.toJSON().chat.approvals.map((card) => card.delegationId)).toEqual(["d-live"]);
+    h.unmount();
+  });
+
+  it("tool approval WS lifecycle adds and resolves the current session card", async () => {
+    const session = makeSession();
+    const approval: ToolApproval = {
+      approval_id: "tool-live",
+      app_session_id: session.id,
+      run_id: "run-1",
+      provider_kind: "codex",
+      tool_name: "shell",
+      summary: { command: "git status" },
+    };
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({ type: "tool_approval_requested", data: approval } as WSEvent);
+    await h.flush();
+    expect(h.$('[data-testid="tool-approval-card"][data-approval-id="tool-live"]')).not.toBeNull();
+
+    h.emit({
+      type: "tool_approval_resolved",
+      data: { approval_id: approval.approval_id, app_session_id: session.id },
+    } as WSEvent);
+    await h.flush();
+    expect(h.$('[data-testid="tool-approval-card"][data-approval-id="tool-live"]')).toBeNull();
     h.unmount();
   });
 

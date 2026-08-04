@@ -1,6 +1,7 @@
 import { useEffect, useReducer } from "react";
 
 import { extBackendBase } from "../extensionIds";
+import { eventBus } from "../lib/eventBus";
 import type { NodeSnapshot, NodeStateChangedData } from "../types";
 
 const machineNodesApi = () => extBackendBase("machineNodes");
@@ -70,11 +71,10 @@ function _refetch(): Promise<void> {
 }
 
 // Backend WS push: a worker-node transitioned connected/disconnected.
-// Listener attached ONCE at module load (not per-hook) so the patch
+// Subscription attached ONCE at module load (not per-hook) so the patch
 // path runs even when no component currently has the hook mounted —
 // the next mount sees fresh state without a refetch.
-function _onNodeStateChanged(ev: Event): void {
-  const detail = (ev as CustomEvent<NodeStateChangedData>).detail;
+function _onNodeStateChanged(detail: NodeStateChangedData): void {
   if (!detail || !detail.node_id) return;
   const idx = _state.machines.findIndex((m) => m.id === detail.node_id);
   if (idx === -1) {
@@ -105,18 +105,17 @@ function _onNodeStateChanged(ev: Event): void {
   _notify();
 }
 
-if (typeof window !== "undefined") {
-  window.addEventListener("node_state_changed", _onNodeStateChanged);
-}
+const _offNodeStateChanged = eventBus.subscribe(
+  "node_state_changed",
+  _onNodeStateChanged,
+);
 
-// Vite HMR: re-evaluating this module would add a SECOND listener that
+// Vite HMR: re-evaluating this module would add a SECOND subscription that
 // can't be removed, multiplying patches per event. Dispose hook tears
 // the old listener down before the new module evaluates.
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    if (typeof window !== "undefined") {
-      window.removeEventListener("node_state_changed", _onNodeStateChanged);
-    }
+    _offNodeStateChanged();
   });
 }
 

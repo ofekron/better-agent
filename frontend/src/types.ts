@@ -132,6 +132,8 @@ export type WSEventType =
   // Credential-broker consent list changed; refetch GET /api/credentials/pending.
   | "credential_consent_changed"
   | "projects_changed"
+  | "project_aggregates_changed"
+  | "session_status_changed"
   | "project_updates_changed"
   | "project_mappings_changed"
   | "turn_started"
@@ -245,7 +247,7 @@ export type WSEventType =
   | "node_state_changed"
   // Multi-machine: a brand-new worker-node is awaiting operator
   // approval (requested) or its request was resolved (approve/deny).
-  // `useWebSocket` re-dispatches both as window CustomEvents that
+  // `useAppWebSocket` publishes both on the typed event bus so
   // `usePendingNodeRegistrations` converges; authoritative snapshot
   // comes from the machine-nodes extension's pending-node snapshot.
   | "node_registration_requested"
@@ -271,8 +273,8 @@ export type WSEventType =
   // future replay path) still type-checks and renders via PrLinkEvent.
   | "pr_link"
   // Backend startup task lifecycle delta (register/done/failed/reset).
-  // `useWebSocket` re-dispatches as a window CustomEvent that
-  // `StartupTasksBanner` listens to; the banner's authoritative
+  // `useAppWebSocket` publishes it on the typed event bus that
+  // `StartupTasksBanner` subscribes to; the banner's authoritative
   // snapshot comes from `GET /api/startup_tasks` on mount.
   | "startup_task_changed"
   // Stamped into events.jsonl by the REST middleware and the CLI
@@ -294,13 +296,21 @@ export type WSEventType =
   // watchdog). Detects a TCP connection killed silently -- common on
   // mobile network transitions -- where readyState stays OPEN forever.
   | "pong"
-  // Fire-and-forget notice pushed by an extension via Client.notify_toast.
-  // One shared event type for every extension's toast, LIVE push only.
-  | "extension_toast";
+  // Core-owned envelope for extension-authored events.
+  | "extension_event";
 
-export interface WSEvent {
-  type: WSEventType;
+/** Validated outer shape accepted from the WebSocket transport. Event names
+ * remain open so provider-native, historical, and extension events can pass
+ * through without pretending that core owns their payload schemas. */
+export interface WireEvent {
+  type: string;
   data: Record<string, unknown>;
+  seq?: number;
+  session_id?: string;
+}
+
+export interface WSEvent extends WireEvent {
+  type: WSEventType;
   /**
    * Render-time enrichment: timestamp of the source event. Set by the
    * timeline renderer before flattening so each rendered row can show
@@ -900,8 +910,8 @@ export interface QueuedPrompt {
   queue_position?: number;
   images_count?: number;
   files_count?: number;
-  images?: import("./hooks/useWebSocket").ImagePayload[];
-  files?: import("./hooks/useWebSocket").FilePayload[];
+  images?: import("./hooks/useAppWebSocket").ImagePayload[];
+  files?: import("./hooks/useAppWebSocket").FilePayload[];
   orchestration_mode?: OrchestrationMode;
   send_target?: "worker" | "supervisor" | null;
   cli_prompt?: string | null;
@@ -1227,7 +1237,21 @@ export interface Session {
   unread_count?: number;
   pending_user_input_count?: number;
   markers?: Record<string, { color: string; tooltip: string; sound?: boolean; tag?: string }>;
+  status_key?: SessionStatusKey;
+  status_rank?: number;
 }
+
+export const SESSION_STATUS_KEYS = [
+  "error",
+  "needs_decision",
+  "unread",
+  "open_work",
+  "running",
+  "all_done",
+  "idle",
+] as const;
+
+export type SessionStatusKey = (typeof SESSION_STATUS_KEYS)[number];
 
 export interface Note {
   id: string;
@@ -1279,6 +1303,30 @@ export interface Project {
   last_used: string;
   running_count?: number;
   unread_session_count?: number;
+  waiting_for_user_count?: number;
+  errored_count?: number;
+}
+
+export interface ProjectAggregateRecord {
+  path: string;
+  node_id: string;
+  running_count: number;
+  unread_session_count: number;
+  waiting_for_user_count: number;
+  errored_count: number;
+}
+
+export interface ProjectsSnapshot {
+  projects: Array<Project & ProjectAggregateRecord>;
+  epoch: string;
+  revision: number;
+}
+
+export interface ProjectAggregatesChangedData {
+  epoch: string;
+  revision: number;
+  upserts: ProjectAggregateRecord[];
+  tombstones: ProjectAggregateRecord[];
 }
 
 export interface BrowseResult {

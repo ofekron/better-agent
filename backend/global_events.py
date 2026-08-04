@@ -36,8 +36,9 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "internal_llm_changed", "runtime_profiles_changed",
     ),
     "project": (
-        "projects_changed", "project_mappings_changed", "workers_changed",
-        "tasks_changed", "project_updates_changed",
+        "projects_changed", "project_aggregates_changed",
+        "project_mappings_changed", "workers_changed", "tasks_changed",
+        "project_updates_changed",
     ),
     "extension": (
         *EXTENSION_CHANGE_TOPICS,
@@ -61,7 +62,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "session_error_changed", "session_user_input_changed",
         "session_running_changed", "session_monitoring_changed",
         "session_provenance_changed", "session_unread_changed",
-        "session_marker_changed",
+        "session_marker_changed", "session_status_changed",
     ),
     "startup_tasks": ("startup_task_changed",),
     "switch_control": ("switch_control_state_changed",),
@@ -81,6 +82,7 @@ GLOBAL_EVENT_SPECS = {
 GLOBAL_EVENT_TYPES = frozenset(GLOBAL_EVENT_SPECS)
 
 _EXTENSION_TOKEN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_EXTENSION_SOURCE_PREFIX = "extension:"
 _MAX_EXTENSION_EVENT_BYTES = 256 * 1024
 
 
@@ -119,6 +121,37 @@ def extension_event(
     }
     validate_global_event("extension_event", payload)
     return "extension_event", payload
+
+
+def canonicalize_extension_session_event(
+    event_type: str,
+    data: dict,
+    source: object,
+) -> tuple[str, dict]:
+    """Give extension-authored session rows one core-owned outer type.
+
+    Current writers already persist the canonical envelope. Historical rows
+    persisted the extension-selected name as their outer type, so replay wraps
+    them here. A valid canonical row is preserved instead of double-wrapped.
+    Non-extension sources are returned unchanged.
+    """
+    if (
+        not isinstance(source, str)
+        or not source.startswith(_EXTENSION_SOURCE_PREFIX)
+    ):
+        return event_type, data
+    extension_id = source.removeprefix(_EXTENSION_SOURCE_PREFIX)
+    if not _EXTENSION_TOKEN.fullmatch(extension_id):
+        raise ValueError("extension event source has an invalid extension_id")
+    if event_type == "extension_event" and isinstance(data, dict):
+        try:
+            validate_global_event(event_type, data)
+        except ValueError:
+            pass
+        else:
+            if data.get("extension_id") == extension_id:
+                return event_type, data
+    return extension_event(extension_id, event_type, data)
 
 
 def _validate_extension_event(payload: dict) -> None:

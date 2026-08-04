@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useSessionMeta } from "../lib/sessionRegistry";
-import Icon from "./Icon";
 
 /** Single source for "this session needs attention" / running / unread
  * badges. Used wherever a session
@@ -29,7 +28,6 @@ export function SessionStatusBadge({
     unread_count,
     pending_user_input_count,
     markers,
-    testape_active,
     monitoring_state,
     has_error,
   } = useSessionMeta(sid);
@@ -44,8 +42,7 @@ export function SessionStatusBadge({
     !awaitingApproval &&
     !debouncedRunning &&
     unread_count === 0 &&
-    markerEntries.length === 0 &&
-    !testape_active
+    markerEntries.length === 0
   )
     return null;
 
@@ -74,16 +71,6 @@ export function SessionStatusBadge({
           data-testid="session-approval-pulse"
           data-session-id={sid}
         />
-      )}
-      {testape_active && (
-        <span
-          className="session-status-testape"
-          title="TestApe active"
-          data-testid="session-testape-indicator"
-          data-session-id={sid}
-        >
-          <Icon name="testape" size={12} />
-        </span>
       )}
       {markerEntries.map(([extId, m]) => (
         <span

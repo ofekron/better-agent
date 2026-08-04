@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
+import { eventBus } from "src/lib/eventBus";
 
 /** What setup started with is a starting point, not a ceiling: every
  * capability can be turned on later here. A capability the running process was
@@ -60,9 +61,10 @@ export function InstallationCapabilities({
 
   useEffect(() => {
     void refetch();
-    const handler = () => void refetch();
-    window.addEventListener("installation_capabilities_changed", handler);
-    return () => window.removeEventListener("installation_capabilities_changed", handler);
+    return eventBus.subscribe(
+      "installation_capabilities_changed",
+      () => void refetch(),
+    );
   }, [refetch]);
 
   const setEnabled = async (capability: CapabilityId, enabled: boolean) => {

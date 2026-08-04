@@ -1,7 +1,7 @@
 """Status include/exclude filter regression tests for the sidebar list.
 
 Locks the backend half of "select which statuses to show or filter out":
-  1. `_session_status_key` names the same buckets `_session_status_rank`
+  1. `session_status.project` names and ranks the same buckets
      orders (rank stays the reverse index, so the sort is unchanged).
   2. `_session_status_gate` semantics: include-empty means every bucket,
      exclude always wins, and no selection at all yields no gate.
@@ -73,7 +73,7 @@ def ids(rows: list[dict]) -> list[str]:
 
 # ── 1. keys mirror ranks ─────────────────────────────────────────────────
 def key(session: dict) -> str:
-    return session_listing_api._session_status_key(session, MON, UNREAD, {})
+    return session_status.project(session, MON, UNREAD, {})["status_key"]
 
 
 check("key.error", key({"id": "err", "has_error": True}) == "error")
@@ -86,8 +86,8 @@ check("key.idle", key({"id": "quiet"}) == "idle")
 check(
     "key.rank_parity",
     all(
-        session_listing_api._session_status_rank(session, MON, UNREAD, {})
-        == len(session_listing_api.SESSION_STATUS_KEYS) - 1 - session_listing_api.SESSION_STATUS_KEYS.index(key(session))
+        session_status.project(session, MON, UNREAD, {})["status_rank"]
+        == len(session_status.SESSION_STATUS_KEYS) - 1 - session_status.SESSION_STATUS_KEYS.index(key(session))
         for session in SESSIONS
     ),
 )

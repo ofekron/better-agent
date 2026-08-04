@@ -485,7 +485,7 @@ def _decorate_local_sidebar_sessions(
             monitoring_state = monitoring_by_sid.get(sid, "stopped")
             unread_count = unread_by_sid.get(sid, 0)
             pending_user_input_count = pending_input_by_sid.get(sid, 0)
-            has_error = bool(s.get("unseen_error"))
+            has_error = bool(s.get("has_error") or s.get("unseen_error"))
             file_path = f"{sessions_dir}/{sid}.json"
             decorated_cache_key = (
                 sid,
@@ -516,6 +516,12 @@ def _decorate_local_sidebar_sessions(
                 "pending_user_input_count": pending_user_input_count,
                 "has_error": has_error,
                 "file_path": f"{sessions_dir}/{sid}.json",
+                **session_status.project(
+                    s,
+                    monitoring_by_sid,
+                    unread_by_sid,
+                    pending_input_by_sid,
+                ),
             }
             if len(_sidebar_decorated_cache) >= _SIDEBAR_DECORATED_CACHE_MAX:
                 _sidebar_decorated_cache.pop(next(iter(_sidebar_decorated_cache)), None)
@@ -555,66 +561,7 @@ def _require_tag_source_owner(source: object, token: str) -> None:
         raise HTTPException(status_code=403, detail=f"{source_name} tag source is owned by {owner}")
 
 
-# ── Status buckets, filtering, sorting, and search-score plumbing ──
-
-#: Status buckets a sidebar session can fall into, highest priority first.
-#: The single source of truth for both the status sort order (rank = reverse
-#: index) and the status include/exclude filter.
-SESSION_STATUS_KEYS: tuple[str, ...] = (
-    "error",
-    "needs_decision",
-    "unread",
-    "open_work",
-    "running",
-    "all_done",
-    "idle",
-)
-
-
-def _session_status_key(
-    session: dict,
-    monitoring_by_sid: dict[str, str],
-    unread_by_sid: dict[str, int],
-    pending_input_by_sid: dict[str, int] | None = None,
-) -> str:
-    """Which SESSION_STATUS_KEYS bucket this session is in.
-
-    A priority projection of the independent dimensions in
-    `session_status.compute` — the bucket is what the sidebar sorts and
-    filters on, so exactly one wins per session.
-    """
-    status = session_status.compute(
-        session, monitoring_by_sid, unread_by_sid, pending_input_by_sid
-    )
-    if status.errored:
-        return "error"
-    if status.waiting_for_user:
-        return "needs_decision"
-    if status.unread and not status.busy:
-        return "unread"
-    if status.open_work:
-        return "open_work"
-    if status.busy:
-        return "running"
-    if status.is_done:
-        return "all_done"
-    return "idle"
-
-
-def _session_status_rank(
-    session: dict,
-    monitoring_by_sid: dict[str, str],
-    unread_by_sid: dict[str, int],
-    pending_input_by_sid: dict[str, int] | None = None,
-) -> int:
-    """Status bucket for the status-sort option. Higher sorts first."""
-    key = _session_status_key(
-        session,
-        monitoring_by_sid,
-        unread_by_sid,
-        pending_input_by_sid,
-    )
-    return len(SESSION_STATUS_KEYS) - 1 - SESSION_STATUS_KEYS.index(key)
+# ── Status filtering, sorting, and search-score plumbing ──
 
 
 def _session_list_sort_key(
@@ -635,12 +582,12 @@ def _session_list_sort_key(
     )
     if status_sort:
         inner += (
-            _session_status_rank(
+            session_status.project(
                 session,
                 monitoring_by_sid or {},
                 unread_by_sid or {},
                 pending_input_by_sid or {},
-            ),
+            )["status_rank"],
         )
     inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:
@@ -658,7 +605,9 @@ def _split_session_filter(value: str | None) -> set[str]:
 def _split_session_statuses(value: str | None) -> frozenset[str]:
     """Parse a comma-separated status list, dropping unknown buckets."""
     return frozenset(
-        item for item in _split_session_filter(value) if item in SESSION_STATUS_KEYS
+        item
+        for item in _split_session_filter(value)
+        if item in session_status.SESSION_STATUS_KEYS
     )
 
 
@@ -678,12 +627,12 @@ def _session_status_gate(
     _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = snapshot
 
     def gate(session: dict) -> bool:
-        key = _session_status_key(
+        key = session_status.project(
             session,
             monitoring_by_sid,
             unread_by_sid,
             pending_input_by_sid,
-        )
+        )["status_key"]
         if key in exclude:
             return False
         return not include or key in include
@@ -869,12 +818,12 @@ def _session_filtered_sort_key(
     )
     if status_sort:
         inner += (
-            _session_status_rank(
+            session_status.project(
                 session,
                 monitoring_by_sid or {},
                 unread_by_sid or {},
                 pending_input_by_sid or {},
-            ),
+            )["status_rank"],
         )
     inner += (session_store.timestamp_sort_value(session.get(sort_by)),)
     if not folder_view:

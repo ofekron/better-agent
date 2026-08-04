@@ -146,26 +146,6 @@ describe("sessionRegistry — a listing page is not a complete snapshot", () => 
     expect(sessionRegistry.getSession(sid).is_running).toBe(true);
   });
 
-  it("stops counting a session that becomes sidebar-hidden", async () => {
-    const sid = "goes-hidden";
-    stubSessionsResponse([
-      { id: sid, cwd: "/repo", node_id: "primary", is_running: true },
-    ]);
-    await sessionRegistry.bootstrap();
-    expect(sessionRegistry.getProject("/repo", "primary").running_count).toBe(1);
-
-    // working_mode set: the backend drops it from the listing and from
-    // its own project aggregate, but the patch carries no cwd.
-    eventBus.publish("session_metadata_updated", {
-      session_id: sid,
-      patch: { working_mode: "file_editing" },
-    });
-
-    expect(sessionRegistry.getProject("/repo", "primary").running_count).toBe(0);
-    // Its own per-session state is still tracked — the chat view reads it.
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-  });
-
   it("evicts only on session_deleted", async () => {
     const sid = "deleted-while-page-in-flight";
     stubSessionsResponse([

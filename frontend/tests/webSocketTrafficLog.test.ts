@@ -146,13 +146,19 @@ describe("WebSocket traffic log", () => {
     expect(socket.send).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps every useWebSocket send on the measured wrapper", () => {
-    const source = readFileSync(
+  it("keeps transport sends measured and application commands behind transport", () => {
+    const transportSource = readFileSync(
       resolve(process.cwd(), "src/hooks/useWebSocket.ts"),
       "utf8",
     );
-    expect(source).not.toMatch(/\b(?:ws|wsRef\.current)\.send\s*\(/);
-    expect(source).toContain("sendWebSocketFrame");
+    const facadeSource = readFileSync(
+      resolve(process.cwd(), "src/hooks/useAppWebSocket.ts"),
+      "utf8",
+    );
+    expect(transportSource).not.toMatch(/\b(?:ws|wsRef\.current)\.send\s*\(/);
+    expect(transportSource).toContain("sendWebSocketFrame");
+    expect(facadeSource).not.toContain("sendWebSocketFrame");
+    expect(facadeSource).not.toMatch(/\b(?:ws|wsRef\.current)\.send\s*\(/);
   });
 
   it("allowlists every declared frontend WebSocket event type", () => {

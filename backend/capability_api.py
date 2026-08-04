@@ -182,7 +182,7 @@ class _SessionIdPayload(_StrictPayload):
 
 
 class _SessionEventsBroadcastPayload(_SessionIdPayload):
-    event_type: str = Field(min_length=1, max_length=128)
+    event_name: str = Field(min_length=1, max_length=128)
     data: dict[str, Any] = Field(default_factory=dict)
 
 

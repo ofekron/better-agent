@@ -1,7 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SnapshotTransport, MAX_SNAPSHOT_BYTES, MAX_CHUNKS, MAX_BUFFERED_LIVE_EVENTS } from "../src/lib/snapshotTransport";
-import { useWebSocket } from "../src/hooks/useWebSocket";
+import { eventBus } from "../src/lib/eventBus";
+import { useAppWebSocket as useWebSocket } from "../src/hooks/useAppWebSocket";
+import { useWebSocket as useWebSocketTransport } from "../src/hooks/useWebSocket";
 import type { WSEvent } from "../src/types";
 import { MockWebSocketController } from "./harness/mockWebSocket";
 
@@ -1003,7 +1005,7 @@ describe("SnapshotTransport — decode + validation branches", () => {
       snapshot_id: "snap-d", revision: "rev1", digest: "0".repeat(64),
       total_bytes: bytes.length, total_chunks: 1,
     } }, send, vi.fn());
-    await settle();
+    await transport.whenIdle();
     expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
       type: "snapshot_refresh", data: { reason: "corrupt" },
     });
@@ -1026,7 +1028,7 @@ describe("SnapshotTransport — decode + validation branches", () => {
       snapshot_id: "snap-p", revision: "rev1", digest: dgst,
       total_bytes: bytes.length, total_chunks: 1,
     } }, send, vi.fn());
-    await settle();
+    await transport.whenIdle();
     expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
       type: "snapshot_refresh", data: { reason: "corrupt" },
     });
@@ -1239,7 +1241,185 @@ describe("SnapshotTransport — decode + validation branches", () => {
   });
 });
 
-describe("useWebSocket snapshot routing", () => {
+describe("useWebSocket transport boundary", () => {
+  it("exposes only transport operations and publishes in cursor-first order", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const order: string[] = [];
+    const unsubscribe = eventBus.subscribe("messages_delta", () => order.push("bus"));
+    const rendered = renderHook(() => useWebSocketTransport({
+      onEventSeqAdvance: (sessionId, seq) => order.push(`cursor:${sessionId}:${seq}`),
+      onBeforePublish: () => order.push("observer"),
+      onEvent: () => order.push("projection"),
+    }));
+    await act(async () => { await Promise.resolve(); });
+
+    try {
+      expect(Object.keys(rendered.result.current).sort()).toEqual([
+        "checkConnection",
+        "connected",
+        "getReadyState",
+        "send",
+        "subscribeSession",
+      ]);
+      act(() => {
+        expect(rendered.result.current.send({ type: "custom_command", value: 1 })).toBe(true);
+      });
+      expect(ctrl.outbound.at(-1)).toEqual({ type: "custom_command", value: 1 });
+
+      ctrl.emit({
+        type: "messages_delta",
+        session_id: "trusted-owner",
+        seq: 9,
+        data: { app_session_id: "payload-owner", messages: [] },
+      } as WSEvent);
+      expect(order).toEqual([
+        "cursor:trusted-owner:9",
+        "observer",
+        "bus",
+        "projection",
+      ]);
+      ctrl.closeCurrent();
+      expect(rendered.result.current.subscribeSession("trusted-owner")).toBe(false);
+    } finally {
+      unsubscribe();
+      rendered.unmount();
+      ctrl.uninstall();
+    }
+  });
+
+  it("aborts on cursor failure but isolates generic observer failures", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const onEvent = vi.fn();
+    const rendered = renderHook(() => useWebSocketTransport({
+      onEventSeqAdvance: () => { throw new Error("cursor failed"); },
+      onBeforePublish: () => { throw new Error("observer failed"); },
+      onEvent,
+    }));
+    await act(async () => { await Promise.resolve(); });
+
+    ctrl.emit({
+      type: "messages_delta",
+      session_id: "trusted-owner",
+      seq: 9,
+      data: { app_session_id: "payload-owner", messages: [] },
+    } as WSEvent);
+    expect(onEvent).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    ctrl.uninstall();
+
+    const isolated = new MockWebSocketController();
+    isolated.install();
+    const isolatedProjection = vi.fn();
+    const isolatedHook = renderHook(() => useWebSocketTransport({
+      onBeforePublish: () => { throw new Error("observer failed"); },
+      onEvent: isolatedProjection,
+    }));
+    await act(async () => { await Promise.resolve(); });
+    isolated.emit({
+      type: "messages_delta",
+      data: { app_session_id: "session-a", messages: [] },
+    } as WSEvent);
+    expect(isolatedProjection).toHaveBeenCalledOnce();
+    isolatedHook.unmount();
+    isolated.uninstall();
+  });
+});
+
+describe("useAppWebSocket facade", () => {
+  it("rejects malformed core frames before observers or projectors mutate state", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const onAnyEvent = vi.fn();
+    const onTurnStarted = vi.fn();
+    const onLiveTurnEvent = vi.fn();
+    const rendered = renderHook(() => useWebSocket("ws://test", {
+      onAnyEvent,
+      onTurnStarted,
+      onLiveTurnEvent,
+    }));
+    await act(async () => { await Promise.resolve(); });
+
+    try {
+      ctrl.emit({ type: "turn_start", data: {} } as WSEvent);
+      expect(onAnyEvent).not.toHaveBeenCalled();
+      expect(onTurnStarted).not.toHaveBeenCalled();
+      expect(onLiveTurnEvent).not.toHaveBeenCalled();
+      expect(rendered.result.current.events).toEqual([]);
+      expect(rendered.result.current.isStreaming).toBe(false);
+      expect(rendered.result.current.streamingPhase).toBeNull();
+    } finally {
+      rendered.unmount();
+      ctrl.uninstall();
+    }
+  });
+
+  it("owns command shapes, ensures subscription, and resets on disconnect", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const rendered = renderHook(() => useWebSocket("ws://test", {
+      getSinceSeq: () => 4,
+      getEventsFromSeq: () => 7,
+      getEventsCursorKnown: () => true,
+    }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      expect(rendered.result.current.sendMessage(
+        "prompt",
+        "model",
+        "/cwd",
+        null,
+        "session-a",
+      )).toBe(true);
+      expect(rendered.result.current.stopStreaming("session-a")).toBe(true);
+      expect(rendered.result.current.sendPromoteQueued(
+        "session-a",
+        "steer",
+        "queued-a",
+        ["queued-a", "queued-b"],
+      )).toBe(true);
+    });
+
+    expect(ctrl.outbound.slice(-4)).toEqual([
+      {
+        type: "subscribe",
+        app_session_id: "session-a",
+        since_seq: 4,
+        events_from_seq: 7,
+        events_cursor_known: true,
+      },
+      expect.objectContaining({
+        type: "send_message",
+        prompt: "prompt",
+        model: "model",
+        cwd: "/cwd",
+        session_id: null,
+        app_session_id: "session-a",
+      }),
+      { type: "stop_message", app_session_id: "session-a" },
+      {
+        type: "promote_queued",
+        app_session_id: "session-a",
+        action: "steer",
+        queued_id: "queued-a",
+        queued_ids: ["queued-a", "queued-b"],
+      },
+    ]);
+    expect(rendered.result.current.isStreaming).toBe(true);
+    expect(rendered.result.current.isStopping).toBe(true);
+
+    ctrl.closeCurrent();
+    expect(rendered.result.current.isStreaming).toBe(false);
+    expect(rendered.result.current.isStopping).toBe(false);
+    rendered.unmount();
+    ctrl.uninstall();
+  });
+});
+
+describe("useAppWebSocket snapshot routing", () => {
   it("offers binary-v1 and requests ArrayBuffer delivery before open", async () => {
     const ctrl = new MockWebSocketController();
     ctrl.install();

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ModelCatalogStatus } from "../src/components/ModelCatalogStatus";
 import { ModelCatalogActivity } from "../src/components/ModelCatalogActivity";
 import { useProviderModelCatalog } from "../src/hooks/useProviderModelCatalog";
+import { eventBus } from "../src/lib/eventBus";
 import type { ModelCatalog } from "../src/types";
 import { readProviderCache } from "../src/utils/providerCache";
 import "../src/i18n";
@@ -82,11 +83,10 @@ describe("authoritative model catalog UI", () => {
     const next = { ...CATALOG, status: "current" as const, models_current: true, reason: "" };
     vi.mocked(fetch).mockResolvedValueOnce(response(next));
     act(() => {
-      window.dispatchEvent(
-        new CustomEvent("models_catalog_changed", {
-          detail: { provider_id: "codex", projection: next },
-        }),
-      );
+      eventBus.publish("models_catalog_changed", {
+        provider_id: "codex",
+        projection: next,
+      });
     });
     await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("current"));
   });
@@ -97,11 +97,7 @@ describe("authoritative model catalog UI", () => {
 
     vi.mocked(fetch).mockRejectedValueOnce(new Error("offline"));
     act(() => {
-      window.dispatchEvent(
-        new CustomEvent("models_catalog_changed", {
-          detail: { provider_id: "codex" },
-        }),
-      );
+      eventBus.publish("models_catalog_changed", { provider_id: "codex" });
     });
     await waitFor(() => expect(screen.getByText(/offline/i)).toBeTruthy());
     expect(screen.getByTestId("models").textContent).toBe("gpt-current");
@@ -139,6 +135,23 @@ describe("authoritative model catalog UI", () => {
     expect(container.querySelector('[role="status"]')).not.toBeNull();
     fireEvent.click(screen.getByRole("button"));
     expect(container.querySelector(".model-catalog-activity")).toBeNull();
+  });
+
+  it("refreshes background activity from a catalog bus fact", async () => {
+    const refreshing = { ...CATALOG, status: "refreshing" as const };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ catalogs: [] }))
+      .mockResolvedValueOnce(response({ catalogs: [refreshing] }));
+    const { container } = render(<ModelCatalogActivity />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      eventBus.publish("models_catalog_changed", { provider_id: "codex" });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector(".model-catalog-activity")).not.toBeNull();
+    });
   });
 
   it("uses logical RTL positioning and disables motion when requested", () => {

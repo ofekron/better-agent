@@ -32,7 +32,7 @@ import type {
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
-import type { StreamingLoadPhase } from "../hooks/useWebSocket";
+import type { StreamingLoadPhase } from "../hooks/useAppWebSocket";
 import { TurnGroup, MessageBubble } from "./MessageBubble";
 import { InputArea } from "./InputArea";
 import type { ScheduleSendPayload } from "./ScheduleSendPopover";
@@ -977,23 +977,26 @@ export function Chat({
   }, [session?.cwd]);
 
   useEffect(() => {
-    const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    const onRequested = (detail: PendingApproval) => {
       if (detail.cwd === session?.cwd) {
-        setPendingApprovals((prev) => [...prev, detail]);
+        setPendingApprovals((prev) => [
+          ...prev.filter((approval) => approval.delegation_id !== detail.delegation_id),
+          detail,
+        ]);
       }
     };
-    const onApproved = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      setPendingApprovals((prev) => prev.filter((a) => a.delegation_id !== detail.delegation_id));
+    const onResolved = (detail: { delegation_id: string }) => {
+      setPendingApprovals((prev) => prev.filter(
+        (approval) => approval.delegation_id !== detail.delegation_id,
+      ));
     };
-    window.addEventListener("better-agent-worker-requested", onRequested);
-    window.addEventListener("better-agent-worker-approved", onApproved);
-    window.addEventListener("better-agent-worker-failed", onApproved);
+    const offRequested = eventBus.subscribe("worker_creation_requested", onRequested);
+    const offApproved = eventBus.subscribe("worker_creation_approved", onResolved);
+    const offFailed = eventBus.subscribe("worker_creation_failed", onResolved);
     return () => {
-      window.removeEventListener("better-agent-worker-requested", onRequested);
-      window.removeEventListener("better-agent-worker-approved", onApproved);
-      window.removeEventListener("better-agent-worker-failed", onApproved);
+      offRequested();
+      offApproved();
+      offFailed();
     };
   }, [session?.cwd]);
   // Pending credential-broker consents for this session. Backend is the
@@ -1105,23 +1108,21 @@ export function Chat({
     if (targetId && scrollMessageIntoView(targetId)) clearPendingMessageFocus(targetId);
   });
   useEffect(() => {
-    const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent<ToolApproval>).detail;
+    const onRequested = (detail: ToolApproval) => {
       if (!detail || detail.app_session_id !== session?.id) return;
       setPendingToolApprovals((prev) => [
         ...prev.filter((a) => a.approval_id !== detail.approval_id),
         detail,
       ]);
     };
-    const onResolved = (e: Event) => {
-      const detail = (e as CustomEvent<{ approval_id?: string }>).detail;
-      if (detail?.approval_id) removeToolApproval(detail.approval_id);
+    const onResolved = (detail: { approval_id: string }) => {
+      removeToolApproval(detail.approval_id);
     };
-    window.addEventListener("tool_approval_requested", onRequested);
-    window.addEventListener("tool_approval_resolved", onResolved);
+    const offRequested = eventBus.subscribe("tool_approval_requested", onRequested);
+    const offResolved = eventBus.subscribe("tool_approval_resolved", onResolved);
     return () => {
-      window.removeEventListener("tool_approval_requested", onRequested);
-      window.removeEventListener("tool_approval_resolved", onResolved);
+      offRequested();
+      offResolved();
     };
   }, [session?.id, removeToolApproval]);
   // Focused-pane label for InputArea's fork-target chip: only while the

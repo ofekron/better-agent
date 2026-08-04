@@ -1,37 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { eventBus } from "../src/lib/eventBus";
 import {
-  sessionRegistry,
-  statusRankOf,
-  statusRankForRow,
-  useSessionMeta,
-  useProjectAggregate,
   ackSessionSeen,
   markSessionUnread,
+  sessionRegistry,
+  statusRankForRow,
+  useProjectAggregate,
+  useSessionMeta,
 } from "../src/lib/sessionRegistry";
-
-/**
- * Reducer-level tests for the singleton sessionRegistry.
- *
- * The registry is the single source of truth that powers
- * `<SessionStatusBadge>` and `<ProjectStatusBadge>` everywhere they
- * render. These tests pin its delta-application semantics.
- *
- * INVARIANTs locked here:
- *  - Sessions enter the map via a `/api/sessions` page merge,
- *    `session_created`, or a routed delta carrying a visible cwd.
- *    Running/unread deltas for unknown sids with an EMPTY cwd are
- *    silently dropped (no phantom-entry inflation of aggregates).
- *  - Per-project aggregates are derived locally by summing visible
- *    sessions. Hidden sessions (cwd === "") never contribute.
- *  - Bootstrap races: deltas arriving before the first successful
- *    bootstrap are buffered FIFO and drained after the snapshot.
- *
- * The bootstrap path goes through `fetch` — we stub `globalThis.fetch`
- * per test to seed the registry from a controlled "REST snapshot".
- */
+import type { ProjectAggregateRecord } from "../src/types";
 
 type SessionRow = {
   id: string;
@@ -40,1083 +19,308 @@ type SessionRow = {
   is_running?: boolean;
   monitoring_state?: string;
   unread_count?: number;
-  pending_user_input_count?: number;
+  status_key?: "error" | "needs_decision" | "unread" | "open_work" | "running" | "all_done" | "idle";
+  status_rank?: number;
 };
 
-function stubSessionsResponse(sessions: SessionRow[]) {
-  const fetchMock = vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({ sessions }),
-  });
-  (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
-  return fetchMock;
+const aggregate = (
+  path: string,
+  counts: Partial<Omit<ProjectAggregateRecord, "path" | "node_id">> = {},
+  node_id = "primary",
+): ProjectAggregateRecord => ({
+  path,
+  node_id,
+  running_count: 0,
+  unread_session_count: 0,
+  waiting_for_user_count: 0,
+  errored_count: 0,
+  ...counts,
+});
+
+function stubSessions(sessions: SessionRow[]) {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ sessions }))));
 }
 
-async function bootstrapWith(sessions: SessionRow[]) {
-  stubSessionsResponse(sessions);
+async function resetRegistry(sessions: SessionRow[] = []) {
+  sessionRegistry.unbind();
+  sessionRegistry.__resetForTests();
+  sessionRegistry.bind();
+  stubSessions(sessions);
   await sessionRegistry.bootstrap();
 }
 
-/** Re-create a fresh registry surface between tests by re-binding the
- * bus (drops the old subscriptions) and seeding with an empty
- * bootstrap snapshot — equivalent to a fresh page load. The module-
- * level singleton itself can't be reset, but bootstrap REPLACES its
- * `sessions` / `projects` maps with the new snapshot. */
-async function resetRegistry() {
-  (sessionRegistry as unknown as { __resetForTests: () => void }).__resetForTests();
-  sessionRegistry.bind();
-  await bootstrapWith([]);
+function applySnapshot(epoch: string, revision: number, projects: ProjectAggregateRecord[]) {
+  const token = sessionRegistry.beginProjectSnapshotFetch();
+  return sessionRegistry.applyProjectSnapshot({ epoch, revision, projects }, token);
 }
 
-function resetForBootstrapTests() {
-  (sessionRegistry as unknown as { __resetForTests: () => void }).__resetForTests();
-  sessionRegistry.bind();
-}
-
-describe("sessionRegistry — per-session deltas", () => {
+describe("sessionRegistry session projection", () => {
   beforeEach(async () => {
     await resetRegistry();
   });
 
-  it("legacy running and run-list frames cannot overwrite monitoring state", () => {
-    const sid = "sess-running-1";
+  it("keeps visual status dimensions independent from canonical sort status", () => {
     eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
+      session: { id: "s", cwd: "/p", node_id: "primary" },
     });
     eventBus.publish("session_monitoring_changed", {
-      session_id: sid,
-      monitoring_state: "blocked_on_user",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("session_running_changed", {
-      session_id: sid,
-      value: true,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("run_state", { app_session_id: sid, runs: [{ run_id: "legacy" }] });
-    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("blocked_on_user");
-    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
-    expect(sessionRegistry.getProject("/p", "primary")).toMatchObject({
-      running_count: 0,
-      waiting_for_user_count: 1,
-    });
-  });
-
-  it("turn_start cannot overwrite authoritative monitoring state", () => {
-    const sid = "file-edit-running";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-
-    eventBus.publish("session_monitoring_changed", {
-      session_id: sid,
-      monitoring_state: "waiting_on_background",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("turn_start", { app_session_id: sid });
-
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("waiting_on_background");
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
-  });
-
-  it("turn_start does not materialize unknown sessions", () => {
-    eventBus.publish("turn_start", { app_session_id: "unknown-file-edit" });
-
-    expect(sessionRegistry.getSession("unknown-file-edit").is_running).toBe(false);
-  });
-
-  it("testape_session_state updates testape_active for the matching sid", () => {
-    const sid = "sess-testape-1";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
-    eventBus.publish("testape_session_state", {
-      session_id: sid,
-      active: true,
-    });
-    expect(sessionRegistry.getSession(sid).testape_active).toBe(true);
-    eventBus.publish("testape_session_state", {
-      session_id: sid,
-      active: false,
-    });
-    expect(sessionRegistry.getSession(sid).testape_active).toBe(false);
-  });
-
-  it("session_unread_changed updates unread_count", () => {
-    const sid = "sess-unread-1";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
-      unread_count: 7,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession(sid).unread_count).toBe(7);
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
-      unread_count: 0,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession(sid).unread_count).toBe(0);
-  });
-
-  it("session_user_input_changed updates pending input count", () => {
-    const sid = "sess-input-1";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-    eventBus.publish("session_user_input_changed", {
-      session_id: sid,
-      pending_user_input_count: 2,
-    });
-    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(2);
-    eventBus.publish("session_user_input_changed", {
-      session_id: sid,
-      pending_user_input_count: 0,
-    });
-    expect(sessionRegistry.getSession(sid).pending_user_input_count).toBe(0);
-  });
-
-  it("only session_error_changed clears the live error indication", () => {
-    const sid = "sess-error-clear";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-    eventBus.publish("session_error_changed", {
-      session_id: sid,
-      has_error: true,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession(sid).has_error).toBe(true);
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(6);
-
-    eventBus.publish("turn_start", { app_session_id: sid });
-
-    expect(sessionRegistry.getSession(sid).has_error).toBe(true);
-    eventBus.publish("session_error_changed", {
-      session_id: sid,
-      has_error: false,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession(sid).has_error).toBe(false);
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
-  });
-
-  it("session_deleted drops the sid's cached meta", () => {
-    const sid = "sess-doomed";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary", is_running: true, unread_count: 3 },
-    });
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    eventBus.publish("session_deleted", { session_id: sid });
-    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
-    expect(sessionRegistry.getSession(sid).unread_count).toBe(0);
-  });
-
-  it("unknown sid returns the stable EMPTY_SESSION sentinel", () => {
-    const a = sessionRegistry.getSession("never-touched-a");
-    const b = sessionRegistry.getSession("never-touched-b");
-    expect(a).toBe(b);
-    expect(a).toEqual({
-      is_running: false,
-      unread_count: 0,
-      pending_user_input_count: 0,
-      monitoring_state: "stopped",
-      markers: {},
-      testape_active: false,
-      has_error: false,
-      current_todos: [],
-      current_tasks: [],
-    });
-  });
-
-  it("per-sid subscriber fires only on its own slice", () => {
-    const a = "sess-A";
-    const b = "sess-B";
-    eventBus.publish("session_created", { session: { id: a, cwd: "/p" } });
-    eventBus.publish("session_created", { session: { id: b, cwd: "/p" } });
-    let aFires = 0;
-    let bFires = 0;
-    const offA = sessionRegistry.subscribeSession(a, () => aFires++);
-    const offB = sessionRegistry.subscribeSession(b, () => bFires++);
-    eventBus.publish("session_unread_changed", {
-      session_id: a,
-      unread_count: 1,
-      cwd: "/p",
-    });
-    expect(aFires).toBe(1);
-    expect(bFires).toBe(0);
-    eventBus.publish("session_unread_changed", {
-      session_id: b,
-      unread_count: 1,
-      cwd: "/p",
-    });
-    expect(aFires).toBe(1);
-    expect(bFires).toBe(1);
-    offA();
-    offB();
-  });
-
-  it("no-op updates (same slice) do not refire subscribers", () => {
-    const sid = "sess-stable";
-    eventBus.publish("session_created", { session: { id: sid, cwd: "/p" } });
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
-      unread_count: 4,
-      cwd: "/p",
-    });
-    let fires = 0;
-    const off = sessionRegistry.subscribeSession(sid, () => fires++);
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
-      unread_count: 4,
-      cwd: "/p",
-    });
-    expect(fires).toBe(0);
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
-      unread_count: 5,
-      cwd: "/p",
-    });
-    expect(fires).toBe(1);
-    off();
-  });
-});
-
-describe("sessionRegistry — auto-insert vs hidden-drop", () => {
-  beforeEach(async () => {
-    await resetRegistry();
-  });
-
-  it("hidden delta (cwd === '') for an unknown sid is dropped (no phantom)", () => {
-    eventBus.publish("session_monitoring_changed", {
-      session_id: "hidden-ghost",
-      monitoring_state: "active",
-      cwd: "",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession("hidden-ghost").is_running).toBe(false);
-    // No aggregate inflation under any project.
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
-  });
-
-  it("visible delta for an unknown sid auto-inserts (covers working_mode-cleared flip)", () => {
-    // Backend's `session_created` is gated on working_mode — so a
-    // session that's created WITH working_mode, then later flipped
-    // to visible, never fires `session_created`. Its first
-    // visible-mode signal is a `monitoring_changed` with real cwd; we
-    // materialize from the payload.
-    eventBus.publish("session_monitoring_changed", {
-      session_id: "late-arriver",
+      session_id: "s",
       monitoring_state: "active",
       cwd: "/p",
       node_id: "primary",
     });
-    expect(sessionRegistry.getSession("late-arriver").is_running).toBe(true);
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+
+    expect(sessionRegistry.getSession("s")).toMatchObject({
+      is_running: true,
+      status_key: "idle",
+      status_rank: 0,
+    });
+
+    eventBus.publish("session_status_changed", {
+      session_id: "s",
+      status_key: "running",
+      status_rank: 2,
+    });
+
+    expect(sessionRegistry.getSession("s")).toMatchObject({
+      is_running: true,
+      status_key: "running",
+      status_rank: 2,
+    });
+    expect(statusRankForRow({ id: "s", status_rank: 0 })).toBe(2);
   });
 
-  it("visible unread delta for an unknown sid auto-inserts", () => {
+  it("uses authoritative row rank when no live entry exists", () => {
+    expect(statusRankForRow({ id: "deep-page", status_rank: 5 })).toBe(5);
+    expect(statusRankForRow({ id: "unranked" })).toBe(0);
+  });
+
+  it("does not materialize an unknown session from a status-only event", () => {
+    eventBus.publish("session_status_changed", {
+      session_id: "unknown",
+      status_key: "error",
+      status_rank: 6,
+    });
+    expect(sessionRegistry.peekMeta("unknown")).toBeNull();
+  });
+
+  it("preserves stable hook snapshots across reads", () => {
+    eventBus.publish("session_created", { session: { id: "s", cwd: "/p" } });
     eventBus.publish("session_unread_changed", {
-      session_id: "late-arriver-2",
-      unread_count: 7,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession("late-arriver-2").unread_count).toBe(7);
-    expect(sessionRegistry.getProject("/p", "primary").unread_session_count).toBe(1);
-  });
-
-  it("visibility flip (visible → hidden via cwd='') removes from aggregate", async () => {
-    await bootstrapWith([
-      { id: "flipper", cwd: "/p", is_running: true, unread_count: 3 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    // Visibility flips to hidden: backend ships cwd="" — we honor it.
-    eventBus.publish("session_unread_changed", {
-      session_id: "flipper",
-      unread_count: 4,
-      cwd: "",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 0,
-      unread_session_count: 0,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    // Per-session state still applies — chat view may still consume it.
-    expect(sessionRegistry.getSession("flipper").unread_count).toBe(4);
-  });
-});
-
-describe("sessionRegistry — project aggregates", () => {
-  beforeEach(async () => {
-    await resetRegistry();
-  });
-
-  it("derives running_count + unread_session_count from bootstrap snapshot", async () => {
-    await bootstrapWith([
-      { id: "s1", cwd: "/p", node_id: "primary", is_running: true, unread_count: 2 },
-      { id: "s2", cwd: "/p", node_id: "primary", is_running: false, unread_count: 3 },
-      { id: "s3", cwd: "/q", node_id: "primary", is_running: true, unread_count: 1 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 2,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    expect(sessionRegistry.getProject("/q", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-  });
-
-  it("hidden session (cwd === '') does NOT contribute to any aggregate", () => {
-    eventBus.publish("session_created", {
-      session: {
-        id: "hidden-eng",
-        cwd: "",
-        node_id: "primary",
-        is_running: true,
-        unread_count: 5,
-      },
-    });
-    // No project key for "" — nothing leaks into any bucket.
-    expect(sessionRegistry.getProject("", "primary")).toEqual({
-      running_count: 0,
-      unread_session_count: 0,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-  });
-
-  it("monitoring delta with cwd=='' updates per-session but not aggregate", async () => {
-    await bootstrapWith([
-      { id: "shown", cwd: "/p", is_running: true, unread_count: 0 },
-      { id: "hidden", cwd: "", is_running: false, unread_count: 0 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
-    // Hidden session flips running. cwd:"" signals "skip aggregate".
-    eventBus.publish("session_monitoring_changed", {
-      session_id: "hidden",
-      monitoring_state: "active",
-      cwd: "",
-      node_id: "primary",
-    });
-    expect(sessionRegistry.getSession("hidden").is_running).toBe(true);
-    // Aggregate unchanged.
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
-  });
-
-  it("session_deleted recomputes aggregate without the deleted session", async () => {
-    await bootstrapWith([
-      { id: "a", cwd: "/p", is_running: true, unread_count: 2 },
-      { id: "b", cwd: "/p", is_running: true, unread_count: 3 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 2,
-      unread_session_count: 2,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    eventBus.publish("session_deleted", { session_id: "a" });
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-  });
-
-  it("session_metadata_updated.patch.cwd migrates aggregate", async () => {
-    await bootstrapWith([
-      { id: "mover", cwd: "/p", is_running: true, unread_count: 4 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    eventBus.publish("session_metadata_updated", {
-      session_id: "mover",
-      patch: { cwd: "/q" },
-    });
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 0,
-      unread_session_count: 0,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-    expect(sessionRegistry.getProject("/q", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-  });
-
-  it("testape_active counts toward running_count even when monitoring_state is stopped", async () => {
-    // A session with a TestApe run active (but no agent turn in flight)
-    // is "running in testape" — the project badge must show 1.
-    await bootstrapWith([
-      { id: "ta", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
-    ]);
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
-    eventBus.publish("testape_session_state", { session_id: "ta", active: true });
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
-    eventBus.publish("testape_session_state", { session_id: "ta", active: false });
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
-  });
-
-  it("session_created is idempotent — second created for same sid is a no-op", () => {
-    eventBus.publish("session_created", {
-      session: { id: "dup", cwd: "/p", is_running: true, unread_count: 2 },
-    });
-    eventBus.publish("session_created", {
-      session: { id: "dup", cwd: "/p", is_running: true, unread_count: 99 },
-    });
-    expect(sessionRegistry.getSession("dup").unread_count).toBe(2);
-    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 0,
-      errored_count: 0,
-    });
-  });
-});
-
-/**
- * Every status dimension gets its own project counter, and every
- * dimension mutation must move it. Before these, only running/unread
- * were aggregated and only running/unread deltas triggered a project
- * recompute — so an error or a waiting-for-user change left the project
- * badge stale until an unrelated delta happened to recompute it.
- */
-describe("sessionRegistry — per-dimension project counters", () => {
-  beforeEach(async () => {
-    await resetRegistry();
-  });
-
-  const NEEDS_DECISION = "NEEDS_USER_DECISION";
-
-  async function seedOne() {
-    await bootstrapWith([
-      { id: "s1", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
-    ]);
-    return () => sessionRegistry.getProject("/p", "primary");
-  }
-
-  it("running_count counts active and background work, not idle or approval-blocked", async () => {
-    await bootstrapWith([
-      { id: "act", cwd: "/p", node_id: "primary" },
-      { id: "bg", cwd: "/p", node_id: "primary" },
-      { id: "idle", cwd: "/p", node_id: "primary" },
-      { id: "blocked", cwd: "/p", node_id: "primary" },
-    ]);
-    for (const [session_id, monitoring_state] of [
-      ["act", "active"],
-      ["bg", "waiting_on_background"],
-      ["idle", "idle"],
-      ["blocked", "blocked_on_user"],
-    ] as const) {
-      eventBus.publish("session_monitoring_changed", {
-        session_id,
-        monitoring_state,
-        cwd: "/p",
-        node_id: "primary",
-      });
-    }
-    const agg = sessionRegistry.getProject("/p", "primary");
-    // "idle" and "blocked_on_user" are live processes with no work in
-    // flight — Idle on the Running dimension.
-    expect(agg.running_count).toBe(2);
-    // The approval-blocked one shows on its own dimension instead.
-    expect(agg.waiting_for_user_count).toBe(1);
-  });
-
-  it("errored_count moves on session_error_changed", async () => {
-    const agg = await seedOne();
-    expect(agg().errored_count).toBe(0);
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
-    expect(agg().errored_count).toBe(1);
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: false });
-    expect(agg().errored_count).toBe(0);
-  });
-
-  it("errored_count clears only on the backend error-state delta", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
-    expect(agg().errored_count).toBe(1);
-    eventBus.publish("turn_start", { app_session_id: "s1" });
-    expect(agg().errored_count).toBe(1);
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: false });
-    expect(agg().errored_count).toBe(0);
-    expect(agg().running_count).toBe(0);
-  });
-
-  it("waiting_for_user_count moves on a pending user-input request", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_user_input_changed", {
-      session_id: "s1",
-      pending_user_input_count: 1,
-    });
-    expect(agg().waiting_for_user_count).toBe(1);
-    eventBus.publish("session_user_input_changed", {
-      session_id: "s1",
-      pending_user_input_count: 0,
-    });
-    expect(agg().waiting_for_user_count).toBe(0);
-  });
-
-  it("waiting_for_user_count moves on a NEEDS_USER_DECISION marker", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_marker_changed", {
-      session_id: "s1",
-      extension_id: "user-attention",
-      marker: { color: "#f80", tooltip: "decide", tag: NEEDS_DECISION },
-    });
-    expect(agg().waiting_for_user_count).toBe(1);
-    eventBus.publish("session_marker_changed", {
-      session_id: "s1",
-      extension_id: "user-attention",
-      marker: null,
-    });
-    expect(agg().waiting_for_user_count).toBe(0);
-  });
-
-  it("a marker that is not NEEDS_USER_DECISION does not mark the session waiting", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_marker_changed", {
-      session_id: "s1",
-      extension_id: "user-attention",
-      marker: { color: "#08f", tooltip: "done", tag: "ALL_TASKS__DONE" },
-    });
-    expect(agg().waiting_for_user_count).toBe(0);
-  });
-
-  it("dimensions never mask each other — one session can hit every counter", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_monitoring_changed", {
-      session_id: "s1",
-      monitoring_state: "active",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("session_unread_changed", {
-      session_id: "s1",
-      unread_count: 4,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
-    eventBus.publish("session_user_input_changed", {
-      session_id: "s1",
-      pending_user_input_count: 2,
-    });
-    expect(agg()).toEqual({
-      running_count: 1,
-      unread_session_count: 1,
-      waiting_for_user_count: 1,
-      errored_count: 1,
-    });
-  });
-
-  it("counters are per project — a sibling project is untouched", async () => {
-    await bootstrapWith([
-      { id: "a", cwd: "/p", node_id: "primary" },
-      { id: "b", cwd: "/q", node_id: "primary" },
-    ]);
-    eventBus.publish("session_error_changed", { session_id: "a", has_error: true });
-    expect(sessionRegistry.getProject("/p", "primary").errored_count).toBe(1);
-    expect(sessionRegistry.getProject("/q", "primary").errored_count).toBe(0);
-  });
-
-  it("a project with only an errored session still has an aggregate entry", async () => {
-    const agg = await seedOne();
-    eventBus.publish("session_error_changed", { session_id: "s1", has_error: true });
-    // Regression: the aggregate map used to be pruned when running and
-    // unread were both zero, which would drop a project whose only
-    // signal is an error or a waiting-for-user request.
-    expect(agg().errored_count).toBe(1);
-  });
-});
-
-describe("sessionRegistry — bootstrap mechanics", () => {
-  beforeEach(() => {
-    resetForBootstrapTests();
-  });
-
-  it("deltas before first successful bootstrap are buffered then drained FIFO", async () => {
-    // No bootstrap yet — these deltas land in the buffer.
-    eventBus.publish("session_created", {
-      session: { id: "buf-1", cwd: "/p", is_running: false, unread_count: 0 },
-    });
-    eventBus.publish("session_unread_changed", {
-      session_id: "buf-1",
-      unread_count: 9,
-      cwd: "/p",
-    });
-    // Before bootstrap, the buffered delta isn't applied yet.
-    // (The first event created the session but `_bootstrapped` is
-    // still false, so even the snapshot/projects derivation hasn't
-    // happened — getSession returns the EMPTY sentinel.)
-    expect(sessionRegistry.getSession("buf-1").unread_count).toBe(0);
-    // Snapshot is empty; bootstrap drains the buffer in order.
-    await bootstrapWith([]);
-    expect(sessionRegistry.getSession("buf-1").unread_count).toBe(9);
-    expect(sessionRegistry.getProject("/p", "primary").unread_session_count).toBe(1);
-  });
-
-  it("buffered legacy frames cannot supersede buffered monitoring state", async () => {
-    eventBus.publish("session_created", {
-      session: { id: "buffered-authority", cwd: "/p", node_id: "primary" },
-    });
-    eventBus.publish("session_monitoring_changed", {
-      session_id: "buffered-authority",
-      monitoring_state: "blocked_on_user",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("session_running_changed", {
-      session_id: "buffered-authority",
-      value: true,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    eventBus.publish("run_state", {
-      app_session_id: "buffered-authority",
-      runs: [{ run_id: "legacy" }],
-    });
-    eventBus.publish("turn_start", { app_session_id: "buffered-authority" });
-
-    await bootstrapWith([]);
-
-    expect(sessionRegistry.getSession("buffered-authority").monitoring_state)
-      .toBe("blocked_on_user");
-    expect(sessionRegistry.getProject("/p", "primary")).toMatchObject({
-      running_count: 0,
-      waiting_for_user_count: 1,
-    });
-  });
-
-  it("concurrent bootstrap calls share one in-flight promise", async () => {
-    let resolved = 0;
-    const fetchMock = vi.fn().mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
-          resolved += 1;
-          setTimeout(
-            () =>
-              resolve({
-                ok: true,
-                json: async () => ({ sessions: [] }),
-              } as Response),
-            10,
-          );
-        }),
-    );
-    (globalThis as unknown as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
-    const a = sessionRegistry.bootstrap();
-    const b = sessionRegistry.bootstrap();
-    expect(a).toBe(b); // same promise — dedup
-    await a;
-    expect(resolved).toBe(1); // fetch called exactly once
-  });
-
-  it("re-bootstraps on a WS reconnect, recovering a running/monitoring ping dropped during the outage (regression)", async () => {
-    // `session_running_changed` / `session_monitoring_changed` ride
-    // `broadcast_global` (session_ws_broadcaster.on_change → schedule_global):
-    // fire-and-forget, no events.jsonl persistence, no replay — unlike
-    // `run_state`. A ping dropped while this tab's socket was briefly
-    // disconnected is gone forever. Before this fix, the only self-heal
-    // was `bootstrap()` on `visibilitychange` — a tab that stays
-    // continuously focused through a reconnect (network blip, backend
-    // restart) never fires that and is stuck showing stale running
-    // state until an unrelated action (new prompt, tab switch) happens
-    // to trigger a resync as a side effect.
-    const sid = "reconnect-stuck";
-    await bootstrapWith([
-      { id: sid, cwd: "/p", node_id: "primary", is_running: false },
-    ]);
-    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
-
-    // Initial handshake — already covered by the mount-time bootstrap
-    // above, so this alone must NOT trigger a second fetch.
-    eventBus.publish("ws_connection_changed", { connected: true });
-
-    // Server-side truth flipped (the session started running) while
-    // disconnected — the corresponding delta never arrived, so the only
-    // way this client learns about it is a fresh `/api/sessions` read.
-    stubSessionsResponse([
-      { id: sid, cwd: "/p", node_id: "primary", is_running: true },
-    ]);
-
-    // The reconnect — a SECOND `connected: true`.
-    eventBus.publish("ws_connection_changed", { connected: true });
-
-    // Only the reconnect handler itself is allowed to trigger the
-    // re-fetch — poll on its effect instead of calling bootstrap()
-    // directly, or the assertion would pass even with no handler wired.
-    await waitFor(() => {
-      expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    });
-  });
-
-  it("the initial WS handshake (first connected: true) does not duplicate the mount-time bootstrap", async () => {
-    const fetchMock = stubSessionsResponse([]);
-    fetchMock.mockClear();
-    eventBus.publish("ws_connection_changed", { connected: true });
-    // No await needed — a synchronous handler either calls fetch or not.
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("a WS disconnect (connected: false) does not trigger a re-bootstrap", async () => {
-    const fetchMock = stubSessionsResponse([]);
-    fetchMock.mockClear();
-    eventBus.publish("ws_connection_changed", { connected: false });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("failed bootstrap keeps _bootstrapped=false; buffer survives until success", async () => {
-    eventBus.publish("session_created", {
-      session: { id: "preboot", cwd: "/p", is_running: true, unread_count: 0 },
-    });
-    // Reject the first fetch.
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("network")) as unknown as typeof fetch;
-    await sessionRegistry.bootstrap();
-    // Session NOT yet in map — bootstrap didn't run drain.
-    expect(sessionRegistry.getSession("preboot").is_running).toBe(false);
-    // Second attempt succeeds — drain happens.
-    await bootstrapWith([]);
-    expect(sessionRegistry.getSession("preboot").is_running).toBe(true);
-    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
-  });
-});
-
-describe("status rank (mirror of backend _session_status_rank)", () => {
-  const m = (tag: string) => ({ ext: { color: "#x", tooltip: "t", tag } });
-
-  it("buckets: 6 error, 5 needs-user, 4 new, 3 open-todo, 2 running, 1 done, 0 none", () => {
-    expect(statusRankOf({ has_error: true })).toBe(6);
-    expect(statusRankOf({ monitoring_state: "active" })).toBe(2);
-    expect(statusRankOf({ monitoring_state: "waiting_on_background" })).toBe(2);
-    expect(statusRankOf({ monitoring_state: "blocked_on_user" })).toBe(5);
-    expect(statusRankOf({ pending_user_input_count: 1 })).toBe(5);
-    expect(statusRankOf({ monitoring_state: "idle", markers: m("NEEDS_USER_DECISION") })).toBe(5);
-    expect(statusRankOf({ unread_count: 2 })).toBe(4);
-    expect(statusRankOf({ monitoring_state: "active", unread_count: 2 })).toBe(2);
-    expect(statusRankOf({ current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
-    expect(statusRankOf({ current_tasks: [{ content: "A", status: "in_progress" }] })).toBe(3);
-    expect(statusRankOf({ markers: m("ALL_TASKS__DONE") })).toBe(1);
-    expect(statusRankOf({ monitoring_state: "idle" })).toBe(0);
-    expect(statusRankOf({ monitoring_state: "active", markers: m("NEEDS_USER_DECISION") })).toBe(5);
-    expect(statusRankOf({ monitoring_state: "active", current_todos: [{ content: "A", status: "pending" }] })).toBe(3);
-    expect(statusRankOf({ monitoring_state: "active", unread_count: 2, current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
-    // classification by TAG, not color — untagged marker is inert
-    expect(statusRankOf({ markers: { ext: { color: "#d29922", tooltip: "x" } } })).toBe(0);
-  });
-
-  it("statusRankForRow prefers the live registry over the row snapshot", async () => {
-    await resetRegistry();
-    const sid = "rank-live";
-    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
-    eventBus.publish("session_monitoring_changed", {
-      session_id: sid,
-      monitoring_state: "active",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    // Row snapshot claims stopped, but the live registry says active → live wins.
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
-
-    eventBus.publish("session_metadata_updated", {
-      session_id: sid,
-      patch: { current_todos: [{ content: "A", status: "pending" }] },
-    });
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(3);
-  });
-
-  it("statusRankForRow falls back to row fields when the sid is unseeded", async () => {
-    await resetRegistry();
-    expect(statusRankForRow({ id: "deep-page", monitoring_state: "active" })).toBe(2);
-    expect(statusRankForRow({ id: "deep-page-input", pending_user_input_count: 1 })).toBe(5);
-    expect(statusRankForRow({ id: "deep-page-2", unread_count: 3 })).toBe(4);
-    expect(statusRankForRow({ id: "deep-page-4", current_tasks: [{ content: "A", status: "pending" }] })).toBe(3);
-    expect(statusRankForRow({ id: "deep-page-3" })).toBe(0);
-  });
-
-  it("seedFromRows fills missing sids without clobbering fresher live state", async () => {
-    await resetRegistry();
-    const sid = "seed-1";
-    eventBus.publish("session_created", { session: { id: sid, cwd: "/p", node_id: "primary" } });
-    eventBus.publish("session_monitoring_changed", {
-      session_id: sid,
-      monitoring_state: "active",
-      cwd: "/p",
-      node_id: "primary",
-    });
-    // A staler page row for the SAME sid must NOT downgrade the live entry…
-    sessionRegistry.seedFromRows([
-      { id: sid, monitoring_state: "stopped", cwd: "/p", node_id: "primary" },
-      { id: "seed-new", monitoring_state: "active", cwd: "/p", node_id: "primary" },
-    ]);
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    // …but a brand-new sid IS materialized from the page row.
-    expect(sessionRegistry.getSession("seed-new").is_running).toBe(true);
-  });
-
-  // Regression for #185: <SessionStatusBadge> → useSessionMeta →
-  // useSyncExternalStore infinite-looped ("getSnapshot should be cached").
-  // applyRoutedDelta's update path dropped `testape_active`, leaving it
-  // undefined; getSession cached `!!undefined` (false) but compared it
-  // against the raw `undefined` on the next call, so the cache missed
-  // every time and getSnapshot returned a fresh object each render.
-  it("getSession returns a stable reference after a routed delta (#185)", async () => {
-    await resetRegistry();
-    const sid = "sess-cache-invariant";
-    eventBus.publish("session_created", {
-      session: { id: sid, cwd: "/p", node_id: "primary" },
-    });
-    // session_unread_changed routes through applyRoutedDelta's update
-    // path — the one that used to drop testape_active.
-    eventBus.publish("session_unread_changed", {
-      session_id: sid,
+      session_id: "s",
       unread_count: 3,
       cwd: "/p",
-      node_id: "primary",
     });
-    const a = sessionRegistry.getSession(sid);
-    const b = sessionRegistry.getSession(sid);
-    expect(a).toBe(b); // SAME reference — cache invariant holds
-    expect(a.testape_active).toBe(false);
+    expect(sessionRegistry.getSession("s")).toBe(sessionRegistry.getSession("s"));
+  });
+
+  it("returns one stable empty session value", () => {
+    expect(sessionRegistry.getSession("a")).toBe(sessionRegistry.getSession("b"));
+    expect(sessionRegistry.getSession("a")).toMatchObject({
+      is_running: false,
+      status_key: "idle",
+      status_rank: 0,
+    });
   });
 });
 
-describe("sessionRegistry — project subscribers", () => {
+describe("sessionRegistry project aggregate projection", () => {
   beforeEach(async () => {
     await resetRegistry();
   });
 
-  it("subscribeProject fires only for its own project key, then cleans up", async () => {
-    await bootstrapWith([
-      { id: "pa", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
-      { id: "pb", cwd: "/q", node_id: "primary", is_running: false, unread_count: 0 },
-    ]);
-    let pFires = 0;
-    let qFires = 0;
-    const offP = sessionRegistry.subscribeProject("/p", "primary", () => pFires++);
-    // A second subscriber on the same key reuses the existing listener set.
-    let p2Fires = 0;
-    const offP2 = sessionRegistry.subscribeProject("/p", "primary", () => p2Fires++);
-    const offQ = sessionRegistry.subscribeProject("/q", "primary", () => qFires++);
+  it("replaces the full projection from a REST snapshot", () => {
+    expect(applySnapshot("epoch-a", 2, [
+      aggregate("/p", { running_count: 2, errored_count: 1 }),
+      aggregate("/q", { unread_session_count: 3 }),
+    ])).toBe(true);
 
-    eventBus.publish("session_unread_changed", {
-      session_id: "pa",
-      unread_count: 1,
-      cwd: "/p",
-      node_id: "primary",
+    expect(sessionRegistry.getProject("/p", "primary")).toEqual({
+      running_count: 2,
+      unread_session_count: 0,
+      waiting_for_user_count: 0,
+      errored_count: 1,
     });
-    expect(pFires).toBe(1);
-    expect(p2Fires).toBe(1);
-    expect(qFires).toBe(0);
-
-    eventBus.publish("session_unread_changed", {
-      session_id: "pb",
-      unread_count: 1,
-      cwd: "/q",
-      node_id: "primary",
-    });
-    expect(pFires).toBe(1);
-    expect(qFires).toBe(1);
-
-    // Unsubscribing one of two keeps the set alive for the other. The
-    // delta must actually change the aggregate (unread 1→0 flips
-    // unread_session_count) for the remaining listener to fire.
-    offP();
-    eventBus.publish("session_unread_changed", {
-      session_id: "pa",
-      unread_count: 0,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(pFires).toBe(1);
-    expect(p2Fires).toBe(2);
-
-    // Last subscriber off → the listener set is pruned from the map.
-    offP2();
-    offQ();
-    p2Fires = 0;
-    qFires = 0;
-    eventBus.publish("session_unread_changed", {
-      session_id: "pa",
-      unread_count: 4,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(p2Fires).toBe(0);
-    expect(qFires).toBe(0);
+    expect(sessionRegistry.getProject("/q", "primary").unread_session_count).toBe(3);
   });
 
-  it("subscribeProject keys by node id (primary vs secondary are independent)", () => {
-    let primaryFires = 0;
-    const off = sessionRegistry.subscribeProject("/p", "secondary", () => primaryFires++);
-    eventBus.publish("session_unread_changed", {
-      session_id: "pn",
-      unread_count: 1,
-      cwd: "/p",
-      node_id: "primary",
-    });
-    expect(primaryFires).toBe(0);
-    off();
-  });
-
-  it("bootstrap fans out to every project + session listener via notifyAll", async () => {
-    let projectFires = 0;
-    let sessionFires = 0;
-    const offP = sessionRegistry.subscribeProject("/p", "primary", () => projectFires++);
-    const offS = sessionRegistry.subscribeSession("boot-1", () => sessionFires++);
-    await bootstrapWith([{ id: "boot-1", cwd: "/p", node_id: "primary", is_running: true }]);
-    expect(projectFires).toBeGreaterThanOrEqual(1);
-    expect(sessionFires).toBeGreaterThanOrEqual(1);
-    offP();
-    offS();
-  });
-});
-
-describe("sessionRegistry — React hooks", () => {
-  beforeEach(async () => {
-    await resetRegistry();
-  });
-
-  it("useSessionMeta returns EMPTY_SESSION for a null sid and live meta for a real one", async () => {
-    await bootstrapWith([
-      { id: "hook-s", cwd: "/p", node_id: "primary", is_running: false, unread_count: 0 },
+  it("applies the next revision atomically and deletes tombstones", () => {
+    applySnapshot("epoch-a", 4, [
+      aggregate("/p", { running_count: 1 }),
+      aggregate("/q", { unread_session_count: 1 }),
     ]);
 
-    const { result: empty, unmount: unmountEmpty } = renderHook(() => useSessionMeta(null));
-    expect(empty.current.unread_count).toBe(0);
-    expect(empty.current.is_running).toBe(false);
-    unmountEmpty();
-
-    const { result, rerender } = renderHook(() => useSessionMeta("hook-s"));
-    expect(result.current.unread_count).toBe(0);
-
-    // A bus delta mutates the slice; useSyncExternalStore re-renders.
-    act(() => {
-      eventBus.publish("session_unread_changed", {
-        session_id: "hook-s",
-        unread_count: 5,
-        cwd: "/p",
-        node_id: "primary",
-      });
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "epoch-a",
+      revision: 5,
+      upserts: [aggregate("/p", { waiting_for_user_count: 2 })],
+      tombstones: [aggregate("/q")],
     });
-    expect(result.current.unread_count).toBe(5);
-    rerender();
-    expect(result.current.unread_count).toBe(5);
-  });
 
-  it("useProjectAggregate returns EMPTY_AGGREGATE for a null path and live counts for a real one", async () => {
-    await bootstrapWith([
-      { id: "agg-s", cwd: "/p", node_id: "primary", is_running: true, unread_count: 0 },
-    ]);
-
-    const { result: empty, unmount: unmountEmpty } = renderHook(() =>
-      useProjectAggregate(null),
-    );
-    expect(empty.current).toEqual({
+    expect(sessionRegistry.getProject("/p", "primary").waiting_for_user_count).toBe(2);
+    expect(sessionRegistry.getProject("/q", "primary")).toEqual({
       running_count: 0,
       unread_session_count: 0,
       waiting_for_user_count: 0,
       errored_count: 0,
     });
-    unmountEmpty();
+  });
 
-    const { result } = renderHook(() => useProjectAggregate("/p"));
-    expect(result.current.running_count).toBe(1);
-
-    act(() => {
-      eventBus.publish("session_unread_changed", {
-        session_id: "agg-s",
-        unread_count: 2,
-        cwd: "/p",
-        node_id: "primary",
+  it("ignores duplicate and stale same-epoch revisions", () => {
+    applySnapshot("epoch-a", 5, [aggregate("/p", { running_count: 2 })]);
+    for (const revision of [5, 4]) {
+      eventBus.publish("project_aggregates_changed", {
+        epoch: "epoch-a",
+        revision,
+        upserts: [aggregate("/p", { running_count: 99 })],
+        tombstones: [],
       });
+    }
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(2);
+  });
+
+  it("refetches a same-epoch gap instead of applying it", async () => {
+    applySnapshot("epoch-a", 1, [aggregate("/p", { running_count: 1 })]);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      epoch: "epoch-a",
+      revision: 3,
+      projects: [aggregate("/p", { running_count: 3 })],
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "epoch-a",
+      revision: 3,
+      upserts: [aggregate("/p", { running_count: 99 })],
+      tombstones: [],
     });
-    expect(result.current.unread_session_count).toBe(1);
+
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
+    await waitFor(() => {
+      expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(3);
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/projects");
+  });
+
+  it("accepts a new epoch by clearing stale data and hydrating its full snapshot", async () => {
+    applySnapshot("epoch-a", 8, [aggregate("/old", { running_count: 1 })]);
+    let resolveFetch!: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    })));
+
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "epoch-b",
+      revision: 1,
+      upserts: [aggregate("/partial", { running_count: 1 })],
+      tombstones: [],
+    });
+
+    expect(sessionRegistry.getProject("/old", "primary").running_count).toBe(0);
+    expect(sessionRegistry.getProject("/partial", "primary").running_count).toBe(0);
+
+    resolveFetch(new Response(JSON.stringify({
+      epoch: "epoch-b",
+      revision: 1,
+      projects: [aggregate("/complete", { errored_count: 2 })],
+    })));
+    await waitFor(() => {
+      expect(sessionRegistry.getProject("/complete", "primary").errored_count).toBe(2);
+    });
+  });
+
+  it("ignores a stale same-epoch REST snapshot", () => {
+    applySnapshot("epoch-a", 4, [aggregate("/p", { running_count: 4 })]);
+    const token = sessionRegistry.beginProjectSnapshotFetch();
+    expect(sessionRegistry.applyProjectSnapshot({
+      epoch: "epoch-a",
+      revision: 3,
+      projects: [aggregate("/p", { running_count: 3 })],
+    }, token)).toBe(false);
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(4);
+  });
+
+  it("ignores an old-epoch response dispatched before an epoch change", async () => {
+    applySnapshot("epoch-a", 1, [aggregate("/p", { running_count: 1 })]);
+    const staleToken = sessionRegistry.beginProjectSnapshotFetch();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      epoch: "epoch-b",
+      revision: 1,
+      projects: [],
+    }))));
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "epoch-b",
+      revision: 1,
+      upserts: [],
+      tombstones: [],
+    });
+
+    expect(sessionRegistry.applyProjectSnapshot({
+      epoch: "epoch-a",
+      revision: 2,
+      projects: [aggregate("/p", { running_count: 9 })],
+    }, staleToken)).toBe(false);
+    await waitFor(() => {
+      expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
+    });
+  });
+
+  it("notifies only changed project keys", () => {
+    applySnapshot("epoch-a", 0, [aggregate("/p"), aggregate("/q")]);
+    let p = 0;
+    let q = 0;
+    const offP = sessionRegistry.subscribeProject("/p", "primary", () => p++);
+    const offQ = sessionRegistry.subscribeProject("/q", "primary", () => q++);
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "epoch-a",
+      revision: 1,
+      upserts: [aggregate("/p", { unread_session_count: 1 })],
+      tombstones: [],
+    });
+    expect({ p, q }).toEqual({ p: 1, q: 0 });
+    offP();
+    offQ();
   });
 });
 
-describe("sessionRegistry — imperative seen/unread acks", () => {
+describe("sessionRegistry hooks and commands", () => {
   beforeEach(async () => {
-    await resetRegistry();
+    await resetRegistry([{ id: "s", cwd: "/p", status_key: "idle", status_rank: 0 }]);
   });
 
-  it("ackSessionSeen POSTs /seen with the uid and resolves on success", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
-    (globalThis as unknown as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+  it("updates session and project hooks from authoritative events", () => {
+    applySnapshot("epoch-a", 0, [aggregate("/p")]);
+    const session = renderHook(() => useSessionMeta("s"));
+    const project = renderHook(() => useProjectAggregate("/p"));
 
-    await ackSessionSeen("sess ack/1", "user-7");
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(`/api/sessions/${encodeURIComponent("sess ack/1")}/seen`);
-    expect(init).toMatchObject({
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    act(() => {
+      eventBus.publish("session_status_changed", {
+        session_id: "s",
+        status_key: "error",
+        status_rank: 6,
+      });
+      eventBus.publish("project_aggregates_changed", {
+        epoch: "epoch-a",
+        revision: 1,
+        upserts: [aggregate("/p", { errored_count: 1 })],
+        tombstones: [],
+      });
     });
-    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ uid: "user-7" });
+
+    expect(session.result.current.status_key).toBe("error");
+    expect(project.result.current.errored_count).toBe(1);
+    session.unmount();
+    project.unmount();
   });
 
-  it("ackSessionSeen resolves silently when the POST rejects (no retry)", async () => {
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
-
-    await expect(ackSessionSeen("sess-fail", null)).resolves.toBeUndefined();
-  });
-
-  it("markSessionUnread POSTs /unread and resolves on success", async () => {
+  it("posts seen and unread commands", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
-    (globalThis as unknown as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
-
-    await markSessionUnread("sess ack/2");
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(`/api/sessions/${encodeURIComponent("sess ack/2")}/unread`);
-    expect(init).toMatchObject({ method: "POST" });
-  });
-
-  it("markSessionUnread resolves silently when the POST rejects", async () => {
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
-
-    await expect(markSessionUnread("sess-fail")).resolves.toBeUndefined();
+    vi.stubGlobal("fetch", fetchMock);
+    await ackSessionSeen("s", "uid");
+    await markSessionUnread("s");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/sessions/s/seen",
+      "/api/sessions/s/unread",
+    ]);
   });
 });

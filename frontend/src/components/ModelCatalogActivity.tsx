@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { parseModelCatalog } from "../hooks/useProviderModelCatalog";
+import { eventBus } from "src/lib/eventBus";
 import type { ModelCatalog } from "../types";
 import Icon from "./Icon";
 
@@ -103,13 +104,16 @@ export function ModelCatalogActivity() {
         },
       }));
     };
-    window.addEventListener("models_catalog_changed", onChanged);
+    const unsubscribeChanged = eventBus.subscribe(
+      "models_catalog_changed",
+      onChanged,
+    );
     window.addEventListener(
       "model_catalog_refresh_acknowledged",
       onAcknowledged,
     );
     return () => {
-      window.removeEventListener("models_catalog_changed", onChanged);
+      unsubscribeChanged();
       window.removeEventListener(
         "model_catalog_refresh_acknowledged",
         onAcknowledged,

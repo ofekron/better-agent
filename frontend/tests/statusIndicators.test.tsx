@@ -25,7 +25,6 @@ import { ProjectStatusBadge } from "../src/components/ProjectStatusBadge";
  *     marker dot the user-attention extension paints.
  */
 
-const NEEDS_DECISION = "NEEDS_USER_DECISION";
 const ALL_TASKS_DONE = "ALL_TASKS__DONE";
 
 const PROJECT = "/p";
@@ -252,13 +251,49 @@ describe("SessionStatusBadge — every status dimension reaches the screen", () 
 // ── Project badge: one counter per dimension ────────────────────────────
 
 describe("ProjectStatusBadge — one counter per dimension", () => {
+  let revision: number;
+
   beforeEach(async () => {
-    await resetRegistry([
-      { id: "a", cwd: PROJECT, node_id: "primary" },
-      { id: "b", cwd: PROJECT, node_id: "primary" },
-      { id: "c", cwd: PROJECT, node_id: "primary" },
-    ]);
+    await resetRegistry();
+    revision = 0;
+    sessionRegistry.applyProjectSnapshot({
+      epoch: "status-indicators",
+      revision,
+      projects: [{
+        path: PROJECT,
+        node_id: "primary",
+        running_count: 0,
+        unread_session_count: 0,
+        waiting_for_user_count: 0,
+        errored_count: 0,
+      }],
+    });
   });
+
+  function publishCounts(
+    path: string,
+    counts: Partial<{
+      running_count: number;
+      unread_session_count: number;
+      waiting_for_user_count: number;
+      errored_count: number;
+    }>,
+  ) {
+    eventBus.publish("project_aggregates_changed", {
+      epoch: "status-indicators",
+      revision: ++revision,
+      upserts: [{
+        path,
+        node_id: "primary",
+        running_count: 0,
+        unread_session_count: 0,
+        waiting_for_user_count: 0,
+        errored_count: 0,
+        ...counts,
+      }],
+      tombstones: [],
+    });
+  }
 
   function counts(container: HTMLElement): Record<string, string> {
     const out: Record<string, string> = {};
@@ -275,23 +310,12 @@ describe("ProjectStatusBadge — one counter per dimension", () => {
 
   it("renders each dimension's counter independently", async () => {
     await act(async () => {
-      eventBus.publish("session_monitoring_changed", {
-        session_id: "a",
-        monitoring_state: "active",
-        cwd: PROJECT,
-        node_id: "primary",
+      publishCounts(PROJECT, {
+        running_count: 1,
+        unread_session_count: 1,
+        waiting_for_user_count: 1,
+        errored_count: 1,
       });
-      eventBus.publish("session_unread_changed", {
-        session_id: "b",
-        unread_count: 2,
-        cwd: PROJECT,
-        node_id: "primary",
-      });
-      eventBus.publish("session_user_input_changed", {
-        session_id: "b",
-        pending_user_input_count: 1,
-      });
-      eventBus.publish("session_error_changed", { session_id: "c", has_error: true });
     });
     const { container } = render(<ProjectStatusBadge path={PROJECT} />);
     expect(counts(container)).toEqual({
@@ -304,7 +328,7 @@ describe("ProjectStatusBadge — one counter per dimension", () => {
 
   it("a project whose only signal is an error still shows a counter", async () => {
     await act(async () => {
-      eventBus.publish("session_error_changed", { session_id: "a", has_error: true });
+      publishCounts(PROJECT, { errored_count: 1 });
     });
     const { container } = render(<ProjectStatusBadge path={PROJECT} />);
     expect(counts(container)).toEqual({ "project-errored-count": "1" });
@@ -314,28 +338,18 @@ describe("ProjectStatusBadge — one counter per dimension", () => {
     const { container } = render(<ProjectStatusBadge path={PROJECT} />);
     expect(indicators(container)).toEqual([]);
     await act(async () => {
-      eventBus.publish("session_user_input_changed", {
-        session_id: "a",
-        pending_user_input_count: 1,
-      });
+      publishCounts(PROJECT, { waiting_for_user_count: 1 });
     });
     expect(counts(container)).toEqual({ "project-waiting-count": "1" });
     await act(async () => {
-      eventBus.publish("session_user_input_changed", {
-        session_id: "a",
-        pending_user_input_count: 0,
-      });
+      publishCounts(PROJECT, {});
     });
     expect(indicators(container)).toEqual([]);
   });
 
   it("counters are scoped to their own project", async () => {
-    await resetRegistry([
-      { id: "mine", cwd: PROJECT, node_id: "primary" },
-      { id: "theirs", cwd: "/other", node_id: "primary" },
-    ]);
     await act(async () => {
-      eventBus.publish("session_error_changed", { session_id: "theirs", has_error: true });
+      publishCounts("/other", { errored_count: 1 });
     });
     const { container } = render(<ProjectStatusBadge path={PROJECT} />);
     expect(indicators(container)).toEqual([]);

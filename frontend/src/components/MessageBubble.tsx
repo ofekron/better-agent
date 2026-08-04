@@ -2412,12 +2412,15 @@ function messageWithHydratedRenderPayload(
     const hydratedWorkers = new Map(
       (hydrated.workers ?? []).map((worker) => [worker.delegation_id, worker]),
     );
-    next.workers = (current.workers ?? hydrated.workers ?? []).map((worker) => {
+    const currentWorkers = current.workers ?? [];
+    next.workers = currentWorkers.map((worker) => {
       const hydratedWorker = hydratedWorkers.get(worker.delegation_id);
+      hydratedWorkers.delete(worker.delegation_id);
       return hydratedWorker?.events
         ? { ...worker, events: hydratedWorker.events }
         : worker;
     });
+    next.workers.push(...hydratedWorkers.values());
   }
   return next;
 }
@@ -2472,7 +2475,7 @@ const AssistantMessage = memo(function AssistantMessage({
   runs?: import("../types").RunInfo[];
   relabelManagerAsWorker?: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. */
-  loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
+  loadPhase?: import("../hooks/useAppWebSocket").StreamingLoadPhase;
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId?: string;
   lazyFetchedMessage?: LazyFetchedMessage | null;
@@ -3127,7 +3130,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   runs?: import("../types").RunInfo[];
   sessionRunning?: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. */
-  loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
+  loadPhase?: import("../hooks/useAppWebSocket").StreamingLoadPhase;
   /** True only for groups freshly prepended via "load older". Plays a
    * one-shot fade/slide-in on mount. Read once at mount (framer-motion
    * owns the animation), so later re-renders never cancel it. Uses

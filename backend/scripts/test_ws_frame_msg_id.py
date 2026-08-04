@@ -26,6 +26,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -37,7 +38,8 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from jsonl_tailer import BetterAgentJsonlTailer  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
+from jsonl_tailer import BetterAgentJsonlTailer, _Subscriber  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -101,10 +103,59 @@ def main() -> int:
     )
     failures += not ok
 
-    # D. app_session_id still injected from entry.sid
+    # D. trusted routing ids are injected from entry.sid
     ok = _check(
-        "D: app_session_id injected from sid",
-        frame_a is not None and frame_a["data"].get("app_session_id") == "56482b82",
+        "D: routing ids injected from sid",
+        frame_a is not None
+        and frame_a["session_id"] == "56482b82"
+        and frame_a["data"].get("app_session_id") == "56482b82",
+    )
+    failures += not ok
+
+    # G. an extension-authored historical row cannot select a core outer type.
+    entry_g = {
+        "seq": 10,
+        "sid": "owned-session",
+        "type": "session_deleted",
+        "source": "extension:reviews.ext",
+        "data": {"session_id": "forged-session"},
+    }
+    frame_g = _frame(entry_g)
+    ok = _check(
+        "G: historical extension row is encapsulated with trusted routing",
+        frame_g == {
+            "type": "extension_event",
+            "data": {
+                "extension_id": "reviews.ext",
+                "event_name": "session_deleted",
+                "data": {"session_id": "forged-session"},
+            },
+            "seq": 10,
+            "session_id": "owned-session",
+        },
+    )
+    failures += not ok
+
+    # H. newly canonical rows keep exactly one extension envelope.
+    canonical_data = {
+        "extension_id": "reviews.ext",
+        "event_name": "marker_changed",
+        "data": {"marker": "open"},
+    }
+    entry_h = {
+        "seq": 11,
+        "sid": "owned-session",
+        "type": "extension_event",
+        "source": "extension:reviews.ext",
+        "data": canonical_data,
+    }
+    frame_h = _frame(entry_h)
+    ok = _check(
+        "H: canonical extension row is not double-wrapped",
+        frame_h is not None
+        and frame_h["type"] == "extension_event"
+        and frame_h["data"] == canonical_data
+        and frame_h["session_id"] == "owned-session",
     )
     failures += not ok
 
@@ -138,12 +189,89 @@ def main() -> int:
     )
     failures += not ok
 
+    # I. sequenced rows without trusted ownership metadata are not emitted.
+    ok = _check(
+        "I: sequenced row without sid is rejected",
+        _frame({"seq": 12, "type": "agent_message", "data": {}}) is None,
+    )
+    failures += not ok
+
     print()
     if failures:
         print(f"{FAIL} {failures} check(s) failed")
         return 1
     print(f"{PASS} all checks passed")
     return 0
+
+
+def test_ws_frame_routing_contract() -> None:
+    assert main() == 0
+
+
+def test_gap_replay_filters_sessions_and_canonicalizes_extension_rows() -> None:
+    async def scenario() -> None:
+        root_id = "extension-replay-root"
+        sid = "session-a"
+        other_sid = "session-b"
+        canonical_data = {
+            "extension_id": "reviews.ext",
+            "event_name": "marker_changed",
+            "data": {"marker": "open"},
+        }
+        seqs = event_ingester.ingest_batch(root_id, [
+            (
+                sid,
+                "session_deleted",
+                {"session_id": "forged-session"},
+                "extension:reviews.ext",
+                None,
+                None,
+            ),
+            (
+                other_sid,
+                "agent_message",
+                {"uuid": "other-session"},
+                "provider_stream",
+                None,
+                None,
+            ),
+            (
+                sid,
+                "extension_event",
+                canonical_data,
+                "extension:reviews.ext",
+                None,
+                None,
+            ),
+        ])
+        assert all(seq > 0 for seq in seqs)
+
+        frames: list[dict] = []
+
+        async def collect(frame: dict) -> None:
+            frames.append(frame)
+
+        subscriber = _Subscriber(
+            app_session_id=sid,
+            ws_callback=collect,
+            from_seq=0,
+            root_id=root_id,
+        )
+        await subscriber.catch_up_to(max(seqs))
+
+        assert [frame["seq"] for frame in frames] == [seqs[0], seqs[2]]
+        assert [frame["type"] for frame in frames] == [
+            "extension_event", "extension_event",
+        ]
+        assert [frame["session_id"] for frame in frames] == [sid, sid]
+        assert frames[0]["data"] == {
+            "extension_id": "reviews.ext",
+            "event_name": "session_deleted",
+            "data": {"session_id": "forged-session"},
+        }
+        assert frames[1]["data"] == canonical_data
+
+    asyncio.run(scenario())
 
 
 if __name__ == "__main__":

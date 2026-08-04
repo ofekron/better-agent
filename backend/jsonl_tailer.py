@@ -56,6 +56,7 @@ from weakref import WeakKeyDictionary
 
 import perf
 from claude_jsonl_enrich import _SubagentRegistry, enrich_jsonl_line
+from global_events import canonicalize_extension_session_event
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -1802,12 +1803,16 @@ class BetterAgentJsonlTailer:
 
         WS frame shape:
           - `agent_message` events pass through as-is with app_session_id:
-              {"type": "agent_message", "data": {..., "app_session_id": sid}, "seq": N}
+              {"type": "agent_message", "data": {..., "app_session_id": sid},
+               "seq": N, "session_id": sid}
           - Legacy `manager_event` rows (pre-migration) are unwrapped to
             agent_message for uniform frontend handling.
+          - extension-authored rows use the core-owned `extension_event`
+            envelope, including rows written before admission was encapsulated.
           - everything else passes through as `{"type": <type>, "data": <data>, "seq": N}`.
 
-        The top-level `seq` lets the frontend track the high-water mark.
+        The top-level `seq` lets the frontend track the high-water mark;
+        sequenced frames also carry trusted `session_id` from the journal row.
         """
         etype = entry.get("type")
         data = entry.get("data") or {}
@@ -1825,16 +1830,29 @@ class BetterAgentJsonlTailer:
                 data = inner_data
                 etype = "agent_message"
 
+        try:
+            etype, data = canonicalize_extension_session_event(
+                etype, data, entry.get("source"),
+            )
+        except ValueError:
+            return None
+
         # Annotate the frame with the entry's session id and owning
         # assistant message id so the frontend can route each frame to the
         # correct pane and message. `msg_id` is what lets a LATE event —
         # one the provider re-emits after its turn already completed and
         # the run was cleared — be applied to its real, already-finalized
         # message instead of spawning a duplicate placeholder bubble.
-        if isinstance(data, dict):
+        if isinstance(data, dict) and etype != "extension_event":
             if "app_session_id" not in data and entry.get("sid"):
                 data = {**data, "app_session_id": entry["sid"]}
             msg_id = entry.get("msg_id")
             if isinstance(msg_id, str) and msg_id and "msg_id" not in data:
                 data = {**data, "msg_id": msg_id}
-        return {"type": etype, "data": data, "seq": seq}
+        frame = {"type": etype, "data": data, "seq": seq}
+        if isinstance(seq, int):
+            session_id = entry.get("sid")
+            if not isinstance(session_id, str) or not session_id:
+                return None
+            frame["session_id"] = session_id
+        return frame

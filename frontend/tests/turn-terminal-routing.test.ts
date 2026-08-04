@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { resolveLiveFrameSessionId, useWebSocket } from "../src/hooks/useWebSocket";
+import {
+  resolveLiveFrameSessionId,
+  useAppWebSocket as useWebSocket,
+} from "../src/hooks/useAppWebSocket";
 import { MockWebSocketController } from "./harness/mockWebSocket";
 import type { WSEvent } from "../src/types";
 

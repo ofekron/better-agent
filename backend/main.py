@@ -671,12 +671,6 @@ ws_broadcaster = SessionWSBroadcaster(coordinator)
 from event_bus_subscribers import bind_session_ws_broadcaster
 bind_session_ws_broadcaster(ws_broadcaster)
 
-# Project-level running/unread/waiting_for_user/errored badge counters
-# invalidate on the same session mutation events the WS broadcaster
-# fans out, so they never freeze stale between project CRUD events.
-from event_bus_subscribers import bind_project_aggregates_invalidation
-bind_project_aggregates_invalidation()
-
 from event_bus_subscribers import (
     bind_post_turn_hooks,
     bind_pre_turn_hooks,
@@ -838,15 +832,11 @@ from session_helpers import (
     existing_session_ids as _existing_session_ids,
     session_lite_by_id as _session_lite_by_id,
 )
-from projects_api import invalidate_project_aggregates as _invalidate_project_aggregates
-
-
 async def _broadcast_projects_changed() -> None:
     """Single source for the projects_changed fan-out frame. Any
     mutation to the projects list (CRUD or auto-add-from-session) ends
     with this broadcast so open clients refresh the sidebar picker.
     Also rebuilds project mappings since project data changed."""
-    _invalidate_project_aggregates()
     await coordinator.broadcast_global("projects_changed", {})
     # Rebuild mappings in background — non-blocking.
     projects = await asyncio.to_thread(project_store.list_projects)

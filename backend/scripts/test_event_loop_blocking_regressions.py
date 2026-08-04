@@ -2591,15 +2591,15 @@ def test_session_discovery_reads_mode_without_deepcopy() -> None:
     assert 'session_manager.get(' not in discovery_source
 
 
-def test_project_aggregates_use_bulk_cached_state() -> None:
-    source = _api_source()
-    start = source.index("def _project_aggregates(")
-    end = source.index("def invalidate_project_aggregates(", start)
-    aggregate_source = source[start:end]
-    assert "cached_state_snapshot()" in aggregate_source
-    assert "unread_counts_snapshot()" in aggregate_source
-    assert "is_running_cached(" not in aggregate_source
-    assert "peek_unread_count(" not in aggregate_source
+def test_project_aggregates_use_event_driven_read_model() -> None:
+    route_source = (ROOT / "projects_api.py").read_text(encoding="utf-8")
+    projector_source = (
+        ROOT / "project_aggregate_projection.py"
+    ).read_text(encoding="utf-8")
+    assert "projection = await aggregate_snapshot()" in route_source
+    assert "session.status_projected" in projector_source
+    assert "session_manager" not in projector_source
+    assert "_project_aggregates" not in route_source
 
 
 def test_sidebar_file_paths_use_cached_sessions_dir() -> None:
@@ -4820,7 +4820,7 @@ if __name__ == "__main__":
     test_sidebar_organization_enrichment_stays_in_summary_index()
     test_sidebar_decoration_uses_bulk_cached_state()
     test_session_discovery_reads_mode_without_deepcopy()
-    test_project_aggregates_use_bulk_cached_state()
+    test_project_aggregates_use_event_driven_read_model()
     test_sidebar_file_paths_use_cached_sessions_dir()
     test_sidebar_payload_reuses_summary_projection_cache()
     test_session_list_uses_sorted_summary_cache()

@@ -631,24 +631,28 @@ class Client:
 
     # ── events ────────────────────────────────────────────────────────
     def broadcast_session_event(
-        self, event_type: str, data: dict[str, Any] | None = None, *, session_id: str = ""
+        self, event_name: str, data: dict[str, Any] | None = None, *, session_id: str = ""
     ) -> dict[str, Any]:
-        """Emit a per-session WebSocket event. ``source`` is pinned to this
-        extension server-side; one extension cannot impersonate another."""
+        """Emit a namespaced extension event to one session.
+
+        Core owns the outer ``extension_event`` type. ``event_name`` and
+        ``data`` are carried inside that envelope, and ``source`` is pinned to
+        this extension server-side so one extension cannot impersonate another.
+        """
         sid = session_id or self.app_session_id
         return self._post(
             f"/api/internal/sessions/{sid}/broadcast",
             {
-                "event_type": event_type,
+                "event_name": event_name,
                 "data": data or {},
             },
             timeout=10.0,
         )
 
     def publish_session_event(
-        self, event_type: str, data: dict[str, Any] | None = None, *, session_id: str = ""
+        self, event_name: str, data: dict[str, Any] | None = None, *, session_id: str = ""
     ) -> dict[str, Any]:
-        return self.broadcast_session_event(event_type, data, session_id=session_id)
+        return self.broadcast_session_event(event_name, data, session_id=session_id)
 
     def notify_toast(
         self,
@@ -660,10 +664,9 @@ class Client:
     ) -> dict[str, Any]:
         """Show a fire-and-forget toast in the target session's UI.
 
-        Thin wrapper over :meth:`broadcast_session_event` with a fixed
-        ``event_type`` (``"extension_toast"``) so every extension emits the
-        same shape and the frontend has exactly one event type to render,
-        instead of each extension inventing its own ad-hoc event name.
+        Thin wrapper over :meth:`broadcast_session_event` with the fixed inner
+        ``event_name`` ``"extension_toast"``. The outer WebSocket type remains
+        the core-owned ``extension_event`` envelope.
         ``level`` is one of ``"info"``/``"success"``/``"warning"``/``"error"``
         (frontend styling hint only, not enforced here). ``session_id``
         defaults to ``self.app_session_id`` like every other per-session

@@ -8,6 +8,7 @@ vi.mock("../src/progress/store", () => ({
 }));
 
 import { InstallationCapabilities } from "../src/components/InstallationCapabilities";
+import { eventBus } from "../src/lib/eventBus";
 
 type Resp = {
   ok: boolean;
@@ -59,8 +60,6 @@ function patchBody(call: FetchCall): Record<string, unknown> {
 function profileResponse(capabilities: Record<string, unknown>): Resp {
   return resp({ json: { capabilities } });
 }
-
-const EVENT = "installation_capabilities_changed";
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
@@ -447,14 +446,14 @@ describe("InstallationCapabilities — badges", () => {
 });
 
 describe("InstallationCapabilities — live refresh", () => {
-  it("re-fetches on the installation_capabilities_changed window event", async () => {
+  it("re-fetches on the installation_capabilities_changed fact", async () => {
     fetchMock.mockImplementation(async () =>
       profileResponse({ integrations: { enabled: false }, mobile: { enabled: false } }),
     );
     render(<InstallationCapabilities />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-    window.dispatchEvent(new Event(EVENT));
+    eventBus.publish("installation_capabilities_changed", {});
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
@@ -466,7 +465,7 @@ describe("InstallationCapabilities — live refresh", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
     unmount();
-    window.dispatchEvent(new Event(EVENT));
+    eventBus.publish("installation_capabilities_changed", {});
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

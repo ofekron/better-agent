@@ -75,6 +75,7 @@ _METADATA_KINDS = {
 # events, event stream, REST snapshot on reconnect).
 _INTERNAL_KINDS = {
     "agent_sid_set",
+    "status_projected",
     "parent_deleted",
     "worker_fanout_required",
     "workers_snapshot",
@@ -690,8 +691,8 @@ class SessionWSBroadcaster:
         INVARIANT: returns `("", node_id)` whenever the session must NOT
         contribute to the sidebar's per-project aggregate (missing
         session, or `should_hide_from_sidebar`). Frontend uses
-        `cwd === ""` as the "skip aggregate" signal — matches backend's
-        `_project_aggregates` filter (main.py:761).
+        `cwd === ""` as the "skip aggregate" signal, matching the
+        canonical status projection's project-membership rule.
 
         Import is lazy because the broadcaster is constructed before
         `session_manager.manager` fully initializes at app startup."""

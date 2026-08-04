@@ -4,11 +4,7 @@ import {
   sanitizeStatusFilters,
   statusKeysWithMode,
 } from "../src/lib/sessionStatusFilters";
-import {
-  SESSION_STATUS_KEYS,
-  statusKeyOf,
-  statusRankOf,
-} from "../src/lib/sessionRegistry";
+import { SESSION_STATUS_KEYS } from "../src/lib/sessionRegistry";
 
 /**
  * The advanced-search status filter. One chip per status bucket carries both
@@ -51,27 +47,17 @@ describe("status filter chips", () => {
   });
 });
 
-describe("status keys stay the source of the status rank", () => {
-  it("rank is the reverse index of the key (mirrors the backend)", () => {
-    const cases = [
-      { has_error: true },
-      { monitoring_state: "blocked_on_user" },
-      { unread_count: 2 },
-      { current_todos: [{ content: "A", status: "pending" }] },
-      { monitoring_state: "active" },
-      { markers: { ext: { color: "#x", tooltip: "t", tag: "ALL_TASKS__DONE" } } },
-      { monitoring_state: "idle" },
-    ];
-    for (const fields of cases) {
-      expect(statusRankOf(fields)).toBe(
-        SESSION_STATUS_KEYS.length - 1 - SESSION_STATUS_KEYS.indexOf(statusKeyOf(fields)),
-      );
-    }
-  });
-
+describe("status key vocabulary", () => {
   it("names every bucket exactly once", () => {
     expect(new Set(SESSION_STATUS_KEYS).size).toBe(SESSION_STATUS_KEYS.length);
-    expect(statusKeyOf({ has_error: true })).toBe("error");
-    expect(statusKeyOf({ monitoring_state: "idle" })).toBe("idle");
+    expect(SESSION_STATUS_KEYS).toEqual([
+      "error",
+      "needs_decision",
+      "unread",
+      "open_work",
+      "running",
+      "all_done",
+      "idle",
+    ]);
   });
 });

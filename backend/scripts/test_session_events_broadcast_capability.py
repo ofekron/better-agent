@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import capability_api  # noqa: E402
 import installation_profile  # noqa: E402
+from better_agent_sdk.client import Client as SDKClient  # noqa: E402
 
 EXT_ID = "ofek.test-broadcaster"
 
@@ -62,7 +63,8 @@ def _arm(monkeypatch, grants: list[str]) -> str:
     return capability_api.extension_token_registry.mint(EXT_ID)
 
 
-def test_granted_extension_broadcasts_with_pinned_source(monkeypatch) -> None:
+def test_granted_extension_broadcasts_encapsulated_event_with_pinned_source(monkeypatch) -> None:
+    import internal_extension_api
     import main
 
     token = _arm(monkeypatch, ["session-events.broadcast"])
@@ -71,7 +73,7 @@ def test_granted_extension_broadcasts_with_pinned_source(monkeypatch) -> None:
     async def fake_broadcast(app_session_id, event_type, data, *, source):
         captured.append((app_session_id, event_type, data, source))
 
-    monkeypatch.setattr(main.coordinator, "broadcast_session", fake_broadcast)
+    monkeypatch.setattr(internal_extension_api, "_broadcast_session", fake_broadcast)
     client = TestClient(main.app)
     try:
         response = client.post(
@@ -82,7 +84,7 @@ def test_granted_extension_broadcasts_with_pinned_source(monkeypatch) -> None:
                 "action": "broadcast",
                 "payload": {
                     "session_id": "s-1",
-                    "event_type": "assistant.board_updated",
+                    "event_name": "session_deleted",
                     "data": {"status": "open"},
                 },
             },
@@ -90,7 +92,18 @@ def test_granted_extension_broadcasts_with_pinned_source(monkeypatch) -> None:
     finally:
         client.close()
     assert response.status_code == 200, response.text
-    assert captured == [("s-1", "assistant.board_updated", {"status": "open"}, f"extension:{EXT_ID}")]
+    assert captured == [(
+        "s-1",
+        "extension_event",
+        {
+            "extension_id": EXT_ID,
+            "event_name": "session_deleted",
+            "data": {"status": "open"},
+        },
+        f"extension:{EXT_ID}",
+    )]
+    assert response.json()["event_type"] == "extension_event"
+    assert response.json()["event_name"] == "session_deleted"
 
 
 def test_ungranted_extension_is_rejected(monkeypatch) -> None:
@@ -105,7 +118,7 @@ def test_ungranted_extension_is_rejected(monkeypatch) -> None:
             json={
                 "capability": "session-events",
                 "action": "broadcast",
-                "payload": {"session_id": "s-1", "event_type": "x", "data": {}},
+                "payload": {"session_id": "s-1", "event_name": "x", "data": {}},
             },
         )
     finally:
@@ -123,7 +136,7 @@ def test_direct_broadcast_route_still_requires_internal_loopback(monkeypatch) ->
         response = client.post(
             "/api/internal/sessions/s-1/broadcast",
             headers={"X-Internal-Token": token},
-            json={"event_type": "x", "data": {}},
+            json={"event_name": "x", "data": {}},
         )
     finally:
         client.close()
@@ -138,6 +151,43 @@ def test_direct_broadcast_is_not_a_narrow_extension_route() -> None:
     narrow = source[source.index("narrow_extension_routes"):source.index("if principal[0]")]
     assert '"/api/internal/sessions/{sid}/broadcast"' not in narrow
     assert '"/api/internal/broadcast-session"' not in narrow
+
+
+def test_sdk_posts_inner_event_name(monkeypatch) -> None:
+    captured: list[tuple[str, dict, float]] = []
+    client = SDKClient(
+        internal_token="token",
+        extension_id=EXT_ID,
+        app_session_id="s-1",
+        backend_url="http://core",
+    )
+
+    def fake_post(path: str, payload: dict, *, timeout: float):
+        captured.append((path, payload, timeout))
+        return {"success": True}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    client.broadcast_session_event("assistant.board_updated", {"status": "open"})
+    client.notify_toast("saved")
+
+    assert captured == [
+        (
+            "/api/internal/sessions/s-1/broadcast",
+            {
+                "event_name": "assistant.board_updated",
+                "data": {"status": "open"},
+            },
+            10.0,
+        ),
+        (
+            "/api/internal/sessions/s-1/broadcast",
+            {
+                "event_name": "extension_toast",
+                "data": {"message": "saved", "level": "info"},
+            },
+            10.0,
+        ),
+    ]
 
 
 if __name__ == "__main__":

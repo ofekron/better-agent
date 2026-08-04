@@ -1,27 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { eventBus, type BusEventMap } from "src/lib/eventBus";
 import { API } from "../api";
 
-export type InstallStream = "stdout" | "stderr";
-export type InstallLine = { s: InstallStream; t: string };
-
-export type InstallRun = {
-  kind: string;
-  label: string;
-  command: string;
-  state: "running" | "succeeded" | "failed";
-  lines: InstallLine[];
-  started_at: string | null;
-  finished_at: string | null;
-  returncode: number | null;
-  installed: boolean | null;
-  message: string | null;
-};
+export type InstallRun = BusEventMap["provider_install_finished"];
+export type InstallLine = InstallRun["lines"][number];
+export type InstallStream = InstallLine["s"];
 
 type RunsMap = Record<string, InstallRun>;
 
-type ProgressDetail =
-  | { kind: string; phase: "started" }
-  | { kind: string; stream: InstallStream; text: string };
+type ProgressDetail = BusEventMap["provider_install_progress"];
 
 const cloneRuns = (r: RunsMap): RunsMap => ({ ...r });
 
@@ -75,20 +62,24 @@ export function useProviderInstalls(onFinished?: (kind: string) => void) {
       })
       .catch(() => {});
 
-    const onProgress = (e: Event) => {
-      const d = (e as CustomEvent<ProgressDetail>).detail;
-      if (d?.kind) applyProgress(d);
+    const onProgress = (detail: ProgressDetail) => {
+      if (detail?.kind) applyProgress(detail);
     };
-    const onFinishedEv = (e: Event) => {
-      const d = (e as CustomEvent<InstallRun>).detail;
-      if (d?.kind) applyFinished(d);
+    const onFinished = (run: InstallRun) => {
+      if (run?.kind) applyFinished(run);
     };
-    window.addEventListener("provider_install_progress", onProgress);
-    window.addEventListener("provider_install_finished", onFinishedEv);
+    const unsubscribeProgress = eventBus.subscribe(
+      "provider_install_progress",
+      onProgress,
+    );
+    const unsubscribeFinished = eventBus.subscribe(
+      "provider_install_finished",
+      onFinished,
+    );
     return () => {
       cancelled = true;
-      window.removeEventListener("provider_install_progress", onProgress);
-      window.removeEventListener("provider_install_finished", onFinishedEv);
+      unsubscribeProgress();
+      unsubscribeFinished();
     };
   }, [applyProgress, applyFinished]);
 

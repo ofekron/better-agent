@@ -20,7 +20,7 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { SearchInput } from "./SearchInput";
-import { eventBus } from "../lib/eventBus";
+import { eventBus } from "src/lib/eventBus";
 import { LanguageSelector } from "./LanguageSelector";
 import { cacheProviders } from "../utils/providerCache";
 import { providerNickname } from "../utils/providerDisplayName";
@@ -339,15 +339,14 @@ export function SettingsPage({
   }, []);
 
   useEffect(() => {
-    const handler = () => refetch();
-    window.addEventListener("provider_changed", handler);
-    return () => window.removeEventListener("provider_changed", handler);
+    return eventBus.subscribe("provider_changed", () => refetch());
   }, []);
 
   useEffect(() => {
-    const handler = () => refetchInstallationProfile();
-    window.addEventListener("installation_capabilities_changed", handler);
-    return () => window.removeEventListener("installation_capabilities_changed", handler);
+    return eventBus.subscribe(
+      "installation_capabilities_changed",
+      () => refetchInstallationProfile(),
+    );
   }, []);
 
   useEffect(() => {

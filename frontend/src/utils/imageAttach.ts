@@ -1,5 +1,5 @@
 import type { FileAttachment, PastedImage } from "../types";
-import type { FilePayload, ImagePayload } from "../hooks/useWebSocket";
+import type { FilePayload, ImagePayload } from "../hooks/useAppWebSocket";
 
 /** Wire payload (base64 + media type) → renderable PastedImage. Single
  *  source of truth for turning backend/offline-backlog attachments back

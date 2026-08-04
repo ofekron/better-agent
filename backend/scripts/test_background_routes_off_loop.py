@@ -127,7 +127,7 @@ def test_extension_session_field_routes_stay_off_loop() -> None:
 
 def test_project_routes_stay_off_loop() -> None:
     route_source = (ROOT / "projects_api.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(_project_aggregates)" in route_source
+    assert "projection = await aggregate_snapshot()" in route_source
     assert "await asyncio.to_thread(project_store.list_projects)" in route_source
     assert "await asyncio.to_thread(\n        project_store.add_project" in route_source
     assert "await asyncio.to_thread(\n        project_store.remove_project" in route_source

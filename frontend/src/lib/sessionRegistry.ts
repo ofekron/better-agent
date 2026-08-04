@@ -1,66 +1,15 @@
-/** Single source of truth for "is this session running" + "how many
- * unseen events does it have" on the frontend, AND for the per-project
- * aggregate derived from those.
- *
- * Architecture (per CLAUDE.md state-ownership rule):
- *
- *   • Backend owns per-session state: `monitoring_state`, `unread_count`,
- *     `pending_user_input_count`, `cwd`, `node_id`. We snapshot from
- *     `GET /api/sessions` at bootstrap, then apply authoritative WS deltas.
- *
- *   • Per-project aggregates are PURE DERIVATIONS from the per-session
- *     state — we derive locally instead of re-fetching `/api/projects`.
- *     This is what eliminates the `/api/projects` refetch storm: the
- *     old design called `refreshProjects()` on every WS
- *     `projects_changed` ping (which the backend fanned out on every
- *     running/unread/seen change). Under load that was ~132
- *     `/api/projects` calls/min.
- *
- *   • Sessions with `cwd === ""` in the WS payload are sidebar-hidden
- *     (`working_mode` set — file_editing / engineering / etc.). Their
- *     per-session state is still tracked (the chat view consumes it),
- *     but they DO NOT contribute to any aggregate. This mirrors the
- *     backend's `should_hide_from_sidebar` filter applied in
- *     `_project_aggregates` (main.py:761).
- *
- *   • `projects_changed` WS event is reserved for STRUCTURAL list
- *     changes (project add / delete / touch). The backend's
- *     broadcaster no longer fires it as a side-effect of running /
- *     unread / seen changes. `App.tsx` still listens and refetches
- *     `/api/projects` for the project METADATA list (path / name); the
- *     registry no longer touches it.
- *
- *   • Subscriptions flow through the typed eventBus. Per-sid /
- *     per-project listener sets gate React re-renders so an unread
- *     bump on session A doesn't force every `<SessionStatusBadge>`
- *     to re-render.
- *
- * Bootstrap sequencing:
- *   1. `bind()` wires bus subscriptions. Until `_bootstrapped === true`
- *      they BUFFER deltas into `_deltaBuffer` rather than apply.
- *   2. `bootstrap()` fetches `/api/sessions` once, builds the sessions
- *      map + derived projects map, drains the buffer in arrival order,
- *      then flips `_bootstrapped = true`.
- *   3. Concurrent `bootstrap()` calls (e.g. mount + visibilitychange
- *      racing) share the same in-flight promise.
- *   4. A bootstrap that fails (network) leaves `_bootstrapped = false`
- *      and continues buffering; the buffer survives across retries.
- *      Successful re-bootstrap (e.g. on visibilitychange) AFTER the
- *      flag is already true bypasses the buffer-drain path (deltas are
- *      already applying directly).
- *
- * Two consumer hooks:
- *   • `useSessionMeta(sid)` — session status fields for one sid.
- *   • `useProjectAggregate(path, nodeId)` — one independent counter per
- *     status dimension (`running_count`, `unread_session_count`,
- *     `waiting_for_user_count`, `errored_count`) for one project
- *     (matched by cwd + node_id).
- */
-
 import { useSyncExternalStore } from "react";
 
 import { API } from "../api";
-import type { TaskItem, TodoItem } from "../types";
+import {
+  SESSION_STATUS_KEYS,
+  type ProjectAggregateRecord,
+  type ProjectAggregatesChangedData,
+  type ProjectsSnapshot,
+  type SessionStatusKey,
+  type TaskItem,
+  type TodoItem,
+} from "../types";
 import { subscribeMany } from "./eventBus";
 
 export type MonitoringState =
@@ -89,10 +38,11 @@ export interface SessionMeta {
   pending_user_input_count: number;
   monitoring_state: MonitoringState;
   markers: Record<string, MarkerInfo>;
-  testape_active?: boolean;
   has_error: boolean;
   current_todos: TodoItem[];
   current_tasks: TaskItem[];
+  status_key: SessionStatusKey;
+  status_rank: number;
 }
 
 export interface ProjectAggregate {
@@ -115,6 +65,8 @@ type SessionRegistryRow = {
   unseen_error?: unknown;
   current_todos?: TodoItem[];
   current_tasks?: TaskItem[];
+  status_key?: SessionStatusKey;
+  status_rank?: number;
 };
 
 // Internal per-session record. `monitoring_state` is the SINGLE source of
@@ -130,10 +82,11 @@ interface SessionEntry {
   cwd: string;
   node_id: string;
   markers: Record<string, MarkerInfo>;
-  testape_active?: boolean;
   has_error: boolean;
   current_todos: TodoItem[];
   current_tasks: TaskItem[];
+  status_key: SessionStatusKey;
+  status_rank: number;
 }
 
 /** The one place `is_running` is defined, mirroring the backend's
@@ -152,16 +105,6 @@ function isRunning(state: MonitoringState): boolean {
 /** Waiting-on-user, mirroring the backend dimension: a pending
  * user-facing request, an approval blocking the turn, or a
  * NEEDS_USER_DECISION marker on the latest turn. */
-function isWaitingForUser(entry: SessionEntry): boolean {
-  return (
-    entry.monitoring_state === "blocked_on_user"
-    || entry.pending_user_input_count > 0
-    || Object.values(entry.markers).some(
-      (m) => m?.tag === MARKER_TAG_NEEDS_DECISION,
-    )
-  );
-}
-
 function entryFromRow(row: SessionRegistryRow): SessionEntry {
   const monitoringState: MonitoringState = (row.monitoring_state as MonitoringState)
     || (row.is_running ? "active" : "stopped");
@@ -172,10 +115,11 @@ function entryFromRow(row: SessionRegistryRow): SessionEntry {
     cwd: row.cwd ?? "",
     node_id: row.node_id || "primary",
     markers: (row.markers && typeof row.markers === "object") ? row.markers : {},
-    testape_active: false,
     has_error: !!row.has_error || !!row.unseen_error,
     current_todos: Array.isArray(row.current_todos) ? row.current_todos : [],
     current_tasks: Array.isArray(row.current_tasks) ? row.current_tasks : [],
+    status_key: row.status_key ?? "idle",
+    status_rank: Math.max(0, Number(row.status_rank) || 0),
   };
 }
 
@@ -186,10 +130,11 @@ const EMPTY_SESSION: SessionMeta = {
   pending_user_input_count: 0,
   monitoring_state: "stopped",
   markers: EMPTY_MARKERS,
-  testape_active: false,
   has_error: false,
   current_todos: [],
   current_tasks: [],
+  status_key: "idle",
+  status_rank: 0,
 };
 const EMPTY_AGGREGATE: ProjectAggregate = {
   running_count: 0,
@@ -197,55 +142,6 @@ const EMPTY_AGGREGATE: ProjectAggregate = {
   waiting_for_user_count: 0,
   errored_count: 0,
 };
-
-/** One session's projection onto its project's counters, mirroring the
- * backend's `_project_aggregates` so the live registry count and the
- * REST bootstrap count agree. Dimensions are independent — one session
- * may contribute to several.
- *
- * One deliberate asymmetry: an active TestApe run also counts as
- * running. TestApe activity arrives only as a WS event and has no
- * server-side store, so the backend cannot see it and the REST
- * bootstrap resets it to false. The badge is more truthful with it than
- * without it, so the live count includes it. */
-function contributionOf(entry: SessionEntry): boolean[] {
-  return [
-    isRunning(entry.monitoring_state) || !!entry.testape_active,
-    entry.unread_count > 0,
-    isWaitingForUser(entry),
-    entry.has_error,
-  ];
-}
-
-const AGGREGATE_COUNTERS: (keyof ProjectAggregate)[] = [
-  "running_count",
-  "unread_session_count",
-  "waiting_for_user_count",
-  "errored_count",
-];
-
-function accumulate(agg: ProjectAggregate, entry: SessionEntry): void {
-  contributionOf(entry).forEach((counts, i) => {
-    if (counts) agg[AGGREGATE_COUNTERS[i]] += 1;
-  });
-}
-
-/** The exact change-gate for a project recompute: the aggregate can only
- * move when a session's contribution changes. Derived from the same
- * projection the counters use, so no counter can go stale because a
- * dimension was left out of an ad-hoc condition. */
-function aggregateSignature(entry: SessionEntry): string {
-  return contributionOf(entry).map((b) => (b ? "1" : "0")).join("");
-}
-
-function isEmptyAggregate(agg: ProjectAggregate): boolean {
-  return (
-    agg.running_count === 0
-    && agg.unread_session_count === 0
-    && agg.waiting_for_user_count === 0
-    && agg.errored_count === 0
-  );
-}
 
 type Listener = () => void;
 type BufferedDelta =
@@ -256,8 +152,18 @@ type BufferedDelta =
   | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
   | { type: "session_deleted"; payload: SessionDeletedPayload }
-  | { type: "session_metadata_updated"; payload: SessionMetadataPayload }
-  | { type: "testape_session_state"; payload: { session_id: string; active: boolean } };
+  | { type: "session_metadata_updated"; payload: SessionMetadataPayload };
+
+interface SessionStatusPayload {
+  session_id: string;
+  status_key: SessionStatusKey;
+  status_rank: number;
+}
+
+export interface ProjectSnapshotToken {
+  sequence: number;
+  epochAtDispatch: string | null;
+}
 
 // Carries (cwd, node_id) so it can route the project aggregate +
 // materialize a not-yet-seen session.
@@ -332,11 +238,16 @@ class SessionRegistry {
   // removal.
   private sessions: Map<string, SessionEntry> = new Map();
 
-  // Per-project aggregate keyed by `<node_id>::<cwd>`. Derived from
-  // `sessions` by `recomputeProject`; never authoritative on its own.
+  // Backend-authored project aggregate projection keyed by `<node_id>::<cwd>`.
   private projects: Map<string, ProjectAggregate> = new Map();
-
-  private version = 0;
+  private _projectEpoch: string | null = null;
+  private _projectRevision = -1;
+  private _projectHydrated = false;
+  private _projectSnapshotInFlight: Promise<void> | null = null;
+  private _projectSnapshotRefreshQueued = false;
+  private _projectSnapshotRequestSeq = 0;
+  private _lastAppliedProjectSnapshotSeq = 0;
+  private _pendingProjectDeltas = new Map<number, ProjectAggregatesChangedData>();
 
   private sessionListeners: Map<string, Set<Listener>> = new Map();
   private projectListeners: Map<string, Set<Listener>> = new Map();
@@ -418,8 +329,11 @@ class SessionRegistry {
       ["session_metadata_updated", (p) => {
         this.dispatch("session_metadata_updated", p as SessionMetadataPayload);
       }],
-      ["testape_session_state", (p) => {
-        this.dispatch("testape_session_state", p as { session_id: string; active: boolean });
+      ["session_status_changed", (p) => {
+        this.onStatusChanged(p as SessionStatusPayload);
+      }],
+      ["project_aggregates_changed", (p) => {
+        this.onProjectAggregatesChanged(p as ProjectAggregatesChangedData);
       }],
       // Drift recovery for a reconnect gap. `session_monitoring_changed`
       // rides `broadcast_global` — a fire-and-forget ping to every connected
@@ -441,6 +355,7 @@ class SessionRegistry {
           return;
         }
         void this.bootstrap();
+        void this.refreshProjectSnapshot();
       }],
     ]);
 
@@ -451,6 +366,7 @@ class SessionRegistry {
     const onResume = () => {
       if (typeof document !== "undefined" && document.hidden) return;
       void this.bootstrap();
+      void this.refreshProjectSnapshot();
     };
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onResume);
@@ -547,8 +463,6 @@ class SessionRegistry {
       this._lastDeltaSeqBySid.set(s.id, ++this._deltaSeq);
     }
     this.sessions = nextSessions;
-    this.projects = this.deriveAllProjects(nextSessions);
-    this.version += 1;
 
     // First successful bootstrap — drain anything buffered while the
     // bus was bound but the snapshot hadn't arrived yet. Apply in
@@ -597,8 +511,6 @@ class SessionRegistry {
         return this.onDeleted(ev.payload);
       case "session_metadata_updated":
         return this.onMetadataUpdated(ev.payload);
-      case "testape_session_state":
-        return this.onTestApeState(ev.payload);
     }
   }
 
@@ -618,18 +530,9 @@ class SessionRegistry {
     });
   }
 
-  /** Single funnel for replacing one session's entry: store it, notify
-   * the session, and recompute the project aggregate when this session's
-   * contribution to it changed. Every per-dimension mutation goes
-   * through here, so a counter can never miss an update because its
-   * handler forgot to recompute. */
-  private commitEntry(sid: string, prev: SessionEntry, next: SessionEntry) {
+  private commitEntry(sid: string, next: SessionEntry) {
     this.sessions.set(sid, next);
-    this.version += 1;
     this.notifySession(sid);
-    if (aggregateSignature(next) === aggregateSignature(prev)) return;
-    this.recomputeProject(prev.cwd, prev.node_id);
-    this.notifyProject(prev.cwd, prev.node_id);
   }
 
   private onError(d: SessionErrorPayload) {
@@ -638,7 +541,7 @@ class SessionRegistry {
     if (!prev) return; // error dot doesn't materialize a session
     const next = !!d.has_error;
     if (prev.has_error === next) return;
-    this.commitEntry(d.session_id, prev, { ...prev, has_error: next });
+    this.commitEntry(d.session_id, { ...prev, has_error: next });
   }
 
   private onUserInput(d: SessionUserInputPayload) {
@@ -648,7 +551,7 @@ class SessionRegistry {
     if (!prev) return; // input dot doesn't materialize a session
     const next = Math.max(0, Number(d.pending_user_input_count) || 0);
     if (prev.pending_user_input_count === next) return;
-    this.commitEntry(sid, prev, { ...prev, pending_user_input_count: next });
+    this.commitEntry(sid, { ...prev, pending_user_input_count: next });
   }
 
   private onMarker(d: SessionMarkerPayload) {
@@ -666,15 +569,7 @@ class SessionRegistry {
     } else {
       delete markers[d.extension_id];
     }
-    this.commitEntry(d.session_id, prev, { ...prev, markers });
-  }
-
-  private onTestApeState(d: { session_id: string; active: boolean }) {
-    if (!d.session_id) return;
-    const prev = this.sessions.get(d.session_id);
-    if (!prev) return;
-    if ((prev.testape_active ?? false) === d.active) return; // no-op
-    this.commitEntry(d.session_id, prev, { ...prev, testape_active: d.active });
+    this.commitEntry(d.session_id, { ...prev, markers });
   }
 
   /** Shared delta-apply path for monitoring-state + unread. The
@@ -720,25 +615,19 @@ class SessionRegistry {
         cwd: payloadCwd,
         node_id: payloadNode,
         markers: {},
-        testape_active: false,
         has_error: false,
         current_todos: [],
         current_tasks: [],
+        status_key: "idle",
+        status_rank: 0,
       };
       this.sessions.set(sid, inserted);
-      this.recomputeProject(payloadCwd, payloadNode);
-      this.version += 1;
       this.notifySession(sid);
-      this.notifyProject(payloadCwd, payloadNode);
       return;
     }
 
     const nextState = patch.monitoring_state ?? prev.monitoring_state;
     const nextUnread = patch.unread_count ?? prev.unread_count;
-    // If the payload's routing key differs from what we have
-    // (visibility flip, or cwd migration we missed), migrate. We
-    // keep the entry's `cwd` aligned with the payload because the
-    // aggregate sums over `entry.cwd === project.cwd`.
     const routingChanged =
       payloadCwd !== prev.cwd || payloadNode !== prev.node_id;
     const valueChanged =
@@ -752,21 +641,13 @@ class SessionRegistry {
       cwd: payloadCwd,
       node_id: payloadNode,
       markers: prev.markers,
-      testape_active: prev.testape_active ?? false,
       has_error: prev.has_error,
       current_todos: prev.current_todos,
       current_tasks: prev.current_tasks,
+      status_key: prev.status_key,
+      status_rank: prev.status_rank,
     };
-    // Commits the entry and recomputes the origin project when this
-    // session's contribution changed.
-    this.commitEntry(sid, prev, next);
-    // A migration additionally moves the destination project, and moves
-    // the origin one even when the contribution itself is unchanged.
-    if (!routingChanged) return;
-    this.recomputeProject(prev.cwd, prev.node_id);
-    this.recomputeProject(payloadCwd, payloadNode);
-    this.notifyProject(prev.cwd, prev.node_id);
-    this.notifyProject(payloadCwd, payloadNode);
+    this.commitEntry(sid, next);
   }
 
   private onCreated(d: SessionCreatedPayload) {
@@ -784,22 +665,21 @@ class SessionRegistry {
       cwd: sess.cwd ?? "",
       node_id: sess.node_id || "primary",
       markers: {},
-      testape_active: false,
       has_error: false,
       current_todos: Array.isArray(sess.current_todos) ? sess.current_todos : [],
       current_tasks: Array.isArray(sess.current_tasks) ? sess.current_tasks : [],
+      status_key: "idle",
+      status_rank: 0,
     };
     this.sessions.set(sess.id, entry);
-    this.recomputeAndNotifySession(sess.id, entry.cwd, entry.node_id);
+    this.notifySession(sess.id);
   }
 
   private onDeleted(d: SessionDeletedPayload) {
     if (!d?.session_id) return;
-    const prev = this.sessions.get(d.session_id);
-    if (!prev) return;
-    this.sessions.delete(d.session_id);
+    if (!this.sessions.delete(d.session_id)) return;
     this.metaCache.delete(d.session_id);
-    this.recomputeAndNotifySession(d.session_id, prev.cwd, prev.node_id);
+    this.notifySession(d.session_id);
   }
 
   private onMetadataUpdated(d: SessionMetadataPayload) {
@@ -815,11 +695,6 @@ class SessionRegistry {
       patch.working_mode === undefined &&
       !hasTodoPatch
     ) return;
-    // A session that gains a working_mode is sidebar-hidden and must stop
-    // contributing to its project aggregate — same rule the routed-delta
-    // path applies when the backend ships `cwd: ""`. The patch carries no
-    // cwd, so route it to "" here. Clearing working_mode cannot restore
-    // the cwd from this payload; the next routed delta or list page does.
     const hiddenNow = patch.working_mode !== undefined && !!patch.working_mode;
     const newCwd = hiddenNow ? "" : (patch.cwd ?? prev.cwd);
     const newNode = patch.node_id ?? prev.node_id;
@@ -838,58 +713,165 @@ class SessionRegistry {
       current_todos: nextTodos,
       current_tasks: nextTasks,
     });
-    // Migrate: recompute BOTH the old and new project's aggregate.
-    this.recomputeProject(prev.cwd, prev.node_id);
-    this.recomputeProject(newCwd, newNode);
     this.notifySession(d.session_id);
-    this.notifyProject(prev.cwd, prev.node_id);
-    this.notifyProject(newCwd, newNode);
-    this.version += 1;
   }
 
-  // ── Aggregate derivation ─────────────────────────────────────────
+  private onStatusChanged(d: SessionStatusPayload) {
+    if (
+      !d?.session_id
+      || !SESSION_STATUS_KEYS.includes(d.status_key)
+      || !Number.isSafeInteger(d.status_rank)
+      || d.status_rank < 0
+    ) return;
+    const prev = this.sessions.get(d.session_id);
+    if (!prev) return;
+    if (prev.status_key === d.status_key && prev.status_rank === d.status_rank) return;
+    this.commitEntry(d.session_id, {
+      ...prev,
+      status_key: d.status_key,
+      status_rank: d.status_rank,
+    });
+  }
 
-  private deriveAllProjects(
-    sessions: Map<string, SessionEntry>,
-  ): Map<string, ProjectAggregate> {
-    const out = new Map<string, ProjectAggregate>();
-    for (const entry of sessions.values()) {
-      if (!entry.cwd) continue;
-      const key = projectKey(entry.cwd, entry.node_id);
-      let agg = out.get(key);
-      if (!agg) {
-        agg = { ...EMPTY_AGGREGATE };
-        out.set(key, agg);
+  beginProjectSnapshotFetch(): ProjectSnapshotToken {
+    return {
+      sequence: ++this._projectSnapshotRequestSeq,
+      epochAtDispatch: this._projectEpoch,
+    };
+  }
+
+  applyProjectSnapshot(
+    value: unknown,
+    token: ProjectSnapshotToken = this.beginProjectSnapshotFetch(),
+  ): boolean {
+    const snapshot = parseProjectSnapshot(value);
+    if (!snapshot) return false;
+    if (token.sequence < this._lastAppliedProjectSnapshotSeq) return false;
+    if (
+      token.epochAtDispatch !== this._projectEpoch
+      && snapshot.epoch !== this._projectEpoch
+    ) return false;
+    if (
+      snapshot.epoch === this._projectEpoch
+      && this._projectHydrated
+      && snapshot.revision < this._projectRevision
+    ) return false;
+
+    const next = new Map<string, ProjectAggregate>();
+    for (const project of snapshot.projects) {
+      next.set(projectKey(project.path, project.node_id), aggregateFromRecord(project));
+    }
+    this.replaceProjects(next);
+    this._projectEpoch = snapshot.epoch;
+    this._projectRevision = snapshot.revision;
+    this._projectHydrated = true;
+    this._lastAppliedProjectSnapshotSeq = token.sequence;
+    this._pendingProjectDeltas = new Map(
+      [...this._pendingProjectDeltas].filter(([, delta]) => delta.epoch === snapshot.epoch),
+    );
+    this.drainProjectDeltas();
+    return true;
+  }
+
+  refreshProjectSnapshot(): Promise<void> {
+    if (this._projectSnapshotInFlight) {
+      this._projectSnapshotRefreshQueued = true;
+      return this._projectSnapshotInFlight;
+    }
+    const token = this.beginProjectSnapshotFetch();
+    this._projectSnapshotInFlight = (async () => {
+      try {
+        const response = await fetch(`${API}/api/projects`);
+        if (!response.ok) return;
+        this.applyProjectSnapshot(await response.json(), token);
+      } catch {
+        return;
       }
-      accumulate(agg, entry);
-    }
-    return out;
+    })().finally(() => {
+      this._projectSnapshotInFlight = null;
+      if (!this._projectSnapshotRefreshQueued) return;
+      this._projectSnapshotRefreshQueued = false;
+      void this.refreshProjectSnapshot();
+    });
+    return this._projectSnapshotInFlight;
   }
 
-  /** Recompute one project's aggregate by summing matching sessions.
-   * Cheaper than maintaining incremental ±delta math (which drifts on
-   * any missed event). At ~200 sessions this is a microsecond
-   * iteration — paid only on the affected project, per delta. */
-  private recomputeProject(cwd: string, nodeId: string) {
-    if (!cwd) return; // hidden — no aggregate to recompute
-    const key = projectKey(cwd, nodeId);
-    const agg: ProjectAggregate = { ...EMPTY_AGGREGATE };
-    for (const entry of this.sessions.values()) {
-      if (entry.cwd !== cwd || entry.node_id !== nodeId) continue;
-      accumulate(agg, entry);
-    }
-    if (isEmptyAggregate(agg)) {
-      this.projects.delete(key);
+  private onProjectAggregatesChanged(delta: ProjectAggregatesChangedData) {
+    if (!isProjectAggregateDelta(delta)) return;
+    if (delta.epoch !== this._projectEpoch) {
+      this._projectEpoch = delta.epoch;
+      this._projectRevision = -1;
+      this._projectHydrated = false;
+      this._pendingProjectDeltas.clear();
+      this._pendingProjectDeltas.set(delta.revision, delta);
+      this.replaceProjects(new Map());
+      void this.refreshProjectSnapshot();
       return;
     }
-    this.projects.set(key, agg);
+    if (!this._projectHydrated) {
+      this._pendingProjectDeltas.set(delta.revision, delta);
+      void this.refreshProjectSnapshot();
+      return;
+    }
+    if (delta.revision <= this._projectRevision) return;
+    if (delta.revision > this._projectRevision + 1) {
+      this._pendingProjectDeltas.set(delta.revision, delta);
+      void this.refreshProjectSnapshot();
+      return;
+    }
+    this.applyProjectDelta(delta);
+    this.drainProjectDeltas();
   }
 
-  private recomputeAndNotifySession(sid: string, cwd: string, nodeId: string) {
-    this.recomputeProject(cwd, nodeId);
-    this.version += 1;
-    this.notifySession(sid);
-    this.notifyProject(cwd, nodeId);
+  private drainProjectDeltas() {
+    if (!this._projectHydrated) return;
+    for (;;) {
+      const next = this._pendingProjectDeltas.get(this._projectRevision + 1);
+      if (!next) break;
+      this._pendingProjectDeltas.delete(next.revision);
+      this.applyProjectDelta(next);
+    }
+    for (const revision of this._pendingProjectDeltas.keys()) {
+      if (revision <= this._projectRevision) this._pendingProjectDeltas.delete(revision);
+    }
+    if (this._pendingProjectDeltas.size > 0) void this.refreshProjectSnapshot();
+  }
+
+  private applyProjectDelta(delta: ProjectAggregatesChangedData) {
+    const changed = new Set<string>();
+    for (const record of delta.upserts) {
+      const key = projectKey(record.path, record.node_id);
+      const aggregate = aggregateFromRecord(record);
+      if (!sameAggregate(this.projects.get(key), aggregate)) {
+        this.projects.set(key, aggregate);
+        changed.add(key);
+      }
+    }
+    for (const record of delta.tombstones) {
+      const key = projectKey(record.path, record.node_id);
+      if (this.projects.delete(key)) changed.add(key);
+    }
+    this._projectRevision = delta.revision;
+    this.notifyProjectKeys(changed);
+  }
+
+  private replaceProjects(next: Map<string, ProjectAggregate>) {
+    const changed = new Set<string>();
+    for (const [key, previous] of this.projects) {
+      if (!sameAggregate(previous, next.get(key))) changed.add(key);
+    }
+    for (const [key, aggregate] of next) {
+      if (!sameAggregate(this.projects.get(key), aggregate)) changed.add(key);
+    }
+    this.projects = next;
+    this.notifyProjectKeys(changed);
+  }
+
+  private notifyProjectKeys(keys: Set<string>) {
+    for (const key of keys) {
+      const listeners = this.projectListeners.get(key);
+      if (listeners) for (const listener of listeners) listener();
+    }
   }
 
   private notifySession(sid: string) {
@@ -901,17 +883,8 @@ class SessionRegistry {
     if (ls) for (const fn of ls) fn();
   }
 
-  private notifyProject(cwd: string, nodeId: string) {
-    if (!cwd) return;
-    const ls = this.projectListeners.get(projectKey(cwd, nodeId));
-    if (ls) for (const fn of ls) fn();
-  }
-
   private notifyAll() {
     for (const ls of this.sessionListeners.values()) {
-      for (const fn of ls) fn();
-    }
-    for (const ls of this.projectListeners.values()) {
       for (const fn of ls) fn();
     }
   }
@@ -930,24 +903,17 @@ class SessionRegistry {
     const e = this.sessions.get(sid);
     if (!e) return EMPTY_SESSION;
     const cached = this.metaCache.get(sid);
-    // Compare the PROJECTED values that go into the result, not the raw
-    // entry fields — `testape_active` is optional and some mutation paths
-    // leave it `undefined`, but the result stores `!!e.testape_active`
-    // (false). Comparing `cached.testape_active (false)` to
-    // `e.testape_active (undefined)` is always false, so the cache would
-    // miss on every call, returning a fresh object each time and sending
-    // `useSyncExternalStore` into an infinite render loop (#185).
-    const testapeActive = !!e.testape_active;
     if (
       cached &&
       cached.unread_count === e.unread_count &&
       cached.pending_user_input_count === e.pending_user_input_count &&
       cached.monitoring_state === e.monitoring_state &&
       cached.markers === e.markers &&
-      cached.testape_active === testapeActive &&
       cached.has_error === e.has_error &&
       cached.current_todos === e.current_todos &&
-      cached.current_tasks === e.current_tasks
+      cached.current_tasks === e.current_tasks &&
+      cached.status_key === e.status_key &&
+      cached.status_rank === e.status_rank
     ) {
       return cached;
     }
@@ -957,10 +923,11 @@ class SessionRegistry {
       pending_user_input_count: e.pending_user_input_count,
       monitoring_state: e.monitoring_state,
       markers: e.markers,
-      testape_active: testapeActive,
       has_error: e.has_error,
       current_todos: e.current_todos,
       current_tasks: e.current_tasks,
+      status_key: e.status_key,
+      status_rank: e.status_rank,
     };
     this.metaCache.set(sid, next);
     return next;
@@ -986,15 +953,11 @@ class SessionRegistry {
    * never overwrites a live entry, which may be fresher than the page
    * snapshot. */
   seedFromRows(rows: SessionRegistryRow[]): void {
-    let changed = false;
     for (const s of rows) {
       if (!s?.id || this.sessions.has(s.id)) continue;
       this.sessions.set(s.id, entryFromRow(s));
-      this.recomputeProject(s.cwd ?? "", s.node_id || "primary");
       this.notifySession(s.id);
-      changed = true;
     }
-    if (changed) this.version += 1;
   }
 
   subscribeSession(sid: string, fn: Listener): () => void {
@@ -1024,7 +987,14 @@ class SessionRegistry {
     this._deltaBuffer = [];
     this._bootstrapped = false;
     this._bootstrapInFlight = null;
-    this.version += 1;
+    this._projectEpoch = null;
+    this._projectRevision = -1;
+    this._projectHydrated = false;
+    this._projectSnapshotInFlight = null;
+    this._projectSnapshotRefreshQueued = false;
+    this._projectSnapshotRequestSeq = 0;
+    this._lastAppliedProjectSnapshotSeq = 0;
+    this._pendingProjectDeltas.clear();
   }
 
   subscribeProject(path: string, nodeId: string, fn: Listener): () => void {
@@ -1046,98 +1016,94 @@ function projectKey(path: string, nodeId: string): string {
   return `${nodeId}::${path}`;
 }
 
+function aggregateFromRecord(record: ProjectAggregateRecord): ProjectAggregate {
+  return {
+    running_count: record.running_count,
+    unread_session_count: record.unread_session_count,
+    waiting_for_user_count: record.waiting_for_user_count,
+    errored_count: record.errored_count,
+  };
+}
+
+function sameAggregate(
+  left: ProjectAggregate | undefined,
+  right: ProjectAggregate | undefined,
+): boolean {
+  return left === right || (
+    !!left
+    && !!right
+    && left.running_count === right.running_count
+    && left.unread_session_count === right.unread_session_count
+    && left.waiting_for_user_count === right.waiting_for_user_count
+    && left.errored_count === right.errored_count
+  );
+}
+
+function isProjectAggregateRecord(value: unknown): value is ProjectAggregateRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.path === "string"
+    && record.path.length > 0
+    && typeof record.node_id === "string"
+    && record.node_id.length > 0
+    && [
+      record.running_count,
+      record.unread_session_count,
+      record.waiting_for_user_count,
+      record.errored_count,
+    ].every((count) => Number.isSafeInteger(count) && Number(count) >= 0);
+}
+
+function isProjectAggregateDelta(value: unknown): value is ProjectAggregatesChangedData {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const delta = value as Record<string, unknown>;
+  return typeof delta.epoch === "string"
+    && delta.epoch.length > 0
+    && Number.isSafeInteger(delta.revision)
+    && Number(delta.revision) >= 0
+    && Array.isArray(delta.upserts)
+    && delta.upserts.every(isProjectAggregateRecord)
+    && Array.isArray(delta.tombstones)
+    && delta.tombstones.every(isProjectAggregateRecord);
+}
+
+function parseProjectSnapshot(value: unknown): ProjectsSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const snapshot = value as Record<string, unknown>;
+  if (
+    typeof snapshot.epoch !== "string"
+    || snapshot.epoch.length === 0
+    || !Number.isSafeInteger(snapshot.revision)
+    || Number(snapshot.revision) < 0
+    || !Array.isArray(snapshot.projects)
+  ) return null;
+  const projects: Array<ProjectsSnapshot["projects"][number]> = [];
+  for (const value of snapshot.projects) {
+    if (!isProjectAggregateRecord(value)) return null;
+    projects.push(value as ProjectsSnapshot["projects"][number]);
+  }
+  return {
+    projects,
+    epoch: snapshot.epoch,
+    revision: Number(snapshot.revision),
+  };
+}
+
 // Module-level singleton. Bound at App mount via `sessionRegistry.bind()`.
 export const sessionRegistry = new SessionRegistry();
 
-// Status-sort tags + states. MUST mirror the backend `_session_status_rank`
-// in `backend/main.py` (parity locked by a test) — same buckets, same
-// highest-wins precedence.
-const MARKER_TAG_NEEDS_DECISION = "NEEDS_USER_DECISION";
-const MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE";
-const RUNNING_STATES = new Set<string>(["active", "waiting_on_background"]);
-
-interface StatusFields {
-  monitoring_state?: string;
-  unread_count?: number;
-  pending_user_input_count?: number;
-  markers?: Record<string, MarkerInfo>;
-  has_error?: boolean;
-  current_todos?: TodoItem[];
-  current_tasks?: TaskItem[];
-}
-
-function hasOpenWorkItems(s: StatusFields): boolean {
-  return [...(s.current_todos ?? []), ...(s.current_tasks ?? [])].some(
-    (item) => item.status !== "completed",
-  );
-}
-
-/** Status buckets, highest priority first. Mirrors the backend
- * `SESSION_STATUS_KEYS` — the shared vocabulary of the status sort (rank =
- * reverse index) and the status include/exclude filter. */
-export const SESSION_STATUS_KEYS = [
-  "error",
-  "needs_decision",
-  "unread",
-  "open_work",
-  "running",
-  "all_done",
-  "idle",
-] as const;
-
-export type SessionStatusKey = (typeof SESSION_STATUS_KEYS)[number];
-
-/** Status bucket for a session's live or row-snapshot status fields.
- * Mirrors the backend `_session_status_key` exactly. */
-export function statusKeyOf(s: StatusFields): SessionStatusKey {
-  const state = s.monitoring_state ?? "stopped";
-  if (s.has_error) return "error";
-  const tags = new Set(
-    Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
-  );
-  if (
-    state === "blocked_on_user" ||
-    (s.pending_user_input_count ?? 0) > 0 ||
-    tags.has(MARKER_TAG_NEEDS_DECISION)
-  ) return "needs_decision";
-  if ((s.unread_count ?? 0) > 0 && !RUNNING_STATES.has(state)) return "unread";
-  if (hasOpenWorkItems(s)) return "open_work";
-  if (RUNNING_STATES.has(state)) return "running";
-  if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return "all_done";
-  return "idle";
-}
-
-/** Status bucket for a session's live or row-snapshot status fields. Higher
- * sorts first. Mirrors the backend rank exactly. */
-export function statusRankOf(s: StatusFields): number {
-  return SESSION_STATUS_KEYS.length - 1 - SESSION_STATUS_KEYS.indexOf(statusKeyOf(s));
-}
+export { SESSION_STATUS_KEYS };
+export type { SessionStatusKey };
 
 /** Rank for a session row: prefer the LIVE registry entry (so it agrees with
  * the rendered badge); fall back to the row's own decorate fields when the
  * registry has no entry yet (deeper page not yet seeded). */
 export function statusRankForRow(session: {
   id: string;
-  monitoring_state?: string;
-  unread_count?: number;
-  pending_user_input_count?: number;
-  markers?: Record<string, MarkerInfo>;
-  has_error?: boolean;
-  unseen_error?: unknown;
-  current_todos?: TodoItem[];
-  current_tasks?: TaskItem[];
+  status_rank?: number;
 }): number {
   const live = sessionRegistry.peekMeta(session.id);
-  if (live) return statusRankOf(live);
-  return statusRankOf({
-    monitoring_state: session.monitoring_state,
-    unread_count: session.unread_count,
-    pending_user_input_count: session.pending_user_input_count,
-    markers: session.markers,
-    has_error: !!session.has_error || !!session.unseen_error,
-    current_todos: session.current_todos,
-    current_tasks: session.current_tasks,
-  });
+  return live?.status_rank ?? session.status_rank ?? 0;
 }
 
 export function useSessionMeta(sid: string | null | undefined): SessionMeta {

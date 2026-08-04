@@ -6,11 +6,9 @@ Unread, Errored, and Is-done. Every surface that displays or aggregates
 session status projects from `compute` rather than re-deriving from raw
 session fields.
 
-Two projections exist today:
-  * `session_listing_api._session_status_key` — collapses the dimensions
-    into one priority-ordered sidebar sort/filter bucket.
-  * `projects_api._project_aggregates` — counts each dimension
-    independently across a project's sessions.
+The priority-ordered sidebar bucket and rank are projected here too, so
+REST rows, live deltas, filters, sorting, and project aggregates share one
+formula owner.
 
 The dimensions are independent and combine freely: a session can be
 errored, unread, and waiting on the user at once. Only the bucket
@@ -41,6 +39,16 @@ _MONITORING_TO_RUNNING = {
     "active": RUNNING,
     "waiting_on_background": AWAITING_BACKGROUND,
 }
+
+SESSION_STATUS_KEYS: tuple[str, ...] = (
+    "error",
+    "needs_decision",
+    "unread",
+    "open_work",
+    "running",
+    "all_done",
+    "idle",
+)
 
 
 @dataclass(frozen=True)
@@ -139,4 +147,44 @@ def compute(
         errored=bool(session.get("has_error") or session.get("unseen_error")),
         is_done=MARKER_TAG_ALL_TASKS_DONE in tags,
         open_work=_has_open_work_items(session),
+    )
+
+
+def key_for(status: SessionStatus) -> str:
+    if status.errored:
+        return "error"
+    if status.waiting_for_user:
+        return "needs_decision"
+    if status.unread and not status.busy:
+        return "unread"
+    if status.open_work:
+        return "open_work"
+    if status.busy:
+        return "running"
+    if status.is_done:
+        return "all_done"
+    return "idle"
+
+
+def project_status(status: SessionStatus) -> dict[str, str | int]:
+    key = key_for(status)
+    return {
+        "status_key": key,
+        "status_rank": len(SESSION_STATUS_KEYS) - 1 - SESSION_STATUS_KEYS.index(key),
+    }
+
+
+def project(
+    session: dict,
+    monitoring_by_sid: dict[str, str],
+    unread_by_sid: dict[str, int],
+    pending_input_by_sid: dict[str, int] | None = None,
+) -> dict[str, str | int]:
+    return project_status(
+        compute(
+            session,
+            monitoring_by_sid,
+            unread_by_sid,
+            pending_input_by_sid,
+        )
     )

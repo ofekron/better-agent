@@ -7,6 +7,7 @@ import {
   useProviderInstalls,
   type InstallRun,
 } from "../src/hooks/useProviderInstalls";
+import { eventBus } from "../src/lib/eventBus";
 
 vi.mock("../src/api", () => ({ API: "https://backend.test" }));
 
@@ -38,19 +39,15 @@ function makeRun(over: Partial<InstallRun> = {}): InstallRun {
   };
 }
 
-function dispatchProgress(detail: unknown) {
+function publishProgress(detail: unknown) {
   act(() => {
-    window.dispatchEvent(
-      new CustomEvent("provider_install_progress", { detail }),
-    );
+    eventBus.publish("provider_install_progress", detail);
   });
 }
 
-function dispatchFinished(detail: unknown) {
+function publishFinished(detail: unknown) {
   act(() => {
-    window.dispatchEvent(
-      new CustomEvent("provider_install_finished", { detail }),
-    );
+    eventBus.publish("provider_install_finished", detail);
   });
 }
 
@@ -108,7 +105,7 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchProgress({ kind: "codex", phase: "started" });
+    publishProgress({ kind: "codex", phase: "started" });
 
     expect(result.current.runs).toEqual({});
   });
@@ -124,7 +121,7 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(result.current.runs.claude).toBeDefined());
 
-    dispatchProgress({ kind: "claude", phase: "started" });
+    publishProgress({ kind: "claude", phase: "started" });
 
     expect(result.current.runs.claude!.state).toBe("running");
   });
@@ -133,7 +130,7 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchProgress({ kind: "codex", stream: "stdout", text: "hello" });
+    publishProgress({ kind: "codex", stream: "stdout", text: "hello" });
 
     const run = result.current.runs.codex!;
     expect(run.state).toBe("running");
@@ -146,8 +143,8 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchProgress({ kind: "codex", stream: "stdout", text: "one" });
-    dispatchProgress({ kind: "codex", stream: "stderr", text: "two" });
+    publishProgress({ kind: "codex", stream: "stdout", text: "one" });
+    publishProgress({ kind: "codex", stream: "stderr", text: "two" });
 
     expect(result.current.runs.codex!.lines).toEqual([
       { s: "stdout", t: "one" },
@@ -159,14 +156,14 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchProgress({ kind: "codex", stream: "stdout", text: "head" });
+    publishProgress({ kind: "codex", stream: "stdout", text: "head" });
     act(() => {
       for (let i = 1; i <= 501; i++) {
-        window.dispatchEvent(
-          new CustomEvent("provider_install_progress", {
-            detail: { kind: "codex", stream: "stdout", text: `l${i}` },
-          }),
-        );
+        eventBus.publish("provider_install_progress", {
+          kind: "codex",
+          stream: "stdout",
+          text: `l${i}`,
+        });
       }
     });
 
@@ -181,7 +178,7 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchProgress({ stream: "stdout", text: "orphan" });
+    publishProgress({ stream: "stdout", text: "orphan" });
 
     expect(result.current.runs).toEqual({});
   });
@@ -197,7 +194,7 @@ describe("useProviderInstalls", () => {
       message: "boom",
       finished_at: "2026-01-01T00:00:00Z",
     });
-    dispatchFinished(terminal);
+    publishFinished(terminal);
 
     expect(result.current.runs.claude).toEqual(terminal);
     expect(onFinished).toHaveBeenCalledWith("claude");
@@ -208,7 +205,7 @@ describe("useProviderInstalls", () => {
     const { result } = renderHook(() => useProviderInstalls(onFinished));
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
-    dispatchFinished({ state: "failed", returncode: 1 });
+    publishFinished({ state: "failed", returncode: 1 });
 
     expect(onFinished).not.toHaveBeenCalled();
     expect(result.current.runs).toEqual({});
@@ -224,7 +221,7 @@ describe("useProviderInstalls", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalled());
     rerender({ cb: cb2 });
 
-    dispatchFinished(makeRun({ kind: "claude", state: "succeeded" }));
+    publishFinished(makeRun({ kind: "claude", state: "succeeded" }));
 
     expect(cb2).toHaveBeenCalledWith("claude");
     expect(cb1).not.toHaveBeenCalled();
@@ -275,20 +272,14 @@ describe("useProviderInstalls", () => {
     expect(result.current.runs).toEqual({});
   });
 
-  it("removes the window listeners on unmount", async () => {
-    const removeSpy = vi.spyOn(window, "removeEventListener");
+  it("unsubscribes from install projections on unmount", async () => {
     const { unmount, result } = renderHook(() => useProviderInstalls());
     await waitFor(() => expect(fetch).toHaveBeenCalled());
 
     unmount();
 
-    const removed = removeSpy.mock.calls.map((c) => c[0]);
-    expect(removed).toContain("provider_install_progress");
-    expect(removed).toContain("provider_install_finished");
-    removeSpy.mockRestore();
-
     // After unmount, a late progress event must not mutate state or throw.
-    dispatchProgress({ kind: "codex", stream: "stdout", text: "late" });
+    publishProgress({ kind: "codex", stream: "stdout", text: "late" });
     expect(result.current.runs).toEqual({});
   });
 

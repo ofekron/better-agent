@@ -52,8 +52,7 @@ function _refetch(): Promise<void> {
 // so we can upsert it directly without a refetch — but a re-dial of an
 // already-listed node (same node_id, possibly new fingerprint) must
 // REPLACE the stale row.
-function _onRequested(ev: Event): void {
-  const rec = (ev as CustomEvent<PendingNodeRegistration>).detail;
+function _onRequested(rec: PendingNodeRegistration): void {
   if (!rec || !rec.node_id) return;
   const next = _pending.filter((p) => p.node_id !== rec.node_id);
   next.push(rec);
@@ -64,8 +63,7 @@ function _onRequested(ev: Event): void {
 
 // The request was approved or denied (here or in another tab) — drop it
 // from the pending list so every open popup converges.
-function _onResolved(ev: Event): void {
-  const detail = (ev as CustomEvent<NodeRegistrationResolvedData>).detail;
+function _onResolved(detail: NodeRegistrationResolvedData): void {
   if (!detail || !detail.node_id) return;
   const next = _pending.filter((p) => p.node_id !== detail.node_id);
   if (next.length !== _pending.length) {
@@ -84,24 +82,19 @@ function _onConnectionChanged({ connected }: { connected: boolean }): void {
   if (connected && _authed) void _refetch();
 }
 
-if (typeof window !== "undefined") {
-  window.addEventListener("node_registration_requested", _onRequested);
-  window.addEventListener("node_registration_resolved", _onResolved);
-}
-
+const _offRequested = eventBus.subscribe("node_registration_requested", _onRequested);
+const _offResolved = eventBus.subscribe("node_registration_resolved", _onResolved);
 const _offConnection = eventBus.subscribe("ws_connection_changed", _onConnectionChanged);
 
-// Vite HMR: tear the old listeners down before the new module evaluates
+// Vite HMR: tear the old subscriptions down before the new module evaluates
 // so we don't multiply patches per event. The dispose callback only fires
 // when the dev server hot-replaces this module — unreachable in tests and
 // production builds, so it is excluded from coverage.
 /* v8 ignore start */
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    if (typeof window !== "undefined") {
-      window.removeEventListener("node_registration_requested", _onRequested);
-      window.removeEventListener("node_registration_resolved", _onResolved);
-    }
+    _offRequested();
+    _offResolved();
     _offConnection();
   });
 }

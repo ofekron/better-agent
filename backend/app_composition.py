@@ -198,12 +198,14 @@ def wire(
 
     from session_manager import manager as session_manager
 
+    import project_aggregate_projection
+    project_aggregate_projection.bind(coordinator.broadcast_global)
+
     import projects_api
     projects_api.configure(
         notify_projects_changed,
         coordinator.broadcast_global,
-        session_manager.projected_state_snapshot,
-        session_manager.projected_state_version,
+        project_aggregate_projection.snapshot,
     )
     app.include_router(projects_api.router)
 
@@ -217,6 +219,12 @@ def wire(
         delete_session_tree,
     )
     app.include_router(session_listing_api.router)
+
+    import session_status_projection
+    session_status_projection.bind(
+        coordinator.broadcast_global,
+        session_manager.projected_state_snapshot,
+    )
 
     # Mounted after session_listing_api so its literal /api/sessions/* paths
     # keep matching ahead of this router's /api/sessions/{session_id}.

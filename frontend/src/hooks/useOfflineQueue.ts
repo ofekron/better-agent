@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { CapabilityContext, OrchestrationMode, SendMode, Session } from "../types";
-import type { ImagePayload, FilePayload } from "./useWebSocket";
+import type { ImagePayload, FilePayload } from "./useAppWebSocket";
 import { uuidv4 } from "../lib/uuid";
 import { OFFLINE_TAB_ID } from "../lib/offlineFlushLock";
 import {

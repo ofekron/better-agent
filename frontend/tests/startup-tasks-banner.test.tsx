@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { fireEvent, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { StartupTasksBanner } from "../src/components/StartupTasksBanner";
+import { eventBus } from "../src/lib/eventBus";
 
 // Bootstrap i18n so `useTranslation` inside the banner has something
 // to resolve against. Side-effecting import is intentional.
@@ -163,19 +164,15 @@ describe("StartupTasksBanner — defends against non-array responses", () => {
       .spyOn(console, "error")
       .mockImplementation(() => {});
 
-    // Dispatch a malformed WS delta. Pre-fix, the handler would
+    // Publish a malformed WS delta. Pre-fix, the handler would
     // happily compute `prev[undefined] = null`, materializing an
     // `undefined`-keyed entry and (eventually, on render) emitting
     // React key warnings or surfacing a corrupt row.
     await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent("startup_task_changed", { detail: { task: null } }),
-      );
+      eventBus.publish("startup_task_changed", { task: null });
     });
     await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent("startup_task_changed", { detail: { task: {} } }),
-      );
+      eventBus.publish("startup_task_changed", { task: {} });
     });
 
     expect(caught).toEqual([]);
@@ -184,6 +181,51 @@ describe("StartupTasksBanner — defends against non-array responses", () => {
     expect(liveErrorSpy).not.toHaveBeenCalled();
 
     liveErrorSpy.mockRestore();
+    unmount();
+  });
+
+  it("keeps a live delta over a stale REST row and handles backend clear", async () => {
+    let resolveSnapshot!: (response: Response) => void;
+    globalThis.fetch = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+    const { container, unmount } = await mount(<StartupTasksBanner />);
+
+    await act(async () => {
+      eventBus.publish("startup_task_changed", {
+        task: {
+          id: "recover",
+          label: "startup_tasks.recover_in_flight",
+          state: "failed",
+          started_at: "2026-06-19T00:00:00.000Z",
+          finished_at: "2026-06-19T00:01:00.000Z",
+          error: "live failure",
+        },
+      });
+    });
+    expect(container.textContent).toContain("live failure");
+
+    await act(async () => {
+      resolveSnapshot({
+        ok: true,
+        json: async () => [{
+          id: "recover",
+          label: "startup_tasks.recover_in_flight",
+          state: "running",
+          started_at: "2026-06-19T00:00:00.000Z",
+          finished_at: null,
+          error: null,
+        }],
+      } as Response);
+    });
+    expect(container.textContent).toContain("live failure");
+
+    await act(async () => {
+      eventBus.publish("startup_task_changed", { cleared: true });
+    });
+    expect(container.firstChild).toBeNull();
     unmount();
   });
 

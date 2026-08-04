@@ -554,6 +554,13 @@ async def on_startup():
     except Exception:
         logger.exception("event_bus subscriber pinning failed")
 
+    import project_aggregate_projection
+    import session_status_projection
+    await session_status_projection.publish_all_current(
+        session_manager.projected_state_snapshot,
+    )
+    await project_aggregate_projection.flush()
+
     # Recovery gets its own thread, loop, and executor so a long
     # run-directory scan or replay does not compete with request
     # handlers. Started before the recovery startup task is dispatched.
@@ -1047,12 +1054,12 @@ async def on_shutdown():
             await _ns.stop_offset_flush_loop()
         except Exception:
             logger.exception("node_store: offset flush loop stop failed")
-    from event_bus_subscribers import (
-        unbind_session_ws_broadcaster,
-        unbind_project_aggregates_invalidation,
-    )
+    from event_bus_subscribers import unbind_session_ws_broadcaster
     unbind_session_ws_broadcaster()
-    unbind_project_aggregates_invalidation()
+    import session_status_projection
+    session_status_projection.unbind()
+    import project_aggregate_projection
+    await project_aggregate_projection.unbind()
     try:
         await _coordinator_ref.turn_manager.lifecycle.close()
     except Exception:

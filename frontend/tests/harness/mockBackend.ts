@@ -1374,7 +1374,17 @@ export class MockBackend {
     }
     // ---- Projects ----
     if (method === "GET" && path === "/api/projects") {
-      return { projects: this.state.projects };
+      return {
+        epoch: "mock-projects",
+        revision: 0,
+        projects: this.state.projects.map((project) => ({
+          ...project,
+          running_count: project.running_count ?? 0,
+          unread_session_count: project.unread_session_count ?? 0,
+          waiting_for_user_count: project.waiting_for_user_count ?? 0,
+          errored_count: project.errored_count ?? 0,
+        })),
+      };
     }
     if (method === "POST" && path === "/api/projects") {
       const p = body as { path: string };

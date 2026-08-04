@@ -1,9 +1,8 @@
-"""Perf regression: the session-list aggregation endpoints must NOT
-deep-hydrate (cold-load) sessions on the request path.
+"""Perf regression: session-list enrichment must not deep-hydrate
+(cold-load) sessions on the request path.
 
-Pins the fix for the ~44s `ingest.read_events` burst. `GET /api/projects`
-(`_project_aggregates`) and `GET /api/sessions` (`get_sessions`) enriched
-every session with `session_manager.is_running` + `get_unread_count`,
+Pins the fix for the ~44s `ingest.read_events` burst. Session-list enrichment
+used `session_manager.is_running` + `get_unread_count`,
 both of which cold-load the full tree via `_load_root` (~2 `events.jsonl`
 scans each: `hydrate_msg_events_from_jsonl` + `_derive_current_todos`).
 On a cold cache the first call deep-hydrated ALL sessions (~423 × 2 ≈
@@ -13,16 +12,13 @@ Asserts:
   1. SETUP IS GENUINELY COLD: the OLD blocking enrichers
      (`is_running` + `get_unread_count`) over the cold sessions DO scan
      `events.jsonl` (>0 read_events) — proves the sessions would scan.
-  2. THE FIX: `_project_aggregates()` over the SAME cold sessions
-     triggers ZERO `read_events` (coordinator.is_running +
-     peek_unread_count, both load-free).
-  3. WARM CORRECTNESS: `warm_unread(sid)` hydrates the count off the hot
+  2. WARM CORRECTNESS: `warm_unread(sid)` hydrates the count off the hot
      path, fires `unread_changed`, and makes `peek_unread_count` return
      the correct non-zero value so project aggregates converge instead
      of staying undercounted.
 
 Run with:
-    cd backend && .venv/bin/python scripts/test_project_aggregates_no_cold_load.py
+    ./scripts/run-backend-tests.sh -- scripts/test_project_aggregates_no_cold_load.py
 """
 
 from __future__ import annotations
@@ -148,24 +144,6 @@ def test_cold_setup_blocking_path_scans() -> bool:
     return ok
 
 
-def test_project_aggregates_zero_cold_load() -> bool:
-    """The fix: `_project_aggregates()` enriches via load-free sources
-    only → ZERO read_events even when every session is cold."""
-    from main import _project_aggregates
-
-    sids = [_mk_session_with_events() for _ in range(3)]
-    _drain_journal(sids)
-    for sid in sids:
-        _make_cold(sid)
-    _reset_counter()
-    _project_aggregates()
-    scanned = _read_events_calls["n"]
-    ok = scanned == 0
-    print(f"{PASS if ok else FAIL} _project_aggregates triggers 0 read_events "
-          f"on cold sessions (got {scanned})")
-    return ok
-
-
 def test_warm_unread_hydrates_and_fires() -> bool:
     """`warm_unread` fills the unread cache off the hot path so the
     project total converges, and fires `unread_changed`."""
@@ -265,7 +243,6 @@ def test_seen_fast_clean_rejects_later_render_before_non_render_tail() -> bool:
 def main() -> int:
     results = [
         test_cold_setup_blocking_path_scans(),
-        test_project_aggregates_zero_cold_load(),
         test_warm_unread_hydrates_and_fires(),
         test_seen_journal_head_fast_clean_skips_cold_load(),
         test_seen_fast_clean_rejects_later_render_before_non_render_tail(),

@@ -23,6 +23,7 @@ import config_store
 import extension_api
 import extension_jobs
 import extension_store
+import global_events
 import harness_profile_resolver
 import internal_guards
 import perf
@@ -1113,8 +1114,9 @@ async def internal_broadcast_session(
     """SDK: let an active extension emit a per-session WebSocket event.
 
     The event is persisted to events.jsonl via ``coordinator.broadcast_session``
-    and fanned to the session's WS subscribers by the tailer. ``source`` is
-    pinned to the calling extension id so emitted events are auditable and one
+    and fanned to the session's WS subscribers by the tailer. Core owns the
+    outer ``extension_event`` type; the extension chooses only the inner event
+    name and data. ``source`` is pinned to the calling extension id so one
     extension cannot impersonate another."""
     return await broadcast_session_for_internal_authority(sid, body)
 
@@ -1128,18 +1130,30 @@ async def broadcast_session_for_internal_authority(sid: str, body: dict):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     app_session_id = sid.strip()
-    event_type = str(body.get("event_type") or "").strip()
-    data = body.get("data") or {}
+    event_name = str(body.get("event_name") or "").strip()
+    data = body.get("data", {})
     if not app_session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
-    if not event_type or len(event_type) > 128 or "\n" in event_type:
-        raise HTTPException(status_code=400, detail="event_type must be a short single-line string")
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="data must be an object")
+    try:
+        event_type, event_data = global_events.extension_event(
+            extension_id, event_name, data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _configured(_broadcast_session, "broadcast_session")(
-        app_session_id, event_type, data, source=f"extension:{extension_id}",
+        app_session_id,
+        event_type,
+        event_data,
+        source=f"extension:{extension_id}",
     )
-    return {"success": True, "event_type": event_type, "source": f"extension:{extension_id}"}
+    return {
+        "success": True,
+        "event_type": event_type,
+        "event_name": event_name,
+        "source": f"extension:{extension_id}",
+    }
 
 
 @router.post("/api/internal/runtime-operations")

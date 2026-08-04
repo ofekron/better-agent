@@ -256,9 +256,10 @@ describe("sessions list background refresh is silent", () => {
 
     // A live status delta debounces the background full-span refetch.
     act(() => {
-      eventBus.publish("session_monitoring_changed", {
+      eventBus.publish("session_status_changed", {
         session_id: "s1",
-        monitoring_state: "active",
+        status_key: "running",
+        status_rank: 2,
       });
     });
     await act(async () => {
@@ -291,5 +292,43 @@ describe("sessions list background refresh is silent", () => {
     });
     await gate.resolveOldestList(EMPTY_PAGE);
     expect(result.current.sessionsSearching).toBe(false);
+  });
+
+  it("keeps backend relevance order while a search is active", async () => {
+    vi.useFakeTimers();
+    const gate = installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+    await gate.resolveOldestList(EMPTY_PAGE);
+
+    act(() => {
+      result.current.setSessionListFilters({ search: "bug", statusSort: true });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await gate.resolveOldestList({
+      sessions: [
+        { id: "relevant", status_key: "idle", status_rank: 0 },
+        { id: "less-relevant", status_key: "error", status_rank: 6 },
+      ],
+      has_more: false,
+      snapshot_complete: true,
+    });
+    expect(result.current.sessions.map((session) => session.id)).toEqual([
+      "relevant",
+      "less-relevant",
+    ]);
+
+    act(() => {
+      eventBus.publish("session_status_changed", {
+        session_id: "less-relevant",
+        status_key: "error",
+        status_rank: 6,
+      });
+    });
+    expect(result.current.sessions.map((session) => session.id)).toEqual([
+      "relevant",
+      "less-relevant",
+    ]);
   });
 });

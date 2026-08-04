@@ -3,10 +3,10 @@ import { Capacitor } from "@capacitor/core";
 import { App as CapApp, type AppState } from "@capacitor/app";
 import { useTranslation } from "react-i18next";
 import {
-  useWebSocket,
+  useAppWebSocket,
   type ImagePayload,
   type FilePayload,
-} from "./hooks/useWebSocket";
+} from "./hooks/useAppWebSocket";
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
 import { filePayloadToAttachment, imagePayloadToPastedImage } from "./utils/imageAttach";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
@@ -480,9 +480,8 @@ export default function App() {
     window.location.reload();
   }, []);
 
-  // Re-gate when the WS reports an auth failure.
- useWebSocket
-  // surfaces this via a custom event so we don't have to thread
+  // Re-gate when the WS reports an auth failure. The socket surfaces
+  // this via a custom event so we don't have to thread
   // a callback through the whole tree.
   useEffect(() => {
     const onAuthFail = () => {
@@ -926,7 +925,7 @@ function AppMain({
 
   // Stable per-tab id: sent in PATCH bodies for tag/draft mutations
   // and echoed back in `session_metadata_updated` WS events. The
-  // useWebSocket hook drops events whose `originated_by` matches this
+  // The application WebSocket projector drops events whose `originated_by` matches this
   // id so a debounced draft PATCH can't race ahead and clobber newer
   // keystrokes typed after the PATCH but before its broadcast lands.
   // Lazy `useState` init so the random id is generated exactly once
@@ -1173,7 +1172,7 @@ function AppMain({
 
   // Ephemeral PR-created toast shown in the chat panel. Single slot
   // (latest wins), auto-dismisses after 10s. Fired only on the LIVE
-  // pr-link push (useWebSocket onPrLink), never on replay.
+  // pr-link push (useAppWebSocket onPrLink), never on replay.
   const [prToast, setPrToast] = useState<{
     prNumber?: number;
     prUrl: string;
@@ -1401,7 +1400,7 @@ function AppMain({
   }, []);
 
   // Optimistic user bubbles, keyed by app_session_id. Declared up here
-  // (above useWebSocket) so `handleUserMessagePersisted` can clear the
+  // (above useAppWebSocket) so `handleUserMessagePersisted` can clear the
   // pending entry directly when the ack frame arrives, without having
   // to round-trip through React's events buffer (which a tight burst
   // of frames can wipe via `turn_start`'s `setEvents([])` before the
@@ -1687,10 +1686,10 @@ function AppMain({
     [removeAckedOfflineAction, setPendingForSession]
   );
 
-  // Forward-declared shim so useWebSocket's `onProjectsChanged` option can
+  // Forward-declared shim so useAppWebSocket's `onProjectsChanged` option can
   // dispatch to refreshProjects, which is declared further down the file.
   // The ref is patched by an effect right after refreshProjects's
-  // declaration. Stable identity ⇒ no churn in useWebSocket option deps.
+  // declaration. Stable identity ⇒ no churn in useAppWebSocket option deps.
   const refreshProjectsRef = useRef<() => void>(() => {});
   const handleProjectsChanged = useCallback(() => {
     refreshProjectsRef.current();
@@ -1722,7 +1721,7 @@ function AppMain({
     lastResult,
     streamingAppSessionId,
     checkConnection,
-  } = useWebSocket(WS_URL, {
+  } = useAppWebSocket(WS_URL, {
     currentAppSessionId: wsTargetSessionId,
     prepareSessionSubscriptions: () => {
       if (!currentSession?.id) return;
@@ -1730,7 +1729,7 @@ function AppMain({
     },
     // Subscribe to every pane in the open tree. `currentAppSessionId`
     // covers the primary transport target; this list carries the rest.
-    // useWebSocket de-duplicates and diffs against the previous set so
+    // The WebSocket transport de-duplicates and diffs against the previous set so
     // subscribe/unsubscribe frames only fire on actual changes.
     additionalAppSessionIds: wsTargetSessionId
       ? additionalSessionSubscriptionIds(allOpenSessionIds(), wsTargetSessionId)
@@ -2850,7 +2849,7 @@ function AppMain({
       setRightPanelTab("files");
     }
   }, [builtinExtensions.canvas, builtinExtensions.testape, rightPanelTab]);
-  // pendingBySession is declared above (right before useWebSocket) so
+  // pendingBySession is declared above (right before useAppWebSocket) so
   // the user_message_persisted callback can clear it imperatively.
   // Each session owns its own pending list so a prompt mid-flight in
   // session A does not bleed into session B's view.
@@ -3650,10 +3649,12 @@ function AppMain({
   const [fileChooserMode, setFileChooserMode] = useState<"browse" | "fileEdit">("browse");
 
   const refreshProjects = useCallback(async () => {
+    const snapshotToken = sessionRegistry.beginProjectSnapshotFetch();
     try {
       const res = await progressTrackedFetch("project:list", `${API}/api/projects`);
       const data = await res.json();
       setProjects(data.projects || []);
+      sessionRegistry.applyProjectSnapshot(data, snapshotToken);
       // Hydrate project update counts (fixes badge showing 0 until next WS event)
       if (builtinExtensions.projectStructure && data.projects?.length) {
         const cwds = data.projects.map((p: Project) => p.path);
@@ -4683,7 +4684,7 @@ function AppMain({
   }, [model, currentSession, refreshSessions, clientId, defaultRuntimeProfile, runtimeProfileLastModels]);
 
   // user_message_persisted ack is now handled imperatively by
-  // `handleUserMessagePersisted` (passed to useWebSocket above) —
+  // `handleUserMessagePersisted` (passed to useAppWebSocket above) —
   // dispatched directly from `onmessage` so it can't be lost to a
   // subsequent `setEvents([])` in the same React commit cycle.
 
