@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,7 @@ def _make_active_venv(backend_dir: Path, relative: str = ".venvs/abc") -> Path:
     env_dir = backend_dir / relative
     (env_dir / "bin").mkdir(parents=True, exist_ok=True)
     (env_dir / "bin" / "python").write_text("#!/bin/sh\n")
+    (env_dir / "bin" / "python").chmod(0o700)
     (backend_dir / de.ACTIVE_POINTER_NAME).write_text(relative, encoding="utf-8")
     return env_dir.resolve()
 
@@ -146,6 +148,84 @@ class TestVerifiedActiveEnv:
         env = captured["env"]
         assert "PYTHONHOME" not in env
         assert "PYTHONPATH" not in env
+
+    def test_source_env_is_allowlisted_for_target_verification(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        _make_active_venv(tmp_path)
+        (tmp_path / "dependency_plan.py").write_text("# planner")
+        captured: dict = {}
+
+        def fake_run(_argv, **kwargs):
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess([], 0)
+
+        monkeypatch.setattr(de.subprocess, "run", fake_run)
+        de.verified_active_env(
+            tmp_path,
+            source_env={
+                "PATH": "/usr/bin",
+                "BETTER_AGENT_HOME": "/state",
+                "PYTHONHOME": "/poison",
+                "PYTHONPATH": "/poison",
+                "BETTER_AGENT_CREDENTIAL_SESSION_AUTH": "secret",
+                "BETTER_AGENT_BACKEND_LAUNCH_TOKEN": "secret",
+                "BA_PASSWORD": "secret",
+            },
+        )
+
+        assert captured["env"] == {
+            "PATH": "/usr/bin",
+            "BETTER_AGENT_HOME": "/state",
+        }
+
+
+class TestActiveRuntimeEnv:
+    def test_stale_but_activated_environment_remains_runnable(self, tmp_path) -> None:
+        env_dir = _make_active_venv(tmp_path)
+        de.python_in(env_dir).write_text(
+            "#!/bin/sh\n[ \"$2\" = \"assert-active-plan\" ] && exit 1\nexit 0\n",
+            encoding="utf-8",
+        )
+        (env_dir / de.PLAN_MARKER).write_text(
+            json.dumps({"schema_version": 1, "hash": "activated-plan"}),
+            encoding="utf-8",
+        )
+        (tmp_path / "dependency_plan.py").write_text("raise SystemExit(1)\n")
+
+        assert de.active_runtime_env(tmp_path) == env_dir
+        with pytest.raises(de.DependencyEnvironmentError) as exc:
+            de.verified_active_env(tmp_path)
+        assert "stale" in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "marker",
+        (None, "{", json.dumps({"schema_version": 1, "hash": ""})),
+    )
+    def test_invalid_activation_receipt_fails_closed(
+        self,
+        tmp_path,
+        marker: str | None,
+    ) -> None:
+        env_dir = _make_active_venv(tmp_path)
+        if marker is not None:
+            (env_dir / de.PLAN_MARKER).write_text(marker, encoding="utf-8")
+        with pytest.raises(de.DependencyEnvironmentError) as exc:
+            de.active_runtime_env(tmp_path)
+        assert "receipt is invalid" in str(exc.value)
+
+    def test_non_executable_interpreter_fails_closed(self, tmp_path) -> None:
+        env_dir = _make_active_venv(tmp_path)
+        (env_dir / de.PLAN_MARKER).write_text(
+            json.dumps({"schema_version": 1, "hash": "activated-plan"}),
+            encoding="utf-8",
+        )
+        de.python_in(env_dir).chmod(0o600)
+        with pytest.raises(de.DependencyEnvironmentError) as exc:
+            de.active_runtime_env(tmp_path)
+        assert "not runnable" in str(exc.value)
 
 
 class TestVerifiedActivePython:

@@ -456,7 +456,10 @@ def test_adoption_does_not_seize_a_default_the_user_already_had() -> None:
         ):
             for chosen in (True, False):
                 dependency_plan.activate_prepared_installation(
-                    Path("/tmp/env"), {"mode": "default"}, make_default=chosen,
+                    Path("/tmp/env"),
+                    {"mode": "default"},
+                    "uv",
+                    make_default=chosen,
                 )
             assert pointer.called
         assert forwarded == [True, False], forwarded

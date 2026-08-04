@@ -141,7 +141,10 @@ async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
         seed_ui_only_harness(mode)
         environment = dependency_plan.prepare_installation(uv, profile)
         dependency_plan.activate_prepared_installation(
-            environment, profile, make_default=not adopt,
+            environment,
+            profile,
+            uv,
+            make_default=not adopt,
         )
 
     channel = install_channel.record_install_channel(mode)

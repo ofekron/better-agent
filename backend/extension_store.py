@@ -3691,7 +3691,7 @@ def _extension_python(install_root: Path, *, has_dependency_environment: bool) -
             raise ExtensionError("extension dependency environment is not runnable")
         return extension_python
     try:
-        return dependency_plan.verified_active_python(Path(__file__).resolve().parent)
+        return dependency_plan.active_runtime_python(Path(__file__).resolve().parent)
     except dependency_plan.DependencyPlanError as exc:
         raise ExtensionError(
             "extension runtime requires an active backend dependency environment"

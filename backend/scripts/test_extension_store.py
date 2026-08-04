@@ -436,7 +436,7 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
     root = Path(tempfile.mkdtemp(prefix="bc-test-internal-runtime-mcp-"))
     package = root / "internal-mcp"
     extension_id = "ofek.internal-runtime-mcp"
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -473,7 +473,7 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         persist=True,
     )
     try:
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: Path("/authoritative/backend/python")
         )
         extension_store.set_enabled(extension_id, True)
@@ -499,7 +499,7 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         if "internal-runtime" in configs:
             raise AssertionError("internal runtime MCP available without internal token")
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         try:
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
@@ -511,7 +511,7 @@ def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
     root = Path(tempfile.mkdtemp(prefix="bc-test-legacy-internal-runtime-mcp-"))
     package = root / "internal-mcp"
     extension_id = "ofek.legacy-internal-runtime-mcp"
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -548,7 +548,7 @@ def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
         persist=True,
     )
     try:
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: Path("/authoritative/backend/python")
         )
         extension_store.set_enabled(extension_id, True)
@@ -567,7 +567,7 @@ def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
         if "legacy-internal-runtime" not in configs:
             raise AssertionError("legacy internal runtime MCP unavailable to non-user-facing runner")
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         try:
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
@@ -4352,7 +4352,7 @@ def test_skill_entrypoint_description_is_validated_and_stored() -> None:
 
 
 def test_module_based_mcp_server_config() -> None:
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     active_python = Path("/authoritative/backend/python")
     package = _write_private_extension_package(
         "ofek.module-mcp",
@@ -4390,7 +4390,7 @@ def test_module_based_mcp_server_config() -> None:
     )
     extension_store.set_enabled(record["manifest"]["id"], True)
     try:
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: active_python
         )
         configs = extension_store.runtime_mcp_server_configs(
@@ -4415,7 +4415,7 @@ def test_module_based_mcp_server_config() -> None:
         if str(Path(record["source"]["install_path"]).resolve()) not in pythonpath.split(os.pathsep):
             raise AssertionError(config["env"])
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         try:
             extension_store.uninstall("ofek.module-mcp")
         except Exception:
@@ -4423,11 +4423,11 @@ def test_module_based_mcp_server_config() -> None:
 
 
 def test_installed_extension_exports_runtime_mcp_server_config() -> None:
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     active_python = Path("/authoritative/backend/python")
     work = _private_monorepo_test_work("bc-test-runtime-extension-repo-")
     try:
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: active_python
         )
         repo, _commit = _make_runtime_repo(work)
@@ -4474,7 +4474,7 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
         if config["env"]["OF_EXTENSION_TEST"] != "1":
             raise AssertionError(config)
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         try:
             extension_store.uninstall("ofek.scheduler")
         except extension_store.ExtensionError:
@@ -4484,9 +4484,9 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
 
 def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
     package = Path(tempfile.mkdtemp(prefix="bc-test-no-loopback-mcp-")) / "no-loopback"
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     try:
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: Path("/authoritative/backend/python")
         )
         (package / "mcp").mkdir(parents=True)
@@ -4552,7 +4552,7 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
         if env["BETTER_CLAUDE_EXTENSION_ID"] != record["manifest"]["id"]:
             raise AssertionError(env)
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         try:
             extension_store.uninstall("ofek.no-loopback")
         except extension_store.ExtensionError:
@@ -6266,14 +6266,14 @@ def _write_mcp_server(
 
 def test_base_extension_environment_lists_sdk_mcp_tools() -> None:
     target = Path(tempfile.mkdtemp(prefix="bc-test-extension-base-mcp-"))
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     try:
         _write_mcp_server(
             target / "scheduler_fixture" / "server.py",
             server_name="scheduler",
             tool_name="schedule_list",
         )
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: Path(sys.executable)
         )
         item = {
@@ -6318,7 +6318,7 @@ def test_base_extension_environment_lists_sdk_mcp_tools() -> None:
         if tool_names != {"schedule_list"}:
             raise AssertionError(tool_names)
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         shutil.rmtree(target, ignore_errors=True)
 
 
@@ -6362,12 +6362,12 @@ def test_private_extension_environment_lists_sdk_mcp_tools() -> None:
 
 def test_extension_runtime_prefers_its_dependency_environment() -> None:
     target = Path(tempfile.mkdtemp(prefix="bc-test-extension-runtime-python-"))
-    original_verified = extension_store.dependency_plan.verified_active_python
+    original_verified = extension_store.dependency_plan.active_runtime_python
     try:
         extension_python = extension_store._venv_python(target / ".venv")
         extension_python.parent.mkdir(parents=True)
         shutil.copy2(sys.executable, extension_python)
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: (_ for _ in ()).throw(
                 AssertionError("backend interpreter should not be resolved")
             )
@@ -6390,7 +6390,7 @@ def test_extension_runtime_prefers_its_dependency_environment() -> None:
         else:
             raise AssertionError("corrupt extension environment should fail closed")
         active_python = Path("/authoritative/backend/python")
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: active_python
         )
         if extension_store._extension_python(
@@ -6399,7 +6399,7 @@ def test_extension_runtime_prefers_its_dependency_environment() -> None:
         ) != active_python:
             raise AssertionError("undeclared extension environment was selected")
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.dependency_plan.active_runtime_python = original_verified
         shutil.rmtree(target, ignore_errors=True)
 
 
@@ -6407,7 +6407,7 @@ if __name__ == "__main__":
     import installation_profile
 
     original_integrations_enabled = installation_profile.integrations_enabled
-    original_verified_active_python = extension_store.dependency_plan.verified_active_python
+    original_verified_active_python = extension_store.dependency_plan.active_runtime_python
     installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         test_sdk_runtime_requirements_resolves_frozen_layout()
@@ -6464,7 +6464,7 @@ if __name__ == "__main__":
         test_smoke_rejects_entrypoint_module_resolved_outside_package()
         test_smoke_acknowledges_import_before_interpreter_teardown()
         test_optional_permissions_allow_forbid()
-        extension_store.dependency_plan.verified_active_python = (
+        extension_store.dependency_plan.active_runtime_python = (
             lambda _backend_dir: Path("/authoritative/backend/python")
         )
         test_command_based_mcp_server()
@@ -6522,7 +6522,7 @@ if __name__ == "__main__":
         test_prune_extension_versions_tolerates_vanishing_dir()
         test_get_extension_setting_values_never_touches_os_keychain()
     finally:
-        extension_store.dependency_plan.verified_active_python = original_verified_active_python
+        extension_store.dependency_plan.active_runtime_python = original_verified_active_python
         installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(_TMP_OS_HOME, ignore_errors=True)

@@ -13,6 +13,7 @@ from typing import Callable
 from backend_exit_journal import append_backend_exit
 from backend_recovery_policy import decide_recovery
 from browser_backend_supervisor import BrowserBackendSupervisor
+from dependency_activation import activate_checkout
 from restart_request import clear_restart_request, consume_restart_request
 
 _PRIMARY_ATTESTATION_TIMEOUT_SECONDS = 90.0
@@ -29,6 +30,30 @@ def _ready(port: int) -> bool:
         return False
 
 
+def _activate_dependency_checkout(checkout: Path) -> Path:
+    return activate_checkout(checkout, "uv")
+
+
+def _activate_before_start(
+    checkout: Path,
+    pointer_state: dict[str, object],
+    activator: Callable[[Path], Path],
+) -> bool:
+    from daemonhost import pointer
+
+    request_id = str(pointer_state.get("request_id") or "")
+    try:
+        activator(checkout)
+    except Exception:
+        if pointer.revert_if_switching(
+            "target dependency activation failed",
+            request_id,
+        ):
+            return False
+        raise
+    return pointer.read() == pointer_state
+
+
 def run(
     checkout: Path,
     host: str,
@@ -41,6 +66,9 @@ def run(
     health_probe: Callable[[int], bool] = _ready,
     install_signal_handlers: bool = True,
     primary_attestation_timeout_seconds: float = _PRIMARY_ATTESTATION_TIMEOUT_SECONDS,
+    activate_dependency_checkout: Callable[
+        [Path], Path
+    ] = _activate_dependency_checkout,
 ) -> int:
     from paths import bc_home
 
@@ -70,7 +98,15 @@ def run(
             healthy_at: float | None = None
             from daemonhost import pointer
 
+            pointer_state = pointer.read()
             active_checkout = Path(pointer.resolve(str(checkout))).resolve()
+            if not _activate_before_start(
+                active_checkout,
+                pointer_state,
+                activate_dependency_checkout,
+            ):
+                attempts = 0
+                continue
             generation = supervisor.handle({
                 "op": "start",
                 "checkout": str(active_checkout),

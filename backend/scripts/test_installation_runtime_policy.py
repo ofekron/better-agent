@@ -807,6 +807,110 @@ def test_activation_rechecks_plan_before_pointer_swap() -> None:
         assert pointer.read_text(encoding="utf-8") == ".venvs/existing"
 
 
+def _run_activation_transition(final_hash: str) -> tuple[
+    Path | None,
+    dependency_plan.DependencyPlanError | None,
+    list[str],
+    list[Path],
+]:
+    plan_a = {"hash": "plan-a", "requirements": (), "probes": ()}
+    plan_b = {"hash": "plan-b", "requirements": (), "probes": ()}
+    final_plan = {"hash": final_hash, "requirements": (), "probes": ()}
+    env_a = Path("/managed/plan-a")
+    env_b = Path("/managed/plan-b")
+    writes: list[Path] = []
+    builds: list[str] = []
+
+    def resolve_environment(_uv: str, plan: dict) -> Path:
+        builds.append(plan["hash"])
+        return env_a if plan["hash"] == "plan-a" else env_b
+
+    with (
+        patch.object(
+            dependency_plan,
+            "resolve_plan",
+            side_effect=(plan_a, plan_a, plan_b, final_plan),
+        ),
+        patch.object(
+            dependency_plan,
+            "_resolve_or_build_environment",
+            side_effect=resolve_environment,
+        ),
+        patch.object(dependency_plan, "_write_pointer", side_effect=writes.append),
+        patch.object(dependency_plan, "_commit_activation"),
+        patch.object(
+            dependency_plan,
+            "_python_in",
+            return_value=Path(sys.executable),
+        ),
+    ):
+        try:
+            return dependency_plan.activate("uv"), None, builds, writes
+        except dependency_plan.DependencyPlanError as exc:
+            return None, exc, builds, writes
+
+
+def test_activation_converges_to_committed_provider_plan() -> None:
+    result, error, builds, writes = _run_activation_transition("plan-b")
+
+    assert error is None
+    assert result == Path("/managed/plan-b")
+    assert builds == ["plan-a", "plan-b"]
+    assert writes == [Path("/managed/plan-a"), Path("/managed/plan-b")]
+
+
+def test_activation_fails_bounded_on_post_commit_plan_drift() -> None:
+    result, error, builds, writes = _run_activation_transition("plan-c")
+
+    assert result is None
+    assert error is not None
+    assert "changed after provider activation" in str(error)
+    assert builds == ["plan-a", "plan-b"]
+    assert writes == [Path("/managed/plan-a")]
+
+
+def test_prepared_activation_converges_to_retained_provider_plan() -> None:
+    prepared_plan = {"hash": "prepared", "requirements": (), "probes": ()}
+    retained_plan = {"hash": "retained", "requirements": (), "probes": ()}
+    prepared_env = Path("/managed/prepared")
+    retained_env = Path("/managed/retained")
+    writes: list[Path] = []
+
+    def resolve_plan(*, profile=None):
+        return prepared_plan if profile is not None else retained_plan
+
+    with (
+        patch.object(dependency_plan, "resolve_plan", side_effect=resolve_plan),
+        patch.object(dependency_plan, "_assert_environment"),
+        patch.object(
+            dependency_plan,
+            "_resolve_or_build_environment",
+            return_value=retained_env,
+        ),
+        patch.object(dependency_plan, "_write_pointer", side_effect=writes.append),
+        patch.object(dependency_plan, "_commit_activation"),
+        patch.object(dependency_plan.installation_profile, "stage_activation"),
+        patch.object(
+            dependency_plan.installation_profile,
+            "selection_pending",
+            return_value=False,
+        ),
+        patch.object(
+            dependency_plan,
+            "_python_in",
+            return_value=Path(sys.executable),
+        ),
+    ):
+        result = dependency_plan.activate_prepared_installation(
+            prepared_env,
+            {"provider": "openai"},
+            "uv",
+        )
+
+    assert result == retained_env
+    assert writes == [prepared_env, retained_env]
+
+
 def test_environment_marker_fails_closed() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-plan-marker-") as tmp:
         env_dir = Path(tmp) / "env"
@@ -898,6 +1002,18 @@ def test_relocated_environment_runs_and_repairs_missing_probe() -> None:
             assert repaired != first
             assert first.exists()
             dependency_plan.assert_active()
+
+
+def test_environment_creation_pins_the_activation_interpreter() -> None:
+    target = Path("/tmp/backend-env")
+    assert dependency_plan._venv_creation_command("/usr/bin/uv", target) == [
+        "/usr/bin/uv",
+        "venv",
+        "--python",
+        str(Path(sys.executable).resolve()),
+        "--relocatable",
+        str(target),
+    ]
 
 
 def test_target_checkout_rejects_stale_dependency_environment() -> None:
@@ -1085,6 +1201,9 @@ if __name__ == "__main__":
     test_activation_lock_serializes_processes()
     test_activation_lock_routes_windows_to_kernel_mutex()
     test_activation_rechecks_plan_before_pointer_swap()
+    test_activation_converges_to_committed_provider_plan()
+    test_activation_fails_bounded_on_post_commit_plan_drift()
+    test_prepared_activation_converges_to_retained_provider_plan()
     test_environment_marker_fails_closed()
     test_relocated_environment_runs_and_repairs_missing_probe()
     test_target_checkout_rejects_stale_dependency_environment()

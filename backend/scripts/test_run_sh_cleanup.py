@@ -3,6 +3,7 @@
 Run with:
     cd backend && .venv/bin/python scripts/test_run_sh_cleanup.py
 """
+import subprocess
 from pathlib import Path
 
 
@@ -62,6 +63,32 @@ def main() -> int:
         '"$DIR/backend/dependency_plan.py" activate --uv "$UV"' in deps_source
         and 'export BETTER_AGENT_BACKEND_PYTHON="$PY"' in deps_source
         and ".requirements.stamp" not in deps_source,
+        failures,
+    )
+    loop_start = text.index(
+        "  while true; do",
+        text.index("start_credential_backend_supervisor"),
+    )
+    generation_loop = text[loop_start:]
+    activation_call = generation_loop.index("admit_backend_generation")
+    backend_start = generation_loop.index("if ! start_backend; then")
+    before_activation = generation_loop[:activation_call]
+    before_backend_start = generation_loop[activation_call:backend_start]
+    check(
+        "every backend generation activates and revalidates its checkout before spawn",
+        activation_call < backend_start
+        and "SWITCH_POINTER_SNAPSHOT=" in before_activation
+        and 'if [ "$GENERATION_ADMISSION" -eq 2 ]' in before_backend_start
+        and 'if [ "$GENERATION_ADMISSION" -ne 0 ]' in before_backend_start,
+        failures,
+    )
+    check(
+        "dependency activation failure reverts only the snapshotted switch before spawn",
+        (
+            'admit_backend_generation || GENERATION_ADMISSION=$?'
+        )
+        in before_backend_start
+        and backend_start > activation_call,
         failures,
     )
     check(
@@ -267,6 +294,70 @@ def main() -> int:
         return 1
     print("ALL PASS")
     return 0
+
+
+def _shell_function(text: str, name: str) -> str:
+    start = text.index(f"{name}() {{")
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+def test_generation_admission_behavior() -> None:
+    text = RUN_SH.read_text(encoding="utf-8")
+    function = _shell_function(text, "admit_backend_generation")
+    scenarios = (
+        (0, 1, "same", 0),
+        (0, 1, "changed", 2),
+        (1, 0, "same", 2),
+        (1, 1, "same", 1),
+    )
+    for activation_status, revert_status, current_snapshot, expected in scenarios:
+        script = f"""
+activate_checkout_dependencies() {{ return {activation_status}; }}
+revert_snapshotted_switch() {{ return {revert_status}; }}
+current_pointer_snapshot() {{ printf '%s' {current_snapshot!r}; }}
+ACTIVE_DIR=/target
+SWITCH_POINTER_SNAPSHOT=same
+{function}
+admit_backend_generation >/dev/null 2>&1
+printf '%s' "$?"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert int(result.stdout) == expected
+
+
+def test_generation_rollback_uses_snapshotted_request(tmp_path: Path) -> None:
+    text = RUN_SH.read_text(encoding="utf-8")
+    function = _shell_function(text, "revert_snapshotted_switch")
+    capture = tmp_path / "argv"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {str(capture)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o700)
+    script = f"""
+DIR=/source-checkout
+PY={str(fake_python)!r}
+SWITCH_REQUEST_ID=request-123
+{function}
+revert_snapshotted_switch
+"""
+    subprocess.run(["bash", "-c", script], check=True)
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "-m",
+        "daemonhost.pointer",
+        "revert-if-switching",
+        "--reason",
+        "target dependency activation failed",
+        "--request-id",
+        "request-123",
+    ]
 
 
 if __name__ == "__main__":

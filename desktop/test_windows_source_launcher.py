@@ -64,6 +64,7 @@ def test_never_ready_generations_open_circuit_and_cleanup(tmp_path) -> None:
         wall_time=lambda: 1,
         health_probe=lambda _: False,
         install_signal_handlers=False,
+        activate_dependency_checkout=lambda path: path,
     )
 
     assert result == 1
@@ -85,6 +86,7 @@ def test_invalid_restart_intent_fails_closed_and_cleans_up(tmp_path) -> None:
             wall_time=lambda: 1,
             health_probe=lambda _: False,
             install_signal_handlers=False,
+            activate_dependency_checkout=lambda path: path,
         )
 
     assert supervisor.starts == 1
@@ -105,6 +107,7 @@ def test_terminal_generation_must_match_and_cleanup(tmp_path) -> None:
             wall_time=lambda: 1,
             health_probe=lambda _: False,
             install_signal_handlers=False,
+            activate_dependency_checkout=lambda path: path,
         )
 
     assert supervisor.shutdown_called is True
@@ -161,8 +164,79 @@ def test_missing_primary_attestation_reverts_generation(tmp_path, monkeypatch) -
             health_probe=lambda _: True,
             install_signal_handlers=False,
             primary_attestation_timeout_seconds=10,
+            activate_dependency_checkout=lambda path: path,
         )
 
     assert finalized
     assert expired
     assert supervisor.signals >= 1
+
+
+def test_activation_failure_prevents_backend_spawn(tmp_path, monkeypatch) -> None:
+    supervisor = FakeSupervisor(tmp_path)
+    state = {"active": str(tmp_path), "status": "active", "request_id": ""}
+    from daemonhost import pointer
+
+    monkeypatch.setattr(pointer, "read", lambda: dict(state))
+    monkeypatch.setattr(pointer, "resolve", lambda _default: str(tmp_path))
+    monkeypatch.setattr(pointer, "revert_if_switching", lambda *_args: False)
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        windows_source_launcher.run(
+            tmp_path,
+            "127.0.0.1",
+            8000,
+            supervisor=supervisor,
+            state_root=tmp_path,
+            install_signal_handlers=False,
+            activate_dependency_checkout=lambda _path: (_ for _ in ()).throw(
+                RuntimeError("activation failed")
+            ),
+        )
+
+    assert supervisor.starts == 0
+    assert supervisor.shutdown_called is True
+
+
+def test_activation_failure_reverts_only_matching_switch(tmp_path, monkeypatch) -> None:
+    state = {
+        "active": str(tmp_path),
+        "status": "switching",
+        "request_id": "request-1",
+    }
+    calls: list[tuple[str, str]] = []
+    from daemonhost import pointer
+
+    monkeypatch.setattr(pointer, "read", lambda: dict(state))
+
+    def revert(reason: str, request_id: str) -> bool:
+        calls.append((reason, request_id))
+        return request_id == state["request_id"]
+
+    monkeypatch.setattr(pointer, "revert_if_switching", revert)
+
+    result = windows_source_launcher._activate_before_start(
+        tmp_path,
+        dict(state),
+        lambda _path: (_ for _ in ()).throw(RuntimeError("activation failed")),
+    )
+
+    assert result is False
+    assert calls == [("target dependency activation failed", "request-1")]
+
+
+def test_pointer_change_during_activation_prevents_backend_spawn(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    before = {"active": str(tmp_path), "status": "active", "request_id": "one"}
+    after = {**before, "request_id": "two"}
+    from daemonhost import pointer
+
+    monkeypatch.setattr(pointer, "read", lambda: dict(after))
+
+    assert windows_source_launcher._activate_before_start(
+        tmp_path,
+        before,
+        lambda path: path,
+    ) is False

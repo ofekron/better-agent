@@ -227,7 +227,11 @@ def test_interrupted_commit_restores_pointer_and_leaves_setup_incomplete() -> No
                 ),
             ):
                 try:
-                    dependency_plan.activate_prepared_installation(new_env, profile)
+                    dependency_plan.activate_prepared_installation(
+                        new_env,
+                        profile,
+                        "uv",
+                    )
                 except RuntimeError:
                     pass
                 else:

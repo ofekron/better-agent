@@ -808,6 +808,48 @@ sync_backend_deps() {
 }
 sync_backend_deps
 
+activate_checkout_dependencies() {
+  local checkout_dir="$1"
+  local activated_python=""
+  if ! activated_python="$(PYTHONPATH="$DIR:$DIR/backend" "$PY" \
+    -m desktop.dependency_activation --checkout "$checkout_dir" --uv "$UV")"; then
+    return 1
+  fi
+  if [ ! -x "$activated_python" ]; then
+    echo "Activated checkout dependency environment is not runnable." >&2
+    return 1
+  fi
+  PY="$activated_python"
+  export BETTER_AGENT_BACKEND_PYTHON="$PY"
+}
+
+current_pointer_snapshot() {
+  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer status
+}
+
+revert_snapshotted_switch() {
+  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
+    --reason "target dependency activation failed" \
+    --request-id "$SWITCH_REQUEST_ID" 2>/dev/null
+}
+
+admit_backend_generation() {
+  if ! activate_checkout_dependencies "$ACTIVE_DIR"; then
+    if revert_snapshotted_switch; then
+      echo "Line switch failed — target dependencies did not activate — recovering previous checkout..."
+      return 2
+    fi
+    echo "Backend dependencies failed to activate; exiting." >&2
+    return 1
+  fi
+  CURRENT_POINTER_SNAPSHOT="$(current_pointer_snapshot)"
+  if [ "$CURRENT_POINTER_SNAPSHOT" != "$SWITCH_POINTER_SNAPSHOT" ]; then
+    echo "Active checkout changed during dependency activation; retrying..."
+    return 2
+  fi
+  return 0
+}
+
 # --- Install the `bagent` CLI command onto PATH (idempotent) --------
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
 bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)"
@@ -1151,11 +1193,22 @@ else
     # named by the pointer. Resolve it every iteration — a switch or an auto-revert
     # changes it between restarts, and the frontend build below must target the
     # same checkout the backend will import.
+    SWITCH_POINTER_SNAPSHOT="$(current_pointer_snapshot)"
     ACTIVE_DIR="$(resolve_active_checkout "$PY" "$DIR" "$DIR")"
-    SWITCH_REQUEST_ID="$(PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer request-id 2>/dev/null || true)"
+    SWITCH_REQUEST_ID="$("$PY" -c \
+      'import json,sys; print(str(json.loads(sys.argv[1]).get("request_id") or ""))' \
+      "$SWITCH_POINTER_SNAPSHOT")"
     export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
     if [ "$ACTIVE_DIR" != "$DIR" ]; then
       echo "Active checkout: $ACTIVE_DIR"
+    fi
+    GENERATION_ADMISSION=0
+    admit_backend_generation || GENERATION_ADMISSION=$?
+    if [ "$GENERATION_ADMISSION" -eq 2 ]; then
+      continue
+    fi
+    if [ "$GENERATION_ADMISSION" -ne 0 ]; then
+      break
     fi
 
     # The backend imports the active checkout's built frontend at import time.

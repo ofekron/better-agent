@@ -27,6 +27,7 @@ from dependency_environment import (
     VENV_ROOT_NAME,
     DependencyEnvironmentError,
     active_env as _active_env,
+    active_runtime_env as _active_runtime_env,
     python_in as _python_in,
     verified_active_env as _verified_active_env,
 )
@@ -238,6 +239,17 @@ def active_env(backend_dir: Path | None = None) -> Path:
         raise DependencyPlanError(str(exc)) from exc
 
 
+def active_runtime_env(backend_dir: Path) -> Path:
+    try:
+        return _active_runtime_env(backend_dir)
+    except DependencyEnvironmentError as exc:
+        raise DependencyPlanError(str(exc)) from exc
+
+
+def active_runtime_python(backend_dir: Path) -> Path:
+    return _python_in(active_runtime_env(backend_dir))
+
+
 def assert_active() -> None:
     plan = resolve_plan()
     _assert_environment(active_env(), plan)
@@ -414,7 +426,7 @@ def _build_environment(uv: str, plan: dict[str, Any]) -> Path:
     plan_root.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            [uv, "venv", "--relocatable", str(stage)],
+            _venv_creation_command(uv, stage),
             check=True,
             stdout=sys.stderr,
         )
@@ -435,6 +447,17 @@ def _build_environment(uv: str, plan: dict[str, Any]) -> Path:
         raise
 
 
+def _venv_creation_command(uv: str, target: Path) -> list[str]:
+    return [
+        uv,
+        "venv",
+        "--python",
+        str(Path(sys.executable).resolve()),
+        "--relocatable",
+        str(target),
+    ]
+
+
 def _resolve_or_build_environment(uv: str, plan: dict[str, Any]) -> Path:
     try:
         env_dir = active_env()
@@ -442,6 +465,24 @@ def _resolve_or_build_environment(uv: str, plan: dict[str, Any]) -> Path:
         return env_dir
     except DependencyPlanError:
         return _build_environment(uv, plan)
+
+
+def _converge_committed_plan(
+    uv: str,
+    activated_plan: dict[str, Any],
+    activated_env: Path,
+) -> Path:
+    committed_plan = resolve_plan()
+    if committed_plan["hash"] == activated_plan["hash"]:
+        return activated_env
+    committed_env = _resolve_or_build_environment(uv, committed_plan)
+    latest_plan = resolve_plan()
+    if latest_plan["hash"] != committed_plan["hash"]:
+        raise DependencyPlanError(
+            "dependency plan changed after provider activation; rerun the installer"
+        )
+    _write_pointer(committed_env)
+    return committed_env
 
 
 def prepare_installation(uv: str, profile: dict[str, Any]) -> Path:
@@ -459,6 +500,7 @@ def prepare_installation(uv: str, profile: dict[str, Any]) -> Path:
 def activate_prepared_installation(
     env_dir: Path,
     profile: dict[str, Any],
+    uv: str,
     *,
     make_default: bool = True,
 ) -> Path:
@@ -486,7 +528,7 @@ def activate_prepared_installation(
     except BaseException:
         _restore_pointer(previous_pointer)
         raise
-    return env_dir
+    return _converge_committed_plan(uv, plan, env_dir)
 
 
 def activate(uv: str) -> Path:
@@ -508,7 +550,7 @@ def activate(uv: str) -> Path:
         except Exception:
             _restore_pointer(previous_pointer)
             raise
-        return env_dir
+        return _converge_committed_plan(uv, plan, env_dir)
 
 
 def main() -> int:
