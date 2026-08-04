@@ -243,6 +243,7 @@ async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
     await engine.start_execution(
         session_id,
         execution_identity=execution,
+        selector_role="primary",
     )
     await engine.bind_execution_run(
         session_id,
@@ -256,9 +257,10 @@ async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
         "thread_store_root": "/tmp/claude/projects",
         "claude_project_namespace": "-repo",
     }
+    selector = SelectorIdentity("provider-a", "model-a", "runner-a")
     authority, decision = lifecycle_command_store.persist_admitted_selector_attempt(
         session_id,
-        target=SelectorIdentity("provider-a", "model-a", "runner-a"),
+        target=selector,
         native_sid_compatibility=compatibility,
         primary_native_sid=None,
         supervisor_native_sid=None,
@@ -266,6 +268,14 @@ async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
         supervisor_native_sid_compatibility=None,
     )
     assert decision == "admitted"
+    await engine.elect_execution_attempt(
+        session_id,
+        execution_identity=execution,
+        provider_run_id="selector-current-attempt",
+        selector_generation=authority.generation,
+        native_sid_compatibility=compatibility,
+        selector=selector,
+    )
     assert not await engine.attach_selector_native_sid(
         session_id,
         selector_generation=authority.generation,
@@ -2095,7 +2105,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 8
     session_columns = {
         row[1]
         for row in migrated.execute("PRAGMA table_info(sessions)").fetchall()
@@ -2109,6 +2119,9 @@ def test_v1_migration_and_atomic_rollback() -> None:
     ).fetchone()[0] == 0
     assert migrated.execute(
         "SELECT COUNT(*) FROM execution_selector_roles"
+    ).fetchone()[0] == 0
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM execution_selector_attempts"
     ).fetchone()[0] == 0
     session_identity = json.loads(migrated.execute(
         "SELECT identity_json FROM sessions WHERE session_id = ?",
@@ -2241,7 +2254,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 7
+        assert type(version) is int and version == 8
 
 
 async def test_terminal_render_reconciliation_inbox() -> None:

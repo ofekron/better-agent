@@ -1368,10 +1368,13 @@ def test_run_turn_persists_and_consumes_elected_selector_slot() -> None:
                         execution.identity.execution_turn_id
                     )
                     provider_run_id = f"provider-run-{selector_role}"
-                    await engine.bind_execution_run(
+                    await engine.elect_execution_attempt(
                         sid,
                         execution_identity=execution.identity,
                         provider_run_id=provider_run_id,
+                        selector_generation=authority.generation,
+                        native_sid_compatibility=compatibility,
+                        selector=target,
                     )
                     assert await engine.attach_selector_native_sid(
                         sid,
@@ -1583,6 +1586,7 @@ def test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid() -> None:
                     await engine.start_execution(
                         sid,
                         execution_identity=execution_identity,
+                        selector_role="primary",
                     )
                     current_sid = (
                         (session_manager.get(sid) or {}).get("agent_session_id")
@@ -1705,6 +1709,7 @@ def test_selector_changes_fence_production_sid_discovery_and_completion() -> Non
                 await engine.start_execution(
                     sid,
                     execution_identity=execution_identity,
+                    selector_role="primary",
                 )
 
                 original_attach = engine.attach_selector_native_sid
@@ -1844,7 +1849,11 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 "stale-session-assistant-1",
                 "native",
             )
-            await engine.start_execution(sid, execution_identity=first_execution)
+            await engine.start_execution(
+                sid,
+                execution_identity=first_execution,
+                selector_role="primary",
+            )
             first = await manager._drive_cli_run(
                 prompt="start",
                 cwd="/tmp",
@@ -1875,7 +1884,11 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 "stale-session-assistant-2",
                 "native",
             )
-            await engine.start_execution(sid, execution_identity=second_execution)
+            await engine.start_execution(
+                sid,
+                execution_identity=second_execution,
+                selector_role="primary",
+            )
             second = await manager._drive_cli_run(
                 prompt="resume",
                 cwd="/tmp",

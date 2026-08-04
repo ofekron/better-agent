@@ -3266,17 +3266,16 @@ class TurnManager:
                     )
                     selector_attempt_decision = None
                     selector_generation = None
+                    prepared_selector = SelectorIdentity(
+                        provider_id=execution.artifact.provider_id,
+                        model=str(artifact_arguments.get("model") or ""),
+                        runner=str((_session_rec or {}).get("runner") or ""),
+                    )
                     try:
                         selector_attempt_decision, selector_generation = await (
                             self._c.lifecycle_commands.admit_prepared_selector_attempt(
                                 primary_session_id or app_session_id,
-                                selector=SelectorIdentity(
-                                    provider_id=execution.artifact.provider_id,
-                                    model=str(artifact_arguments.get("model") or ""),
-                                    runner=str(
-                                        (_session_rec or {}).get("runner") or ""
-                                    ),
-                                ),
+                                selector=prepared_selector,
                                 native_sid_compatibility=(
                                     admitted_compatibility
                                     if isinstance(admitted_compatibility, dict)
@@ -3350,11 +3349,29 @@ class TurnManager:
                         payload=admission_identity,
                     )
                     if execution_identity is not None:
-                        await self._c.lifecycle_commands.elect_execution_attempt(
-                            app_session_id,
-                            execution_identity=execution_identity,
-                            provider_run_id=run_id,
-                        )
+                        try:
+                            await self._c.lifecycle_commands.elect_execution_attempt(
+                                app_session_id,
+                                execution_identity=execution_identity,
+                                provider_run_id=run_id,
+                                selector_generation=selector_generation,
+                                native_sid_compatibility=admitted_compatibility,
+                                selector=prepared_selector,
+                            )
+                        except BaseException:
+                            await _to_turn_dispatch_thread(
+                                provider.discard_prepared_execution,
+                                execution,
+                            )
+                            self._pop_run_id(app_session_id, run_id)
+                            await self.lifecycle.publish(
+                                "lifecycle.admission_failed",
+                                root_id=root_id,
+                                session_id=app_session_id,
+                                run_id=run_id,
+                                payload=admission_identity,
+                            )
+                            raise
                     try:
                         admitted = await _to_turn_dispatch_thread(
                             start_prepared_run,

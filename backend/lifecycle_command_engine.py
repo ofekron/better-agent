@@ -570,6 +570,131 @@ class LifecycleCommandEngine:
             expected_native_sid=None,
         )
 
+    async def attach_recovered_selector_native_sid(
+        self,
+        session_id: str,
+        *,
+        provider_run_id: str,
+        native_sid: str,
+        native_sid_compatibility: Mapping[str, Any],
+        selector: SelectorIdentity,
+    ) -> bool:
+        from native_sid_compatibility import NativeSidCompatibility
+
+        validate_identifier(native_sid, "native_sid")
+        compatibility = NativeSidCompatibility.from_dict(
+            native_sid_compatibility,
+        ).to_dict()
+        validate_identifier(provider_run_id, "provider_run_id")
+        await self.bind()
+        async with self._lock_for(session_id):
+            attempt = await self._recover_execution_selector_attempt_locked(
+                session_id,
+                provider_run_id=provider_run_id,
+                selector=selector,
+                compatibility=compatibility,
+            )
+            if attempt is None:
+                return False
+            persisted = await asyncio.to_thread(
+                lifecycle_command_store.attach_selector_native_sid,
+                session_id,
+                expected_generation=attempt["selector_generation"],
+                role=attempt["role"],
+                native_sid=native_sid,
+            )
+            if persisted is None:
+                return False
+            _authority, projection = persisted
+            return await self._apply_selector_projection(session_id, projection)
+
+    async def recover_execution_selector_attempt(
+        self,
+        session_id: str,
+        *,
+        provider_run_id: str,
+        native_sid_compatibility: Mapping[str, Any],
+        selector: SelectorIdentity,
+    ) -> dict[str, Any] | None:
+        from native_sid_compatibility import NativeSidCompatibility
+
+        validate_identifier(provider_run_id, "provider_run_id")
+        compatibility = NativeSidCompatibility.from_dict(
+            native_sid_compatibility,
+        ).to_dict()
+        await self.bind()
+        async with self._lock_for(session_id):
+            return await self._recover_execution_selector_attempt_locked(
+                session_id,
+                provider_run_id=provider_run_id,
+                selector=selector,
+                compatibility=compatibility,
+            )
+
+    async def _recover_execution_selector_attempt_locked(
+        self,
+        session_id: str,
+        *,
+        provider_run_id: str,
+        selector: SelectorIdentity,
+        compatibility: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        lifecycle = await asyncio.to_thread(
+            lifecycle_command_store.session_snapshot,
+            session_id,
+        )
+        execution = lifecycle.execution
+        if execution is None or execution.provider_run_id != provider_run_id:
+            return None
+        authority = await asyncio.to_thread(
+            lifecycle_command_store.selector_authority_snapshot,
+            session_id,
+        )
+        if (
+            authority is None
+            or authority.identity != selector
+            or authority.native_sid_compatibility != compatibility
+        ):
+            return None
+        attempt = await asyncio.to_thread(
+            lifecycle_command_store.execution_selector_attempt,
+            session_id,
+            provider_run_id,
+        )
+        if attempt is None:
+            role = await asyncio.to_thread(
+                lifecycle_command_store.execution_selector_role,
+                session_id,
+                execution.identity.execution_turn_id,
+            )
+            if role is None:
+                return None
+            await asyncio.to_thread(
+                lifecycle_command_store.record_execution_selector_attempt,
+                session_id,
+                execution_turn_id=execution.identity.execution_turn_id,
+                provider_run_id=provider_run_id,
+                selector_generation=authority.generation,
+                role=role,
+                selector=selector,
+                native_sid_compatibility=dict(compatibility),
+            )
+            attempt = await asyncio.to_thread(
+                lifecycle_command_store.execution_selector_attempt,
+                session_id,
+                provider_run_id,
+            )
+        if (
+            attempt is None
+            or attempt["execution_turn_id"]
+            != execution.identity.execution_turn_id
+            or attempt["selector_generation"] != authority.generation
+            or attempt["selector"] != selector
+            or attempt["native_sid_compatibility"] != compatibility
+        ):
+            return None
+        return attempt
+
     async def clear_selector_native_sid(
         self,
         session_id: str,
@@ -608,6 +733,27 @@ class LifecycleCommandEngine:
             )
             execution = lifecycle.execution
             if execution is None or execution.provider_run_id != provider_run_id:
+                return False
+            attempt = await asyncio.to_thread(
+                lifecycle_command_store.execution_selector_attempt,
+                session_id,
+                provider_run_id,
+            )
+            authority = await asyncio.to_thread(
+                lifecycle_command_store.selector_authority_snapshot,
+                session_id,
+            )
+            if (
+                attempt is None
+                or authority is None
+                or attempt["execution_turn_id"]
+                != execution.identity.execution_turn_id
+                or attempt["selector_generation"] != selector_generation
+                or attempt["role"] != role
+                or attempt["selector"] != authority.identity
+                or attempt["native_sid_compatibility"]
+                != authority.native_sid_compatibility
+            ):
                 return False
             if native_sid is None:
                 persisted = await asyncio.to_thread(
@@ -813,12 +959,51 @@ class LifecycleCommandEngine:
         *,
         execution_identity: ExecutionTurnIdentity,
         provider_run_id: str,
+        selector_generation: int | None = None,
+        native_sid_compatibility: Mapping[str, Any] | None = None,
+        selector: SelectorIdentity | None = None,
     ) -> CommandResult:
-        return await self.bind_execution_run(
-            session_id,
-            execution_identity=execution_identity,
-            provider_run_id=provider_run_id,
-        )
+        if selector_generation is None:
+            if native_sid_compatibility is not None or selector is not None:
+                raise ValueError("selector evidence requires a generation")
+            return await self.bind_execution_run(
+                session_id,
+                execution_identity=execution_identity,
+                provider_run_id=provider_run_id,
+            )
+        if selector is None:
+            raise ValueError("selector identity is required")
+        if native_sid_compatibility is None:
+            compatibility = None
+        else:
+            from native_sid_compatibility import NativeSidCompatibility
+
+            compatibility = NativeSidCompatibility.from_dict(
+                native_sid_compatibility,
+            ).to_dict()
+        await self.bind()
+        async with self._lock_for(session_id):
+            role = await asyncio.to_thread(
+                lifecycle_command_store.execution_selector_role,
+                session_id,
+                execution_identity.execution_turn_id,
+            )
+            if role is None:
+                raise LifecycleCommandRejected(
+                    "execution selector role is unavailable"
+                )
+            return await self._transition_execution_locked(
+                session_id,
+                "bind_execution_run",
+                execution_identity,
+                provider_run_id=provider_run_id,
+                execution_selector_attempt={
+                    "selector_generation": selector_generation,
+                    "role": role,
+                    "selector": selector.to_dict(),
+                    "native_sid_compatibility": compatibility,
+                },
+            )
 
     async def restore_execution_run(
         self,
@@ -1053,6 +1238,7 @@ class LifecycleCommandEngine:
         replacement_provider_run_id: str | None = None,
         outcome: str | None = None,
         execution_selector_role: str | None = None,
+        execution_selector_attempt: dict[str, Any] | None = None,
     ) -> CommandResult:
         if execution_selector_role is not None and execution_selector_role not in {
             "primary",
@@ -1063,28 +1249,52 @@ class LifecycleCommandEngine:
             raise ValueError("selector role is only valid when starting execution")
         await self.bind()
         async with self._lock_for(session_id):
-            snapshot = await asyncio.to_thread(
-                lifecycle_command_store.session_snapshot,
+            return await self._transition_execution_locked(
                 session_id,
-            )
-            if snapshot.identity is None:
-                raise LifecycleCommandRejected(
-                    "execution requires an active user turn"
-                )
-            command = LifecycleCommand(
-                request_id=f"execution:{snapshot.revision}:{kind}",
-                session_id=session_id,
-                kind=kind,
-                identity=snapshot.identity,
-                execution_identity=execution_identity,
+                kind,
+                execution_identity,
                 provider_run_id=provider_run_id,
                 replacement_provider_run_id=replacement_provider_run_id,
                 outcome=outcome,
-            )
-            return await self._execute_bound(
-                command,
                 execution_selector_role=execution_selector_role,
+                execution_selector_attempt=execution_selector_attempt,
             )
+
+    async def _transition_execution_locked(
+        self,
+        session_id: str,
+        kind: str,
+        execution_identity: ExecutionTurnIdentity,
+        *,
+        provider_run_id: str | None = None,
+        replacement_provider_run_id: str | None = None,
+        outcome: str | None = None,
+        execution_selector_role: str | None = None,
+        execution_selector_attempt: dict[str, Any] | None = None,
+    ) -> CommandResult:
+        snapshot = await asyncio.to_thread(
+            lifecycle_command_store.session_snapshot,
+            session_id,
+        )
+        if snapshot.identity is None:
+            raise LifecycleCommandRejected(
+                "execution requires an active user turn"
+            )
+        command = LifecycleCommand(
+            request_id=f"execution:{snapshot.revision}:{kind}",
+            session_id=session_id,
+            kind=kind,
+            identity=snapshot.identity,
+            execution_identity=execution_identity,
+            provider_run_id=provider_run_id,
+            replacement_provider_run_id=replacement_provider_run_id,
+            outcome=outcome,
+        )
+        return await self._execute_bound(
+            command,
+            execution_selector_role=execution_selector_role,
+            execution_selector_attempt=execution_selector_attempt,
+        )
 
     async def _transition_active(
         self,
@@ -1178,6 +1388,7 @@ class LifecycleCommandEngine:
         command: LifecycleCommand,
         *,
         execution_selector_role: str | None = None,
+        execution_selector_attempt: dict[str, Any] | None = None,
     ) -> CommandResult:
         await self._align_session_owner(command.session_id)
         existing = await asyncio.to_thread(
@@ -1199,6 +1410,36 @@ class LifecycleCommandEngine:
                 if persisted_role != execution_selector_role:
                     raise LifecycleCommandRejected(
                         "request_id is already bound to another selector role"
+                    )
+            if command.kind == "bind_execution_run":
+                persisted_attempt = await asyncio.to_thread(
+                    lifecycle_command_store.execution_selector_attempt,
+                    command.session_id,
+                    command.provider_run_id,
+                )
+                expected_attempt = (
+                    None
+                    if execution_selector_attempt is None
+                    else {
+                        "execution_turn_id": (
+                            command.execution_identity.execution_turn_id
+                        ),
+                        "provider_run_id": command.provider_run_id,
+                        "selector_generation": execution_selector_attempt[
+                            "selector_generation"
+                        ],
+                        "role": execution_selector_attempt["role"],
+                        "selector": SelectorIdentity.from_dict(
+                            execution_selector_attempt["selector"]
+                        ),
+                        "native_sid_compatibility": execution_selector_attempt[
+                            "native_sid_compatibility"
+                        ],
+                    }
+                )
+                if persisted_attempt != expected_attempt:
+                    raise LifecycleCommandRejected(
+                        "request_id is already bound to another selector attempt"
                     )
             if existing["status"] in {"planned", "effects_applied"}:
                 snapshot = await asyncio.to_thread(
@@ -1237,6 +1478,7 @@ class LifecycleCommandEngine:
                 plan,
                 selector_handoff_acceptance=selector_handoff_acceptance,
                 execution_selector_role=execution_selector_role,
+                execution_selector_attempt=execution_selector_attempt,
             )
         except lifecycle_command_store.TransitionConflict as exc:
             raise LifecycleCommandRejected(str(exc)) from exc
@@ -1353,11 +1595,14 @@ class LifecycleCommandEngine:
         )
         if pending_projection is not None:
             await self._apply_selector_projection(session_id, pending_projection)
-        next_snapshot = await asyncio.to_thread(
-            lifecycle_command_store.commit_transition,
-            session_id,
-            request_id,
-        )
+        try:
+            next_snapshot = await asyncio.to_thread(
+                lifecycle_command_store.commit_transition,
+                session_id,
+                request_id,
+            )
+        except lifecycle_command_store.TransitionConflict as exc:
+            raise LifecycleCommandRejected(str(exc)) from exc
         pending_projection = await asyncio.to_thread(
             lifecycle_command_store.pending_selector_projection,
             session_id,

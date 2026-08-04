@@ -23,7 +23,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -204,11 +204,23 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                     ON DELETE CASCADE
             ) STRICT;
+            CREATE TABLE execution_selector_attempts (
+                session_id TEXT NOT NULL,
+                execution_turn_id TEXT NOT NULL,
+                provider_run_id TEXT NOT NULL,
+                selector_generation INTEGER NOT NULL CHECK (selector_generation >= 0),
+                role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
+                selector_identity_json TEXT NOT NULL,
+                native_sid_compatibility_json TEXT,
+                PRIMARY KEY (session_id, provider_run_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            ) STRICT;
             """
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 7")
+            connection.execute("PRAGMA user_version = 8")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
@@ -227,6 +239,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
         if version == 6:
             _migrate_v6_to_v7(connection)
             version = 7
+        if version == 7:
+            _migrate_v7_to_v8(connection)
+            version = 8
         connection.commit()
     except Exception:
         connection.rollback()
@@ -439,6 +454,26 @@ def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 7")
 
 
+def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE execution_selector_attempts (
+            session_id TEXT NOT NULL,
+            execution_turn_id TEXT NOT NULL,
+            provider_run_id TEXT NOT NULL,
+            selector_generation INTEGER NOT NULL CHECK (selector_generation >= 0),
+            role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
+            selector_identity_json TEXT NOT NULL,
+            native_sid_compatibility_json TEXT,
+            PRIMARY KEY (session_id, provider_run_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        ) STRICT
+        """
+    )
+    connection.execute("PRAGMA user_version = 8")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -609,6 +644,130 @@ def execution_selector_role(
             (session_id, execution_turn_id),
         ).fetchone()
     return row["role"] if row is not None else None
+
+
+def record_execution_selector_attempt(
+    session_id: str,
+    *,
+    execution_turn_id: str,
+    provider_run_id: str,
+    selector_generation: int,
+    role: str,
+    selector: SelectorIdentity,
+    native_sid_compatibility: dict[str, Any] | None,
+) -> None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(execution_turn_id, "execution_turn_id")
+    validate_identifier(provider_run_id, "provider_run_id")
+    if type(selector_generation) is not int or selector_generation < 0:
+        raise ValueError("selector_generation is invalid")
+    if role not in {"primary", "supervisor"}:
+        raise ValueError("selector attempt role is invalid")
+    if not isinstance(selector, SelectorIdentity):
+        raise ValueError("selector attempt identity is invalid")
+    if native_sid_compatibility is not None and type(
+        native_sid_compatibility
+    ) is not dict:
+        raise ValueError("native SID compatibility must be an object")
+    compatibility_json = (
+        _dump(native_sid_compatibility)
+        if native_sid_compatibility is not None
+        else None
+    )
+    selector_identity_json = _dump(selector.to_dict())
+    with connection() as database:
+        database.execute("BEGIN IMMEDIATE")
+        existing = database.execute(
+            """
+            SELECT execution_turn_id, selector_generation, role,
+                   selector_identity_json,
+                   native_sid_compatibility_json
+            FROM execution_selector_attempts
+            WHERE session_id = ? AND provider_run_id = ?
+            """,
+            (session_id, provider_run_id),
+        ).fetchone()
+        expected = (
+            execution_turn_id,
+            selector_generation,
+            role,
+            selector_identity_json,
+            compatibility_json,
+        )
+        if existing is not None:
+            actual = (
+                existing["execution_turn_id"],
+                existing["selector_generation"],
+                existing["role"],
+                existing["selector_identity_json"],
+                existing["native_sid_compatibility_json"],
+            )
+            database.commit()
+            if actual != expected:
+                raise TransitionConflict(
+                    "provider run is already bound to another selector attempt"
+                )
+            return
+        database.execute(
+            """
+            INSERT INTO execution_selector_attempts(
+                session_id, execution_turn_id, provider_run_id,
+                selector_generation, role, selector_identity_json,
+                native_sid_compatibility_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                execution_turn_id,
+                provider_run_id,
+                selector_generation,
+                role,
+                selector_identity_json,
+                compatibility_json,
+            ),
+        )
+        database.commit()
+
+
+def execution_selector_attempt(
+    session_id: str,
+    provider_run_id: str,
+) -> dict[str, Any] | None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(provider_run_id, "provider_run_id")
+    with connection() as database:
+        row = database.execute(
+            """
+            SELECT execution_turn_id, selector_generation, role,
+                   selector_identity_json,
+                   native_sid_compatibility_json
+            FROM execution_selector_attempts
+            WHERE session_id = ? AND provider_run_id = ?
+            """,
+            (session_id, provider_run_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "execution_turn_id": row["execution_turn_id"],
+        "provider_run_id": provider_run_id,
+        "selector_generation": row["selector_generation"],
+        "role": row["role"],
+        "selector": SelectorIdentity.from_dict(
+            _load_object(
+                row["selector_identity_json"],
+                "execution selector attempt identity",
+            )
+        ),
+        "native_sid_compatibility": (
+            _load_object(
+                row["native_sid_compatibility_json"],
+                "execution selector attempt compatibility",
+            )
+            if row["native_sid_compatibility_json"] is not None
+            else None
+        ),
+    }
 
 
 def persist_admitted_selector_attempt(
@@ -1267,6 +1426,7 @@ def persist_plan(
     *,
     selector_handoff_acceptance: dict[str, Any] | None = None,
     execution_selector_role: str | None = None,
+    execution_selector_attempt: dict[str, Any] | None = None,
 ) -> str:
     acceptance = _validated_selector_handoff_acceptance(
         command,
@@ -1278,6 +1438,41 @@ def persist_plan(
         command,
         execution_selector_role,
     )
+    selector_attempt = None
+    if execution_selector_attempt is not None:
+        if (
+            command.kind != "bind_execution_run"
+            or command.execution_identity is None
+            or command.provider_run_id is None
+            or type(execution_selector_attempt) is not dict
+            or set(execution_selector_attempt) != {
+                "selector_generation",
+                "role",
+                "selector",
+                "native_sid_compatibility",
+            }
+        ):
+            raise ValueError("execution selector attempt is invalid")
+        generation = execution_selector_attempt["selector_generation"]
+        role = execution_selector_attempt["role"]
+        if type(generation) is not int or generation < 0:
+            raise ValueError("execution selector attempt generation is invalid")
+        if role not in {"primary", "supervisor"}:
+            raise ValueError("execution selector attempt role is invalid")
+        selector = SelectorIdentity.from_dict(execution_selector_attempt["selector"])
+        compatibility = execution_selector_attempt["native_sid_compatibility"]
+        if compatibility is not None and type(compatibility) is not dict:
+            raise ValueError("execution selector attempt compatibility is invalid")
+        selector_attempt = {
+            "execution_turn_id": command.execution_identity.execution_turn_id,
+            "provider_run_id": command.provider_run_id,
+            "selector_generation": generation,
+            "role": role,
+            "selector_identity_json": _dump(selector.to_dict()),
+            "native_sid_compatibility_json": (
+                _dump(compatibility) if compatibility is not None else None
+            ),
+        }
     command_json = _dump(command.to_dict())
     next_snapshot_json = _dump(plan.next_snapshot.to_dict())
     notification_payload_json = _dump(materialize_json(plan.fact_payload))
@@ -1322,6 +1517,18 @@ def persist_plan(
                         command.execution_identity.execution_turn_id,
                     ),
                 ).fetchone()
+            existing_attempt = None
+            if command.kind == "bind_execution_run":
+                existing_attempt = database.execute(
+                    """
+                    SELECT execution_turn_id, provider_run_id,
+                           selector_generation, role, selector_identity_json,
+                           native_sid_compatibility_json
+                    FROM execution_selector_attempts
+                    WHERE session_id = ? AND provider_run_id = ?
+                    """,
+                    (command.session_id, command.provider_run_id),
+                ).fetchone()
             database.commit()
             if existing["fingerprint"] != command.fingerprint():
                 raise TransitionConflict(
@@ -1345,6 +1552,13 @@ def persist_plan(
             if command.kind == "start_execution" and persisted_role != selector_role:
                 raise TransitionConflict(
                     "request_id is already bound to another selector role"
+                )
+            persisted_attempt = (
+                dict(existing_attempt) if existing_attempt is not None else None
+            )
+            if persisted_attempt != selector_attempt:
+                raise TransitionConflict(
+                    "request_id is already bound to another selector attempt"
                 )
             return "existing"
         database.execute(
@@ -1370,6 +1584,50 @@ def persist_plan(
         if _snapshot_from_row(current) != snapshot:
             database.rollback()
             raise SnapshotChanged("lifecycle snapshot changed before intent")
+        if selector_attempt is not None:
+            authority_row = database.execute(
+                "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
+                (command.session_id,),
+            ).fetchone()
+            role_row = database.execute(
+                """
+                SELECT role FROM execution_selector_roles
+                WHERE session_id = ? AND execution_turn_id = ?
+                """,
+                (
+                    command.session_id,
+                    selector_attempt["execution_turn_id"],
+                ),
+            ).fetchone()
+            authority = (
+                SelectorAuthoritySnapshot.from_dict(
+                    _load_object(
+                        authority_row["snapshot_json"],
+                        "selector authority snapshot",
+                    )
+                )
+                if authority_row is not None
+                else None
+            )
+            if (
+                authority is None
+                or authority.generation != selector_attempt["selector_generation"]
+                or authority.identity is None
+                or _dump(authority.identity.to_dict())
+                != selector_attempt["selector_identity_json"]
+                or (
+                    _dump(authority.native_sid_compatibility)
+                    if authority.native_sid_compatibility is not None
+                    else None
+                )
+                != selector_attempt["native_sid_compatibility_json"]
+                or role_row is None
+                or role_row["role"] != selector_attempt["role"]
+            ):
+                database.rollback()
+                raise TransitionConflict(
+                    "execution selector attempt lost its admitted authority"
+                )
         try:
             database.execute(
                 """
@@ -1443,6 +1701,25 @@ def persist_plan(
                         command.session_id,
                         command.execution_identity.execution_turn_id,
                         selector_role,
+                    ),
+                )
+            if selector_attempt is not None:
+                database.execute(
+                    """
+                    INSERT INTO execution_selector_attempts(
+                        session_id, execution_turn_id, provider_run_id,
+                        selector_generation, role, selector_identity_json,
+                        native_sid_compatibility_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        command.session_id,
+                        selector_attempt["execution_turn_id"],
+                        selector_attempt["provider_run_id"],
+                        selector_attempt["selector_generation"],
+                        selector_attempt["role"],
+                        selector_attempt["selector_identity_json"],
+                        selector_attempt["native_sid_compatibility_json"],
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -1647,6 +1924,30 @@ def _consume_selector_handoff_at_commit(
     )
 
 
+def _discard_selector_bind_intent(
+    database: sqlite3.Connection,
+    *,
+    session_id: str,
+    request_id: str,
+    provider_run_id: str,
+) -> None:
+    database.execute(
+        """
+        DELETE FROM execution_selector_attempts
+        WHERE session_id = ? AND provider_run_id = ?
+        """,
+        (session_id, provider_run_id),
+    )
+    database.execute(
+        "DELETE FROM effects WHERE session_id = ? AND request_id = ?",
+        (session_id, request_id),
+    )
+    database.execute(
+        "DELETE FROM transitions WHERE session_id = ? AND request_id = ?",
+        (session_id, request_id),
+    )
+
+
 def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
     with connection() as database:
         database.execute("BEGIN IMMEDIATE")
@@ -1673,6 +1974,72 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
         if row["status"] != "effects_applied":
             database.rollback()
             raise RuntimeError("cannot commit lifecycle transition before effects")
+        if command.kind == "bind_execution_run":
+            role_row = database.execute(
+                """
+                SELECT role FROM execution_selector_roles
+                WHERE session_id = ? AND execution_turn_id = ?
+                """,
+                (
+                    session_id,
+                    command.execution_identity.execution_turn_id,
+                ),
+            ).fetchone()
+            attempt_row = database.execute(
+                """
+                SELECT execution_turn_id, selector_generation, role,
+                       selector_identity_json,
+                       native_sid_compatibility_json
+                FROM execution_selector_attempts
+                WHERE session_id = ? AND provider_run_id = ?
+                """,
+                (session_id, command.provider_run_id),
+            ).fetchone()
+            if attempt_row is not None:
+                authority_row = database.execute(
+                    """
+                    SELECT snapshot_json FROM selector_authorities
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                authority = (
+                    SelectorAuthoritySnapshot.from_dict(
+                        _load_object(
+                            authority_row["snapshot_json"],
+                            "selector authority snapshot",
+                        )
+                    )
+                    if authority_row is not None
+                    else None
+                )
+                if (
+                    authority is None
+                    or role_row is None
+                    or attempt_row["execution_turn_id"]
+                    != command.execution_identity.execution_turn_id
+                    or attempt_row["role"] != role_row["role"]
+                    or attempt_row["selector_generation"] != authority.generation
+                    or authority.identity is None
+                    or attempt_row["selector_identity_json"]
+                    != _dump(authority.identity.to_dict())
+                    or attempt_row["native_sid_compatibility_json"]
+                    != (
+                        _dump(authority.native_sid_compatibility)
+                        if authority.native_sid_compatibility is not None
+                        else None
+                    )
+                ):
+                    _discard_selector_bind_intent(
+                        database,
+                        session_id=session_id,
+                        request_id=request_id,
+                        provider_run_id=command.provider_run_id,
+                    )
+                    database.commit()
+                    raise TransitionConflict(
+                        "execution selector attempt lost its admitted authority"
+                    )
         cursor = database.execute(
             """
             UPDATE sessions

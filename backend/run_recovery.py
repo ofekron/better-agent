@@ -20,7 +20,10 @@ import loop_affinity
 import perf
 import recovery_manager
 import recovery_schedule
-from execution_artifact_io import validate_execution_input_projection
+from execution_artifact_io import (
+    load_execution_artifact,
+    validate_execution_input_projection,
+)
 from execution_template import (
     ExecutionArtifact,
     ExecutionAuthorityError,
@@ -2343,11 +2346,6 @@ def _apply_recovered_stream_event_sync(
     event_type = event.get("type")
     data = event.get("data") or {}
     if event_type == "session_discovered":
-        sid = data.get("session_id") if isinstance(data, dict) else None
-        if sid:
-            session_manager.set_agent_sid(
-                persist_sid, mode, sid, bump_updated_at=False,
-            )
         return
     if event_type in {"complete", "error"}:
         return
@@ -2379,6 +2377,149 @@ def _apply_recovered_stream_event_sync(
     )
 
 
+def _recovered_selector_evidence(desc: dict) -> tuple[object, dict] | None:
+    run_id = str(desc.get("run_id") or "")
+    artifact = None
+    if run_id:
+        try:
+            artifact = load_execution_artifact(_runs_root() / run_id)
+            compatibility = artifact.runtime_policy.get(
+                "native_sid_compatibility"
+            )
+            if compatibility is not None:
+                from native_sid_compatibility import NativeSidCompatibility
+
+                compatibility = NativeSidCompatibility.from_dict(
+                    compatibility
+                ).to_dict()
+        except (ExecutionAuthorityError, OSError, ValueError):
+            artifact = None
+            compatibility = None
+    else:
+        compatibility = None
+    if compatibility is None:
+        compatibility = desc.get("native_sid_compatibility")
+        if compatibility is None:
+            return None
+        try:
+            from native_sid_compatibility import NativeSidCompatibility
+
+            compatibility = NativeSidCompatibility.from_dict(
+                compatibility
+            ).to_dict()
+        except ValueError:
+            return None
+    from lifecycle_command_model import SelectorIdentity
+
+    arguments = artifact.template.arguments() if artifact is not None else {}
+    provider_id = (
+        artifact.provider_id if artifact is not None else desc.get("provider_id")
+    )
+    model = arguments.get("model") or desc.get("model")
+    runner = desc.get("runner")
+    try:
+        selector = SelectorIdentity(
+            str(provider_id or ""),
+            str(model or ""),
+            str(runner or ""),
+        )
+    except ValueError:
+        return None
+    return selector, compatibility
+
+
+async def _attach_recovered_selector_sid(
+    coordinator,
+    desc: dict,
+    native_sid: object,
+) -> str | None:
+    if not isinstance(native_sid, str) or not native_sid:
+        return None
+    lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
+    if lifecycle_commands is None:
+        return None
+    evidence = await asyncio.to_thread(
+        _recovered_selector_evidence,
+        desc,
+    )
+    if evidence is None:
+        return None
+    selector, compatibility = evidence
+    app_session_id = str(desc.get("app_session_id") or "")
+    provider_run_id = str(desc.get("run_id") or "")
+    if not app_session_id or not provider_run_id:
+        return None
+    attached = await lifecycle_commands.attach_recovered_selector_native_sid(
+        app_session_id,
+        provider_run_id=provider_run_id,
+        native_sid=native_sid,
+        native_sid_compatibility=compatibility,
+        selector=selector,
+    )
+    return native_sid if attached else None
+
+
+async def _recovered_retry_selector_attempt(
+    lifecycle_commands,
+    *,
+    app_session_id: str,
+    provider_run_id: str,
+    desc: dict,
+) -> dict | None:
+    import lifecycle_command_store
+
+    evidence = await asyncio.to_thread(_recovered_selector_evidence, desc)
+    if evidence is None:
+        return None
+    selector, compatibility = evidence
+    attempt = await asyncio.to_thread(
+        lifecycle_command_store.execution_selector_attempt,
+        app_session_id,
+        provider_run_id,
+    )
+    if attempt is None:
+        attempt = await lifecycle_commands.recover_execution_selector_attempt(
+            app_session_id,
+            provider_run_id=provider_run_id,
+            native_sid_compatibility=compatibility,
+            selector=selector,
+        )
+    if (
+        attempt is None
+        or attempt["selector"] != selector
+        or attempt["native_sid_compatibility"] != compatibility
+    ):
+        return None
+    return attempt
+
+
+def _prepared_retry_matches_selector_attempt(
+    prepared_execution,
+    attempt: dict,
+) -> bool:
+    from lifecycle_command_model import SelectorIdentity
+    from native_sid_compatibility import NativeSidCompatibility
+
+    arguments = prepared_execution.artifact.template.arguments()
+    try:
+        selector = SelectorIdentity(
+            prepared_execution.artifact.provider_id,
+            str(arguments.get("model") or ""),
+            attempt["selector"].runner,
+        )
+        compatibility = NativeSidCompatibility.from_dict(
+            prepared_execution.artifact.runtime_policy.get(
+                "native_sid_compatibility"
+            )
+        ).to_dict()
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        selector == attempt["selector"]
+        and compatibility == attempt["native_sid_compatibility"]
+    )
+
+
 async def _drain_recovered_live_queue(
     coordinator,
     provider,
@@ -2392,6 +2533,7 @@ async def _drain_recovered_live_queue(
     pid = live_recovery_pid(desc)
     owner_retired = False
     owner_invalidated = False
+    approved_recovered_sid: str | None = None
     owner_token = await asyncio.to_thread(session_manager.claim_owner, persist_sid)
     if owner_token is None:
         logger.info(
@@ -2410,7 +2552,26 @@ async def _drain_recovered_live_queue(
 
             event = {"type": stream_event.type, "data": stream_event.data}
             if stream_event.type in {"complete", "error"}:
+                if stream_event.type == "complete":
+                    terminal_sid = stream_event.data.get("session_id")
+                    approved_recovered_sid = (
+                        await _attach_recovered_selector_sid(
+                            coordinator,
+                            desc,
+                            terminal_sid,
+                        )
+                        or approved_recovered_sid
+                    )
                 break
+            if stream_event.type == "session_discovered":
+                approved_recovered_sid = (
+                    await _attach_recovered_selector_sid(
+                        coordinator,
+                        desc,
+                        stream_event.data.get("session_id"),
+                    )
+                    or approved_recovered_sid
+                )
             await asyncio.to_thread(
                 _apply_recovered_stream_event_sync,
                 persist_sid=persist_sid,
@@ -2451,7 +2612,13 @@ async def _drain_recovered_live_queue(
         logger.exception("_drain_recovered_live_queue: failed for %s", run_id)
     finally:
         if not owner_invalidated:
-            await _finalize_when_done(coordinator, provider, desc, recovering_msg_id)
+            await _finalize_when_done(
+                coordinator,
+                provider,
+                desc,
+                recovering_msg_id,
+                approved_recovered_sid=approved_recovered_sid,
+            )
 
 
 def _barrier_journal(persist_sid: str) -> None:
@@ -2875,6 +3042,11 @@ async def _integrate_one_locked(
     if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
         _is_consistent, sess, desc,
     ):
+        approved_recovered_sid = await _attach_recovered_selector_sid(
+            coordinator,
+            desc,
+            desc.get("session_id"),
+        )
         if last_asst_initial is not None:
             try:
                 await _emit_recovered_user_message_terminal(
@@ -2882,7 +3054,7 @@ async def _integrate_one_locked(
                     app_session_id=app_sid,
                     persist_sid=persist_sid,
                     mode=desc.get("mode") or "manager",
-                    agent_sid=desc.get("session_id"),
+                    agent_sid=approved_recovered_sid,
                     run_id=run_id,
                     execution_turn_id=desc.get("turn_run_id"),
                     cancelled=cancelled,
@@ -2904,6 +3076,11 @@ async def _integrate_one_locked(
 
     mode = desc.get("mode") or "manager"
     claude_sid = desc.get("session_id")
+    approved_recovered_sid = await _attach_recovered_selector_sid(
+        coordinator,
+        desc,
+        claude_sid,
+    )
 
     # Flip the recovering pill on the assistant message we're about to
     # mutate. Ownership of the clear is handed to `_finalize_when_done`
@@ -2985,7 +3162,7 @@ async def _integrate_one_locked(
                 persist_sid=persist_sid,
                 run_id=run_id,
                 mode=mode,
-                claude_sid=claude_sid,
+                claude_sid=approved_recovered_sid,
                 sess=sess,
                 alive=alive,
                 has_complete=has_complete,
@@ -3147,7 +3324,13 @@ async def _integrate_one_locked(
                 )
             else:
                 asyncio.create_task(
-                    _finalize_when_done(coordinator, provider, desc, recovering_msg_id),
+                    _finalize_when_done(
+                        coordinator,
+                        provider,
+                        desc,
+                        recovering_msg_id,
+                        approved_recovered_sid=approved_recovered_sid,
+                    ),
                     name=f"recover-finalize-{run_id[:8]}",
                 )
             handed_off = True
@@ -3251,7 +3434,7 @@ async def _integrate_one_locked(
                             app_session_id=app_sid,
                             persist_sid=persist_sid,
                             mode=mode,
-                            agent_sid=claude_sid,
+                            agent_sid=approved_recovered_sid,
                             run_id=run_id,
                             execution_turn_id=desc.get("turn_run_id"),
                             cancelled=cancelled,
@@ -3553,7 +3736,7 @@ async def _emit_recovered_user_message_terminal_on_main(
                 success=success,
                 token_usage=complete.get("token_usage"),
                 error=error,
-                agent_sid=agent_sid or complete.get("session_id"),
+                agent_sid=agent_sid,
             )
             await coordinator.user_prompt_manager.emit_user_msg_done(
                 persist_sid,
@@ -3677,11 +3860,6 @@ def _apply_integration_sync(
     listener it fires uses the bound loop via `run_coroutine_threadsafe`
     when off the event-loop thread."""
     with session_manager.batch(persist_sid, bump_updated_at=False):
-        if claude_sid:
-            session_manager.set_agent_sid(
-                persist_sid, mode, claude_sid, bump_updated_at=False,
-            )
-
         live_sess = session_manager.get_ref(persist_sid) or sess
         last_asst = _assistant_by_id(live_sess, target_message_id)
         if last_asst is None:
@@ -4458,6 +4636,14 @@ async def _retry_recovered_run(
         )
     lifecycle_commands = getattr(coordinator, "lifecycle_commands", None)
     if lifecycle_commands is not None:
+        async def reject_prepared_retry(reason: str) -> None:
+            await asyncio.to_thread(
+                provider.discard_prepared_execution,
+                restored_execution,
+            )
+            await cleanup_retry_registration()
+            raise RuntimeError(reason)
+
         lifecycle_snapshot = lifecycle_commands.snapshot(app_sid)
         execution = lifecycle_snapshot.execution
         old_run_id = str(desc.get("run_id") or run_dir.name)
@@ -4466,12 +4652,46 @@ async def _retry_recovered_run(
             or execution.identity.assistant_message_id != msg_id
             or execution.provider_run_id != old_run_id
         ):
-            raise RuntimeError("recovered retry execution identity is ambiguous")
-        await lifecycle_commands.elect_execution_attempt(
-            app_sid,
-            execution_identity=execution.identity,
-            provider_run_id=new_run_id,
+            await reject_prepared_retry(
+                "recovered retry execution identity is ambiguous"
+            )
+        prior_selector_attempt = await _recovered_retry_selector_attempt(
+            lifecycle_commands,
+            app_session_id=app_sid,
+            provider_run_id=old_run_id,
+            desc=desc,
         )
+        if prior_selector_attempt is None:
+            await reject_prepared_retry(
+                "recovered retry evidence does not match current authority"
+            )
+        if not _prepared_retry_matches_selector_attempt(
+            restored_execution,
+            prior_selector_attempt,
+        ):
+            await reject_prepared_retry(
+                "prepared retry selector evidence changed"
+            )
+        try:
+            await lifecycle_commands.elect_execution_attempt(
+                app_sid,
+                execution_identity=execution.identity,
+                provider_run_id=new_run_id,
+                selector_generation=prior_selector_attempt[
+                    "selector_generation"
+                ],
+                native_sid_compatibility=prior_selector_attempt[
+                    "native_sid_compatibility"
+                ],
+                selector=prior_selector_attempt["selector"],
+            )
+        except BaseException:
+            await asyncio.to_thread(
+                provider.discard_prepared_execution,
+                restored_execution,
+            )
+            await cleanup_retry_registration()
+            raise
         elected_execution_identity = execution.identity
         old_elected_run_id = old_run_id
         election_rebound = True
@@ -4641,7 +4861,12 @@ async def _adopt_recovered_live_execution(
 
 
 async def _finalize_when_done(
-    coordinator, provider, desc: dict, recovering_msg_id: Optional[str] = None,
+    coordinator,
+    provider,
+    desc: dict,
+    recovering_msg_id: Optional[str] = None,
+    *,
+    approved_recovered_sid: str | None = None,
 ) -> None:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
@@ -4732,12 +4957,21 @@ async def _finalize_when_done(
             # event_ingester keeps replay idempotent for events already
             # processed by the live tailer before the backend restart.
             try:
+                recovered_sid = desc.get("session_id")
+                approved_recovered_sid = (
+                    approved_recovered_sid
+                    or await _attach_recovered_selector_sid(
+                        coordinator,
+                        desc,
+                        recovered_sid,
+                    )
+                )
                 await asyncio.to_thread(
                     _finalize_sync,
                     persist_sid=persist_sid,
                     run_id=run_id,
                     mode=desc.get("mode") or "native",
-                    claude_sid=desc.get("session_id"),
+                    claude_sid=approved_recovered_sid,
                     sess=sess,
                     last_asst=last_asst,
                     msg_id=msg_id,
@@ -4813,7 +5047,7 @@ async def _finalize_when_done(
                     app_session_id=app_sid,
                     persist_sid=persist_sid,
                     mode=desc.get("mode") or "native",
-                    agent_sid=desc.get("session_id"),
+                    agent_sid=approved_recovered_sid,
                     run_id=run_id,
                     execution_turn_id=desc.get("turn_run_id"),
                     cancelled=cancelled,
