@@ -89,6 +89,15 @@ _AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE = (
 )
 
 
+class AmbiguousRecoveredExecutionIdentityError(RuntimeError):
+    """The session's current lifecycle command targets the SAME message
+    as this recovered run, but a DIFFERENT execution (run_id/turn) owns
+    it. That other execution — not this stale one — will emit the
+    correct terminal when it completes; a caller catching this should
+    retire the recovered run without emitting anything, never treat this
+    as "safe to fabricate a terminal for"."""
+
+
 def _normalize_recovered_started_at(value: object) -> str:
     """Return a UTC-aware run start, interpreting legacy naive values locally."""
     if isinstance(value, str) and value:
@@ -2867,18 +2876,28 @@ async def _integrate_one_locked(
         _is_consistent, sess, desc,
     ):
         if last_asst_initial is not None:
-            await _emit_recovered_user_message_terminal(
-                coordinator=coordinator,
-                app_session_id=app_sid,
-                persist_sid=persist_sid,
-                mode=desc.get("mode") or "manager",
-                agent_sid=desc.get("session_id"),
-                run_id=run_id,
-                execution_turn_id=desc.get("turn_run_id"),
-                cancelled=cancelled,
-                sess=sess,
-                assistant_msg=last_asst_initial,
-            )
+            try:
+                await _emit_recovered_user_message_terminal(
+                    coordinator=coordinator,
+                    app_session_id=app_sid,
+                    persist_sid=persist_sid,
+                    mode=desc.get("mode") or "manager",
+                    agent_sid=desc.get("session_id"),
+                    run_id=run_id,
+                    execution_turn_id=desc.get("turn_run_id"),
+                    cancelled=cancelled,
+                    sess=sess,
+                    assistant_msg=last_asst_initial,
+                )
+            except AmbiguousRecoveredExecutionIdentityError:
+                # See the identical catch in the non-"consistent state"
+                # branch below for why this is safe to retire silently.
+                await _to_thread_joined(_barrier_journal, persist_sid)
+                await _mark_reconciled_terminal_async(
+                    run_id, desc, "superseded lifecycle identity",
+                    summary=summary,
+                )
+                return
             await _to_thread_joined(_barrier_journal, persist_sid)
         await _mark_reconciled_terminal_async(run_id, desc, "consistent state")
         return
@@ -3239,18 +3258,16 @@ async def _integrate_one_locked(
                             sess=live_sess,
                             assistant_msg=terminal_asst,
                         )
-                    except RuntimeError as exc:
-                        if str(exc) != _AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE:
-                            raise
-                        # The session's lifecycle already moved past this
-                        # recovered run (a later turn superseded it, or a
-                        # concurrent execution already bound a different
-                        # identity) — the run itself is done and safe to
-                        # retire. Unlike every other raise in this
-                        # function, nothing marks this run reconciled
-                        # afterward, so `recover_all_in_flight` re-hits
-                        # the same fail-closed ambiguity guard and re-logs
-                        # this error on every single restart forever.
+                    except AmbiguousRecoveredExecutionIdentityError:
+                        # A different, currently-owning execution will
+                        # emit the correct terminal for this exact message
+                        # when IT completes — this stale run is done and
+                        # safe to retire without emitting anything.
+                        # Unlike every other exit in this function,
+                        # nothing marked this run reconciled before this
+                        # fix, so `recover_all_in_flight` re-hit this
+                        # fail-closed guard and re-logged the identical
+                        # error on every single restart forever.
                         await _to_thread_joined(_barrier_journal, persist_sid)
                         await _mark_reconciled_terminal_async(
                             run_id,
@@ -3460,7 +3477,26 @@ async def _emit_recovered_user_message_terminal_on_main(
                         else snapshot.phase
                     ),
                 ):
-                    raise RuntimeError(_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE)
+                    # The session has moved on to a DIFFERENT message
+                    # entirely and we can't prove clean ordering. Ideally
+                    # this should still fall through and emit the stale
+                    # message's own terminal (no other execution owns it
+                    # anymore, so durable ask/mssg waiters on it would
+                    # otherwise hang forever) — but that path depends on
+                    # the full turn-finalization stack (event journal +
+                    # user_msg_lifecycle persistence) and hasn't been
+                    # verified safe under all conditions this raise can
+                    # occur in. Fail closed for now, same as the sibling
+                    # branch below; see the caller's
+                    # AmbiguousRecoveredExecutionIdentityError catch.
+                    # TODO(follow-up): distinguish this branch from the
+                    # sibling one below with its own exception type once
+                    # someone can add integration-level coverage for the
+                    # fall-through-and-emit path, so stale waiters here
+                    # get unblocked instead of retiring silently.
+                    raise AmbiguousRecoveredExecutionIdentityError(
+                        _AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE
+                    )
             elif (
                 execution is None
                 or execution.identity.assistant_message_id
@@ -3469,7 +3505,14 @@ async def _emit_recovered_user_message_terminal_on_main(
                 != str(execution_turn_id or "")
                 or execution.provider_run_id != run_id
             ):
-                raise RuntimeError(_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE)
+                # Same message, but a DIFFERENT execution (run_id/turn)
+                # currently owns it — that execution, not this stale one,
+                # will emit the correct terminal when it completes.
+                # Raising here (unlike the branch above) is correct: the
+                # caller retires this run without emitting anything.
+                raise AmbiguousRecoveredExecutionIdentityError(
+                    _AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE
+                )
             else:
                 terminal_result = await lifecycle_commands.finish_execution_and_turn(
                     app_session_id,
@@ -3744,6 +3787,7 @@ def _replay_from_codex_rollout(
         codex_subagent_delegation_id,
         codex_subagent_sources_from_event,
         codex_subagent_rollout_start_byte,
+        codex_rollout_terminal_from_byte,
         normalize_rollout_file,
         resolve_rollout_path,
     )
@@ -3838,6 +3882,18 @@ def _replay_from_codex_rollout(
                 wrapped.append({"type": "worker_event", "data": {
                     "delegation_id": delegation_id,
                     "event": child_event,
+                }})
+            terminal_state = codex_rollout_terminal_from_byte(
+                Path(child_path), child_start,
+            )
+            if terminal_state is None and (run_dir / "complete.json").exists():
+                terminal_state = False
+            if terminal_state is not None:
+                wrapped.append({"type": "worker_complete", "data": {
+                    "delegation_id": delegation_id,
+                    "worker_session_id": child_id,
+                    "success": terminal_state,
+                    "run_mode": "codex_subagent",
                 }})
     return wrapped, context_window
 
@@ -4751,18 +4807,35 @@ async def _finalize_when_done(
                 return  # new task owns cleanup
 
         if finalize_ok and last_asst is not None:
-            await _emit_recovered_user_message_terminal(
-                coordinator=coordinator,
-                app_session_id=app_sid,
-                persist_sid=persist_sid,
-                mode=desc.get("mode") or "native",
-                agent_sid=desc.get("session_id"),
-                run_id=run_id,
-                execution_turn_id=desc.get("turn_run_id"),
-                cancelled=cancelled,
-                sess=sess,
-                assistant_msg=last_asst,
-            )
+            try:
+                await _emit_recovered_user_message_terminal(
+                    coordinator=coordinator,
+                    app_session_id=app_sid,
+                    persist_sid=persist_sid,
+                    mode=desc.get("mode") or "native",
+                    agent_sid=desc.get("session_id"),
+                    run_id=run_id,
+                    execution_turn_id=desc.get("turn_run_id"),
+                    cancelled=cancelled,
+                    sess=sess,
+                    assistant_msg=last_asst,
+                )
+            except AmbiguousRecoveredExecutionIdentityError:
+                # See the identical catch in `_integrate_one_locked` for
+                # why this is safe to retire silently: a different,
+                # currently-owning execution will emit the correct
+                # terminal for this exact message. Without this catch it
+                # falls through to the generic `except Exception` below,
+                # which never marks the run reconciled — the identical
+                # ambiguity re-fires on every subsequent restart forever.
+                provider._cleanup_run(run_id)
+                coordinator.turn_manager.run_state_remove(app_sid, run_id)
+                await coordinator.turn_manager.emit_run_state(app_sid)
+                await asyncio.to_thread(_barrier_journal, persist_sid)
+                _mark_reconciled_terminal(
+                    run_id, desc, "superseded lifecycle identity",
+                )
+                return
 
         provider._cleanup_run(run_id)
         coordinator.turn_manager.run_state_remove(app_sid, run_id)

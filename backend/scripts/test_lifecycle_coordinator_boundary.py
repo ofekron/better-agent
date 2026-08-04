@@ -1,4 +1,16 @@
-"""Coordinator-boundary proof for logical user-turn lifecycle ownership."""
+"""Coordinator-boundary proof for logical user-turn lifecycle ownership.
+
+Not pytest-collected on purpose (no `test_*`/`Test*` symbol; every proof
+here is named `prove_*`). A `test_*` wrapper was tried and reverted: this
+module's `_test_home.isolate()` races every OTHER collected file's own
+`isolate()` call for the process-global `BETTER_AGENT_HOME` env var (each
+repoints it at import time), so whichever file's installation profile is
+active by test-EXECUTION time depends on collection order — confirmed
+this file's proofs pass alone or paired with `test_codex_recovery.py`,
+but fail with `IncompatibleOrchestrationMode: installation setup is
+required` paired with `test_session_store_root_resolve_cache.py`.
+Fixing that needs a real cross-file test-isolation mechanism, not a
+per-file wrapper. Run via `python scripts/test_lifecycle_coordinator_boundary.py`."""
 
 from __future__ import annotations
 
@@ -961,35 +973,6 @@ def main() -> int:
         return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
-
-
-def test_recovery_reconciles_superseded_lifecycle_identity() -> None:
-    """pytest entry point for the one regression this change added.
-
-    Every proof in this module is named `prove_*`, not `test_*`, so
-    `conftest.py`'s `pytest_ignore_collect` skips the whole file — none of
-    these assertions run under pytest/CI, only via manual script
-    invocation (`python scripts/test_lifecycle_coordinator_boundary.py`).
-    This wrapper deliberately runs ONLY
-    `prove_integrate_one_locked_reconciles_superseded_recovery`, not the
-    full `run()` — `run()` also exercises
-    `prove_cancel_before_execution`, which fails independently of this
-    change (reproduces identically on an unmodified checkout under this
-    host's Docker test image); wiring the whole suite into pytest would
-    turn that pre-existing, unrelated failure into a new CI break."""
-    coordinator = Coordinator()
-
-    async def _run() -> None:
-        await coordinator.lifecycle_commands.bind()
-        try:
-            await prove_integrate_one_locked_reconciles_superseded_recovery(
-                coordinator,
-            )
-        finally:
-            await coordinator.quiesce_prompt_processors()
-            await coordinator.lifecycle_commands.close()
-
-    asyncio.run(_run())
 
 
 if __name__ == "__main__":
