@@ -1514,7 +1514,6 @@ class CodexProvider(Provider):
                     codex_runner_launch_from_artifact,
                 )
 
-                contract = codex_contract_from_artifact(artifact)
                 execution_arguments = artifact.template.arguments()
                 persist_to = (
                     execution_arguments.get("worker_agent_session_id")
@@ -1535,8 +1534,22 @@ class CodexProvider(Provider):
                     codex_runtime_agent_manifest(artifact),
                 )
                 if not has_complete_json:
+                    # Only a still-in-flight run needs its execution
+                    # contract re-attested. A terminal run's contract is
+                    # never read below — computing it unconditionally
+                    # rejected every already-complete run whose authority
+                    # was executed via `better_agent_runner`'s openai-family
+                    # delegation (provider_contract.type="openai", not
+                    # "codex"; see codex_contract_from_artifact), which is
+                    # a legitimate delegation shape, not a corrupt record.
+                    contract = codex_contract_from_artifact(artifact)
                     codex_runner_launch_from_artifact(artifact)
-                    if not contract.attest():
+                    # Bounded 1-shot retry: the attestation can race a
+                    # still-running runner's own concurrent writes to its
+                    # execution artifact during the prepare->spawn window
+                    # (mirrors family_launch_from_artifact's identical
+                    # retry in provider_family_execution_runtime.py).
+                    if not contract.attest() and not contract.attest():
                         raise ValueError("Codex recovery authority mismatch")
             except Exception:
                 logger.exception(

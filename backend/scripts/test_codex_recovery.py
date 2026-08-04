@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ from session_manager import manager as session_manager  # noqa: E402
 from codex_execution_contract import build_codex_execution_contract  # noqa: E402
 from codex_execution_runtime import codex_provider_contract  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
+from provider_execution_contract import provider_family_contract  # noqa: E402
 from provider_runner_launch import capture_runner_launch  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
@@ -114,10 +116,18 @@ def _seed_codex_run(
     target_message_id: str | None = None,
     write_jsonl_path: bool = True,
     run_id: str | None = None,
+    family_contract: bool = False,
 ) -> str:
     """Synthesize a codex run dir: native rollout jsonl + codex_stderr.log
     (NOT gemini_stderr.log) + state/backend_state. `pid` is stamped as
-    runner_pid; `complete` controls whether complete.json exists."""
+    runner_pid; `complete` controls whether complete.json exists.
+
+    `family_contract=True` freezes a `provider_contract.type == "openai"`
+    envelope onto the (still `provider_kind="codex"`) artifact, matching
+    what `better_agent_runner`'s openai-family delegation actually
+    persists via `provider_family_execution_runtime.prepare_family_execution`
+    (see `provider_execution_contract.provider_family_contract`) — as
+    opposed to native codex execution, whose envelope type is "codex"."""
     run_id = run_id or str(uuid.uuid4())
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +157,14 @@ def _seed_codex_run(
             str(config_root / "auth.json"),
         ),
     )
+    provider_contract = (
+        provider_family_contract(
+            {**provider_record, "kind": "openai"},
+            payload={},
+        )
+        if family_contract
+        else codex_provider_contract(contract)
+    )
     runtime_policy = {
         "context_strategy": None,
         "disabled_runtime_skills": [],
@@ -168,7 +186,7 @@ def _seed_codex_run(
     execution = prepare_execution(
         provider_record,
         runtime_policy=runtime_policy,
-        provider_contract=codex_provider_contract(contract),
+        provider_contract=provider_contract,
         run_id=run_id,
         prompt="recover",
         cwd="/tmp",
@@ -623,6 +641,52 @@ def test_dead_wrapper_uses_rollout_terminal_complete() -> bool:
     if usage.get("total_tokens") != 17 or usage.get("cache_read_input_tokens") != 3:
         print(f"  unexpected token usage: {usage!r}")
         return False
+    return True
+
+
+def test_terminal_family_delegated_run_recovers_without_authority_error() -> bool:
+    """Bug: a `provider_kind="codex"` run whose `provider_contract.type`
+    is "openai" (better_agent_runner openai-family delegation — a
+    legitimate shape, not corruption; see `family_execution_kind`) used to
+    permanently fail `recover_in_flight` on every restart once it already
+    had a terminal `complete.json`, because `codex_contract_from_artifact`
+    was called unconditionally and raises on any non-"codex" contract type,
+    even though the terminal branch never reads `contract` at all."""
+    app_sid, asst_id = _seed_session_with_streaming_assistant()
+    codex_sid = str(uuid.uuid4())
+    run_id = _seed_codex_run(
+        app_sid=app_sid,
+        codex_sid=codex_sid,
+        pid=0,
+        events=[_make_assistant_text_event("already finished")],
+        complete=True,
+        target_message_id=asst_id,
+        family_contract=True,
+    )
+
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        recovered = CodexProvider({"id": "codex-test"}).recover_in_flight()
+    finally:
+        root_logger.removeHandler(handler)
+
+    log_text = log_stream.getvalue()
+    assert "invalid execution authority" not in log_text, (
+        f"unexpected authority-error log: {log_text!r}"
+    )
+    desc = next((item for item in recovered if item.get("run_id") == run_id), None)
+    assert desc is not None, (
+        "terminal family-delegated run was skipped by recover_in_flight"
+    )
+    assert desc.get("has_complete_json") is True, (
+        f"expected has_complete_json=True, got {desc.get('has_complete_json')!r}"
+    )
+    assert desc.get("provider_kind") == "codex", (
+        f"expected provider_kind=codex, got {desc.get('provider_kind')!r}"
+    )
     return True
 
 
@@ -2734,6 +2798,7 @@ TESTS = [
     ("codex live recovery streams rollout events before complete", test_live_recovery_streams_rollout_events_before_complete),
     ("codex live recovery waits for child setup before complete", test_live_recovery_waits_for_child_setup_before_complete),
     ("dead codex wrapper uses rollout terminal complete", test_dead_wrapper_uses_rollout_terminal_complete),
+    ("terminal family-delegated codex run recovers without authority error", test_terminal_family_delegated_run_recovers_without_authority_error),
     ("dead codex wrapper resolves missing jsonl path", test_dead_wrapper_resolves_missing_jsonl_path),
     ("dead codex wrapper ignores malformed usage values", test_dead_wrapper_ignores_malformed_usage_values),
     ("codex usage normalizer zeros malformed live values", test_codex_usage_normalizer_zeros_malformed_live_values),
