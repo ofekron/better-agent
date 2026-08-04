@@ -668,7 +668,10 @@ def test_async_provider_resolution_runs_off_loop() -> None:
     assert "coordinator.provider_for_session(worker_session_id)" not in run_source
     assert "coordinator.provider_for_session,\n            worker_session_id" in run_source
     assert "coordinator.provider_for_run(worker_agent_session_id, provider_id)" not in locked_source
-    assert "coordinator.provider_for_run,\n        worker_agent_session_id" in locked_source
+    assert "resolve_provider_with_restart(\n        coordinator.provider_for_run" in locked_source
+
+    recovery_source = (ROOT / "credential_session_recovery.py").read_text(encoding="utf-8")
+    assert "return await asyncio.to_thread(resolve, *args)" in recovery_source
 
     main_source = _api_source()
     route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")

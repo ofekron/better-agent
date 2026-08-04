@@ -1174,7 +1174,8 @@ async def run_delegation_locked(
         delegation_id,
         stage="delegation_provider_resolving",
     )
-    provider = await asyncio.to_thread(
+    from credential_session_recovery import resolve_provider_with_restart
+    provider = await resolve_provider_with_restart(
         coordinator.provider_for_run,
         worker_agent_session_id,
         provider_id,

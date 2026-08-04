@@ -45,6 +45,7 @@ frontend_logger = logging.getLogger("frontend")
 
 
 _coordinator_ref: Any = None
+_supervised_restart_requested = False
 
 
 def _coordinator() -> Any:
@@ -347,6 +348,21 @@ async def internal_switch_restart(
     restarted_nodes = await _restart_connected_worker_nodes()
     await _trigger_supervisor_restart(request_id)
     return {"status": "rebuilding", "request_id": request_id, "restarted_nodes": restarted_nodes}
+
+
+async def request_supervised_backend_restart() -> bool:
+    global _supervised_restart_requested
+    if get_env("BETTER_CLAUDE_RUN_SH_SUPERVISOR") != "1":
+        return False
+    if _supervised_restart_requested:
+        return True
+    _supervised_restart_requested = True
+    try:
+        await _trigger_supervisor_restart(new_restart_request_id())
+    except Exception:
+        _supervised_restart_requested = False
+        raise
+    return True
 
 
 async def _trigger_supervisor_restart(request_id: str) -> None:
