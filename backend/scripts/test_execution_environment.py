@@ -13,6 +13,30 @@ import pytest  # noqa: E402
 import execution_environment as ee  # noqa: E402
 
 
+def test_isolated_subprocess_environment_keeps_platform_state_not_secrets():
+    source = {
+        "PATH": "/host/bin",
+        "SystemRoot": r"C:\WINDOWS",
+        "APPDATA": r"C:\Users\me\AppData\Roaming",
+        "PARENT_SECRET": "secret",
+    }
+    assert ee.isolated_subprocess_environment(source) == {
+        "PATH": "/host/bin",
+        "SystemRoot": r"C:\WINDOWS",
+    }
+
+
+def test_isolated_subprocess_environment_reasserts_local_system_root():
+    env = ee.isolated_subprocess_environment(
+        {"PATH": r"C:\Windows\System32", "SystemRoot": r"C:\WINDOWS"},
+        {"PATH": r"C:\extension-venv", "SYSTEMROOT": "/primary/SystemRoot"},
+    )
+    assert env == {
+        "PATH": r"C:\extension-venv",
+        "SystemRoot": r"C:\WINDOWS",
+    }
+
+
 # --- happy paths -------------------------------------------------------------
 
 @pytest.mark.parametrize("value", [None, {}, {"MY_VAR": "value"}])

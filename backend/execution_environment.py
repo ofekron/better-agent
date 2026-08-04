@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
-from typing import Any
+from typing import Any, Mapping
 
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -45,6 +46,36 @@ _PROTECTED_PREFIXES = (
     "CLAUDE_CODE_",
     "CODEX_",
 )
+
+_ISOLATED_SUBPROCESS_HOST_KEYS = frozenset({
+    "PATH",
+    "SYSTEMROOT",
+})
+
+
+def isolated_subprocess_environment(
+    source: Mapping[str, str] | None = None,
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Keep only host variables required to start an isolated child process."""
+    values = os.environ if source is None else source
+    env = {
+        key: value
+        for key, value in values.items()
+        if key.upper() in _ISOLATED_SUBPROCESS_HOST_KEYS
+    }
+    env.setdefault("PATH", "")
+    env.update(overrides or {})
+    system_root = next(
+        ((key, value) for key, value in values.items() if key.upper() == "SYSTEMROOT"),
+        None,
+    )
+    if system_root is not None:
+        env = {key: value for key, value in env.items() if key.upper() != "SYSTEMROOT"}
+        env[system_root[0]] = system_root[1]
+    return env
+
+
 def validate_extra_env(value: Any) -> None:
     if value is None:
         return

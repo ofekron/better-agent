@@ -10,7 +10,7 @@ from provider_family_execution_runtime import (
     FamilyExecutionRuntime,
     restore_family_runner_runtime,
 )
-from provider_runtime_plan_source import hydrate_runner_operation_broker
+from provider_runtime_plan_source import hydrate_runner_runtime_plan
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ def _runtime_capabilities(
         raise ExecutionContractError(
             "session-events runtime capability hydration is invalid",
         )
-    return hydrate_runner_operation_broker(
+    return hydrate_runner_runtime_plan(
         hydration["capability_plan"],
         get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip(),
     )

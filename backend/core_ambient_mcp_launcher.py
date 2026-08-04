@@ -36,6 +36,7 @@ import os
 import sys
 
 from env_compat import dual_env_many, get_env
+from execution_environment import isolated_subprocess_environment
 
 
 _AMBIENT_ELIGIBLE_SERVERS = {
@@ -78,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), script_name)
     sdk_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sdk")
     env = {
-        "PATH": os.environ.get("PATH", ""),
+        **isolated_subprocess_environment(),
         "PYTHONIOENCODING": "utf-8",
         "PYTHONPATH": sdk_path,
         **dual_env_many({

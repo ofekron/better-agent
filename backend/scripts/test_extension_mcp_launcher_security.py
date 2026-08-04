@@ -24,6 +24,7 @@ def check(condition: bool, message: str) -> None:
 
 def main() -> int:
     os.environ["PATH"] = "/usr/bin"
+    os.environ["SystemRoot"] = r"C:\WINDOWS"
     os.environ["PARENT_SECRET_SHOULD_NOT_LEAK"] = "secret"
     captured: dict[str, object] = {}
 
@@ -31,7 +32,7 @@ def main() -> int:
         return {
             "command": "server-bin",
             "args": ["--serve"],
-            "env": {"EXTENSION_ENV": "ok"},
+            "env": {"EXTENSION_ENV": "ok", "SYSTEMROOT": "/primary/SystemRoot"},
         }
 
     def execvpe(command, args, env):
@@ -51,7 +52,9 @@ def main() -> int:
     env = captured.get("env")
     check(isinstance(env, dict), "launcher passes explicit env")
     check(env.get("EXTENSION_ENV") == "ok", "launcher includes extension env")
-    check(env.get("PATH") == "/usr/bin", "launcher preserves PATH only")
+    check(env.get("PATH") == "/usr/bin", "launcher preserves PATH")
+    check(env.get("SystemRoot") == r"C:\WINDOWS", "launcher preserves Windows runtime state")
+    check("SYSTEMROOT" not in env, "launcher rejects frozen SystemRoot overrides")
     check(env.get("PYTHONIOENCODING") == "utf-8", "launcher sets python encoding")
     check("PARENT_SECRET_SHOULD_NOT_LEAK" not in env, "launcher does not inherit parent secrets")
     return 0

@@ -1522,8 +1522,8 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     ).read_text(encoding="utf-8")
     check(
         "hydrate_frozen_provider_runtime_plan(" in claude_provider_src
-        and "hydrate_runner_operation_broker(" in runner_src,
-        "Claude spawn hydrates only volatile frozen-plan references",
+        and "hydrate_runner_runtime_plan(" in runner_src,
+        "Claude spawn hydrates volatile references and local process state",
     )
     check(
         '"session-bridge" in _active_builtin_mcp_servers' not in runner_src,

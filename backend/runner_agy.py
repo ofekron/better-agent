@@ -23,7 +23,7 @@ from provider_family_execution_runtime import (
     FamilyExecutionRuntime,
     restore_family_runner_runtime,
 )
-from provider_runtime_plan_source import hydrate_runner_operation_broker
+from provider_runtime_plan_source import hydrate_runner_runtime_plan
 from runs_dir import atomic_write_json
 from i18n import t
 import runner_errors
@@ -1262,7 +1262,7 @@ def _runtime_capabilities(
     }
     if hydration["skill_dirs"] != expected_skills:
         raise RuntimeError("AGY runtime skill hydration is invalid")
-    plan = hydrate_runner_operation_broker(
+    plan = hydrate_runner_runtime_plan(
         hydration["capability_plan"],
         get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip(),
     )

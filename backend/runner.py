@@ -171,7 +171,7 @@ from provider_family_execution_runtime import (
     FamilyExecutionRuntime,
     restore_family_runner_runtime,
 )
-from provider_runtime_plan_source import hydrate_runner_operation_broker
+from provider_runtime_plan_source import hydrate_runner_runtime_plan
 from codex_execution_identity import file_identity_from_dict
 from provider_pinned_launch import (
     MaterializedSdkLaunch,
@@ -3367,7 +3367,7 @@ def _runtime_capabilities(
                 "Claude Agent SDK execution authority mismatch",
             )
 
-    capability_plan = hydrate_runner_operation_broker(
+    capability_plan = hydrate_runner_runtime_plan(
         hydration["capability_plan"],
         get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip(),
     )

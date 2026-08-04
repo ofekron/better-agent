@@ -30,6 +30,7 @@ from urllib.parse import quote, urlparse
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from env_compat import dual_env_many, dual_env_raw, get_env
+from execution_environment import isolated_subprocess_environment
 from extension_identifiers import (
     EXTENSION_ID_RE as _ID_RE,
     EXTENSION_SETTING_KEY_RE as _SETTING_KEY_RE,
@@ -4554,42 +4555,11 @@ def _smoke_static_modules(entrypoints: dict[str, Any]) -> dict[str, str]:
     return modules
 
 
-# OS/interpreter-essential env vars the smoke subprocess needs to even run.
-# The smoke env is otherwise kept minimal (no host app secrets), but on
-# Windows winsock's WSAStartup loads its service-provider DLLs from
-# %SystemRoot%\System32 and fails with OSError [WinError 10106] when
-# SystemRoot is absent — which crashes `import mcp` (asyncio/anyio create a
-# socket / proactor loop). Forward the platform basics so importability, not
-# the host's networking config, is what's being tested.
-_SMOKE_OS_ENV_KEYS = (
-    "SystemRoot",
-    "SYSTEMROOT",
-    "SystemDrive",
-    "windir",
-    "TEMP",
-    "TMP",
-    "PATHEXT",
-    "COMSPEC",
-    "NUMBER_OF_PROCESSORS",
-    "PROCESSOR_ARCHITECTURE",
-    "PROCESSOR_IDENTIFIER",
-    "LOCALAPPDATA",
-    "APPDATA",
-)
-
-
 def _smoke_subprocess_env(python_path_parts: list[str]) -> dict[str, str]:
-    """Minimal env for the smoke subprocess plus the OS-essential vars a
-    Python interpreter (and Windows winsock) needs to start and import."""
-    env = {
+    return {
+        **isolated_subprocess_environment(),
         "PYTHONPATH": os.pathsep.join(python_path_parts),
-        "PATH": os.environ.get("PATH", ""),
     }
-    for key in _SMOKE_OS_ENV_KEYS:
-        value = os.environ.get(key)
-        if value is not None:
-            env.setdefault(key, value)
-    return env
 
 
 def _run_python_module_smoke(

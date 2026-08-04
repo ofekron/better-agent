@@ -98,6 +98,7 @@ def _patch_for_main(monkeypatch, *, backend_url, token):
 
 def test_main_capabilities_spawn_shape_and_sanitized_env(monkeypatch):
     _patch_for_main(monkeypatch, backend_url="http://b:5", token="tok-1")
+    monkeypatch.setenv("SystemRoot", r"C:\WINDOWS")
     captured = {}
 
     def fake_execvpe(exe, args, env):
@@ -124,6 +125,7 @@ def test_main_capabilities_spawn_shape_and_sanitized_env(monkeypatch):
     )
     assert env["PYTHONPATH"] == expected_sdk
     assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["SystemRoot"] == r"C:\WINDOWS"
     # dual_env_many emits both BETTER_AGENT_ and BETTER_CLAUDE_ prefixes.
     assert env["BETTER_AGENT_BACKEND_URL"] == "http://b:5"
     assert env["BETTER_CLAUDE_BACKEND_URL"] == "http://b:5"
@@ -134,7 +136,7 @@ def test_main_capabilities_spawn_shape_and_sanitized_env(monkeypatch):
     # Sanitization: env is a fresh dict, not os.environ — the canary must not leak.
     assert "BC_TEST_SECRET_CANARY" not in env
     assert set(env.keys()) == {
-        "PATH", "PYTHONIOENCODING", "PYTHONPATH",
+        "PATH", "SystemRoot", "PYTHONIOENCODING", "PYTHONPATH",
         "BETTER_AGENT_BACKEND_URL", "BETTER_CLAUDE_BACKEND_URL",
         "BETTER_AGENT_INTERNAL_TOKEN", "BETTER_CLAUDE_INTERNAL_TOKEN",
         "BETTER_AGENT_AMBIENT_LAUNCH", "BETTER_CLAUDE_AMBIENT_LAUNCH",

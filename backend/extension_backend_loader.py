@@ -23,6 +23,7 @@ from fastapi.responses import Response
 from starlette.requests import ClientDisconnect
 
 from env_compat import dual_env_many
+from execution_environment import isolated_subprocess_environment
 import extension_store
 import perf
 from paths import ba_home
@@ -131,13 +132,11 @@ def _allows_backend_exit_retry(spec: dict[str, Any], path: str) -> bool:
 
 def _host_env() -> dict[str, str]:
     env = {
+        **isolated_subprocess_environment(),
         "BETTER_AGENT_HOME": str(ba_home()),
         "PYTHONIOENCODING": "utf-8",
         **dual_env_many({"BETTER_CLAUDE_HOME": ba_home()}),
     }
-    path = os.environ.get("PATH")
-    if path:
-        env["PATH"] = path
     marketplace_base_url = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
     if marketplace_base_url:
         env["BETTER_AGENT_MARKETPLACE_BASE_URL"] = marketplace_base_url

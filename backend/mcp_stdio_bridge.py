@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
+from execution_environment import isolated_subprocess_environment
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
@@ -20,11 +20,10 @@ def mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
     raw_env = config.get("env") or {}
     if not isinstance(raw_env, dict):
         raise RuntimeError("MCP server config env must be an object")
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONIOENCODING": "utf-8",
-    }
-    env.update({str(k): str(v) for k, v in raw_env.items()})
+    env = isolated_subprocess_environment(
+        overrides={str(k): str(v) for k, v in raw_env.items()},
+    )
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 

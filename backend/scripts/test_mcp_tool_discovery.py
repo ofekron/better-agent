@@ -59,6 +59,18 @@ import runner
 import runner_better_agent
 
 
+def test_mcp_subprocess_env_keeps_windows_runtime_without_parent_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("SystemRoot", r"C:\WINDOWS")
+    monkeypatch.setenv("MCP_PARENT_SECRET", "secret")
+    env = mcp_stdio_bridge.mcp_subprocess_env({
+        "env": {"MCP_CONFIG": "ok", "SYSTEMROOT": "/primary/SystemRoot"},
+    })
+    assert env["SystemRoot"] == r"C:\WINDOWS"
+    assert "SYSTEMROOT" not in env
+    assert env["MCP_CONFIG"] == "ok"
+    assert "MCP_PARENT_SECRET" not in env
+
+
 def _config(mode: str, counter: Path) -> dict:
     return {
         "command": sys.executable,

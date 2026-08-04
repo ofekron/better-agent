@@ -20,6 +20,7 @@ from provider_runtime_capability_model import (  # noqa: E402
 from provider_runtime_plan_source import (  # noqa: E402
     hydrate_frozen_provider_runtime_plan,
     hydrate_runner_operation_broker,
+    hydrate_runner_runtime_plan,
     selected_runtime_agent_sources,
     selected_runtime_skill_sources,
     structural_provider_runtime_plan,
@@ -519,12 +520,29 @@ def test_agy_plan_preserves_builtin_mcp_tools_with_typed_broker_hydration() -> N
     encoded = json.dumps(prepared, sort_keys=True)
     assert "must-not-persist" not in encoded
     assert "unix:/tmp/runtime-broker.sock" not in encoded
-    hydrated = hydrate_runner_operation_broker(
-        prepared["resolved_plan"],
-        "unix:/tmp/runtime-broker.sock",
-    )
+    assert r"C:\WINDOWS" not in encoded
+    remote_plan = copy.deepcopy(prepared["resolved_plan"])
+    for server in remote_plan["mcp_servers"]:
+        server["config"]["effective"]["env"]["SYSTEMROOT"] = "/primary/SystemRoot"
+    with patch.dict(
+        "os.environ",
+        {
+            "PATH": r"C:\Windows\System32",
+            "SystemRoot": r"C:\WINDOWS",
+            "PARENT_SECRET": "secret",
+        },
+        clear=True,
+    ):
+        hydrated = hydrate_runner_runtime_plan(
+            remote_plan,
+            "unix:/tmp/runtime-broker.sock",
+        )
     for server in hydrated["mcp_servers"]:
         env = server["config"]["effective"]["env"]
+        assert env["SystemRoot"] == r"C:\WINDOWS"
+        assert "SYSTEMROOT" not in env
+        assert env["PATH"] == r"C:\Windows\System32"
+        assert "PARENT_SECRET" not in env
         assert env["BETTER_AGENT_RUNTIME_BROKER"] == (
             "unix:/tmp/runtime-broker.sock"
         )

@@ -5,6 +5,7 @@ import sys
 import json
 
 from env_compat import get_env
+from execution_environment import isolated_subprocess_environment
 import extension_store
 from paths import ba_home
 
@@ -79,11 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         print("extension MCP resolved without a command", file=sys.stderr)
         return 1
     exec_args = [command, *[str(arg) for arg in config.get("args") or []]]
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONIOENCODING": "utf-8",
-    }
-    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
+    env = isolated_subprocess_environment(
+        overrides={str(k): str(v) for k, v in (config.get("env") or {}).items()},
+    )
+    env["PYTHONIOENCODING"] = "utf-8"
     os.execvpe(command, exec_args, env)
     return 1
 

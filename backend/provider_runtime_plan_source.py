@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError
+from execution_environment import isolated_subprocess_environment
 from provider_runtime_capability_model import (
     frozen_json,
     normalize_plan,
@@ -672,9 +673,31 @@ def hydrate_runner_operation_broker(
     return hydrate(_json_copy(plan, label="runtime capability plan"))
 
 
+def hydrate_runner_runtime_plan(
+    plan: Mapping[str, Any],
+    address: str,
+) -> dict[str, Any]:
+    hydrated = hydrate_runner_operation_broker(plan, address)
+    for server in hydrated.get("mcp_servers") or []:
+        configs = server.get("config") if type(server) is dict else None
+        if type(configs) is not dict:
+            continue
+        for config in configs.values():
+            if type(config) is not dict:
+                continue
+            env = config.get("env")
+            if env is None:
+                env = {}
+            if type(env) is not dict:
+                raise ExecutionContractError("runtime MCP environment is invalid")
+            config["env"] = isolated_subprocess_environment(overrides=env)
+    return hydrated
+
+
 __all__ = [
     "hydrate_frozen_provider_runtime_plan",
     "hydrate_runner_operation_broker",
+    "hydrate_runner_runtime_plan",
     "selected_runtime_agent_sources",
     "selected_runtime_skill_sources",
     "structural_provider_runtime_plan",
