@@ -14,7 +14,6 @@ from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_o
 from env_compat import get_env, require_env
 
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     DEFAULT_ASK_MODE,
     normalize_ask_execution,
 )
