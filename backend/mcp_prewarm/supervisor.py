@@ -24,12 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from mcp_prewarm import paths as mp_paths
+from paths import bc_home
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 0.05
 _STOP_GRACE_SECONDS = 2.0
 _DAEMON_MODULE = Path(__file__).resolve().parent / "daemon_process.py"
+_DAEMON_IMPLEMENTATION_FINGERPRINT = hashlib.sha256(_DAEMON_MODULE.read_bytes()).hexdigest()
 
 # The backend process is these daemons' real OS parent (via `Popen`), so an
 # unreaped dead child becomes a zombie that keeps responding to
@@ -90,6 +92,8 @@ def compute_fingerprint(real_config: dict[str, Any], extension_record: dict[str,
             "package": package_fingerprint,
             "command": real_config.get("command"),
             "args": real_config.get("args"),
+            "daemon": _DAEMON_IMPLEMENTATION_FINGERPRINT,
+            "sessions_dir": str(bc_home() / "sessions"),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -182,6 +186,7 @@ def _spawn(
         "extension_id": extension_id,
         "server_name": server_name,
         "transport": transport,
+        "sessions_dir": str(bc_home() / "sessions"),
     }
     if transport == "unix":
         spawn_config["socket_path"] = str(socket_file)

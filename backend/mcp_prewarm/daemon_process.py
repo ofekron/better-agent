@@ -53,6 +53,16 @@ def _load_spawn_config(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _sessions_dir(config: dict[str, Any]) -> Path:
+    raw = config.get("sessions_dir")
+    if not isinstance(raw, str) or not raw:
+        raise RuntimeError("warm_pool sessions directory must be a non-empty string")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError("warm_pool sessions directory must be absolute")
+    return path
+
+
 def _load_entrypoint(args: list[str]) -> tuple[Any, list[str]]:
     if len(args) < 2 or args[0] != "-m":
         raise RuntimeError("warm_pool requires a Python module or script entrypoint")
@@ -91,10 +101,7 @@ def _write_state(state_path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp_path, state_path)
 
 
-def _session_exists(session_id: str) -> bool:
-    from paths import bc_home
-
-    sessions_dir = bc_home() / "sessions"
+def _session_exists(session_id: str, sessions_dir: Path) -> bool:
     return (sessions_dir / f"{session_id}.json").exists() or (sessions_dir / session_id).is_dir()
 
 
@@ -195,7 +202,12 @@ async def _pump_connection_core(stream: Any, mcp_server: Any, init_options: Any,
             pass
 
 
-async def _idle_reaper(activity: _Activity, idle_timeout_seconds: float, session_id: str) -> None:
+async def _idle_reaper(
+    activity: _Activity,
+    idle_timeout_seconds: float,
+    session_id: str,
+    sessions_dir: Path,
+) -> None:
     check_interval = min(1.0, max(0.1, idle_timeout_seconds / 20))
     while True:
         await anyio.sleep(check_interval)
@@ -203,7 +215,7 @@ async def _idle_reaper(activity: _Activity, idle_timeout_seconds: float, session
             activity.connections == 0
             and (time.monotonic() - activity.last_active) >= idle_timeout_seconds
         )
-        if idle_expired or not _session_exists(session_id):
+        if idle_expired or not _session_exists(session_id, sessions_dir):
             # `anyio`'s asyncio backend runs a blocking `accept()` in a
             # non-daemon worker thread with `abandon_on_cancel=True` --
             # cancelling the task group leaves that thread genuinely
@@ -216,6 +228,7 @@ async def _idle_reaper(activity: _Activity, idle_timeout_seconds: float, session
 
 
 async def _serve(config: dict[str, Any]) -> None:
+    sessions_dir = _sessions_dir(config)
     mcp_server = _build_mcp_server(list(config["args"]))
     init_options = mcp_server.create_initialization_options()
 
@@ -226,7 +239,7 @@ async def _serve(config: dict[str, Any]) -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(
             _idle_reaper, activity, float(config["idle_timeout_seconds"]),
-            config["session_id"],
+            config["session_id"], sessions_dir,
         )
 
         if transport == "tcp":

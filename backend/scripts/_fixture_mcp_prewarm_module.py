@@ -10,7 +10,9 @@ test simulate a slow/hanging extension without a second fixture file.
 from __future__ import annotations
 
 import os
+import sys
 import time
+import types
 
 
 def build_server():
@@ -30,5 +32,10 @@ def build_server():
     @server.tool()
     def ping(x: int) -> int:
         return x + 1
+
+    if os.environ.get("MCP_PREWARM_FIXTURE_PATHS_COLLISION") == "1":
+        collision = types.ModuleType("paths")
+        collision.__file__ = "/fixture-extension/backend/paths.py"
+        sys.modules["paths"] = collision
 
     return server

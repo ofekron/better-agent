@@ -199,6 +199,110 @@ _INITIALIZE_REQUEST = (
     b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05",'
     b'"capabilities":{},"clientInfo":{"name":"test","version":"0"}}}\n'
 )
+_INITIALIZED_NOTIFICATION = (
+    b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n'
+)
+_TOOLS_LIST_REQUEST = b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
+
+
+async def test_extension_paths_module_cannot_kill_idle_reaper() -> None:
+    session_id = "sess-paths-collision"
+    ext_id = "fixture-ext-paths-collision"
+    server_name = "fixture-server-paths-collision"
+    session_file = _TMP_HOME / "sessions" / f"{session_id}.json"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text("{}", encoding="utf-8")
+    real_config = _fixture_real_config(
+        extra_env={"MCP_PREWARM_FIXTURE_PATHS_COLLISION": "1"},
+    )
+    daemon_pid = None
+    proc = None
+    try:
+        result = await supervisor.ensure_daemon_ready(
+            session_id,
+            ext_id,
+            server_name,
+            real_config,
+            "fp-paths-collision",
+            bound_seconds=8.0,
+            idle_timeout_seconds=5.0,
+        )
+        daemon_log = mp_paths.log_path(session_id, ext_id, server_name)
+        detail = daemon_log.read_text(encoding="utf-8") if daemon_log.is_file() else ""
+        assert result.ready, detail
+        state = supervisor._read_state(mp_paths.state_path(session_id, ext_id, server_name))
+        assert state is not None
+        daemon_pid = state["pid"]
+        spawn_config = supervisor._read_state(
+            mp_paths.spawn_config_path(session_id, ext_id, server_name),
+        )
+        assert spawn_config is not None
+        assert Path(spawn_config["sessions_dir"]) == session_file.parent
+
+        if result.transport == "tcp":
+            assert result.host and result.port and result.connect_secret
+            stub_env = {
+                "BETTER_AGENT_MCP_DAEMON_ADDR": f"{result.host}:{result.port}",
+                "BETTER_AGENT_MCP_DAEMON_CONNECT_SECRET": result.connect_secret,
+            }
+        else:
+            assert result.socket_path
+            stub_env = {"BETTER_AGENT_MCP_DAEMON_SOCKET": result.socket_path}
+        proc = _run_stub(stub_env)
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        proc.stdin.write(_INITIALIZE_REQUEST)
+        proc.stdin.flush()
+        initialize_response = await asyncio.wait_for(
+            asyncio.to_thread(proc.stdout.readline),
+            timeout=5.0,
+        )
+        detail = daemon_log.read_text(encoding="utf-8") if daemon_log.is_file() else ""
+        assert b'"id":1' in initialize_response and b'"result"' in initialize_response, detail
+        proc.stdin.write(_INITIALIZED_NOTIFICATION + _TOOLS_LIST_REQUEST)
+        proc.stdin.flush()
+        tools_response = await asyncio.wait_for(
+            asyncio.to_thread(proc.stdout.readline),
+            timeout=5.0,
+        )
+        detail = daemon_log.read_text(encoding="utf-8") if daemon_log.is_file() else ""
+        assert b'"id":2' in tools_response and b'"tools"' in tools_response, detail
+
+        await asyncio.sleep(0.5)
+        surviving_state = supervisor._read_state(
+            mp_paths.state_path(session_id, ext_id, server_name),
+        )
+        assert surviving_state is not None and surviving_state["pid"] == daemon_pid
+        assert supervisor._pid_alive(daemon_pid)
+        if result.transport == "tcp":
+            assert surviving_state.get("host") == result.host
+            assert surviving_state.get("port") == result.port
+            assert surviving_state.get("connect_secret") == result.connect_secret
+        else:
+            assert result.socket_path and Path(result.socket_path).exists()
+
+        session_file.unlink()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and supervisor._pid_alive(daemon_pid):
+            await asyncio.sleep(0.05)
+        assert not supervisor._pid_alive(daemon_pid)
+    finally:
+        if proc is not None and proc.stdin is not None and not proc.stdin.closed:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                proc.wait(timeout=5)
+        state = supervisor._read_state(mp_paths.state_path(session_id, ext_id, server_name))
+        cleanup_pid = daemon_pid or (state.get("pid") if state else None)
+        if cleanup_pid and supervisor._pid_alive(cleanup_pid):
+            supervisor._terminate(cleanup_pid)
+        session_file.unlink(missing_ok=True)
 
 
 async def test_tcp_daemon_secret_gate() -> None:
@@ -589,6 +693,7 @@ def _cleanup_all_sessions() -> None:
 async def main_async() -> None:
     await test_supervisor_lifecycle()
     await test_python_file_low_level_server_factory()
+    await test_extension_paths_module_cannot_kill_idle_reaper()
     test_manifest_drives_prewarm_independently_of_user_facing()
     test_stub_forwarding()
     await test_tcp_daemon_secret_gate()
