@@ -18,6 +18,7 @@ export interface FullStackBackend {
   username: string;
   password: string;
   homeDir: string;
+  logs(): string;
   stop(): Promise<void>;
 }
 
@@ -194,6 +195,7 @@ export async function startFullStackBackend(
     username: credentials.username,
     password: credentials.password,
     homeDir,
+    logs: () => logLines.join(""),
     stop,
   };
 }

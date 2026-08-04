@@ -20,16 +20,36 @@ export interface CreatedSessionRecord {
 
 const DEFAULT_FAST_MODEL = /haiku/i;
 const CREATE_ENABLED_TIMEOUT_MS = 20_000;
+const OPTION_AVAILABLE_TIMEOUT_MS = 15_000;
 const MAX_OPEN_ATTEMPTS = 3;
 
-async function selectOptionMatching(page: Page, testId: string, pattern: RegExp): Promise<void> {
+async function selectOptionMatching(
+  page: Page,
+  testId: string,
+  pattern: RegExp,
+  required: boolean,
+): Promise<void> {
+  if (required) {
+    await page.waitForFunction(
+      ({ selector, source, flags }) => {
+        const select = document.querySelector<HTMLSelectElement>(
+          `[data-testid="${selector}"]`,
+        );
+        return Array.from(select?.options ?? []).some((option) =>
+          new RegExp(source, flags).test(option.textContent ?? ""),
+        );
+      },
+      { selector: testId, source: pattern.source, flags: pattern.flags },
+      { timeout: OPTION_AVAILABLE_TIMEOUT_MS },
+    );
+  }
   const select = page.getByTestId(testId);
   const options = select.locator("option");
   const count = await options.count();
   for (let i = 0; i < count; i++) {
     const option = options.nth(i);
     const text = (await option.textContent()) ?? "";
-    if (pattern.test(text)) {
+    if (new RegExp(pattern.source, pattern.flags).test(text)) {
       const value = await option.getAttribute("value");
       if (value !== null) {
         await select.selectOption(value);
@@ -37,8 +57,7 @@ async function selectOptionMatching(page: Page, testId: string, pattern: RegExp)
       }
     }
   }
-  // No match (e.g. the pattern doesn't exist in this catalog) — leave the
-  // provider's own default selected rather than failing the whole flow.
+  if (required) throw new Error(`required option ${pattern} missing from ${testId}`);
 }
 
 /**
@@ -61,9 +80,14 @@ async function configureSessionSelectors(page: Page, options: CreateSessionOptio
     { timeout: 15_000 },
   );
   if (options.profilePattern) {
-    await selectOptionMatching(page, "new-session-profile-select", options.profilePattern);
+    await selectOptionMatching(page, "new-session-profile-select", options.profilePattern, true);
   }
-  await selectOptionMatching(page, "new-session-model-select", options.modelPattern ?? DEFAULT_FAST_MODEL);
+  await selectOptionMatching(
+    page,
+    "new-session-model-select",
+    options.modelPattern ?? DEFAULT_FAST_MODEL,
+    options.modelPattern !== undefined,
+  );
 }
 
 /**
@@ -118,11 +142,24 @@ export async function createSessionWithPrompt(
   page: Page,
   prompt: string,
   options: CreateSessionOptions = {},
-): Promise<void> {
+): Promise<CreatedSessionRecord> {
   await openConfiguredNewSessionModal(page, options);
   await page.getByTestId("new-session-prompt-textarea").fill(prompt);
+  const created = page.waitForResponse(
+    (res) => new URL(res.url()).pathname === "/api/sessions" && res.request().method() === "POST",
+  );
   await page.locator(".ns-create-primary").click();
+  const res = await created;
+  if (!res.ok()) {
+    throw new Error(`POST /api/sessions failed: ${res.status()} ${await res.text()}`);
+  }
+  const session = (await res.json()) as CreatedSessionRecord;
+  await page.waitForURL((url) => url.pathname === `/s/${session.id}`, { timeout: 20_000 });
+  await page
+    .getByTestId("new-session-prompt-textarea")
+    .waitFor({ state: "hidden", timeout: 20_000 });
   await page.getByTestId("chat-messages").waitFor({ state: "visible", timeout: 20_000 });
+  return session;
 }
 
 /**
