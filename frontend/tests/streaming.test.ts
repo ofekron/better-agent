@@ -11,6 +11,7 @@ describe("streaming + multi-session behavior", () => {
 
     // Backend pushes a run_state with one active run → run badge + Stop
     // button render under the optimistic user bubble (target null = unanchored).
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -64,6 +65,7 @@ describe("streaming + multi-session behavior", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -75,6 +77,7 @@ describe("streaming + multi-session behavior", () => {
     expect(h.toJSON().chat.running).toBe(true);
 
     // Backend reports nothing running.
+    h.setMonitoring(session.id, "stopped");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [] },
@@ -94,6 +97,7 @@ describe("streaming + multi-session behavior", () => {
     await h.selectSession("a");
     await h.typeAndSend("on A");
 
+    h.setMonitoring("a", "active");
     h.emit({
       type: "run_state",
       data: {

@@ -93,6 +93,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
@@ -155,6 +156,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
@@ -192,6 +194,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
@@ -244,6 +247,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
@@ -300,6 +304,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
@@ -408,6 +413,7 @@ describe("steer prompt events", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },

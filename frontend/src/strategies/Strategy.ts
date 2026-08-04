@@ -2,6 +2,7 @@ import type { ChatMessage, EntityBlock, OrchestrationMode, WSEvent, WorkerPanel 
 import type { OrchestrationStrategy } from "./OrchestrationStrategy";
 import { tagEvents, groupByEntity, dedupeWorkerPanels } from "../utils/mergeEvents";
 import { unwrapTypedAgentMessageEnvelope } from "../utils/workerEventEnvelope";
+import { extractAssistantTextFromEvents } from "../utils/agentMessages";
 
 /**
  * Single orchestration strategy, parameterized by mode. Both manager and
@@ -77,7 +78,18 @@ export class Strategy implements OrchestrationStrategy {
       } else {
         nextEvs = [...evs, ev];
       }
-      return { ...message, events: nextEvs };
+      // Mirror the backend's `_refresh_message_content_from_event_projection`:
+      // a live render event (e.g. a late `agent_message` reaching a message
+      // whose REST snapshot carried stubbed events + a now-stale `content`)
+      // must re-project `content` from the event stream so the finalized
+      // message renders the current text. `MessageBubble` already suppresses
+      // double-rendering when events and content agree.
+      const projected = extractAssistantTextFromEvents(nextEvs);
+      return {
+        ...message,
+        events: nextEvs,
+        content: projected || message.content,
+      };
     }
 
     if (etype === "todos_snapshot") {

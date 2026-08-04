@@ -9,6 +9,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -17,6 +18,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       },
     });
     await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.length === 1);
 
     const view = h.toJSON();
     expect(view.chat.runs).toHaveLength(1);
@@ -37,6 +39,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       target_message_id: null,
     });
     void _targetMessageId;
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -44,7 +47,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         runs: [run],
       },
     });
-    await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.length === 1);
 
     const view = h.toJSON();
     expect(view.chat.running).toBe(true);
@@ -71,6 +74,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       type: "messages_replay",
       data: { app_session_id: session.id, messages: [userMsg, assistantMsg] },
     });
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -78,7 +82,11 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         runs: [makeRun({ kind: "manager", target_message_id: "a" })],
       },
     });
-    await h.flush();
+    await h.waitFor(
+      () =>
+        h.$('[data-testid="assistant-message"][data-message-id="a"]')?.querySelector(".run-badge")
+        != null,
+    );
 
     const view = h.toJSON();
     expect(view.chat.running).toBe(true);
@@ -116,6 +124,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       type: "messages_replay",
       data: { app_session_id: session.id, messages: [userMsg, assistantMsg] },
     });
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -129,7 +138,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         ],
       },
     });
-    await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.some((r) => r.kind === "worker"));
 
     const view = h.toJSON();
     expect(view.chat.runs.some((r) => r.kind === "worker")).toBe(true);
@@ -153,6 +162,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         ],
       },
     });
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -168,7 +178,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         ],
       },
     });
-    await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.length === 2);
 
     const kinds = h.toJSON().chat.runs.map((r) => r.kind).sort();
     expect(kinds).toEqual(["manager", "worker"]);
@@ -201,6 +211,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -208,7 +219,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         runs: [makeRun({ kind: "native", target_message_id: null })],
       },
     });
-    await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.length >= 1);
 
     const view = h.toJSON();
     expect(view.chat.runs[0]?.kind).toBe("native");
@@ -259,6 +270,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
+    h.setMonitoring(session.id, "active");
     h.emit({
       type: "run_state",
       data: {
@@ -266,7 +278,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         runs: [makeRun({ kind: "native", target_message_id: null })],
       },
     });
-    await h.flush();
+    await h.waitFor(() => h.toJSON().chat.runs.length === 1);
 
     expect(h.toJSON().chat.running).toBe(true);
     expect(h.toJSON().chat.runs).toHaveLength(1);

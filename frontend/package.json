@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:fullstack": "npm run build && node_modules/.bin/playwright test",
     "test:fullstack:headed": "npm run build && node_modules/.bin/playwright test --headed",
     "install:desktop-deps": "node scripts/install-frontend-deps.mjs desktop",

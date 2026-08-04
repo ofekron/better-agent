@@ -36,6 +36,14 @@ export interface Harness {
   emit(event: WSEvent): void;
   /** Push many WS events in sequence. */
   emitMany(events: WSEvent[]): void;
+  /** Emit `session_monitoring_changed` — the backend-owned source of truth
+   * for the Running dimension (docs/session-states.md). In production the
+   * monitoring loop announces active/stopped alongside `run_state`, so tests
+   * simulating an in-flight turn pair the two. */
+  setMonitoring(
+    sessionId: string,
+    state: "active" | "stopped" | "waiting_on_background",
+  ): void;
   /** Type into the input box and click Send. */
   typeAndSend(text: string): Promise<void>;
   /** Click a session row to make it the current one. */
@@ -164,6 +172,14 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     emitMany: (events) => {
       for (const event of events) backend.applyWsEvent(event);
       wsController.emitMany(events);
+    },
+    setMonitoring: (sessionId, state) => {
+      const event = {
+        type: "session_monitoring_changed",
+        data: { session_id: sessionId, monitoring_state: state },
+      } as WSEvent;
+      backend.applyWsEvent(event);
+      wsController.emit(event);
     },
     typeAndSend: async (text: string) => {
       const ta = result.container.querySelector(
