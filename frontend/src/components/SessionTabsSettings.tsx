@@ -39,7 +39,7 @@ export function SessionTabsSettings() {
   const patch = (body: Record<string, unknown>, apply: () => void) => {
     apply();
     eventBus.publish("user_prefs_changed", body);
-    const field = Object.keys(body)[0] ?? "misc";
+    const field = Object.keys(body)[0];
     queueWrite({
       method: "PATCH",
       url: "/api/user-prefs",
