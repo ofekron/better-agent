@@ -320,16 +320,35 @@ def test_admit_catalog_model_rejects_warming_catalog(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "state_kwarg, match",
+    "state_kwarg",
     [
-        (dict(status="stale"), "not current"),
-        (dict(models_current=False), "not current"),
-        (dict(reason="fetching"), "not current"),
-        (dict(snapshot_present=False), "not current"),
-        (dict(last_fetch_state="error"), "not current"),
+        dict(status="stale"),
+        dict(status="refreshing"),
+        dict(status="error"),
+        dict(models_current=False),
+        dict(reason="fetching"),
     ],
 )
-def test_admit_catalog_model_rejects_non_current_projection(monkeypatch, state_kwarg, match):
+def test_admit_catalog_model_admits_stale_projection_with_good_snapshot(monkeypatch, state_kwarg):
+    """A non-"current" projection (background refresh pending/degraded) must not
+    block admission as long as the last successfully committed snapshot still
+    validates (authority/fingerprint/contract/model checks below still apply) —
+    availability must not regress on mere staleness."""
+    monkeypatch.setattr(mcr, "runtime_snapshot", lambda *_a: _catalog_state(**state_kwarg))
+    _wire_contract_from_dict(monkeypatch)
+
+    assert mea._admit_catalog_model(_catalog_artifact(), _admission_descriptor(_contract())) is None
+
+
+@pytest.mark.parametrize(
+    "state_kwarg, match",
+    [
+        (dict(snapshot_present=False), "catalog is warming"),
+        (dict(last_fetch_state="error"), "catalog is warming"),
+        (dict(last_fetch_state="failing"), "catalog is warming"),
+    ],
+)
+def test_admit_catalog_model_rejects_when_no_committed_snapshot(monkeypatch, state_kwarg, match):
     monkeypatch.setattr(mcr, "runtime_snapshot", lambda *_a: _catalog_state(**state_kwarg))
 
     with pytest.raises(ModelAdmissionError, match=match):

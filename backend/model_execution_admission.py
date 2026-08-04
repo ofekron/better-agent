@@ -147,14 +147,17 @@ def _admit_catalog_model(artifact: Any, descriptor: Mapping[str, Any]) -> None:
         raise ModelAdmissionError("model catalog is warming")
     projection = state.projection
     snapshot = state.snapshot
-    if (
-        projection.status != "current"
-        or not projection.models_current
-        or projection.reason
-        or snapshot is None
-        or snapshot.last_fetch_state != "ok"
-    ):
-        raise ModelAdmissionError("model catalog is not current")
+    # `projection.status`/`models_current`/`reason` describe freshness of the
+    # background refresh (e.g. "stale", "refreshing", "error" while a retry is
+    # backing off) — not whether the last successfully committed snapshot is
+    # safe to admit against. A run must still be able to proceed on the last
+    # known-good catalog while a refresh is pending or degraded; the checks
+    # below (authority identity/fingerprint, execution-contract fingerprint,
+    # retired/absent model) are what actually guard correctness, independent
+    # of freshness. Only refuse when no successfully committed snapshot
+    # exists at all to validate the selected model against.
+    if snapshot is None or snapshot.last_fetch_state != "ok":
+        raise ModelAdmissionError("model catalog is warming")
     authority = snapshot.authority
     if (
         authority.provider_id != artifact.provider_id
