@@ -63,13 +63,11 @@ def _skill_source(name: str, *, nested: bool = False) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     skill_md = root / "SKILL.md"
     skill_md.write_text(f"# {name}\n")
-    skill_md.chmod(0o400)
     if nested:
         sub = root / "lib"
         sub.mkdir(exist_ok=True)
         helper = sub / "helper.md"
         helper.write_text("helper\n")
-        helper.chmod(0o400)
     return root
 
 
@@ -77,7 +75,6 @@ def _agent_source(name: str) -> Path:
     path = Path(_TEST_HOME) / "sources" / f"{name}.agent.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"# agent {name}\n")
-    path.chmod(0o400)
     return path
 
 
