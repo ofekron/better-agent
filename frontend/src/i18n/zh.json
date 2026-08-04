@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "保持启用",
   "extensionHealth.working": "处理中…",
   "errorCopy.copy": "复制错误详情",
-  "errorCopy.copied": "已复制错误详情"
+  "errorCopy.copied": "已复制错误详情",
+  "nodeCredentials.syncing": "正在将 {{provider}} 凭据同步到 {{node}}…",
+  "nodeCredentials.failed": "无法将 {{provider}} 凭据同步到 {{node}}。",
+  "nodeCredentials.dismiss": "关闭 {{node}} 上 {{provider}} 凭据的同步状态"
 }

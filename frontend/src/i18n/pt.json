@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "Manter ativada",
   "extensionHealth.working": "Processando…",
   "errorCopy.copy": "Copiar detalhes do erro",
-  "errorCopy.copied": "Detalhes do erro copiados"
+  "errorCopy.copied": "Detalhes do erro copiados",
+  "nodeCredentials.syncing": "Sincronizando as credenciais de {{provider}} com {{node}}…",
+  "nodeCredentials.failed": "Não foi possível sincronizar as credenciais de {{provider}} com {{node}}.",
+  "nodeCredentials.dismiss": "Dispensar o status de sincronização das credenciais de {{provider}} em {{node}}"
 }

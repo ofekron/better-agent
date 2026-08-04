@@ -1501,5 +1501,8 @@
   "extensionHealth.keepEnabled": "Оставить включённым",
   "extensionHealth.working": "Обработка…",
   "errorCopy.copy": "Копировать сведения об ошибке",
-  "errorCopy.copied": "Сведения об ошибке скопированы"
+  "errorCopy.copied": "Сведения об ошибке скопированы",
+  "nodeCredentials.syncing": "Синхронизация учётных данных {{provider}} с {{node}}…",
+  "nodeCredentials.failed": "Не удалось синхронизировать учётные данные {{provider}} с {{node}}.",
+  "nodeCredentials.dismiss": "Скрыть состояние синхронизации учётных данных {{provider}} на {{node}}"
 }

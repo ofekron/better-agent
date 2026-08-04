@@ -68,7 +68,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     "switch_control": ("switch_control_state_changed",),
     "machine_nodes": (
         "node_state_changed", "node_registration_requested",
-        "node_registration_resolved",
+        "node_registration_resolved", "node_provider_credentials_changed",
     ),
     "credential_broker": ("credential_consent_changed",),
     "installation_profile": ("installation_capabilities_changed",),

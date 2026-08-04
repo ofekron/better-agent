@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "השאר מופעל",
   "extensionHealth.working": "מעבד…",
   "errorCopy.copy": "העתקת פרטי השגיאה",
-  "errorCopy.copied": "פרטי השגיאה הועתקו"
+  "errorCopy.copied": "פרטי השגיאה הועתקו",
+  "nodeCredentials.syncing": "מסנכרן את פרטי הגישה של {{provider}} אל {{node}}…",
+  "nodeCredentials.failed": "לא ניתן לסנכרן את פרטי הגישה של {{provider}} אל {{node}}.",
+  "nodeCredentials.dismiss": "סגירת מצב סנכרון פרטי הגישה של {{provider}} ב־{{node}}"
 }

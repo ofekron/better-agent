@@ -34,8 +34,13 @@ async def internal_get_nodes(
     deployments rather than raising. Frontend uses this to render
     node-status badges and the per-worker node selector."""
     try:
+        import node_provider_credential_sync
         import node_store
-        return await asyncio.to_thread(node_store.snapshot)
+        snapshot = await asyncio.to_thread(node_store.snapshot)
+        return await asyncio.to_thread(
+            node_provider_credential_sync.project_node_snapshots,
+            snapshot,
+        )
     except Exception:
         logger.exception("get_nodes failed")
         return []
@@ -132,10 +137,12 @@ async def internal_revoke_node(
     """Revoke a node: drops it from the dynamic registry or static
     topology.yaml. Cleans up node_store state and fires WS broadcast."""
     import node_registry_store
+    import node_provider_credential_sync
     import node_store
     import topology
 
     if node_registry_store.remove(node_id):
+        await asyncio.to_thread(node_provider_credential_sync.remove_node, node_id)
         await node_store.forget(node_id)
         return {"status": "revoked", "node_id": node_id}
 
@@ -149,6 +156,7 @@ async def internal_revoke_node(
     if not removed:
         raise HTTPException(status_code=404, detail=t("error.node_request_not_found"))
 
+    await asyncio.to_thread(node_provider_credential_sync.remove_node, node_id)
     await node_store.forget(node_id)
     return {"status": "revoked", "node_id": node_id}
 

@@ -1,7 +1,11 @@
 import { describe, beforeEach, afterEach, it, expect, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 
-import type { NodeSnapshot, NodeStateChangedData } from "../src/types";
+import type {
+  NodeProviderCredentialsChangedData,
+  NodeSnapshot,
+  NodeStateChangedData,
+} from "../src/types";
 
 // useMachines keeps its topology snapshot in module-level singleton state
 // and attaches an eventBus subscription at module load. Every test resets the
@@ -39,6 +43,13 @@ function node(id = "n1", over: Partial<NodeSnapshot> = {}): NodeSnapshot {
 async function publishNodeStateChanged(detail: unknown): Promise<void> {
   const { eventBus } = await import("../src/lib/eventBus");
   eventBus.publish("node_state_changed", detail);
+}
+
+async function publishProviderCredentialsChanged(
+  detail: NodeProviderCredentialsChangedData,
+): Promise<void> {
+  const { eventBus } = await import("../src/lib/eventBus");
+  eventBus.publish("node_provider_credentials_changed", detail);
 }
 
 // State-mutating handlers end in _notify() → React force update, so the
@@ -239,6 +250,30 @@ describe("useMachines", () => {
     m = result.current.machines[0];
     expect(m.state).toBe("disconnected");
     expect(m.last_seen).toBe(2000);
+  });
+
+  it("patches provider credential status from backend websocket state", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResp([node("n1")])) as unknown as typeof globalThis.fetch;
+    const mod = await fresh();
+    const { result } = renderHook(() => mod.useMachines("authed"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await fire(() => publishProviderCredentialsChanged({
+      node_id: "n1",
+      provider_credentials: [{
+        node_id: "n1",
+        provider_id: "zai-claude",
+        provider_name: "Z.AI Claude",
+        status: "pending",
+        authorized_at: "2026-08-04T09:00:00Z",
+        updated_at: "2026-08-04T10:00:00Z",
+      }],
+    }));
+
+    expect(result.current.machines[0].provider_credentials?.[0]).toMatchObject({
+      provider_id: "zai-claude",
+      status: "pending",
+    });
   });
 
   // --- deleteNode ---

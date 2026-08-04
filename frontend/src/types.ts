@@ -245,6 +245,7 @@ export type WSEventType =
   | "session_marker_changed"
   // Multi-machine: live up/down transitions of worker-nodes.
   | "node_state_changed"
+  | "node_provider_credentials_changed"
   // Multi-machine: a brand-new worker-node is awaiting operator
   // approval (requested) or its request was resolved (approve/deny).
   // `useAppWebSocket` publishes both on the typed event bus so
@@ -355,6 +356,17 @@ export interface NodeSnapshot {
   primary_commit_sha: string;
   primary_dirty: boolean;
   version_status: "ok" | "mismatch" | "unknown";
+  provider_credentials?: NodeProviderCredentialStatus[];
+}
+
+export interface NodeProviderCredentialStatus {
+  node_id: string;
+  provider_id: string;
+  provider_name: string;
+  status: "pending" | "synced" | "failed";
+  authorized_at: string;
+  updated_at: string;
+  failure_code?: string;
 }
 
 /** A single member in a project mapping group — one project on one node. */
@@ -386,6 +398,11 @@ export interface NodeStateChangedData {
   primary_commit_sha?: string;
   primary_dirty?: boolean;
   version_status?: "ok" | "mismatch" | "unknown";
+}
+
+export interface NodeProviderCredentialsChangedData {
+  node_id: string;
+  provider_credentials: NodeProviderCredentialStatus[];
 }
 
 /** A worker-node awaiting operator approval before it can join the

@@ -749,6 +749,7 @@ if (
 ):
     try:
         import node_link
+        import node_provider_credential_sync
         import node_store
         import provider_remote  # noqa: F401 — wires dispatchers as side effect
         app.include_router(node_link.router)
@@ -780,6 +781,28 @@ if (
                 logger.exception("node_state_changed broadcast failed")
 
         node_store.add_listener(_on_node_state_changed)
+
+        async def _on_node_provider_credentials_changed(
+            node_id: str,
+            provider_credentials: list[dict],
+        ) -> None:
+            try:
+                await coordinator.broadcast_global(
+                    "node_provider_credentials_changed",
+                    {
+                        "node_id": node_id,
+                        "provider_credentials": provider_credentials,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "node provider credential status broadcast failed for %s",
+                    node_id,
+                )
+
+        node_provider_credential_sync.add_listener(
+            _on_node_provider_credentials_changed,
+        )
 
         async def _on_node_connected_recover(node_id: str, new_state: str) -> None:
             """When a node (re)connects, reconcile every pending remote run

@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "有効のままにする",
   "extensionHealth.working": "処理中…",
   "errorCopy.copy": "エラー詳細をコピー",
-  "errorCopy.copied": "エラー詳細をコピーしました"
+  "errorCopy.copied": "エラー詳細をコピーしました",
+  "nodeCredentials.syncing": "{{provider}} の認証情報を {{node}} に同期しています…",
+  "nodeCredentials.failed": "{{provider}} の認証情報を {{node}} に同期できませんでした。",
+  "nodeCredentials.dismiss": "{{node}} の {{provider}} 認証情報同期ステータスを閉じる"
 }

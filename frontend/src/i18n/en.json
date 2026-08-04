@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "Keep enabled",
   "extensionHealth.working": "Working…",
   "errorCopy.copy": "Copy error details",
-  "errorCopy.copied": "Error details copied"
+  "errorCopy.copied": "Error details copied",
+  "nodeCredentials.syncing": "Syncing {{provider}} credentials to {{node}}…",
+  "nodeCredentials.failed": "Couldn't sync {{provider}} credentials to {{node}}.",
+  "nodeCredentials.dismiss": "Dismiss credential sync status for {{provider}} on {{node}}"
 }

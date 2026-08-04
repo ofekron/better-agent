@@ -213,6 +213,46 @@ function nodeStateChangedPayload(data: Record<string, unknown>): boolean {
     && (data.last_seen === null || typeof data.last_seen === "number");
 }
 
+const NODE_PROVIDER_CREDENTIAL_STATUS_KEYS = new Set([
+  "node_id",
+  "provider_id",
+  "provider_name",
+  "status",
+  "authorized_at",
+  "updated_at",
+  "failure_code",
+]);
+
+function nodeProviderCredentialsChangedPayload(
+  data: Record<string, unknown>,
+): boolean {
+  return Object.keys(data).length === 2
+    && hasOwn(data, "node_id")
+    && hasOwn(data, "provider_credentials")
+    && hasString(data, "node_id")
+    && Array.isArray(data.provider_credentials)
+    && data.provider_credentials.every((value) => {
+      if (!isRecord(value)) return false;
+      return Object.keys(value).every((key) =>
+        NODE_PROVIDER_CREDENTIAL_STATUS_KEYS.has(key)
+      )
+        && hasString(value, "node_id")
+        && hasString(value, "provider_id")
+        && hasString(value, "provider_name")
+        && (
+          value.status === "pending"
+          || value.status === "synced"
+          || value.status === "failed"
+        )
+        && hasString(value, "authorized_at")
+        && hasString(value, "updated_at")
+        && (
+          !hasOwn(value, "failure_code")
+          || typeof value.failure_code === "string"
+        );
+    });
+}
+
 function nodeRegistrationRequestedPayload(data: Record<string, unknown>): boolean {
   return hasString(data, "node_id")
     && hasString(data, "address")
@@ -434,6 +474,7 @@ export const knownCoreEventValidators: Readonly<
   ui_selection_changed: uiSelectionChangedPayload,
   credential_consent_changed: noFieldPayload,
   node_state_changed: nodeStateChangedPayload,
+  node_provider_credentials_changed: nodeProviderCredentialsChangedPayload,
   node_registration_requested: nodeRegistrationRequestedPayload,
   node_registration_resolved: (data) =>
     hasString(data, "node_id")
@@ -501,8 +542,9 @@ function parseWireEventUnsafe(value: unknown): WireEventParseResult {
   }
 
   const validator = Object.prototype.hasOwnProperty.call(knownCoreEventValidators, type)
-    ? knownCoreEventValidators[type as ValidatedCoreEventType]
-    : undefined;
+    && !(UNPROJECTED_WIRE_EVENT_TYPES as readonly string[]).includes(type)
+      ? knownCoreEventValidators[type as ValidatedCoreEventType]
+      : undefined;
   if (validator && !validator(data)) {
     return failure("invalid_core_payload", type);
   }

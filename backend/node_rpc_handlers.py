@@ -777,6 +777,7 @@ async def call_local_or_remote(
     timeout: float = 30.0,
     secure_transport_required: bool = False,
     version_ready_required: bool = False,
+    expected_connection=None,
 ):
     """Route an RPC to the local `dispatch_rpc` (in-process) when
     `node_id` is the local sentinel `"primary"` or matches the local
@@ -785,6 +786,8 @@ async def call_local_or_remote(
     ValueError, RuntimeError, etc.) — callers that need HTTP status
     translation wrap this themselves (see `node_op.node_op`)."""
     if node_id == "primary":
+        if expected_connection is not None:
+            raise RuntimeError("expected remote node connection resolved locally")
         return await dispatch_rpc(method, params)
     # `topology.local_node_id()` raises when topology.yaml is absent
     # (dynamic-only deploy). That only means we can't CONFIRM the node
@@ -797,6 +800,8 @@ async def call_local_or_remote(
     try:
         from topology import local_node_id as _lid
         if node_id == _lid():
+            if expected_connection is not None:
+                raise RuntimeError("expected remote node connection resolved locally")
             return await dispatch_rpc(method, params)
     except Exception:
         pass
@@ -808,6 +813,7 @@ async def call_local_or_remote(
         timeout=timeout,
         secure_transport_required=secure_transport_required,
         version_ready_required=version_ready_required,
+        expected_connection=expected_connection,
     )
 
 
@@ -1100,11 +1106,17 @@ def _rpc_sync_provider_config(params: dict) -> dict:
         raise ValueError("provider_state must be an object")
     import config_store
     synced = config_store.apply_provider_sync_projection(provider_state)
+    provider_api_key_ids = [
+        item["provider_id"]
+        for item in provider_state.get("provider_api_keys", [])
+        if isinstance(item, dict) and isinstance(item.get("provider_id"), str)
+    ]
     return {
         "ok": True,
         "default_provider_id": synced.get("default_provider_id"),
         "provider_count": len(synced.get("providers", [])),
         "provider_api_key_count": synced.get("provider_api_key_count", 0),
+        "provider_api_key_ids": provider_api_key_ids,
         "provider_state_authority": synced.get("provider_state_authority"),
         "sync_status": synced.get("sync_status"),
     }

@@ -22,6 +22,7 @@
 
 import type {
   NodeRegistrationResolvedData,
+  NodeProviderCredentialsChangedData,
   NodeStateChangedData,
   PendingApproval,
   PendingNodeRegistration,
@@ -100,6 +101,7 @@ export interface BusEventMap {
     session_id: string;
   };
   node_state_changed: NodeStateChangedData;
+  node_provider_credentials_changed: NodeProviderCredentialsChangedData;
   node_registration_requested: PendingNodeRegistration;
   node_registration_resolved: NodeRegistrationResolvedData;
   user_input_requested: UserInteractionRequest;

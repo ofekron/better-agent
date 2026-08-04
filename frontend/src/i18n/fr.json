@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "Garder activé",
   "extensionHealth.working": "Traitement…",
   "errorCopy.copy": "Copier les détails de l’erreur",
-  "errorCopy.copied": "Détails de l’erreur copiés"
+  "errorCopy.copied": "Détails de l’erreur copiés",
+  "nodeCredentials.syncing": "Synchronisation des identifiants {{provider}} avec {{node}}…",
+  "nodeCredentials.failed": "Impossible de synchroniser les identifiants {{provider}} avec {{node}}.",
+  "nodeCredentials.dismiss": "Masquer l’état de synchronisation des identifiants {{provider}} sur {{node}}"
 }

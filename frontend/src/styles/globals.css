@@ -17894,6 +17894,75 @@ html[dir="rtl"] .user-request-toast::before {
 .model-catalog-activity-pending svg {
   animation: startup-tasks-spin 1.2s linear infinite;
 }
+.node-provider-credential-status {
+  position: fixed;
+  inset-inline-end: 24px;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  z-index: 92;
+  width: min(380px, calc(100vw - 48px));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  animation: node-provider-credential-status-in 180ms ease-out;
+}
+body:has(.model-catalog-activity) .node-provider-credential-status {
+  bottom: calc(250px + env(safe-area-inset-bottom, 0px));
+}
+.node-provider-credential-status ul {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.node-provider-credential-status li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 9px 11px;
+  font-size: calc(12px * var(--app-font-scale));
+}
+.node-provider-credential-status li + li {
+  border-top: 1px solid var(--border-color);
+}
+.node-provider-credential-status-indicator {
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: startup-tasks-spin 1.2s linear infinite;
+}
+.node-provider-credential-status-failed {
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+.node-provider-credential-status-failed .node-provider-credential-status-indicator {
+  border: 0;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: none;
+}
+.node-provider-credential-status button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: calc(16px * var(--app-font-scale));
+  line-height: 1;
+  opacity: 0.72;
+  transition: opacity 180ms ease;
+}
+.node-provider-credential-status button:hover {
+  opacity: 1;
+}
+@keyframes node-provider-credential-status-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .model-catalog-status {
   display: flex;
   align-items: center;
@@ -17940,6 +18009,9 @@ html[dir="rtl"] .user-request-toast::before {
 }
 @media (prefers-reduced-motion: reduce) {
   .model-catalog-activity,
+  .node-provider-credential-status,
+  .node-provider-credential-status-indicator,
+  .node-provider-credential-status button,
   .model-catalog-status,
   .model-catalog-activity svg {
     animation: none;
@@ -17959,6 +18031,10 @@ html[dir="rtl"] .user-request-toast::before {
   .model-catalog-activity {
     inset-inline-end: 12px;
     width: min(360px, calc(100vw - 24px));
+  }
+  .node-provider-credential-status {
+    inset-inline-end: 12px;
+    width: min(380px, calc(100vw - 24px));
   }
 }
 

@@ -2,7 +2,11 @@ import { useEffect, useReducer } from "react";
 
 import { extBackendBase } from "../extensionIds";
 import { eventBus } from "../lib/eventBus";
-import type { NodeSnapshot, NodeStateChangedData } from "../types";
+import type {
+  NodeProviderCredentialsChangedData,
+  NodeSnapshot,
+  NodeStateChangedData,
+} from "../types";
 
 const machineNodesApi = () => extBackendBase("machineNodes");
 
@@ -105,9 +109,31 @@ function _onNodeStateChanged(detail: NodeStateChangedData): void {
   _notify();
 }
 
+function _onNodeProviderCredentialsChanged(
+  detail: NodeProviderCredentialsChangedData,
+): void {
+  if (!detail?.node_id || !Array.isArray(detail.provider_credentials)) return;
+  const idx = _state.machines.findIndex((machine) => machine.id === detail.node_id);
+  if (idx === -1) {
+    void _refetch();
+    return;
+  }
+  const next = _state.machines.slice();
+  next[idx] = {
+    ...next[idx],
+    provider_credentials: detail.provider_credentials,
+  };
+  _state = { ..._state, machines: next };
+  _notify();
+}
+
 const _offNodeStateChanged = eventBus.subscribe(
   "node_state_changed",
   _onNodeStateChanged,
+);
+const _offNodeProviderCredentialsChanged = eventBus.subscribe(
+  "node_provider_credentials_changed",
+  _onNodeProviderCredentialsChanged,
 );
 
 // Vite HMR: re-evaluating this module would add a SECOND subscription that
@@ -116,6 +142,7 @@ const _offNodeStateChanged = eventBus.subscribe(
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     _offNodeStateChanged();
+    _offNodeProviderCredentialsChanged();
   });
 }
 

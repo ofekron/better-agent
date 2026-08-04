@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "Aktiviert lassen",
   "extensionHealth.working": "Wird verarbeitet…",
   "errorCopy.copy": "Fehlerdetails kopieren",
-  "errorCopy.copied": "Fehlerdetails kopiert"
+  "errorCopy.copied": "Fehlerdetails kopiert",
+  "nodeCredentials.syncing": "Anmeldedaten für {{provider}} werden mit {{node}} synchronisiert…",
+  "nodeCredentials.failed": "Anmeldedaten für {{provider}} konnten nicht mit {{node}} synchronisiert werden.",
+  "nodeCredentials.dismiss": "Status der Anmeldedatensynchronisierung für {{provider}} auf {{node}} ausblenden"
 }

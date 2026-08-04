@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "Ingeschakeld laten",
   "extensionHealth.working": "Verwerken…",
   "errorCopy.copy": "Foutdetails kopiëren",
-  "errorCopy.copied": "Foutdetails gekopieerd"
+  "errorCopy.copied": "Foutdetails gekopieerd",
+  "nodeCredentials.syncing": "Inloggegevens voor {{provider}} worden gesynchroniseerd met {{node}}…",
+  "nodeCredentials.failed": "Inloggegevens voor {{provider}} konden niet met {{node}} worden gesynchroniseerd.",
+  "nodeCredentials.dismiss": "Status van inloggegevenssynchronisatie voor {{provider}} op {{node}} sluiten"
 }

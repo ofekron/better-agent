@@ -204,21 +204,54 @@ class RemoteProviderProxy(Provider):
         state: _RemoteRunState,
         payload: dict[str, Any],
     ):
-        ready_conn = await node_store.wait_for_runtime_ready(self.node_id)
-        if state.admission.done():
-            return None
-        ready_conn.runs[state.run_id] = state
-        self._arm_admission_lease(state, ready_conn)
-        try:
-            await node_link.send_spawn_run(self.node_id, payload)
-        except BaseException:
-            if ready_conn.runs.get(state.run_id) is state:
+        artifact = payload.get("execution_artifact")
+        provider_id = (
+            artifact.get("provider_id")
+            if isinstance(artifact, dict)
+            else None
+        )
+        if not isinstance(provider_id, str) or not provider_id:
+            raise RuntimeError("remote execution artifact has no provider authority")
+        import node_provider_credential_sync
+
+        while True:
+            ready_conn = await node_store.wait_for_runtime_ready(self.node_id)
+            if state.admission.done():
+                return None
+            try:
+                await node_provider_credential_sync.ensure_for_admission(
+                    self.node_id,
+                    provider_id,
+                    expected_connection=ready_conn,
+                )
+            except node_provider_credential_sync.CredentialSyncConnectionChanged:
+                continue
+            if state.admission.done():
+                return None
+            if node_store.get_connection(self.node_id) is not ready_conn:
+                continue
+            ready_conn.runs[state.run_id] = state
+            self._arm_admission_lease(state, ready_conn)
+            if state.admission.done():
                 ready_conn.runs.pop(state.run_id, None)
-            if state.admission_lease_handle is not None:
-                state.admission_lease_handle.cancel()
-                state.admission_lease_handle = None
-            raise
-        return ready_conn
+                if state.admission_lease_handle is not None:
+                    state.admission_lease_handle.cancel()
+                    state.admission_lease_handle = None
+                return None
+            try:
+                await node_link.send_spawn_run(
+                    self.node_id,
+                    payload,
+                    expected_connection=ready_conn,
+                )
+            except BaseException:
+                if ready_conn.runs.get(state.run_id) is state:
+                    ready_conn.runs.pop(state.run_id, None)
+                if state.admission_lease_handle is not None:
+                    state.admission_lease_handle.cancel()
+                    state.admission_lease_handle = None
+                raise
+            return ready_conn
 
     async def _dispatch_admission_or_fail(
         self,

@@ -25,6 +25,7 @@ import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { useLatestEventOfTypes } from "./hooks/useLatestEventOfTypes";
 import { Chat } from "./components/Chat";
 import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
+import { NodeProviderCredentialStatus } from "./components/NodeProviderCredentialStatus";
 import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthPrompt";
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
@@ -6587,6 +6588,7 @@ function AppMain({
       )}
       <StartupTasksBanner />
       <ModelCatalogActivity />
+      <NodeProviderCredentialStatus machines={machines} />
       {authStatus === "authed" ? <MarketplaceBridgeCenter /> : null}
       {authStatus === "authed" &&
         sessionDragOverlayModules.map((module) => (

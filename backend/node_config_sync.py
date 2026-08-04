@@ -165,20 +165,20 @@ def _schedule_push(loop: asyncio.AbstractEventLoop) -> None:
         _push_task = loop.create_task(_push_until_clean(), name="node-config-sync-push")
 
 
-async def _push_surface(surface: _Surface, node_ids: list[str]) -> bool:
+async def _push_surface(surface: _Surface, node_ids: list[str]) -> set[str]:
     try:
         state = await asyncio.to_thread(surface.export)
     except Exception:
         # A broken exporter must not take the other surfaces down with it.
         logger.exception("node config sync export failed for surface %s", surface.name)
-        return False
-    succeeded = True
+        return set()
+    succeeded: set[str] = set()
     for node_id in node_ids:
         try:
             await _call_rpc(node_id, surface, state)
+            succeeded.add(node_id)
             logger.info("node config sync of %s to node %s ok", surface.name, node_id)
         except Exception:
-            succeeded = False
             logger.exception(
                 "node config sync of %s to node %s failed", surface.name, node_id
             )
@@ -197,7 +197,32 @@ async def _push_until_clean() -> None:
         if not node_ids:
             return
         for name in pending:
-            await _push_surface(_SURFACES_BY_NAME[name], node_ids)
+            succeeded = await _push_surface(_SURFACES_BY_NAME[name], node_ids)
+            if name == "providers":
+                for node_id in succeeded:
+                    await _replay_provider_credentials(
+                        node_id,
+                        version_ready_required=True,
+                    )
+
+
+async def _replay_provider_credentials(
+    node_id: str,
+    *,
+    version_ready_required: bool,
+) -> None:
+    try:
+        import node_provider_credential_sync
+
+        await node_provider_credential_sync.replay_grants(
+            node_id,
+            version_ready_required=version_ready_required,
+        )
+    except Exception:
+        logger.exception(
+            "node provider credential replay failed for %s",
+            node_id,
+        )
 
 
 async def _project_connected_node(node_id: str) -> None:
@@ -217,8 +242,17 @@ async def _project_connected_node(node_id: str) -> None:
         return
     logger.info("node config sync: projecting all surfaces onto %s", node_id)
     succeeded = True
+    provider_projection_succeeded = False
     for surface in SURFACES:
-        succeeded = await _push_surface(surface, [node_id]) and succeeded
+        surface_succeeded = await _push_surface(surface, [node_id])
+        succeeded = node_id in surface_succeeded and succeeded
+        if surface.name == "providers":
+            provider_projection_succeeded = node_id in surface_succeeded
+    if provider_projection_succeeded:
+        await _replay_provider_credentials(
+            node_id,
+            version_ready_required=False,
+        )
     if succeeded:
         _set_runtime_ready(node_id, expected_connection)
     else:

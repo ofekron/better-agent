@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "إبقاء مفعّل",
   "extensionHealth.working": "جارٍ المعالجة…",
   "errorCopy.copy": "نسخ تفاصيل الخطأ",
-  "errorCopy.copied": "تم نسخ تفاصيل الخطأ"
+  "errorCopy.copied": "تم نسخ تفاصيل الخطأ",
+  "nodeCredentials.syncing": "جارٍ مزامنة بيانات اعتماد {{provider}} مع {{node}}…",
+  "nodeCredentials.failed": "تعذرت مزامنة بيانات اعتماد {{provider}} مع {{node}}.",
+  "nodeCredentials.dismiss": "إخفاء حالة مزامنة بيانات اعتماد {{provider}} على {{node}}"
 }

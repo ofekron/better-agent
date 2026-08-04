@@ -830,10 +830,17 @@ def connection_allows_credential_sync(conn: node_store.NodeConnection) -> bool:
     return _is_loopback_host(host)
 
 
-async def send_spawn_run(node_id: str, payload: dict) -> None:
+async def send_spawn_run(
+    node_id: str,
+    payload: dict,
+    *,
+    expected_connection=None,
+) -> None:
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    if expected_connection is not None and conn is not expected_connection:
+        raise NodeOffline(f"node {node_id!r} connection changed")
     node_store.assert_node_version_ready(node_id)
     await conn.ws.send_json({"type": "spawn_run", **payload})
 
@@ -930,6 +937,7 @@ async def rpc_call(
     timeout: float = 30.0,
     secure_transport_required: bool = False,
     version_ready_required: bool = False,
+    expected_connection=None,
 ) -> Optional[dict]:
     """Send an `rpc_request` to a node and await its `rpc_response`.
 
@@ -941,6 +949,8 @@ async def rpc_call(
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    if expected_connection is not None and conn is not expected_connection:
+        raise NodeOffline(f"node {node_id!r} connection changed")
     if secure_transport_required and not connection_allows_credential_sync(conn):
         raise RuntimeError("provider credential sync requires a WSS or loopback node connection")
     if version_ready_required:

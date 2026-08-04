@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "활성화 유지",
   "extensionHealth.working": "처리 중…",
   "errorCopy.copy": "오류 세부정보 복사",
-  "errorCopy.copied": "오류 세부정보가 복사됨"
+  "errorCopy.copied": "오류 세부정보가 복사됨",
+  "nodeCredentials.syncing": "{{provider}} 자격 증명을 {{node}}에 동기화하는 중…",
+  "nodeCredentials.failed": "{{provider}} 자격 증명을 {{node}}에 동기화하지 못했습니다.",
+  "nodeCredentials.dismiss": "{{node}}의 {{provider}} 자격 증명 동기화 상태 닫기"
 }

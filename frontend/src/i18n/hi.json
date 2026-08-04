@@ -1499,5 +1499,8 @@
   "extensionHealth.keepEnabled": "सक्षम रखें",
   "extensionHealth.working": "प्रसंस्करण…",
   "errorCopy.copy": "त्रुटि विवरण कॉपी करें",
-  "errorCopy.copied": "त्रुटि विवरण कॉपी हो गया"
+  "errorCopy.copied": "त्रुटि विवरण कॉपी हो गया",
+  "nodeCredentials.syncing": "{{provider}} क्रेडेंशियल {{node}} से सिंक किए जा रहे हैं…",
+  "nodeCredentials.failed": "{{provider}} क्रेडेंशियल {{node}} से सिंक नहीं हो सके।",
+  "nodeCredentials.dismiss": "{{node}} पर {{provider}} क्रेडेंशियल सिंक स्थिति हटाएँ"
 }

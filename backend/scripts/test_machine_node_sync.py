@@ -31,6 +31,8 @@ from headless_request_contract import (  # noqa: E402
 )
 import node_client  # noqa: E402
 import node_link  # noqa: E402
+import node_provider_credential_sync  # noqa: E402
+import node_registry_store  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import node_store  # noqa: E402
 import provider_sync_authority  # noqa: E402
@@ -281,11 +283,28 @@ async def test_provider_secret_sync_passes_explicit_ids_on_loopback() -> None:
     original_export = config_store.export_provider_sync_state
     original_get_connection = node_store.get_connection
     original_call = node_rpc_handlers.call_local_or_remote
+    original_get_provider = config_store.get_provider
+    original_registry_get = node_registry_store.get
     seen: dict[str, object] = {}
+    provider = {
+        "id": "api-provider",
+        "name": "API Provider",
+        "mode": "api_key",
+        "generation": "provider-generation",
+        "execution_revision": 1,
+    }
+    authority = {"generation": "state-generation", "revision": 1, "digest": "digest"}
 
     def export(provider_api_key_ids=None):
-        seen["provider_api_key_ids"] = provider_api_key_ids
-        return {"providers": [], "provider_api_keys": []}
+        seen.setdefault("provider_api_key_calls", []).append(provider_api_key_ids)
+        return {
+            "provider_state_authority": authority,
+            "default_provider_id": "api-provider",
+            "providers": [provider],
+            "provider_api_keys": [
+                {"provider_id": "api-provider", "api_key": "selected-secret"},
+            ],
+        }
 
     async def call(node_id, method, params, **kwargs):
         seen["node_id"] = node_id
@@ -293,15 +312,27 @@ async def test_provider_secret_sync_passes_explicit_ids_on_loopback() -> None:
         seen["params"] = params
         seen["secure_transport_required"] = kwargs.get("secure_transport_required")
         seen["version_ready_required"] = kwargs.get("version_ready_required")
-        return {"provider_count": 0, "provider_api_key_count": 0}
+        return {
+            "provider_count": 1,
+            "provider_api_key_count": 1,
+            "provider_api_key_ids": ["api-provider"],
+            "provider_state_authority": authority,
+            "sync_status": "credentials_applied",
+        }
 
     config_store.export_provider_sync_state = export  # type: ignore[assignment]
-    node_store.get_connection = lambda _node_id: SimpleNamespace(  # type: ignore[assignment]
+    config_store.get_provider = lambda _provider_id: provider  # type: ignore[assignment]
+    node_registry_store.get = lambda node_id: {  # type: ignore[assignment]
+        "node_id": node_id,
+        "secret_hash": "$argon2id$node-authority",
+    }
+    connection = SimpleNamespace(
         ws=SimpleNamespace(
             url=SimpleNamespace(scheme="ws"),
             client=SimpleNamespace(host="127.0.0.1"),
         )
     )
+    node_store.get_connection = lambda _node_id: connection  # type: ignore[assignment]
     node_rpc_handlers.call_local_or_remote = call  # type: ignore[assignment]
     try:
         response = await extension_api._dispatch_machine_nodes_core_backend(
@@ -313,17 +344,28 @@ async def test_provider_secret_sync_passes_explicit_ids_on_loopback() -> None:
         )
     finally:
         config_store.export_provider_sync_state = original_export  # type: ignore[assignment]
+        config_store.get_provider = original_get_provider  # type: ignore[assignment]
+        node_registry_store.get = original_registry_get  # type: ignore[assignment]
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
         node_rpc_handlers.call_local_or_remote = original_call  # type: ignore[assignment]
 
     assert response is not None
     assert response.status_code == 200
-    assert seen["provider_api_key_ids"] == ["api-provider"]
+    assert ["api-provider"] in seen["provider_api_key_calls"]
     assert seen["node_id"] == "node-a"
     assert seen["method"] == "sync_provider_config"
     assert seen["secure_transport_required"] is True
     assert seen["version_ready_required"] is True
-    assert seen["params"] == {"provider_state": {"providers": [], "provider_api_keys": []}}
+    assert seen["params"] == {
+        "provider_state": {
+            "provider_state_authority": authority,
+            "default_provider_id": "api-provider",
+            "providers": [provider],
+            "provider_api_keys": [
+                {"provider_id": "api-provider", "api_key": "selected-secret"},
+            ],
+        },
+    }
 
 
 async def test_provider_sync_requires_version_ready() -> None:
@@ -365,6 +407,15 @@ async def test_provider_secret_sync_rechecks_transport_on_rpc_send() -> None:
 
     original_export = config_store.export_provider_sync_state
     original_get_connection = node_store.get_connection
+    original_get_provider = config_store.get_provider
+    original_registry_get = node_registry_store.get
+    provider = {
+        "id": "api-provider",
+        "name": "API Provider",
+        "mode": "api_key",
+        "generation": "provider-generation",
+        "execution_revision": 1,
+    }
     connections = iter([
         SimpleNamespace(
             ws=SimpleNamespace(
@@ -382,8 +433,16 @@ async def test_provider_secret_sync_rechecks_transport_on_rpc_send() -> None:
     ])
 
     config_store.export_provider_sync_state = lambda _ids=None: {  # type: ignore[assignment]
-        "providers": [],
-        "provider_api_keys": [],
+        "provider_state_authority": {},
+        "providers": [provider],
+        "provider_api_keys": [
+            {"provider_id": "api-provider", "api_key": "selected-secret"},
+        ],
+    }
+    config_store.get_provider = lambda _provider_id: provider  # type: ignore[assignment]
+    node_registry_store.get = lambda node_id: {  # type: ignore[assignment]
+        "node_id": node_id,
+        "secret_hash": "$argon2id$node-authority",
     }
     node_store.get_connection = lambda _node_id: next(connections)  # type: ignore[assignment]
     try:
@@ -396,10 +455,12 @@ async def test_provider_secret_sync_rechecks_transport_on_rpc_send() -> None:
         )
     except extension_api.HTTPException as exc:
         assert exc.status_code == 409
-        assert "requires a WSS or loopback" in str(exc.detail)
+        assert "connection changed" in str(exc.detail)
         return
     finally:
         config_store.export_provider_sync_state = original_export  # type: ignore[assignment]
+        config_store.get_provider = original_get_provider  # type: ignore[assignment]
+        node_registry_store.get = original_registry_get  # type: ignore[assignment]
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
     raise AssertionError("provider secret sync did not recheck transport at RPC send")
 
@@ -552,6 +613,8 @@ async def test_node_runtime_readiness_waits_across_reconnect() -> None:
 async def test_remote_admission_starts_only_after_runtime_ready() -> None:
     original_wait = node_store.wait_for_runtime_ready
     original_send = node_link.send_spawn_run
+    original_get_connection = node_store.get_connection
+    original_ensure = node_provider_credential_sync.ensure_for_admission
     gate = asyncio.Event()
     calls: list[str] = []
     conn = SimpleNamespace(runs={})
@@ -566,15 +629,27 @@ async def test_remote_admission_starts_only_after_runtime_ready() -> None:
         calls.append("ready")
         return conn
 
-    async def send_spawn_run(_node_id, _payload):
+    async def ensure(_node_id, _provider_id, *, expected_connection):
+        assert expected_connection is conn
+
+    async def send_spawn_run(_node_id, _payload, *, expected_connection):
+        assert expected_connection is conn
         calls.append("send")
 
     proxy._arm_admission_lease = lambda _state, _conn: calls.append("lease")  # type: ignore[method-assign]
     node_store.wait_for_runtime_ready = wait_for_runtime_ready  # type: ignore[assignment]
+    node_store.get_connection = lambda _node_id: conn  # type: ignore[assignment]
+    node_provider_credential_sync.ensure_for_admission = ensure  # type: ignore[assignment]
     node_link.send_spawn_run = send_spawn_run  # type: ignore[assignment]
     try:
         dispatch = asyncio.create_task(
-            proxy._dispatch_admission_when_ready(state, {"run_id": "run-a"}),
+            proxy._dispatch_admission_when_ready(
+                state,
+                {
+                    "run_id": "run-a",
+                    "execution_artifact": {"provider_id": "zai-claude"},
+                },
+            ),
         )
         await asyncio.sleep(0)
         assert calls == []
@@ -583,6 +658,8 @@ async def test_remote_admission_starts_only_after_runtime_ready() -> None:
         assert await dispatch is conn
     finally:
         node_store.wait_for_runtime_ready = original_wait  # type: ignore[assignment]
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+        node_provider_credential_sync.ensure_for_admission = original_ensure  # type: ignore[assignment]
         node_link.send_spawn_run = original_send  # type: ignore[assignment]
 
     assert calls == ["ready", "lease", "send"]
@@ -592,6 +669,7 @@ async def test_remote_admission_starts_only_after_runtime_ready() -> None:
 async def test_failed_remote_send_cleans_exact_connection_and_lease() -> None:
     original_wait = node_store.wait_for_runtime_ready
     original_send = node_link.send_spawn_run
+    original_ensure = node_provider_credential_sync.ensure_for_admission
     conn_a = SimpleNamespace(runs={})
     conn_b = SimpleNamespace(runs={"other-run": object()})
     proxy = provider_remote.RemoteProviderProxy("node-a")
@@ -615,7 +693,11 @@ async def test_failed_remote_send_cleans_exact_connection_and_lease() -> None:
     async def wait_for_runtime_ready(_node_id):
         return conn_a
 
-    async def send_spawn_run(_node_id, _payload):
+    async def ensure(_node_id, _provider_id, *, expected_connection):
+        assert expected_connection is conn_a
+
+    async def send_spawn_run(_node_id, _payload, *, expected_connection):
+        assert expected_connection is conn_a
         node_store.get_connection = lambda _node_id: conn_b  # type: ignore[assignment]
         raise ConnectionError("socket closed")
 
@@ -624,16 +706,22 @@ async def test_failed_remote_send_cleans_exact_connection_and_lease() -> None:
         lambda target, _conn: setattr(target, "admission_lease_handle", lease)
     )
     node_store.wait_for_runtime_ready = wait_for_runtime_ready  # type: ignore[assignment]
+    node_store.get_connection = lambda _node_id: conn_a  # type: ignore[assignment]
+    node_provider_credential_sync.ensure_for_admission = ensure  # type: ignore[assignment]
     node_link.send_spawn_run = send_spawn_run  # type: ignore[assignment]
     try:
         await proxy._dispatch_admission_or_fail(
             state,
-            {"run_id": "run-a"},
+            {
+                "run_id": "run-a",
+                "execution_artifact": {"provider_id": "zai-claude"},
+            },
             asyncio.Queue(),
         )
     finally:
         node_store.wait_for_runtime_ready = original_wait  # type: ignore[assignment]
         node_link.send_spawn_run = original_send  # type: ignore[assignment]
+        node_provider_credential_sync.ensure_for_admission = original_ensure  # type: ignore[assignment]
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
 
     assert state.admission.done()
@@ -760,6 +848,46 @@ def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
     assert result["provider_api_key_count"] == 1
     assert result["default_provider_id"] == "api-provider"
     assert result["providers"][0].get("suspended") is False
+
+
+def test_provider_sync_rpc_acknowledges_idempotent_credentials() -> None:
+    original_compare_set = config_store._compare_set_api_key
+    original_read = config_store._read_api_key
+    original_read_authoritative = config_store._read_api_key_authoritative
+    keys: dict[str, str] = {}
+    config_store._compare_set_api_key = (
+        lambda provider_id, _expected, api_key: keys.__setitem__(provider_id, api_key)
+    )
+    config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
+    config_store._read_api_key_authoritative = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
+    providers = [_provider_record("api-provider", "API Provider", mode="api_key")]
+    provider_state = _provider_sync_payload(
+        "api-provider",
+        providers,
+        provider_api_keys=[
+            {"provider_id": "api-provider", "api_key": "selected-secret"},
+        ],
+    )
+    try:
+        config_store._config_path().unlink(missing_ok=True)
+        with config_store._state_cache_lock:
+            config_store._state_cache = None
+        first = node_rpc_handlers._rpc_sync_provider_config(
+            {"provider_state": provider_state}
+        )
+        second = node_rpc_handlers._rpc_sync_provider_config(
+            {"provider_state": provider_state}
+        )
+    finally:
+        config_store._compare_set_api_key = original_compare_set  # type: ignore[assignment]
+        config_store._read_api_key = original_read  # type: ignore[assignment]
+        config_store._read_api_key_authoritative = original_read_authoritative  # type: ignore[assignment]
+
+    assert first["provider_api_key_ids"] == ["api-provider"]
+    assert second["provider_api_key_ids"] == ["api-provider"]
+    assert first["sync_status"] == "applied"
+    assert second["sync_status"] == "unchanged"
+    assert second["provider_api_key_count"] == 0
 
 
 def test_import_provider_sync_fails_when_api_key_cannot_be_stored() -> None:

@@ -148,21 +148,6 @@ async def _provider_sync_api_key_ids_from_request(request: Request) -> tuple[str
     return tuple(cleaned)
 
 
-def _assert_node_credential_sync_transport(node_id: str) -> None:
-    import node_link
-    import node_store
-
-    conn = node_store.get_connection(node_id)
-    if conn is None:
-        raise HTTPException(status_code=409, detail="node is not connected")
-    if node_link.connection_allows_credential_sync(conn):
-        return
-    raise HTTPException(
-        status_code=409,
-        detail="provider credential sync requires a WSS or loopback node connection",
-    )
-
-
 class InstallExtensionRequest(BaseModel):
     repo_url: str = ""
     extension_path: str = ""
@@ -727,9 +712,16 @@ async def _dispatch_machine_nodes_core_backend(
         return JSONResponse({"ok": ok, "results": results})
 
     if request.method == "GET" and path == "nodes":
+        import node_provider_credential_sync
         import node_store
         with perf.timed("extension.machine_nodes.nodes"):
-            return JSONResponse(await asyncio.to_thread(node_store.snapshot))
+            snapshot = await asyncio.to_thread(node_store.snapshot)
+            return JSONResponse(
+                await asyncio.to_thread(
+                    node_provider_credential_sync.project_node_snapshots,
+                    snapshot,
+                )
+            )
     if request.method == "GET" and path == "pending_nodes":
         import node_link
         with perf.timed("extension.machine_nodes.pending_nodes"):
@@ -787,17 +779,24 @@ async def _dispatch_machine_nodes_core_backend(
             node_id = parts[1]
             provider_api_key_ids = await _provider_sync_api_key_ids_from_request(request)
             if provider_api_key_ids:
-                _assert_node_credential_sync_transport(node_id)
+                import node_provider_credential_sync
+
+                try:
+                    result = await node_provider_credential_sync.authorize_and_sync(
+                        node_id,
+                        list(provider_api_key_ids),
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                return JSONResponse({"node_id": node_id, "ok": True, **result})
             provider_state = await asyncio.to_thread(
-                config_store.export_provider_sync_state,
-                list(provider_api_key_ids),
+                config_store.export_provider_sync_state
             )
             try:
                 result = await call_local_or_remote(
                     node_id,
                     "sync_provider_config",
                     {"provider_state": provider_state},
-                    secure_transport_required=bool(provider_api_key_ids),
                     version_ready_required=True,
                 )
             except Exception as exc:
