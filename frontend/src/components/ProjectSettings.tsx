@@ -36,6 +36,11 @@ const CATEGORY_ICONS: Record<string, IconName> = {
   hook: "sliders",
 };
 
+/** Sort rank for a category; unknown categories sort last. */
+function categoryRank(category: string): number {
+  return CATEGORY_ORDER[category] ?? 99;
+}
+
 export function ProjectSettings({ cwd, onFileClick, onEngineerFile, onClose }: Props) {
   const { t } = useTranslation();
   useBackButtonDismiss(true, onClose);
@@ -87,15 +92,15 @@ export function ProjectSettings({ cwd, onFileClick, onEngineerFile, onClose }: P
 
   const projectName = cwd.replace(/\/+$/, "").split("/").pop() || cwd;
 
-  // Group files by category, sorted
+  // Group files by category, sorted by canonical rank.
   const grouped = new Map<string, ProjectConfigFile[]>();
   for (const f of files) {
     const list = grouped.get(f.category) ?? [];
     list.push(f);
     grouped.set(f.category, list);
   }
-  const sortedCategories = [...grouped.keys()].sort(
-    (a, b) => (CATEGORY_ORDER[a] ?? 99) - (CATEGORY_ORDER[b] ?? 99)
+  const sortedGroups = [...grouped.entries()].sort(
+    ([a], [b]) => categoryRank(a) - categoryRank(b),
   );
 
   return (
@@ -116,8 +121,7 @@ export function ProjectSettings({ cwd, onFileClick, onEngineerFile, onClose }: P
         <div className="project-settings-content">
           {loading && <div className="project-settings-loading">{t("projectSettings.loading")}</div>}
           {error && <div className="project-settings-error">{error}</div>}
-          {!loading && !error && sortedCategories.map((cat) => {
-            const catFiles = grouped.get(cat) ?? [];
+          {!loading && !error && sortedGroups.map(([cat, catFiles]) => {
             return (
               <div key={cat} className="project-settings-group">
                 <div className="project-settings-group-header">
