@@ -16,6 +16,7 @@ import _test_installation  # noqa: E402
 
 _test_installation.activate(Path(_TMP_HOME))
 
+from ingestion_versions import current_ingestion_version  # noqa: E402
 import lifecycle_command_store  # noqa: E402
 from lifecycle_command_model import (  # noqa: E402
     ExecutionTurnIdentity,
@@ -24,6 +25,7 @@ from lifecycle_command_model import (  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 import run_recovery  # noqa: E402
 from lifecycle_command_states import LifecycleCommandRejected  # noqa: E402
+from runs_dir import runs_root  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import user_msg_lifecycle  # noqa: E402
 
@@ -567,6 +569,110 @@ async def prove_recovery_requires_ordered_supersession(
     )
 
 
+async def prove_integrate_one_locked_reconciles_superseded_recovery(
+    coordinator: Coordinator,
+) -> None:
+    """Regression test for the `_integrate_one_locked` fail-closed gap.
+
+    `_emit_recovered_user_message_terminal_on_main` correctly raises
+    `RuntimeError(_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE)` when the
+    session's current lifecycle has already moved on to a later turn
+    while a stale recovered run is being integrated
+    (`prove_recovery_requires_ordered_supersession` above proves that
+    raise fires for real mismatches). Before the fix, nothing at the
+    `_integrate_one_locked` call site caught that RuntimeError: it
+    propagated to `_integrate_recovered_session_group`'s generic
+    `except Exception: logger.exception(...)`, which never marks the
+    run reconciled — so the identical run got re-scanned and re-raised
+    the same error on every subsequent backend restart, forever. This
+    drives the real `_integrate_one_locked` entry point (not the
+    lower-level `_emit_recovered_user_message_terminal` call) so it
+    exercises the actual try/except + `_mark_reconciled_terminal_async`
+    wrapping, not just the raise condition.
+    """
+    app_session_id = create_session("recovery-integrate-superseded")
+    recovered_lifecycle_id = "turn-integrate-superseded-old"
+    current_lifecycle_id = "turn-integrate-superseded-new"
+    run_id = "run-integrate-superseded"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    marker = run_dir / "reconciled.marker"
+
+    assistant_id = "integrate-superseded-assistant"
+    session_manager.append_user_msg(app_session_id, {
+        "id": "integrate-superseded-user",
+        "role": "user",
+        "content": "old turn",
+        "lifecycle_msg_id": recovered_lifecycle_id,
+    })
+    session_manager.append_assistant_msg(app_session_id, {
+        "id": assistant_id,
+        "role": "assistant",
+        "content": "",
+    })
+    session_manager.flush_pending_persists()
+
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="integrate-superseded:old",
+        session_id=app_session_id,
+        identity=UserTurnIdentity(
+            recovered_lifecycle_id,
+            recovered_lifecycle_id,
+        ),
+    )
+    await coordinator.lifecycle_commands.finish_active(
+        app_session_id,
+        lifecycle_message_id=recovered_lifecycle_id,
+        outcome="complete",
+    )
+    # The session moved on to a new turn while this run is being
+    # recovered — the exact real-world trigger for the ambiguity guard.
+    await coordinator.lifecycle_commands.begin_turn(
+        request_id="integrate-superseded:new",
+        session_id=app_session_id,
+        identity=UserTurnIdentity(current_lifecycle_id, current_lifecycle_id),
+    )
+    before = coordinator.lifecycle_commands.snapshot(app_session_id)
+
+    desc = {
+        "run_id": run_id,
+        "app_session_id": app_session_id,
+        "has_complete_json": False,
+        "ingestion_version": current_ingestion_version("claude"),
+        "provider_kind": "claude",
+        "target_message_id": assistant_id,
+        "turn_run_id": "integrate-superseded-old-execution",
+    }
+
+    check("no reconciled marker before integration", not marker.exists())
+    propagated: Exception | None = None
+    try:
+        await run_recovery._integrate_one_locked(
+            coordinator,
+            None,
+            desc,
+            summary=None,
+            recovery_root_id=None,
+            root_lease=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - captured for the check below
+        propagated = exc
+    check(
+        "superseded recovery integration does not propagate the "
+        "ambiguity RuntimeError",
+        propagated is None,
+    )
+    check(
+        "superseded recovery integration writes the reconciled marker",
+        marker.exists(),
+    )
+    check(
+        "superseded recovery integration leaves the current turn's "
+        "lifecycle untouched",
+        coordinator.lifecycle_commands.snapshot(app_session_id) == before,
+    )
+
+
 async def prove_recovery_terminal_failure_blocks_marker(
     coordinator: Coordinator,
 ) -> None:
@@ -833,6 +939,9 @@ async def run() -> None:
     await coordinator.lifecycle_commands.bind()
     try:
         await prove_recovery_requires_ordered_supersession(coordinator)
+        await prove_integrate_one_locked_reconciles_superseded_recovery(
+            coordinator,
+        )
         await prove_serialized_turns(coordinator)
         await prove_running_stop_transition(coordinator)
         await prove_cancel_before_execution(coordinator)
@@ -852,6 +961,35 @@ def main() -> int:
         return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
+
+
+def test_recovery_reconciles_superseded_lifecycle_identity() -> None:
+    """pytest entry point for the one regression this change added.
+
+    Every proof in this module is named `prove_*`, not `test_*`, so
+    `conftest.py`'s `pytest_ignore_collect` skips the whole file — none of
+    these assertions run under pytest/CI, only via manual script
+    invocation (`python scripts/test_lifecycle_coordinator_boundary.py`).
+    This wrapper deliberately runs ONLY
+    `prove_integrate_one_locked_reconciles_superseded_recovery`, not the
+    full `run()` — `run()` also exercises
+    `prove_cancel_before_execution`, which fails independently of this
+    change (reproduces identically on an unmodified checkout under this
+    host's Docker test image); wiring the whole suite into pytest would
+    turn that pre-existing, unrelated failure into a new CI break."""
+    coordinator = Coordinator()
+
+    async def _run() -> None:
+        await coordinator.lifecycle_commands.bind()
+        try:
+            await prove_integrate_one_locked_reconciles_superseded_recovery(
+                coordinator,
+            )
+        finally:
+            await coordinator.quiesce_prompt_processors()
+            await coordinator.lifecycle_commands.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

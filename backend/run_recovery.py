@@ -84,6 +84,9 @@ _TERMINAL_MARKER_QUANTUM_MAX = 16
 _TERMINAL_MARKER_QUANTUM_MS = 5.0
 _PRE_PROVIDER_ORPHAN_ERROR = "Backend stopped before the provider run started."
 _MISSING_BOUND_RUN_ERROR = "The provider run ended while the backend was offline."
+_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE = (
+    "recovered terminal execution identity is ambiguous"
+)
 
 
 def _normalize_recovered_started_at(value: object) -> str:
@@ -3223,18 +3226,41 @@ async def _integrate_one_locked(
                     recovering_msg_id,
                 )
                 if live_sess is not None and terminal_asst is not None:
-                    await _emit_recovered_user_message_terminal(
-                        coordinator=coordinator,
-                        app_session_id=app_sid,
-                        persist_sid=persist_sid,
-                        mode=mode,
-                        agent_sid=claude_sid,
-                        run_id=run_id,
-                        execution_turn_id=desc.get("turn_run_id"),
-                        cancelled=cancelled,
-                        sess=live_sess,
-                        assistant_msg=terminal_asst,
-                    )
+                    try:
+                        await _emit_recovered_user_message_terminal(
+                            coordinator=coordinator,
+                            app_session_id=app_sid,
+                            persist_sid=persist_sid,
+                            mode=mode,
+                            agent_sid=claude_sid,
+                            run_id=run_id,
+                            execution_turn_id=desc.get("turn_run_id"),
+                            cancelled=cancelled,
+                            sess=live_sess,
+                            assistant_msg=terminal_asst,
+                        )
+                    except RuntimeError as exc:
+                        if str(exc) != _AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE:
+                            raise
+                        # The session's lifecycle already moved past this
+                        # recovered run (a later turn superseded it, or a
+                        # concurrent execution already bound a different
+                        # identity) — the run itself is done and safe to
+                        # retire. Unlike every other raise in this
+                        # function, nothing marks this run reconciled
+                        # afterward, so `recover_all_in_flight` re-hits
+                        # the same fail-closed ambiguity guard and re-logs
+                        # this error on every single restart forever.
+                        await _to_thread_joined(_barrier_journal, persist_sid)
+                        await _mark_reconciled_terminal_async(
+                            run_id,
+                            desc,
+                            "superseded lifecycle identity",
+                            summary=summary,
+                        )
+                        if redigest_backup is not None:
+                            await _to_thread_joined(redigest_backup.commit)
+                        return
             # The replay's events.jsonl writes are fire-and-forget
             # (timeout=0 shard-executor submits). The marker permanently
             # gates this run out of future replays, so it must not land
@@ -3434,9 +3460,7 @@ async def _emit_recovered_user_message_terminal_on_main(
                         else snapshot.phase
                     ),
                 ):
-                    raise RuntimeError(
-                        "recovered terminal execution identity is ambiguous"
-                    )
+                    raise RuntimeError(_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE)
             elif (
                 execution is None
                 or execution.identity.assistant_message_id
@@ -3445,9 +3469,7 @@ async def _emit_recovered_user_message_terminal_on_main(
                 != str(execution_turn_id or "")
                 or execution.provider_run_id != run_id
             ):
-                raise RuntimeError(
-                    "recovered terminal execution identity is ambiguous"
-                )
+                raise RuntimeError(_AMBIGUOUS_TERMINAL_IDENTITY_MESSAGE)
             else:
                 terminal_result = await lifecycle_commands.finish_execution_and_turn(
                     app_session_id,
