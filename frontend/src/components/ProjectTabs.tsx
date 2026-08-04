@@ -117,7 +117,6 @@ export function ProjectTabs({
   };
 
   const deleteSelectedProjects = async () => {
-    if (selectedProjects.length === 0 || deleting) return;
     setDeleting(true);
     try {
       for (const project of selectedProjects) {
