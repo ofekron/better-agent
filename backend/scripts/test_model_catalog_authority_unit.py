@@ -46,6 +46,7 @@ def _build_authority(root: Path) -> CatalogAuthority:
         "kind": "codex",
         "generation": PROVIDER_GENERATION,
         "revision": 7,
+        "execution_revision": 3,
         "config_dir": str(config_dir),
         "base_url": "",
         "mode": "subscription",

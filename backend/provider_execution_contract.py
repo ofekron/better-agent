@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 from provider_manifest import artifact_family_kinds
 
 
-FAMILY_CONTRACT_SCHEMA = 1
+FAMILY_CONTRACT_SCHEMA = 2
 _FAMILY_TYPES = artifact_family_kinds()
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|authorization|credential|password|secret|token)($|_)",
@@ -90,6 +90,7 @@ def _decode_family(raw: Mapping[str, Any]) -> _FrozenContract:
         "provider_kind",
         "provider_generation",
         "provider_revision",
+        "provider_execution_revision",
         "payload",
     }
     if type(raw) is not dict or set(raw) != expected:
@@ -105,6 +106,8 @@ def _decode_family(raw: Mapping[str, Any]) -> _FrozenContract:
         or not raw["provider_generation"]
         or type(raw["provider_revision"]) is not int
         or raw["provider_revision"] < 0
+        or type(raw["provider_execution_revision"]) is not int
+        or raw["provider_execution_revision"] < 0
         or type(raw["payload"]) is not dict
     ):
         raise ProviderExecutionContractError(
@@ -163,12 +166,12 @@ def freeze_provider_contract(
     expected = (
         provider.get("id"),
         provider.get("generation"),
-        provider.get("revision"),
+        provider.get("execution_revision"),
     )
     actual = (
         decoded.get("provider_id"),
         decoded.get("provider_generation"),
-        decoded.get("provider_revision"),
+        decoded.get("provider_execution_revision"),
     )
     decoded_kind = decoded.get("provider_kind")
     # The contract carries the runtime FAMILY kind; the provider record
@@ -218,6 +221,9 @@ def provider_family_contract(
             "provider_kind": kind,
             "provider_generation": provider.get("generation"),
             "provider_revision": provider.get("revision"),
+            "provider_execution_revision": provider.get(
+                "execution_revision"
+            ),
             "payload": dict(payload),
         },
     }

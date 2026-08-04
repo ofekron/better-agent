@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 
-EXECUTION_SCHEMA = 2
+EXECUTION_SCHEMA = 3
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SECRET_KEY_RE = re.compile(
     r"(^|_)(api_?key|authorization|credential|password|secret|token)($|_)",
@@ -331,6 +331,7 @@ class ExecutionArtifact:
     provider_kind: str
     provider_generation: str
     provider_revision: int
+    provider_execution_revision: int
     routing_session_id: str
     template: ExecutionTemplate
     _runtime_policy_json: str = field(repr=False)
@@ -350,6 +351,7 @@ class ExecutionArtifact:
         provider_kind = provider.get("kind")
         generation = provider.get("generation")
         revision = provider.get("revision")
+        execution_revision = provider.get("execution_revision")
         try:
             parsed_generation = uuid.UUID(generation)
         except (AttributeError, TypeError, ValueError) as exc:
@@ -364,6 +366,8 @@ class ExecutionArtifact:
             or str(parsed_generation) != generation
             or type(revision) is not int
             or revision < 0
+            or type(execution_revision) is not int
+            or execution_revision < 0
         ):
             raise ExecutionAuthorityError("provider authority is invalid")
         route = (
@@ -378,6 +382,7 @@ class ExecutionArtifact:
             provider_kind=provider_kind,
             provider_generation=generation,
             provider_revision=revision,
+            provider_execution_revision=execution_revision,
             routing_session_id=route,
             template=template,
             _runtime_policy_json=_freeze_runtime_policy(runtime_policy),
@@ -395,6 +400,7 @@ class ExecutionArtifact:
             "provider_kind",
             "provider_generation",
             "provider_revision",
+            "provider_execution_revision",
             "routing_session_id",
             "template",
             "runtime_policy",
@@ -411,6 +417,7 @@ class ExecutionArtifact:
                 "kind": raw["provider_kind"],
                 "generation": raw["provider_generation"],
                 "revision": raw["provider_revision"],
+                "execution_revision": raw["provider_execution_revision"],
             },
             ExecutionTemplate.from_dict(raw["template"]),
             routing_session_id=raw["routing_session_id"],
@@ -428,6 +435,7 @@ class ExecutionArtifact:
             "provider_kind": self.provider_kind,
             "provider_generation": self.provider_generation,
             "provider_revision": self.provider_revision,
+            "provider_execution_revision": self.provider_execution_revision,
             "routing_session_id": self.routing_session_id,
             "template": self.template.to_dict(),
             "runtime_policy": self.runtime_policy,
@@ -447,13 +455,13 @@ class ExecutionArtifact:
             self.provider_id,
             self.provider_kind,
             self.provider_generation,
-            self.provider_revision,
+            self.provider_execution_revision,
         )
         actual = (
             provider.get("id"),
             provider.get("kind"),
             provider.get("generation"),
-            provider.get("revision"),
+            provider.get("execution_revision"),
         )
         if actual != expected:
             raise ExecutionAuthorityError(
@@ -506,6 +514,9 @@ class PreparedExecution:
             provider_kind=self.artifact.provider_kind,
             provider_generation=self.artifact.provider_generation,
             provider_revision=self.artifact.provider_revision,
+            provider_execution_revision=(
+                self.artifact.provider_execution_revision
+            ),
             routing_session_id=self.artifact.routing_session_id,
             template=template,
             _runtime_policy_json=self.artifact._runtime_policy_json,

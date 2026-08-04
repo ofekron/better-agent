@@ -34,12 +34,13 @@ from provider import Provider  # noqa: E402
 import runs_dir  # noqa: E402
 
 
-def _record(*, revision: int = 4) -> dict:
+def _record(*, revision: int = 4, execution_revision: int = 3) -> dict:
     return {
         "id": "codex-work",
         "kind": "codex",
         "generation": "0a1f0f6c-f19f-4b9d-93d1-45d2db3af620",
         "revision": revision,
+        "execution_revision": execution_revision,
     }
 
 
@@ -111,10 +112,12 @@ def test_prepared_execution_is_detached_secret_free_and_authority_bound() -> Non
     assert "resolved_harness_run_config" in serialized
     assert "must-not-persist" not in repr(prepared)
     assert prepared.artifact.provider_revision == 4
+    assert prepared.artifact.provider_execution_revision == 3
     prepared.artifact.require_authority(_record())
+    prepared.artifact.require_authority(_record(revision=5))
 
     for changed in (
-        _record(revision=5),
+        _record(execution_revision=4),
         {**_record(), "generation": str(uuid.uuid4())},
         {**_record(), "id": "other"},
     ):
@@ -137,6 +140,9 @@ def test_artifact_round_trip_is_strict_and_fingerprint_bound() -> None:
     boolean_revision = json.loads(json.dumps(encoded))
     boolean_revision["provider_revision"] = True
     mutations.append(boolean_revision)
+    boolean_execution_revision = json.loads(json.dumps(encoded))
+    boolean_execution_revision["provider_execution_revision"] = True
+    mutations.append(boolean_execution_revision)
     tampered_model = json.loads(json.dumps(encoded))
     tampered_model["template"]["arguments"]["model"] = "other"
     mutations.append(tampered_model)
@@ -268,6 +274,10 @@ def test_retry_preserves_authority_and_original_frozen_inputs() -> None:
 
     assert retry.artifact.provider_generation == prepared.artifact.provider_generation
     assert retry.artifact.provider_revision == prepared.artifact.provider_revision
+    assert (
+        retry.artifact.provider_execution_revision
+        == prepared.artifact.provider_execution_revision
+    )
     assert retry.start_arguments()["run_id"] != prepared.start_arguments()["run_id"]
     assert retry.start_arguments()["session_id"] == "resumed-session"
     assert retry.start_arguments()["model"] == "gpt-5.6-sol"
@@ -390,7 +400,7 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
         def build_env(self) -> dict[str, str]:
             return {}
 
-        def _start_run(self, **kwargs) -> None:
+        def _start_run(self, **kwargs) -> bool:
             assert kwargs["internal_token"] == "must-not-persist"
             replacement_done = threading.Event()
             replacement = threading.Thread(
@@ -408,6 +418,7 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
             assert self.record["revision"] == 5
             self.events.append("spawn")
             self.replacement = replacement
+            return True
 
         def _write_backend_state(self, rs) -> None:
             del rs
@@ -459,7 +470,7 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
         ]
 
     provider.events.clear()
-    provider.record = {**_provider_record(), "revision": 5}
+    provider.record = {**_provider_record(), "execution_revision": 4}
     stale_loop = asyncio.new_event_loop()
     try:
         provider.start_run(
@@ -501,10 +512,11 @@ def test_provider_starts_are_concurrent() -> None:
         def build_env(self) -> dict[str, str]:
             return {}
 
-        def _start_run(self, **kwargs) -> None:
+        def _start_run(self, **kwargs) -> bool:
             self.spawned.append(kwargs["run_id"])
             self.spawn_started.set()
             self.spawn_gate.wait(timeout=1)
+            return True
 
         def _write_backend_state(self, rs) -> None:
             del rs
@@ -591,10 +603,11 @@ def test_spawn_commit_linearizes_cancellation() -> None:
         def build_env(self) -> dict[str, str]:
             return {}
 
-        def _start_run(self, **kwargs) -> None:
+        def _start_run(self, **kwargs) -> bool:
             self.spawned.append(kwargs["run_id"])
             self.spawn_started.set()
             self.spawn_gate.wait(timeout=1)
+            return True
 
         def _write_backend_state(self, rs) -> None:
             del rs

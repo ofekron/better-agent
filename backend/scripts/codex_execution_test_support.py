@@ -17,6 +17,7 @@ def provider(config_dir: Path) -> dict:
         "kind": "codex",
         "generation": "generation-a",
         "revision": 7,
+        "execution_revision": 3,
         "config_dir": str(config_dir),
         "base_url": "",
         "mode": "subscription",

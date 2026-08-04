@@ -72,6 +72,7 @@ def _record(kind: str, *, provider_id: str | None = None) -> dict:
         "kind": kind,
         "generation": str(uuid.uuid4()),
         "revision": 4,
+        "execution_revision": 3,
         "mode": "subscription",
     }
 
@@ -128,10 +129,11 @@ class _Provider(Provider):
             **arguments,
         )
 
-    def _start_run(self, **kwargs) -> None:
+    def _start_run(self, **kwargs) -> bool:
         del kwargs
         self.build_env()
         self.spawned = True
+        return True
 
     def _write_backend_state(self, rs) -> None:
         del rs
@@ -201,7 +203,7 @@ def test_atomic_hydration_separates_bound_sensitive_credential() -> None:
     hydration = config_store.hydrate_provider_execution(
         created["id"],
         expected_generation=created["generation"],
-        expected_revision=created["revision"],
+        expected_execution_revision=created["execution_revision"],
     )
     assert isinstance(hydration, ProviderExecutionHydration)
     snapshot = hydration.provider
@@ -211,11 +213,15 @@ def test_atomic_hydration_separates_bound_sensitive_credential() -> None:
     assert isinstance(hydration.credential, ProviderExecutionCredential)
     assert hydration.credential.provider_id == created["id"]
     assert hydration.credential.provider_generation == created["generation"]
-    assert hydration.credential.provider_revision == created["revision"]
+    assert hydration.credential.provider_kind == created["kind"]
+    assert (
+        hydration.credential.provider_execution_revision
+        == created["execution_revision"]
+    )
     assert hydration.credential.api_key == "sensitive-value"
 
 
-def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
+def test_base_admission_allows_metadata_only_prepare_to_start_change() -> None:
     import execution_spawn_authority
 
     created = config_store.add_provider({
@@ -238,6 +244,45 @@ def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
         lambda _artifact: None
     )
     try:
+        assert provider.start_run(
+            execution=prepared,
+            loop=loop,
+            queue=asyncio.Queue(),
+        )
+    finally:
+        execution_spawn_authority.attest_execution_spawn_authority = original_attest
+        loop.close()
+    assert provider.spawned
+    assert provider.released == 1
+
+
+def test_base_admission_rejects_execution_change_after_prepare() -> None:
+    import execution_spawn_authority
+
+    created = config_store.add_provider({
+        "name": "Execution-bound Claude",
+        "kind": "claude",
+        "mode": "subscription",
+    })
+    provider = _Provider(created)
+    prepared = provider.prepare_run(**_arguments())
+    changed = config_store.update_provider(
+        created["id"],
+        {"base_url": "https://example.test"},
+        expected_generation=created["generation"],
+        expected_revision=created["revision"],
+    )
+    assert changed is not None
+    assert (
+        changed["execution_revision"]
+        == created["execution_revision"] + 1
+    )
+    loop = asyncio.new_event_loop()
+    original_attest = execution_spawn_authority.attest_execution_spawn_authority
+    execution_spawn_authority.attest_execution_spawn_authority = (
+        lambda _artifact: None
+    )
+    try:
         try:
             provider.start_run(
                 execution=prepared,
@@ -247,7 +292,7 @@ def test_base_admission_rejects_prepare_to_start_authority_race() -> None:
         except config_store.ProviderConfigConflict:
             pass
         else:
-            raise AssertionError("stale prepared authority reached provider spawn")
+            raise AssertionError("stale execution authority reached spawn")
     finally:
         execution_spawn_authority.attest_execution_spawn_authority = original_attest
         loop.close()
@@ -376,7 +421,8 @@ def test_family_artifact_and_input_projection_fail_closed() -> None:
 TESTS = (
     test_family_contract_codec_is_strict_immutable_and_tamper_bound,
     test_atomic_hydration_separates_bound_sensitive_credential,
-    test_base_admission_rejects_prepare_to_start_authority_race,
+    test_base_admission_allows_metadata_only_prepare_to_start_change,
+    test_base_admission_rejects_execution_change_after_prepare,
     test_base_admission_rejects_wrong_provider_instance,
     test_extra_env_rejects_launch_runtime_and_authority_collisions,
     test_family_artifact_and_input_projection_fail_closed,

@@ -37,8 +37,9 @@ GEN = "a1b2c3d4-1111-1111-1111-111111111111"
 def _cred(**over) -> ProviderExecutionCredential:
     base: dict = {
         "provider_id": "p1",
+        "provider_kind": "claude",
         "provider_generation": GEN,
-        "provider_revision": 0,
+        "provider_execution_revision": 0,
         "status": "available",
         "api_key": "k",
     }
@@ -125,8 +126,9 @@ def test_credential_non_canonical_uuid_form_rejected():
     [
         ({"provider_id": ""}, "invalid"),
         ({"provider_id": 5}, "invalid"),
-        ({"provider_revision": -1}, "invalid"),
-        ({"provider_revision": "0"}, "invalid"),
+        ({"provider_kind": ""}, "invalid"),
+        ({"provider_execution_revision": -1}, "invalid"),
+        ({"provider_execution_revision": "0"}, "invalid"),
         ({"status": "bogus"}, "invalid"),
         ({"api_key": None}, "invalid"),
     ],
@@ -144,14 +146,21 @@ def test_credential_authoritative_flag():
 
 
 def test_credential_api_key_not_in_repr():
-    assert "k" not in repr(_cred(api_key="secret-value"))
+    assert "secret-value" not in repr(_cred(api_key="secret-value"))
 
 
 # --------------------------------------------------------------------------- #
 # ProviderExecutionHydration
 # --------------------------------------------------------------------------- #
 def _provider() -> dict:
-    return {"id": "p1", "generation": GEN, "revision": 0, "name": "demo"}
+    return {
+        "id": "p1",
+        "kind": "claude",
+        "generation": GEN,
+        "revision": 7,
+        "execution_revision": 0,
+        "name": "demo",
+    }
 
 
 def test_create_without_credential_round_trips():
@@ -165,7 +174,7 @@ def test_create_authority_mismatch_rejected():
     with pytest.raises(ValueError, match="authority does not match"):
         ProviderExecutionHydration.create(
             _provider(),
-            _cred(provider_id="other", provider_generation=GEN, provider_revision=0),
+            _cred(provider_id="other", provider_generation=GEN),
         )
 
 

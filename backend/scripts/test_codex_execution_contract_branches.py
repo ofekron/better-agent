@@ -91,6 +91,20 @@ def test_catalog_fingerprint_is_independent_of_runtime_args() -> None:
         assert base_contract.fingerprint != other_contract.fingerprint
 
 
+def test_catalog_fingerprint_ignores_metadata_revision() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        base = CodexExecutionContract.from_dict(_build_encoded(root))
+        metadata_only = CodexExecutionContract.from_dict(
+            _build_encoded(
+                root,
+                provider_overrides={"revision": 99},
+            )
+        )
+        assert base.fingerprint != metadata_only.fingerprint
+        assert base.catalog_fingerprint == metadata_only.catalog_fingerprint
+
+
 def test_attest_metadata_is_true_for_an_unmodified_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -347,11 +361,12 @@ def test_build_rejects_invalid_provider_revision() -> None:
         write_executable(executable, b"native")
 
         for revision in ("7", -1):
-            with pytest.raises(ExecutionContractError):
-                build_codex_execution_contract(
-                    {**provider(config_dir), "revision": revision},
-                    launcher_path=str(executable),
-                )
+            for key in ("revision", "execution_revision"):
+                with pytest.raises(ExecutionContractError):
+                    build_codex_execution_contract(
+                        {**provider(config_dir), key: revision},
+                        launcher_path=str(executable),
+                    )
 
 
 def test_build_rejects_invalid_profile() -> None:

@@ -18,7 +18,12 @@ _AUTHORITY_KEYS = frozenset({
     "discovery",
     "fingerprint",
 })
-_PROVIDER_KEYS = frozenset({"id", "generation", "revision"})
+_PROVIDER_KEYS = frozenset({
+    "id",
+    "generation",
+    "revision",
+    "execution_revision",
+})
 _SOURCE_KEYS = frozenset({"execution_contract", "catalog_fingerprint"})
 _DISCOVERY_KEYS = frozenset({"method", "version"})
 _DISCOVERY_METHOD_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
@@ -37,6 +42,7 @@ class CatalogAuthority:
     provider_id: str
     provider_generation: str
     provider_revision: int
+    provider_execution_revision: int
     provider_state_generation: str
     provider_state_revision: int
     provider_state_digest: str
@@ -50,6 +56,7 @@ class CatalogAuthority:
                 "id": self.provider_id,
                 "generation": self.provider_generation,
                 "revision": self.provider_revision,
+                "execution_revision": self.provider_execution_revision,
             },
             "provider_state": {
                 "generation": self.provider_state_generation,
@@ -111,6 +118,14 @@ class CatalogAuthority:
                 provider.get("generation"),
                 provider.get("revision"),
             )
+            provider_execution_revision = provider.get("execution_revision")
+            if (
+                type(provider_execution_revision) is not int
+                or provider_execution_revision < 0
+            ):
+                raise CatalogAuthorityError(
+                    "invalid provider execution authority"
+                )
             state_authority = provider_sync_authority.parse_authority(
                 raw.get("provider_state"),
             )
@@ -150,6 +165,7 @@ class CatalogAuthority:
                 provider_id=provider_id,
                 provider_generation=provider_authority["generation"],
                 provider_revision=provider_authority["revision"],
+                provider_execution_revision=provider_execution_revision,
                 provider_state_generation=state_authority["generation"],
                 provider_state_revision=state_authority["revision"],
                 provider_state_digest=state_authority["digest"],
@@ -165,8 +181,8 @@ class CatalogAuthority:
             execution_contract.provider_id != authority.provider_id
             or execution_contract.provider_generation
             != authority.provider_generation
-            or execution_contract.provider_revision
-            != authority.provider_revision
+            or execution_contract.provider_execution_revision
+            != authority.provider_execution_revision
         ):
             raise CatalogAuthorityError(
                 "execution contract provider authority mismatch",
@@ -197,6 +213,9 @@ def build_catalog_authority(
             "id": provider_id,
             "generation": provider_generation,
             "revision": provider_revision,
+            "execution_revision": (
+                execution_contract.provider_execution_revision
+            ),
         },
         "provider_state": dict(provider_state_authority),
         "source": {

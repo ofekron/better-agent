@@ -1137,7 +1137,9 @@ class Provider(ABC):
             hydration = config_store.hydrate_provider_execution(
                 artifact.provider_id,
                 expected_generation=artifact.provider_generation,
-                expected_revision=artifact.provider_revision,
+                expected_execution_revision=(
+                    artifact.provider_execution_revision
+                ),
             )
             if hydration is None:
                 if config_store.provider_suspended(artifact.provider_id):

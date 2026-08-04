@@ -43,6 +43,7 @@ _RUNTIME_POLICY_KEYS = {
     "working_mode",
     "model_admission",
     "runner_launch",
+    "native_sid_compatibility",
 }
 _LEGACY_CODEX_AUTHORITY_KEYS = {
     "codex_binary",
@@ -92,13 +93,13 @@ def codex_contract_from_artifact(
         artifact.provider_id,
         artifact.provider_kind,
         artifact.provider_generation,
-        artifact.provider_revision,
+        artifact.provider_execution_revision,
     )
     actual = (
         contract.provider_id,
         contract.provider_kind,
         contract.provider_generation,
-        contract.provider_revision,
+        contract.provider_execution_revision,
     )
     if actual != expected:
         raise ExecutionAuthorityError(
@@ -166,6 +167,7 @@ def retry_codex_execution(
             "kind": artifact.provider_kind,
             "generation": artifact.provider_generation,
             "revision": artifact.provider_revision,
+            "execution_revision": artifact.provider_execution_revision,
         },
         routing_session_id=artifact.routing_session_id,
         runtime_policy=runtime_policy,

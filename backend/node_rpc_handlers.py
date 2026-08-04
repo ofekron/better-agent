@@ -96,7 +96,8 @@ def _prepare_node_execution(
         or node_artifact.provider_id != artifact.provider_id
         or node_artifact.provider_kind != artifact.provider_kind
         or node_artifact.provider_generation != artifact.provider_generation
-        or node_artifact.provider_revision != artifact.provider_revision
+        or node_artifact.provider_execution_revision
+        != artifact.provider_execution_revision
     ):
         run_id = arguments["run_id"]
         from runs_dir import runs_root

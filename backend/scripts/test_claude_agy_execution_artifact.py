@@ -19,6 +19,7 @@ TEST_HOME = _test_home.TestHome.acquire(
 )
 
 import config_store  # noqa: E402
+from paths import encode_cwd  # noqa: E402
 from provider_agy import AgyProvider  # noqa: E402
 from provider_claude import ClaudeProvider  # noqa: E402
 from provider_family_launch_attestation import (  # noqa: E402
@@ -53,7 +54,7 @@ def _arguments(root: Path, session_id: str, kind: str) -> dict:
         "model": (
             "claude-opus-4-6"
             if kind == "claude"
-            else "Frozen AGY Model"
+            else "Gemini 3.5 Flash (Low)"
         ),
         "reasoning_effort": "high" if kind == "claude" else None,
         "session_id": None,
@@ -127,6 +128,18 @@ def _assert_family_preparation(
         "frozen-profile"
     )
     assert runner_input["provisioned_tool_profile"] == "frozen-tools"
+    compatibility = runtime_policy["native_sid_compatibility"]
+    assert compatibility["engine"] == f"{kind}-native"
+    assert compatibility["node_id"] == "primary"
+    assert compatibility["thread_store_root"] == str(
+        (
+            Path(provider.record["config_dir"])
+            / ("projects" if kind == "claude" else "conversations")
+        ).resolve()
+    )
+    assert compatibility["claude_project_namespace"] == (
+        encode_cwd(str(root)) if kind == "claude" else None
+    )
 
     arguments["prompt"] = "mutated"
     arguments["provider_run_config"]["mcp_servers"].clear()
@@ -154,7 +167,7 @@ def test_claude_and_agy_prepare_complete_immutable_family_artifacts() -> None:
             bin_dir / "agy",
             "#!/bin/sh\n"
             "if [ \"${1:-}\" = models ]; then\n"
-            "  printf 'Frozen AGY Model\\n'\n"
+                "  printf 'Gemini 3.5 Flash (Low)\\n'\n"
             "fi\n"
             "exit 0\n",
         )

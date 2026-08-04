@@ -27,6 +27,7 @@ from provider_family_runtime_capabilities import (
     stage_family_runtime_capabilities,
 )
 from provider_manifest import artifact_family_kinds
+from native_sid_compatibility import NativeSidCompatibility
 
 import runtime_profile
 
@@ -126,6 +127,7 @@ def prepare_family_execution(
     runner_input: Mapping[str, Any],
     launch: FamilyLaunchAttestation,
     capabilities: PreparedRuntimeCapabilities,
+    native_sid_compatibility: NativeSidCompatibility | None = None,
 ) -> PreparedExecution:
     if (
         type(provider) is not dict
@@ -144,9 +146,14 @@ def prepare_family_execution(
     # record at spawn). The contract envelope carries the runtime FAMILY:
     # better_agent_runner delegation executes codex/fugu records through
     # the openai family, and the family codec is keyed by envelope type.
+    runtime_policy = {"runner_input": dict(runner_input)}
+    if native_sid_compatibility is not None:
+        runtime_policy["native_sid_compatibility"] = (
+            native_sid_compatibility.to_dict()
+        )
     execution = prepare_execution(
         provider,
-        runtime_policy={"runner_input": dict(runner_input)},
+        runtime_policy=runtime_policy,
         provider_contract=provider_family_contract(
             {**provider, "kind": launch.family},
             payload=payload,
@@ -204,6 +211,7 @@ def retry_family_execution(
             "kind": artifact.provider_kind,
             "generation": artifact.provider_generation,
             "revision": artifact.provider_revision,
+            "execution_revision": artifact.provider_execution_revision,
         },
         routing_session_id=artifact.routing_session_id,
         runtime_policy={
@@ -216,6 +224,7 @@ def retry_family_execution(
                 "kind": family,
                 "generation": artifact.provider_generation,
                 "revision": artifact.provider_revision,
+                "execution_revision": artifact.provider_execution_revision,
             },
             payload=contract_payload,
         ),

@@ -52,8 +52,9 @@ def _canonical_provider(provider: Mapping[str, Any]) -> str:
 @dataclass(frozen=True)
 class ProviderExecutionCredential:
     provider_id: str
+    provider_kind: str
     provider_generation: str
-    provider_revision: int
+    provider_execution_revision: int
     status: Literal["available", "missing", "blocked"]
     api_key: str = field(repr=False)
 
@@ -65,9 +66,11 @@ class ProviderExecutionCredential:
         if (
             type(self.provider_id) is not str
             or not self.provider_id
+            or type(self.provider_kind) is not str
+            or not self.provider_kind
             or generation != self.provider_generation
-            or type(self.provider_revision) is not int
-            or self.provider_revision < 0
+            or type(self.provider_execution_revision) is not int
+            or self.provider_execution_revision < 0
             or self.status not in {"available", "missing", "blocked"}
             or type(self.api_key) is not str
         ):
@@ -96,13 +99,15 @@ class ProviderExecutionHydration:
         if credential is not None:
             authority = (
                 provider.get("id"),
+                provider.get("kind"),
                 provider.get("generation"),
-                provider.get("revision"),
+                provider.get("execution_revision"),
             )
             credential_authority = (
                 credential.provider_id,
+                credential.provider_kind,
                 credential.provider_generation,
-                credential.provider_revision,
+                credential.provider_execution_revision,
             )
             if credential_authority != authority:
                 raise ValueError(

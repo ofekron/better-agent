@@ -472,6 +472,22 @@ class CodexProvider(Provider):
             "worker_working_mode": worker_record.get("working_mode"),
             "working_mode": session_record.get("working_mode"),
         }
+        from native_sid_compatibility import (
+            derive_admitted_native_sid_compatibility,
+        )
+
+        runtime_policy["native_sid_compatibility"] = (
+            derive_admitted_native_sid_compatibility(
+                engine="codex-native",
+                node_id=str(
+                    (worker_record if worker_session_id else session_record).get(
+                        "node_id"
+                    )
+                    or "primary"
+                ),
+                thread_store_root=config_root / "sessions",
+            ).to_dict()
+        )
         from provider_runner_launch import capture_runner_launch
 
         runtime_policy["runner_launch"] = capture_runner_launch(

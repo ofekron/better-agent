@@ -281,6 +281,8 @@ def _context_from_authority(
         or authority.discovery_method != method
         or authority.discovery_version != DISCOVERY_VERSION
         or snapshot.identity != expected_identity
+        or snapshot.provider["execution_revision"]
+        != authority.provider_execution_revision
         or contract.provider_id != provider_id
         or contract.catalog_args != catalog_args
         or selectors != {"CODEX_HOME": str(codex_home)}

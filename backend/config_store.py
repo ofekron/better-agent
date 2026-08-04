@@ -188,6 +188,32 @@ def _assert_provider_authority(
         raise ProviderConfigConflict(provider)
 
 
+def _assert_provider_execution_authority(
+    provider: dict,
+    expected_generation: str,
+    expected_execution_revision: int,
+) -> None:
+    try:
+        canonical_generation = str(uuid.UUID(expected_generation))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("expected_generation must be a canonical UUID") from exc
+    if canonical_generation != expected_generation:
+        raise ValueError("expected_generation must be a canonical UUID")
+    if (
+        not isinstance(expected_execution_revision, int)
+        or isinstance(expected_execution_revision, bool)
+        or expected_execution_revision < 0
+    ):
+        raise ValueError(
+            "expected_execution_revision must be a non-negative integer"
+        )
+    if (
+        provider["generation"] != expected_generation
+        or provider["execution_revision"] != expected_execution_revision
+    ):
+        raise ProviderConfigConflict(provider)
+
+
 def _provider_execution_projection(provider: dict) -> dict:
     return {
         field: copy.deepcopy(provider[field])
@@ -2734,7 +2760,8 @@ def hydrate_provider_execution(
     provider_id: str,
     *,
     expected_generation: str,
-    expected_revision: int,
+    expected_execution_revision: int | None = None,
+    expected_revision: int | None = None,
     runner: object = None,
 ) -> Optional["ProviderExecutionHydration"]:
     from provider_execution_authority import (
@@ -2748,11 +2775,23 @@ def hydrate_provider_execution(
             continue
         if not _provider_available_for_state(state, provider):
             return None
-        _assert_provider_authority(
-            provider,
-            expected_generation,
-            expected_revision,
-        )
+        if expected_execution_revision is None:
+            _assert_provider_authority(
+                provider,
+                expected_generation,
+                expected_revision,
+            )
+        else:
+            if expected_revision is not None:
+                raise ValueError(
+                    "expected_revision and expected_execution_revision "
+                    "are mutually exclusive"
+                )
+            _assert_provider_execution_authority(
+                provider,
+                expected_generation,
+                expected_execution_revision,
+            )
         # The execution snapshot carries the resolved runtime view: the
         # store record plus profile-derived runner/model/effort defaults.
         # Downstream pinned values (headless requests) still override.
@@ -2776,8 +2815,9 @@ def hydrate_provider_execution(
             )
             credential = ProviderExecutionCredential(
                 provider_id=provider_id,
+                provider_kind=provider["kind"],
                 provider_generation=expected_generation,
-                provider_revision=expected_revision,
+                provider_execution_revision=provider["execution_revision"],
                 status=status,
                 api_key=api_key,
             )

@@ -66,6 +66,7 @@ def _record(*, kind: str, config_dir: Path, revision: int = 7) -> dict:
         "kind": kind,
         "generation": str(uuid.uuid4()),
         "revision": revision,
+        "execution_revision": revision,
         "name": kind,
         "mode": "api_key" if kind == "fugu" else "subscription",
         "base_url": "",
@@ -173,7 +174,14 @@ def test_codex_prepare_binds_runtime_policy_and_contract() -> None:
         assert contract.provider_id == provider.id
         assert contract.provider_kind == "codex"
         assert contract.provider_revision == prepared.artifact.provider_revision
-        assert contract.credential_generation == contract.provider_revision
+        assert (
+            contract.provider_execution_revision
+            == prepared.artifact.provider_execution_revision
+        )
+        assert (
+            contract.credential_generation
+            == contract.provider_execution_revision
+        )
         assert contract.launch_chain.argv_prefix
         runner_launch = codex_runner_launch_from_artifact(prepared.artifact)
         assert runner_launch.attest()
@@ -183,6 +191,16 @@ def test_codex_prepare_binds_runtime_policy_and_contract() -> None:
         )
         assert contract.config
         assert prepared.artifact.runtime_policy["permission"]
+        compatibility = prepared.artifact.runtime_policy[
+            "native_sid_compatibility"
+        ]
+        assert compatibility == {
+            "schema": 1,
+            "engine": "codex-native",
+            "node_id": "primary",
+            "thread_store_root": str((config_dir / "sessions").resolve()),
+            "claude_project_namespace": None,
+        }
         assert prepared.artifact.runtime_policy["run_policy"][
             "resolved_harness_run_config"
         ]["profile_id"] == "reviewer"
@@ -397,6 +415,9 @@ def test_fugu_isolation_and_invalid_model_fail_closed() -> None:
         prepared = _prepare(provider, root, model="fugu-ultra")
         contract = codex_contract_from_artifact(prepared.artifact)
         assert contract.provider_kind == "fugu"
+        assert prepared.artifact.runtime_policy[
+            "native_sid_compatibility"
+        ]["engine"] == "codex-native"
         assert contract.runtime_args == (
             "-c",
             'model_provider="sakana"',
@@ -539,7 +560,9 @@ def test_prepare_to_spawn_provider_mutation_fails_closed() -> None:
         prepared = _prepare(provider, root, model="gpt-5.5")
         provider.record = {
             **provider.record,
-            "revision": provider.record["revision"] + 1,
+            "execution_revision": (
+                provider.record["execution_revision"] + 1
+            ),
         }
         original_hydrate = config_store.hydrate_provider_execution
         config_store.hydrate_provider_execution = (
@@ -765,7 +788,9 @@ def test_runtime_agent_payload_is_removed_on_failed_admission() -> None:
             run_id = prepared.artifact.template.arguments()["run_id"]
             provider.record = {
                 **provider.record,
-                "revision": provider.record["revision"] + 1,
+                "execution_revision": (
+                    provider.record["execution_revision"] + 1
+                ),
             }
             config_store.hydrate_provider_execution = (
                 lambda *_args, **_kwargs: ProviderExecutionHydration.create(

@@ -133,6 +133,22 @@ class AgyProvider(SessionEventsProvider):
             str(authority.get("config_dir") or ".gemini/antigravity-cli"),
         )
         config_root.mkdir(parents=True, exist_ok=True)
+        config_root = config_root.resolve(strict=True)
+        from native_sid_compatibility import (
+            admitted_native_routing_node_id,
+            derive_admitted_native_sid_compatibility,
+        )
+
+        native_sid_compatibility = derive_admitted_native_sid_compatibility(
+            engine="agy-native",
+            node_id=admitted_native_routing_node_id(
+                app_session_id=start_arguments["app_session_id"],
+                worker_session_id=start_arguments.get(
+                    "worker_agent_session_id"
+                ),
+            ),
+            thread_store_root=config_root / "conversations",
+        )
         resume_path = (
             config_root
             / "conversations"
@@ -214,6 +230,7 @@ class AgyProvider(SessionEventsProvider):
             runner_input=runner_input,
             launch=launch,
             capabilities=capabilities,
+            native_sid_compatibility=native_sid_compatibility,
         )
 
     def _build_runner_input(

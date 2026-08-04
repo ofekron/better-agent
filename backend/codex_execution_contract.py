@@ -41,6 +41,7 @@ class CodexExecutionContract:
     provider_kind: str
     provider_generation: str
     provider_revision: int
+    provider_execution_revision: int
     mode: str
     base_url: str
     profile: str
@@ -72,7 +73,7 @@ class CodexExecutionContract:
             "provider_id": self.provider_id,
             "provider_kind": self.provider_kind,
             "provider_generation": self.provider_generation,
-            "provider_revision": self.provider_revision,
+            "provider_execution_revision": self.provider_execution_revision,
             "mode": self.mode,
             "base_url": self.base_url,
             "profile": self.profile,
@@ -113,6 +114,7 @@ class CodexExecutionContract:
             "provider_kind",
             "provider_generation",
             "provider_revision",
+            "provider_execution_revision",
             "mode",
             "base_url",
             "profile",
@@ -206,6 +208,10 @@ class CodexExecutionContract:
                     raw,
                     "provider_revision",
                 ),
+                provider_execution_revision=required_integer(
+                    raw,
+                    "provider_execution_revision",
+                ),
                 mode=required_string(raw, "mode"),
                 base_url=required_string(raw, "base_url"),
                 profile=required_string(raw, "profile"),
@@ -235,7 +241,9 @@ class CodexExecutionContract:
             or not contract.provider_id
             or not contract.provider_generation
             or contract.provider_revision < 0
-            or contract.credential_generation != contract.provider_revision
+            or contract.provider_execution_revision < 0
+            or contract.credential_generation
+            != contract.provider_execution_revision
             or not SAFE_PROFILE_RE.fullmatch(contract.profile)
             or not SHA256_RE.fullmatch(supplied_fingerprint)
         ):
@@ -400,11 +408,14 @@ def build_codex_execution_contract(
     provider_kind = str(provider.get("kind") or "").strip()
     generation = str(provider.get("generation") or "").strip()
     provider_revision = provider.get("revision")
+    provider_execution_revision = provider.get("execution_revision")
     if not provider_id or provider_kind not in {"codex", "fugu"} or not generation:
         raise ExecutionContractError("provider authority is incomplete")
     if (
         type(provider_revision) is not int
         or provider_revision < 0
+        or type(provider_execution_revision) is not int
+        or provider_execution_revision < 0
     ):
         raise ExecutionContractError("provider authority revision is invalid")
     cleaned_profile = str(profile or "")
@@ -443,10 +454,11 @@ def build_codex_execution_contract(
         provider_kind=provider_kind,
         provider_generation=generation,
         provider_revision=provider_revision,
+        provider_execution_revision=provider_execution_revision,
         mode=str(provider.get("mode") or "subscription"),
         base_url=_clean_base_url(provider.get("base_url")),
         profile=cleaned_profile,
-        credential_generation=provider_revision,
+        credential_generation=provider_execution_revision,
         catalog_args=_clean_config_args(catalog_args),
         runtime_args=_clean_config_args(runtime_args),
         environment_selectors=_clean_environment_selectors(environment_selectors),

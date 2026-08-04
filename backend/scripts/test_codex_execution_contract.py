@@ -213,6 +213,9 @@ def test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint() -> 
         boolean_revision = json.loads(json.dumps(encoded))
         boolean_revision["provider_revision"] = True
         mutations.append(boolean_revision)
+        boolean_execution_revision = json.loads(json.dumps(encoded))
+        boolean_execution_revision["provider_execution_revision"] = True
+        mutations.append(boolean_execution_revision)
         string_args = json.loads(json.dumps(encoded))
         string_args["catalog_args"] = "abc"
         mutations.append(string_args)
@@ -341,6 +344,10 @@ def test_builder_accepts_config_store_provider_authority() -> None:
 
         assert contract.provider_generation == record["generation"]
         assert contract.provider_revision == record["revision"]
+        assert (
+            contract.provider_execution_revision
+            == record["execution_revision"]
+        )
 
 
 CONTRACT_TESTS = (
