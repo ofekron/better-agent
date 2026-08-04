@@ -4,10 +4,8 @@
 Fugu's CLI catalog is unverifiable (codex_model_discovery rejects it
 with `fugu_catalog_unverifiable`), so its catalog authority is the
 bundled `FUGU_MODELS` constant: model listing serves it via the generic
-cache/static path, headless model validation checks against it, and
-spawn admission does not demand a D3 catalog that can never exist.
-Before this, every fugu session create failed with
-"Fugu has no known models".
+cache/static path, Fugu validates selections before launch, and spawn
+admission does not demand a D3 catalog that can never exist.
 """
 from __future__ import annotations
 
@@ -22,9 +20,8 @@ import _test_home
 _test_home.isolate(prefix="fugu-catalog-")
 
 import models as models_mod  # noqa: E402
-from codex_headless_execution import _require_model  # noqa: E402
 from model_execution_admission import _CATALOG_KINDS  # noqa: E402
-from provider_fugu import FUGU_MODELS  # noqa: E402
+from provider_fugu import FUGU_MODELS, FuguProvider  # noqa: E402
 
 RECORD = {
     "id": "fugu-test-provider",
@@ -42,10 +39,11 @@ def test_models_projection_serves_curated_catalog() -> None:
         assert model in models, (model, models)
 
 
-def test_headless_model_validation_uses_curated_catalog() -> None:
-    _require_model(dict(RECORD), "fugu")
+def test_fugu_provider_validates_curated_catalog() -> None:
+    provider = FuguProvider(dict(RECORD))
+    provider.codex_config_overrides(model="fugu")
     try:
-        _require_model(dict(RECORD), "not-a-fugu-model")
+        provider.codex_config_overrides(model="not-a-fugu-model")
     except ValueError:
         return
     raise AssertionError("expected unknown fugu model rejection")
@@ -75,7 +73,7 @@ def test_admission_skips_catalog_only_for_delegated_family_contract() -> None:
 
 TESTS = (
     test_models_projection_serves_curated_catalog,
-    test_headless_model_validation_uses_curated_catalog,
+    test_fugu_provider_validates_curated_catalog,
     test_admission_does_not_demand_unobtainable_catalog,
     test_admission_skips_catalog_only_for_delegated_family_contract,
 )

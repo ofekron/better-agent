@@ -24,8 +24,6 @@ from headless_request_contract import (  # noqa: E402
     HeadlessRequest,
     admit_headless_request,
 )
-from model_catalog_refresh_state import CatalogProjection, changed_fact  # noqa: E402
-import model_catalog_read_projection  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import config_store  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
@@ -35,7 +33,7 @@ from provider_fugu import FuguProvider  # noqa: E402
 def _fake_codex(root: Path) -> Path:
     path = root / "codex"
     path.write_text(
-        """#!/usr/bin/python3
+        f"#!{sys.executable}\n" + """
 import json, os, sys
 log = os.environ.get("HEADLESS_TEST_LOG")
 for raw in sys.stdin:
@@ -113,21 +111,6 @@ def _admitted(
     return admit_headless_request(request, authority)
 
 
-def _catalog(record: dict, models: tuple[str, ...]) -> None:
-    projection = CatalogProjection(
-        provider_id=record["id"],
-        provider_generation=record["generation"],
-        status="current",
-        models=models,
-        models_current=True,
-        retired=(),
-        last_refreshed_at=1.0,
-        reason="",
-        authority_fingerprint="catalog-proof",
-    )
-    model_catalog_read_projection.apply_fact(changed_fact(projection))
-
-
 async def _exercise(
     provider,
     record: dict,
@@ -135,10 +118,10 @@ async def _exercise(
     *,
     fork: bool,
     resume: bool = False,
+    model: str | None = None,
 ) -> tuple[dict, list[dict]]:
-    _catalog(record, ("fugu", "fugu-ultra") if record["kind"] == "fugu" else ("gpt-5",))
-    log = Path(TEST_HOME) / f"{record['kind']}.jsonl"
-    admitted = _admitted(record, fork=fork, resume=resume)
+    log = Path(TEST_HOME) / f"{record['kind']}-{uuid.uuid4().hex}.jsonl"
+    admitted = _admitted(record, fork=fork, resume=resume, model=model)
     prepared = prepare_codex_headless(provider, admitted, launcher_path=str(fake))
     runtime = dict(record)
     runtime["api_key"] = "sakana-secret" if record["kind"] == "fugu" else ""
@@ -208,22 +191,39 @@ async def test_codex_and_fugu_exact_execution(root: Path, fake: Path) -> None:
     assert all(row["sakana"] for row in fugu_rows)
 
 
+async def test_codex_delegates_model_validation_to_cli(
+    root: Path,
+    fake: Path,
+) -> None:
+    record = _record(root, "codex")
+    model = "codex-model-not-in-better-agent-catalog"
+    result, rows = await _exercise(
+        CodexProvider(record),
+        record,
+        fake,
+        fork=False,
+        model=model,
+    )
+    assert result["result"] == "precise-result"
+    turn = next(row for row in rows if row["method"] == "turn/start")
+    assert turn["params"]["model"] == model
+
+
 async def test_rejections_and_drift(root: Path, fake: Path) -> None:
     record = _record(root, "codex")
     provider = CodexProvider(record)
     assert provider.supports_headless_no_tools is False
     assert FuguProvider(_record(root, "fugu")).supports_headless_no_tools is False
-    _catalog(record, ("gpt-5",))
-    for kwargs, message in (
-        ({"model": "unknown"}, "model"),
-        ({"no_tools": True}, "no-tools"),
-    ):
-        try:
-            prepare_codex_headless(provider, _admitted(record, fork=False, **kwargs), launcher_path=str(fake))
-        except ValueError as exc:
-            assert message in str(exc)
-        else:
-            raise AssertionError(f"expected {message} rejection")
+    try:
+        prepare_codex_headless(
+            provider,
+            _admitted(record, fork=False, no_tools=True),
+            launcher_path=str(fake),
+        )
+    except ValueError as exc:
+        assert "no-tools" in str(exc)
+    else:
+        raise AssertionError("expected no-tools rejection")
     hydration_calls = 0
     original_hydrate = config_store.hydrate_provider_execution
 
@@ -270,6 +270,7 @@ async def main_async() -> None:
     root = Path(TEST_HOME)
     fake = _fake_codex(root)
     await test_codex_and_fugu_exact_execution(root, fake)
+    await test_codex_delegates_model_validation_to_cli(root, fake)
     await test_rejections_and_drift(root, fake)
 
 

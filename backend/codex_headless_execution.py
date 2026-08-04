@@ -85,31 +85,6 @@ def _authority_tuple(record: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _require_model(provider: Mapping[str, Any], model: str) -> None:
-    if provider.get("kind") == "fugu":
-        # Fugu has no verifiable CLI catalog; the curated constant is
-        # its catalog authority (see codex_model_discovery).
-        from provider_fugu import FUGU_MODELS
-
-        if model not in FUGU_MODELS:
-            raise ValueError(
-                "headless model is not in the current provider catalog",
-            )
-        return
-    import model_catalog_read_projection
-
-    projection = model_catalog_read_projection.snapshot(
-        str(provider["id"]),
-        str(provider["generation"]),
-    )
-    if (
-        projection is None
-        or not projection.models_current
-        or model not in projection.models
-    ):
-        raise ValueError("headless model is not in the current provider catalog")
-
-
 def prepare_codex_headless(
     provider: Any,
     admitted: AdmittedHeadlessRequest,
@@ -133,7 +108,6 @@ def prepare_codex_headless(
         raise ValueError("headless provider cannot guarantee no-tools")
     if payload["fork"] and not provider.supports_fork:
         raise ValueError("headless provider cannot fork")
-    _require_model(authority, payload["model"])
     if payload["reasoning_effort"] not in provider.reasoning_effort_options:
         raise ValueError("headless reasoning effort is unsupported")
 
