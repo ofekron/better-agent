@@ -181,6 +181,17 @@ def main() -> None:
             else:
                 raise AssertionError("dirty node checkout was admitted")
 
+            # desired_manifest()'s own dirty check (distinct raise site from
+            # align_repositories' above) must name the actual dirty file(s)
+            # so an operator doesn't have to shell in and re-run `git
+            # status` themselves to find out why publishing was refused.
+            try:
+                alignment.desired_manifest()
+            except alignment.RepositoryAlignmentError as exc:
+                assert "dirty.txt" in str(exc), str(exc)
+            else:
+                raise AssertionError("dirty public checkout was admitted")
+
             packaged = [{
                 **manifest[0],
                 "source_kind": "packaged",
@@ -205,6 +216,14 @@ def main() -> None:
             alignment.app_root = original_root
             alignment.ba_home = original_home
             alignment._prepare_runtime = original_prepare
+
+
+def test_repository_alignment_suite() -> None:
+    """pytest entry point. `main()`'s assertions previously only ran via
+    `python scripts/test_repository_alignment.py` — this file defines no
+    `test_*`/`Test*` symbol, so `conftest.py`'s `pytest_ignore_collect`
+    skipped it entirely under pytest/CI."""
+    main()
 
 
 if __name__ == "__main__":

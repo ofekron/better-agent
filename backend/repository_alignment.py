@@ -168,6 +168,16 @@ def _dirty(path: Path) -> bool:
     return result.returncode != 0 or bool(result.stdout.strip())
 
 
+def _dirty_files(path: Path) -> list[str]:
+    """Porcelain status lines for a dirty repository, for diagnostics only
+    (never used to decide dirtiness — `_dirty` remains the single source
+    of truth for that check)."""
+    result = _git(path, "status", "--porcelain", "--untracked-files=normal")
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
 def repository_identity(remote: str) -> str:
     text = remote.strip()
     match = _SCP_REMOTE.match(text) or _URL_REMOTE.match(text)
@@ -227,8 +237,23 @@ def desired_manifest() -> list[dict[str, Any]]:
             or not record["remote_url"]
             or record["dirty"]
         ):
+            reasons = []
+            if not record["available"]:
+                reasons.append("not available")
+            if record["available"] and not _SHA.fullmatch(record["commit_sha"]):
+                reasons.append(f"invalid commit sha {record['commit_sha']!r}")
+            if record["available"] and not record["remote_url"]:
+                reasons.append("no remote url")
+            if record["dirty"]:
+                dirty_files = _dirty_files(role_paths()[record["role"]])
+                reasons.append(
+                    "dirty working tree: " + ", ".join(dirty_files)
+                    if dirty_files
+                    else "dirty working tree"
+                )
             raise RepositoryAlignmentError(
-                f"{record['role']} is not a clean publishable repository"
+                f"{record['role']} is not a clean publishable repository "
+                f"({'; '.join(reasons)})"
             )
         manifest.append({**record, "required": required})
     return manifest
