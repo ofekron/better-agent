@@ -35,6 +35,7 @@ import project_update_store
 import provider_auth
 import provider_setup
 import recovery
+import requirements_extension_reconciler
 import session_detail_api
 import session_store
 import shortcut_picker
@@ -635,6 +636,11 @@ async def on_startup():
                 "startup_tasks.extension_reconciliation",
                 _reconcile_managed_extensions,
             )
+            await run_task(
+                "requirements_background_reconciliation",
+                "startup_tasks.requirements_background_reconciliation",
+                requirements_extension_reconciler.bind_and_reconcile,
+            )
             import extension_package_loader
             try:
                 await asyncio.to_thread(
@@ -934,6 +940,10 @@ async def on_shutdown():
         logger.exception("provider auth status probes did not quiesce")
     finally:
         provider_auth.shutdown_all()
+    try:
+        await requirements_extension_reconciler.shutdown()
+    except Exception:
+        logger.exception("requirements extension reconciler did not quiesce")
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()

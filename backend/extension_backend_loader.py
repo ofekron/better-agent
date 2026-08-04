@@ -838,6 +838,57 @@ async def invoke_extension_backend(
     )
 
 
+_CORE_BACKEND_CONTRACTS = {
+    "requirements.reconcile": {
+        "role": "requirements",
+        "path": "internal/reconcile",
+        "header": ("x-better-agent-core-contract", "requirements-reconcile-v1"),
+    },
+}
+
+
+async def invoke_core_backend_contract(
+    contract: str,
+    *,
+    body_bytes: bytes,
+) -> Response:
+    spec = _CORE_BACKEND_CONTRACTS.get(contract)
+    if spec is None:
+        raise ValueError("unknown core extension backend contract")
+    extension_id = await asyncio.to_thread(
+        extension_store.extension_id_for_role,
+        spec["role"],
+    )
+    if extension_id is None:
+        return Response(
+            content=b'{"status":"extension_absent"}',
+            status_code=200,
+            media_type="application/json",
+        )
+    backend_spec = await asyncio.to_thread(
+        backend_entrypoint_spec_cached,
+        extension_id,
+    )
+    if backend_spec is None:
+        return Response(
+            content=b'{"status":"extension_unavailable"}',
+            status_code=503,
+            media_type="application/json",
+        )
+    return await _invoke_backend(
+        backend_spec,
+        method="POST",
+        path=spec["path"],
+        body_bytes=body_bytes,
+        query_b64=_EMPTY_B64,
+        safe_headers=[
+            ("content-type", "application/json"),
+            spec["header"],
+        ],
+        base_url="",
+    )
+
+
 def invoke_extension_backend_sync(
     extension_id: str,
     path: str,
