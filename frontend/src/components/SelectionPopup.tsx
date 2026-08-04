@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useTranslation } from "react-i18next";
 import { copyToClipboard } from "../utils/clipboard";
 import { useMobileActionSheet, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
@@ -16,17 +15,12 @@ interface PopupState {
   y: number;
 }
 
-type Phase = "actions" | "comment";
-
 export function SelectionPopup({ onAdd }: Props) {
-  const { t } = useTranslation();
   const [popup, setPopup] = useState<PopupState | null>(null);
-  const [phase, setPhase] = useState<Phase>("actions");
-  const [comment, setComment] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
-  // Mirrors popup.text synchronously so the keydown handler can read it
-  // without waiting for React to re-render (avoids one-frame race).
+  // Mirrors the open popup's text synchronously so the document-level
+  // contextmenu handler can tell whether the popup is open without waiting
+  // for React to re-render (avoids a one-frame race).
   const popupTextRef = useRef<string | null>(null);
   // Stable refs for props so the mouseup/touchend effect deps don't
   // change when parent re-renders (which would tear down listeners).
@@ -37,8 +31,6 @@ export function SelectionPopup({ onAdd }: Props) {
   const closePopup = useCallback(() => {
     popupTextRef.current = null;
     setPopup(null);
-    setComment("");
-    setPhase("actions");
   }, []);
 
   const dismiss = useCallback(() => {
@@ -91,14 +83,12 @@ export function SelectionPopup({ onAdd }: Props) {
 
       const text = sel.toString();
 
-      // Walk up from the selection anchor to find [data-message-id]
-      const anchor = sel.anchorNode;
-      if (!anchor) return;
-      const el =
-        anchor instanceof HTMLElement
-          ? anchor
-          : anchor.parentElement;
-      if (!el) return;
+      // Walk up from the selection anchor to find [data-message-id]. A
+      // non-empty live selection always carries an attached anchor node.
+      const anchor = sel.anchorNode!;
+      const el: HTMLElement = anchor instanceof HTMLElement
+        ? anchor
+        : anchor.parentElement!;
 
       const messageEl = el.closest("[data-message-id]") as HTMLElement | null;
       if (!messageEl) return;
@@ -122,8 +112,6 @@ export function SelectionPopup({ onAdd }: Props) {
         y: rect.bottom + 8,
       });
       popupTextRef.current = text;
-      setComment("");
-      setPhase("actions");
     };
 
     const handleMouseUp = (e: MouseEvent) => {
@@ -135,10 +123,6 @@ export function SelectionPopup({ onAdd }: Props) {
       // the user needs to drag and extend the range.
       if (lastPointerType === "touch" && touchTimeout) return;
       lastPointerType = "mouse";
-      if (touchTimeout) {
-        clearTimeout(touchTimeout);
-        touchTimeout = null;
-      }
 
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.toString().trim()) {
@@ -165,7 +149,6 @@ export function SelectionPopup({ onAdd }: Props) {
       if (touchTimeout) clearTimeout(touchTimeout);
       touchTimeout = setTimeout(() => {
         touchTimeout = null;
-        if (lastPointerType !== "touch") return;
         showPopupForSelection(true);
       }, 400);
     };
@@ -186,32 +169,6 @@ export function SelectionPopup({ onAdd }: Props) {
     };
   }, [dismiss, showMobileSheet]);
 
-  // Focus input when entering comment phase
-  useEffect(() => {
-    if (popup && phase === "comment") {
-      setTimeout(() => inputRef.current?.focus(), 0);
-    }
-  }, [popup, phase]);
-
-  const handleSubmit = useCallback(() => {
-    if (!popup) return;
-    window.getSelection()?.removeAllRanges();
-    onAddRef.current(popup.text, comment.trim(), popup.messageId);
-    closePopup();
-  }, [popup, comment, closePopup]);
-
-  const handleCopy = useCallback(async () => {
-    if (!popup) return;
-    if (await copyToClipboard(popup.text)) closePopup();
-  }, [popup, closePopup]);
-
-  const handleComment = useCallback(() => {
-    if (!popup) return;
-    window.getSelection()?.removeAllRanges();
-    onAddRef.current(popup.text, "", popup.messageId);
-    closePopup();
-  }, [popup, closePopup]);
-
   if (!popup) return null;
 
   return (
@@ -224,41 +181,26 @@ export function SelectionPopup({ onAdd }: Props) {
         transform: "translateX(-50%)",
       }}
     >
-      {phase === "actions" ? (
-        <div className="selection-popup-actions">
-          <button className="selection-popup-action-btn" onClick={() => void handleCopy()}>
-            Copy
-          </button>
-          <button className="selection-popup-action-btn" onClick={handleComment}>
-            Comment
-          </button>
-        </div>
-      ) : (
-        <div className="selection-popup-row">
-          <input
-            ref={inputRef}
-            className="selection-popup-input"
-            type="text"
-            placeholder={t("selection.placeholder")}
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleSubmit();
-              if (e.key === "Escape") dismiss();
-            }}
-          />
-          <button
-            className="selection-popup-add"
-            onClick={handleSubmit}
-            disabled={!comment.trim()}
-          >
-            Add
-          </button>
-          <button className="selection-popup-close" onClick={dismiss}>
-            &times;
-          </button>
-        </div>
-      )}
+      <div className="selection-popup-actions">
+        <button
+          className="selection-popup-action-btn"
+          onClick={async () => {
+            if (await copyToClipboard(popup.text)) closePopup();
+          }}
+        >
+          Copy
+        </button>
+        <button
+          className="selection-popup-action-btn"
+          onClick={() => {
+            window.getSelection()?.removeAllRanges();
+            onAddRef.current(popup.text, "", popup.messageId);
+            closePopup();
+          }}
+        >
+          Comment
+        </button>
+      </div>
     </div>
   );
 }
