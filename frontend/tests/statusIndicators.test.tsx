@@ -246,6 +246,42 @@ describe("SessionStatusBadge — every status dimension reaches the screen", () 
       container.querySelector('[data-testid="session-unread-count"]')?.textContent,
     ).toBe("99+");
   });
+
+  // The singular vs plural title branch and the under-99 count render branch.
+  it.each([
+    ["one", 1, "1", "session.unread_1"],
+    ["a few", 5, "5", "session.unread_other"],
+  ] as const)(
+    "renders the exact unread count (%s) below the 99+ cap with the right title",
+    async (_label, count, text, title) => {
+      await resetRegistry([{ id: "few", cwd: PROJECT, node_id: "primary" }]);
+      eventBus.publish("session_unread_changed", {
+        session_id: "few",
+        unread_count: count,
+        cwd: PROJECT,
+        node_id: "primary",
+      });
+      const { container } = render(<SessionStatusBadge sid="few" showUnreadCount />);
+      const el = container.querySelector('[data-testid="session-unread-count"]');
+      expect(el?.textContent).toBe(text);
+      expect(el?.getAttribute("title")).toBe(title);
+    },
+  );
+
+  // With showUnreadCount off, the unread span renders but carries no count text.
+  it("renders the unread span with no count text when showUnreadCount is off", async () => {
+    await resetRegistry([{ id: "silent", cwd: PROJECT, node_id: "primary" }]);
+    eventBus.publish("session_unread_changed", {
+      session_id: "silent",
+      unread_count: 7,
+      cwd: PROJECT,
+      node_id: "primary",
+    });
+    const { container } = render(<SessionStatusBadge sid="silent" />);
+    expect(
+      container.querySelector('[data-testid="session-unread-count"]')?.textContent,
+    ).toBe("");
+  });
 });
 
 // ── Project badge: one counter per dimension ────────────────────────────
