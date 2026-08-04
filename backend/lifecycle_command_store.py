@@ -23,7 +23,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -187,11 +187,28 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                     ON DELETE CASCADE
             ) STRICT;
+            CREATE TABLE selector_handoff_acceptances (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                acceptance_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, request_id),
+                FOREIGN KEY (session_id, request_id)
+                    REFERENCES transitions(session_id, request_id)
+                    ON DELETE CASCADE
+            ) STRICT;
+            CREATE TABLE execution_selector_roles (
+                session_id TEXT NOT NULL,
+                execution_turn_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
+                PRIMARY KEY (session_id, execution_turn_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            ) STRICT;
             """
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 6")
+            connection.execute("PRAGMA user_version = 7")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
@@ -206,6 +223,10 @@ def _migrate(connection: sqlite3.Connection) -> None:
             version = 5
         if version == 5:
             _migrate_v5_to_v6(connection)
+            version = 6
+        if version == 6:
+            _migrate_v6_to_v7(connection)
+            version = 7
         connection.commit()
     except Exception:
         connection.rollback()
@@ -389,6 +410,35 @@ def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version = 6")
 
 
+def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE selector_handoff_acceptances (
+            session_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            acceptance_json TEXT NOT NULL,
+            PRIMARY KEY (session_id, request_id),
+            FOREIGN KEY (session_id, request_id)
+                REFERENCES transitions(session_id, request_id)
+                ON DELETE CASCADE
+        ) STRICT
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE execution_selector_roles (
+            session_id TEXT NOT NULL,
+            execution_turn_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
+            PRIMARY KEY (session_id, execution_turn_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        ) STRICT
+        """
+    )
+    connection.execute("PRAGMA user_version = 7")
+
+
 def _logical_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise RuntimeError("invalid persisted turn identity")
@@ -524,6 +574,43 @@ def pending_selector_projections() -> tuple[tuple[str, dict[str, Any]], ...]:
     )
 
 
+def pending_selector_projection(session_id: str) -> dict[str, Any] | None:
+    validate_identifier(session_id, "session_id")
+    with connection() as database:
+        row = database.execute(
+            """
+            SELECT pending_projection_json
+            FROM selector_authorities
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None or row["pending_projection_json"] is None:
+        return None
+    return _load_object(
+        row["pending_projection_json"],
+        "selector projection",
+    )
+
+
+def execution_selector_role(
+    session_id: str,
+    execution_turn_id: str,
+) -> str | None:
+    validate_identifier(session_id, "session_id")
+    validate_identifier(execution_turn_id, "execution_turn_id")
+    with connection() as database:
+        row = database.execute(
+            """
+            SELECT role
+            FROM execution_selector_roles
+            WHERE session_id = ? AND execution_turn_id = ?
+            """,
+            (session_id, execution_turn_id),
+        ).fetchone()
+    return row["role"] if row is not None else None
+
+
 def persist_admitted_selector_attempt(
     session_id: str,
     *,
@@ -608,92 +695,6 @@ def acknowledge_selector_projection(
             WHERE session_id = ?
             """,
             (session_id,),
-        )
-        database.commit()
-    return True
-
-
-def consume_selector_handoff(
-    session_id: str,
-    *,
-    role: str,
-    source_sid: str,
-    target: SelectorIdentity,
-) -> bool:
-    validate_identifier(session_id, "session_id")
-    validate_identifier(source_sid, "source_sid")
-    if role not in {"primary", "supervisor"}:
-        raise ValueError("selector handoff role is invalid")
-    with connection() as database:
-        database.execute("BEGIN IMMEDIATE")
-        row = database.execute(
-            "SELECT snapshot_json FROM selector_authorities WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        if row is None:
-            database.rollback()
-            return False
-        snapshot = SelectorAuthoritySnapshot.from_dict(
-            _load_object(row["snapshot_json"], "selector authority snapshot")
-        )
-        handoff = snapshot.handoff
-        if handoff is None or handoff.target != target:
-            database.rollback()
-            return False
-        expected = (
-            handoff.supervisor_source_sid
-            if role == "supervisor"
-            else handoff.primary_source_sid
-        )
-        if expected != source_sid:
-            database.rollback()
-            return False
-        primary_source = (
-            handoff.primary_source_sid if role == "supervisor" else None
-        )
-        supervisor_source = (
-            handoff.supervisor_source_sid if role == "primary" else None
-        )
-        remaining = (
-            type(handoff)(
-                primary_source_sid=primary_source,
-                supervisor_source_sid=supervisor_source,
-                target=handoff.target,
-                primary_source_native_sid_compatibility=(
-                    handoff.primary_source_native_sid_compatibility
-                    if primary_source is not None
-                    else None
-                ),
-                supervisor_source_native_sid_compatibility=(
-                    handoff.supervisor_source_native_sid_compatibility
-                    if supervisor_source is not None
-                    else None
-                ),
-            )
-            if primary_source is not None or supervisor_source is not None
-            else None
-        )
-        updated = SelectorAuthoritySnapshot(
-            generation=snapshot.generation,
-            identity=snapshot.identity,
-            native_sid_compatibility=snapshot.native_sid_compatibility,
-            primary_native_sid=snapshot.primary_native_sid,
-            supervisor_native_sid=snapshot.supervisor_native_sid,
-            primary_native_sid_compatibility=(
-                snapshot.primary_native_sid_compatibility
-            ),
-            supervisor_native_sid_compatibility=(
-                snapshot.supervisor_native_sid_compatibility
-            ),
-            handoff=remaining,
-        )
-        database.execute(
-            """
-            UPDATE selector_authorities
-            SET snapshot_json = ?
-            WHERE session_id = ?
-            """,
-            (_dump(updated.to_dict()), session_id),
         )
         database.commit()
     return True
@@ -828,13 +829,12 @@ def _persist_selector_native_sid(
     return updated, projection
 
 
-def acknowledge_native_sid_projection(
+def _acknowledge_exact_selector_projection(
     session_id: str,
     projection: dict[str, Any],
+    *,
+    label: str,
 ) -> bool:
-    validate_identifier(session_id, "session_id")
-    if type(projection) is not dict or projection.get("kind") != "native_sid":
-        raise ValueError("native SID projection is invalid")
     with connection() as database:
         database.execute("BEGIN IMMEDIATE")
         row = database.execute(
@@ -848,10 +848,7 @@ def acknowledge_native_sid_projection(
         if row is None or row["pending_projection_json"] is None:
             database.rollback()
             return False
-        pending = _load_object(
-            row["pending_projection_json"],
-            "native SID projection",
-        )
+        pending = _load_object(row["pending_projection_json"], label)
         if pending != projection:
             database.rollback()
             return False
@@ -865,6 +862,34 @@ def acknowledge_native_sid_projection(
         )
         database.commit()
     return True
+
+
+def acknowledge_native_sid_projection(
+    session_id: str,
+    projection: dict[str, Any],
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    if type(projection) is not dict or projection.get("kind") != "native_sid":
+        raise ValueError("native SID projection is invalid")
+    return _acknowledge_exact_selector_projection(
+        session_id,
+        projection,
+        label="native SID projection",
+    )
+
+
+def acknowledge_handoff_projection(
+    session_id: str,
+    projection: dict[str, Any],
+) -> bool:
+    validate_identifier(session_id, "session_id")
+    if type(projection) is not dict or projection.get("kind") != "handoff_consumed":
+        raise ValueError("handoff projection is invalid")
+    return _acknowledge_exact_selector_projection(
+        session_id,
+        projection,
+        label="handoff projection",
+    )
 
 
 def active_session_snapshots() -> list[tuple[str, LifecycleSnapshot]]:
@@ -1151,7 +1176,24 @@ def transition_for(session_id: str, request_id: str) -> dict[str, Any] | None:
             """,
             (session_id, request_id),
         ).fetchall()
-    return _transition_from_rows(row, effects)
+        acceptance_row = database.execute(
+            """
+            SELECT acceptance_json
+            FROM selector_handoff_acceptances
+            WHERE session_id = ? AND request_id = ?
+            """,
+            (session_id, request_id),
+        ).fetchone()
+    transition = _transition_from_rows(row, effects)
+    transition["selector_handoff_acceptance"] = (
+        _load_object(
+            acceptance_row["acceptance_json"],
+            "selector handoff acceptance",
+        )
+        if acceptance_row is not None
+        else None
+    )
+    return transition
 
 
 def required_transition(session_id: str, request_id: str) -> dict[str, Any]:
@@ -1174,11 +1216,68 @@ def unfinished_transitions() -> tuple[tuple[str, str], ...]:
     return tuple((row["session_id"], row["request_id"]) for row in rows)
 
 
+def _validated_selector_handoff_acceptance(
+    command: LifecycleCommand,
+    value: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {
+        "generation", "role", "source_sid", "target", "provider_run_id",
+    }:
+        raise ValueError("selector handoff acceptance is invalid")
+    if (
+        command.kind not in {"finish_execution", "finish_execution_and_turn"}
+        or command.provider_run_id != value["provider_run_id"]
+    ):
+        raise ValueError("selector handoff acceptance requires exact success")
+    generation = value["generation"]
+    if type(generation) is not int or generation < 0:
+        raise ValueError("selector handoff generation is invalid")
+    role = value["role"]
+    if role not in {"primary", "supervisor"}:
+        raise ValueError("selector handoff role is invalid")
+    validate_identifier(value["source_sid"], "selector handoff source_sid")
+    validate_identifier(value["provider_run_id"], "selector handoff provider_run_id")
+    target = SelectorIdentity.from_dict(value["target"])
+    return {
+        "generation": generation,
+        "role": role,
+        "source_sid": value["source_sid"],
+        "target": target.to_dict(),
+        "provider_run_id": value["provider_run_id"],
+    }
+
+
+def _validated_execution_selector_role(
+    command: LifecycleCommand,
+    role: str | None,
+) -> str | None:
+    if role is None:
+        return None
+    if command.kind != "start_execution" or role not in {"primary", "supervisor"}:
+        raise ValueError("execution selector role is invalid")
+    return role
+
+
 def persist_plan(
     command: LifecycleCommand,
     snapshot: LifecycleSnapshot,
     plan: TransitionPlan,
+    *,
+    selector_handoff_acceptance: dict[str, Any] | None = None,
+    execution_selector_role: str | None = None,
 ) -> str:
+    acceptance = _validated_selector_handoff_acceptance(
+        command,
+        selector_handoff_acceptance,
+    )
+    if acceptance is not None and plan.fact_payload.get("outcome") != "complete":
+        raise ValueError("selector handoff acceptance requires terminal success")
+    selector_role = _validated_execution_selector_role(
+        command,
+        execution_selector_role,
+    )
     command_json = _dump(command.to_dict())
     next_snapshot_json = _dump(plan.next_snapshot.to_dict())
     notification_payload_json = _dump(materialize_json(plan.fact_payload))
@@ -1202,10 +1301,50 @@ def persist_plan(
             (command.session_id, command.request_id),
         ).fetchone()
         if existing is not None:
+            existing_acceptance = database.execute(
+                """
+                SELECT acceptance_json
+                FROM selector_handoff_acceptances
+                WHERE session_id = ? AND request_id = ?
+                """,
+                (command.session_id, command.request_id),
+            ).fetchone()
+            existing_role = None
+            if command.kind == "start_execution":
+                existing_role = database.execute(
+                    """
+                    SELECT role
+                    FROM execution_selector_roles
+                    WHERE session_id = ? AND execution_turn_id = ?
+                    """,
+                    (
+                        command.session_id,
+                        command.execution_identity.execution_turn_id,
+                    ),
+                ).fetchone()
             database.commit()
             if existing["fingerprint"] != command.fingerprint():
                 raise TransitionConflict(
                     "request_id is already bound to another command"
+                )
+            persisted_acceptance = (
+                _load_object(
+                    existing_acceptance["acceptance_json"],
+                    "selector handoff acceptance",
+                )
+                if existing_acceptance is not None
+                else None
+            )
+            if persisted_acceptance != acceptance:
+                raise TransitionConflict(
+                    "request_id is already bound to another selector acceptance"
+                )
+            persisted_role = (
+                existing_role["role"] if existing_role is not None else None
+            )
+            if command.kind == "start_execution" and persisted_role != selector_role:
+                raise TransitionConflict(
+                    "request_id is already bound to another selector role"
                 )
             return "existing"
         database.execute(
@@ -1280,6 +1419,32 @@ def persist_plan(
                     for ordinal, effect_id, kind, payload_json in effects
                 ),
             )
+            if acceptance is not None:
+                database.execute(
+                    """
+                    INSERT INTO selector_handoff_acceptances(
+                        session_id, request_id, acceptance_json
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        command.session_id,
+                        command.request_id,
+                        _dump(acceptance),
+                    ),
+                )
+            if selector_role is not None:
+                database.execute(
+                    """
+                    INSERT INTO execution_selector_roles(
+                        session_id, execution_turn_id, role
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        command.session_id,
+                        command.execution_identity.execution_turn_id,
+                        selector_role,
+                    ),
+                )
         except sqlite3.IntegrityError as exc:
             database.rollback()
             raise TransitionBusy(
@@ -1344,12 +1509,150 @@ def record_effect_result(
     return result
 
 
+def _consume_selector_handoff_at_commit(
+    database: sqlite3.Connection,
+    *,
+    session_id: str,
+    request_id: str,
+    command: LifecycleCommand,
+) -> None:
+    row = database.execute(
+        """
+        SELECT acceptance_json
+        FROM selector_handoff_acceptances
+        WHERE session_id = ? AND request_id = ?
+        """,
+        (session_id, request_id),
+    ).fetchone()
+    if row is None:
+        return
+    acceptance = _validated_selector_handoff_acceptance(
+        command,
+        _load_object(row["acceptance_json"], "selector handoff acceptance"),
+    )
+    if acceptance is None:
+        return
+    effect_row = database.execute(
+        """
+        SELECT payload_json
+        FROM effects
+        WHERE session_id = ? AND request_id = ? AND ordinal = 0
+        """,
+        (session_id, request_id),
+    ).fetchone()
+    if effect_row is None or _load_object(
+        effect_row["payload_json"],
+        "effect payload",
+    ).get("outcome") != "complete":
+        return
+    role_row = database.execute(
+        """
+        SELECT role
+        FROM execution_selector_roles
+        WHERE session_id = ? AND execution_turn_id = ?
+        """,
+        (session_id, command.execution_identity.execution_turn_id),
+    ).fetchone()
+    if role_row is None or role_row["role"] != acceptance["role"]:
+        return
+    authority_row = database.execute(
+        """
+        SELECT snapshot_json, pending_projection_json
+        FROM selector_authorities
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    if authority_row is None:
+        return
+    if authority_row["pending_projection_json"] is not None:
+        raise SnapshotChanged("selector projection changed before handoff commit")
+    snapshot = SelectorAuthoritySnapshot.from_dict(
+        _load_object(authority_row["snapshot_json"], "selector authority snapshot")
+    )
+    target = SelectorIdentity.from_dict(acceptance["target"])
+    handoff = snapshot.handoff
+    if (
+        snapshot.generation != acceptance["generation"]
+        or snapshot.identity != target
+        or handoff is None
+        or handoff.target != target
+    ):
+        return
+    role = acceptance["role"]
+    if role == "supervisor":
+        source_sid = handoff.supervisor_source_sid
+        target_sid = snapshot.supervisor_native_sid
+        target_compatibility = snapshot.supervisor_native_sid_compatibility
+    else:
+        source_sid = handoff.primary_source_sid
+        target_sid = snapshot.primary_native_sid
+        target_compatibility = snapshot.primary_native_sid_compatibility
+    if (
+        source_sid != acceptance["source_sid"]
+        or target_sid is None
+        or target_compatibility is None
+        or target_compatibility != snapshot.native_sid_compatibility
+    ):
+        return
+    primary_source = handoff.primary_source_sid if role == "supervisor" else None
+    supervisor_source = handoff.supervisor_source_sid if role == "primary" else None
+    remaining = (
+        type(handoff)(
+            primary_source_sid=primary_source,
+            supervisor_source_sid=supervisor_source,
+            target=handoff.target,
+            primary_source_native_sid_compatibility=(
+                handoff.primary_source_native_sid_compatibility
+                if primary_source is not None
+                else None
+            ),
+            supervisor_source_native_sid_compatibility=(
+                handoff.supervisor_source_native_sid_compatibility
+                if supervisor_source is not None
+                else None
+            ),
+        )
+        if primary_source is not None or supervisor_source is not None
+        else None
+    )
+    updated = SelectorAuthoritySnapshot(
+        generation=snapshot.generation,
+        identity=snapshot.identity,
+        native_sid_compatibility=snapshot.native_sid_compatibility,
+        primary_native_sid=snapshot.primary_native_sid,
+        supervisor_native_sid=snapshot.supervisor_native_sid,
+        primary_native_sid_compatibility=snapshot.primary_native_sid_compatibility,
+        supervisor_native_sid_compatibility=(
+            snapshot.supervisor_native_sid_compatibility
+        ),
+        handoff=remaining,
+    )
+    projection = {
+        "kind": "handoff_consumed",
+        "generation": snapshot.generation,
+        "role": role,
+        "source_sid": source_sid,
+        "target": target.to_dict(),
+        "native_sid": target_sid,
+        "provider_run_id": acceptance["provider_run_id"],
+    }
+    database.execute(
+        """
+        UPDATE selector_authorities
+        SET snapshot_json = ?, pending_projection_json = ?
+        WHERE session_id = ?
+        """,
+        (_dump(updated.to_dict()), _dump(projection), session_id),
+    )
+
+
 def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
     with connection() as database:
         database.execute("BEGIN IMMEDIATE")
         row = database.execute(
             """
-            SELECT source_revision, next_snapshot_json, status
+            SELECT command_json, source_revision, next_snapshot_json, status
             FROM transitions
             WHERE session_id = ? AND request_id = ?
             """,
@@ -1360,6 +1663,9 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
             raise RuntimeError("lifecycle transition disappeared")
         next_snapshot = LifecycleSnapshot.from_dict(
             _load_object(row["next_snapshot_json"], "next snapshot")
+        )
+        command = LifecycleCommand.from_dict(
+            _load_object(row["command_json"], "command")
         )
         if row["status"] in {"committed", "notification_attempted"}:
             database.commit()
@@ -1392,6 +1698,12 @@ def commit_transition(session_id: str, request_id: str) -> LifecycleSnapshot:
         if cursor.rowcount != 1:
             database.rollback()
             raise SnapshotChanged("lifecycle revision changed before commit")
+        _consume_selector_handoff_at_commit(
+            database,
+            session_id=session_id,
+            request_id=request_id,
+            command=command,
+        )
         database.execute(
             """
             UPDATE transitions

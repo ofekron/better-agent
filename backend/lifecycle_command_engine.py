@@ -21,6 +21,7 @@ from lifecycle_command_model import (
     ExecutionTurnIdentity,
     SelectorAttemptDecision,
     SelectorIdentity,
+    TransitionPlan,
     UserTurnIdentity,
     freeze_json,
     materialize_json,
@@ -351,11 +352,13 @@ class LifecycleCommandEngine:
         session_id: str,
         *,
         execution_identity: ExecutionTurnIdentity,
+        selector_role: str | None = None,
     ) -> CommandResult:
         return await self._transition_execution(
             session_id,
             "start_execution",
             execution_identity,
+            execution_selector_role=selector_role,
         )
 
     async def transition_selectors(
@@ -548,24 +551,6 @@ class LifecycleCommandEngine:
             )
             return decision, authority.generation
 
-    async def consume_selector_handoff(
-        self,
-        session_id: str,
-        *,
-        role: str,
-        source_sid: str,
-        target: SelectorIdentity,
-    ) -> bool:
-        await self.bind()
-        async with self._lock_for(session_id):
-            return await asyncio.to_thread(
-                lifecycle_command_store.consume_selector_handoff,
-                session_id,
-                role=role,
-                source_sid=source_sid,
-                target=target,
-            )
-
     async def attach_selector_native_sid(
         self,
         session_id: str,
@@ -650,6 +635,57 @@ class LifecycleCommandEngine:
         session_id: str,
         projection: Mapping[str, Any],
     ) -> bool:
+        if projection.get("kind") == "handoff_consumed":
+            if set(projection) != {
+                "kind",
+                "generation",
+                "role",
+                "source_sid",
+                "target",
+                "native_sid",
+                "provider_run_id",
+            }:
+                raise RuntimeError("persisted handoff projection has unexpected fields")
+            generation = projection["generation"]
+            role = projection["role"]
+            if type(generation) is not int or generation < 0:
+                raise RuntimeError("persisted handoff projection generation is invalid")
+            if role not in {"primary", "supervisor"}:
+                raise RuntimeError("persisted handoff projection role is invalid")
+            for field in ("source_sid", "native_sid", "provider_run_id"):
+                try:
+                    validate_identifier(projection[field], field)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"persisted handoff projection {field} is invalid"
+                    ) from exc
+            target = SelectorIdentity.from_dict(projection["target"])
+            import session_manager
+
+            session = await asyncio.to_thread(session_manager.manager.get, session_id)
+            if session is None:
+                return False
+            projection_mode = (
+                "supervisor"
+                if role == "supervisor"
+                else str(session.get("orchestration_mode") or "manager")
+            )
+            projected = await asyncio.to_thread(
+                session_manager.manager.set_agent_sid,
+                session_id,
+                projection_mode,
+                projection["native_sid"],
+                provider_id=target.provider_id,
+                model=target.model,
+                runner=target.runner,
+            )
+            if projected is None:
+                return False
+            return await asyncio.to_thread(
+                lifecycle_command_store.acknowledge_handoff_projection,
+                session_id,
+                dict(projection),
+            )
         if projection.get("kind") == "native_sid":
             if set(projection) != {
                 "kind", "generation", "identity", "role", "native_sid",
@@ -1016,7 +1052,15 @@ class LifecycleCommandEngine:
         provider_run_id: str | None = None,
         replacement_provider_run_id: str | None = None,
         outcome: str | None = None,
+        execution_selector_role: str | None = None,
     ) -> CommandResult:
+        if execution_selector_role is not None and execution_selector_role not in {
+            "primary",
+            "supervisor",
+        }:
+            raise ValueError("selector role is invalid")
+        if execution_selector_role is not None and kind != "start_execution":
+            raise ValueError("selector role is only valid when starting execution")
         await self.bind()
         async with self._lock_for(session_id):
             snapshot = await asyncio.to_thread(
@@ -1027,7 +1071,7 @@ class LifecycleCommandEngine:
                 raise LifecycleCommandRejected(
                     "execution requires an active user turn"
                 )
-            return await self._execute_bound(LifecycleCommand(
+            command = LifecycleCommand(
                 request_id=f"execution:{snapshot.revision}:{kind}",
                 session_id=session_id,
                 kind=kind,
@@ -1036,7 +1080,11 @@ class LifecycleCommandEngine:
                 provider_run_id=provider_run_id,
                 replacement_provider_run_id=replacement_provider_run_id,
                 outcome=outcome,
-            ))
+            )
+            return await self._execute_bound(
+                command,
+                execution_selector_role=execution_selector_role,
+            )
 
     async def _transition_active(
         self,
@@ -1079,9 +1127,57 @@ class LifecycleCommandEngine:
         async with self._lock_for(command.session_id):
             return await self._execute_bound(command)
 
+    async def _selector_handoff_acceptance(
+        self,
+        command: LifecycleCommand,
+        snapshot: LifecycleSnapshot,
+        plan: TransitionPlan,
+    ) -> dict[str, Any] | None:
+        if (
+            command.kind not in {"finish_execution", "finish_execution_and_turn"}
+            or plan.fact_payload.get("outcome") != "complete"
+            or snapshot.execution is None
+            or snapshot.execution.identity != command.execution_identity
+            or snapshot.execution.provider_run_id != command.provider_run_id
+        ):
+            return None
+        role = await asyncio.to_thread(
+            lifecycle_command_store.execution_selector_role,
+            command.session_id,
+            snapshot.execution.identity.execution_turn_id,
+        )
+        if role is None:
+            return None
+        authority = await asyncio.to_thread(
+            lifecycle_command_store.selector_authority_snapshot,
+            command.session_id,
+        )
+        if (
+            authority is None
+            or authority.handoff is None
+            or authority.identity is None
+        ):
+            return None
+        source_sid = (
+            authority.handoff.supervisor_source_sid
+            if role == "supervisor"
+            else authority.handoff.primary_source_sid
+        )
+        if source_sid is None:
+            return None
+        return {
+            "generation": authority.generation,
+            "role": role,
+            "source_sid": source_sid,
+            "target": authority.identity.to_dict(),
+            "provider_run_id": command.provider_run_id,
+        }
+
     async def _execute_bound(
         self,
         command: LifecycleCommand,
+        *,
+        execution_selector_role: str | None = None,
     ) -> CommandResult:
         await self._align_session_owner(command.session_id)
         existing = await asyncio.to_thread(
@@ -1094,6 +1190,31 @@ class LifecycleCommandEngine:
                 raise LifecycleCommandRejected(
                     "request_id is already bound to another command"
                 )
+            if command.kind == "start_execution":
+                persisted_role = await asyncio.to_thread(
+                    lifecycle_command_store.execution_selector_role,
+                    command.session_id,
+                    command.execution_identity.execution_turn_id,
+                )
+                if persisted_role != execution_selector_role:
+                    raise LifecycleCommandRejected(
+                        "request_id is already bound to another selector role"
+                    )
+            if existing["status"] in {"planned", "effects_applied"}:
+                snapshot = await asyncio.to_thread(
+                    lifecycle_command_store.session_snapshot,
+                    command.session_id,
+                )
+                plan = STATES[snapshot.phase].decide(snapshot, command)
+                acceptance = await self._selector_handoff_acceptance(
+                    command,
+                    snapshot,
+                    plan,
+                )
+                if existing["selector_handoff_acceptance"] != acceptance:
+                    raise LifecycleCommandRejected(
+                        "request_id selector acceptance changed before resume"
+                    )
             return await self._resume_transition(
                 command.session_id,
                 command.request_id,
@@ -1103,12 +1224,19 @@ class LifecycleCommandEngine:
             command.session_id,
         )
         plan = STATES[snapshot.phase].decide(snapshot, command)
+        selector_handoff_acceptance = await self._selector_handoff_acceptance(
+            command,
+            snapshot,
+            plan,
+        )
         try:
             disposition = await asyncio.to_thread(
                 lifecycle_command_store.persist_plan,
                 command,
                 snapshot,
                 plan,
+                selector_handoff_acceptance=selector_handoff_acceptance,
+                execution_selector_role=execution_selector_role,
             )
         except lifecycle_command_store.TransitionConflict as exc:
             raise LifecycleCommandRejected(str(exc)) from exc
@@ -1219,11 +1347,23 @@ class LifecycleCommandEngine:
                 materialized,
             )
             results.append(durable_result)
+        pending_projection = await asyncio.to_thread(
+            lifecycle_command_store.pending_selector_projection,
+            session_id,
+        )
+        if pending_projection is not None:
+            await self._apply_selector_projection(session_id, pending_projection)
         next_snapshot = await asyncio.to_thread(
             lifecycle_command_store.commit_transition,
             session_id,
             request_id,
         )
+        pending_projection = await asyncio.to_thread(
+            lifecycle_command_store.pending_selector_projection,
+            session_id,
+        )
+        if pending_projection is not None:
+            await self._apply_selector_projection(session_id, pending_projection)
         self._notify_waiters(session_id, next_snapshot)
         should_notify = await asyncio.to_thread(
             lifecycle_command_store.mark_notification_attempted,

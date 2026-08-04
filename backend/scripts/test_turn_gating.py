@@ -1214,6 +1214,228 @@ def test_s1_never_consumes_selector_handoff() -> None:
     )
 
 
+def test_run_turn_persists_and_consumes_elected_selector_slot() -> None:
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-tmp",
+    }
+
+    class _RunTurnUPM:
+        def __init__(self) -> None:
+            self.lifecycle_message_id = ""
+
+        def get_in_flight_lifecycle_msg_id(self, _sid):
+            return self.lifecycle_message_id
+
+        async def notify_user_msg_persisted(self, *_args) -> None:
+            return None
+
+    class _Provider:
+        KIND = "claude"
+        id = "run-turn-slot-provider"
+        record = {"name": "Run turn slot provider"}
+
+    class _RunTurnCoordinator(_StubCoordinator):
+        def __init__(self, engine: LifecycleCommandEngine) -> None:
+            super().__init__()
+            self.lifecycle_commands = engine
+            self.user_prompt_manager = _RunTurnUPM()
+            self._session_cancelled = {}
+
+        async def _init_turn_messages(self, **kwargs):
+            message = {
+                "id": self.user_prompt_manager.lifecycle_message_id,
+                "role": "user",
+                "content": kwargs["prompt"],
+                "events": [],
+            }
+            session_manager.append_user_msg(
+                kwargs["app_session_id"],
+                message,
+                strict=True,
+            )
+            return message
+
+        def _build_assistant_msg(self, **kwargs):
+            return {
+                "id": f'assistant-{kwargs["app_session_id"]}',
+                "role": "assistant",
+                "content": "",
+                "events": [],
+                "workers": [],
+            }
+
+        async def _dispatch_messages_delta(self, *_args, **_kwargs) -> None:
+            return None
+
+        def _finalize_turn_messages(self, **_kwargs) -> None:
+            return None
+
+        def _forget_active_prompt_item(self, _item_id) -> None:
+            return None
+
+        async def await_outstanding_mssg(self, _sid) -> None:
+            return None
+
+        def provider_for_run(self, *_args, **_kwargs):
+            return _Provider()
+
+    async def _go() -> None:
+        engine = LifecycleCommandEngine(EventBus())
+        await engine.bind()
+        try:
+            for selector_role, session_id_field, source in (
+                ("primary", "agent_session_id", "supervisor"),
+                ("supervisor", "supervisor_agent_session_id", None),
+            ):
+                session = session_manager.create(
+                    name=f"run-turn-slot-{selector_role}",
+                    cwd="/tmp",
+                    model="sonnet",
+                    orchestration_mode="native",
+                )
+                sid = session["id"]
+                lifecycle_message_id = f"run-turn-message-{selector_role}"
+                await engine.begin_turn(
+                    request_id=f"run-turn-begin-{selector_role}",
+                    session_id=sid,
+                    identity=UserTurnIdentity(
+                        f"run-turn-user-{selector_role}",
+                        lifecycle_message_id,
+                    ),
+                    execution_policy="sequential",
+                )
+                target = SelectorIdentity(
+                    str(session.get("provider_id") or "claude"),
+                    str(session.get("model") or "sonnet"),
+                    str(session.get("runner") or ""),
+                )
+                source_selector = SelectorIdentity(
+                    "source-provider",
+                    "source-model",
+                    "source-runner",
+                )
+                lifecycle_command_store.persist_admitted_selector_attempt(
+                    sid,
+                    target=source_selector,
+                    native_sid_compatibility=compatibility,
+                    primary_native_sid=f"primary-source-{selector_role}",
+                    supervisor_native_sid=f"supervisor-source-{selector_role}",
+                    primary_native_sid_compatibility=compatibility,
+                    supervisor_native_sid_compatibility=compatibility,
+                )
+                lifecycle_command_store.persist_selector_transition(
+                    sid,
+                    target=target,
+                    projection_updates=target.to_dict(),
+                    primary_native_sid=None,
+                    supervisor_native_sid=None,
+                    primary_legacy_native_sid_compatibility=None,
+                    supervisor_legacy_native_sid_compatibility=None,
+                )
+                assert lifecycle_command_store.acknowledge_selector_projection(
+                    sid,
+                    target,
+                )
+                authority, decision = (
+                    lifecycle_command_store.persist_admitted_selector_attempt(
+                        sid,
+                        target=target,
+                        native_sid_compatibility=compatibility,
+                        primary_native_sid=None,
+                        supervisor_native_sid=None,
+                        primary_native_sid_compatibility=None,
+                        supervisor_native_sid_compatibility=None,
+                    )
+                )
+                assert decision == "admitted"
+
+                coordinator = _RunTurnCoordinator(engine)
+                coordinator.user_prompt_manager.lifecycle_message_id = (
+                    lifecycle_message_id
+                )
+                manager = TurnManager(coordinator)
+                await manager.lifecycle.bind()
+                captured_execution_ids: list[str] = []
+
+                async def _drive_cli_run(**kwargs):
+                    execution = engine.snapshot(sid).execution
+                    assert execution is not None
+                    captured_execution_ids.append(
+                        execution.identity.execution_turn_id
+                    )
+                    provider_run_id = f"provider-run-{selector_role}"
+                    await engine.bind_execution_run(
+                        sid,
+                        execution_identity=execution.identity,
+                        provider_run_id=provider_run_id,
+                    )
+                    assert await engine.attach_selector_native_sid(
+                        sid,
+                        selector_generation=authority.generation,
+                        provider_run_id=provider_run_id,
+                        role=selector_role,
+                        native_sid=f"target-{selector_role}",
+                    )
+                    return {
+                        "success": True,
+                        "session_id": f"target-{selector_role}",
+                        "events": [],
+                        "provider_kind": "claude",
+                    }
+
+                async def _noop(*_args, **_kwargs) -> None:
+                    return None
+
+                manager._drive_cli_run = _drive_cli_run
+                manager._publish_turn_start_lifecycle = _noop
+                manager._publish_terminal_lifecycle = _noop
+                manager._await_worker_panel_fold = _noop
+                await manager.run_turn(
+                    session=session,
+                    prompt="continue",
+                    cli_prompt="continue",
+                    app_session_id=sid,
+                    model="sonnet",
+                    cwd="/tmp",
+                    ws_callback=_noop,
+                    images=None,
+                    trace_step_name="run-turn-slot-test",
+                    session_id_field=session_id_field,
+                    mode="native",
+                    source=source,
+                )
+                execution_turn_id = captured_execution_ids[0]
+                assert lifecycle_command_store.execution_selector_role(
+                    sid,
+                    execution_turn_id,
+                ) == selector_role
+                final_authority = (
+                    lifecycle_command_store.selector_authority_snapshot(sid)
+                )
+                assert final_authority is not None
+                assert final_authority.handoff is not None
+                assert getattr(
+                    final_authority.handoff,
+                    f"{selector_role}_source_sid",
+                ) is None
+                other_role = (
+                    "supervisor" if selector_role == "primary" else "primary"
+                )
+                assert getattr(
+                    final_authority.handoff,
+                    f"{other_role}_source_sid",
+                ) is not None
+                await manager.lifecycle.close()
+        finally:
+            await engine.close()
+
+    asyncio.run(_go())
+
+
 def test_stale_prepared_selector_attempt_is_discarded_and_retried() -> None:
     provider_id = config_store.get_default_provider()["id"]
     session = session_manager.create(

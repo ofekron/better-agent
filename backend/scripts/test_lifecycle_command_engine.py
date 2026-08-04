@@ -240,7 +240,10 @@ async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
         "selector-attachment-assistant",
         "native",
     )
-    await engine.start_execution(session_id, execution_identity=execution)
+    await engine.start_execution(
+        session_id,
+        execution_identity=execution,
+    )
     await engine.bind_execution_run(
         session_id,
         execution_identity=execution,
@@ -370,6 +373,524 @@ async def test_native_sid_projection_replays_after_crash(monkeypatch) -> None:
     ]
     assert lifecycle_command_store.pending_selector_projections() == ()
     await recovered.close()
+
+
+async def _seed_selector_handoff_execution(
+    engine: LifecycleCommandEngine,
+    *,
+    session_id: str,
+    role: str,
+    provider_run_id: str,
+    execution_policy: str = "sequential",
+    execution_role: str | None = None,
+    include_other_source: bool = False,
+) -> tuple[ExecutionTurnIdentity, SelectorIdentity, str, str]:
+    source = SelectorIdentity("provider-a", "model-a", "runner-a")
+    target = SelectorIdentity("provider-b", "model-b", "runner-b")
+    source_sid = f"source-{role}-{session_id}"
+    other_role = "supervisor" if role == "primary" else "primary"
+    other_source_sid = f"source-{other_role}-{session_id}"
+    target_sid = f"target-{role}-{session_id}"
+    compatibility = {
+        "schema": 1,
+        "engine": "claude-native",
+        "node_id": "primary",
+        "thread_store_root": "/tmp/claude/projects",
+        "claude_project_namespace": "-repo",
+    }
+    await engine.begin_turn(
+        request_id=f"{session_id}:begin",
+        session_id=session_id,
+        identity=identity(session_id),
+        execution_policy=execution_policy,
+    )
+    first, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+        session_id,
+        target=source,
+        native_sid_compatibility=compatibility,
+        primary_native_sid=(
+            source_sid
+            if role == "primary"
+            else other_source_sid if include_other_source else None
+        ),
+        supervisor_native_sid=(
+            source_sid
+            if role == "supervisor"
+            else other_source_sid if include_other_source else None
+        ),
+        primary_native_sid_compatibility=(
+            compatibility
+            if role == "primary" or include_other_source
+            else None
+        ),
+        supervisor_native_sid_compatibility=(
+            compatibility
+            if role == "supervisor" or include_other_source
+            else None
+        ),
+    )
+    assert decision == "admitted"
+    transitioned = lifecycle_command_store.persist_selector_transition(
+        session_id,
+        target=target,
+        projection_updates=target.to_dict(),
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_legacy_native_sid_compatibility=None,
+        supervisor_legacy_native_sid_compatibility=None,
+    )
+    assert transitioned.generation == first.generation + 1
+    assert lifecycle_command_store.acknowledge_selector_projection(
+        session_id,
+        target,
+    )
+    admitted, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+        session_id,
+        target=target,
+        native_sid_compatibility=compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    attached = lifecycle_command_store.attach_selector_native_sid(
+        session_id,
+        expected_generation=admitted.generation,
+        role=role,
+        native_sid=target_sid,
+    )
+    assert attached is not None
+    _, projection = attached
+    assert lifecycle_command_store.acknowledge_native_sid_projection(
+        session_id,
+        projection,
+    )
+    pending_handoff = lifecycle_command_store.selector_authority_snapshot(
+        session_id
+    )
+    assert pending_handoff is not None
+    assert pending_handoff.handoff is not None
+    assert getattr(pending_handoff.handoff, f"{role}_source_sid") == source_sid
+    execution = ExecutionTurnIdentity(
+        f"execution-{role}-{session_id}",
+        f"assistant-{role}-{session_id}",
+        execution_role or ("supervisor" if role == "supervisor" else "native"),
+    )
+    await engine.start_execution(
+        session_id,
+        execution_identity=execution,
+        selector_role=role,
+    )
+    await engine.bind_execution_run(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+    )
+    return execution, target, source_sid, target_sid
+
+
+async def test_successful_handoff_finalizer_crash_replays_both_roles(
+    monkeypatch,
+) -> None:
+    projected: list[tuple[str, str, str | None]] = []
+    fail_projection = True
+
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
+    )
+
+    def set_agent_sid(requested_id, mode, native_sid, **_metadata):
+        nonlocal fail_projection
+        if fail_projection:
+            fail_projection = False
+            raise RuntimeError("simulated projection crash")
+        projected.append((requested_id, mode, native_sid))
+        return {"id": requested_id}
+
+    monkeypatch.setattr(session_manager.manager, "set_agent_sid", set_agent_sid)
+
+    for role in ("primary", "supervisor"):
+        session_id = f"handoff-finalizer-crash-{role}"
+        provider_run_id = f"handoff-finalizer-run-{role}"
+        engine = LifecycleCommandEngine(EventBus())
+        execution, target, source_sid, target_sid = (
+            await _seed_selector_handoff_execution(
+                engine,
+                session_id=session_id,
+                role=role,
+                provider_run_id=provider_run_id,
+                execution_policy=(
+                    "single" if role == "supervisor" else "sequential"
+                ),
+            )
+        )
+        fail_projection = True
+        assert lifecycle_command_store.execution_selector_role(
+            session_id,
+            execution.execution_turn_id,
+        ) == role
+        with pytest.raises(RuntimeError, match="simulated projection crash"):
+            terminal = (
+                engine.finish_execution_and_turn
+                if role == "supervisor"
+                else engine.finish_execution
+            )
+            await terminal(
+                session_id,
+                execution_identity=execution,
+                provider_run_id=provider_run_id,
+                outcome="complete",
+            )
+        finalized = lifecycle_command_store.session_snapshot(session_id)
+        if role == "supervisor":
+            assert finalized.execution is None
+        else:
+            assert finalized.execution is not None
+            assert finalized.execution.phase == "complete"
+        authority = lifecycle_command_store.selector_authority_snapshot(session_id)
+        assert authority is not None
+        assert authority.identity == target
+        assert authority.primary_native_sid == (
+            target_sid if role == "primary" else None
+        )
+        assert authority.supervisor_native_sid == (
+            target_sid if role == "supervisor" else None
+        )
+        assert authority.handoff is None
+        pending = dict(lifecycle_command_store.pending_selector_projections())
+        assert pending[session_id]["kind"] == "handoff_consumed"
+        assert pending[session_id]["source_sid"] == source_sid
+        await engine.close()
+
+        recovered = LifecycleCommandEngine(EventBus())
+        await recovered.bind()
+        assert session_id not in dict(
+            lifecycle_command_store.pending_selector_projections()
+        )
+        await recovered.close()
+
+    assert projected == [
+        (
+            "handoff-finalizer-crash-primary",
+            "native",
+            "target-primary-handoff-finalizer-crash-primary",
+        ),
+        (
+            "handoff-finalizer-crash-supervisor",
+            "supervisor",
+            "target-supervisor-handoff-finalizer-crash-supervisor",
+        ),
+    ]
+
+
+async def test_handoff_finalizer_requires_exact_current_success(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda requested_id, _mode, _native_sid, **_metadata: {"id": requested_id},
+    )
+    session_id = "handoff-finalizer-exact"
+    provider_run_id = "handoff-finalizer-current-run"
+    engine = LifecycleCommandEngine(EventBus())
+    execution, target, source_sid, _target_sid = (
+        await _seed_selector_handoff_execution(
+            engine,
+            session_id=session_id,
+            role="primary",
+            provider_run_id=provider_run_id,
+        )
+    )
+    with pytest.raises(LifecycleCommandRejected):
+        await engine.finish_execution(
+            session_id,
+            execution_identity=execution,
+            provider_run_id="handoff-finalizer-stale-run",
+            outcome="complete",
+        )
+    pending = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert pending is not None
+    assert pending.handoff is not None
+    assert pending.handoff.primary_source_sid == source_sid
+
+    await engine.finish_execution(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="failed",
+    )
+    failed = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert failed is not None
+    assert failed.handoff is not None
+
+    replacement = ExecutionTurnIdentity(
+        "handoff-finalizer-replacement",
+        "handoff-finalizer-replacement-assistant",
+        "native",
+    )
+    await engine.start_execution(
+        session_id,
+        execution_identity=replacement,
+        selector_role="primary",
+    )
+    await engine.bind_execution_run(
+        session_id,
+        execution_identity=replacement,
+        provider_run_id="handoff-finalizer-replacement-run",
+    )
+    await engine.finish_execution(
+        session_id,
+        execution_identity=replacement,
+        provider_run_id="handoff-finalizer-replacement-run",
+        outcome="complete",
+    )
+    accepted = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert accepted is not None
+    assert accepted.identity == target
+    assert accepted.handoff is None
+    await engine.close()
+
+
+async def test_failed_execution_outer_cleanup_retains_handoff() -> None:
+    session_id = "handoff-finalizer-failed-outer-cleanup"
+    provider_run_id = "handoff-finalizer-failed-outer-cleanup-run"
+    engine = LifecycleCommandEngine(EventBus())
+    execution, _target, source_sid, _target_sid = (
+        await _seed_selector_handoff_execution(
+            engine,
+            session_id=session_id,
+            role="primary",
+            provider_run_id=provider_run_id,
+        )
+    )
+    await engine.finish_execution(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="failed",
+    )
+    await engine.finish_execution_and_turn(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="complete",
+    )
+    authority = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert authority is not None
+    assert authority.handoff is not None
+    assert authority.handoff.primary_source_sid == source_sid
+    assert lifecycle_command_store.pending_selector_projection(session_id) is None
+    await engine.close()
+
+
+async def test_elected_slot_consumes_only_its_handoff_role(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda requested_id, _mode, _native_sid, **_metadata: {"id": requested_id},
+    )
+    for role in ("primary", "supervisor"):
+        session_id = f"handoff-elected-slot-{role}"
+        provider_run_id = f"handoff-elected-slot-{role}-run"
+        engine = LifecycleCommandEngine(EventBus())
+        execution, _target, _source_sid, _target_sid = (
+            await _seed_selector_handoff_execution(
+                engine,
+                session_id=session_id,
+                role=role,
+                provider_run_id=provider_run_id,
+                execution_role="supervisor",
+                include_other_source=True,
+            )
+        )
+        await engine.finish_execution(
+            session_id,
+            execution_identity=execution,
+            provider_run_id=provider_run_id,
+            outcome="complete",
+        )
+        authority = lifecycle_command_store.selector_authority_snapshot(session_id)
+        assert authority is not None
+        assert authority.handoff is not None
+        assert getattr(authority.handoff, f"{role}_source_sid") is None
+        other_role = "supervisor" if role == "primary" else "primary"
+        assert getattr(authority.handoff, f"{other_role}_source_sid") is not None
+        await engine.close()
+
+
+async def test_handoff_acceptance_cannot_consume_newer_selector_generation() -> None:
+    session_id = "handoff-finalizer-selector-race"
+    provider_run_id = "handoff-finalizer-selector-race-run"
+    engine = LifecycleCommandEngine(EventBus())
+    execution, target, source_sid, _target_sid = (
+        await _seed_selector_handoff_execution(
+            engine,
+            session_id=session_id,
+            role="primary",
+            provider_run_id=provider_run_id,
+        )
+    )
+    snapshot = lifecycle_command_store.session_snapshot(session_id)
+    command = LifecycleCommand(
+        request_id=f"execution:{snapshot.revision}:finish_execution",
+        session_id=session_id,
+        kind="finish_execution",
+        identity=snapshot.identity,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="complete",
+    )
+    plan = STATES[snapshot.phase].decide(snapshot, command)
+    authority = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert authority is not None
+    assert lifecycle_command_store.persist_plan(
+        command,
+        snapshot,
+        plan,
+        selector_handoff_acceptance={
+            "generation": authority.generation,
+            "role": "primary",
+            "source_sid": source_sid,
+            "target": target.to_dict(),
+            "provider_run_id": provider_run_id,
+        },
+    ) == "inserted"
+    with pytest.raises(
+        lifecycle_command_store.TransitionConflict,
+        match="another selector acceptance",
+    ):
+        lifecycle_command_store.persist_plan(
+            command,
+            snapshot,
+            plan,
+            selector_handoff_acceptance={
+                "generation": authority.generation,
+                "role": "supervisor",
+                "source_sid": source_sid,
+                "target": target.to_dict(),
+                "provider_run_id": provider_run_id,
+            },
+        )
+
+    newer = SelectorIdentity("provider-c", "model-c", "runner-c")
+    transitioned = lifecycle_command_store.persist_selector_transition(
+        session_id,
+        target=newer,
+        projection_updates=newer.to_dict(),
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_legacy_native_sid_compatibility=None,
+        supervisor_legacy_native_sid_compatibility=None,
+    )
+    assert transitioned.generation == authority.generation + 1
+    assert lifecycle_command_store.acknowledge_selector_projection(
+        session_id,
+        newer,
+    )
+    with pytest.raises(
+        LifecycleCommandRejected,
+        match="selector acceptance changed before resume",
+    ):
+        await engine.finish_execution(
+            session_id,
+            execution_identity=execution,
+            provider_run_id=provider_run_id,
+            outcome="complete",
+        )
+    for ordinal, _effect in enumerate(plan.effects):
+        lifecycle_command_store.record_effect_result(
+            session_id,
+            command.request_id,
+            ordinal,
+            {},
+        )
+    lifecycle_command_store.commit_transition(session_id, command.request_id)
+
+    current = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert current is not None
+    assert current.identity == newer
+    assert current.handoff is not None
+    assert current.handoff.primary_source_sid == source_sid
+    assert lifecycle_command_store.pending_selector_projection(session_id) is None
+    await engine.close()
+
+
+async def test_existing_transition_rejects_missing_selector_acceptance() -> None:
+    session_id = "handoff-finalizer-missing-acceptance"
+    provider_run_id = "handoff-finalizer-missing-acceptance-run"
+    engine = LifecycleCommandEngine(EventBus())
+    execution, target, source_sid, _target_sid = (
+        await _seed_selector_handoff_execution(
+            engine,
+            session_id=session_id,
+            role="primary",
+            provider_run_id=provider_run_id,
+        )
+    )
+    snapshot = lifecycle_command_store.session_snapshot(session_id)
+    command = LifecycleCommand(
+        request_id=f"execution:{snapshot.revision}:finish_execution",
+        session_id=session_id,
+        kind="finish_execution",
+        identity=snapshot.identity,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        outcome="complete",
+    )
+    plan = STATES[snapshot.phase].decide(snapshot, command)
+    authority = lifecycle_command_store.selector_authority_snapshot(session_id)
+    assert authority is not None
+    assert lifecycle_command_store.persist_plan(
+        command,
+        snapshot,
+        plan,
+        selector_handoff_acceptance={
+            "generation": authority.generation,
+            "role": "primary",
+            "source_sid": source_sid,
+            "target": target.to_dict(),
+            "provider_run_id": provider_run_id,
+        },
+    ) == "inserted"
+    with lifecycle_command_store.connection() as database:
+        database.execute(
+            """
+            DELETE FROM execution_selector_roles
+            WHERE session_id = ? AND execution_turn_id = ?
+            """,
+            (session_id, execution.execution_turn_id),
+        )
+    with pytest.raises(
+        LifecycleCommandRejected,
+        match="selector acceptance changed before resume",
+    ):
+        await engine.finish_execution(
+            session_id,
+            execution_identity=execution,
+            provider_run_id=provider_run_id,
+            outcome="complete",
+        )
+    for ordinal, _effect in enumerate(plan.effects):
+        lifecycle_command_store.record_effect_result(
+            session_id,
+            command.request_id,
+            ordinal,
+            {},
+        )
+    lifecycle_command_store.commit_transition(session_id, command.request_id)
+    await engine.close()
 
 
 async def test_late_prepared_selector_attempt_cannot_rewind_authority() -> None:
@@ -1574,7 +2095,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
     session_columns = {
         row[1]
         for row in migrated.execute("PRAGMA table_info(sessions)").fetchall()
@@ -1582,6 +2103,12 @@ def test_v1_migration_and_atomic_rollback() -> None:
     assert "owner_incarnation" in session_columns
     assert migrated.execute(
         "SELECT COUNT(*) FROM authority_owner"
+    ).fetchone()[0] == 0
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM selector_handoff_acceptances"
+    ).fetchone()[0] == 0
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM execution_selector_roles"
     ).fetchone()[0] == 0
     session_identity = json.loads(migrated.execute(
         "SELECT identity_json FROM sessions WHERE session_id = ?",
@@ -1714,7 +2241,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 6
+        assert type(version) is int and version == 7
 
 
 async def test_terminal_render_reconciliation_inbox() -> None:

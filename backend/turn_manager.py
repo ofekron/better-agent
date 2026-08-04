@@ -2151,6 +2151,11 @@ class TurnManager:
             await self._c.lifecycle_commands.start_execution(
                 app_session_id,
                 execution_identity=execution_identity,
+                selector_role=(
+                    "supervisor"
+                    if session_id_field == "supervisor_agent_session_id"
+                    else "primary"
+                ),
             )
             try:
                 from event_journal import publish_event

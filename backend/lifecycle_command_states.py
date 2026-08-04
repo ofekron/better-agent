@@ -272,7 +272,14 @@ class LifecycleState(ABC):
             "provider_run_id": command.provider_run_id,
         }
         if command.outcome is not None:
-            payload["outcome"] = command.outcome
+            payload["outcome"] = (
+                execution.phase
+                if command.kind in {
+                    "finish_execution",
+                    "finish_execution_and_turn",
+                }
+                else command.outcome
+            )
         return TransitionPlan(
             next_snapshot=next_snapshot,
             effects=(LifecycleEffect(
