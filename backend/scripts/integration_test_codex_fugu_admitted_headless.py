@@ -20,10 +20,12 @@ os.environ["BETTER_AGENT_HOME"] = TEST_HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_headless_execution import (  # noqa: E402
+    PreparedCodexHeadless,
     execute_codex_headless,
     prepare_codex_headless,
 )
 from headless_request_contract import (  # noqa: E402
+    AdmittedHeadlessRequest,
     HeadlessAuthority,
     HeadlessRequest,
     admit_headless_request,
@@ -285,14 +287,26 @@ async def test_rejections_and_drift(root: Path, fake: Path) -> None:
 
     tampered = _admitted(record, fork=False).to_dict()
     tampered["provider"]["execution_revision"] += 1
-    try:
-        await node_rpc_handlers._rpc_run_admitted_headless({
-            "admitted": tampered,
-        })
-    except ValueError as exc:
-        assert "fingerprint" in str(exc)
-    else:
-        raise AssertionError("RPC authority tampering must fail")
+    malformed = _admitted(record, fork=False).to_dict()
+    malformed["provider"]["execution_revision"] = "2"
+    with pytest.MonkeyPatch.context() as rpc_patch:
+        rpc_patch.setattr(node_rpc_handlers, "get_provider", lambda *_args: provider)
+        try:
+            await node_rpc_handlers._rpc_run_admitted_headless({
+                "admitted": tampered,
+            })
+        except ValueError as exc:
+            assert "authority" in str(exc)
+        else:
+            raise AssertionError("RPC execution authority drift must fail")
+        try:
+            await node_rpc_handlers._rpc_run_admitted_headless({
+                "admitted": malformed,
+            })
+        except ValueError as exc:
+            assert "provider authority" in str(exc)
+        else:
+            raise AssertionError("RPC malformed authority must fail")
 
     fugu_record = _record(root, "fugu")
     try:
@@ -307,19 +321,53 @@ async def test_rejections_and_drift(root: Path, fake: Path) -> None:
         raise AssertionError("Fugu curated model validation must remain")
 
     admitted = _admitted(record, fork=False)
-    prepared = prepare_codex_headless(
-        provider,
-        admitted,
-        launcher_path=str(fake),
-    )
     metadata_only_drift = dict(record)
     metadata_only_drift["revision"] += 1
-    result = await execute_codex_headless(
-        provider,
-        prepared,
-        runtime_record=metadata_only_drift,
-    )
+
+    def local_codec_forbidden(*_args, **_kwargs):
+        raise AssertionError("local Codex headless execution must stay typed")
+
+    with pytest.MonkeyPatch.context() as local_patch:
+        local_patch.setattr(
+            AdmittedHeadlessRequest,
+            "to_dict",
+            local_codec_forbidden,
+        )
+        local_patch.setattr(
+            AdmittedHeadlessRequest,
+            "from_dict",
+            classmethod(local_codec_forbidden),
+        )
+        local_patch.setattr(
+            PreparedCodexHeadless,
+            "to_dict",
+            local_codec_forbidden,
+        )
+        local_patch.setattr(
+            PreparedCodexHeadless,
+            "from_dict",
+            classmethod(local_codec_forbidden),
+        )
+        prepared = prepare_codex_headless(
+            provider,
+            admitted,
+            launcher_path=str(fake),
+        )
+        result = await execute_codex_headless(
+            provider,
+            prepared,
+            runtime_record=metadata_only_drift,
+        )
     assert result["result"] == "precise-result"
+
+    prepared_wire = prepared.to_dict()
+    prepared_wire["admitted"]["unexpected"] = True
+    try:
+        PreparedCodexHeadless.from_dict(prepared_wire)
+    except ValueError as exc:
+        assert "admitted headless request" in str(exc)
+    else:
+        raise AssertionError("process codec must reject unknown admission fields")
 
     execution_drift = dict(record)
     execution_drift["execution_revision"] += 1

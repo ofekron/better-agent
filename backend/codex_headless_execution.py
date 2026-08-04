@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError
@@ -16,10 +15,36 @@ from headless_request_contract import AdmittedHeadlessRequest
 from provider_run_config import toml_literal
 
 
+def _admitted_authority_tuple(
+    admitted: AdmittedHeadlessRequest,
+) -> tuple[Any, ...]:
+    authority = admitted.authority
+    return (
+        authority.provider_id,
+        authority.provider_kind,
+        authority.provider_generation,
+        authority.provider_execution_revision,
+    )
+
+
 @dataclass(frozen=True)
 class PreparedCodexHeadless:
-    _admitted_json: str = field(repr=False)
+    admitted: AdmittedHeadlessRequest
     contract: CodexExecutionContract
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.admitted, AdmittedHeadlessRequest):
+            raise TypeError("admitted headless request is invalid")
+        if not isinstance(self.contract, CodexExecutionContract):
+            raise TypeError("Codex execution contract is invalid")
+        actual = (
+            self.contract.provider_id,
+            self.contract.provider_kind,
+            self.contract.provider_generation,
+            self.contract.provider_execution_revision,
+        )
+        if actual != _admitted_authority_tuple(self.admitted):
+            raise ValueError("headless execution authority conflicts")
 
     @classmethod
     def create(
@@ -27,42 +52,13 @@ class PreparedCodexHeadless:
         admitted: AdmittedHeadlessRequest,
         contract: CodexExecutionContract,
     ) -> PreparedCodexHeadless:
-        admitted_payload = admitted.to_dict()
-        provider = admitted_payload["provider"]
-        expected = (
-            provider["id"],
-            provider["kind"],
-            provider["generation"],
-            provider["execution_revision"],
-        )
-        actual = (
-            contract.provider_id,
-            contract.provider_kind,
-            contract.provider_generation,
-            contract.provider_execution_revision,
-        )
-        if actual != expected:
-            raise ValueError("headless execution authority conflicts")
-        return cls(
-            json.dumps(
-                admitted_payload,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            contract,
-        )
-
-    @property
-    def admitted(self) -> AdmittedHeadlessRequest:
-        raw = json.loads(self._admitted_json)
-        return AdmittedHeadlessRequest.from_dict(raw)
+        return cls(admitted=admitted, contract=contract)
 
     def to_dict(self) -> dict[str, Any]:
-        return json.loads(json.dumps({
+        return {
             "admitted": self.admitted.to_dict(),
             "contract": self.contract.to_dict(),
-        }, allow_nan=False, separators=(",", ":"), sort_keys=True))
+        }
 
     @classmethod
     def from_dict(
@@ -91,24 +87,25 @@ def prepare_codex_headless(
     *,
     launcher_path: str | None = None,
 ) -> PreparedCodexHeadless:
-    admitted = AdmittedHeadlessRequest.from_dict(admitted.to_dict())
-    payload = admitted.to_dict()
-    authority = payload["provider"]
+    if not isinstance(admitted, AdmittedHeadlessRequest):
+        raise TypeError("admitted headless request is invalid")
+    request = admitted.request
+    authority = admitted.authority
     record = dict(provider.record)
     if (
-        authority["kind"] not in {"codex", "fugu"}
-        or provider.KIND != authority["kind"]
-        or _authority_tuple(record) != _authority_tuple(authority)
+        authority.provider_kind not in {"codex", "fugu"}
+        or provider.KIND != authority.provider_kind
+        or _authority_tuple(record) != _admitted_authority_tuple(admitted)
     ):
         raise ValueError("headless provider authority conflicts")
     expected_runner = str(record.get("runner") or "native")
-    if payload["runner"] != expected_runner:
+    if authority.runner != expected_runner:
         raise ValueError("headless runner conflicts")
-    if payload["no_tools"] and not provider.supports_headless_no_tools:
+    if request.no_tools and not provider.supports_headless_no_tools:
         raise ValueError("headless provider cannot guarantee no-tools")
-    if payload["fork"] and not provider.supports_fork:
+    if request.fork and not provider.supports_fork:
         raise ValueError("headless provider cannot fork")
-    if payload["reasoning_effort"] not in provider.reasoning_effort_options:
+    if authority.reasoning_effort not in provider.reasoning_effort_options:
         raise ValueError("headless reasoning effort is unsupported")
 
     from cli_paths import resolve_cli_binary
@@ -123,9 +120,9 @@ def prepare_codex_headless(
         if config_dir_raw
         else user_home() / ".codex"
     ).resolve(strict=True)
-    overrides = list(provider.codex_config_overrides(model=payload["model"]))
+    overrides = list(provider.codex_config_overrides(model=authority.model))
     if not any(value.startswith("model=") for value in overrides):
-        overrides.append(f"model={toml_literal(payload['model'])}")
+        overrides.append(f"model={toml_literal(authority.model)}")
     contract = build_codex_execution_contract(
         {**record, "config_dir": str(config_root)},
         launcher_path=launcher,
@@ -150,13 +147,13 @@ async def execute_codex_headless(
 ) -> dict[str, Any]:
     if not isinstance(prepared, PreparedCodexHeadless):
         raise TypeError("prepared headless execution is invalid")
-    prepared = PreparedCodexHeadless.from_dict(prepared.to_dict())
     admitted = prepared.admitted
-    payload = admitted.to_dict()
+    request = admitted.request
+    authority = admitted.authority
     if (
         provider.KIND != prepared.contract.provider_kind
         or _authority_tuple(runtime_record)
-        != _authority_tuple(payload["provider"])
+        != _admitted_authority_tuple(admitted)
         or not prepared.contract.attest()
     ):
         raise RuntimeError("headless execution authority changed")
@@ -178,13 +175,13 @@ async def execute_codex_headless(
             return await run_headless_app_server(
                 launch.argv_prefix,
                 pass_fds=launch.pass_fds,
-                prompt=payload["prompt"],
-                cwd=payload["cwd"],
-                model=payload["model"],
-                reasoning_effort=payload["reasoning_effort"],
-                session_id=payload["resume_sid"],
-                fork=payload["fork"],
-                timeout=payload["timeout"],
+                prompt=request.prompt,
+                cwd=authority.cwd,
+                model=authority.model,
+                reasoning_effort=authority.reasoning_effort,
+                session_id=authority.resume_sid,
+                fork=request.fork,
+                timeout=request.timeout,
                 profile=prepared.contract.profile or None,
                 config_overrides=overrides,
                 env=env,

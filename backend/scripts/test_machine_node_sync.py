@@ -24,6 +24,11 @@ _TMP_HOME = _test_home.isolate("bc-test-machine-node-sync-")
 import config_store  # noqa: E402
 import extension_api  # noqa: E402
 import extension_store  # noqa: E402
+from headless_request_contract import (  # noqa: E402
+    HeadlessAuthority,
+    HeadlessRequest,
+    admit_headless_request,
+)
 import node_client  # noqa: E402
 import node_link  # noqa: E402
 import node_rpc_handlers  # noqa: E402
@@ -50,6 +55,7 @@ def _provider_record(
     authority = {
         "generation": provider["generation"],
         "revision": provider["revision"],
+        "execution_revision": provider["execution_revision"],
     }
     return {
         **config_store._clean_provider_record(provider),
@@ -469,21 +475,55 @@ async def test_run_headless_requires_version_ready() -> None:
 
     async def rpc_call(_node_id, _method, _params, **kwargs):
         seen.update(kwargs)
+        seen["params"] = _params
         return {"result": {"result": "ok"}}
 
     node_link.rpc_call = rpc_call  # type: ignore[assignment]
     try:
-        class Admitted:
-            def to_dict(self):
-                return {"timeout": 10}
-
+        provider = _provider_record("provider-a", "Provider A")
+        request = HeadlessRequest.from_dict({
+            "schema": 1,
+            "prompt": "test remote boundary",
+            "owner": {"kind": "session", "id": "session-a"},
+            "fork": False,
+            "no_tools": False,
+            "timeout": 10,
+        })
+        admitted = admit_headless_request(
+            request,
+            HeadlessAuthority.create(
+                owner_kind="session",
+                owner_id="session-a",
+                provider={
+                    key: provider[key]
+                    for key in (
+                        "id",
+                        "kind",
+                        "generation",
+                        "execution_revision",
+                    )
+                },
+                model="opus",
+                reasoning_effort="",
+                runner="native",
+                permission_scope="spawn_runs",
+                routing={"node_id": "node-a"},
+                cwd="/tmp",
+                resume_sid=None,
+                supports_fork=True,
+                supports_no_tools=True,
+            ),
+        )
         await provider_remote.RemoteProviderProxy(
             "node-a",
-        ).run_admitted_headless(Admitted())
+        ).run_admitted_headless(admitted)
     finally:
         node_link.rpc_call = original_rpc_call  # type: ignore[assignment]
 
     assert seen["version_ready_required"] is True
+    wire = seen["params"]["admitted"]
+    assert wire["schema"] == 3
+    assert "fingerprint" not in wire
 
 
 async def test_node_runtime_readiness_waits_across_reconnect() -> None:

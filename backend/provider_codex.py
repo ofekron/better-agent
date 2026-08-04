@@ -1747,11 +1747,11 @@ class CodexProvider(Provider):
         )
 
         prepared = prepare_codex_headless(self, admitted)
-        authority = prepared.admitted.to_dict()["provider"]
+        authority = prepared.admitted.authority
         hydration = config_store.hydrate_provider_execution(
-            authority["id"],
-            expected_generation=authority["generation"],
-            expected_execution_revision=authority["execution_revision"],
+            authority.provider_id,
+            expected_generation=authority.provider_generation,
+            expected_execution_revision=authority.provider_execution_revision,
         )
         if hydration is None:
             raise RuntimeError("headless provider authority is unavailable")

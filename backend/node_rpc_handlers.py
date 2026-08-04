@@ -1282,10 +1282,9 @@ async def _rpc_run_admitted_headless(params: dict) -> dict:
     from headless_request_contract import AdmittedHeadlessRequest
 
     admitted = AdmittedHeadlessRequest.from_dict(params["admitted"])
-    payload = admitted.to_dict()
     provider = get_provider(
-        payload["provider"]["id"],
-        payload["runner"],
+        admitted.authority.provider_id,
+        admitted.authority.runner,
     )
     result = await provider.run_admitted_headless(admitted)
     return {"result": result}

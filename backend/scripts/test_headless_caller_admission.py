@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import headless_admission  # noqa: E402
 import provider as provider_module  # noqa: E402
 from headless_request_contract import (  # noqa: E402
+    AdmittedHeadlessRequest,
     HeadlessAuthority,
     HeadlessRequest,
     admit_headless_request,
@@ -244,6 +245,21 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
 
     provider_module.config_store.hydrate_provider_execution = hydrate
     instance = LegacyProvider()
+
+    def local_codec_forbidden(*_args, **_kwargs):
+        raise AssertionError("local headless execution must not use wire codecs")
+
+    local_patch = pytest.MonkeyPatch()
+    local_patch.setattr(
+        AdmittedHeadlessRequest,
+        "to_dict",
+        local_codec_forbidden,
+    )
+    local_patch.setattr(
+        AdmittedHeadlessRequest,
+        "from_dict",
+        classmethod(local_codec_forbidden),
+    )
     try:
         result = await instance.run_admitted_headless(admitted("claude-model"))
         assert result == {"result": "legacy-ok"}
@@ -266,6 +282,7 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
         else:
             raise AssertionError("execution authority drift must fail")
     finally:
+        local_patch.undo()
         provider_module.config_store.hydrate_provider_execution = original_hydrate
     assert len(hydration_calls) == 2
     assert all(

@@ -1742,15 +1742,16 @@ class Provider(ABC):
         from headless_request_contract import AdmittedHeadlessRequest
         import runtime_profile
 
-        admitted = AdmittedHeadlessRequest.from_dict(admitted.to_dict())
-        payload = admitted.to_dict()
-        authority = payload["provider"]
+        if not isinstance(admitted, AdmittedHeadlessRequest):
+            raise TypeError("admitted headless request is invalid")
+        request = admitted.request
+        authority = admitted.authority
         record = self.record
         expected = (
-            authority["id"],
-            authority["kind"],
-            authority["generation"],
-            authority["execution_revision"],
+            authority.provider_id,
+            authority.provider_kind,
+            authority.provider_generation,
+            authority.provider_execution_revision,
         )
         actual = (
             record.get("id"),
@@ -1760,16 +1761,16 @@ class Provider(ABC):
         )
         if actual != expected:
             raise ValueError("headless provider authority changed")
-        if payload["runner"] != runtime_profile.resolve_runner(
+        if authority.runner != runtime_profile.resolve_runner(
             record,
             record.get("runner"),
         ):
             raise ValueError("headless runner changed")
-        if payload["fork"] and not self.supports_fork:
+        if request.fork and not self.supports_fork:
             raise ValueError("headless provider does not support fork")
-        if payload["no_tools"] and not self.supports_headless_no_tools:
+        if request.no_tools and not self.supports_headless_no_tools:
             raise ValueError("headless provider does not support no-tools")
-        effort = payload["reasoning_effort"]
+        effort = authority.reasoning_effort
         if self.supports_reasoning_effort:
             if effort not in self.reasoning_effort_options:
                 raise ValueError("headless reasoning effort is unsupported")
@@ -1782,32 +1783,32 @@ class Provider(ABC):
             pair_profile = config_store.find_runtime_profile(
                 str(record.get("id") or ""), str(record.get("runner") or "")
             )
-            if pair_profile is not None and payload["model"] != str(
+            if pair_profile is not None and authority.model != str(
                 pair_profile.get("default_model") or ""
             ):
                 raise ValueError(
                     "headless provider cannot override its configured model"
                 )
         hydration = config_store.hydrate_provider_execution(
-            authority["id"],
-            expected_generation=authority["generation"],
-            expected_execution_revision=authority["execution_revision"],
+            authority.provider_id,
+            expected_generation=authority.provider_generation,
+            expected_execution_revision=authority.provider_execution_revision,
         )
         if hydration is None:
             raise RuntimeError("headless provider authority is unavailable")
         runtime_record = dict(hydration.runtime_record())
-        runtime_record["default_model"] = payload["model"]
+        runtime_record["default_model"] = authority.model
         runtime_record["default_reasoning_effort"] = effort
         installed = getattr(self._execution_record, "value", None)
         self._execution_record.value = runtime_record
         try:
             result = await self.run_headless(
-                prompt=payload["prompt"],
-                resume_sid=payload["resume_sid"],
-                fork=payload["fork"],
-                cwd=payload["cwd"],
-                timeout=payload["timeout"],
-                no_tools=payload["no_tools"],
+                prompt=request.prompt,
+                resume_sid=authority.resume_sid,
+                fork=request.fork,
+                cwd=authority.cwd,
+                timeout=request.timeout,
+                no_tools=request.no_tools,
             )
         finally:
             if installed is None:

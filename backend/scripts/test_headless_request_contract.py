@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -75,6 +76,7 @@ def test_request_schema_is_exact_and_non_coercive() -> None:
     _raises(lambda: _request(fork="true"), "fork")
     _raises(lambda: _request(no_tools=1), "no_tools")
     _raises(lambda: _request(timeout=True), "timeout")
+    _raises(lambda: _request(timeout=float("nan")), "timeout")
     _raises(lambda: _request(api_key="secret"), "invalid headless request")
     _raises(lambda: _request(executable="/tmp/evil"), "invalid headless request")
     _raises(lambda: _request(config={"env": {}}), "invalid headless request")
@@ -100,6 +102,24 @@ def test_request_schema_is_exact_and_non_coercive() -> None:
             _authority(),
         ),
         "fork",
+    )
+    _raises(
+        lambda: HeadlessRequest(
+            prompt="direct",
+            owner_kind="session",
+            owner_id="session-1",
+            fork=False,
+            no_tools=False,
+            timeout=float("nan"),
+        ),
+        "timeout",
+    )
+    _raises(
+        lambda: replace(
+            _authority(),
+            provider_execution_revision=-1,
+        ),
+        "provider authority",
     )
 
 
@@ -143,15 +163,31 @@ def test_admission_freezes_authority_without_secrets() -> None:
     }
     assert before["permission_scope"] == "spawn_runs"
     assert before["routing"] == {"lane": ["headless"], "node_id": "primary"}
+    assert "fingerprint" not in before
     assert AdmittedHeadlessRequest.from_dict(before).to_dict() == before
-    tampered = dict(before)
-    tampered["model"] = "attacker-model"
+    malformed = dict(before)
+    malformed["provider"] = {
+        **before["provider"],
+        "execution_revision": "2",
+    }
     _raises(
-        lambda: AdmittedHeadlessRequest.from_dict(tampered),
-        "fingerprint",
+        lambda: AdmittedHeadlessRequest.from_dict(malformed),
+        "provider authority",
+    )
+    unexpected = dict(before)
+    unexpected["executable"] = "/tmp/other"
+    _raises(
+        lambda: AdmittedHeadlessRequest.from_dict(unexpected),
+        "invalid admitted headless request",
+    )
+    nonfinite = dict(before)
+    nonfinite["timeout"] = float("nan")
+    _raises(
+        lambda: AdmittedHeadlessRequest.from_dict(nonfinite),
+        "timeout",
     )
     legacy = dict(before)
-    legacy["schema"] = 1
+    legacy["schema"] = 2
     _raises(
         lambda: AdmittedHeadlessRequest.from_dict(legacy),
         "schema",
@@ -172,23 +208,23 @@ def test_secret_bearing_authority_is_rejected() -> None:
     _raises(lambda: _authority(provider=legacy), "provider authority")
 
 
-def test_owner_and_capabilities_fail_truthfully() -> None:
+def test_typed_admission_enforces_owner_and_capabilities_without_codecs() -> None:
     _raises(
-        lambda: admit_headless_request(
+        lambda: AdmittedHeadlessRequest.create(
             _request(),
             _authority(owner_id="different-session"),
         ),
         "owner",
     )
     _raises(
-        lambda: admit_headless_request(
+        lambda: AdmittedHeadlessRequest.create(
             _request(),
             _authority(supports_fork=False),
         ),
         "fork",
     )
     _raises(
-        lambda: admit_headless_request(
+        lambda: AdmittedHeadlessRequest.create(
             _request(),
             _authority(supports_no_tools=False),
         ),
@@ -232,7 +268,7 @@ def main() -> None:
         test_standalone_ownership_is_explicit()
         test_admission_freezes_authority_without_secrets()
         test_secret_bearing_authority_is_rejected()
-        test_owner_and_capabilities_fail_truthfully()
+        test_typed_admission_enforces_owner_and_capabilities_without_codecs()
         test_provider_parity_contract()
     finally:
         import shutil

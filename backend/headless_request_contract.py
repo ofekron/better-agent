@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 
 HEADLESS_REQUEST_SCHEMA = 1
-HEADLESS_ADMISSION_SCHEMA = 2
+HEADLESS_ADMISSION_SCHEMA = 3
 _MAX_PROMPT_CHARS = 1_000_000
 _MAX_TIMEOUT_SECONDS = 86_400.0
 _SECRET_KEY_RE = re.compile(
@@ -86,7 +86,11 @@ def _positive_timeout(value: Any) -> float | None:
     if type(value) not in (int, float):
         raise ValueError("headless request timeout is invalid")
     timeout = float(value)
-    if timeout <= 0 or timeout > _MAX_TIMEOUT_SECONDS:
+    if (
+        not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > _MAX_TIMEOUT_SECONDS
+    ):
         raise ValueError("headless request timeout is invalid")
     return timeout
 
@@ -99,6 +103,27 @@ class HeadlessRequest:
     fork: bool
     no_tools: bool
     timeout: float | None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.prompt) is not str
+            or not self.prompt
+            or len(self.prompt) > _MAX_PROMPT_CHARS
+            or "\x00" in self.prompt
+        ):
+            raise ValueError("headless request prompt is invalid")
+        _, owner_id = _owner({
+            "kind": self.owner_kind,
+            (
+                "id" if self.owner_kind == "session" else "profile"
+            ): self.owner_id,
+        })
+        object.__setattr__(self, "owner_id", owner_id)
+        if type(self.fork) is not bool:
+            raise ValueError("headless request fork is invalid")
+        if type(self.no_tools) is not bool:
+            raise ValueError("headless request no_tools is invalid")
+        object.__setattr__(self, "timeout", _positive_timeout(self.timeout))
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> HeadlessRequest:
@@ -114,26 +139,14 @@ class HeadlessRequest:
             raise ValueError("invalid headless request")
         if raw["schema"] != HEADLESS_REQUEST_SCHEMA:
             raise ValueError("unsupported headless request schema")
-        prompt = raw["prompt"]
-        if (
-            type(prompt) is not str
-            or not prompt
-            or len(prompt) > _MAX_PROMPT_CHARS
-            or "\x00" in prompt
-        ):
-            raise ValueError("headless request prompt is invalid")
-        if type(raw["fork"]) is not bool:
-            raise ValueError("headless request fork is invalid")
-        if type(raw["no_tools"]) is not bool:
-            raise ValueError("headless request no_tools is invalid")
         owner_kind, owner_id = _owner(raw["owner"])
         return cls(
-            prompt=prompt,
+            prompt=raw["prompt"],
             owner_kind=owner_kind,
             owner_id=owner_id,
             fork=raw["fork"],
             no_tools=raw["no_tools"],
-            timeout=_positive_timeout(raw["timeout"]),
+            timeout=raw["timeout"],
         )
 
 
@@ -141,7 +154,10 @@ class HeadlessRequest:
 class HeadlessAuthority:
     owner_kind: str
     owner_id: str
-    _provider_json: str = field(repr=False)
+    provider_id: str
+    provider_kind: str
+    provider_generation: str
+    provider_execution_revision: int
     model: str
     reasoning_effort: str
     runner: str
@@ -151,6 +167,71 @@ class HeadlessAuthority:
     resume_sid: str | None
     supports_fork: bool
     supports_no_tools: bool
+
+    def __post_init__(self) -> None:
+        _, owner_id = _owner({
+            "kind": self.owner_kind,
+            (
+                "id" if self.owner_kind == "session" else "profile"
+            ): self.owner_id,
+        })
+        object.__setattr__(self, "owner_id", owner_id)
+        try:
+            generation = str(uuid.UUID(self.provider_generation))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("headless provider authority is invalid") from exc
+        if (
+            type(self.provider_id) is not str
+            or not self.provider_id
+            or type(self.provider_kind) is not str
+            or not self.provider_kind
+            or generation != self.provider_generation
+            or type(self.provider_execution_revision) is not int
+            or self.provider_execution_revision < 0
+        ):
+            raise ValueError("headless provider authority is invalid")
+        for value, label, allow_empty in (
+            (self.model, "model", False),
+            (self.reasoning_effort, "reasoning effort", True),
+            (self.runner, "runner", False),
+            (self.permission_scope, "permission scope", False),
+            (self.cwd, "cwd", False),
+        ):
+            if type(value) is not str or (not allow_empty and not value):
+                raise ValueError(f"headless authority {label} is invalid")
+        if (
+            "\x00" in self.cwd
+            or not (
+                PurePosixPath(self.cwd).is_absolute()
+                or PureWindowsPath(self.cwd).is_absolute()
+            )
+        ):
+            raise ValueError("headless authority cwd is invalid")
+        if self.resume_sid is not None and (
+            type(self.resume_sid) is not str
+            or not self.resume_sid
+            or "\x00" in self.resume_sid
+        ):
+            raise ValueError("headless authority resume sid is invalid")
+        if (
+            type(self.supports_fork) is not bool
+            or type(self.supports_no_tools) is not bool
+        ):
+            raise ValueError("headless authority capabilities are invalid")
+        if type(self._routing_json) is not str:
+            raise ValueError("headless routing authority is invalid")
+        try:
+            routing = json.loads(self._routing_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("headless routing authority is invalid") from exc
+        _reject_secrets(routing, label="headless routing authority")
+        if type(routing) is not dict or not routing:
+            raise ValueError("headless routing authority is invalid")
+        object.__setattr__(
+            self,
+            "_routing_json",
+            _canonical_json(routing, label="headless routing authority"),
+        )
 
     @classmethod
     def create(
@@ -169,10 +250,6 @@ class HeadlessAuthority:
         supports_fork: bool,
         supports_no_tools: bool,
     ) -> HeadlessAuthority:
-        if owner_kind not in {"session", "standalone"}:
-            raise ValueError("headless authority owner is invalid")
-        if type(owner_id) is not str or not owner_id:
-            raise ValueError("headless authority owner is invalid")
         expected_provider = {
             "id",
             "kind",
@@ -182,53 +259,13 @@ class HeadlessAuthority:
         _reject_secrets(provider, label="headless provider authority")
         if type(provider) is not dict or set(provider) != expected_provider:
             raise ValueError("headless provider authority is invalid")
-        try:
-            generation = str(uuid.UUID(provider["generation"]))
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ValueError("headless provider authority is invalid") from exc
-        if (
-            type(provider["id"]) is not str
-            or not provider["id"]
-            or type(provider["kind"]) is not str
-            or not provider["kind"]
-            or generation != provider["generation"]
-            or type(provider["execution_revision"]) is not int
-            or provider["execution_revision"] < 0
-        ):
-            raise ValueError("headless provider authority is invalid")
-        for value, label, allow_empty in (
-            (model, "model", False),
-            (reasoning_effort, "reasoning effort", True),
-            (runner, "runner", False),
-            (permission_scope, "permission scope", False),
-            (cwd, "cwd", False),
-        ):
-            if type(value) is not str or (not allow_empty and not value):
-                raise ValueError(f"headless authority {label} is invalid")
-        if (
-            "\x00" in cwd
-            or not (
-                PurePosixPath(cwd).is_absolute()
-                or PureWindowsPath(cwd).is_absolute()
-            )
-        ):
-            raise ValueError("headless authority cwd is invalid")
-        if resume_sid is not None and (
-            type(resume_sid) is not str or not resume_sid or "\x00" in resume_sid
-        ):
-            raise ValueError("headless authority resume sid is invalid")
-        if type(supports_fork) is not bool or type(supports_no_tools) is not bool:
-            raise ValueError("headless authority capabilities are invalid")
-        _reject_secrets(routing, label="headless routing authority")
-        if type(routing) is not dict or not routing:
-            raise ValueError("headless routing authority is invalid")
         return cls(
             owner_kind=owner_kind,
             owner_id=owner_id,
-            _provider_json=_canonical_json(
-                provider,
-                label="headless provider authority",
-            ),
+            provider_id=provider["id"],
+            provider_kind=provider["kind"],
+            provider_generation=provider["generation"],
+            provider_execution_revision=provider["execution_revision"],
             model=model,
             reasoning_effort=reasoning_effort,
             runner=runner,
@@ -245,10 +282,12 @@ class HeadlessAuthority:
 
     @property
     def provider(self) -> dict[str, Any]:
-        return _json_object(
-            self._provider_json,
-            label="headless provider authority",
-        )
+        return {
+            "id": self.provider_id,
+            "kind": self.provider_kind,
+            "generation": self.provider_generation,
+            "execution_revision": self.provider_execution_revision,
+        }
 
     @property
     def routing(self) -> dict[str, Any]:
@@ -260,7 +299,34 @@ class HeadlessAuthority:
 
 @dataclass(frozen=True)
 class AdmittedHeadlessRequest:
-    _json: str = field(repr=False)
+    request: HeadlessRequest = field(repr=False)
+    authority: HeadlessAuthority = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, HeadlessRequest):
+            raise TypeError("headless request is invalid")
+        if not isinstance(self.authority, HeadlessAuthority):
+            raise TypeError("headless authority is invalid")
+        if (
+            self.request.owner_kind != self.authority.owner_kind
+            or self.request.owner_id != self.authority.owner_id
+        ):
+            raise HeadlessAdmissionError(
+                "headless request owner conflicts with authority",
+            )
+        if self.request.fork:
+            if not self.authority.supports_fork:
+                raise HeadlessAdmissionError(
+                    "headless provider does not support fork",
+                )
+            if self.authority.resume_sid is None:
+                raise HeadlessAdmissionError(
+                    "headless fork requires a provider session",
+                )
+        if self.request.no_tools and not self.authority.supports_no_tools:
+            raise HeadlessAdmissionError(
+                "headless provider cannot guarantee a no-tools run",
+            )
 
     @classmethod
     def create(
@@ -268,30 +334,7 @@ class AdmittedHeadlessRequest:
         request: HeadlessRequest,
         authority: HeadlessAuthority,
     ) -> AdmittedHeadlessRequest:
-        payload = {
-            "schema": HEADLESS_ADMISSION_SCHEMA,
-            "prompt": request.prompt,
-            "owner": {
-                "kind": authority.owner_kind,
-                (
-                    "id"
-                    if authority.owner_kind == "session"
-                    else "profile"
-                ): authority.owner_id,
-            },
-            "provider": authority.provider,
-            "model": authority.model,
-            "reasoning_effort": authority.reasoning_effort,
-            "runner": authority.runner,
-            "permission_scope": authority.permission_scope,
-            "routing": authority.routing,
-            "cwd": authority.cwd,
-            "resume_sid": authority.resume_sid,
-            "fork": request.fork,
-            "no_tools": request.no_tools,
-            "timeout": request.timeout,
-        }
-        return cls(_canonical_json(payload, label="admitted headless request"))
+        return cls(request=request, authority=authority)
 
     @classmethod
     def from_dict(
@@ -302,7 +345,6 @@ class AdmittedHeadlessRequest:
             "schema", "prompt", "owner", "provider", "model",
             "reasoning_effort", "runner", "routing", "cwd",
             "permission_scope", "resume_sid", "fork", "no_tools", "timeout",
-            "fingerprint",
         }
         if type(raw) is not dict or set(raw) != expected:
             raise ValueError("invalid admitted headless request")
@@ -330,25 +372,29 @@ class AdmittedHeadlessRequest:
             supports_fork=request.fork,
             supports_no_tools=request.no_tools,
         )
-        artifact = cls.create(request, authority)
-        if (
-            type(raw["fingerprint"]) is not str
-            or raw["fingerprint"] != artifact.fingerprint
-        ):
-            raise ValueError("admitted headless request fingerprint mismatch")
-        return artifact
+        return cls.create(request, authority)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = _json_object(
-            self._json,
-            label="admitted headless request",
-        )
-        payload["fingerprint"] = self.fingerprint
-        return payload
-
-    @property
-    def fingerprint(self) -> str:
-        return hashlib.sha256(self._json.encode("utf-8")).hexdigest()
+        owner_key = "id" if self.authority.owner_kind == "session" else "profile"
+        return {
+            "schema": HEADLESS_ADMISSION_SCHEMA,
+            "prompt": self.request.prompt,
+            "owner": {
+                "kind": self.authority.owner_kind,
+                owner_key: self.authority.owner_id,
+            },
+            "provider": self.authority.provider,
+            "model": self.authority.model,
+            "reasoning_effort": self.authority.reasoning_effort,
+            "runner": self.authority.runner,
+            "permission_scope": self.authority.permission_scope,
+            "routing": self.authority.routing,
+            "cwd": self.authority.cwd,
+            "resume_sid": self.authority.resume_sid,
+            "fork": self.request.fork,
+            "no_tools": self.request.no_tools,
+            "timeout": self.request.timeout,
+        }
 
 
 def admit_headless_request(
@@ -359,44 +405,4 @@ def admit_headless_request(
         raise TypeError("headless request is invalid")
     if not isinstance(authority, HeadlessAuthority):
         raise TypeError("headless authority is invalid")
-    owner_key = "id" if request.owner_kind == "session" else "profile"
-    request = HeadlessRequest.from_dict({
-        "schema": HEADLESS_REQUEST_SCHEMA,
-        "prompt": request.prompt,
-        "owner": {
-            "kind": request.owner_kind,
-            owner_key: request.owner_id,
-        },
-        "fork": request.fork,
-        "no_tools": request.no_tools,
-        "timeout": request.timeout,
-    })
-    authority = HeadlessAuthority.create(
-        owner_kind=authority.owner_kind,
-        owner_id=authority.owner_id,
-        provider=authority.provider,
-        model=authority.model,
-        reasoning_effort=authority.reasoning_effort,
-        runner=authority.runner,
-        permission_scope=authority.permission_scope,
-        routing=authority.routing,
-        cwd=authority.cwd,
-        resume_sid=authority.resume_sid,
-        supports_fork=authority.supports_fork,
-        supports_no_tools=authority.supports_no_tools,
-    )
-    if (
-        request.owner_kind != authority.owner_kind
-        or request.owner_id != authority.owner_id
-    ):
-        raise HeadlessAdmissionError("headless request owner conflicts with authority")
-    if request.fork:
-        if not authority.supports_fork:
-            raise HeadlessAdmissionError("headless provider does not support fork")
-        if authority.resume_sid is None:
-            raise HeadlessAdmissionError("headless fork requires a provider session")
-    if request.no_tools and not authority.supports_no_tools:
-        raise HeadlessAdmissionError(
-            "headless provider cannot guarantee a no-tools run",
-        )
     return AdmittedHeadlessRequest.create(request, authority)

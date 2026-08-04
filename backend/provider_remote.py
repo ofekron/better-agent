@@ -595,7 +595,11 @@ class RemoteProviderProxy(Provider):
         )
 
     async def run_admitted_headless(self, admitted: Any) -> dict:
-        timeout = admitted.to_dict().get("timeout")
+        from headless_request_contract import AdmittedHeadlessRequest
+
+        if not isinstance(admitted, AdmittedHeadlessRequest):
+            raise TypeError("admitted headless request is invalid")
+        timeout = admitted.request.timeout
         rpc_timeout = (
             float(timeout) + 30.0
             if type(timeout) in (int, float)
