@@ -38,6 +38,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provisioning  # noqa: E402
+import config_store  # noqa: E402
 import delegation_status_store  # noqa: E402
 import session_store  # noqa: E402
 import provisioning.config as prov_config  # noqa: E402
@@ -59,6 +60,24 @@ from provisioning import (  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _test_provider_resolver(resolve_provider_ref):
+    def resolve(provider_id: str):
+        if provider_id == "provider":
+            return {"id": provider_id, "supports_fork": True}
+        return resolve_provider_ref(provider_id)
+
+    return resolve
+
+
+@pytest.fixture(autouse=True)
+def _fork_capable_test_provider(monkeypatch):
+    monkeypatch.setattr(
+        config_store,
+        "resolve_provider_ref",
+        _test_provider_resolver(config_store.resolve_provider_ref),
+    )
 
 
 async def _ready_base_without_provider(
@@ -338,6 +357,44 @@ def test_resolve_config_uses_runtime_profile_authority_and_typed_errors() -> boo
     return True
 
 
+def test_custom_config_rejects_unsupported_fork_provider() -> None:
+    class _S(ProvisionedSessionSpec):
+        key = "custom_config_fork_validation"
+        env_prefix = "CUSTOM_CONFIG_FORK_VALIDATION"
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo",
+                model=model or "model",
+                provider_id="custom-direct-only",
+                reasoning_effort="",
+                run_mode="fork",
+                dispatch="http",
+                on_no_fork="error",
+                node_id="primary",
+                backend_url="http://localhost:8000",
+                internal_token="token",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description="worker:custom-config-fork-validation",
+            )
+
+    original_resolve_provider = config_store.resolve_provider_ref
+    config_store.resolve_provider_ref = lambda provider_id: {
+        "id": provider_id,
+        "supports_fork": False,
+    }
+    try:
+        with pytest.raises(
+            getattr(prov_config, "ProvisionedConfigurationError"),
+            match="requires a fork-capable provider",
+        ) as fork_unsupported:
+            resolve_config(_S())
+    finally:
+        config_store.resolve_provider_ref = original_resolve_provider
+    assert fork_unsupported.value.code == "fork_unsupported"
+
+
 def test_fork_capability_checks_never_resolve_credentials() -> bool:
     import config_store
     import provider
@@ -431,10 +488,12 @@ def test_dispatch_sends_resolved_disk_token() -> bool:
         default_model = "model"
 
     token_path = Path(os.environ["BETTER_CLAUDE_HOME"]) / "internal_token"
-    token_path.write_text("disk-dispatch-token", encoding="utf-8")
+    disk_token = "d" * 32
+    token_path.write_text(disk_token, encoding="utf-8")
     original_env = {
         "BETTER_AGENT_INTERNAL_TOKEN": os.environ.get("BETTER_AGENT_INTERNAL_TOKEN"),
         "BETTER_CLAUDE_INTERNAL_TOKEN": os.environ.get("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        "CFG_DISPATCH_TOKEN_PROVIDER_ID": os.environ.get("CFG_DISPATCH_TOKEN_PROVIDER_ID"),
     }
     captured: list[str] = []
     original_post = prov_dispatch._post_ask_fork
@@ -456,6 +515,7 @@ def test_dispatch_sends_resolved_disk_token() -> bool:
     try:
         os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "stale-dispatch-env-token"
         os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "stale-agent-dispatch-env-token"
+        os.environ["CFG_DISPATCH_TOKEN_PROVIDER_ID"] = "provider"
         prov_dispatch._post_ask_fork = fake_post  # type: ignore[assignment]
         asyncio.run(run())
     finally:
@@ -466,7 +526,7 @@ def test_dispatch_sends_resolved_disk_token() -> bool:
             else:
                 os.environ[key] = value
         token_path.unlink(missing_ok=True)
-    ok = captured == ["disk-dispatch-token"]
+    ok = captured == [disk_token]
     print(f"{PASS if ok else FAIL} dispatch uses resolved disk token (captured={captured!r})")
     return ok
 
@@ -1714,12 +1774,17 @@ def test_working_mode_index_stays_compact_across_restart_update_and_delete() -> 
 # ── entry point ───────────────────────────────────────────────────────
 
 def main_run() -> int:
+    original_resolve_provider = config_store.resolve_provider_ref
+    config_store.resolve_provider_ref = _test_provider_resolver(
+        original_resolve_provider,
+    )
     tests = [
         test_dirty_reason,
         test_expired_reason,
         test_spec_and_registry,
         test_resolve_config_overlay,
         test_resolve_config_uses_runtime_profile_authority_and_typed_errors,
+        test_custom_config_rejects_unsupported_fork_provider,
         test_fork_capability_checks_never_resolve_credentials,
         test_resolve_config_uses_current_disk_token,
         test_dispatch_sends_resolved_disk_token,
@@ -1741,20 +1806,24 @@ def main_run() -> int:
         test_working_mode_lookup_uses_explicit_entity_scopes,
         test_working_mode_index_stays_compact_across_restart_update_and_delete,
     ]
-    results = []
-    for fn in tests:
-        try:
-            results.append(fn())
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"{FAIL} {fn.__name__} raised: {e}")
-            results.append(False)
-    n_pass = sum(1 for r in results if r)
-    n_total = len(results)
-    print(f"\n{n_pass}/{n_total} provisioning-framework unit tests passed")
-    shutil.rmtree(os.environ["BETTER_CLAUDE_HOME"], ignore_errors=True)
-    return 0 if n_pass == n_total else 1
+    try:
+        results = []
+        for fn in tests:
+            try:
+                result = fn()
+                results.append(True if result is None else result)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"{FAIL} {fn.__name__} raised: {e}")
+                results.append(False)
+        n_pass = sum(1 for r in results if r)
+        n_total = len(results)
+        print(f"\n{n_pass}/{n_total} provisioning-framework unit tests passed")
+        return 0 if n_pass == n_total else 1
+    finally:
+        config_store.resolve_provider_ref = original_resolve_provider
+        shutil.rmtree(os.environ["BETTER_CLAUDE_HOME"], ignore_errors=True)
 
 
 if __name__ == "__main__":
