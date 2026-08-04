@@ -14,8 +14,6 @@ export function NotesPanel({ notes, onRemove, onEdit, onSendToPrompt }: Props) {
   const { t } = useTranslation();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
-  // Track whether an action button caused the blur so commitEdit can skip
-  const actionBtnPressed = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
@@ -28,18 +26,13 @@ export function NotesPanel({ notes, onRemove, onEdit, onSendToPrompt }: Props) {
   }, [notes, stickToBottom]);
 
   const handleScroll = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    const el = containerRef.current!;
     const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
     setStickToBottom(isAtBottom);
   }, []);
 
   // Hooks must be called before any early returns
   const commitEdit = useCallback(() => {
-    if (actionBtnPressed.current) {
-      actionBtnPressed.current = false;
-      return;
-    }
     if (editingId && editText.trim()) {
       onEdit(editingId, editText.trim());
     }
@@ -52,8 +45,9 @@ export function NotesPanel({ notes, onRemove, onEdit, onSendToPrompt }: Props) {
     setEditText(note.text);
   }, []);
 
+  // Action buttons use onMouseDown + preventDefault so they never blur the
+  // textarea into a commit; clear any in-flight edit, then run the action.
   const handleAction = useCallback((fn: () => void) => {
-    actionBtnPressed.current = true;
     setEditingId(null);
     setEditText("");
     fn();
@@ -83,7 +77,6 @@ export function NotesPanel({ notes, onRemove, onEdit, onSendToPrompt }: Props) {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  actionBtnPressed.current = true;
                   commitEdit();
                 } else if (e.key === "Escape") {
                   setEditingId(null);
