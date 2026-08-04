@@ -4,7 +4,6 @@
 // are passed to t() with NO defaultValue, so under empty-resources config the
 // KEY string renders verbatim (gotcha-24/31); interpolation options are
 // ignored because the resolved string (the key) has no {{project}} slot.
-import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ProjectSuggestion } from "../src/components/ProjectSuggestionModal";
