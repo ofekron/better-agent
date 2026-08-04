@@ -19,13 +19,18 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import delegation_status_store
 import httpx
 from runs_dir import read_best_complete, runs_root
 
 from provisioning.config import ProvisionedConfig
+from provisioning.progress import (
+    MilestoneCallback,
+    delegation_milestone,
+    emit_milestone,
+)
 from provisioning.spec import ProvisionedSessionSpec
 
 logger = logging.getLogger(__name__)
@@ -85,10 +90,24 @@ async def dispatch(
     instructions: str,
     provision_prompt: str,
     client_delegation_id: str = "",
+    milestone_callback: MilestoneCallback | None = None,
 ) -> dict:
     """Run one fork off the provisioned base. Returns the result payload."""
-    if cfg.dispatch == "http":
-        return await _dispatch_http(
+    unsubscribe = _observe_delegation_milestones(
+        client_delegation_id,
+        milestone_callback,
+    )
+    try:
+        if cfg.dispatch == "http":
+            return await _dispatch_http(
+                spec, cfg,
+                base_session_id=base_session_id,
+                caller_session_id=caller_session_id,
+                instructions=instructions,
+                provision_prompt=provision_prompt,
+                client_delegation_id=client_delegation_id,
+            )
+        return await _dispatch_in_process(
             spec, cfg,
             base_session_id=base_session_id,
             caller_session_id=caller_session_id,
@@ -96,13 +115,36 @@ async def dispatch(
             provision_prompt=provision_prompt,
             client_delegation_id=client_delegation_id,
         )
-    return await _dispatch_in_process(
-        spec, cfg,
-        base_session_id=base_session_id,
-        caller_session_id=caller_session_id,
-        instructions=instructions,
-        provision_prompt=provision_prompt,
-        client_delegation_id=client_delegation_id,
+    finally:
+        unsubscribe()
+
+
+def _observe_delegation_milestones(
+    delegation_id: str,
+    callback: MilestoneCallback | None,
+) -> Callable[[], None]:
+    if callback is None or not delegation_id:
+        return lambda: None
+    last_signature: tuple[str, tuple[tuple[str, str], ...]] | None = None
+    signature_lock = threading.Lock()
+
+    def on_status(status: dict[str, Any]) -> None:
+        nonlocal last_signature
+        milestone = delegation_milestone(status)
+        if milestone is None:
+            return
+        name, fields = milestone
+        signature = name, tuple(sorted((key, repr(value)) for key, value in fields.items()))
+        with signature_lock:
+            if signature == last_signature:
+                return
+            last_signature = signature
+        emit_milestone(callback, name, fields)
+
+    return delegation_status_store.subscribe_status(
+        delegation_id,
+        on_status,
+        replay=False,
     )
 
 

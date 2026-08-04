@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import _test_home
 _test_home.isolate("bc-test-provisioning-")
@@ -35,6 +36,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provisioning  # noqa: E402
+import delegation_status_store  # noqa: E402
 import provisioning.config as prov_config  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.inline_spec as inline_spec  # noqa: E402
@@ -952,6 +954,185 @@ def test_run_honors_client_delegation_id_from_ctx() -> bool:
         return False
     print(f"{PASS} run honors client_delegation_id from ctx")
     return True
+
+
+def test_run_emits_provider_neutral_milestones() -> None:
+    spec = _budget_spec(55.0, 7.0)
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
+    observed: list[tuple[str, dict]] = []
+
+    async def fake_dispatch(*args, **kwargs):
+        callback = kwargs["milestone_callback"]
+        callback("delegation_resolving", {"delegation_id": "job-owned-id"})
+        callback("runner_started", {"provider_run_id": "run-1", "worker_pid": 123})
+        return {"success": True, "sdk_output": "ok"}
+
+    try:
+        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
+        prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
+        asyncio.run(prov_manager.run(
+            spec,
+            "query",
+            {"client_delegation_id": "job-owned-id"},
+            milestone_callback=lambda name, fields: observed.append((name, fields)),
+        ))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
+
+    assert [name for name, _fields in observed] == [
+        "provisioning_started",
+        "configuration_resolved",
+        "lifecycle_started",
+        "lifecycle_ready",
+        "dispatch_started",
+        "delegation_resolving",
+        "runner_started",
+        "dispatch_complete",
+        "result_parsed",
+    ]
+    assert observed[1][1]["provider_id"] == spec.build_config().provider_id
+    assert observed[3][1] == {
+        "base_session_id": "base",
+        "caller_session_id": "caller",
+    }
+
+
+def test_run_ignores_milestone_callback_failures() -> None:
+    spec = _budget_spec(55.0, 7.0)
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
+
+    async def fake_dispatch(*_args, **_kwargs):
+        return {"success": True, "sdk_output": "ok"}
+
+    def failing_callback(_name: str, _fields: dict) -> None:
+        raise RuntimeError("milestone sink unavailable")
+
+    try:
+        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
+        prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
+        result = asyncio.run(prov_manager.run(
+            spec,
+            "query",
+            milestone_callback=failing_callback,
+        ))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
+
+    assert result.text == "ok"
+
+
+def test_dispatch_projects_delegation_status_to_milestones() -> None:
+    spec = _budget_spec(55.0, 7.0)
+    cfg = spec.build_config()
+    cfg.dispatch = "in_process"
+    observed: list[tuple[str, dict]] = []
+    original_main = sys.modules.get("main")
+
+    class _Coordinator:
+        async def run_delegation(self, **kwargs):
+            delegation_id = kwargs["client_delegation_id"]
+            delegation_status_store.write_status(delegation_id, status="resolving")
+            delegation_status_store.write_status(delegation_id, status="queued")
+            delegation_status_store.write_status(
+                delegation_id,
+                status="running",
+                provider_id="zai",
+                provider_run_id="run-1",
+                worker_pid=321,
+            )
+            delegation_status_store.write_status(
+                delegation_id,
+                status="running",
+                fork_agent_sid="native-1",
+                jsonl_path="/native/session.jsonl",
+            )
+            return {"success": True, "sdk_output": "ok"}
+
+    sys.modules["main"] = SimpleNamespace(coordinator=_Coordinator())
+    try:
+        asyncio.run(prov_dispatch.dispatch(
+            spec,
+            cfg,
+            base_session_id="base",
+            caller_session_id="caller",
+            instructions="instructions",
+            provision_prompt="provision",
+            client_delegation_id="milestone-dispatch",
+            milestone_callback=lambda name, fields: observed.append((name, fields)),
+        ))
+    finally:
+        if original_main is None:
+            sys.modules.pop("main", None)
+        else:
+            sys.modules["main"] = original_main
+
+    assert [name for name, _fields in observed] == [
+        "delegation_resolving",
+        "delegation_queued",
+        "runner_started",
+        "native_session_started",
+    ]
+    assert observed[-1][1]["native_session_id"] == "native-1"
+    assert observed[-1][1]["native_session_file_path"] == "/native/session.jsonl"
+    assert "milestone-dispatch" not in delegation_status_store._LISTENERS
+
+
+def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
+    spec = _budget_spec(55.0, 7.0)
+    cfg = spec.build_config()
+    observed: list[tuple[str, dict]] = []
+    original_post = prov_dispatch._post_ask_fork
+
+    async def fake_post(_cfg, payload, *, timeout):
+        assert timeout == spec.effective_dispatch_timeout
+        delegation_id = payload["client_delegation_id"]
+        delegation_status_store.write_status(delegation_id, status="resolving")
+        delegation_status_store.write_status(delegation_id, status="queued")
+        delegation_status_store.write_status(
+            delegation_id,
+            status="running",
+            provider_run_id="run-http",
+            worker_pid=654,
+        )
+        return {"success": True, "sdk_output": "ok"}
+
+    try:
+        prov_dispatch._post_ask_fork = fake_post
+        asyncio.run(prov_dispatch.dispatch(
+            spec,
+            cfg,
+            base_session_id="base",
+            caller_session_id="caller",
+            instructions="instructions",
+            provision_prompt="provision",
+            client_delegation_id="milestone-http-dispatch",
+            milestone_callback=lambda name, fields: observed.append((name, fields)),
+        ))
+    finally:
+        prov_dispatch._post_ask_fork = original_post
+
+    assert [name for name, _fields in observed] == [
+        "delegation_resolving",
+        "delegation_queued",
+        "runner_started",
+    ]
+    assert "milestone-http-dispatch" not in delegation_status_store._LISTENERS
 
 
 def test_run_logs_phase_timings_for_debug_requests() -> bool:

@@ -27,6 +27,7 @@ from provisioning.dispatch import (
     extract_fork_text,
 )
 from provisioning.lifecycle import ensure_caller, ensure_session
+from provisioning.progress import MilestoneCallback, emit_milestone
 from provisioning.spec import ProvisionedSessionSpec
 
 _LIFECYCLE_LOCKS: dict[tuple[str, str, str, str, str], threading.Lock] = {}
@@ -67,6 +68,7 @@ async def run(
     ctx: dict | None = None,
     *,
     model: str | None = None,
+    milestone_callback: MilestoneCallback | None = None,
 ) -> ProvisionedResult:
     """Provision-and-fork `query` through `spec`. Raises on dispatch failure
     (after spec.retries). Parse-level failures are the spec's to express in
@@ -74,17 +76,32 @@ async def run(
     total_started = time.perf_counter()
     timings_ms: dict[str, float] = {}
     ctx = dict(ctx or {})
+    emit_milestone(milestone_callback, "provisioning_started")
     phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.resolve_config"):
         cfg = resolve_config(spec, model=model)
     timings_ms["resolve_config_ms"] = _elapsed_ms(phase_started)
+    emit_milestone(
+        milestone_callback,
+        "configuration_resolved",
+        {"provider_id": cfg.provider_id, "model": cfg.model},
+    )
     ctx.setdefault("worker_description", cfg.worker_description)
+    emit_milestone(milestone_callback, "lifecycle_started")
     phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.ensure_lifecycle"):
         base_session_id, caller_session_id = await _ensure_ready_lifecycle(
             spec, cfg, ctx,
         )
     timings_ms["ensure_lifecycle_ms"] = _elapsed_ms(phase_started)
+    emit_milestone(
+        milestone_callback,
+        "lifecycle_ready",
+        {
+            "base_session_id": base_session_id,
+            "caller_session_id": caller_session_id,
+        },
+    )
     debug_request_id = _debug_request_id(ctx)
     client_delegation_id = _client_delegation_id(ctx) or client_delegation_id_for_request(
         spec.key,
@@ -108,6 +125,11 @@ async def run(
         instructions = spec.build_instructions(query, ctx)
         provision_prompt = spec.build_provision_prompt(ctx)
     timings_ms["build_prompts_ms"] = _elapsed_ms(phase_started)
+    emit_milestone(
+        milestone_callback,
+        "dispatch_started",
+        {"delegation_id": client_delegation_id},
+    )
     try:
         phase_started = time.perf_counter()
         with perf.timed(f"provisioning.{spec.key}.dispatch"):
@@ -118,6 +140,7 @@ async def run(
                 instructions=instructions,
                 provision_prompt=provision_prompt,
                 client_delegation_id=client_delegation_id,
+                milestone_callback=milestone_callback,
             )
         timings_ms["dispatch_ms"] = _elapsed_ms(phase_started)
     except Exception as exc:
@@ -137,6 +160,7 @@ async def run(
                 _format_timings(timings_ms),
             )
         raise
+    emit_milestone(milestone_callback, "dispatch_complete")
     if debug_request_id:
         logger.info(
             "provisioned_dispatch_returned spec=%s request_id=%s base_session_id=%s "
@@ -159,6 +183,7 @@ async def run(
     phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.parse_result"):
         value = spec.parse_result(text, ctx)
+    emit_milestone(milestone_callback, "result_parsed")
     timings_ms["parse_result_ms"] = _elapsed_ms(phase_started)
     timings_ms.update(_dispatch_timings(result))
     timings_ms["total_ms"] = _elapsed_ms(total_started)
@@ -363,6 +388,7 @@ def run_sync(
     ctx: dict | None = None,
     *,
     model: str | None = None,
+    milestone_callback: MilestoneCallback | None = None,
 ) -> ProvisionedResult:
     """Sync entry point — runs `run(...)` on a private loop in a worker
     thread, so callers without an event loop (or already inside one) both work."""
@@ -370,7 +396,13 @@ def run_sync(
 
     def _target() -> None:
         try:
-            results.put(("value", asyncio.run(run(spec, query, ctx, model=model))))
+            results.put(("value", asyncio.run(run(
+                spec,
+                query,
+                ctx,
+                model=model,
+                milestone_callback=milestone_callback,
+            ))))
         except BaseException as exc:  # noqa: BLE001 — re-raised on join
             results.put(("error", exc))
 

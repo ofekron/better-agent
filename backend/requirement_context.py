@@ -22,6 +22,7 @@ import provisioning
 import extension_package_loader
 import extension_store
 import transcript_text_collapse
+from provisioning.progress import MilestoneCallback, emit_milestone
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +448,7 @@ def _run_requirements_processor(
     all_projects: bool = False,
     debug_request_id: str = "",
     delegation_id: str = "",
+    milestone_callback: MilestoneCallback | None = None,
 ) -> dict[str, Any]:
     ctx = {
         "cwd": cwd,
@@ -457,6 +459,7 @@ def _run_requirements_processor(
         ctx["_debug_request_id"] = debug_request_id
     if delegation_id:
         ctx["client_delegation_id"] = delegation_id
+    emit_milestone(milestone_callback, "processor_started")
     try:
         spec = _backend_processor_spec(get_requirements_processor_spec())
     except Exception as exc:
@@ -468,9 +471,14 @@ def _run_requirements_processor(
             )
         return processor_failure_result(exc)
     tool_unavailable_retried = False
+    run_kwargs = (
+        {"milestone_callback": milestone_callback}
+        if milestone_callback is not None
+        else {}
+    )
     for _attempt in range(PROCESSOR_ATTEMPTS):
         try:
-            result = provisioning.run_sync(spec, query, ctx)
+            result = provisioning.run_sync(spec, query, ctx, **run_kwargs)
         except Exception as exc:
             recovered = recover_processed_requirements_from_delegation(
                 request_id=debug_request_id,

@@ -84,3 +84,32 @@ def test_write_status_creates_parent_directory():
 def test_write_status_async_wraps_sync_write():
     asyncio.run(store.write_status_async("d4", state="async"))
     assert store.read_status("d4") == {"state": "async"}
+
+
+def test_status_observer_receives_changes_and_can_replay_latest():
+    observed: list[dict] = []
+    unsubscribe = store.subscribe_status("d5", observed.append)
+    store.write_status("d5", status="resolving")
+    store.write_status("d5", status="running", worker_pid=123)
+    unsubscribe()
+    store.write_status("d5", status="complete")
+
+    assert [item["status"] for item in observed] == ["resolving", "running"]
+    assert observed[-1]["worker_pid"] == 123
+
+    replayed: list[dict] = []
+    stop_replay = store.subscribe_status("d5", replayed.append, replay=True)
+    stop_replay()
+    assert replayed == [store.read_status("d5")]
+
+
+def test_status_observer_failure_does_not_break_durable_write():
+    def _boom(_status: dict) -> None:
+        raise RuntimeError("observer failed")
+
+    unsubscribe = store.subscribe_status("d6", _boom)
+    try:
+        store.write_status("d6", status="running", worker_pid=456)
+    finally:
+        unsubscribe()
+    assert store.read_status("d6") == {"status": "running", "worker_pid": 456}

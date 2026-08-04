@@ -223,14 +223,14 @@ def test_phase_timings_complete_once_and_survive_restart() -> None:
         )
         _persist_phase("job-phase-history", "preparing_local_context", "preparing")
         _persist_phase("job-phase-history", "preparing_local_context", "still preparing")
-        _persist_phase("job-phase-history", "processor_running", "running")
+        _persist_phase("job-phase-history", "processor_admitted", "admitted")
         result = await task
         complete = _persist_complete("job-phase-history", result)
         phases = complete["progress"]["phases"]
         assert [item["phase"] for item in phases] == [
             "created",
             "preparing_local_context",
-            "processor_running",
+            "processor_admitted",
         ]
         assert phases[1]["message"] == "still preparing"
         assert all(item["duration_ms"] >= 0 for item in phases)
@@ -255,14 +255,14 @@ def test_phase_progress_is_isolated_between_jobs() -> None:
         first = _fire("job-phase-first", {"query": "first"}, _holds)
         second = _fire("job-phase-second", {"query": "second"}, _holds)
         _persist_phase("job-phase-first", "queued_for_processor", "first queued")
-        _persist_phase("job-phase-second", "processor_running", "second running")
+        _persist_phase("job-phase-second", "processor_admitted", "second admitted")
 
         first_progress = jobs.response_from_record(_read_record("job-phase-first") or {})["progress"]
         second_progress = jobs.response_from_record(_read_record("job-phase-second") or {})["progress"]
         assert first_progress["current_phase"] == "queued_for_processor"
-        assert second_progress["current_phase"] == "processor_running"
+        assert second_progress["current_phase"] == "processor_admitted"
         assert first_progress["message"] == "first queued"
-        assert second_progress["message"] == "second running"
+        assert second_progress["message"] == "second admitted"
 
         release.set()
         await asyncio.gather(first, second)
@@ -278,7 +278,7 @@ def test_failed_job_closes_active_phase_timing() -> None:
             _failing_runner,
             metadata={"phase": "created", "message": "created"},
         )
-        _persist_phase("job-phase-failed", "processor_running", "running")
+        _persist_phase("job-phase-failed", "processor_admitted", "admitted")
         try:
             await task
         except RuntimeError:
@@ -565,6 +565,164 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
     assert processed.get("error") is None
     assert processed["text"] == fork_text
     assert dispatches["count"] == 1, "unparseable text must not trigger a re-dispatch"
+
+
+def test_processor_forwards_milestone_callback_to_provisioning() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+    original_run_sync = requirement_context.provisioning.run_sync
+    observed: list[tuple[str, dict]] = []
+
+    class Spec:
+        pass
+
+    def _run_sync(_spec, _query, _ctx, *, milestone_callback=None):
+        assert milestone_callback is not None
+        milestone_callback("provisioning_started", {})
+        return SimpleNamespace(
+            text="ok",
+            value={"text": "ok"},
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={},
+        )
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: Spec()
+        requirement_context.provisioning.run_sync = _run_sync
+        processed = requirement_context._run_requirements_processor(
+            query="q",
+            cwd="/repo",
+            debug_request_id="job-milestone-forwarding",
+            milestone_callback=lambda name, fields: observed.append((name, fields)),
+        )
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+        requirement_context.provisioning.run_sync = original_run_sync
+
+    assert processed.get("error") is None
+    assert [name for name, _fields in observed] == [
+        "processor_started",
+        "provisioning_started",
+    ]
+
+
+def test_processor_milestones_persist_and_survive_restart() -> None:
+    import requirements_api
+
+    async def scenario() -> None:
+        request_id = "job-milestone-history"
+        task = _fire(
+            request_id,
+            {"query": "q-milestones"},
+            _ok_runner,
+            metadata={"phase": "created", "message": "created"},
+        )
+        requirements_api._persist_requirements_processor_milestone(
+            request_id,
+            "processor_started",
+            {},
+        )
+        requirements_api._persist_requirements_processor_milestone(
+            request_id,
+            "runner_started",
+            {"provider_id": "zai", "provider_run_id": "run-1", "worker_pid": 123},
+        )
+        requirements_api._persist_requirements_processor_milestone(
+            request_id,
+            "native_session_started",
+            {
+                "native_session_id": "native-1",
+                "native_session_file_path": "/native/session.jsonl",
+            },
+        )
+
+        record = _read_record(request_id) or {}
+        assert [item["phase"] for item in record["progress"]["phases"]] == [
+            "created",
+            "processor_started",
+            "runner_started",
+            "native_session_started",
+        ]
+        assert record["provider_id"] == "zai"
+        assert record["provider_run_id"] == "run-1"
+        assert record["native_session_id"] == "native-1"
+        assert record["native_session_file_paths"] == ["/native/session.jsonl"]
+
+        await task
+        _simulate_restart()
+        persisted = _read_record(request_id) or {}
+        assert [item["phase"] for item in persisted["progress"]["phases"]] == [
+            "created",
+            "processor_started",
+            "runner_started",
+            "native_session_started",
+        ]
+        assert persisted["progress"]["phases"][-1]["completed_at"] >= (
+            persisted["progress"]["phases"][-1]["started_at"]
+        )
+        assert persisted["native_session_file_paths"] == ["/native/session.jsonl"]
+
+    asyncio.run(scenario())
+
+
+def test_processed_requirements_job_wires_milestones_end_to_end() -> None:
+    async def scenario() -> None:
+        import requirements_api
+
+        original_prepare = requirement_context.prepare_requirements_local_read_context
+        original_processor = requirement_context._run_requirements_processor
+        original_build = requirement_context.build_processed_requirements_response
+        request_id = "job-milestone-wiring"
+
+        def processor(**kwargs):
+            callback = kwargs["milestone_callback"]
+            callback("processor_started", {})
+            callback("dispatch_started", {"delegation_id": kwargs["delegation_id"]})
+            callback(
+                "native_session_started",
+                {
+                    "native_session_id": "native-wiring",
+                    "native_session_file_path": "/native/wiring.jsonl",
+                },
+            )
+            return {"text": "wired"}
+
+        try:
+            requirement_context.prepare_requirements_local_read_context = lambda: None
+            requirement_context._run_requirements_processor = processor
+            requirement_context.build_processed_requirements_response = (
+                lambda **kwargs: {"success": True, "text": kwargs["processed"]["text"]}
+            )
+            _persist_phase(request_id, "created", "created")
+            result = await requirements_api._run_processed_requirements_payload(
+                {"query": "q", "cwd": "/repo", "cwds": [], "all_projects": False},
+                request_id=request_id,
+            )
+        finally:
+            requirement_context.prepare_requirements_local_read_context = original_prepare
+            requirement_context._run_requirements_processor = original_processor
+            requirement_context.build_processed_requirements_response = original_build
+
+        assert result == {"success": True, "text": "wired"}
+        record = _read_record(request_id) or {}
+        phases = [item["phase"] for item in record["progress"]["phases"]]
+        assert phases == [
+            "created",
+            "preparing_local_context",
+            "queued_for_processor",
+            "processor_admitted",
+            "processor_started",
+            "dispatch_started",
+            "native_session_started",
+            "finalizing",
+        ]
+        running = requirements_api._with_running_requirements_native_session_files(
+            jobs.response_from_record(record),
+            request_id,
+        )
+        assert running["native_session_file_paths"] == ["/native/wiring.jsonl"]
+
+    asyncio.run(scenario())
 
 
 def test_backend_requirements_processor_uses_in_process_dispatch() -> None:

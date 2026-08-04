@@ -38,6 +38,33 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["requirements"])
 
+_PROCESSOR_MILESTONE_MESSAGES = {
+    "processor_started": "Requirements processor worker started",
+    "provisioning_started": "Resolving requirements processor runtime",
+    "configuration_resolved": "Requirements processor runtime resolved",
+    "lifecycle_started": "Preparing requirements processor session",
+    "lifecycle_ready": "Requirements processor session ready",
+    "dispatch_started": "Dispatching requirements processor turn",
+    "delegation_resolving": "Resolving requirements processor delegation",
+    "delegation_queued": "Requirements processor runner queued",
+    "runner_started": "Requirements processor runner started",
+    "native_session_started": "Requirements processor native session started",
+    "dispatch_complete": "Requirements processor turn returned",
+    "result_parsed": "Requirements processor result parsed",
+}
+
+_PROCESSOR_MILESTONE_FIELDS = frozenset({
+    "provider_id",
+    "model",
+    "base_session_id",
+    "caller_session_id",
+    "delegation_id",
+    "provider_run_id",
+    "worker_pid",
+    "worker_agent_session_id",
+    "native_session_id",
+})
+
 
 def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
     require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
@@ -155,8 +182,12 @@ async def _run_processed_requirements_payload(
             on_admitted=functools.partial(
                 _mark_requirements_job_phase,
                 request_id,
-                "processor_running",
-                "Requirements processor is running",
+                "processor_admitted",
+                "Requirements processor capacity admitted",
+            ),
+            milestone_callback=functools.partial(
+                _persist_requirements_processor_milestone,
+                request_id,
             ),
             on_caller_cancelled=functools.partial(
                 _cancel_requirements_processor_delegation,
@@ -214,6 +245,47 @@ async def _mark_requirements_job_phase(request_id: str, phase: str, message: str
             "requirements_async_phase_persist_failed request_id=%s phase=%s",
             request_id,
             phase,
+        )
+
+
+def _persist_requirements_processor_milestone(
+    request_id: str,
+    milestone: str,
+    fields: dict[str, Any],
+) -> None:
+    if not request_id:
+        return
+    message = _PROCESSOR_MILESTONE_MESSAGES.get(milestone)
+    if message is None:
+        logger.warning(
+            "requirements_processor_unknown_milestone request_id=%s milestone=%s",
+            request_id,
+            milestone,
+        )
+        return
+    safe_fields = {
+        key: value
+        for key, value in fields.items()
+        if key in _PROCESSOR_MILESTONE_FIELDS
+    }
+    native_path = fields.get("native_session_file_path")
+    if isinstance(native_path, str) and native_path:
+        safe_fields["native_session_file_paths"] = [native_path]
+    try:
+        extension_jobs.persist_phase(
+            "requirements",
+            "processed",
+            request_id,
+            milestone,
+            message,
+            **safe_fields,
+            **_requirements_processor_queue_fields(),
+        )
+    except (OSError, TypeError, ValueError):
+        logger.warning(
+            "requirements_processor_milestone_persist_failed request_id=%s milestone=%s",
+            request_id,
+            milestone,
         )
 
 
@@ -487,7 +559,15 @@ def _with_running_requirements_native_session_files(
         )
     status = delegation_status_store.read_status(delegation_id)
     path = status.get("jsonl_path") if isinstance(status, dict) else None
-    paths = [path] if isinstance(path, str) and path else []
+    record = extension_jobs.read_record("requirements", "processed", request_id)
+    persisted_paths = record.get("native_session_file_paths") if isinstance(record, dict) else None
+    paths = (
+        [item for item in persisted_paths if isinstance(item, str) and item]
+        if isinstance(persisted_paths, list)
+        else []
+    )
+    if isinstance(path, str) and path and path not in paths:
+        paths.append(path)
     return {**response, "native_session_file_paths": paths}
 
 
