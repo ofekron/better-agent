@@ -29,9 +29,9 @@ export function allocateLoopbackPort(excluded: ReadonlySet<number> = new Set()):
   });
 }
 
-/** Polls `${baseURL}/api/auth/needs_setup` (always-reachable per the
- * installation-bootstrap gate) until it responds OK, or throws if the
- * process exits first or the timeout elapses. */
+/** Polls the backend's real readiness probe until startup projections and
+ * extension cleanup are complete, or throws if the process exits first or
+ * the timeout elapses. */
 export async function waitUntilHealthyOrExit(
   baseURL: string,
   isExited: () => string | null,
@@ -45,7 +45,7 @@ export async function waitUntilHealthyOrExit(
       throw new Error(`${label} process exited before becoming healthy: ${exitDescription}`);
     }
     try {
-      const res = await fetch(`${baseURL}/api/auth/needs_setup`);
+      const res = await fetch(`${baseURL}/readyz`);
       if (res.ok) return;
     } catch {
       // not accepting connections yet

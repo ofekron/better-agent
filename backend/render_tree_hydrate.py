@@ -621,6 +621,16 @@ def _hydrate_msg_events_from_jsonl(
         for idx, (ai, m) in enumerate(assistant_msgs):
             msg_id = m["id"]
             if m.get("isStreaming"):
+                for raw in by_msg_id.get(msg_id, []):
+                    if not _is_worker_row(raw):
+                        continue
+                    strategy.apply_event(
+                        app_session_id=sid,
+                        msg=m,
+                        event=_row_event(raw),
+                        ctx=ctx,
+                        source_is_provider_stream=False,
+                    )
                 continue
 
             # Stub-invalidation detection: every completed assistant msg is

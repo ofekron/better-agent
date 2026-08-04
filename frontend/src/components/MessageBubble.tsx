@@ -2416,9 +2416,15 @@ function messageWithHydratedRenderPayload(
     next.workers = currentWorkers.map((worker) => {
       const hydratedWorker = hydratedWorkers.get(worker.delegation_id);
       hydratedWorkers.delete(worker.delegation_id);
-      return hydratedWorker?.events
-        ? { ...worker, events: hydratedWorker.events }
-        : worker;
+      if (!hydratedWorker) return worker;
+      return {
+        ...worker,
+        ...hydratedWorker,
+        events:
+          mergeEventsByUuid(hydratedWorker.events, worker.events) ??
+          hydratedWorker.events ??
+          worker.events,
+      };
     });
     next.workers.push(...hydratedWorkers.values());
   }

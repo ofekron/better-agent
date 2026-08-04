@@ -1,6 +1,12 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { test, expect } from "./harness/fixtures";
+import {
+  killBackendProcessOnly,
+  spawnBackendAgainstExistingHome,
+} from "./harness/recovery";
 
-test("renders nested Codex child activity and terminal state across reload", async ({
+test("renders journaled Codex children after backend restart and browser reload", async ({
   authedPage: page,
   backend,
 }) => {
@@ -9,87 +15,177 @@ test("renders nested Codex child activity and terminal state across reload", asy
   });
   expect(create.ok()).toBe(true);
   const session = (await create.json()) as { id: string };
-  let running = true;
 
-  const child = (
-    id: string,
-    label: string,
-    success?: boolean,
-    parentDelegationId?: string,
-  ) => ({
-    delegation_id: id,
-    worker_session_id: `thread-${id}`,
-    worker_description: label,
-    panel_kind: "worker",
-    run_mode: "codex_subagent",
-    parent_delegation_id: parentDelegationId,
-    is_new: false,
-    instructions_preview: "",
-    events: [{ type: "output", data: { output: `${label} output` } }],
-    ...(success === undefined ? {} : { success }),
-  });
+  await killBackendProcessOnly(backend);
+  const sessionPath = path.join(backend.homeDir, "sessions", `${session.id}.json`);
+  const tree = JSON.parse(readFileSync(sessionPath, "utf-8")) as Record<string, unknown>;
+  const userMessageId = "u-codex-children";
+  const assistantMessageId = "a-codex-children";
+  tree.messages = [
+    {
+      id: userMessageId,
+      role: "user",
+      content: "coordinate children",
+      events: [],
+      timestamp: "2026-08-04T09:00:00.000Z",
+      isStreaming: false,
+    },
+    {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "parent final",
+      events: [],
+      workers: [],
+      timestamp: "2026-08-04T09:00:01.000Z",
+      isStreaming: false,
+      run_meta: { provider_id: "codex", model: "gpt-5.6-sol" },
+    },
+  ];
+  tree.last_applied_seq = 0;
+  writeFileSync(sessionPath, JSON.stringify(tree));
 
-  await page.route(`**/api/sessions/${encodeURIComponent(session.id)}*`, async (route) => {
-    const response = await route.fetch();
-    const tree = (await response.json()) as Record<string, unknown>;
-    tree.messages = [
+  const eventsDir = path.join(backend.homeDir, "sessions", session.id);
+  mkdirSync(eventsDir, { recursive: true });
+  const childRows = [
+    ["child-a", "First Codex child", "first child output"],
+    ["child-b", "Second Codex child", "second child output"],
+  ].flatMap(([delegationId, label, output], childIndex) => {
+    const firstSeq = childIndex * 3 + 1;
+    return [
       {
-        id: "u-codex-children",
-        role: "user",
-        content: "coordinate children",
-        events: [],
-        timestamp: "2026-08-04T09:00:00.000Z",
-        isStreaming: false,
+        seq: firstSeq,
+        type: "worker_start",
+        data: {
+          delegation_id: delegationId,
+          worker_session_id: `codex-thread-${delegationId}`,
+          worker_description: label,
+          panel_kind: "worker",
+          run_mode: "codex_subagent",
+          is_new: false,
+        },
       },
       {
-        id: "a-codex-children",
-        role: "assistant",
-        content: running ? "parent-only status" : "parent-only final",
-        events: [],
-        timestamp: "2026-08-04T09:00:01.000Z",
-        isStreaming: running,
-        run_meta: { provider_id: "codex", model: "gpt-5.6" },
-        workers: [
-          {
-            ...child("codex-root", "Active Codex child", running ? undefined : true),
-            jsonl_path: "/tmp/sanitized-codex-child.jsonl",
-            new_byte_offset: 42,
+        seq: firstSeq + 1,
+        type: "worker_event",
+        data: {
+          delegation_id: delegationId,
+          event: {
+            type: "agent_message",
+            data: {
+              uuid: `${delegationId}-output`,
+              type: "assistant",
+              message: { content: [{ type: "text", text: output }] },
+            },
           },
-          child("codex-done", "Completed Codex child", true),
-          child("codex-failed", "Failed Codex child", false),
-          child(
-            "codex-nested",
-            "Nested Codex child",
-            running ? undefined : true,
-            "codex-root",
-          ),
-        ],
+        },
+      },
+      {
+        seq: firstSeq + 2,
+        type: "worker_complete",
+        data: { delegation_id: delegationId, success: true },
       },
     ];
-    tree.total_messages = 2;
-    await route.fulfill({ response, body: JSON.stringify(tree) });
-  });
+  }).map((row) => ({
+    ...row,
+    ts: "2026-08-04T09:00:02.000Z",
+    root_id: session.id,
+    sid: session.id,
+    msg_id: assistantMessageId,
+    source: "provider_stream",
+  }));
+  writeFileSync(
+    path.join(eventsDir, "events.jsonl"),
+    `${childRows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+  );
 
-  await page.goto(new URL(`/s/${session.id}`, backend.baseURL).toString());
-  await expect(page.getByTestId("assistant-message")).toBeVisible();
+  const restarted = await spawnBackendAgainstExistingHome(backend);
+  try {
+    const restoredResponse = await page.request.get(
+      `${backend.baseURL}/api/sessions/${session.id}`,
+    );
+    expect(restoredResponse.ok()).toBe(true);
+    const restoredTree = await restoredResponse.json() as {
+      messages: Array<{ id: string; workers?: unknown[] }>;
+    };
+    const restoredAssistant = restoredTree.messages.find(
+      (message) => message.id === assistantMessageId,
+    );
+    expect(
+      restoredAssistant?.workers,
+      JSON.stringify(restoredAssistant),
+    ).toHaveLength(2);
 
-  const expanded = async (label: RegExp) =>
-    page.getByRole("button", { name: label }).getAttribute("aria-expanded");
-  await expect.poll(() => expanded(/Active Codex child/i)).toBe("true");
-  await expect.poll(() => expanded(/Nested Codex child/i)).toBe("true");
-  await expect.poll(() => expanded(/Completed Codex child/i)).toBe("false");
-  await expect.poll(() => expanded(/Failed Codex child/i)).toBe("false");
-  await expect(page.locator(".assistant-run-meta-footer.is-running")).toBeVisible();
+    await page.goto(`${backend.baseURL}/s/${session.id}`);
+    await page.locator(".message-box-header-main").first().click();
+    for (const label of ["First Codex child", "Second Codex child"]) {
+      await expect(page.getByRole("button", { name: new RegExp(label, "i") })).toBeVisible();
+    }
+    await page.getByRole("button", { name: /First Codex child/i }).click();
+    await expect(page.getByText("first child output")).toBeVisible();
+    await expect(page.locator(".assistant-run-meta-footer.is-running")).toHaveCount(0);
 
-  running = false;
-  await page.reload();
-  const summary = page.locator(".collapse-summary");
-  await expect(summary).toHaveText("4 workers");
-  await expect(summary).not.toContainText("Codex child output");
-  await page.locator(".message-box-header-main").click();
-  await expect(page.getByTestId("assistant-message")).toContainText("parent-only final");
+    const internalToken = readFileSync(
+      path.join(backend.homeDir, "internal_token"),
+      "utf-8",
+    ).trim();
+    const liveEvents = [
+      {
+        type: "worker_start",
+        data: {
+          delegation_id: "child-live",
+          worker_session_id: "codex-thread-child-live",
+          worker_description: "Live Codex child",
+          panel_kind: "worker",
+          run_mode: "codex_subagent",
+          is_new: false,
+        },
+      },
+      {
+        type: "worker_event",
+        data: {
+          delegation_id: "child-live",
+          event: {
+            type: "agent_message",
+            data: {
+              uuid: "child-live-output",
+              type: "assistant",
+              message: { content: [{ type: "text", text: "live child output" }] },
+            },
+          },
+        },
+      },
+      {
+        type: "worker_complete",
+        data: { delegation_id: "child-live", success: true },
+      },
+    ];
+    for (const event of liveEvents) {
+      const projected = await page.request.post(
+        `${backend.baseURL}/api/internal/test/project-worker-event`,
+        {
+          headers: { "X-Internal-Token": internalToken },
+          data: {
+            confirm: "PROJECT_WORKER_EVENT_FOR_TESTING",
+            session_id: session.id,
+            msg_id: assistantMessageId,
+            ...event,
+          },
+        },
+      );
+      expect(projected.ok(), await projected.text()).toBe(true);
+    }
+    const liveChild = page.getByRole("button", { name: /Live Codex child/i });
+    await expect(liveChild).toBeVisible();
+    await liveChild.click();
+    await expect(page.getByText("live child output")).toBeVisible();
 
-  await expect.poll(() => expanded(/Active Codex child/i)).toBe("false");
-  await expect.poll(() => expanded(/Nested Codex child/i)).toBe("false");
-  await expect(page.locator(".assistant-run-meta-footer.is-running")).toHaveCount(0);
+    await page.reload();
+    await page.locator(".message-box-header-main").first().click();
+    await expect(page.getByRole("button", { name: /First Codex child/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Second Codex child/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Live Codex child/i })).toBeVisible();
+    await expect(page.locator(".assistant-run-meta-footer.is-running")).toHaveCount(0);
+  } finally {
+    await restarted.stop();
+  }
 });

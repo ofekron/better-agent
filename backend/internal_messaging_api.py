@@ -532,6 +532,139 @@ async def internal_testape_qa_create_sub_session(
     return result
 
 
+@router.post("/api/internal/test/project-worker-event")
+async def internal_test_project_worker_event(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    import paths
+
+    if not paths.is_test_mode():
+        raise HTTPException(status_code=404, detail="not found")
+    if not internal_guards.authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    if set(body) != {"confirm", "session_id", "msg_id", "type", "data"}:
+        raise HTTPException(status_code=400, detail="invalid test event shape")
+    if body["confirm"] != "PROJECT_WORKER_EVENT_FOR_TESTING":
+        raise HTTPException(status_code=400, detail="invalid confirmation")
+
+    session_id = body["session_id"]
+    msg_id = body["msg_id"]
+    event_type = body["type"]
+    data = body["data"]
+    if not all(
+        isinstance(value, str) and 0 < len(value) <= 256
+        for value in (session_id, msg_id)
+    ):
+        raise HTTPException(status_code=400, detail="invalid session or message id")
+    if not isinstance(event_type, str) or event_type not in {
+        "worker_start", "worker_event", "worker_complete",
+    }:
+        raise HTTPException(status_code=400, detail="invalid worker event type")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="worker event data must be an object")
+    import json
+    if len(json.dumps(data)) > 50_000:
+        raise HTTPException(status_code=413, detail="worker event data is too large")
+    delegation_id = data.get("delegation_id")
+    if (
+        not isinstance(delegation_id, str)
+        or not delegation_id
+        or len(delegation_id) > 256
+    ):
+        raise HTTPException(status_code=400, detail="delegation_id is required")
+    allowed_keys = {
+        "worker_start": {
+            "delegation_id", "worker_session_id", "worker_description",
+            "panel_kind", "run_mode", "is_new",
+        },
+        "worker_event": {"delegation_id", "event"},
+        "worker_complete": {"delegation_id", "success", "error"},
+    }[event_type]
+    if set(data) - allowed_keys:
+        raise HTTPException(status_code=400, detail="unexpected worker event fields")
+    if event_type == "worker_start":
+        if set(data) != allowed_keys:
+            raise HTTPException(status_code=400, detail="incomplete worker start")
+        if (
+            not isinstance(data.get("worker_session_id"), str)
+            or not data["worker_session_id"]
+            or len(data["worker_session_id"]) > 256
+            or not isinstance(data.get("worker_description"), str)
+            or not data["worker_description"]
+            or len(data["worker_description"]) > 1_000
+            or data.get("panel_kind") != "worker"
+            or data.get("run_mode") != "codex_subagent"
+            or type(data.get("is_new")) is not bool
+        ):
+            raise HTTPException(status_code=400, detail="invalid worker start")
+    if event_type == "worker_event":
+        if set(data) != allowed_keys:
+            raise HTTPException(status_code=400, detail="incomplete worker event")
+        inner = data.get("event")
+        inner_data = inner.get("data") if isinstance(inner, dict) else None
+        message = inner_data.get("message") if isinstance(inner_data, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if (
+            not isinstance(inner, dict)
+            or set(inner) != {"type", "data"}
+            or inner.get("type") != "agent_message"
+            or not isinstance(inner_data, dict)
+            or set(inner_data) != {"uuid", "type", "message"}
+            or inner_data.get("type") != "assistant"
+            or not isinstance(inner_data.get("uuid"), str)
+            or not inner_data["uuid"]
+            or len(inner_data["uuid"]) > 256
+            or not isinstance(content, list)
+            or not content
+            or len(content) > 8
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"type", "text"}
+                or item.get("type") != "text"
+                or not isinstance(item.get("text"), str)
+                or len(item["text"]) > 20_000
+                for item in content
+            )
+        ):
+            raise HTTPException(status_code=400, detail="invalid nested worker event")
+    if event_type == "worker_complete" and type(data.get("success")) is not bool:
+        raise HTTPException(status_code=400, detail="success must be a boolean")
+    error = data.get("error")
+    if event_type == "worker_complete" and (
+        set(data) not in (
+            {"delegation_id", "success"},
+            {"delegation_id", "success", "error"},
+        )
+        or (error is not None and (not isinstance(error, str) or len(error) > 2_000))
+    ):
+        raise HTTPException(status_code=400, detail="invalid worker completion")
+
+    from event_bus import BusEvent, bus
+    from event_bus_subscribers import await_session_content_projection
+    from session_manager import manager as session_manager
+
+    session = await asyncio.to_thread(session_manager.get, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    if not any(
+        message.get("id") == msg_id
+        for message in session.get("messages") or []
+        if isinstance(message, dict)
+    ):
+        raise HTTPException(status_code=404, detail="message not found")
+
+    await bus.publish(BusEvent(
+        type=event_type,
+        root_id=session_manager.root_id_for(session_id) or session_id,
+        sid=session_id,
+        msg_id=msg_id,
+        payload=data,
+    ))
+    await await_session_content_projection(session_id)
+    return {"success": True}
+
+
 @router.post("/api/internal/test/force-context-overflow")
 async def internal_force_context_overflow(
     body: dict,

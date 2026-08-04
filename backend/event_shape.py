@@ -21,7 +21,9 @@ RENDER_EVENT_TYPES = frozenset({
     "model_switched",
     "steer_prompt",
     "lifecycle_notice",
+    "worker_start",
     "worker_event",
+    "worker_complete",
 })
 
 

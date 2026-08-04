@@ -2223,6 +2223,7 @@ class SessionManager:
         self, msg: dict, events: list[dict],
     ) -> None:
         msg["events"] = []
+        self._restore_worker_panels_from_events(msg, events)
         workers = {
             worker.get("delegation_id"): worker
             for worker in (msg.get("workers") or [])
@@ -2236,7 +2237,10 @@ class SessionManager:
         for event in events:
             if not isinstance(event, dict):
                 continue
-            if event.get("type") != "worker_event":
+            event_type = event.get("type")
+            if event_type in ("worker_start", "worker_complete"):
+                continue
+            if event_type != "worker_event":
                 self._merge_render_event(msg, event)
                 continue
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -2275,15 +2279,12 @@ class SessionManager:
     def _restore_worker_panels_from_events(
         self, msg: dict, events: list[dict],
     ) -> None:
-        existing = [
+        valid_workers = [
             worker for worker in (msg.get("workers") or [])
             if isinstance(worker, dict) and worker.get("delegation_id")
         ]
-        by_delegation = {
-            str(worker.get("delegation_id")): worker
-            for worker in existing
-        }
-        order = [str(worker.get("delegation_id")) for worker in existing]
+        if len(valid_workers) != len(msg.get("workers") or []):
+            msg["workers"] = valid_workers
         for index, event in enumerate(events):
             if not isinstance(event, dict):
                 continue
@@ -2292,30 +2293,24 @@ class SessionManager:
             if not isinstance(delegation_id, str) or not delegation_id:
                 continue
             if event.get("type") == "worker_start":
-                panel = self._worker_panel_from_start(data, index)
-                prior = by_delegation.get(delegation_id)
-                if prior:
-                    retained_events = prior.get("events") or []
-                    prior.update(panel)
-                    prior["events"] = retained_events
-                    panel = prior
-                else:
-                    by_delegation[delegation_id] = panel
-                    order.append(delegation_id)
+                self.project_worker_panel_start(
+                    msg, self._worker_panel_from_start(data, index),
+                )
                 continue
             if event.get("type") == "worker_complete":
-                panel = by_delegation.get(delegation_id)
-                if panel is None:
-                    panel = {
+                panel_exists = any(
+                    worker.get("delegation_id") == delegation_id
+                    for worker in msg.get("workers") or []
+                )
+                if not panel_exists:
+                    self.project_worker_panel_start(msg, {
                         "delegation_id": delegation_id,
                         "worker_session_id": data.get("worker_session_id") or "",
                         "worker_description": delegation_id,
                         "panel_kind": "worker",
                         "insert_at": index,
                         "events": [],
-                    }
-                    by_delegation[delegation_id] = panel
-                    order.append(delegation_id)
+                    })
                 fields = {
                     "worker_session_id": data.get("worker_session_id"),
                     "jsonl_path": data.get("jsonl_path"),
@@ -2326,9 +2321,11 @@ class SessionManager:
                     "fork_agent_sid": data.get("fork_agent_sid"),
                     "run_mode": data.get("run_mode"),
                 }
-                panel.update({k: v for k, v in fields.items() if v is not None})
-        if order:
-            msg["workers"] = [by_delegation[delegation_id] for delegation_id in order]
+                self.project_worker_panel_update(
+                    msg,
+                    delegation_id,
+                    {key: value for key, value in fields.items() if value is not None},
+                )
 
     @staticmethod
     def _summary_may_have_worker_panels(summary: dict) -> bool:
@@ -5750,33 +5747,10 @@ class SessionManager:
         if not delegation_id:
             return None
         def _do(s: dict) -> None:
-            from render_stub import mark_message_content_dirty
-
             m = _find_message(s, msg_id)
             if m is None:
                 return
-            workers = m.setdefault("workers", [])
-            existing = next(
-                (p for p in workers if p.get("delegation_id") == delegation_id),
-                None,
-            )
-            if existing is None:
-                workers.append(panel)
-                if panel.get("events"):
-                    mark_message_content_dirty(m)
-                return
-            events = existing.get("events")
-            existing.update(panel)
-            if reset_events:
-                existing["events"] = []
-                existing.pop("_uid_idx", None)
-                existing.pop("_has_final", None)
-                from render_stub import invalidate_panel_anchor_cache
-                invalidate_panel_anchor_cache(existing)
-            elif events and not panel.get("events"):
-                existing["events"] = events
-            if events or existing.get("events"):
-                mark_message_content_dirty(m)
+            self.project_worker_panel_start(m, panel, reset_events=reset_events)
         return self._run(
             sid, _do,
             {"kind": "worker_panel_upserted", "msg_id": msg_id, "panel": panel},
@@ -5789,20 +5763,10 @@ class SessionManager:
         if not delegation_id:
             return None
         def _do(s: dict) -> None:
-            from render_stub import mark_message_content_dirty
-
             m = _find_message(s, msg_id)
             if m is None:
                 return
-            panel = next(
-                (p for p in m.get("workers") or []
-                 if p.get("delegation_id") == delegation_id),
-                None,
-            )
-            if panel is not None:
-                panel.update(fields)
-                if panel.get("events"):
-                    mark_message_content_dirty(m)
+            self.project_worker_panel_update(m, delegation_id, fields)
         return self._run(
             sid, _do,
             {
@@ -5830,51 +5794,19 @@ class SessionManager:
         existing entry in place (supports streaming updates / cumulative
         snapshots).
 
-        Sole writer for `msg.workers[i].events`. The previous direct
-        mutation at `orchs/manager/_delegation.py:545` is gone — every
-        worker event flows through `apply_event(... worker_event)` →
-        this mutator, mirroring the rule that the primary `msg.events`
-        only mutates via `apply_event`.
+        Every worker event flows through the same projection helper used by
+        `apply_event(... worker_event)`, mirroring the rule that primary
+        `msg.events` has one mutation implementation.
 
         No-op when the msg or the panel can't be resolved (replay
         ordering glitch, ghost delegation_id, etc.) — never crashes the
         caller, never pollutes the primary `msg.events`.
         """
-        # Resolve the inner uuid OUTSIDE _do so the dedup decision and
-        # the mutation are atomic under the per-root lock.
-        from orchs.base import _event_uuid, _uid_idx_for
-        from render_stub import mark_message_content_dirty
-        ev_uuid = _event_uuid(inner_event)
         def _do(s: dict) -> None:
             m = _find_message(s, msg_id)
             if m is None:
                 return
-            workers = m.get("workers") or []
-            panel = next(
-                (p for p in workers
-                 if p.get("delegation_id") == delegation_id),
-                None,
-            )
-            if panel is None:
-                return
-            evs = panel.setdefault("events", [])
-            uid_idx = _uid_idx_for(panel, evs)
-            if ev_uuid:
-                existing_idx = uid_idx.get(ev_uuid)
-                if existing_idx is not None and existing_idx >= len(evs):
-                    panel.pop("_uid_idx", None)
-                    uid_idx = _uid_idx_for(panel, evs)
-                    existing_idx = uid_idx.get(ev_uuid)
-                if existing_idx is not None:
-                    if evs[existing_idx] == inner_event:
-                        return
-                    evs[existing_idx] = inner_event
-                else:
-                    uid_idx[ev_uuid] = len(evs)
-                    evs.append(inner_event)
-            else:
-                evs.append(inner_event)
-            mark_message_content_dirty(m)
+            self.project_worker_panel_event(m, delegation_id, inner_event)
         return self._run(
             sid, _do,
             {
@@ -5885,6 +5817,103 @@ class SessionManager:
             },
             hydrate_events=False,
         )
+
+    @staticmethod
+    def project_worker_panel_start(
+        msg: dict, panel: dict, *, reset_events: bool = False,
+    ) -> bool:
+        from render_stub import (
+            invalidate_panel_anchor_cache,
+            mark_message_content_dirty,
+        )
+
+        delegation_id = str(panel.get("delegation_id") or "")
+        if not delegation_id:
+            return False
+        workers = msg.setdefault("workers", [])
+        existing = next(
+            (
+                worker for worker in workers
+                if worker.get("delegation_id") == delegation_id
+            ),
+            None,
+        )
+        if existing is None:
+            workers.append(panel)
+            if panel.get("events"):
+                mark_message_content_dirty(msg)
+            return True
+        prior_events = existing.get("events")
+        incoming = dict(panel)
+        if prior_events and not reset_events and not incoming.get("events"):
+            incoming.pop("events", None)
+        changed = any(existing.get(key) != value for key, value in incoming.items())
+        existing.update(incoming)
+        if reset_events:
+            changed = changed or existing.get("events") != []
+            existing["events"] = []
+            existing.pop("_uid_idx", None)
+            existing.pop("_has_final", None)
+            invalidate_panel_anchor_cache(existing)
+        if prior_events or existing.get("events"):
+            mark_message_content_dirty(msg)
+        return changed
+
+    @staticmethod
+    def project_worker_panel_update(
+        msg: dict, delegation_id: str, fields: dict,
+    ) -> bool:
+        from render_stub import mark_message_content_dirty
+
+        panel = next(
+            (worker for worker in msg.get("workers") or []
+             if worker.get("delegation_id") == delegation_id),
+            None,
+        )
+        if panel is None:
+            return False
+        changed = any(panel.get(key) != value for key, value in fields.items())
+        if not changed:
+            return False
+        panel.update(fields)
+        if panel.get("events"):
+            mark_message_content_dirty(msg)
+        return True
+
+    @staticmethod
+    def project_worker_panel_event(
+        msg: dict, delegation_id: str, inner_event: dict,
+    ) -> bool:
+        from orchs.base import _event_uuid, _uid_idx_for
+        from render_stub import mark_message_content_dirty
+
+        panel = next(
+            (worker for worker in msg.get("workers") or []
+             if worker.get("delegation_id") == delegation_id),
+            None,
+        )
+        if panel is None:
+            return False
+        events = panel.setdefault("events", [])
+        event_uuid = _event_uuid(inner_event)
+        uid_idx = _uid_idx_for(panel, events)
+        if event_uuid:
+            existing_idx = uid_idx.get(event_uuid)
+            if existing_idx is not None and existing_idx >= len(events):
+                panel.pop("_uid_idx", None)
+                uid_idx = _uid_idx_for(panel, events)
+                existing_idx = uid_idx.get(event_uuid)
+            if existing_idx is not None:
+                if events[existing_idx] == inner_event:
+                    return False
+                events[existing_idx] = inner_event
+            else:
+                uid_idx[event_uuid] = len(events)
+                events.append(inner_event)
+        else:
+            events.append(inner_event)
+        mark_message_content_dirty(msg)
+        return True
 
     def worker_panel_message_id(
         self, sid: str, preferred_msg_id: str, delegation_id: str,

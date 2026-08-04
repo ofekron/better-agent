@@ -74,11 +74,8 @@ class ApplyEventCtx:
     user_msg (so manager_event with a user claude entry can wire the
     rewind anchor).
 
-    `msg["workers"]` itself is NOT mirrored here — `worker_start` /
-    `worker_complete` / `worker_event` write directly into it via
-    `session_manager.upsert_worker_panel` / `update_worker_panel` /
-    `apply_worker_panel_event`, which is the single writer of that
-    state (the fold, both live and replayed).
+    `msg["workers"]` itself is NOT mirrored here. Worker events mutate the
+    supplied message through SessionManager's canonical projection helpers.
     """
     manager_sid_holder: Optional[dict] = None
     user_msg: Optional[dict] = None
@@ -770,12 +767,12 @@ class OrchestrationStrategy(ABC):
         self,
         *,
         app_session_id: str,
-        msg_id: str,
+        msg: dict,
         data: dict,
         ctx: "ApplyEventCtx",
         source_is_provider_stream: bool,
         write_journal: bool,
-    ) -> None:
+    ) -> bool:
         """Route a worker_event to the matching delegation panel.
 
         Worker_event frames wrap a worker's inner agent_message under
@@ -796,7 +793,7 @@ class OrchestrationStrategy(ABC):
         # metadata-free panel.
         from event_shape import is_metadata_event
         if is_metadata_event(inner):
-            return
+            return False
         # Rewrite file refs on the INNER claude-shaped event. The
         # outer worker_event wrapper has no file paths of its own.
         if source_is_provider_stream:
@@ -817,19 +814,27 @@ class OrchestrationStrategy(ABC):
                     "file_ref_resolver rewrite failed for worker_event",
                     exc_info=True,
                 )
-        # Route to the panel; no-op when delegation_id absent or
-        # panel missing (mutator handles both).
+        msg_id = str(msg.get("id") or "")
         target_msg_id = msg_id
+        changed = False
         if delegation_id and inner:
-            target_msg_id = (
-                session_manager.worker_panel_message_id(
-                    app_session_id, msg_id, str(delegation_id),
+            changed = session_manager.project_worker_panel_event(
+                msg, str(delegation_id), inner,
+            )
+            if not changed and not any(
+                panel.get("delegation_id") == delegation_id
+                for panel in msg.get("workers") or []
+            ):
+                target_msg_id = (
+                    session_manager.worker_panel_message_id(
+                        app_session_id, msg_id, str(delegation_id),
+                    )
+                    or msg_id
                 )
-                or msg_id
-            )
-            session_manager.apply_worker_panel_event(
-                app_session_id, target_msg_id, delegation_id, inner,
-            )
+                if target_msg_id != msg_id:
+                    session_manager.apply_worker_panel_event(
+                        app_session_id, target_msg_id, delegation_id, inner,
+                    )
         # events.jsonl gets the OUTER worker_event wrapper so
         # reconcile can re-apply through this same branch.
         self._publish_provider_event(
@@ -841,6 +846,7 @@ class OrchestrationStrategy(ABC):
             msg_id=target_msg_id,
             log_label="apply_event: worker_event ingest failed",
         )
+        return changed
 
     @perf.timed_fn("ingest_orphan")
     def ingest_orphan(
@@ -1001,12 +1007,9 @@ class OrchestrationStrategy(ABC):
     ) -> bool:
         """Apply one session event to the render tree.
 
-        Returns whether this call actually mutated `msg.events` (a
-        genuine append or an in-place data replace for a mutated
-        uuid). `False` covers every case where the render tree ended
-        up byte-identical to how it started: non-render-tree etypes
-        (metadata, worker_start/complete/event, turn_start/complete —
-        none of these touch `msg.events`), and idempotent re-applies
+        Returns whether this call actually mutated the supplied message's
+        render tree. `False` covers every case where it ended up
+        byte-identical to how it started: non-render-tree etypes and idempotent re-applies
         of an already-present uuid with unchanged data (replay,
         reconcile catch-up racing a live-drained row). Callers use
         this instead of a before/after deepcopy-compare (see
@@ -1141,9 +1144,11 @@ class OrchestrationStrategy(ABC):
                     "run_mode": data.get("run_mode"),
                     "token_usage": data.get("token_usage"),
                 }
-                session_manager.upsert_worker_panel(
-                    app_session_id, msg_id, panel, reset_events=reset_events,
+                changed = session_manager.project_worker_panel_start(
+                    msg, panel, reset_events=reset_events,
                 )
+            else:
+                changed = False
             self._publish_provider_event(
                 write_journal,
                 ctx,
@@ -1153,7 +1158,7 @@ class OrchestrationStrategy(ABC):
                 msg_id=msg_id,
                 log_label="apply_event: worker_start ingest failed",
             )
-            return False
+            return changed
 
         if etype == "worker_complete":
             delegation_id = data.get("delegation_id")
@@ -1168,12 +1173,13 @@ class OrchestrationStrategy(ABC):
                     "fork_agent_sid": data.get("fork_agent_sid"),
                     "run_mode": data.get("run_mode"),
                 }
-                session_manager.update_worker_panel(
-                    app_session_id,
-                    msg_id,
+                changed = session_manager.project_worker_panel_update(
+                    msg,
                     str(delegation_id),
                     {k: v for k, v in fields.items() if v is not None},
                 )
+            else:
+                changed = False
             self._publish_provider_event(
                 write_journal,
                 ctx,
@@ -1183,21 +1189,20 @@ class OrchestrationStrategy(ABC):
                 msg_id=msg_id,
                 log_label="apply_event: worker_complete ingest failed",
             )
-            return False
+            return changed
 
         # `worker_event` frames wrap a worker's inner agent_message under
         # `data.event`. They MUST route to the matching panel's events
         # list — NOT to the primary `msg.events`.
         if etype == "worker_event":
-            self._apply_worker_event(
+            return self._apply_worker_event(
                 app_session_id=app_session_id,
-                msg_id=msg_id,
+                msg=msg,
                 data=data,
                 ctx=ctx,
                 source_is_provider_stream=source_is_provider_stream,
                 write_journal=write_journal,
             )
-            return False
 
         # Rewrite file refs BEFORE appending to the session JSON so the
         # persisted events carry bcfile: links.  The ingester also rewrites

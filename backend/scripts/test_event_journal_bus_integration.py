@@ -7,6 +7,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import shutil
 import sys
@@ -27,6 +28,7 @@ from event_bus_subscribers import (  # noqa: E402
     shutdown_session_content_projection,
 )
 from session_manager import manager as session_manager  # noqa: E402
+from render_tree_hydrate import _hydrate_msg_events_from_jsonl  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -116,6 +118,135 @@ async def _run() -> bool:
         "projection barrier preserves journal order",
         str(event_uuids),
     ) and ok
+
+    worker_changes: list[dict] = []
+    worker_deltas_ready = asyncio.Event()
+
+    async def capture_worker_delta(event: BusEvent) -> None:
+        if event.sid != sid:
+            return
+        worker_changes.append(event.payload)
+        if len(worker_changes) == 3:
+            worker_deltas_ready.set()
+
+    delta_subscriber = f"test-worker-deltas-{sid}"
+    session_manager.bind_loop(asyncio.get_running_loop())
+    bus.subscribe(
+        "session.journal_event_projected",
+        capture_worker_delta,
+        name=delta_subscriber,
+        bind_current_loop=True,
+    )
+    worker_id = "codex-child"
+    worker_events = [
+        BusEvent(
+            type="worker_start", root_id=sid, sid=sid, msg_id=msg_id,
+            payload={
+                "delegation_id": worker_id,
+                "worker_session_id": "codex-thread-child",
+                "worker_description": "Codex child",
+                "run_mode": "codex_subagent",
+            },
+        ),
+        BusEvent(
+            type="worker_event", root_id=sid, sid=sid, msg_id=msg_id,
+            payload={
+                "delegation_id": worker_id,
+                "event": {
+                    "type": "agent_message",
+                    "data": {
+                        "uuid": "codex-child-output",
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": "child result"}],
+                        },
+                    },
+                },
+            },
+        ),
+        BusEvent(
+            type="worker_complete", root_id=sid, sid=sid, msg_id=msg_id,
+            payload={"delegation_id": worker_id, "success": True},
+        ),
+    ]
+    try:
+        for worker_event in worker_events:
+            await bus.publish(worker_event)
+        await await_session_content_projection(sid)
+        await asyncio.wait_for(worker_deltas_ready.wait(), timeout=2)
+    finally:
+        bus.unsubscribe(delta_subscriber)
+
+    projected_worker_deltas = [
+        change for change in worker_changes
+        if change.get("kind") == "journal_event_projected"
+        and (change.get("delta") or {}).get("workers")
+    ]
+    current = session_manager.get(sid) or {}
+    current_msg = next(
+        message for message in current.get("messages") or []
+        if message.get("id") == msg_id
+    )
+    current_panel = next(
+        panel for panel in current_msg.get("workers") or []
+        if panel.get("delegation_id") == worker_id
+    )
+    ok = _check(
+        len(projected_worker_deltas) == 3
+        and len(current_panel.get("events") or []) == 1
+        and current_panel.get("success") is True,
+        "worker rows project through journal into canonical deltas",
+        str(projected_worker_deltas),
+    ) and ok
+
+    session_manager.set_streaming(sid, msg_id, True)
+    root = session_manager._load_root(sid, hydrate_events=False)
+    snapshot = session_manager._compute_messages_snapshot(sid, sid, root) or {}
+    snapshot_msg = next(
+        message for message in snapshot.get("messages") or []
+        if message.get("id") == msg_id
+    )
+    snapshot_panel = next(
+        panel for panel in snapshot_msg.get("workers") or []
+        if panel.get("delegation_id") == worker_id
+    )
+    ok = _check(
+        not any(
+            event.get("type") in ("worker_start", "worker_complete")
+            for event in snapshot_msg.get("events") or []
+        )
+        and len(snapshot_panel.get("events") or []) == 1
+        and snapshot_panel.get("success") is True,
+        "streaming snapshot routes every worker lifecycle row to its panel",
+        str(snapshot_msg),
+    ) and ok
+
+    streaming_snapshot = copy.deepcopy(current)
+    streaming_msg = next(
+        message for message in streaming_snapshot.get("messages") or []
+        if message.get("id") == msg_id
+    )
+    streaming_msg["isStreaming"] = True
+    streaming_msg["workers"] = []
+    streaming_msg["events"] = []
+    _hydrate_msg_events_from_jsonl(
+        streaming_snapshot,
+        caller_owns_live_tree=True,
+    )
+    hydrated_panel = next(
+        (
+            panel for panel in streaming_msg.get("workers") or []
+            if panel.get("delegation_id") == worker_id
+        ),
+        None,
+    )
+    ok = _check(
+        hydrated_panel is not None
+        and len(hydrated_panel.get("events") or []) == 1
+        and hydrated_panel.get("success") is True,
+        "streaming reconnect snapshot rebuilds worker panels before watermark",
+        str(streaming_msg),
+    ) and ok
     return ok
 
 
@@ -124,6 +255,10 @@ def main() -> int:
         return 0 if asyncio.run(_run()) else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
+
+
+def test_event_journal_bus_integration() -> None:
+    assert asyncio.run(_run())
 
 
 if __name__ == "__main__":

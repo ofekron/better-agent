@@ -1467,6 +1467,123 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     }
   });
 
+  it("hydrates worker panels omitted from the compact message stub", async () => {
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeAssistantMsg({
+          id: "a1",
+          workers: [{
+            delegation_id: "codex-child",
+            worker_session_id: "codex-thread-child",
+            worker_description: "Hydrated Codex child",
+            panel_kind: "worker",
+            run_mode: "codex_subagent",
+            is_new: false,
+            instructions_preview: "",
+            success: true,
+            events: [{
+              type: "agent_message",
+              data: {
+                uuid: "codex-child-output",
+                type: "assistant",
+                message: { content: [{ type: "text", text: "hydrated child output" }] },
+              },
+            }],
+          }],
+        })),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "delegate" })}
+          responseMessage={makeAssistantMsg({
+            id: "a1",
+            workers: [],
+            omitted_payloads: { events: { revision: "worker-rev", count: 1 } },
+          })}
+          sessionId="s1"
+          initialExpanded={true}
+          orchestrationMode="native"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /Hydrated Codex child/i })).toBeTruthy();
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Hydrated Codex child/i }));
+      expect(screen.getByText("hydrated child output")).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("hydrates terminal worker metadata without losing newer live events", async () => {
+    const realFetch = globalThis.fetch;
+    let resolveFetch!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const worker = {
+      delegation_id: "codex-child",
+      worker_session_id: "codex-thread-child",
+      worker_description: "Hydrating Codex child",
+      panel_kind: "worker" as const,
+      run_mode: "codex_subagent",
+      is_new: false,
+      instructions_preview: "",
+      events: [{ type: "output" as const, data: { output: "newer live output" } }],
+    };
+
+    try {
+      render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "delegate" })}
+          responseMessage={makeAssistantMsg({
+            id: "a1",
+            workers: [worker],
+            omitted_payloads: { events: { revision: "worker-rev", count: 1 } },
+          })}
+          runs={[{
+            run_id: "run-codex-child",
+            kind: "worker",
+            target_message_id: "a1",
+            delegation_id: "codex-child",
+            pid: null,
+            started_at: "2026-08-04T09:00:00Z",
+            last_event_at: "2026-08-04T09:00:01Z",
+          }]}
+          sessionId="s1"
+          initialExpanded={true}
+          orchestrationMode="native"
+        />,
+      );
+
+      const panel = screen.getByRole("button", { name: /Hydrating Codex child/i });
+      expect(panel.getAttribute("aria-expanded")).toBe("true");
+      resolveFetch(new Response(JSON.stringify(makeAssistantMsg({
+        id: "a1",
+        workers: [{
+          ...worker,
+          success: true,
+          events: [{ type: "output", data: { output: "hydrated final output" } }],
+        }],
+      })), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+      await waitFor(() => expect(panel.getAttribute("aria-expanded")).toBe("false"));
+      fireEvent.click(panel);
+      expect(screen.getByText("newer live output")).toBeTruthy();
+      expect(screen.getByText("hydrated final output")).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("never lazily fetches events for a streaming message", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
