@@ -56,6 +56,9 @@ import httpx
 import uvicorn
 import websockets
 from auth_test_helpers import authenticate_async_client
+from live_llm_test_guard import require_live_llm_tests
+
+import _test_home
 
 
 def free_port() -> int:
@@ -96,6 +99,8 @@ class BackgroundUvicorn:
             self.server.should_exit = True
         if self.thread:
             self.thread.join(timeout=10)
+            if self.thread.is_alive():
+                raise RuntimeError("uvicorn did not stop")
 
 
 def _ok(label: str) -> None:
@@ -144,15 +149,11 @@ async def collect_ws_events(
 
 
 async def main() -> int:
-    # Use an ISOLATED Better Agent home so the test never touches the
-    # developer's real ~/.better-claude/. The env var must be set
-    # BEFORE uvicorn imports backend modules (paths.py reads it at
-    # access time, but module-level constants in some modules cache
-    # at import). Set it here in the parent process; the child
-    # uvicorn thread inherits it via os.environ.
-    ba_home = tempfile.mkdtemp(prefix="bc-int-home-")
-    os.environ["BETTER_CLAUDE_HOME"] = ba_home
-    os.environ["BETTER_AGENT_HOME"] = ba_home
+    if not require_live_llm_tests("worker redesign provider smoke"):
+        return 0
+
+    test_home = _test_home.TestHome.acquire("bc-int-home-")
+    ba_home = test_home.path
     os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
     print(f"BETTER_CLAUDE_HOME = {ba_home}")
 
@@ -449,12 +450,8 @@ async def main() -> int:
         return 0 if failures == 0 else 1
     finally:
         server.stop()
-        # Wipe the isolated home — totally safe because BETTER_CLAUDE_HOME
-        # was set to a tempdir at the top of this run.
-        try:
-            shutil.rmtree(ba_home, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(cwd, ignore_errors=True)
+        test_home.release()
 
 
 if __name__ == "__main__":

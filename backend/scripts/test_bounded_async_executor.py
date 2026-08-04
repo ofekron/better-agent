@@ -17,7 +17,6 @@ Pure in-memory module (imports perf only) -> no BETTER_AGENT_HOME needed.
 import asyncio
 import sys
 import threading
-import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,24 @@ def _make(**over):
     base = dict(name="t", max_workers=4, capacity=2, timeout_seconds=2.0)
     base.update(over)
     return bae.BoundedAsyncExecutor(**base)
+
+
+class _ObservableWaiters(deque):
+    def __init__(self) -> None:
+        super().__init__()
+        self._changed = asyncio.Event()
+
+    def append(self, item: Any) -> None:
+        super().append(item)
+        self._changed.set()
+
+    async def wait_for_count(self, count: int) -> None:
+        async def _wait() -> None:
+            while len(self) < count:
+                self._changed.clear()
+                await self._changed.wait()
+
+        await asyncio.wait_for(_wait(), timeout=2.0)
 
 
 def test_fast_path_runs_and_releases_slot() -> None:
@@ -48,21 +65,31 @@ def test_depth_tracks_in_use_during_run() -> None:
     exe = _make(capacity=1, max_workers=1)
     seen: dict[str, int] = {}
     hold = threading.Event()
+    started = threading.Event()
 
     def fn() -> str:
         seen["depth"] = exe.depth()
+        started.set()
         hold.wait(2)
         return "done"
 
     async def body() -> str:
         task = asyncio.create_task(exe.run(fn))
-        await asyncio.sleep(0.1)
-        hold.set()
-        return await task
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            hold.set()
+            return await task
+        finally:
+            hold.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-    assert asyncio.run(body()) == "done"
-    assert seen["depth"] == 1
-    asyncio.run(exe.shutdown())
+    try:
+        assert asyncio.run(body()) == "done"
+        assert seen["depth"] == 1
+    finally:
+        asyncio.run(exe.shutdown())
 
 
 def test_acquire_after_shutdown_raises() -> None:
@@ -90,19 +117,34 @@ def test_queued_waiter_is_granted_on_release() -> None:
         return "first"
 
     async def body() -> None:
+        waiters = _ObservableWaiters()
+        exe._waiters = waiters
         first = asyncio.create_task(exe.run(blocker))
-        assert await asyncio.to_thread(started.wait, 2)
-        assert exe.depth() == 1
-        second = asyncio.create_task(exe.run(lambda: "second"))
-        await asyncio.sleep(0.1)
-        assert exe.depth() == 1  # second is queued, not admitted
-        hold.set()
-        assert await first == "first"
-        assert await second == "second"
-        assert exe.depth() == 0
+        second = None
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            assert exe.depth() == 1
+            second = asyncio.create_task(exe.run(lambda: "second"))
+            await waiters.wait_for_count(1)
+            assert exe.depth() == 1
+            hold.set()
+            assert await first == "first"
+            assert await second == "second"
+            assert exe.depth() == 0
+        finally:
+            hold.set()
+            for task in (first, second):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (first, second) if task is not None),
+                return_exceptions=True,
+            )
 
-    asyncio.run(body())
-    asyncio.run(exe.shutdown())
+    try:
+        asyncio.run(body())
+    finally:
+        asyncio.run(exe.shutdown())
 
 
 def test_timeout_raises_admission_overloaded() -> None:
@@ -126,10 +168,13 @@ def test_timeout_raises_admission_overloaded() -> None:
             hold.set()
             await first
 
-    msg = asyncio.run(body())
-    assert "full" in msg
-    assert exe.depth() == 0
-    asyncio.run(exe.shutdown())
+    try:
+        msg = asyncio.run(body())
+        assert "full" in msg
+        assert exe.depth() == 0
+    finally:
+        hold.set()
+        asyncio.run(exe.shutdown())
 
 
 def test_cancelled_queued_waiter_does_not_leak_slot() -> None:
@@ -142,21 +187,36 @@ def test_cancelled_queued_waiter_does_not_leak_slot() -> None:
         hold.wait(2)
 
     async def body() -> None:
+        waiters = _ObservableWaiters()
+        exe._waiters = waiters
         first = asyncio.create_task(exe.run(blocker))
-        assert await asyncio.to_thread(started.wait, 2)
-        second = asyncio.create_task(exe.run(lambda: time.sleep(0.01)))
-        await asyncio.sleep(0.1)  # second is queued
-        second.cancel()
+        second = None
         try:
-            await second
-        except asyncio.CancelledError:
-            pass
-        hold.set()
-        await first
+            assert await asyncio.to_thread(started.wait, 2)
+            second = asyncio.create_task(exe.run(lambda: None))
+            await waiters.wait_for_count(1)
+            second.cancel()
+            try:
+                await second
+            except asyncio.CancelledError:
+                pass
+            hold.set()
+            await first
+        finally:
+            hold.set()
+            for task in (first, second):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (first, second) if task is not None),
+                return_exceptions=True,
+            )
 
-    asyncio.run(body())
-    assert exe.depth() == 0
-    asyncio.run(exe.shutdown())
+    try:
+        asyncio.run(body())
+        assert exe.depth() == 0
+    finally:
+        asyncio.run(exe.shutdown())
 
 
 def test_shutdown_fails_queued_waiters() -> None:
@@ -276,9 +336,11 @@ class _ConcurrentlyGrantedWaiters:
 
     def __init__(self, real: deque) -> None:
         self._real = real
+        self._added = asyncio.Event()
 
     def append(self, x: Any) -> None:
         self._real.append(x)
+        self._added.set()
 
     def popleft(self) -> Any:
         return self._real.popleft()
@@ -291,6 +353,11 @@ class _ConcurrentlyGrantedWaiters:
 
     def __bool__(self) -> bool:
         return bool(self._real)
+
+    async def wait_until_queued(self) -> None:
+        if self._real:
+            return
+        await asyncio.wait_for(self._added.wait(), timeout=2.0)
 
 
 def test_release_retries_next_waiter_when_call_soon_fails() -> None:
@@ -324,23 +391,34 @@ def test_cancel_after_concurrent_grant_releases_slot() -> None:
 
     async def body() -> None:
         first = asyncio.create_task(exe.run(blocker))
-        assert await asyncio.to_thread(started.wait, 2)
-        second = asyncio.create_task(exe.run(lambda: time.sleep(0.01)))
-        await asyncio.sleep(0.1)  # second queued
-        second.cancel()
+        second = None
         try:
-            await second
-        except asyncio.CancelledError:
-            pass
-        hold.set()
-        await first
+            assert await asyncio.to_thread(started.wait, 2)
+            second = asyncio.create_task(exe.run(lambda: None))
+            await exe._waiters.wait_until_queued()
+            second.cancel()
+            try:
+                await second
+            except asyncio.CancelledError:
+                pass
+            hold.set()
+            await first
+        finally:
+            hold.set()
+            for task in (first, second):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (first, second) if task is not None),
+                return_exceptions=True,
+            )
 
     try:
         asyncio.run(body())
         assert exe.depth() == 0  # granted=True branch released consistently
     finally:
         exe._waiters = real
-    asyncio.run(exe.shutdown())
+        asyncio.run(exe.shutdown())
 
 
 def test_timeout_after_concurrent_grant_releases_slot() -> None:
@@ -370,8 +448,9 @@ def test_timeout_after_concurrent_grant_releases_slot() -> None:
         assert asyncio.run(body()) == "rejected"
         assert exe.depth() == 0  # granted=True branch released consistently
     finally:
+        hold.set()
         exe._waiters = real
-    asyncio.run(exe.shutdown())
+        asyncio.run(exe.shutdown())
 
 
 if __name__ == "__main__":

@@ -38,23 +38,26 @@ pytestmark = pytest.mark.anyio
 
 import asyncio
 import os
-import shutil
 import sys
 import threading
 import time
-
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-native-import-scan-executor-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+
+_TEST_HOME = _test_home.TestHome.acquire("bc-test-native-import-scan-executor-")
+
 import native_import  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
 
 
 async def _unrelated_default_pool_latency() -> float:
@@ -69,20 +72,34 @@ async def _unrelated_default_pool_latency() -> float:
 async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> bool:
     loop = asyncio.get_running_loop()
     workers = native_import._SCAN_EXECUTOR._max_workers
+    started = threading.Barrier(workers + 1)
+    release = threading.Event()
+
+    def block_scan_worker() -> None:
+        started.wait(timeout=5.0)
+        release.wait(timeout=5.0)
+
     futures = [
-        loop.run_in_executor(native_import._SCAN_EXECUTOR, lambda: time.sleep(1.5))
-        for _ in range(workers + 2)
+        loop.run_in_executor(native_import._SCAN_EXECUTOR, block_scan_worker)
+        for _ in range(workers)
     ]
-    await asyncio.sleep(0.1)  # let the saturating work actually start
-    elapsed = await _unrelated_default_pool_latency()
-    ok = elapsed < 0.5
+    try:
+        await asyncio.to_thread(started.wait, 5.0)
+        elapsed = await _unrelated_default_pool_latency()
+    finally:
+        release.set()
+        await asyncio.gather(*futures, return_exceptions=True)
+
+    assert elapsed < 0.5, (
+        f"unrelated default-pool call took {elapsed:.3f}s while the dedicated "
+        f"scan executor was saturated"
+    )
     print(
-        f"{PASS if ok else FAIL} A: unrelated default-pool call took "
-        f"{elapsed:.3f}s while {workers + 2} slow tasks saturated "
+        f"{PASS} A: unrelated default-pool call took "
+        f"{elapsed:.3f}s while {workers} blocked tasks saturated "
         f"native_import._SCAN_EXECUTOR ({workers} workers) (want < 0.5s)"
     )
-    await asyncio.gather(*futures, return_exceptions=True)
-    return ok
+    return True
 
 
 async def test_b_count_native_sessions_async_uses_dedicated_executor() -> bool:
@@ -100,12 +117,13 @@ async def test_b_count_native_sessions_async_uses_dedicated_executor() -> bool:
         native_import.count_native_sessions = original
 
     thread_name = captured.get("thread", "")
-    ok = thread_name.startswith("native-import-scan") and result.get("total") == 0
+    assert thread_name.startswith("native-import-scan"), thread_name
+    assert result.get("total") == 0, result
     print(
-        f"{PASS if ok else FAIL} B: count_native_sessions_async ran on "
+        f"{PASS} B: count_native_sessions_async ran on "
         f"thread '{thread_name}' (want prefix 'native-import-scan')"
     )
-    return ok
+    return True
 
 
 async def _run() -> int:
@@ -123,7 +141,11 @@ def main() -> int:
     try:
         return asyncio.run(_run())
     finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+        _TEST_HOME.release()
+
+
+def teardown_module() -> None:
+    _TEST_HOME.release()
 
 
 if __name__ == "__main__":

@@ -31,8 +31,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Use a tempdir so we don't touch the real session store.
 import _test_home
-_TMP = _test_home.isolate("bc_a1b_")
+_TEST_HOME = _test_home.TestHome.acquire("bc_a1b_")
+_TMP = _TEST_HOME.path
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
+
+
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
+
+
+def teardown_module() -> None:
+    _TEST_HOME.release()
 
 
 def _check(cond: bool, label: str, failures: list[str]) -> None:
@@ -41,86 +50,125 @@ def _check(cond: bool, label: str, failures: list[str]) -> None:
         failures.append(label)
 
 
+class _ChangeProbe:
+    def __init__(self) -> None:
+        self.hits: list[tuple[str, dict]] = []
+        self._delivered: dict[tuple[str, str], asyncio.Event] = {}
+
+    def __call__(self, sid: str, change: dict) -> None:
+        self.hits.append((sid, change))
+        key = (sid, str(change.get("kind")))
+        self._delivered.setdefault(key, asyncio.Event()).set()
+
+    async def wait_for(self, sid: str, kind: str) -> None:
+        key = (sid, kind)
+        if any(
+            hit_sid == sid and change.get("kind") == kind
+            for hit_sid, change in self.hits
+        ):
+            return
+        await asyncio.wait_for(
+            self._delivered.setdefault(key, asyncio.Event()).wait(),
+            timeout=2.0,
+        )
+
+
 async def _run(failures: list[str]) -> None:
     import main
+    import loop_affinity
     from event_bus import bus
+    from event_bus_subscribers import bind_session_ws_broadcaster
 
     sm = main.session_manager
-    # Bind the running loop so `_fire`'s bus path is active for this
-    # test (main.py's startup hook does this too, but we're not going
-    # through on_startup here).
+    previous_sm_loop = sm._loop
+    previous_main_loop = loop_affinity.main_loop()
     sm.bind_loop(asyncio.get_running_loop())
-
-    # 1. Legacy listener list empty at startup
-    _check(
-        len(sm._listeners) == 0,
-        f"session_manager._listeners is empty (got {len(sm._listeners)})",
-        failures,
-    )
-
-    # 2. session_ws_broadcaster_on_change subscriber registered
-    sub_names = {s["name"] for s in bus.describe()}
-    _check(
-        "session_ws_broadcaster_on_change" in sub_names,
-        "bus subscriber `session_ws_broadcaster_on_change` registered",
-        failures,
-    )
-
-    # 3. _fire → bus → on_change end-to-end
-    hits: list[tuple[str, dict]] = []
     orig = main.ws_broadcaster.on_change
-    main.ws_broadcaster.on_change = lambda sid, change: hits.append((sid, change))
-    # Rebind so the subscriber captures the stubbed on_change.
-    from event_bus_subscribers import bind_session_ws_broadcaster
+    probe = _ChangeProbe()
+
+    def legacy_listener(sid_, change_):
+        return None
+
+    live_sids: set[str] = set()
+    main.ws_broadcaster.on_change = probe
     bind_session_ws_broadcaster(main.ws_broadcaster)
 
-    sess = sm.create(name="a1b-test", cwd=_TMP, orchestration_mode="native")
-    sid = sess["id"]
-    await asyncio.sleep(0.05)  # let async dispatch land
-    sm.delete(sid)
-    await asyncio.sleep(0.05)
-
-    kinds = [h[1].get("kind") for h in hits]
-    _check("created" in kinds, "bus subscriber received `created`", failures)
-    _check("deleted" in kinds, "bus subscriber received `deleted`", failures)
-
-    # 4. add_listener emits DeprecationWarning
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        sm.add_listener(lambda sid_, change_: None)
-        deprecated = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    try:
         _check(
-            len(deprecated) >= 1,
-            "add_listener emits DeprecationWarning",
+            len(sm._listeners) == 0,
+            f"session_manager._listeners is empty (got {len(sm._listeners)})",
             failures,
         )
 
-    # Restore for downstream tests (the test process might continue).
-    main.ws_broadcaster.on_change = orig
+        sub_names = {s["name"] for s in bus.describe()}
+        _check(
+            "session_ws_broadcaster_on_change" in sub_names,
+            "bus subscriber `session_ws_broadcaster_on_change` registered",
+            failures,
+        )
 
-    # 5. _fire from a worker thread doesn't crash
-    hits.clear()
-    bind_session_ws_broadcaster(main.ws_broadcaster)
-    main.ws_broadcaster.on_change = lambda sid, change: hits.append((sid, change))
-    sess2 = sm.create(name="a1b-thread", cwd=_TMP, orchestration_mode="native")
+        sess = sm.create(name="a1b-test", cwd=_TMP, orchestration_mode="native")
+        sid = sess["id"]
+        live_sids.add(sid)
+        await probe.wait_for(sid, "created")
+        sm.delete(sid)
+        await probe.wait_for(sid, "deleted")
+        live_sids.remove(sid)
 
-    def thread_work():
-        # `set_archived` is a mutator that calls `_fire` synchronously
-        # under the per-root lock. From a thread, `_fire`'s bus path
-        # must use `run_coroutine_threadsafe` (NOT `loop.create_task`)
-        # to avoid corrupting the asyncio loop.
-        sm.set_archived(sess2["id"], True)
+        kinds = [
+            change.get("kind") for hit_sid, change in probe.hits if hit_sid == sid
+        ]
+        _check("created" in kinds, "bus subscriber received `created`", failures)
+        _check("deleted" in kinds, "bus subscriber received `deleted`", failures)
 
-    await asyncio.to_thread(thread_work)
-    await asyncio.sleep(0.05)
-    archived_kinds = [h[1].get("kind") for h in hits]
-    _check(
-        any(k == "archived_set" for k in archived_kinds),
-        f"_fire from worker thread reaches bus subscriber (kinds: {archived_kinds})",
-        failures,
-    )
-    sm.delete(sess2["id"])
-    main.ws_broadcaster.on_change = orig
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            sm.add_listener(legacy_listener)
+            deprecated = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            _check(
+                len(deprecated) >= 1,
+                "add_listener emits DeprecationWarning",
+                failures,
+            )
+
+        sess2 = sm.create(name="a1b-thread", cwd=_TMP, orchestration_mode="native")
+        sid2 = sess2["id"]
+        live_sids.add(sid2)
+        await probe.wait_for(sid2, "created")
+        await asyncio.to_thread(sm.set_archived, sid2, True)
+        await probe.wait_for(sid2, "archived_set")
+        archived_kinds = [
+            change.get("kind") for hit_sid, change in probe.hits if hit_sid == sid2
+        ]
+        _check(
+            "archived_set" in archived_kinds,
+            f"_fire from worker thread reaches bus subscriber (kinds: {archived_kinds})",
+            failures,
+        )
+        sm.delete(sid2)
+        await probe.wait_for(sid2, "deleted")
+        live_sids.remove(sid2)
+    finally:
+        for sid in live_sids:
+            sm.delete(sid)
+        sm.flush_pending_persists()
+        if legacy_listener in sm._listeners:
+            sm._listeners.remove(legacy_listener)
+        main.ws_broadcaster.on_change = orig
+        bind_session_ws_broadcaster(main.ws_broadcaster)
+        sm._loop = previous_sm_loop
+        if previous_main_loop is None:
+            loop_affinity.reset_for_tests()
+        else:
+            loop_affinity.bind_main_loop(previous_main_loop)
+
+
+def test_session_bus_migration() -> None:
+    failures: list[str] = []
+    asyncio.run(_run(failures))
+    assert not failures, "\n".join(failures)
 
 
 def main_entry() -> int:
@@ -128,8 +176,7 @@ def main_entry() -> int:
     try:
         asyncio.run(_run(failures))
     finally:
-        import shutil
-        shutil.rmtree(_TMP, ignore_errors=True)
+        _TEST_HOME.release()
 
     if failures:
         print(f"\n{len(failures)} FAILURES")

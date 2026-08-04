@@ -57,6 +57,9 @@ import httpx
 import uvicorn
 import websockets
 from auth_test_helpers import authenticate_async_client
+from live_llm_test_guard import require_live_llm_tests
+
+import _test_home
 
 
 def free_port() -> int:
@@ -91,6 +94,8 @@ class BackgroundUvicorn:
             self.server.should_exit = True
         if self.thread:
             self.thread.join(timeout=10)
+            if self.thread.is_alive():
+                raise RuntimeError("uvicorn did not stop")
 
 
 def _ok(label: str): print(f"\033[92mPASS\033[0m  {label}")
@@ -98,11 +103,11 @@ def _fail(label: str, why: str): print(f"\033[91mFAIL\033[0m  {label}: {why}")
 
 
 async def main() -> int:
-    # Isolated state dir — never touches the developer's real
-    # ~/.better-claude/. See integration_test.py for rationale.
-    ba_home = tempfile.mkdtemp(prefix="bc-int-adv-home-")
-    os.environ["BETTER_CLAUDE_HOME"] = ba_home
-    os.environ["BETTER_AGENT_HOME"] = ba_home
+    if not require_live_llm_tests("advanced worker redesign provider smoke"):
+        return 0
+
+    test_home = _test_home.TestHome.acquire("bc-int-adv-home-")
+    ba_home = test_home.path
     os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
     print(f"BETTER_CLAUDE_HOME = {ba_home}")
 
@@ -529,10 +534,8 @@ async def main() -> int:
         return 0 if failures == 0 else 1
     finally:
         server.stop()
-        try:
-            shutil.rmtree(ba_home, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(cwd, ignore_errors=True)
+        test_home.release()
 
 
 if __name__ == "__main__":

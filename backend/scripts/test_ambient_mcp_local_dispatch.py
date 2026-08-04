@@ -8,14 +8,8 @@ every `tools/call` for such a tool failed with "Better Agent runtime broker
 is unavailable" even though `initialize`/`tools/list` succeeded (the
 handshake working is not evidence the tool works). This locks that
 `capabilities`'s ambient launch actually completes a real `tools/call`
-against the live backend, not just a resolver-level or handshake-level
-check.
-
-Requires a real backend reachable at BETTER_CLAUDE_BACKEND_URL (defaults to
-http://localhost:18765, this project's standard dev port) and a real
-session id to target, since `list_capabilities` needs one to resolve
-against. Skips (not fails) if neither is available, matching how other
-live-backend-dependent scripts in this suite behave.
+against an isolated loopback backend, not just a resolver-level or
+handshake-level check.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_ambient_mcp_local_dispatch.py
@@ -27,38 +21,117 @@ import os
 import select
 import subprocess
 import sys
-import urllib.error
-import urllib.request
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-OK = "\033[92mPASS\033[0m"
-FAIL = "\033[91mFAIL\033[0m"
-SKIP = "\033[93mSKIP\033[0m"
+import _test_home  # noqa: E402
 
-_BACKEND_URL = os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:18765")
+_TEST_HOME = _test_home.TestHome.acquire("ba-ambient-mcp-local-dispatch-")
+_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
-def _backend_reachable() -> bool:
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
+
+
+def teardown_module() -> None:
+    _TEST_HOME.release()
+
+
+class _SyntheticBackend(ThreadingHTTPServer):
+    requests: list[dict]
+    daemon_threads = True
+
+
+class _SyntheticBackendHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        size = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(size) or b"{}")
+        server = self.server
+        assert isinstance(server, _SyntheticBackend)
+        server.requests.append({
+            "path": self.path,
+            "body": body,
+            "token": self.headers.get("X-Internal-Token", ""),
+        })
+        if self.path == f"/api/internal/sessions/{_SESSION_ID}/capabilities":
+            payload = {"success": True, "capabilities": [], "active_capability_ids": []}
+            status = 200
+        elif self.path == "/api/internal/open-file-panel":
+            payload = {"success": True, "panel": {"id": "synthetic-panel"}}
+            status = 200
+        else:
+            payload = {"error": "unexpected test endpoint"}
+            status = 404
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, _format: str, *_args) -> None:
+        return
+
+
+@contextmanager
+def _synthetic_backend():
+    server = _SyntheticBackend(("127.0.0.1", 0), _SyntheticBackendHandler)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, name="ambient-mcp-test-backend")
+    thread.start()
     try:
-        urllib.request.urlopen(_BACKEND_URL + "/api/health", timeout=2.0)
-        return True
-    except Exception:
-        try:
-            urllib.request.urlopen(_BACKEND_URL, timeout=2.0)
-            return True
-        except urllib.error.HTTPError:
-            return True  # reachable, just not this exact path
-        except Exception:
-            return False
+        host, port = server.server_address
+        yield f"http://{host}:{port}", server.requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "synthetic backend thread did not stop"
 
 
-def _rpc_session(server_name: str, env: dict[str, str]):
+def _rpc_env(backend_url: str) -> dict[str, str]:
+    return {
+        **os.environ,
+        "BETTER_AGENT_BACKEND_URL": backend_url,
+        "BETTER_CLAUDE_BACKEND_URL": backend_url,
+        "BETTER_AGENT_INTERNAL_TOKEN": "synthetic-token",
+        "BETTER_CLAUDE_INTERNAL_TOKEN": "synthetic-token",
+    }
+
+
+def _stop_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+def _rpc_session(
+    server_name: str,
+    env: dict[str, str],
+    *,
+    ambient_launcher: bool = True,
+):
+    command = (
+        [sys.executable, os.path.join(_BACKEND, "core_ambient_mcp_launcher.py"), server_name]
+        if ambient_launcher
+        else [sys.executable, os.path.join(_BACKEND, f"{server_name}_mcp.py")]
+    )
     proc = subprocess.Popen(
-        [sys.executable, os.path.join(_BACKEND, "core_ambient_mcp_launcher.py"), server_name],
+        command,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env, text=True, bufsize=1,
     )
@@ -73,14 +146,19 @@ def _rpc_session(server_name: str, env: dict[str, str]):
         line = proc.stdout.readline() if ready else None
         return json.loads(line) if line else None
 
-    request({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18", "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"},
-        },
-    })
-    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    try:
+        initialized = request({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        })
+        assert initialized is not None, f"{server_name} MCP initialize timed out"
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    except BaseException:
+        _stop_process(proc)
+        raise
     return proc, request
 
 
@@ -89,185 +167,120 @@ def _rpc_roundtrip(env: dict[str, str], call: dict) -> dict | None:
     try:
         return request({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call})
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+        _stop_process(proc)
 
 
-def _first_real_session_id() -> str:
-    """`list_capabilities` needs a real session to target. Reads the on-disk
-    session store directly (read-only) rather than `session_store.list_sessions()`,
-    which serves an in-memory index that a fresh one-off process never warms."""
-    import re
+def test_ambient_capabilities_call_succeeds_with_local_dispatch() -> None:
+    with _synthetic_backend() as (backend_url, requests):
+        response = _rpc_roundtrip(
+            _rpc_env(backend_url),
+            {"name": "list_capabilities", "arguments": {"session_id": _SESSION_ID}},
+        )
 
-    from paths import bc_home
-
-    sessions_dir = bc_home() / "sessions"
-    if not sessions_dir.is_dir():
-        return ""
-    uuid_re = re.compile(r"^[0-9a-f-]{36}\.json$")
-    for entry in sorted(sessions_dir.iterdir()):
-        if uuid_re.match(entry.name):
-            return entry.name[: -len(".json")]
-    return ""
-
-
-def test_ambient_capabilities_call_succeeds_with_local_dispatch() -> bool:
-    if not _backend_reachable():
-        print(f"{SKIP} no live backend at {_BACKEND_URL}; cannot verify a real tools/call")
-        return True
-    session_id = _first_real_session_id()
-    if not session_id:
-        print(f"{SKIP} no existing session to target with list_capabilities")
-        return True
-    env = {**os.environ}
-    response = _rpc_roundtrip(
-        env,
-        {"name": "list_capabilities", "arguments": {"session_id": session_id}},
-    )
-    is_error = bool((response or {}).get("result", {}).get("isError"))
-    ok = response is not None and not is_error
-    print(f"{OK if ok else FAIL} ambient capabilities tools/call succeeds via local dispatch "
-          f"(response={response})")
-    return ok
+    assert response is not None
+    assert not response.get("result", {}).get("isError"), response
+    assert len(requests) == 1, requests
+    request = requests[0]
+    assert request == {
+        "path": f"/api/internal/sessions/{_SESSION_ID}/capabilities",
+        "body": {"action": "list"},
+        "token": request["token"],
+    }
+    assert request["token"]
 
 
-def test_without_the_ambient_marker_the_call_hits_the_absent_broker() -> bool:
+def test_without_the_ambient_marker_the_call_hits_the_absent_broker() -> None:
     """Regression guard: `core_ambient_mcp_launcher.py` always sets
     `BETTER_CLAUDE_AMBIENT_LAUNCH=1`. Spawning `capabilities_mcp.py` directly
     (bypassing the launcher, so the marker is unset) must fail with the
     broker-unavailable error -- proving the marker, not something else,
     is what makes the ambient call above succeed."""
-    if not _backend_reachable():
-        print(f"{SKIP} no live backend at {_BACKEND_URL}")
-        return True
-    env = {
-        **os.environ,
-        "BETTER_CLAUDE_BACKEND_URL": _BACKEND_URL,
-        "BETTER_CLAUDE_INTERNAL_TOKEN": "not-a-real-token-this-should-never-be-reached",
-    }
-    env.pop("BETTER_CLAUDE_AMBIENT_LAUNCH", None)
-    env.pop("BETTER_AGENT_AMBIENT_LAUNCH", None)
-    proc = subprocess.Popen(
-        [sys.executable, os.path.join(_BACKEND, "capabilities_mcp.py")],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, text=True, bufsize=1,
-    )
-    try:
-        def send(msg: dict) -> None:
-            proc.stdin.write(json.dumps(msg) + "\n")
-            proc.stdin.flush()
-
-        send({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "test", "version": "0"},
-            },
-        })
-        ready, _, _ = select.select([proc.stdout], [], [], 15)
-        if ready:
-            proc.stdout.readline()
-        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        send({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "list_capabilities", "arguments": {"session_id": "irrelevant"}},
-        })
-        ready, _, _ = select.select([proc.stdout], [], [], 15)
-        line = proc.stdout.readline() if ready else None
-        response = json.loads(line) if line else None
-    finally:
-        proc.terminate()
+    with _synthetic_backend() as (backend_url, requests):
+        env = _rpc_env(backend_url)
+        env.pop("BETTER_CLAUDE_AMBIENT_LAUNCH", None)
+        env.pop("BETTER_AGENT_AMBIENT_LAUNCH", None)
+        proc, request = _rpc_session("capabilities", env, ambient_launcher=False)
         try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+            response = request({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "list_capabilities",
+                    "arguments": {"session_id": _SESSION_ID},
+                },
+            })
+        finally:
+            _stop_process(proc)
     text = str(((response or {}).get("result") or {}).get("content", [{}])[0].get("text", ""))
-    ok = "runtime broker" in text.lower()
-    print(f"{OK if ok else FAIL} without the ambient marker, dispatch falls through to the "
-          f"(absent) broker as before (response={response})")
-    return ok
+    assert "runtime broker" in text.lower(), response
+    assert requests == []
 
 
-def test_ambient_ui_tool_list_is_narrowed_to_open_file_panel() -> bool:
+def test_ambient_ui_tool_list_is_narrowed_to_open_file_panel() -> None:
     """request_user_input/request_user_approval/start_file_discussion and
     open_file_panel(mode="inline") all attach to an in-flight turn's
     assistant message, which doesn't exist ambiently -- they must not even
     be advertised (see core_ambient_mcp_launcher.py's docstring)."""
-    if not _backend_reachable():
-        print(f"{SKIP} no live backend at {_BACKEND_URL}")
-        return True
-    proc, request = _rpc_session("ui", {**os.environ})
-    try:
-        response = request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-    finally:
-        proc.terminate()
+    with _synthetic_backend() as (backend_url, requests):
+        proc, request = _rpc_session("ui", _rpc_env(backend_url))
         try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+            response = request({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+            })
+        finally:
+            _stop_process(proc)
     names = sorted(
         tool.get("name") for tool in ((response or {}).get("result") or {}).get("tools", [])
     )
-    ok = names == ["open_file_panel"]
-    print(f"{OK if ok else FAIL} ambient ui server only advertises open_file_panel (got {names})")
-    return ok
+    assert names == ["open_file_panel"]
+    assert requests == []
 
 
-def test_ambient_open_file_panel_mode_panel_succeeds_and_is_cleaned_up() -> bool:
+def test_ambient_open_file_panel_mode_panel_succeeds() -> None:
     """mode='panel' is a plain per-session state mutation, not tied to any
     in-flight turn -- it's the one ui tool that can do real ambient work."""
-    if not _backend_reachable():
-        print(f"{SKIP} no live backend at {_BACKEND_URL}")
-        return True
-    session_id = _first_real_session_id()
-    if not session_id:
-        print(f"{SKIP} no existing session to target with open_file_panel")
-        return True
-    proc, request = _rpc_session("ui", {**os.environ})
-    panel_id = ""
-    try:
-        response = request({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {
-                "name": "open_file_panel",
-                "arguments": {
-                    "mode": "panel",
-                    "path": "backend/scripts/test_ambient_mcp_local_dispatch.py",
-                    "session_id": session_id,
-                },
-            },
-        })
-    finally:
-        proc.terminate()
+    with _synthetic_backend() as (backend_url, requests):
+        proc, request = _rpc_session("ui", _rpc_env(backend_url))
         try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+            response = request({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "open_file_panel",
+                    "arguments": {
+                        "mode": "panel",
+                        "path": "backend/scripts/test_ambient_mcp_local_dispatch.py",
+                        "session_id": _SESSION_ID,
+                    },
+                },
+            })
+        finally:
+            _stop_process(proc)
     is_error = bool((response or {}).get("result", {}).get("isError"))
-    try:
-        text = response["result"]["content"][0]["text"]
-        body = json.loads(text)
-        panel_id = str((body.get("panel") or {}).get("id") or "")
-    except Exception:
-        body = None
-    ok = response is not None and not is_error and bool(panel_id)
-    if panel_id:
-        from session_manager import manager as session_manager
-
-        session_manager.remove_open_file_panel(session_id, panel_id, client_id=None)
-    print(f"{OK if ok else FAIL} ambient open_file_panel(mode='panel') succeeds and is cleaned "
-          f"up (response={response})")
-    return ok
+    assert response is not None and not is_error, response
+    body = json.loads(response["result"]["content"][0]["text"])
+    assert body["panel"]["id"] == "synthetic-panel"
+    assert len(requests) == 1, requests
+    request = requests[0]
+    assert request == {
+        "path": "/api/internal/open-file-panel",
+        "body": {
+            "app_session_id": _SESSION_ID,
+            "mode": "panel",
+            "path": "backend/scripts/test_ambient_mcp_local_dispatch.py",
+            "start_line": None,
+            "end_line": None,
+            "selected_start": None,
+            "selected_end": None,
+        },
+        "token": request["token"],
+    }
+    assert request["token"]
 
 
 if __name__ == "__main__":
-    results = [
-        fn()
-        for name, fn in sorted(globals().items())
+    tests = [
+        fn for name, fn in sorted(globals().items())
         if name.startswith("test_") and callable(fn)
     ]
-    print(f"\n{sum(1 for r in results if r)}/{len(results)} ambient MCP local-dispatch tests passed")
-    raise SystemExit(0 if all(results) else 1)
+    for test in tests:
+        test()
+    print(f"\n{len(tests)}/{len(tests)} ambient MCP local-dispatch tests passed")

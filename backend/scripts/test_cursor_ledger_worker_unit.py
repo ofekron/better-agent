@@ -10,25 +10,27 @@ never joined before the coverage report, so the loop-exit branch isn't
 captured). This file drives each directly with real assertions and joins
 every worker thread it starts.
 
-State isolation: a throwaway BETTER_AGENT_HOME via `paths.engage_test_home`
-before any backend import (project rule).
+State isolation: a throwaway BETTER_AGENT_HOME via `_test_home` before any
+backend import.
 """
 from __future__ import annotations
 
 import logging
 import sys
-import tempfile
 import threading
-import time
 from pathlib import Path
 
-_TEST_HOME = tempfile.mkdtemp(prefix="ba-clw-unit-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import paths  # noqa: E402
 
-paths.engage_test_home(_TEST_HOME)
+import _test_home
+
+_TEST_HOME = _test_home.TestHome.acquire("ba-clw-unit-")
 
 import cursor_ledger_worker as clw  # noqa: E402
+
+
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
 
 
 def _stop(worker: clw.CursorLedgerWorker) -> None:
@@ -37,6 +39,23 @@ def _stop(worker: clw.CursorLedgerWorker) -> None:
     worker.stop()
     worker._thread.join(timeout=3.0)
     assert not worker._thread.is_alive(), "worker thread did not exit"
+
+
+class _ObservedIdleEvents(dict[str, threading.Event]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.created = threading.Event()
+        self.reused = threading.Event()
+
+    def get(self, key, default=None):
+        event = super().get(key, default)
+        if event is not None:
+            self.reused.set()
+        return event
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self.created.set()
 
 
 # ---------------------------------------------------------------------------
@@ -63,23 +82,26 @@ def test_process_key_noop_when_nothing_pending():
 
 def test_write_exception_is_caught_and_logged(caplog):
     w = clw.CursorLedgerWorker(name="unit-exc")
+    proceed = threading.Event()
     try:
         started = threading.Event()
 
         def bad_write() -> None:
             started.set()
-            time.sleep(0.15)
+            proceed.wait(3.0)
             raise RuntimeError("persist boom")
 
         caplog.set_level(logging.ERROR, logger="cursor_ledger_worker")
         w.note("k", bad_write)
         assert started.wait(2.0), "write never started"
-        # flush_now blocks until the worker's finally clears in_flight and sets
-        # the idle event — proving the exception path still completes cleanup.
+        # Releasing the write lets flush_now observe the exception path's
+        # finally cleanup rather than relying on a duration guess.
+        proceed.set()
         assert w.flush_now("k", timeout=3.0) is True
         assert "k" not in w._in_flight
         assert any("write failed" in rec.message for rec in caplog.records)
     finally:
+        proceed.set()
         _stop(w)
 
 
@@ -93,9 +115,12 @@ def test_flush_now_reuses_existing_idle_event():
     event already created (the `event is None` False branch), not create a
     second one."""
     w = clw.CursorLedgerWorker(name="unit-reuse")
+    proceed = threading.Event()
+    threads: list[threading.Thread] = []
     try:
         started = threading.Event()
-        proceed = threading.Event()
+        observed = _ObservedIdleEvents()
+        w._idle_events = observed
 
         def slow() -> None:
             started.set()
@@ -108,25 +133,32 @@ def test_flush_now_reuses_existing_idle_event():
         def flusher():
             results.append(w.flush_now("k", timeout=5.0))
 
-        t1 = threading.Thread(target=flusher)
-        t2 = threading.Thread(target=flusher)
-        t1.start()
-        t2.start()
-        time.sleep(0.2)  # both flushers parked; only one created the event
+        threads = [
+            threading.Thread(target=flusher, name="cursor-flush-first"),
+            threading.Thread(target=flusher, name="cursor-flush-second"),
+        ]
+        threads[0].start()
+        assert observed.created.wait(2.0), "first flusher did not create an idle event"
+        threads[1].start()
+        assert observed.reused.wait(2.0), "second flusher did not reuse the idle event"
         assert len(w._idle_events) == 1  # reused, not duplicated
         proceed.set()
-        t1.join(5.0)
-        t2.join(5.0)
+        for thread in threads:
+            thread.join(5.0)
+            assert not thread.is_alive(), f"{thread.name} did not exit"
         assert results == [True, True]
     finally:
+        proceed.set()
+        for thread in threads:
+            thread.join(5.0)
         _stop(w)
 
 
 def test_flush_now_returns_false_on_timeout():
     w = clw.CursorLedgerWorker(name="unit-timeout")
+    proceed = threading.Event()
     try:
         started = threading.Event()
-        proceed = threading.Event()
 
         def slow() -> None:
             started.set()
@@ -138,6 +170,7 @@ def test_flush_now_returns_false_on_timeout():
         proceed.set()
         assert w.flush_now("k", timeout=3.0) is True  # eventually lands
     finally:
+        proceed.set()
         _stop(w)
 
 
@@ -159,9 +192,9 @@ def test_note_coalesces_in_flight_key_without_requeue():
     (already_scheduled True); the worker picks it up via the requeue path in
     its finally block."""
     w = clw.CursorLedgerWorker(name="unit-coalesce")
+    proceed = threading.Event()
     try:
         started = threading.Event()
-        proceed = threading.Event()
         written: list[str] = []
 
         def slow(v: str) -> None:
@@ -182,16 +215,18 @@ def test_note_coalesces_in_flight_key_without_requeue():
         assert written[-1] == "v4"
         assert len(written) <= 3  # coalescing dropped the middle ones
     finally:
+        proceed.set()
         _stop(w)
 
 
 def test_worker_loop_exits_on_stop():
-    """stop() must break the `while not self._stop.is_set()` loop; joining the
-    thread (in _stop) captures the loop-exit branch and proves clean exit."""
+    """stop() must break the worker loop and permit a clean join."""
     w = clw.CursorLedgerWorker(name="unit-exit")
     done = threading.Event()
     w.note("k", lambda: done.set())
     assert done.wait(2.0)
-    # Idle past the queue.get timeout so the queue.Empty branch fires too.
-    time.sleep(0.6)
     _stop(w)  # asserts the thread is dead
+
+
+def teardown_module() -> None:
+    _TEST_HOME.release()

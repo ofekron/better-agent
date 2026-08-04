@@ -12,31 +12,48 @@ import threading
 import time
 from pathlib import Path
 
-from starlette.requests import ClientDisconnect
-
-TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-extension-backend-"))
-import _test_home
-_test_home.isolate("ba-test-")
-os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "test-extension-backend-token"
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import _test_home
+
+_TEST_HOME = _test_home.TestHome.acquire("ba-test-extension-backend-")
+TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-extension-backend-"))
+os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "test-extension-backend-token"
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.requests import ClientDisconnect  # noqa: E402
 
 import extension_api  # noqa: E402
 import extension_backend_loader  # noqa: E402
 import extension_store  # noqa: E402
 import installation_profile  # noqa: E402
 import project_update_store  # noqa: E402
+import _test_installation  # noqa: E402
 from paths import ba_home, encode_cwd  # noqa: E402
+
+MACHINE_NODES_EXTENSION_ID = "test.machine-nodes"
+PROJECT_STRUCTURE_EXTENSION_ID = "test.project-structure"
+
+
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
 
 
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
     print(f"PASS {message}")
+
+
+def _wait_for_path(path: Path, *, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 class _DisconnectingRequest:
@@ -57,11 +74,7 @@ def _configure_internal_llm_defaults() -> None:
 
     provider = config_store.list_providers()["providers"][0]
     config_store.set_internal_llm_assignments({
-        "default_session": {
-            "provider_id": provider["id"],
-            "model": provider["default_model"],
-            "reasoning_effort": provider.get("default_reasoning_effort") or "",
-        }
+        "default_session": _test_installation.default_llm_assignment(provider["id"])
     })
 
 
@@ -122,6 +135,17 @@ def _seed_extension() -> Path:
                 "    @router.get('/sleep2')",
                 "    def sleep2():",
                 "        time.sleep(2)",
+                "        return {'ok': True}",
+                "    @router.get('/overlap')",
+                "    def overlap():",
+                "        entered = context.install_path / 'overlap.entered'",
+                "        release = context.install_path / 'overlap.release'",
+                "        entered.write_text('entered', encoding='utf-8')",
+                "        deadline = time.monotonic() + 5",
+                "        while not release.exists():",
+                "            if time.monotonic() >= deadline:",
+                "                raise RuntimeError('overlap route was not released')",
+                "            time.sleep(0.01)",
                 "        return {'ok': True}",
                 "    @router.get('/sleep-short')",
                 "    def sleep_short():",
@@ -256,7 +280,7 @@ def _seed_module_backend_extension() -> Path:
     return package
 
 
-def _seed_core_builtin_without_backend(extension_id: str) -> None:
+def _seed_core_builtin_without_backend(extension_id: str, core_role: str) -> None:
     data = extension_store._load()  # type: ignore[attr-defined]
     data["extensions"][extension_id] = {
         "manifest": {
@@ -266,6 +290,7 @@ def _seed_core_builtin_without_backend(extension_id: str) -> None:
             "version": "1.0.0",
             "description": "",
             "surfaces": ["backend_feature"],
+            "core_roles": [core_role],
             "entrypoints": {},
             "permissions": {},
             "marketplace": {},
@@ -449,6 +474,7 @@ def _check_projection_response_singleflight() -> None:
 def main() -> int:
     original_integrations_enabled = installation_profile.integrations_enabled
     installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
+    client: TestClient | None = None
     try:
         app = FastAPI()
         app.include_router(extension_api.router)
@@ -458,7 +484,7 @@ def main() -> int:
         for extension_id in ("ofek.backend", "ofek.compiled-backend"):
             extension_store.grant_consent(extension_id)
             extension_store.set_enabled(extension_id, True)
-        _seed_core_builtin_without_backend(extension_store.extension_id_for_role('machine-nodes'))
+        _seed_core_builtin_without_backend(MACHINE_NODES_EXTENSION_ID, "machine-nodes")
         client = TestClient(app)
         _check_projection_response_singleflight()
 
@@ -751,7 +777,6 @@ def main() -> int:
         # Multiplexed transport abandons the timed-out request but keeps the
         # process alive so concurrent/subsequent requests keep working.
         pid = int((package / "slow.pid").read_text(encoding="utf-8"))
-        time.sleep(0.2)
         try:
             os.kill(pid, 0)
             alive = True
@@ -850,26 +875,51 @@ def main() -> int:
             "backend_retry_on_exit does not prefix-match routes",
         )
 
-        # Concurrency: a fast route must return while a slow route is in flight
+        # Concurrency: a fast route must return while a blocked route is in flight
         # on the SAME extension subprocess — requests are multiplexed, not
-        # serialized behind one lock. Pre-multiplex this fast call would queue
-        # behind the 2s /sleep2 and take ~2s.
+        # serialized behind one lock.
         concurrent_results: dict[str, tuple[int, float]] = {}
+        concurrent_errors: list[BaseException] = []
+        overlap_entered = package / "overlap.entered"
+        overlap_release = package / "overlap.release"
+        overlap_entered.unlink(missing_ok=True)
+        overlap_release.unlink(missing_ok=True)
 
-        def _fire(key: str, route: str) -> None:
-            t0 = time.monotonic()
-            r = client.get(f"/api/extensions/ofek.backend/backend/{route}")
-            concurrent_results[key] = (r.status_code, time.monotonic() - t0)
+        def _fire(key: str, route: str, done: threading.Event) -> None:
+            try:
+                t0 = time.monotonic()
+                r = client.get(f"/api/extensions/ofek.backend/backend/{route}")
+                concurrent_results[key] = (r.status_code, time.monotonic() - t0)
+            except BaseException as exc:
+                concurrent_errors.append(exc)
+            finally:
+                done.set()
 
-        run_start = time.monotonic()
-        bg = threading.Thread(target=_fire, args=("slow", "sleep2"))
+        slow_done = threading.Event()
+        fast_done = threading.Event()
+        bg = threading.Thread(target=_fire, args=("slow", "overlap", slow_done))
+        fast_bg: threading.Thread | None = None
         bg.start()
-        time.sleep(0.4)  # let /sleep2 reach the extension and start sleeping
-        _fire("fast", "ping")
-        fast_total = time.monotonic() - run_start
+        route_entered = False
+        fast_completed_while_blocked = False
+        try:
+            route_entered = _wait_for_path(overlap_entered)
+            if route_entered:
+                fast_bg = threading.Thread(target=_fire, args=("fast", "ping", fast_done))
+                fast_bg.start()
+                fast_completed_while_blocked = fast_done.wait(timeout=1.5)
+        finally:
+            overlap_release.write_text("release", encoding="utf-8")
+            slow_done.wait(timeout=3)
+            bg.join(timeout=1)
+            if fast_bg is not None:
+                fast_bg.join(timeout=1)
+        check(route_entered, "blocked route reports that it entered the extension process")
+        check(fast_completed_while_blocked, "fast route finishes before the blocked route is released")
+        check(not bg.is_alive(), "blocked route thread is joined after release")
+        check(fast_bg is not None and not fast_bg.is_alive(), "fast route thread is joined")
+        check(not concurrent_errors, "concurrent extension requests finish without thread errors")
         check(concurrent_results["fast"][0] == 200, "fast route returns 200 while a slow route is in flight")
-        check(fast_total < 1.8, "fast route is not head-of-line-blocked by the in-flight slow route")
-        bg.join()
         check(concurrent_results["slow"][0] == 200, "concurrent slow route also completes")
 
         async def _check_get_coalescing() -> None:
@@ -977,7 +1027,7 @@ def main() -> int:
         response = client.get(f"/api/extensions/{extension_store.extension_id_for_role('machine-nodes')}/backend/pending_nodes")
         check(response.status_code == 200, "core built-in backend compatibility route returns")
         check(response.json() == {"pending_nodes": []}, "machine-node pending fallback returns empty snapshot")
-        _seed_core_builtin_without_backend(extension_store.extension_id_for_role('project-structure'))
+        _seed_core_builtin_without_backend(PROJECT_STRUCTURE_EXTENSION_ID, "project-structure")
         project_id = encode_cwd(str(TMP_HOME))
         project_update_store.append(project_id, "changed")
         response = client.post(
@@ -1015,8 +1065,16 @@ def main() -> int:
     finally:
         installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         os.environ.pop("BETTER_CLAUDE_INTERNAL_TOKEN", None)
+        if client is not None:
+            client.close()
+        extension_backend_loader.shutdown_persistent_backends()
         shutil.rmtree(TMP_HOME, ignore_errors=True)
+        _TEST_HOME.release()
     return 0
+
+
+def test_extension_backend_loader() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

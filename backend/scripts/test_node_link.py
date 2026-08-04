@@ -12,22 +12,17 @@ Isolation: real BETTER_AGENT_HOME tempdir, real pending_node_registrations
 per test. No real WebSocket / backend / network.
 """
 import asyncio
-import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import paths  # noqa: E402
+import _test_home
 
-_TMP = tempfile.mkdtemp(prefix="node_link_")
-import atexit  # noqa: E402
-
-atexit.register(lambda: shutil.rmtree(_TMP, ignore_errors=True))
-paths.engage_test_home(_TMP)
+_TEST_HOME = _test_home.TestHome.acquire("node_link_")
+_TMP = _TEST_HOME.path
 
 import node_link  # noqa: E402
 import node_store  # noqa: E402
@@ -37,6 +32,10 @@ import shadow_jsonl  # noqa: E402
 from topology import NodeSpec  # noqa: E402
 from fastapi import WebSocketDisconnect  # noqa: E402
 from node_protocol import PROTOCOL_VERSION  # noqa: E402
+
+
+def setup_function(_function) -> None:
+    _test_home.engage(_TEST_HOME.path)
 
 
 def _reset_modules():
@@ -67,22 +66,42 @@ class _FakeClient:
         self.host = host
 
 
-class _FakeWS:
+class _SentFrameProbe:
+    def _init_sent_frames(self):
+        self.sent = []
+        self._frame_sent = asyncio.Event()
+
+    def _record_sent_frame(self, obj):
+        self.sent.append(obj)
+        self._frame_sent.set()
+
+    async def wait_for_sent_frame(self, frame_type, *, timeout=2.0):
+        async def _wait():
+            while True:
+                for frame in self.sent:
+                    if frame.get("type") == frame_type:
+                        return frame
+                self._frame_sent.clear()
+                await self._frame_sent.wait()
+
+        return await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+class _FakeWS(_SentFrameProbe):
     """Minimal WebSocket stand-in for send/client/url + receive_json."""
 
     def __init__(self, *, scheme="ws", host="127.0.0.1", inbox=None):
         self.url = _FakeURL(scheme)
         self.client = _FakeClient(host)
-        self.sent = []
+        self._init_sent_frames()
         self._inbox = inbox or []
         self.closed = False
 
     async def send_json(self, obj):
-        self.sent.append(obj)
+        self._record_sent_frame(obj)
 
     async def receive_json(self):
         if not self._inbox:
-            await asyncio.sleep(0.05)
             raise asyncio.TimeoutError
         return self._inbox.pop(0)
 
@@ -560,15 +579,19 @@ def test_await_registration_happy_path_resolves_on_approval():
     ws = _FakeWS()
 
     async def _scenario():
-        # Run await in a task; approve it mid-flight from the outside.
-        task = asyncio.ensure_future(
+        task = asyncio.create_task(
             node_link._await_registration(ws, "happy-n", "topsecret",
                                           {"address": "9.9.9.9", "cwd_roots": [str(Path(_TMP))]})
         )
-        await asyncio.sleep(0.02)  # let it register a waiter + send pending frame
-        # Approve via the public path so the waiter is resolved with a spec.
-        await node_link.approve_registration("happy-n")
-        return await asyncio.wait_for(task, timeout=2.0)
+        try:
+            await ws.wait_for_sent_frame("registration_pending")
+            assert "happy-n" in node_link._node_approval_waiters
+            await node_link.approve_registration("happy-n")
+            return await asyncio.wait_for(task, timeout=2.0)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     try:
         spec = _run(_scenario())
@@ -1270,14 +1293,20 @@ def test_rpc_call_offline_secure_gate_and_happy():
     conn = _conn("rpc-ok")
 
     async def _scenario():
-        task = asyncio.ensure_future(node_link.rpc_call("rpc-ok", "ls", {"p": 1}, timeout=2.0))
-        await asyncio.sleep(0.02)
-        # The request frame was sent.
-        assert conn.ws.sent[-1]["type"] == "rpc_request"
-        rid = conn.ws.sent[-1]["request_id"]
-        # Simulate the node's reply resolving it.
-        node_link._handle_rpc_response("rpc-ok", {"request_id": rid, "ok": True, "result": {"v": 1}})
-        return await task
+        task = asyncio.create_task(
+            node_link.rpc_call("rpc-ok", "ls", {"p": 1}, timeout=2.0)
+        )
+        try:
+            frame = await conn.ws.wait_for_sent_frame("rpc_request")
+            node_link._handle_rpc_response(
+                "rpc-ok",
+                {"request_id": frame["request_id"], "ok": True, "result": {"v": 1}},
+            )
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     try:
         result = _run(_scenario())
@@ -1475,7 +1504,7 @@ def test_incident_rejection_non_serializable_is_malformed():
 
 # ============================================================ node_connect handshake
 
-class _HSWS:
+class _HSWS(_SentFrameProbe):
     """Fake WebSocket for driving node_connect end-to-end: header auth,
     a scripted receive_json queue, and recorded accept/send/close. When
     the queue drains, receive_json raises WebSocketDisconnect so the
@@ -1484,7 +1513,7 @@ class _HSWS:
 
     def __init__(self, *, auth="", inbox=None, receive_exc=None):
         self.headers = {"authorization": auth} if auth else {}
-        self.sent: list[dict] = []
+        self._init_sent_frames()
         self.closes: list[tuple] = []
         self.accepted = False
         self._inbox = list(inbox or [])
@@ -1494,7 +1523,7 @@ class _HSWS:
         self.accepted = True
 
     async def send_json(self, obj):
-        self.sent.append(obj)
+        self._record_sent_frame(obj)
 
     async def receive_json(self):
         if self._receive_exc is not None:
@@ -1858,10 +1887,16 @@ def test_node_connect_registration_approved_proceeds_to_connect():
          "app_version": {}, "repositories": []}])
 
     async def _scenario():
-        task = asyncio.ensure_future(node_link.node_connect(ws))
-        await asyncio.sleep(0.05)  # let _await_registration register a waiter
-        await node_link.approve_registration("kn-approve")
-        return await asyncio.wait_for(task, timeout=3.0)
+        task = asyncio.create_task(node_link.node_connect(ws))
+        try:
+            await ws.wait_for_sent_frame("registration_pending")
+            assert "kn-approve" in node_link._node_approval_waiters
+            await node_link.approve_registration("kn-approve")
+            return await asyncio.wait_for(task, timeout=3.0)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     try:
         _run(_scenario())
@@ -2006,10 +2041,17 @@ def test_align_node_repositories_blocked_on_rpc_failure():
 
 # ============================================================ self-runner
 
+
+def teardown_module() -> None:
+    _TEST_HOME.release()
+
 if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            print(f"  {name} ...", end=" ")
-            fn()
-            print("ok")
-    print("all node_link tests passed")
+    try:
+        for name, fn in list(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                print(f"  {name} ...", end=" ")
+                fn()
+                print("ok")
+        print("all node_link tests passed")
+    finally:
+        teardown_module()

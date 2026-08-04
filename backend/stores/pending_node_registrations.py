@@ -61,6 +61,7 @@ PRUNE_AFTER_DAYS = 7
 _ID_RE = re.compile(r"[A-Za-z0-9_\-.]{1,64}")
 _cache_lock = threading.Lock()
 _cache_loaded = False
+_cache_home: Path | None = None
 _pending_by_node: dict[str, dict] = {}
 _cache_version = 0
 
@@ -68,6 +69,18 @@ _cache_version = 0
 def _bump_version_locked() -> None:
     global _cache_version
     _cache_version += 1
+
+
+def _align_cache_home_locked() -> Path:
+    global _cache_home, _cache_loaded
+    current = _dir().resolve()
+    if _cache_home == current:
+        return current
+    _cache_home = current
+    _cache_loaded = False
+    _pending_by_node.clear()
+    _bump_version_locked()
+    return current
 
 
 def _copy_record(record: dict) -> dict:
@@ -132,6 +145,7 @@ def create(
     # latest request is the one a human should act on.
     _path(node_id).write_text(json.dumps(record, indent=2), encoding="utf-8")
     with _cache_lock:
+        _align_cache_home_locked()
         _pending_by_node[node_id] = _copy_record(record)
         _bump_version_locked()
     return _copy_record(record)
@@ -139,6 +153,7 @@ def create(
 
 def version() -> int:
     with _cache_lock:
+        _align_cache_home_locked()
         return _cache_version
 
 
@@ -160,6 +175,7 @@ def list_pending() -> list[dict]:
     REST `GET /api/pending_nodes` endpoint for popup rehydration."""
     global _cache_loaded
     with _cache_lock:
+        store_dir = _align_cache_home_locked()
         now = datetime.now()
         if _cache_loaded:
             expired = [
@@ -175,7 +191,7 @@ def list_pending() -> list[dict]:
                 (_copy_record(rec) for rec in _pending_by_node.values()),
                 key=lambda r: r.get("created_at", ""),
             )
-        if not _dir().exists():
+        if not store_dir.exists():
             changed = bool(_pending_by_node)
             _pending_by_node.clear()
             if changed:
@@ -184,7 +200,7 @@ def list_pending() -> list[dict]:
             return []
         out: list[dict] = []
         _pending_by_node.clear()
-        for path in _dir().glob("*.json"):
+        for path in store_dir.glob("*.json"):
             try:
                 rec = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -243,6 +259,7 @@ def _transition_locked(node_id: str, new_status: str) -> tuple[Optional[dict], s
                 f.truncate()
                 f.write(json.dumps(rec, indent=2))
                 with _cache_lock:
+                    _align_cache_home_locked()
                     _pending_by_node.pop(node_id, None)
                     _bump_version_locked()
                 return rec, "ok"
@@ -266,16 +283,19 @@ def deny(node_id: str) -> tuple[Optional[dict], str]:
 def prune_old(max_age_days: int = PRUNE_AFTER_DAYS) -> int:
     """Delete records older than `max_age_days` regardless of status.
     Called at backend startup. Returns count deleted."""
-    if not _dir().exists():
+    with _cache_lock:
+        store_dir = _align_cache_home_locked()
+    if not store_dir.exists():
         return 0
     cutoff_ts = (datetime.now() - timedelta(days=max_age_days)).timestamp()
     deleted = 0
-    for path in _dir().glob("*.json"):
+    for path in store_dir.glob("*.json"):
         try:
             if path.stat().st_mtime < cutoff_ts:
                 path.unlink()
                 deleted += 1
                 with _cache_lock:
+                    _align_cache_home_locked()
                     if _pending_by_node.pop(path.stem, None) is not None:
                         _bump_version_locked()
         except OSError:

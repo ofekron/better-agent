@@ -7,14 +7,33 @@ import sys
 import tempfile
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 
-os.environ.setdefault("BETTER_AGENT_HOME", tempfile.mkdtemp(prefix="ba-prov-changes-"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+_BACKEND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_BACKEND))
+
+import _test_home  # noqa: E402
+import pytest  # noqa: E402
+
+_INHERITED_HOME = tempfile.TemporaryDirectory(prefix="ba-prov-inherited-canary-")
+_INHERITED_CANARY = Path(_INHERITED_HOME.name) / "preserve"
+_INHERITED_CANARY.write_text("preserve", encoding="utf-8")
+os.environ["BETTER_AGENT_HOME"] = _INHERITED_HOME.name
+os.environ["BETTER_CLAUDE_HOME"] = _INHERITED_HOME.name
+_TEST_HOME = _test_home.isolate("ba-prov-changes-")
 
 from stores import provenance_store  # noqa: E402
 
 
 SID = "test-provenance-changes-sid"
+
+
+def test_test_home_overrides_inherited_state_home():
+    test_home = Path(_TEST_HOME).resolve()
+    assert Path(os.environ["BETTER_AGENT_HOME"]).resolve() == test_home
+    assert Path(os.environ["BETTER_CLAUDE_HOME"]).resolve() == test_home
+    assert Path(provenance_store._path(SID)).resolve().is_relative_to(test_home)
+    assert _INHERITED_CANARY.read_text(encoding="utf-8") == "preserve"
 
 
 def _event(uuid: str, content: list) -> dict:
@@ -38,12 +57,21 @@ def _tool(name: str, inp: dict, tid: str) -> dict:
     return {"type": "tool_use", "id": tid, "name": name, "input": inp}
 
 
-def setup_function(_):
-    try:
-        os.remove(provenance_store._path(SID))
-    except FileNotFoundError:
-        pass
-    provenance_store._seen.pop(SID, None)
+@pytest.fixture(autouse=True)
+def _isolated_provenance_home(monkeypatch):
+    monkeypatch.setenv("BETTER_AGENT_HOME", _TEST_HOME)
+    monkeypatch.setenv("BETTER_CLAUDE_HOME", _TEST_HOME)
+
+    def clean() -> None:
+        try:
+            os.remove(provenance_store._path(SID))
+        except FileNotFoundError:
+            pass
+        provenance_store._seen.pop(SID, None)
+
+    clean()
+    yield
+    clean()
 
 
 def test_edit_normalized_with_reasoning():
