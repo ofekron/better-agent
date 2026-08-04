@@ -2331,7 +2331,6 @@ def ensure_fresh_for_read(timeout: float = _FRESH_WAIT_TIMEOUT) -> dict[str, Any
     state = quick_state()
     if not state.get("covered"):
         return state
-    ensure_started()
     if is_covered() and not is_usable():
         request_refresh()
         wait_fresh(timeout)

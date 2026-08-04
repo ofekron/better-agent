@@ -39,6 +39,14 @@ def _launcher() -> int:
         except RuntimeError:
             return 0
         return 1
+    if "--reader" in sys.argv:
+        result = index.run_readonly_sql(
+            "SELECT COUNT(*) AS count FROM native_element_fts"
+        )
+        if result.get("error") is None and result.get("rows") == [[1]]:
+            return 0
+        print(json.dumps(result, sort_keys=True), file=sys.stderr)
+        return 1
     if "--gated" in sys.argv:
         os.environ[index._WORKER_TEST_START_GATE_ENV] = str(
             state_root / "release-worker-start"
@@ -113,6 +121,64 @@ def _worker_cpu_seconds(pid: int) -> float:
         return float(times.user + times.system)
     except psutil.Error:
         return 0.0
+
+
+def test_supervised_reader_uses_foreign_owned_worker() -> None:
+    home = _test_home.TestHome.acquire("ba-test-native-worker-reader-")
+    state_root = Path(home.path)
+    env = os.environ.copy()
+    launcher = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--launcher"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    worker_pid = 0
+    try:
+        ready_path = state_root / "launcher-ready.json"
+        assert _wait_until(ready_path.exists), "launcher did not publish worker identity"
+        worker_pid = int(json.loads(ready_path.read_text(encoding="utf-8"))["pid"])
+        assert _wait_until(lambda: _worker_indexed_fixture(state_root), 20.0), (
+            "worker did not index the reader fixture"
+        )
+
+        contender = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--launcher", "--contender"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        reader = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--launcher", "--reader"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        assert contender.returncode == 0, "second launcher adopted another owner's worker"
+        assert reader.returncode == 0, reader.stderr
+        assert psutil.pid_exists(worker_pid), "reader stopped the backend-owned worker"
+        record_path = state_root / "native_transcript_index.sqlite3.worker.pid"
+        record = json.loads(
+            record_path.read_text(encoding="utf-8")
+        )
+        assert int(record["owner"]["pid"]) == launcher.pid
+        assert int(record["worker"]["pid"]) == worker_pid
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=5)
+        if worker_pid:
+            try:
+                process = psutil.Process(worker_pid)
+            except psutil.NoSuchProcess:
+                pass
+            else:
+                process.kill()
+                process.wait(timeout=5)
+        home.release()
 
 
 def _run() -> int:

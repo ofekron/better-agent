@@ -234,13 +234,9 @@ def test_ensure_fresh_for_read_refreshes_stale_covered_index() -> bool:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     )
     conn.commit()
-    original_ensure_started = idx.ensure_started
     original_request_refresh = idx.request_refresh
     original_wait_fresh = idx.wait_fresh
     calls: list[str] = []
-
-    def fake_ensure_started() -> None:
-        calls.append("ensure_started")
 
     def fake_request_refresh() -> None:
         calls.append("request_refresh")
@@ -256,15 +252,13 @@ def test_ensure_fresh_for_read_refreshes_stale_covered_index() -> bool:
         return True
 
     try:
-        idx.ensure_started = fake_ensure_started  # type: ignore[assignment]
         idx.request_refresh = fake_request_refresh  # type: ignore[assignment]
         idx.wait_fresh = fake_wait_fresh  # type: ignore[assignment]
         state = idx.ensure_fresh_for_read()
     finally:
-        idx.ensure_started = original_ensure_started  # type: ignore[assignment]
         idx.request_refresh = original_request_refresh  # type: ignore[assignment]
         idx.wait_fresh = original_wait_fresh  # type: ignore[assignment]
-    ok = calls == ["ensure_started", "request_refresh", "wait_fresh"] and state.get("usable") is True
+    ok = calls == ["request_refresh", "wait_fresh"] and state.get("usable") is True
     print(f"{OK if ok else FAIL} stale covered index refresh protocol (calls={calls}, state={state})")
     return ok
 
