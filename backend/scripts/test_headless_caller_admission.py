@@ -59,6 +59,7 @@ def _provider(kind: str = "claude") -> dict:
         "kind": kind,
         "generation": str(uuid.uuid4()),
         "revision": 3,
+        "execution_revision": 2,
         "runner": "native",
     }
 
@@ -101,6 +102,8 @@ async def test_session_owner_is_frozen_for_every_caller_class() -> None:
     for call in executor.calls:
         assert call["owner"] == {"kind": "session", "id": "session-1"}
         assert call["provider"]["id"] == "provider-1"
+        assert call["provider"]["execution_revision"] == 2
+        assert "revision" not in call["provider"]
         assert call["model"] == "claude-model"
         assert call["runner"] == "native"
         assert call["routing"] == {"node_id": "primary"}
@@ -209,7 +212,12 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
                 owner_id="session-1",
                 provider={
                     key: record[key]
-                    for key in ("id", "kind", "generation", "revision")
+                    for key in (
+                        "id",
+                        "kind",
+                        "generation",
+                        "execution_revision",
+                    )
                 },
                 model=model,
                 reasoning_effort="high",
@@ -228,11 +236,10 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
             return dict(record) | {"api_key": "runtime-secret"}
 
     original_hydrate = provider_module.config_store.hydrate_provider_execution
-    hydration_calls = 0
+    hydration_calls = []
 
-    def hydrate(*_args, **_kwargs):
-        nonlocal hydration_calls
-        hydration_calls += 1
+    def hydrate(*args, **kwargs):
+        hydration_calls.append((args, kwargs))
         return Hydration()
 
     provider_module.config_store.hydrate_provider_execution = hydrate
@@ -243,15 +250,31 @@ async def test_generic_provider_consumes_admitted_authority() -> None:
         assert instance.seen[0]["no_tools"] is True
         assert instance.seen[1]["default_model"] == "claude-model"
         assert "runtime-secret" not in str(result)
+        instance.record["revision"] += 1
+        result = await instance.run_admitted_headless(
+            admitted("model-not-in-better-agent-catalog")
+        )
+        assert result == {"result": "legacy-ok"}
+        assert instance.seen[1]["default_model"] == (
+            "model-not-in-better-agent-catalog"
+        )
+        instance.record["execution_revision"] += 1
         try:
-            await instance.run_admitted_headless(admitted("stale-model"))
+            await instance.run_admitted_headless(admitted("claude-model"))
         except ValueError as exc:
-            assert "model" in str(exc)
+            assert "authority" in str(exc)
         else:
-            raise AssertionError("stale model must fail")
+            raise AssertionError("execution authority drift must fail")
     finally:
         provider_module.config_store.hydrate_provider_execution = original_hydrate
-    assert hydration_calls == 1
+    assert len(hydration_calls) == 2
+    assert all(
+        call[1] == {
+            "expected_generation": record["generation"],
+            "expected_execution_revision": record["execution_revision"],
+        }
+        for call in hydration_calls
+    )
 
 
 def test_legacy_caller_bypasses_are_removed() -> None:
@@ -369,7 +392,12 @@ async def test_non_claude_kind_headless_uses_profile_default_model() -> None:
                 owner_id="session-1",
                 provider={
                     key: record[key]
-                    for key in ("id", "kind", "generation", "revision")
+                    for key in (
+                        "id",
+                        "kind",
+                        "generation",
+                        "execution_revision",
+                    )
                 },
                 model=model,
                 reasoning_effort="",
@@ -393,62 +421,55 @@ async def test_non_claude_kind_headless_uses_profile_default_model() -> None:
     )
     instance = KimiProvider()
     try:
-        import models as models_mod
-
-        original_models = models_mod.models_for_record
-        models_mod.models_for_record = lambda _r: ["kimi-headless-model"]
+        result = await instance.run_admitted_headless(
+            admitted("kimi-headless-model")
+        )
+        assert result == {"result": "kimi-ok"}
         try:
-            result = await instance.run_admitted_headless(
-                admitted("kimi-headless-model")
-            )
-            assert result == {"result": "kimi-ok"}
-            try:
-                await instance.run_admitted_headless(admitted("other-model"))
-            except ValueError as exc:
-                assert "model" in str(exc)
-            else:
-                raise AssertionError("mismatched model must be rejected")
+            await instance.run_admitted_headless(admitted("other-model"))
+        except ValueError as exc:
+            assert "model" in str(exc)
+        else:
+            raise AssertionError("mismatched model must be rejected")
 
-            # R1.3(c): tombstoning the pair profile must not block turns
-            # whose admitted model matches the (still resolvable) tombstone.
-            profile_id = config_store.provider_execution_defaults(created["id"])[
-                "runtime_profile_id"
-            ]
-            deleted_ok, deleted_reason = config_store.delete_runtime_profile(
-                profile_id
-            )
-            assert deleted_ok, deleted_reason
-            result = await instance.run_admitted_headless(
-                admitted("kimi-headless-model")
-            )
-            assert result == {"result": "kimi-ok"}, (
-                "tombstoned pair profile must not block admitted turns"
-            )
+        # R1.3(c): tombstoning the pair profile must not block turns
+        # whose admitted model matches the (still resolvable) tombstone.
+        profile_id = config_store.provider_execution_defaults(created["id"])[
+            "runtime_profile_id"
+        ]
+        deleted_ok, deleted_reason = config_store.delete_runtime_profile(
+            profile_id
+        )
+        assert deleted_ok, deleted_reason
+        result = await instance.run_admitted_headless(
+            admitted("kimi-headless-model")
+        )
+        assert result == {"result": "kimi-ok"}, (
+            "tombstoned pair profile must not block admitted turns"
+        )
 
-            # A pair with no profile history has no configured model to
-            # protect — the guard is vacuous, not a rejection. Fabricate
-            # zero-history by dropping the provider's profile rows from the
-            # persisted store.
-            import json as _json
+        # A pair with no profile history has no configured model to
+        # protect — the guard is vacuous, not a rejection. Fabricate
+        # zero-history by dropping the provider's profile rows from the
+        # persisted store.
+        import json as _json
 
-            config_path = config_store._config_path()
-            raw = _json.loads(Path(config_path).read_text())
-            raw["runtime_profiles"] = [
-                p
-                for p in raw["runtime_profiles"]
-                if p["provider_id"] != created["id"]
-            ]
-            Path(config_path).write_text(_json.dumps(raw))
-            with config_store._state_cache_lock:
-                config_store._state_cache = None
-            result = await instance.run_admitted_headless(
-                admitted("kimi-headless-model")
-            )
-            assert result == {"result": "kimi-ok"}, (
-                "absent pair profile must not block admitted turns"
-            )
-        finally:
-            models_mod.models_for_record = original_models
+        config_path = config_store._config_path()
+        raw = _json.loads(Path(config_path).read_text())
+        raw["runtime_profiles"] = [
+            p
+            for p in raw["runtime_profiles"]
+            if p["provider_id"] != created["id"]
+        ]
+        Path(config_path).write_text(_json.dumps(raw))
+        with config_store._state_cache_lock:
+            config_store._state_cache = None
+        result = await instance.run_admitted_headless(
+            admitted("kimi-headless-model")
+        )
+        assert result == {"result": "kimi-ok"}, (
+            "absent pair profile must not block admitted turns"
+        )
     finally:
         provider_module.config_store.hydrate_provider_execution = original_hydrate
 

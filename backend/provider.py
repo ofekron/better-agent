@@ -1750,13 +1750,13 @@ class Provider(ABC):
             authority["id"],
             authority["kind"],
             authority["generation"],
-            authority["revision"],
+            authority["execution_revision"],
         )
         actual = (
             record.get("id"),
             record.get("kind"),
             record.get("generation"),
-            record.get("revision"),
+            record.get("execution_revision"),
         )
         if actual != expected:
             raise ValueError("headless provider authority changed")
@@ -1769,10 +1769,6 @@ class Provider(ABC):
             raise ValueError("headless provider does not support fork")
         if payload["no_tools"] and not self.supports_headless_no_tools:
             raise ValueError("headless provider does not support no-tools")
-        import models as models_mod
-        models = models_mod.models_for_record(record)
-        if payload["model"] not in models:
-            raise ValueError("headless model is stale or unsupported")
         effort = payload["reasoning_effort"]
         if self.supports_reasoning_effort:
             if effort not in self.reasoning_effort_options:
@@ -1795,7 +1791,7 @@ class Provider(ABC):
         hydration = config_store.hydrate_provider_execution(
             authority["id"],
             expected_generation=authority["generation"],
-            expected_revision=authority["revision"],
+            expected_execution_revision=authority["execution_revision"],
         )
         if hydration is None:
             raise RuntimeError("headless provider authority is unavailable")

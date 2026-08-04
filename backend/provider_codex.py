@@ -1751,7 +1751,7 @@ class CodexProvider(Provider):
         hydration = config_store.hydrate_provider_execution(
             authority["id"],
             expected_generation=authority["generation"],
-            expected_revision=authority["revision"],
+            expected_execution_revision=authority["execution_revision"],
         )
         if hydration is None:
             raise RuntimeError("headless provider authority is unavailable")

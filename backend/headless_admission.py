@@ -136,7 +136,12 @@ async def run_session_headless(
                 owner_id=session_id,
                 provider={
                     key: record[key]
-                    for key in ("id", "kind", "generation", "revision")
+                    for key in (
+                        "id",
+                        "kind",
+                        "generation",
+                        "execution_revision",
+                    )
                 },
                 model=model,
                 reasoning_effort=str(session.get("reasoning_effort") or ""),

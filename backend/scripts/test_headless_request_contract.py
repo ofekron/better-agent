@@ -26,7 +26,7 @@ def _provider(kind: str) -> dict:
         "id": f"{kind}-provider",
         "kind": kind,
         "generation": str(uuid.uuid4()),
-        "revision": 7,
+        "execution_revision": 2,
     }
 
 
@@ -127,7 +127,7 @@ def test_admission_freezes_authority_without_secrets() -> None:
     admitted = admit_headless_request(_request(), authority)
     before = admitted.to_dict()
 
-    provider["revision"] = 99
+    provider["execution_revision"] = 99
     provider["api_key"] = "late-secret"
     routing["node_id"] = "attacker"
     routing["lane"].append("mutated")
@@ -135,7 +135,12 @@ def test_admission_freezes_authority_without_secrets() -> None:
     assert admitted.to_dict() == before
     encoded = repr(admitted) + str(admitted.to_dict())
     assert "late-secret" not in encoded
-    assert before["provider"]["revision"] == 7
+    assert before["provider"] == {
+        "id": "claude-provider",
+        "kind": "claude",
+        "generation": before["provider"]["generation"],
+        "execution_revision": 2,
+    }
     assert before["permission_scope"] == "spawn_runs"
     assert before["routing"] == {"lane": ["headless"], "node_id": "primary"}
     assert AdmittedHeadlessRequest.from_dict(before).to_dict() == before
@@ -144,6 +149,12 @@ def test_admission_freezes_authority_without_secrets() -> None:
     _raises(
         lambda: AdmittedHeadlessRequest.from_dict(tampered),
         "fingerprint",
+    )
+    legacy = dict(before)
+    legacy["schema"] = 1
+    _raises(
+        lambda: AdmittedHeadlessRequest.from_dict(legacy),
+        "schema",
     )
 
 
@@ -156,6 +167,9 @@ def test_secret_bearing_authority_is_rejected() -> None:
         lambda: _authority(routing={"authorization": "Bearer secret"}),
         "secret-free",
     )
+    legacy = _provider("claude")
+    legacy["revision"] = legacy.pop("execution_revision")
+    _raises(lambda: _authority(provider=legacy), "provider authority")
 
 
 def test_owner_and_capabilities_fail_truthfully() -> None:

@@ -49,6 +49,7 @@ def _provider_record() -> dict:
         "kind": "claude",
         "generation": str(uuid.uuid4()),
         "revision": 3,
+        "execution_revision": 2,
     }
 
 
@@ -268,6 +269,8 @@ async def test_run_happy_path_admits_and_executes(monkeypatch):
     assert len(executor.calls) == 1
     admitted = executor.calls[0].to_dict()
     assert admitted["owner"] == {"kind": "session", "id": "session-1"}
+    assert admitted["provider"]["execution_revision"] == 2
+    assert "revision" not in admitted["provider"]
     assert admitted["fork"] is False
 
 

@@ -33,13 +33,13 @@ class PreparedCodexHeadless:
             provider["id"],
             provider["kind"],
             provider["generation"],
-            provider["revision"],
+            provider["execution_revision"],
         )
         actual = (
             contract.provider_id,
             contract.provider_kind,
             contract.provider_generation,
-            contract.provider_revision,
+            contract.provider_execution_revision,
         )
         if actual != expected:
             raise ValueError("headless execution authority conflicts")
@@ -81,7 +81,7 @@ def _authority_tuple(record: Mapping[str, Any]) -> tuple[Any, ...]:
         record.get("id"),
         record.get("kind"),
         record.get("generation"),
-        record.get("revision"),
+        record.get("execution_revision"),
     )
 
 

@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 
 HEADLESS_REQUEST_SCHEMA = 1
-HEADLESS_ADMISSION_SCHEMA = 1
+HEADLESS_ADMISSION_SCHEMA = 2
 _MAX_PROMPT_CHARS = 1_000_000
 _MAX_TIMEOUT_SECONDS = 86_400.0
 _SECRET_KEY_RE = re.compile(
@@ -177,7 +177,7 @@ class HeadlessAuthority:
             "id",
             "kind",
             "generation",
-            "revision",
+            "execution_revision",
         }
         _reject_secrets(provider, label="headless provider authority")
         if type(provider) is not dict or set(provider) != expected_provider:
@@ -192,8 +192,8 @@ class HeadlessAuthority:
             or type(provider["kind"]) is not str
             or not provider["kind"]
             or generation != provider["generation"]
-            or type(provider["revision"]) is not int
-            or provider["revision"] < 0
+            or type(provider["execution_revision"]) is not int
+            or provider["execution_revision"] < 0
         ):
             raise ValueError("headless provider authority is invalid")
         for value, label, allow_empty in (
@@ -306,8 +306,10 @@ class AdmittedHeadlessRequest:
         }
         if type(raw) is not dict or set(raw) != expected:
             raise ValueError("invalid admitted headless request")
+        if raw["schema"] != HEADLESS_ADMISSION_SCHEMA:
+            raise ValueError("unsupported admitted headless request schema")
         request = HeadlessRequest.from_dict({
-            "schema": raw["schema"],
+            "schema": HEADLESS_REQUEST_SCHEMA,
             "prompt": raw["prompt"],
             "owner": raw["owner"],
             "fork": raw["fork"],

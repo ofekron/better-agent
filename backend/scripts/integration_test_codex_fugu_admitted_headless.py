@@ -10,6 +10,10 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.anyio
 
 TEST_HOME = tempfile.mkdtemp(prefix="ba-codex-headless-")
 os.environ["BETTER_AGENT_HOME"] = TEST_HOME
@@ -28,6 +32,16 @@ import node_rpc_handlers  # noqa: E402
 import config_store  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_fugu import FuguProvider  # noqa: E402
+
+
+@pytest.fixture
+def root() -> Path:
+    return Path(TEST_HOME)
+
+
+@pytest.fixture
+def fake(root: Path) -> Path:
+    return _fake_codex(root)
 
 
 def _fake_codex(root: Path) -> Path:
@@ -70,6 +84,7 @@ def _record(root: Path, kind: str) -> dict:
         "kind": kind,
         "generation": str(uuid.uuid4()),
         "revision": 4,
+        "execution_revision": 2,
         "mode": "api_key" if kind == "fugu" else "subscription",
         "config_dir": str(config),
         "runner": "native",
@@ -97,7 +112,10 @@ def _admitted(
     authority = HeadlessAuthority.create(
         owner_kind="session",
         owner_id="session-1",
-        provider={key: record[key] for key in ("id", "kind", "generation", "revision")},
+        provider={
+            key: record[key]
+            for key in ("id", "kind", "generation", "execution_revision")
+        },
         model=selected_model,
         reasoning_effort="high",
         runner="native",
@@ -137,7 +155,16 @@ async def _exercise(
     original_hydrate = config_store.hydrate_provider_execution
     original_path = os.environ.get("PATH", "")
     node_rpc_handlers.get_provider = lambda *_args: provider
-    config_store.hydrate_provider_execution = lambda *_args, **_kwargs: Hydration()
+
+    def hydrate(provider_id: str, **expected) -> Hydration:
+        assert provider_id == record["id"]
+        assert expected == {
+            "expected_generation": record["generation"],
+            "expected_execution_revision": record["execution_revision"],
+        }
+        return Hydration()
+
+    config_store.hydrate_provider_execution = hydrate
     os.environ["PATH"] = f"{fake.parent}{os.pathsep}{original_path}"
     os.environ["HEADLESS_TEST_LOG"] = str(log)
     try:
@@ -256,7 +283,57 @@ async def test_rejections_and_drift(root: Path, fake: Path) -> None:
     else:
         raise AssertionError("RPC authority override must fail")
 
-    prepared = prepare_codex_headless(provider, _admitted(record, fork=False), launcher_path=str(fake))
+    tampered = _admitted(record, fork=False).to_dict()
+    tampered["provider"]["execution_revision"] += 1
+    try:
+        await node_rpc_handlers._rpc_run_admitted_headless({
+            "admitted": tampered,
+        })
+    except ValueError as exc:
+        assert "fingerprint" in str(exc)
+    else:
+        raise AssertionError("RPC authority tampering must fail")
+
+    fugu_record = _record(root, "fugu")
+    try:
+        prepare_codex_headless(
+            FuguProvider(fugu_record),
+            _admitted(fugu_record, fork=False, model="not-fugu"),
+            launcher_path=str(fake),
+        )
+    except ValueError as exc:
+        assert "Fugu model" in str(exc)
+    else:
+        raise AssertionError("Fugu curated model validation must remain")
+
+    admitted = _admitted(record, fork=False)
+    prepared = prepare_codex_headless(
+        provider,
+        admitted,
+        launcher_path=str(fake),
+    )
+    metadata_only_drift = dict(record)
+    metadata_only_drift["revision"] += 1
+    result = await execute_codex_headless(
+        provider,
+        prepared,
+        runtime_record=metadata_only_drift,
+    )
+    assert result["result"] == "precise-result"
+
+    execution_drift = dict(record)
+    execution_drift["execution_revision"] += 1
+    try:
+        await execute_codex_headless(
+            provider,
+            prepared,
+            runtime_record=execution_drift,
+        )
+    except RuntimeError as exc:
+        assert "authority" in str(exc)
+    else:
+        raise AssertionError("execution revision drift must fail")
+
     (Path(record["config_dir"]) / "config.toml").write_text("changed=true\n", encoding="utf-8")
     try:
         await execute_codex_headless(provider, prepared, runtime_record=record)
