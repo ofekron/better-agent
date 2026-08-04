@@ -6,10 +6,12 @@ import {
   baMarkersToMarkdown,
   compactLinkLabel,
   eventLinkMarker,
+  isAbsolutePath,
   linkifyFilePaths,
   markdownLinkifyComponents,
   parseMarkdownFileHref,
   sessionLinkMarker,
+  sessionMarkersToMarkdown,
 } from "../src/utils/linkifyFilePaths";
 
 describe("parseMarkdownFileHref — bcfile + decode edge cases", () => {
@@ -232,5 +234,173 @@ describe("markdownLinkifyComponents ScrollableTable", () => {
     expect(container.querySelector(".table-scroll-wrapper")).not.toBeNull();
     expect(container.querySelector("table")).not.toBeNull();
     expect(container.textContent).toContain("cell");
+  });
+});
+
+describe("isAbsolutePath — absolute path detection", () => {
+  it("recognizes POSIX, backslash, and Windows-drive absolutes, rejects relative", () => {
+    expect(isAbsolutePath("/usr/bin")).toBe(true);
+    // A leading single backslash (source "\\" is one backslash).
+    expect(isAbsolutePath("\\srv\\share")).toBe(true);
+    expect(isAbsolutePath("C:\\Users")).toBe(true);
+    expect(isAbsolutePath("D:/code")).toBe(true);
+    expect(isAbsolutePath("rel/path")).toBe(false);
+    expect(isAbsolutePath("file.txt")).toBe(false);
+  });
+});
+
+describe("sessionMarkersToMarkdown — delegation", () => {
+  it("aliases baMarkersToMarkdown", () => {
+    expect(sessionMarkersToMarkdown(sessionLinkMarker("s1", "Hi"))).toBe("[Hi · s1](/s/s1)");
+  });
+});
+
+describe("parseBcfileHref — focus query parsing (via parseMarkdownFileHref)", () => {
+  it("extracts a single-line focus", () => {
+    expect(parseMarkdownFileHref("bcfile:/a/b.py?L=3")).toEqual({ path: "/a/b.py", focus: { startLine: 3, endLine: 3 } });
+  });
+  it("extracts a line range", () => {
+    expect(parseMarkdownFileHref("bcfile:/a/b.py?L=5-9")).toEqual({ path: "/a/b.py", focus: { startLine: 5, endLine: 9 } });
+  });
+  it("ignores a malformed L value but keeps the path", () => {
+    expect(parseMarkdownFileHref("bcfile:/a/b.py?L=abc")).toEqual({ path: "/a/b.py" });
+  });
+  it("ignores an unrelated query param", () => {
+    expect(parseMarkdownFileHref("bcfile:/a/b.py?Z=1")).toEqual({ path: "/a/b.py" });
+  });
+});
+
+describe("parseMarkdownFileHref — guard and query-split branches", () => {
+  it("rejects anchor and empty hrefs", () => {
+    expect(parseMarkdownFileHref("#section")).toBeNull();
+    expect(parseMarkdownFileHref("")).toBeNull();
+  });
+  it("rejects a url-scheme href that is not a file", () => {
+    expect(parseMarkdownFileHref("https://example.com")).toBeNull();
+  });
+  it("splits a query off a plain file href", () => {
+    expect(parseMarkdownFileHref("a/b.py?x")).toEqual({ path: "a/b.py" });
+  });
+});
+
+describe("plainText — array child that carries no text", () => {
+  it("returns null when an array child is a non-text element, falling back to the generated label", () => {
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: "/s/s1/" }, [42, createElement("i", null, "z")]));
+    // plainText bails on the <i> element → label falls back to sessionLinkLabel.
+    expect(container.querySelector("a")?.textContent).toContain("Session");
+  });
+});
+
+describe("compactLinkLabel — basename, kept-label, and url-compact branches", () => {
+  it("compacts when label basename matches href basename but the dir differs", () => {
+    expect(compactLinkLabel("dir1/x.py", "dir2/x.py")).toBe("x.py");
+  });
+  it("keeps a differing file label", () => {
+    expect(compactLinkLabel("a/b.py", "a/c.py")).toBe("a/c.py");
+  });
+  it("keeps a non-matching label on a non-file href", () => {
+    expect(compactLinkLabel("https://example.com", "Click")).toBe("Click");
+  });
+  it("compacts a bare url without a label to host/last-segment", () => {
+    expect(compactLinkLabel("https://x.com/a/b")).toBe("x.com/b");
+    expect(compactLinkLabel("https://x.com")).toBe("x.com");
+  });
+});
+
+describe("eventLinkMarker — empty name falls back to 'Event'", () => {
+  it("renders the default label when the name is blank", () => {
+    expect(baMarkersToMarkdown(eventLinkMarker("s1", "m1", ""))).toBe("[Event · m1](/s/s1?m=m1)");
+  });
+});
+
+describe("FileLinkButton — static render (no onFileClick) via Anchor", () => {
+  it("renders a non-media file as a static, non-interactive span", () => {
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: "notes.txt" }));
+    expect(container.querySelector(".file-path-link-static")).not.toBeNull();
+    expect(container.textContent).toContain("notes.txt");
+  });
+});
+
+describe("SessionLink — click guards and session-only navigation", () => {
+  it("skips navigation on a modified click (early return before navigateRoute)", () => {
+    const pushSpy = vi.spyOn(window.history, "pushState");
+    render(linkifyFilePaths(eventLinkMarker("s1", "m1", "Ev")) as never);
+    fireEvent.click(screen.getByRole("link", { name: "Ev · m1" }), { metaKey: true });
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+  it("navigates a session link (no messageId) without requesting message focus", () => {
+    window.history.pushState(null, "", "/");
+    render(linkifyFilePaths(sessionLinkMarker("s1", "Hi")) as never);
+    fireEvent.click(screen.getByRole("link", { name: "Hi · s1" }));
+    expect(window.location.pathname).toBe("/s/s1");
+  });
+});
+
+describe("preserveTextBreaks + linkifyRawFileString — multiline and trailing text", () => {
+  it("renders <br> for embedded newlines and trailing text around a file link", () => {
+    const html = renderToStaticMarkup(linkifyFilePaths("see\n[a.py](a.py:3) end") as never);
+    expect(html).toContain("<br/>");
+    expect(html).toContain("see");
+    expect(html).toContain("a.py");
+    expect(html).toContain("end");
+  });
+});
+
+describe("linkifyRawString — text before and after a ba marker", () => {
+  it("emits inter and trailing text around a session marker", () => {
+    const html = renderToStaticMarkup(linkifyFilePaths("x[[ba-session:s1|Hi]]y") as never);
+    expect(html.startsWith("x")).toBe(true);
+    expect(html).toContain("<a ");
+    expect(html).toContain("</a>y");
+    expect(html).toContain("Hi · s1");
+  });
+});
+
+describe("linkifyFilePaths — non-element fallback node", () => {
+  it("returns a plain object child untouched", () => {
+    const node = { not: "an element" };
+    expect(linkifyFilePaths(node as never)).toBe(node);
+  });
+});
+
+describe("markdownLinkifyComponents Anchor — href-type edge branches", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("renders an event session href (/s/.../?m=...) as an event smart link", () => {
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: "/s/s1/?m=m9" }, "Go"));
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBe("/s/s1?m=m9");
+    expect(link?.textContent).toBe("Go");
+  });
+
+  it("uses the generated event label when children carry no plain text", () => {
+    // plainText(<i/>) is null → the ?? fallback evaluates the messageId ternary (eventLinkLabel).
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: "/s/s1/?m=m9" }, createElement("i", null, "z")));
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("/s/s1?m=m9");
+    expect(container.textContent).toContain("Event");
+  });
+
+  it("renders an in-page #anchor without routing it through external-link compaction", () => {
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: "#section" }, "§"));
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBe("#section");
+    expect(link?.textContent).toContain("§");
+  });
+
+  it("renders a non-string href as an empty, non-navigating anchor", () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { a: Anchor } = markdownLinkifyComponents();
+    const { container } = render(createElement(Anchor, { href: undefined }, "x"));
+    const link = container.querySelector("a");
+    expect(link?.getAttribute("href")).toBeNull();
+    expect(link?.getAttribute("title")).toBeNull();
+    expect(link?.textContent).toBe("x");
+    fireEvent.click(link!);
+    expect(openSpy).not.toHaveBeenCalled();
   });
 });
