@@ -92,8 +92,19 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
-CONFIG_SCHEMA_VERSION = 4
+CONFIG_SCHEMA_VERSION = 5
 MIN_SUPPORTED_CONFIG_SCHEMA_VERSION = 1
+
+_PROVIDER_EXECUTION_FIELDS = (
+    "kind",
+    "mode",
+    "base_url",
+    "config_dir",
+    "default_permission",
+    "suspended",
+    "allowed_sinks",
+    "capabilities",
+)
 
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
@@ -141,6 +152,14 @@ def _validate_provider_authority(provider: dict) -> None:
         ) from exc
 
 
+def _validate_provider_execution_revision(provider: dict) -> None:
+    value = provider.get("execution_revision")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise RuntimeError(
+            "unsupported provider config schema: invalid execution_revision"
+        )
+
+
 def _assert_provider_authority(
     provider: dict,
     expected_generation: str | None,
@@ -169,8 +188,21 @@ def _assert_provider_authority(
         raise ProviderConfigConflict(provider)
 
 
-def _advance_provider_revision(provider: dict) -> None:
+def _provider_execution_projection(provider: dict) -> dict:
+    return {
+        field: copy.deepcopy(provider[field])
+        for field in _PROVIDER_EXECUTION_FIELDS
+    }
+
+
+def _advance_provider_revision(
+    provider: dict,
+    *,
+    execution_changed: bool = False,
+) -> None:
     provider["revision"] += 1
+    if execution_changed:
+        provider["execution_revision"] += 1
 
 
 @contextmanager
@@ -486,7 +518,7 @@ def clone_provider_credential(
         None,
     )
     if target is not None:
-        _advance_provider_revision(target)
+        _advance_provider_revision(target, execution_changed=True)
         _validate_state_for_save(state)
     with _credential_transaction(
         [(target_provider_id, source_value)],
@@ -661,6 +693,7 @@ def _new_provider_record(kind: str) -> dict:
     provider_id = str(uuid.uuid4())
     return {
         **_new_provider_authority(),
+        "execution_revision": 0,
         "id": provider_id,
         "name": kind.replace("-", " ").title(),
         "nickname": "",
@@ -803,11 +836,14 @@ def apply_installation_profile_selection(make_default: bool = False) -> dict:
         if previous_default is not None:
             _advance_provider_revision(previous_default)
         if not created:
-            _advance_provider_revision(target)
+            _advance_provider_revision(
+                target,
+                execution_changed=target_changed,
+            )
         state["default_provider_id"] = target["id"]
         _reconcile_default_runtime_profile(state)
     elif target_changed:
-        _advance_provider_revision(target)
+        _advance_provider_revision(target, execution_changed=True)
     if created or target_changed or default_changed:
         _save_state(state)
     installation_profile.mark_selection_applied()
@@ -836,6 +872,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"better-agent:legacy-provider:{_config_path()}"))
     provider = {
         **_new_provider_authority(),
+        "execution_revision": 0,
         "id": pid,
         "name": _detect_provider_name(mode, base_url),
         "nickname": "",
@@ -856,6 +893,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     authority = {
         "generation": provider["generation"],
         "revision": provider["revision"],
+        "execution_revision": provider["execution_revision"],
     }
     provider = {
         **_clean_provider_record(provider),
@@ -984,6 +1022,7 @@ def _normalize_loaded_state(raw: dict) -> dict:
         if not isinstance(provider, dict):
             raise RuntimeError("unsupported provider config schema: invalid provider record")
         _validate_provider_authority(provider)
+        _validate_provider_execution_revision(provider)
         provider_id = provider.get("id")
         if not isinstance(provider_id, str) or not provider_id or provider_id in provider_ids:
             raise RuntimeError("unsupported provider config schema: invalid provider id")
@@ -992,6 +1031,7 @@ def _normalize_loaded_state(raw: dict) -> dict:
             **_clean_provider_record(provider),
             "generation": provider["generation"],
             "revision": provider["revision"],
+            "execution_revision": provider["execution_revision"],
         }
         if provider != canonical:
             raise RuntimeError("unsupported provider config schema: noncanonical provider record")
@@ -1253,6 +1293,37 @@ def _migrate_schema_3_to_4(raw: dict) -> dict:
     state = copy.deepcopy(raw)
     state["schema_version"] = 4
     state["disabled_runtime_skills"] = []
+    return state
+
+
+def _migrate_schema_4_to_5(raw: dict) -> dict:
+    if raw.get("schema_version") != 4:
+        raise RuntimeError("unsupported provider config schema")
+    state = copy.deepcopy(raw)
+    providers = state.get("providers")
+    if not isinstance(providers, list) or any(
+        not isinstance(provider, dict) or "execution_revision" in provider
+        for provider in providers
+    ):
+        raise RuntimeError("unsupported provider config schema")
+    try:
+        authority = provider_sync_authority.validate_authority(
+            state.get("provider_state_authority"),
+            state.get("default_provider_id"),
+            providers,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"unsupported provider config schema: {exc}"
+        ) from exc
+    for provider in providers:
+        provider["execution_revision"] = 0
+    state["schema_version"] = 5
+    state["provider_state_authority"] = provider_sync_authority.advance_authority(
+        authority,
+        state.get("default_provider_id"),
+        providers,
+    )
     return _normalize_loaded_state(state)
 
 
@@ -1260,6 +1331,7 @@ _CONFIG_SCHEMA_MIGRATIONS: dict[int, Callable[[dict], dict]] = {
     1: _migrate_schema_1_to_2,
     2: _migrate_schema_2_to_3,
     3: _migrate_schema_3_to_4,
+    4: _migrate_schema_4_to_5,
 }
 
 
@@ -1947,6 +2019,7 @@ def _provider_config(provider: dict) -> dict:
         "id": provider["id"],
         "generation": provider["generation"],
         "revision": provider["revision"],
+        "execution_revision": provider["execution_revision"],
         "name": provider.get("name", ""),
         "nickname": provider.get("nickname", ""),
         "kind": kind,
@@ -2331,12 +2404,14 @@ def _canonical_provider_sync_snapshot(
             raise ValueError("provider sync providers must be objects")
         try:
             _validate_provider_authority(provider)
+            _validate_provider_execution_revision(provider)
         except RuntimeError as exc:
             raise ValueError(str(exc)) from exc
         clean = {
             **_clean_provider_record(provider),
             "generation": provider["generation"],
             "revision": provider["revision"],
+            "execution_revision": provider["execution_revision"],
         }
         if provider != clean:
             raise ValueError("provider sync payload contains a noncanonical provider")
@@ -2570,7 +2645,11 @@ def provision_provider_catalog(payload: dict) -> dict:
         if not isinstance(raw_provider, dict):
             raise ValueError("provider catalog items must be objects")
         clean = _clean_provider_record(raw_provider)
-        provider = {**clean, **_new_provider_authority()}
+        provider = {
+            **clean,
+            **_new_provider_authority(),
+            "execution_revision": 0,
+        }
         dependency_plan.assert_provider_supported(provider)
         providers.append(provider)
     provider_ids = {provider["id"] for provider in providers}
@@ -2774,6 +2853,7 @@ def add_provider(payload: dict) -> dict:
     authority = _new_provider_authority()
     provider = {
         **authority,
+        "execution_revision": 0,
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
         "nickname": (payload.get("nickname") or "").strip(),
@@ -2799,6 +2879,7 @@ def add_provider(payload: dict) -> dict:
         **_clean_provider_record(provider),
         "generation": authority["generation"],
         "revision": authority["revision"],
+        "execution_revision": provider["execution_revision"],
     }
     dependency_plan.assert_provider_supported(provider)
     state["providers"].append(provider)
@@ -2912,6 +2993,7 @@ def update_provider(
     authority = {
         "generation": target["generation"],
         "revision": target["revision"],
+        "execution_revision": target["execution_revision"],
     }
     canonical_target = _clean_provider_record(target)
     target.clear()
@@ -2930,7 +3012,14 @@ def update_provider(
     credential_changed = bool(credential_changes)
     if not provider_changed and not credential_changed:
         return _provider_ui_state(target)
-    _advance_provider_revision(target)
+    execution_changed = (
+        _provider_execution_projection(target)
+        != _provider_execution_projection(before)
+    )
+    _advance_provider_revision(
+        target,
+        execution_changed=execution_changed or credential_changed,
+    )
     if default_replacement is not None:
         _advance_provider_revision(default_replacement)
     _validate_state_for_save(state)

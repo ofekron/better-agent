@@ -446,9 +446,11 @@ def test_v2_internal_llm_assignment_migrates_to_profile_ref() -> None:
     }
     v2.pop("default_runtime_profile_id")
     v2.pop("deleted_providers")
+    v2.pop("disabled_runtime_skills")
     pinned_provider = None
     pinned_runner = None
     for provider in v2["providers"]:
+        provider.pop("execution_revision")
         profile = profiles_by_provider.get(provider["id"])
         provider["runner"] = profile["runner"] if profile else "native"
         provider["default_model"] = profile["default_model"] if profile else ""
@@ -622,6 +624,7 @@ def test_sync_import_seeds_profiles() -> None:
                     }
                 ),
                 **config_store._new_provider_authority(),
+                "execution_revision": 0,
             }
         ]
         authority = provider_sync_authority.new_authority(pid, providers)

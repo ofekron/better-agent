@@ -62,6 +62,7 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
         "id": "provider-pure",
         "generation": "00000000-0000-4000-8000-000000000002",
         "revision": 0,
+        "execution_revision": 0,
         "name": "Pure provider",
         "kind": "codex",
         "mode": "api_key",

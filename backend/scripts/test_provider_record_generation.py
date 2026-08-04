@@ -123,6 +123,7 @@ def _schema_v2_state(canonical: dict) -> dict:
         if not profile["deleted_at"]
     }
     for provider in state["providers"]:
+        provider.pop("execution_revision")
         profile = profiles_by_provider.get(provider["id"])
         kind = provider["kind"]
         provider["runner"] = (
