@@ -1665,6 +1665,7 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = str(uuid.uuid4())
+    unresolved_child_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid=app_sid,
         codex_sid=parent_sid,
@@ -1693,6 +1694,7 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     )
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
+    unresolved_child_path = run_dir / "unresolved-child-rollout.jsonl"
     with child_path.open("wb") as f:
         agent_path = "/root/reviewer"
         f.write(json.dumps({
@@ -1716,6 +1718,26 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
         }).encode() + b"\n")
         child_start = f.tell()
         f.write(json.dumps(_make_assistant_text_event("child answer")).encode() + b"\n")
+        f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+    with unresolved_child_path.open("wb") as f:
+        f.write(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": "/root/unresolved",
+            }}}},
+        }).encode() + b"\n")
+        f.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": "/root/unresolved",
+                "content": "unresolved child prompt",
+            },
+        }).encode() + b"\n")
+        unresolved_child_start = f.tell()
+        f.write(json.dumps(
+            _make_assistant_text_event("unresolved child partial")
+        ).encode() + b"\n")
     backend_state_path = run_dir / "backend_state.json"
     backend_state = json.loads(backend_state_path.read_text(encoding="utf-8"))
     backend_state["child_sources"] = {
@@ -1725,6 +1747,13 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
             "start_byte": child_start,
             "processed_byte_offset": child_path.stat().st_size,
             "delegation_id": f"codex_subagent_{child_sid}",
+        },
+        unresolved_child_sid: {
+            "agent_id": unresolved_child_sid,
+            "jsonl_path": str(unresolved_child_path),
+            "start_byte": unresolved_child_start,
+            "processed_byte_offset": unresolved_child_path.stat().st_size,
+            "delegation_id": f"codex_subagent_{unresolved_child_sid}",
         }
     }
     backend_state_path.write_text(json.dumps(backend_state), encoding="utf-8")
@@ -1736,6 +1765,15 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     if not any(e.get("type") == "worker_event" for e in events):
         print("  missing worker_event")
         return False
+    child_completions = {
+        (e.get("data") or {}).get("delegation_id"): (e.get("data") or {}).get("success")
+        for e in events
+        if e.get("type") == "worker_complete"
+    }
+    assert (
+        child_completions.get(f"codex_subagent_{child_sid}") is True
+        and child_completions.get(f"codex_subagent_{unresolved_child_sid}") is False
+    ), f"child_completions={child_completions!r}"
 
     sess = session_manager.get(app_sid) or {}
     last_asst = next(m for m in sess.get("messages", []) if m.get("id") == asst_id)
@@ -1751,20 +1789,23 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     hydrated = session_manager.get(app_sid) or {}
     msg = next(m for m in hydrated.get("messages", []) if m.get("id") == asst_id)
     panels = msg.get("workers") or []
-    panel = next(
-        (p for p in panels if p.get("delegation_id") == f"codex_subagent_{child_sid}"),
-        None,
-    )
+    panels_by_id = {panel.get("delegation_id"): panel for panel in panels}
+    panel = panels_by_id.get(f"codex_subagent_{child_sid}")
+    unresolved_panel = panels_by_id.get(f"codex_subagent_{unresolved_child_sid}")
     parent_text = json.dumps(msg.get("events") or [])
     child_text = json.dumps((panel or {}).get("events") or [])
     ok = (
         panel is not None
+        and panel.get("success") is True
+        and unresolved_panel is not None
+        and unresolved_panel.get("success") is False
         and "child answer" in child_text
         and "parent history" not in child_text
         and "child answer" not in parent_text
     )
     if not ok:
         print(f"  panel={panel!r} parent_text={parent_text[:200]} child_text={child_text[:200]}")
+    assert ok
     return ok
 
 
@@ -2279,6 +2320,7 @@ def test_codex_provider_waits_for_child_terminal_before_complete() -> bool:
             with child_path.open("ab") as f:
                 f.write(json.dumps(_make_assistant_text_event("late child final")).encode() + b"\n")
                 f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+                f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
 
         append_task = asyncio.create_task(append_child_terminal())
         (run_dir / "complete.json").write_text(json.dumps({
@@ -2317,9 +2359,22 @@ def test_codex_provider_waits_for_child_terminal_before_complete() -> bool:
             ),
             -1,
         )
-        ok = worker_index >= 0 and complete_index > worker_index
+        worker_complete_indexes = [
+            index
+            for index, event in enumerate(events)
+            if event.type == "worker_complete"
+            and event.data.get("delegation_id") == delegation_id
+        ]
+        ok = (
+            worker_index >= 0
+            and len(worker_complete_indexes) == 1
+            and worker_complete_indexes[0] > worker_index
+            and complete_index > worker_complete_indexes[0]
+            and events[worker_complete_indexes[0]].data.get("success") is True
+        )
         if not ok:
             print(f"  events={events!r}")
+        assert ok
         return ok
 
     return asyncio.run(_run())
@@ -2383,17 +2438,33 @@ def test_codex_provider_reuses_processed_child_terminal_on_complete() -> bool:
             "error": None,
             "token_usage": None,
         }), encoding="utf-8")
+        events = []
         try:
             event = await asyncio.wait_for(queue.get(), timeout=1)
+            events.append(event)
             while event.type != "complete":
                 event = await asyncio.wait_for(queue.get(), timeout=1)
+                events.append(event)
             await asyncio.wait_for(watch, timeout=1)
         finally:
             for tailer in rs.child_tailers.values():
                 tailer.stop()
             await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
             provider._cleanup_run(run_dir.name)
-        return True
+        event_types = [event.type for event in events]
+        child_completions = [
+            event for event in events
+            if event.type == "worker_complete"
+            and event.data.get("delegation_id") == f"codex_subagent_{source_key}"
+        ]
+        ok = (
+            len(child_completions) == 1
+            and child_completions[0].data.get("success") is True
+            and event_types.index("worker_start") < event_types.index("worker_complete")
+            < event_types.index("complete")
+        )
+        assert ok, events
+        return ok
 
     return asyncio.run(_run())
 
@@ -2453,17 +2524,32 @@ def test_codex_provider_parent_failure_does_not_wait_for_child_terminal() -> boo
             "error": "parent failed",
             "token_usage": None,
         }), encoding="utf-8")
+        events = []
         try:
             event = await asyncio.wait_for(queue.get(), timeout=1)
+            events.append(event)
             while event.type != "complete":
                 event = await asyncio.wait_for(queue.get(), timeout=1)
+                events.append(event)
             await asyncio.wait_for(watch, timeout=1)
         finally:
             for tailer in rs.child_tailers.values():
                 tailer.stop()
             await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
             provider._cleanup_run(run_dir.name)
-        return event.data.get("success") is False
+        child_completions = [
+            queued for queued in events
+            if queued.type == "worker_complete"
+            and queued.data.get("delegation_id") == f"codex_subagent_{source_key}"
+        ]
+        ok = (
+            event.data.get("success") is False
+            and len(child_completions) == 1
+            and child_completions[0].data.get("success") is False
+            and events.index(child_completions[0]) < events.index(event)
+        )
+        assert ok, events
+        return ok
 
     return asyncio.run(_run())
 
@@ -2778,14 +2864,24 @@ def test_codex_provider_recovers_nested_child_sources_from_processed_history() -
             if source.get("agent_id") == grandchild_sid
         ]
         nested_text = json.dumps([event.data for event in queued])
+        completion_by_delegation = {
+            event.data.get("delegation_id"): event.data.get("success")
+            for event in queued
+            if event.type == "worker_complete"
+        }
         ok = (
             len(nested_sources) == 1
             and nested_sources[0].get("parent_source_key") == source_key
             and nested_sources[0].get("start_byte") == grandchild_start
             and "nested answer" in nested_text
+            and completion_by_delegation.get(f"codex_subagent_{source_key}") is True
+            and completion_by_delegation.get(
+                nested_sources[0].get("delegation_id")
+            ) is True
         )
         if not ok:
             print(f"  sources={rs.child_sources!r} queued={nested_text[:500]}")
+        assert ok
         return ok
 
     return asyncio.run(_run())

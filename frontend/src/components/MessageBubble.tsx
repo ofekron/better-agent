@@ -161,13 +161,7 @@ function AssistantRunMeta({
 }
 
 function workerPanelComplete(worker: WorkerPanel): boolean {
-  return (
-    worker.success !== undefined ||
-    worker.error != null ||
-    worker.jsonl_path !== undefined ||
-    worker.new_byte_offset !== undefined ||
-    worker.token_usage !== undefined
-  );
+  return worker.success !== undefined || worker.error != null;
 }
 
 function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
@@ -2591,8 +2585,19 @@ const AssistantMessage = memo(function AssistantMessage({
       if (run.kind !== "worker" || !run.delegation_id) continue;
       ids.add(run.delegation_id);
     }
+    if (isGroupRunning(effectiveMessage, runs)) {
+      for (const worker of workers) {
+        if (
+          worker.run_mode !== "codex_subagent" ||
+          workerPanelComplete(worker)
+        ) {
+          continue;
+        }
+        ids.add(worker.delegation_id);
+      }
+    }
     return ids;
-  }, [runs]);
+  }, [effectiveMessage, runs, workers]);
   const entityBlocks = useMemo(() => {
     const blocks = strategy.buildEntityBlocks(messageWithoutPrepEvents, workers);
     if (relabelManagerAsWorker && blocks) {

@@ -51,7 +51,6 @@ from runs_dir import (
     runs_root as _runs_root,
 )
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
-from codex_normalize import _codex_terminal_state
 from codex_usage import token_usage_from_codex_usage
 from provider_completion import recoverable_partial_payload
 from codex_execution_contract import build_codex_execution_contract
@@ -93,26 +92,6 @@ def _run_start_byte(bs: dict, rs_disk: dict) -> int:
         except (TypeError, ValueError):
             continue
     return 0
-
-
-def _rollout_terminal_from_byte(path: Path, start_byte: int) -> Optional[bool]:
-    try:
-        with path.open("rb") as file:
-            file.seek(max(0, start_byte))
-            terminal: Optional[bool] = None
-            for raw in file:
-                if not raw.endswith(b"\n"):
-                    break
-                try:
-                    row = json.loads(raw.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    continue
-                state = _codex_terminal_state(row)
-                if state is not None:
-                    terminal = state
-            return terminal
-    except OSError:
-        return None
 
 
 def _complete_path_success(path: Path) -> bool:
@@ -299,6 +278,7 @@ class RunState:
     child_sources: dict[str, dict] = field(default_factory=dict)
     child_terminal_events: dict[str, asyncio.Event] = field(default_factory=dict)
     child_terminal_states: dict[str, bool] = field(default_factory=dict)
+    child_terminal_projected: set[str] = field(default_factory=set)
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -1039,6 +1019,33 @@ class CodexProvider(Provider):
                     if not task.done():
                         task.cancel()
 
+    def _record_child_terminal(
+        self,
+        rs: RunState,
+        source_key: str,
+        terminal_state: bool,
+    ) -> None:
+        rs.child_terminal_states[source_key] = terminal_state
+        rs.child_terminal_events.setdefault(source_key, asyncio.Event()).set()
+        if source_key in rs.child_terminal_projected:
+            return
+        source = rs.child_sources.get(source_key) or {}
+        delegation_id = source.get("delegation_id")
+        if not delegation_id:
+            return
+        child_id = str(source.get("agent_id") or source.get("child_id") or source_key)
+        try:
+            rs.queue.put_nowait(StreamEvent("worker_complete", {
+                "delegation_id": delegation_id,
+                "worker_session_id": child_id,
+                "success": terminal_state,
+                "run_mode": "codex_subagent",
+            }))
+        except Exception:
+            logger.exception("failed to enqueue codex subagent completion")
+            return
+        rs.child_terminal_projected.add(source_key)
+
     def _schedule_child_sources(
         self,
         rs: RunState,
@@ -1102,6 +1109,7 @@ class CodexProvider(Provider):
         from codex_native import CodexRolloutTailer
         from codex_native import codex_subagent_delegation_id
         from codex_native import codex_subagent_rollout_start_byte
+        from codex_native import codex_rollout_terminal_from_byte
         from codex_native import normalize_rollout_file
         from codex_native import resolve_rollout_path_polled
 
@@ -1152,15 +1160,11 @@ class CodexProvider(Provider):
         if parent_source_key:
             rs.child_sources[source_key]["parent_source_key"] = parent_source_key
             rs.child_sources[source_key]["parent_delegation_id"] = parent_delegation_id
-        terminal_event = rs.child_terminal_events.setdefault(source_key, asyncio.Event())
         existing_terminal = await asyncio.to_thread(
-            _rollout_terminal_from_byte,
+            codex_rollout_terminal_from_byte,
             path,
             source_start_byte,
         )
-        if existing_terminal is not None:
-            rs.child_terminal_states[source_key] = existing_terminal
-            terminal_event.set()
         await asyncio.to_thread(self._write_backend_state, rs)
 
         if tail_start_byte > source_start_byte:
@@ -1197,6 +1201,8 @@ class CodexProvider(Provider):
                 }))
             except Exception:
                 logger.exception("failed to enqueue codex subagent panel")
+        if existing_terminal is not None:
+            self._record_child_terminal(rs, source_key, existing_terminal)
 
         def _dispatch_child(
             event: dict,
@@ -1237,8 +1243,7 @@ class CodexProvider(Provider):
             _rs: RunState = rs,
             _source_key: str = source_key,
         ) -> None:
-            _rs.child_terminal_states[_source_key] = terminal_state
-            _rs.child_terminal_events.setdefault(_source_key, asyncio.Event()).set()
+            self._record_child_terminal(_rs, _source_key, terminal_state)
 
         tailer = CodexRolloutTailer(
             path=path,
@@ -1279,6 +1284,9 @@ class CodexProvider(Provider):
         if getattr(rs, "cancelled", False):
             payload["success"] = False
             payload["error"] = "cancelled"
+        if payload.get("success") is not True:
+            for source_key in rs.child_sources:
+                self._record_child_terminal(rs, source_key, False)
         # Codex's runner can't see token_count (it's in the rollout, tailed
         # here), so stamp the context window captured during tailing onto the
         # complete envelope — turn_manager routes it to set_context_window,

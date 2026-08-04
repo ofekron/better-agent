@@ -949,6 +949,26 @@ def normalize_rollout_file(
     return wrapped, normalizer.context_window
 
 
+def codex_rollout_terminal_from_byte(path: Path, start_byte: int) -> Optional[bool]:
+    try:
+        with path.open("rb") as file:
+            file.seek(max(0, start_byte))
+            terminal: Optional[bool] = None
+            for raw in file:
+                if not raw.endswith(b"\n"):
+                    break
+                try:
+                    row = json.loads(raw.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    continue
+                state = _codex_terminal_state(row)
+                if state is not None:
+                    terminal = state
+            return terminal
+    except OSError:
+        return None
+
+
 class CodexRolloutTailer:
     _POLL_INTERVAL = 0.05
 

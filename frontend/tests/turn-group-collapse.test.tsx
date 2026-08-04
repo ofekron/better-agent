@@ -941,6 +941,81 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.querySelector(".collapse-ellipsis")?.textContent).toBe("• • •");
   });
 
+  it("tracks native Codex child activity from the owning turn and terminal panels", async () => {
+    const child = (id: string, label: string, success?: boolean, parent?: string) => ({
+      delegation_id: id,
+      worker_session_id: `thread-${id}`,
+      worker_description: label,
+      panel_kind: "worker" as const,
+      run_mode: "codex_subagent",
+      parent_delegation_id: parent,
+      is_new: false,
+      instructions_preview: "",
+      events: [{ type: "output" as const, data: { output: `${label} output` } }],
+      ...(success === undefined ? {} : { success }),
+    });
+    const activeRoot = {
+      ...child("codex-root", "Active Codex child"),
+      jsonl_path: "/tmp/sanitized-codex-child.jsonl",
+      new_byte_offset: 42,
+    };
+    const completedSibling = child("codex-done", "Completed Codex child", true);
+    const failedSibling = child("codex-failed", "Failed Codex child", false);
+    const activeNested = child("codex-nested", "Nested Codex child", undefined, "codex-root");
+    const parentRun = {
+      run_id: "parent-run",
+      kind: "manager" as const,
+      target_message_id: "a1",
+      pid: null,
+    };
+    const { rerender } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "coordinate children" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "parent-only status",
+          isStreaming: true,
+          workers: [activeRoot, completedSibling, failedSibling, activeNested],
+        })}
+        runs={[parentRun]}
+        keepExpanded
+        orchestrationMode="native"
+      />,
+    );
+
+    const expanded = (label: RegExp) =>
+      screen.getByRole("button", { name: label }).getAttribute("aria-expanded");
+    expect(expanded(/Active Codex child/i)).toBe("true");
+    expect(expanded(/Nested Codex child/i)).toBe("true");
+    expect(expanded(/Completed Codex child/i)).toBe("false");
+    expect(expanded(/Failed Codex child/i)).toBe("false");
+
+    rerender(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "coordinate children" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "parent-only final",
+          isStreaming: false,
+          workers: [
+            { ...activeRoot, success: true },
+            completedSibling,
+            failedSibling,
+            { ...activeNested, success: true },
+          ],
+        })}
+        runs={[]}
+        keepExpanded
+        orchestrationMode="native"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(expanded(/Active Codex child/i)).toBe("false");
+      expect(expanded(/Nested Codex child/i)).toBe("false");
+    });
+  });
+
   it("auto-collapses a nested native sub-agent block after its tool result arrives", async () => {
     const events = [
       {
