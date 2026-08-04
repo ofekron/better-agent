@@ -9,7 +9,12 @@ and call `provisioning.run(spec, query, ctx)`.
 Builds on the existing `working_mode` registry, `worker_store`, and the fork
 engine (`coordinator.run_delegation` / `/api/internal/ask-fork`).
 """
-from provisioning.config import ProvisionedConfig, resolve_config, spec_is_runnable
+from provisioning.config import (
+    ProvisionedConfig,
+    ProvisionedConfigurationError,
+    resolve_config,
+    spec_is_runnable,
+)
 from provisioning.dispatch import extract_fork_text
 from provisioning.inline_spec import InlineProvisionedSessionSpec, inline_spec_from_payload
 from provisioning.lifecycle import dirty_reason, ensure_caller, ensure_session, expired_reason
@@ -26,6 +31,7 @@ __all__ = [
     "DirtyPolicy",
     "InlineProvisionedSessionSpec",
     "ProvisionedConfig",
+    "ProvisionedConfigurationError",
     "ProvisionedResult",
     "ProvisionedSessionSpec",
     "all_specs",

@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import _test_home
 _test_home.isolate("bc-test-provisioning-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
@@ -280,6 +282,62 @@ def test_resolve_config_overlay() -> bool:
     return True
 
 
+def test_resolve_config_uses_runtime_profile_authority_and_typed_errors() -> bool:
+    import config_store
+
+    class _S(ProvisionedSessionSpec):
+        key = "runtime_profile_config_spec"
+        env_prefix = "RUNTIME_PROFILE_CONFIG"
+        task_key = "requirement_analysis"
+
+    original_resolve_task = config_store.resolve_internal_llm
+    original_resolve_provider = config_store.resolve_provider_ref
+    resolved = {
+        "provider_id": "profile-provider",
+        "model": "glm-5.2",
+        "reasoning_effort": "medium",
+        "runner": "native",
+        "runtime_profile_id": "profile-id",
+    }
+    config_store.resolve_internal_llm = lambda _task: dict(resolved)
+    config_store.resolve_provider_ref = lambda provider_id: {
+        "id": provider_id,
+        "supports_fork": True,
+        # Schema v3 owns the model on the runtime profile, not here.
+        "custom_models": [],
+    }
+    try:
+        cfg = resolve_config(_S())
+        assert (cfg.provider_id, cfg.model, cfg.runner) == (
+            "profile-provider", "glm-5.2", "native",
+        )
+
+        resolved["provider_id"] = ""
+        with pytest.raises(
+            getattr(prov_config, "ProvisionedConfigurationError"),
+            match="has no provider configured",
+        ) as missing_provider:
+            resolve_config(_S())
+        assert missing_provider.value.code == "missing_provider"
+
+        resolved["provider_id"] = "direct-only"
+        config_store.resolve_provider_ref = lambda provider_id: {
+            "id": provider_id,
+            "supports_fork": False,
+        }
+        with pytest.raises(
+            getattr(prov_config, "ProvisionedConfigurationError"),
+            match="requires a fork-capable provider",
+        ) as fork_unsupported:
+            resolve_config(_S())
+        assert fork_unsupported.value.code == "fork_unsupported"
+    finally:
+        config_store.resolve_internal_llm = original_resolve_task
+        config_store.resolve_provider_ref = original_resolve_provider
+    print(f"{PASS} resolve_config: runtime-profile authority + typed failures")
+    return True
+
+
 def test_fork_capability_checks_never_resolve_credentials() -> bool:
     import config_store
     import provider
@@ -319,33 +377,38 @@ def test_resolve_config_uses_current_disk_token() -> bool:
         task_key = ""
         dispatch = "http"
         default_model = "model"
+        run_mode = "direct"
 
     token_path = Path(os.environ["BETTER_CLAUDE_HOME"]) / "internal_token"
-    token_path.write_text("disk-token", encoding="utf-8")
+    disk_token = "d" * 32
+    token_path.write_text(disk_token, encoding="utf-8")
     original_env = {
         "BETTER_AGENT_INTERNAL_TOKEN": os.environ.get("BETTER_AGENT_INTERNAL_TOKEN"),
         "BETTER_CLAUDE_INTERNAL_TOKEN": os.environ.get("BETTER_CLAUDE_INTERNAL_TOKEN"),
         "CFG_TOKEN_INTERNAL_TOKEN": os.environ.get("CFG_TOKEN_INTERNAL_TOKEN"),
+        "CFG_TOKEN_PROVIDER_ID": os.environ.get("CFG_TOKEN_PROVIDER_ID"),
     }
     try:
-        os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "stale-agent-env-token"
-        os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "stale-env-token"
+        os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "a" * 32
+        os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "l" * 32
+        os.environ["CFG_TOKEN_PROVIDER_ID"] = "provider"
         os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
         cfg = resolve_config(_S())
-        if cfg.internal_token != "disk-token":
+        if cfg.internal_token != disk_token:
             print(f"{FAIL} resolve_config token: disk token did not beat stale env")
             return False
 
-        os.environ["CFG_TOKEN_INTERNAL_TOKEN"] = "explicit-token"
+        explicit_token = "x" * 32
+        os.environ["CFG_TOKEN_INTERNAL_TOKEN"] = explicit_token
         cfg = resolve_config(_S())
-        if cfg.internal_token != "explicit-token":
+        if cfg.internal_token != explicit_token:
             print(f"{FAIL} resolve_config token: explicit spec token did not win")
             return False
 
         token_path.unlink()
         os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
         cfg = resolve_config(_S())
-        if cfg.internal_token != "stale-agent-env-token":
+        if cfg.internal_token != "a" * 32:
             print(f"{FAIL} resolve_config token: env fallback did not survive missing disk")
             return False
     finally:
@@ -1656,6 +1719,7 @@ def main_run() -> int:
         test_expired_reason,
         test_spec_and_registry,
         test_resolve_config_overlay,
+        test_resolve_config_uses_runtime_profile_authority_and_typed_errors,
         test_fork_capability_checks_never_resolve_credentials,
         test_resolve_config_uses_current_disk_token,
         test_dispatch_sends_resolved_disk_token,

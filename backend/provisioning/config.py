@@ -25,12 +25,20 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from paths import ba_home
+from paths import bc_home
 from env_compat import get_env
 
 from provisioning.spec import ProvisionedSessionSpec
 
 logger = logging.getLogger(__name__)
+
+
+class ProvisionedConfigurationError(RuntimeError):
+    """A provisioned task cannot resolve a runnable provider configuration."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -56,13 +64,21 @@ def resolve_config(
 ) -> ProvisionedConfig:
     custom = spec.build_config(model=model)
     if custom is not None:
-        return _with_resolved_runner(custom)
+        return _validate_config(spec, _with_resolved_runner(custom))
     resolved = _resolve_task(spec)
 
     model = model or _env(spec, "MODEL") or resolved.get("model") or spec.default_model
     if not model:
-        raise RuntimeError(f"{spec.key or spec.name or 'provisioned session'} has no model configured")
+        raise ProvisionedConfigurationError(
+            "missing_model",
+            f"{spec.key or spec.name or 'provisioned session'} has no model configured",
+        )
     provider_id = _env(spec, "PROVIDER_ID") or resolved.get("provider_id") or ""
+    if not provider_id:
+        raise ProvisionedConfigurationError(
+            "missing_provider",
+            f"{spec.key or spec.name or 'provisioned session'} has no provider configured",
+        )
     reasoning_effort = _env(spec, "REASONING_EFFORT")
     if reasoning_effort is None:
         reasoning_effort = resolved.get("reasoning_effort") or ""
@@ -125,6 +141,30 @@ def _with_resolved_runner(cfg: ProvisionedConfig) -> ProvisionedConfig:
     return cfg
 
 
+def _validate_config(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+) -> ProvisionedConfig:
+    label = spec.key or spec.name or "provisioned session"
+    if not cfg.model:
+        raise ProvisionedConfigurationError(
+            "missing_model", f"{label} has no model configured",
+        )
+    if not cfg.provider_id:
+        raise ProvisionedConfigurationError(
+            "missing_provider", f"{label} has no provider configured",
+        )
+    if cfg.run_mode == "fork" and not _provider_supports_fork_or_error(
+        spec, cfg.provider_id,
+    ):
+        raise ProvisionedConfigurationError(
+            "fork_unsupported",
+            f"{spec.env_prefix} fork run_mode requires a fork-capable provider "
+            f"(provider {cfg.provider_id!r} does not support fork)",
+        )
+    return cfg
+
+
 def _resolve_task(spec: ProvisionedSessionSpec) -> dict:
     """app-settings resolution for `spec.task_key`. Empty (headless/standalone
     or unknown task) — caller falls back to spec defaults / env."""
@@ -153,22 +193,42 @@ def _choice(
         return default
     value = raw.lower()
     if value not in allowed:
-        raise RuntimeError(f"{spec.env_prefix}_{suffix} must be one of {allowed}")
+        raise ProvisionedConfigurationError(
+            "invalid_choice",
+            f"{spec.env_prefix}_{suffix} must be one of {allowed}",
+        )
     return value
 
 
 def _resolve_run_mode(spec: ProvisionedSessionSpec, provider_id: str) -> str:
     requested = (_env(spec, "RUN_MODE") or spec.run_mode).lower()
     if requested not in ("fork", "direct"):
-        raise RuntimeError(f"{spec.env_prefix}_RUN_MODE must be 'fork' or 'direct'")
+        raise ProvisionedConfigurationError(
+            "invalid_run_mode",
+            f"{spec.env_prefix}_RUN_MODE must be 'fork' or 'direct'",
+        )
     if requested == "direct":
         return requested
-    if not provider_supports_fork(provider_id):
-        raise RuntimeError(
+    if not _provider_supports_fork_or_error(spec, provider_id):
+        raise ProvisionedConfigurationError(
+            "fork_unsupported",
             f"{spec.env_prefix} fork run_mode requires a fork-capable provider "
             f"(provider {provider_id!r} does not support fork)"
         )
     return requested
+
+
+def _provider_supports_fork_or_error(
+    spec: ProvisionedSessionSpec,
+    provider_id: str,
+) -> bool:
+    try:
+        return provider_supports_fork(provider_id)
+    except Exception as exc:
+        raise ProvisionedConfigurationError(
+            "provider_unavailable",
+            f"{spec.env_prefix} cannot inspect provider {provider_id!r}",
+        ) from exc
 
 
 def provider_supports_fork(provider_id: str) -> bool:
@@ -194,4 +254,4 @@ def _resolve_internal_token(spec: ProvisionedSessionSpec) -> str:
 def _read_internal_token() -> str:
     from internal_token_file import read_private_token
 
-    return read_private_token(ba_home() / "internal_token") or ""
+    return read_private_token(bc_home() / "internal_token") or ""
