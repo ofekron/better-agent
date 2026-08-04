@@ -77,7 +77,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 19
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -108,6 +108,9 @@ _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQL_PLAN_PROBE_LIMIT = 10_000
+_SQL_ELEMENT_WINDOW_MAX_SCOPE_CHARS = 64 * 1024
+_SQL_ELEMENT_WINDOW_MAX_SPAN = 100_000
+_SQLITE_INT64_MAX = (1 << 63) - 1
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
 _FULL_REFRESH_FILE_BATCH = 16
 _FULL_SCAN_DISCOVERY_BATCH = 128
@@ -529,6 +532,8 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(path, rowid DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_role_rowid_idx
             ON native_element_meta(path, role, rowid DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_path_element_index_idx
+            ON native_element_meta(path, element_index, rowid);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_role_ts_idx
             ON native_element_meta(cwd, role, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_idx
@@ -539,6 +544,8 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(cwd, ts_utc ASC, rowid ASC);
         CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_idx
             ON native_element_meta(sid, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_sid_element_index_idx
+            ON native_element_meta(sid, element_index, rowid);
         CREATE INDEX IF NOT EXISTS native_element_meta_text_hash_idx
             ON native_element_meta(text_sha256);
         CREATE INDEX IF NOT EXISTS native_element_meta_norm_hash_idx
@@ -2459,6 +2466,17 @@ _SQL_METADATA_COUNT_RE = re.compile(
     r"from\s+native_element_fts\s+where\s+(?P<where>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SQL_ELEMENT_WINDOW_RE = re.compile(
+    r"^\s*select\s+(?P<select>.+?)\s+from\s+native_element_fts\s+where\s+"
+    r"(?:native_element_fts\.)?(?P<scope>path|sid)\s*=\s*"
+    r"(?P<scope_value>\?|'(?:''|[^'])*')\s+and\s+"
+    r"(?:native_element_fts\.)?element_index\s+between\s+"
+    r"(?P<start>\?|\d+)\s+and\s+(?P<end>\?|\d+)"
+    r"(?P<order>\s+order\s+by\s+(?:native_element_fts\.)?element_index"
+    r"(?:\s+(?P<direction>asc|desc))?)?"
+    r"(?:\s+limit\s+(?P<limit>\?|\d+))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _SQL_EQUAL_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?(?P<column>path|cwd|role|element_kind|tool_name)\s*=\s*(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
@@ -3137,7 +3155,114 @@ def _choose_match_recency_sql(
     return parsed.render(drive="fts"), "match_fts", probe
 
 
+def _rewrite_element_window_sql(sql: str, params: tuple = ()) -> str | None:
+    match = _SQL_ELEMENT_WINDOW_RE.fullmatch(sql)
+    if match is None:
+        return None
+    projections = _parse_sql_projections(match.group("select"))
+    if projections is None:
+        return None
+
+    raw_values = [
+        match.group("scope_value"),
+        match.group("start"),
+        match.group("end"),
+    ]
+    if match.group("limit") is not None:
+        raw_values.append(match.group("limit"))
+    if sum(value == "?" for value in raw_values) != len(params):
+        return None
+
+    resolved: list[Any] = []
+    param_index = 0
+    for value in raw_values:
+        if value == "?":
+            resolved.append(params[param_index])
+            param_index += 1
+        elif value.startswith("'"):
+            resolved.append(value[1:-1].replace("''", "'"))
+        else:
+            resolved.append(int(value))
+
+    scope_value, start, end, *limit_values = resolved
+    if (
+        not isinstance(scope_value, str)
+        or len(scope_value) > _SQL_ELEMENT_WINDOW_MAX_SCOPE_CHARS
+    ):
+        return None
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (start, end)
+    ):
+        return None
+    if not (
+        0 <= start <= _SQLITE_INT64_MAX
+        and 0 <= end <= _SQLITE_INT64_MAX
+        and start <= end
+        and end - start <= _SQL_ELEMENT_WINDOW_MAX_SPAN
+    ):
+        return None
+    if limit_values:
+        limit = limit_values[0]
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 0 < limit <= _SQL_ELEMENT_WINDOW_MAX_SPAN
+        ):
+            return None
+
+    scope = match.group("scope").lower()
+    direction = (match.group("direction") or "asc").upper()
+    order_sql = (
+        f"m.element_index {direction}, m.rowid ASC"
+        if match.group("order") is not None
+        else "m.rowid ASC"
+    )
+    raw_text_join = (
+        " CROSS JOIN native_element_text r ON r.rowid = e.rowid"
+        if any(item.uses_raw_text for item in projections)
+        else ""
+    )
+    limit_sql = (
+        f" LIMIT {match.group('limit')}"
+        if match.group("limit") is not None
+        else ""
+    )
+    return (
+        f"SELECT {', '.join(item.sql for item in projections)} "
+        f"FROM native_element_meta m INDEXED BY "
+        f"native_element_meta_{scope}_element_index_idx "
+        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid"
+        f"{raw_text_join} WHERE m.{scope} = {match.group('scope_value')} "
+        f"AND m.element_index BETWEEN {match.group('start')} AND {match.group('end')} "
+        f"ORDER BY {order_sql}{limit_sql}"
+    )
+
+
+def _element_window_indexes_ready(conn: sqlite3.Connection) -> bool:
+    expected = {
+        "native_element_meta_path_element_index_idx": ("path", "element_index", "rowid"),
+        "native_element_meta_sid_element_index_idx": ("sid", "element_index", "rowid"),
+    }
+    try:
+        if _state_get(conn, "schema_version") != str(_SCHEMA_VERSION):
+            return False
+        for name, columns in expected.items():
+            actual = tuple(
+                row[2]
+                for row in conn.execute(f"PRAGMA index_info({name})").fetchall()
+            )
+            if actual != columns:
+                return False
+    except sqlite3.Error:
+        return False
+    return True
+
+
 def _rewrite_fast_metadata_sql(sql: str, params: tuple = ()) -> str | None:
+    element_window = _rewrite_element_window_sql(sql, params)
+    if element_window is not None:
+        return element_window
     metadata_count = _rewrite_metadata_count_sql(sql, params)
     if metadata_count is not None:
         return metadata_count
@@ -3248,11 +3373,18 @@ def run_readonly_sql(
         return 1 if time.monotonic() > deadline else 0
 
     try:
-        rewritten_sql = phase("rewrite", lambda: _rewrite_fast_metadata_sql(sql, params))
-        executed_sql = rewritten_sql or sql
+        element_window_sql = phase(
+            "element_window_recognize",
+            lambda: _rewrite_element_window_sql(sql, params),
+        )
+        rewritten_sql = phase(
+            "rewrite",
+            lambda: element_window_sql or _rewrite_fast_metadata_sql(sql, params),
+        )
+        executed_sql = sql if element_window_sql is not None else rewritten_sql or sql
         execution_route = (
             "metadata_count" if rewritten_sql and _SQL_METADATA_COUNT_RE.fullmatch(sql)
-            else "path_metadata" if rewritten_sql
+            else "path_metadata" if rewritten_sql and element_window_sql is None
             else "direct"
         )
         require_budget("rewrite")
@@ -3271,6 +3403,14 @@ def run_readonly_sql(
         require_budget("open")
         timings["query_concurrency"] = query_concurrency
         record_reconcile_snapshot("start")
+        if element_window_sql is not None:
+            if phase(
+                "element_window_readiness",
+                lambda: _element_window_indexes_ready(conn),
+            ):
+                executed_sql = element_window_sql
+                execution_route = "element_window"
+            require_budget("element_window_readiness")
         conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)
         conn.set_authorizer(_sql_authorizer)
         match_plan = phase("plan_probe", lambda: _choose_match_recency_sql(conn, sql, params))

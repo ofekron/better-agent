@@ -1499,6 +1499,220 @@ def test_result_byte_budget_fails_atomically_at_boundary() -> bool:
     return ok
 
 
+def _seed_element_window_rows():
+    conn = idx._writer_connection()
+    conn.execute("DELETE FROM native_file_state")
+    conn.commit()
+    _seed()
+    conn = idx._writer_connection()
+    rows = [
+        ("window zero", "/p/window-a.jsonl", "s-window", "/proj", "codex",
+         "assistant_text", "", "2026-08-01T00:00:00Z", "assistant", "w0", 2),
+        ("window one", "/p/window-a.jsonl", "s-window", "/proj", "codex",
+         "assistant_text", "", "2026-08-01T00:00:01Z", "assistant", "w1", 1),
+        ("window two", "/p/window-a.jsonl", "s-window", "/proj", "codex",
+         "assistant_text", "", "2026-08-01T00:00:02Z", "assistant", "w2", 2),
+        ("window three", "/p/window-b.jsonl", "s-window", "/proj", "codex",
+         "assistant_text", "", "2026-08-01T00:00:03Z", "assistant", "w3", 3),
+    ]
+    start_rowid = conn.execute(
+        "SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts"
+    ).fetchone()[0]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?",
+        (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.execute(
+        "INSERT INTO native_element_text(rowid,text) "
+        "SELECT rowid,text FROM native_element_fts WHERE rowid > ?",
+        (start_rowid,),
+    )
+    idx._state_set(conn, "schema_version", str(idx._SCHEMA_VERSION))
+    conn.commit()
+    return conn
+
+
+def test_element_window_rewrite_preserves_results_order_limits_and_plan() -> bool:
+    conn = _seed_element_window_rows()
+    cases = [
+        (
+            "SELECT sid,path,element_index,text FROM native_element_fts "
+            "WHERE sid=? AND element_index BETWEEN ? AND ? LIMIT ?",
+            ("s-window", 1, 3, 3),
+            "native_element_meta_sid_element_index_idx",
+            "ORDER BY m.rowid ASC",
+        ),
+        (
+            "SELECT sid,path,element_index,text FROM native_element_fts "
+            "WHERE sid=? AND element_index BETWEEN ? AND ? "
+            "ORDER BY element_index DESC",
+            ("s-window", 1, 3),
+            "native_element_meta_sid_element_index_idx",
+            "ORDER BY m.element_index DESC, m.rowid ASC",
+        ),
+        (
+            "SELECT path,element_index,substr(text,1,6) AS prefix "
+            "FROM native_element_fts WHERE path='/p/window-a.jsonl' "
+            "AND element_index BETWEEN 1 AND 3 ORDER BY element_index ASC LIMIT 3",
+            (),
+            "native_element_meta_path_element_index_idx",
+            "ORDER BY m.element_index ASC, m.rowid ASC",
+        ),
+    ]
+    parity = True
+    plans = []
+    for sql, params, index_name, expected_order in cases:
+        rewritten = idx._rewrite_element_window_sql(sql, params)
+        if rewritten is None:
+            parity = False
+            continue
+        expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+        actual = idx.run_readonly_sql(sql, params)
+        plan = " ".join(
+            str(row[-1])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN " + rewritten,
+                params,
+            ).fetchall()
+        )
+        plans.append(plan)
+        parity = (
+            parity
+            and actual.get("rows") == expected
+            and actual.get("execution_route") == "element_window"
+            and index_name in plan
+            and expected_order in rewritten
+        )
+    empty = idx.run_readonly_sql(
+        "SELECT text FROM native_element_fts WHERE sid=? "
+        "AND element_index BETWEEN ? AND ?",
+        ("missing-sid", 1, 3),
+    )
+    ok = (
+        parity
+        and empty.get("rows") == []
+        and empty.get("execution_route") == "element_window"
+    )
+    print(f"{OK if ok else FAIL} element windows preserve results/order and use indexes "
+          f"(plans={plans!r})")
+    return ok
+
+
+def test_element_window_schema_readiness_and_unsafe_shapes_fall_back() -> bool:
+    conn = _seed_element_window_rows()
+    sql = (
+        "SELECT text,element_index FROM native_element_fts WHERE sid=? "
+        "AND element_index BETWEEN ? AND ? ORDER BY element_index DESC"
+    )
+    params = ("s-window", 1, 3)
+    expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+    conn.execute("DROP INDEX native_element_meta_sid_element_index_idx")
+    conn.commit()
+    try:
+        not_ready = idx.run_readonly_sql(sql, params)
+    finally:
+        conn.execute(
+            "CREATE INDEX native_element_meta_sid_element_index_idx "
+            "ON native_element_meta(sid,element_index,rowid)"
+        )
+        conn.commit()
+
+    unsafe_sql = (
+        'SELECT text FROM native_element_fts WHERE sid="element_index" '
+        "AND element_index BETWEEN ? AND ?"
+    )
+    near_miss_sql = (
+        "SELECT text FROM native_element_fts WHERE sid=? "
+        "AND element_index>=? AND element_index<=?"
+    )
+    unsafe = idx.run_readonly_sql(unsafe_sql, (1, 3))
+    near_miss = idx.run_readonly_sql(near_miss_sql, params)
+
+    stale = idx.sqlite3.connect(":memory:")
+    try:
+        idx._ensure_schema(stale)
+        stale.execute(
+            "INSERT INTO native_element_fts(text,path,sid,element_index) "
+            "VALUES ('stale','/stale','stale',1)"
+        )
+        idx._state_set(stale, "schema_version", str(idx._SCHEMA_VERSION - 1))
+        stale.commit()
+        idx._ensure_schema(stale)
+        rebuilt_empty = stale.execute(
+            "SELECT COUNT(*) FROM native_element_fts"
+        ).fetchone()[0] == 0
+        idx._state_set(stale, "schema_version", str(idx._SCHEMA_VERSION))
+        migrated_ready = idx._element_window_indexes_ready(stale)
+    finally:
+        stale.close()
+
+    ok = (
+        not_ready.get("rows") == expected
+        and not_ready.get("execution_route") == "direct"
+        and idx._rewrite_element_window_sql(unsafe_sql, (1, 3)) is None
+        and unsafe.get("execution_route") == "direct"
+        and idx._rewrite_element_window_sql(near_miss_sql, params) is None
+        and near_miss.get("execution_route") == "direct"
+        and rebuilt_empty
+        and migrated_ready
+    )
+    print(f"{OK if ok else FAIL} element windows gate on schema readiness and reject unsafe shapes")
+    return ok
+
+
+def test_element_window_route_keeps_deadline_and_result_size_guards() -> bool:
+    _seed_element_window_rows()
+    sql = (
+        "SELECT text FROM native_element_fts WHERE sid=? "
+        "AND element_index BETWEEN ? AND ?"
+    )
+    params = ("s-window", 1, 3)
+    routes = []
+    old_record = idx._record_sql_query
+    old_ready = idx._element_window_indexes_ready
+    old_monotonic = idx.time.monotonic
+    clock = [100.0]
+
+    def capture(*args, execution_route, **kwargs):
+        routes.append(execution_route)
+
+    idx._record_sql_query = capture
+    try:
+        oversized = idx.run_readonly_sql(sql, params, max_result_bytes=1)
+        idx.time.monotonic = lambda: clock[0]
+        def delayed_ready(conn):
+            clock[0] += 1.0
+            return old_ready(conn)
+        idx._element_window_indexes_ready = delayed_ready
+        deadline = idx.run_readonly_sql(sql, params, timeout_s=0.1)
+    finally:
+        idx._record_sql_query = old_record
+        idx._element_window_indexes_ready = old_ready
+        idx.time.monotonic = old_monotonic
+
+    ok = (
+        oversized.get("error_code") == "result_too_large"
+        and deadline.get("error", "").startswith("TimeoutError:")
+        and routes == ["element_window", "element_window"]
+    )
+    print(f"{OK if ok else FAIL} element window route keeps deadline/result guards "
+          f"(routes={routes}, deadline={deadline.get('error')})")
+    return ok
+
+
 def test_metadata_count_rewrite_preserves_results_and_rejects_near_misses() -> bool:
     conn = idx._writer_connection()
     cases = [
@@ -1906,6 +2120,9 @@ def main_run() -> int:
         test_match_recency_alias_and_rowid_order_preserve_exact_parity,
         test_match_recency_text_like_is_rejected_before_execution,
         test_result_byte_budget_fails_atomically_at_boundary,
+        test_element_window_rewrite_preserves_results_order_limits_and_plan,
+        test_element_window_schema_readiness_and_unsafe_shapes_fall_back,
+        test_element_window_route_keeps_deadline_and_result_size_guards,
         test_metadata_count_rewrite_preserves_results_and_rejects_near_misses,
         test_metadata_count_rewrite_uses_index_and_bounds_vm_steps,
         test_sql_timings_split_sqlite_steps_transform_and_reconcile_overlap,
