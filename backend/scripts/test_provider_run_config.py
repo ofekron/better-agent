@@ -65,15 +65,9 @@ def _check_sdk_script_server(server: dict, script: Path, message: str) -> None:
 
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
-    providers = config_store.list_providers()["providers"]
-    provider = providers[0]
     assignments = config_store.get_internal_llm_assignments()
     for task in tasks:
-        assignments[task] = {
-            "provider_id": provider["id"],
-            "model": provider["default_model"],
-            "reasoning_effort": provider.get("default_reasoning_effort") or "",
-        }
+        assignments[task] = _test_installation.default_llm_assignment()
     config_store.set_internal_llm_assignments(assignments)
 
 
