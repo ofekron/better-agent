@@ -1346,7 +1346,7 @@ export function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
   );
 }
 
-function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
+export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
   const message = String(data.message ?? "");
   if (!message) return null;
   const replacementHistory = Array.isArray(data.replacement_history)
