@@ -6588,7 +6588,7 @@ function AppMain({
         </div>
       )}
       <StartupTasksBanner />
-      <ModelCatalogActivity />
+      <ModelCatalogActivity providers={providers} />
       <NodeProviderCredentialStatus machines={machines} />
       {authStatus === "authed" ? <MarketplaceBridgeCenter /> : null}
       {authStatus === "authed" &&

@@ -31,6 +31,11 @@ const CATALOG: ModelCatalog = {
 };
 
 
+const ACTIVITY_PROVIDERS = [
+  { id: "codex", name: "Codex", nickname: "work" },
+] as unknown as Parameters<typeof ModelCatalogActivity>[0]["providers"];
+
+
 function response(body: unknown, ok = true): Response {
   return {
     ok,
@@ -128,7 +133,9 @@ describe("authoritative model catalog UI", () => {
   it("shows refreshing background work in a dismissible RTL-safe popup", async () => {
     const refreshing = { ...CATALOG, status: "refreshing" as const };
     vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(<ModelCatalogActivity />);
+    const { container } = render(
+      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
+    );
     await waitFor(() => {
       expect(container.querySelector(".model-catalog-activity")).not.toBeNull();
     });
@@ -142,7 +149,9 @@ describe("authoritative model catalog UI", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(response({ catalogs: [] }))
       .mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(<ModelCatalogActivity />);
+    const { container } = render(
+      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
+    );
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
     act(() => {
@@ -152,6 +161,51 @@ describe("authoritative model catalog UI", () => {
     await waitFor(() => {
       expect(container.querySelector(".model-catalog-activity")).not.toBeNull();
     });
+  });
+
+  it("names the provider and the specific reason for each activity row", async () => {
+    const refreshing = {
+      ...CATALOG,
+      status: "refreshing" as const,
+      reason: "provider_changed",
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
+    const { container } = render(
+      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector(".model-catalog-activity-provider"),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector(".model-catalog-activity-provider")?.textContent,
+    ).toBe("Codex · work");
+    expect(
+      container.querySelector(".model-catalog-activity-detail")?.textContent,
+    ).toBe("Provider settings changed — rediscovering models");
+  });
+
+  it("falls back to the provider id and status when the provider is unknown", async () => {
+    const refreshing = {
+      ...CATALOG,
+      provider_id: "13831e83",
+      status: "refreshing" as const,
+      reason: "",
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
+    const { container } = render(<ModelCatalogActivity providers={[]} />);
+    await waitFor(() => {
+      expect(
+        container.querySelector(".model-catalog-activity-provider"),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector(".model-catalog-activity-provider")?.textContent,
+    ).toBe("13831e83");
+    expect(
+      container.querySelector(".model-catalog-activity-detail")?.textContent,
+    ).toBe("Refreshing models…");
   });
 
   it("uses logical RTL positioning and disables motion when requested", () => {
@@ -183,6 +237,12 @@ describe("authoritative model catalog UI", () => {
       "model.catalogActivity.error",
       "model.catalogActivity.unsupported",
       "model.catalogActivity.unavailable",
+      "model.catalogReason.catalog_pending",
+      "model.catalogReason.provider_changed",
+      "model.catalogReason.source_changed",
+      "model.catalogReason.watcher_unavailable",
+      "model.catalogReason.refresh_failed",
+      "model.catalogReason.no_provider",
       "model.notSelectable",
       "setup.defaultModelCustomPlaceholder",
     ];

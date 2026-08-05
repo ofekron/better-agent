@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { parseModelCatalog } from "../hooks/useProviderModelCatalog";
 import { eventBus } from "src/lib/eventBus";
-import type { ModelCatalog } from "../types";
+import type { ModelCatalog, Provider } from "../types";
+import { providerDisplayName } from "../utils/providerDisplayName";
 import Icon from "./Icon";
 
 type Activity = {
@@ -60,8 +61,8 @@ function reconcileActivities(
   return next;
 }
 
-export function ModelCatalogActivity() {
-  const { t } = useTranslation();
+export function ModelCatalogActivity({ providers }: { providers: Provider[] }) {
+  const { t, i18n } = useTranslation();
   const [activities, setActivities] = useState<Record<string, Activity>>({});
   const requestSequence = useRef(0);
 
@@ -137,26 +138,39 @@ export function ModelCatalogActivity() {
         </button>
       </header>
       <ul>
-        {visible.map(({ catalog, requestPending }) => (
-          <li
-            key={catalog.provider_id}
-            className={`model-catalog-activity-${requestPending ? "pending" : catalog.status}`}
-          >
-            <Icon
-              name={
-                requestPending || catalog.status === "refreshing"
-                  ? "refresh"
-                  : "warning"
-              }
-              size={12}
-            />
-            <span>
-              {requestPending
-                ? t("model.catalogRefreshAccepted")
-                : t(`model.catalogActivity.${catalog.status}`)}
-            </span>
-          </li>
-        ))}
+        {visible.map(({ catalog, requestPending }) => {
+          const label = providerDisplayName(
+            providers.find((p) => p.id === catalog.provider_id),
+            catalog.provider_id,
+          );
+          const reasonKey = `model.catalogReason.${catalog.reason}`;
+          const detail = requestPending
+            ? t("model.catalogRefreshAccepted")
+            : catalog.reason && i18n.exists(reasonKey)
+              ? t(reasonKey)
+              : t(`model.catalogActivity.${catalog.status}`);
+          return (
+            <li
+              key={catalog.provider_id}
+              className={`model-catalog-activity-${requestPending ? "pending" : catalog.status}`}
+            >
+              <Icon
+                name={
+                  requestPending || catalog.status === "refreshing"
+                    ? "refresh"
+                    : "warning"
+                }
+                size={12}
+              />
+              <span className="model-catalog-activity-text">
+                <span className="model-catalog-activity-provider">{label}</span>
+                <span className="model-catalog-activity-detail" title={detail}>
+                  {detail}
+                </span>
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </aside>
   );

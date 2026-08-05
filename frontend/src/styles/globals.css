@@ -17872,6 +17872,29 @@ html[dir="rtl"] .user-request-toast::before {
   align-items: center;
   gap: 8px;
 }
+.model-catalog-activity li {
+  align-items: flex-start;
+  animation: model-catalog-activity-in 180ms ease-out;
+}
+.model-catalog-activity li svg {
+  margin-top: 3px;
+  flex: none;
+}
+.model-catalog-activity-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.model-catalog-activity-provider {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.model-catalog-activity-detail {
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+  overflow-wrap: anywhere;
+  transition: color 180ms ease-out;
+}
 .model-catalog-activity header {
   justify-content: space-between;
   font-weight: 600;
@@ -18013,6 +18036,8 @@ body:has(.model-catalog-activity) .node-provider-credential-status {
   .node-provider-credential-status-indicator,
   .node-provider-credential-status button,
   .model-catalog-status,
+  .model-catalog-activity li,
+  .model-catalog-activity-detail,
   .model-catalog-activity svg {
     animation: none;
     transition: none;
