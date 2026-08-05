@@ -52,6 +52,7 @@ _PROVIDER_RECORD = {
     "kind": "test",
     "generation": "7e3b9b0c-2c4d-4f6a-9d77-1f0e2a3b4c5d",
     "revision": 0,
+    "execution_revision": 0,
 }
 
 
