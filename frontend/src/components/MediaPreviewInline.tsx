@@ -28,7 +28,7 @@ interface Props {
 export function MediaPreviewInline({ path, mediaType, onFileClick }: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const fileName = path.split("/").pop() ?? path;
+  const fileName = path.split("/").pop()!;
 
   const handleToggle = useCallback(
     (e: React.MouseEvent) => {
