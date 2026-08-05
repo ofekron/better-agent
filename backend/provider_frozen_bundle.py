@@ -793,6 +793,18 @@ def _set_materialized_mtime(
     os.utime(path, ns=timestamps, follow_symlinks=False)
 
 
+def _set_materialized_mode(
+    descriptor: int,
+    path: Path,
+    mode: int,
+) -> None:
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(descriptor, mode)
+        return
+    os.chmod(path, mode)
+
+
 def _copy_attested_file(
     entry: FrozenBundleEntry,
     destination: Path,
@@ -831,7 +843,7 @@ def _copy_attested_file(
                 entry.mode,
             )
             try:
-                os.fchmod(output, entry.mode)
+                _set_materialized_mode(output, destination, entry.mode)
                 digest = hashlib.sha256()
                 while chunk := os.read(source, 1024 * 1024):
                     digest.update(chunk)

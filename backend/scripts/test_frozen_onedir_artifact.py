@@ -199,6 +199,68 @@ def test_materialized_mtime_uses_supported_platform_operation() -> None:
         )
 
 
+def test_materialized_mode_uses_supported_platform_operation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "materialized-entry"
+    target.write_bytes(b"entry")
+    descriptor = os.open(target, os.O_WRONLY)
+    try:
+        monkeypatch.delattr(
+            provider_frozen_bundle.os,
+            "fchmod",
+            raising=False,
+        )
+        with mock.patch.object(
+            provider_frozen_bundle.os,
+            "chmod",
+            wraps=os.chmod,
+        ) as chmod:
+            provider_frozen_bundle._set_materialized_mode(
+                descriptor,
+                target,
+                0o600,
+            )
+        chmod.assert_called_once_with(target, 0o600)
+
+        with mock.patch.object(
+            provider_frozen_bundle.os,
+            "fchmod",
+            create=True,
+        ) as fchmod:
+            provider_frozen_bundle._set_materialized_mode(
+                descriptor,
+                target,
+                0o500,
+            )
+        fchmod.assert_called_once_with(descriptor, 0o500)
+    finally:
+        os.close(descriptor)
+
+
+def test_complete_materialization_without_fchmod(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle, _, _ = _capture(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    destination = run_dir / "frozen-runner"
+    monkeypatch.delattr(
+        provider_frozen_bundle.os,
+        "fchmod",
+        raising=False,
+    )
+    previous_umask = os.umask(0o777)
+    try:
+        materialized = materialize_frozen_bundle(bundle, destination)
+    finally:
+        os.umask(previous_umask)
+    assert materialized == destination.resolve()
+    assert attest_materialized_frozen_bundle(bundle, destination)
+
+
 def test_macos_default_bundle_root_preserves_app_layout() -> None:
     if sys.platform != "darwin":
         return
@@ -259,22 +321,31 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     windows_smoke = next(
         step for step in steps if step.get("name") == "Smoke Windows artifact"
     )
-    assert "Start-Process" in windows_smoke["run"]
-    assert "-PassThru" in windows_smoke["run"]
-    assert "$Smoke.WaitForExit(1000)" in windows_smoke["run"]
-    assert "[DateTime]::UtcNow.AddMinutes(5)" in windows_smoke["run"]
-    assert "taskkill.exe" in windows_smoke["run"]
-    assert "/T" in windows_smoke["run"]
-    assert "/F" in windows_smoke["run"]
-    assert "$Smoke.WaitForExit(5000)" in windows_smoke["run"]
-    assert "$Smoke.WaitForExit()" not in windows_smoke["run"]
-    assert windows_smoke["run"].count("Show-SmokeDiagnostics") == 3
-    assert 'Filter "result.progress.*.json"' in windows_smoke["run"]
-    assert "ConvertFrom-Json" in windows_smoke["run"]
-    assert "artifact-smoke-progress" in windows_smoke["run"]
-    assert "$Smoke.ExitCode" in windows_smoke["run"]
-    assert "$LASTEXITCODE" not in windows_smoke["run"]
-    assert "state\\faulthandler.log" in windows_smoke["run"]
+    assert "run_windows_artifact_smoke.ps1" in windows_smoke["run"]
+    smoke_runner = (
+        ROOT / "desktop" / "run_windows_artifact_smoke.ps1"
+    ).read_text(encoding="utf-8")
+    assert "Start-Process" in smoke_runner
+    assert "-PassThru" in smoke_runner
+    assert "$Smoke.WaitForExit(1000)" in smoke_runner
+    assert "[DateTime]::UtcNow.AddMinutes(5)" in smoke_runner
+    assert "taskkill.exe" in smoke_runner
+    assert "/T" in smoke_runner
+    assert "/F" in smoke_runner
+    assert "$Smoke.WaitForExit(5000)" in smoke_runner
+    assert "$Smoke.WaitForExit()" not in smoke_runner
+    assert smoke_runner.count("Show-SmokeDiagnostics") == 3
+    assert 'Filter "result.progress.*.json"' in smoke_runner
+    assert "ConvertFrom-Json" in smoke_runner
+    assert "artifact-smoke-progress" in smoke_runner
+    assert "$Smoke.ExitCode" in smoke_runner
+    assert "$LASTEXITCODE" not in smoke_runner
+    assert "state\\faulthandler.log" in smoke_runner
+    assert "$ResultArgument = '\"' + $Result + '\"'" in smoke_runner
+    build_script = (
+        ROOT / "desktop" / "build_windows.ps1"
+    ).read_text(encoding="utf-8")
+    assert "run_windows_artifact_smoke.ps1" in build_script
     upload = next(
         step for step in steps
         if step.get("name") == "Upload artifact smoke diagnostics"
