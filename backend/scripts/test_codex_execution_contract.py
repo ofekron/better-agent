@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Callable
+from contextlib import redirect_stdout
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,32 +100,66 @@ def test_contract_is_deterministic_secret_free_and_config_bound() -> None:
         assert not contract.attest()
 
 
-def test_config_path_escape_and_secret_selectors_are_rejected() -> None:
+def _create_symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+
+def test_external_config_symlink_is_exactly_attested() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         config_dir = root / "config"
         config_dir.mkdir()
         executable = root / "codex"
         write_executable(executable, b"native")
-        provider_record = provider(config_dir)
 
-        escaped = config_dir / "escaped.toml"
-        escaped.symlink_to(root / "outside.toml")
-        (root / "outside.toml").write_text("x=1", encoding="utf-8")
+        first = root / "first.toml"
+        second = root / "second.toml"
+        first.write_text("x=1", encoding="utf-8")
+        second.write_text("x=1", encoding="utf-8")
+        config_file = config_dir / "config.toml"
+        _create_symlink_or_skip(config_file, first)
+
+        contract = build_codex_execution_contract(
+            provider(config_dir),
+            launcher_path=str(executable),
+            config_paths=(str(config_file),),
+        )
+        round_tripped = CodexExecutionContract.from_dict(
+            json.loads(json.dumps(contract.to_dict())),
+        )
+
+        assert round_tripped == contract
+        assert round_tripped.attest()
+
+        config_file.unlink()
+        config_file.symlink_to(second)
+        assert not round_tripped.attest()
+
+        config_file.unlink()
+        config_file.symlink_to(first)
+        contract = build_codex_execution_contract(
+            provider(config_dir),
+            launcher_path=str(executable),
+            config_paths=(str(config_file),),
+        )
+        first.write_text("x=2", encoding="utf-8")
+        assert not contract.attest()
+
+
+def test_secret_selectors_are_rejected() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        config_dir = root / "config"
+        config_dir.mkdir()
+        executable = root / "codex"
+        write_executable(executable, b"native")
+
         try:
             build_codex_execution_contract(
-                provider_record,
-                launcher_path=str(executable),
-                config_paths=(str(escaped),),
-            )
-        except ExecutionContractError:
-            pass
-        else:
-            raise AssertionError("config symlink escape must fail closed")
-
-        try:
-            build_codex_execution_contract(
-                provider_record,
+                provider(config_dir),
                 launcher_path=str(executable),
                 environment_selectors={"SAKANA_API_KEY": "secret"},
             )
@@ -128,6 +167,33 @@ def test_config_path_escape_and_secret_selectors_are_rejected() -> None:
             pass
         else:
             raise AssertionError("secret selectors must never enter the contract")
+
+
+def _run_direct_tests(tests: tuple[Callable[[], None], ...]) -> None:
+    for test in tests:
+        try:
+            test()
+        except pytest.skip.Exception as exc:
+            print(f"SKIP {test.__name__}: {exc}")
+
+
+def test_direct_runner_reports_skip_and_continues() -> None:
+    completed: list[bool] = []
+
+    def unsupported() -> None:
+        pytest.skip("symlink creation is unavailable")
+
+    def supported() -> None:
+        completed.append(True)
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        _run_direct_tests((unsupported, supported))
+
+    assert completed == [True]
+    assert output.getvalue() == (
+        "SKIP unsupported: symlink creation is unavailable\n"
+    )
 
 
 def test_agent_authority_membership_is_frozen() -> None:
@@ -353,7 +419,9 @@ def test_builder_accepts_config_store_provider_authority() -> None:
 CONTRACT_TESTS = (
     test_facade_exports_stable_execution_api,
     test_contract_is_deterministic_secret_free_and_config_bound,
-    test_config_path_escape_and_secret_selectors_are_rejected,
+    test_external_config_symlink_is_exactly_attested,
+    test_secret_selectors_are_rejected,
+    test_direct_runner_reports_skip_and_continues,
     test_agent_authority_membership_is_frozen,
     test_secret_arguments_and_url_query_are_rejected,
     test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint,
@@ -364,6 +432,5 @@ CONTRACT_TESTS = (
 
 
 if __name__ == "__main__":
-    for test in (*LAUNCH_TESTS, *CONTRACT_TESTS):
-        test()
+    _run_direct_tests((*LAUNCH_TESTS, *CONTRACT_TESTS))
     print("PASS codex execution contract")
