@@ -38,7 +38,6 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import provider_completion as pc  # noqa: E402
 from provider_completion import (  # noqa: E402
     RECOVERABLE_PARTIAL_OUTCOME,
     TRANSPORT_TRUNCATED_AFTER_PROGRESS_ERROR,

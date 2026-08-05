@@ -53,7 +53,6 @@ from event_bus import bus  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
 from jsonl_tailer import OwnedClaudeJsonlTailer  # noqa: E402
-import jsonl_tailer  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
