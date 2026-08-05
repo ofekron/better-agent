@@ -210,6 +210,7 @@ def test_lock_file_is_private_regular_and_metadata_is_diagnostic() -> None:
             lock_path = home / "primary-launcher.lock"
             observed = lock_path.lstat()
             assert stat.S_ISREG(observed.st_mode)
+            paths.require_private_file(lock_path)
             if os.name != "nt":
                 assert stat.S_IMODE(observed.st_mode) == 0o600
             metadata = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -217,6 +218,39 @@ def test_lock_file_is_private_regular_and_metadata_is_diagnostic() -> None:
             assert metadata["home"] == lease.canonical_home
         finally:
             lease.release()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
+def test_existing_unsafe_windows_lock_is_rejected_without_repair(
+    tmp_path: Path,
+) -> None:
+    home = _private_home(tmp_path)
+    lock_path = home / "primary-launcher.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+    assert not paths.windows_path_has_private_acl(lock_path)
+
+    with pytest.raises(PrimaryLauncherLeaseError):
+        PrimaryLauncherLease.acquire(home, checkout=tmp_path)
+
+    assert not paths.windows_path_has_private_acl(lock_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
+def test_failed_windows_lock_hardening_removes_new_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = _private_home(tmp_path)
+    lock_path = home / "primary-launcher.lock"
+
+    def fail_hardening(_path: Path) -> None:
+        raise PermissionError("hardening failed")
+
+    monkeypatch.setattr("primary_launcher_lease.make_private_file", fail_hardening)
+    with pytest.raises(PermissionError, match="hardening failed"):
+        PrimaryLauncherLease.acquire(home, checkout=tmp_path)
+
+    assert not lock_path.exists()
 
 
 def test_rejects_redirecting_or_non_regular_lock_paths() -> None:

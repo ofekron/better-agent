@@ -10,7 +10,12 @@ import time
 import uuid
 from pathlib import Path
 
-from paths import bc_home, require_private_directory, require_private_file
+from paths import (
+    bc_home,
+    make_private_file,
+    require_private_directory,
+    require_private_file,
+)
 from portable_lock import try_lock_ex, unlock
 
 
@@ -75,21 +80,46 @@ def _validate_lock_file(path: Path, fd: int) -> None:
 
 
 def _open_lock_file(path: Path) -> int:
-    flags = os.O_RDWR | os.O_CREAT
+    flags = os.O_RDWR
     flags |= getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NOINHERIT", 0)
+    created = False
     try:
-        fd = os.open(path, flags, 0o600)
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise PrimaryLauncherLeaseError(
+                "primary launcher lock could not be opened"
+            ) from exc
     except OSError as exc:
         raise PrimaryLauncherLeaseError("primary launcher lock could not be opened") from exc
     try:
         os.set_inheritable(fd, False)
-        if os.name != "nt":
+        if os.name == "nt" and created:
+            make_private_file(path)
+        elif os.name != "nt":
             os.fchmod(fd, 0o600)
         _validate_lock_file(path, fd)
         return fd
     except Exception:
+        created_identity = None
+        if created:
+            try:
+                opened = os.fstat(fd)
+                if os.path.samestat(opened, path.lstat()):
+                    created_identity = opened
+            except OSError:
+                pass
         os.close(fd)
+        if created_identity is not None:
+            try:
+                if os.path.samestat(created_identity, path.lstat()):
+                    path.unlink()
+            except OSError:
+                pass
         raise
 
 

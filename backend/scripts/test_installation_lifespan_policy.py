@@ -21,6 +21,10 @@ def _child(mode: str, home: Path) -> None:
     sys.path.insert(0, str(SDK))
     (home / "runs").mkdir()
 
+    from backend_instance_lock import adopt_primary_backend_instance_lock
+
+    adopt_primary_backend_instance_lock()
+
     import installation_profile
     import provider_setup
 
@@ -193,6 +197,12 @@ def _child(mode: str, home: Path) -> None:
 
 
 def test_every_profile_lifespan_obeys_runtime_tier() -> None:
+    sys.path.insert(0, str(BACKEND))
+    from backend_instance_lock import reserve_primary_backend_instance_lock
+    from backend_launch_authority import issue_primary_backend_launch
+    from paths import make_private_directory
+    from primary_launcher_lease import PrimaryLauncherLease
+
     modes = (
         "setup-required",
         "desktop-ui-only",
@@ -203,11 +213,41 @@ def test_every_profile_lifespan_obeys_runtime_tier() -> None:
         with tempfile.TemporaryDirectory(
             prefix=f"ba-install-lifespan-{mode}-"
         ) as tmp:
-            subprocess.run(
-                [sys.executable, __file__, "--child", mode, tmp],
-                check=True,
-                cwd=ROOT,
-            )
+            home = Path(tmp)
+            make_private_directory(home)
+            lease = PrimaryLauncherLease.acquire(home, checkout=ROOT)
+            reservation = None
+            process = None
+            try:
+                reservation = reserve_primary_backend_instance_lock(lease)
+                env = {
+                    **os.environ,
+                    **issue_primary_backend_launch(
+                        checkout=ROOT,
+                        state_root=home,
+                        launcher_lease=lease,
+                        backend_reservation=reservation,
+                    ),
+                }
+                with reservation.child_spawn_kwargs() as inheritance_kwargs:
+                    process = subprocess.Popen(
+                        [sys.executable, __file__, "--child", mode, tmp],
+                        cwd=ROOT,
+                        env=env,
+                        **inheritance_kwargs,
+                    )
+                reservation.await_adoption(process)
+                reservation.detach_after_transfer()
+                returncode = process.wait()
+                if returncode:
+                    raise subprocess.CalledProcessError(returncode, process.args)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=10)
+                if reservation is not None:
+                    reservation.release()
+                lease.release()
 
 
 if __name__ == "__main__":
