@@ -20,6 +20,7 @@ from pathlib import Path
 # Per CLAUDE.md, isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module so the dev's real session store is untouched.
 import _test_home
+import _test_installation
 _test_home.isolate("bc-test-del-nonfork-")
 for _sub in ("sessions", "runs", "ask-status", "delegate-status"):
     (Path(os.environ["BETTER_AGENT_HOME"]) / _sub).mkdir(parents=True, exist_ok=True)
@@ -28,6 +29,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+# run_delegation's first guard is assert_orchestration_mode_allowed("team"),
+# which needs an active, bootstrap-ready installation profile (provider
+# conversations and integrations are enabled by such a profile in the default
+# mode). Activate one explicitly so the module does not lean on a side effect
+# of an earlier-collected module's setup.
+_test_installation.activate(
+    Path(os.environ["BETTER_AGENT_HOME"]), provider="claude"
+)
 
 from orchs.manager import _delegation  # noqa: E402
 
@@ -61,6 +71,16 @@ class _TurnManager:
 
     def run_state_remove(self, *args, **kwargs):
         pass
+
+    async def run_state_add_on_owner_loop(self, *args, **kwargs):
+        # Mirrors the real TurnManager wrapper around run_state_add. run_delegation
+        # calls this on the allowed path; the return is unused.
+        return {}
+
+    async def run_state_remove_on_owner_loop(self, *args, **kwargs):
+        # Mirrors the real wrapper around run_state_remove. Returning an empty
+        # list (falsy) keeps the finally block from scheduling a projection.
+        return []
 
     async def emit_run_state(self, app_session_id: str):
         pass
