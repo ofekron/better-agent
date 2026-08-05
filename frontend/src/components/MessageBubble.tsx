@@ -1044,7 +1044,7 @@ function ModelFallbackEvent({ data }: { data: Record<string, unknown> }) {
 
 type EventRenderGroups = EventRenderGroup[];
 
-function isActionLeadGroup(group: EventRenderGroup): boolean {
+export function isActionLeadGroup(group: EventRenderGroup): boolean {
   return group.kind === "event" && (
     group.event.type === "output" ||
     group.event.type === "thinking"
@@ -1052,7 +1052,7 @@ function isActionLeadGroup(group: EventRenderGroup): boolean {
 }
 
 // Text of an output/thinking lead, or "" for anything else.
-function leadText(group: EventRenderGroup): string {
+export function leadText(group: EventRenderGroup): string {
   if (group.kind !== "event") return "";
   const ev = group.event;
   if (ev.type === "output") return (ev.data.output as string) || "";
@@ -1062,25 +1062,25 @@ function leadText(group: EventRenderGroup): string {
 
 // A lead with no visible headline text. These must not spawn their own
 // "no text" action group — their actions merge into the running group.
-function isHeadlessLead(group: EventRenderGroup): boolean {
+export function isHeadlessLead(group: EventRenderGroup): boolean {
   return isActionLeadGroup(group) && !leadText(group).trim();
 }
 
-function isAutoGroupedAction(group: EventRenderGroup): boolean {
+export function isAutoGroupedAction(group: EventRenderGroup): boolean {
   return group.kind === "tool";
 }
 
 // A tool group that dispatched a sub-agent (has child events). These render as
 // SubAgentBlock — already self-contained containers — so they must never be
 // wrapped inside an AutoActionGroup.
-function isSubAgentAction(group: EventRenderGroup, childrenMap: ChildrenMap): boolean {
+export function isSubAgentAction(group: EventRenderGroup, childrenMap: ChildrenMap): boolean {
   if (group.kind !== "tool") return false;
   const toolUseId = group.event.data.tool_use_id as string | undefined;
   const children = toolUseId ? childrenMap.get(toolUseId) : undefined;
   return !!children && children.length > 0;
 }
 
-function hasLaterActionLead(groups: EventRenderGroups, startIdx: number): boolean {
+export function hasLaterActionLead(groups: EventRenderGroups, startIdx: number): boolean {
   for (let i = startIdx; i < groups.length; i++) {
     if (isActionLeadGroup(groups[i])) return true;
   }

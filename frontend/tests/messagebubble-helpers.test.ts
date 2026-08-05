@@ -10,9 +10,15 @@ import {
   fmt,
   fmtSize,
   fmtTime,
+  hasLaterActionLead,
   hexAlphaToRgba,
+  isActionLeadGroup,
+  isAutoGroupedAction,
   isEffectivelyEmpty,
+  isHeadlessLead,
+  isSubAgentAction,
   isToolResult,
+  leadText,
   messageWithHydratedRenderPayload,
   normalizeAssistantContentText,
   parseErrorMessage,
@@ -27,6 +33,7 @@ import {
   workerPanelDefaultOpen,
 } from "../src/components/MessageBubble";
 import type { ChatMessage, WSEvent, WorkerPanel } from "../src/types";
+import type { EventRenderGroup } from "../src/lib/groupEvents";
 
 const ev = (type: string, data: Record<string, unknown>): WSEvent =>
   ({ type, data } as unknown as WSEvent);
@@ -749,5 +756,101 @@ describe("routeLeakedWorkerEvents", () => {
     const wrapped = ev("agent_message", { type: "agent_message", data: { text: "inner" } });
     const out = routeLeakedWorkerEvents(msg({ events: [wrapped] }));
     expect(out.events).toEqual([{ type: "agent_message", data: { text: "inner" } }]);
+  });
+});
+
+// --- auto-action grouping predicates (MessageBubble.tsx) ---
+
+const eventGroup = (event: WSEvent): EventRenderGroup => ({ kind: "event", idx: 0, event });
+const toolGroup = (event: WSEvent): EventRenderGroup => ({ kind: "tool", idx: 0, event });
+
+const outputEv = (text: string): WSEvent => ({ type: "output", data: { output: text } });
+const thinkingEv = (thought: string): WSEvent => ({ type: "thinking", data: { thought } });
+const toolCallEv = (toolUseId?: string): WSEvent => ({
+  type: "tool_call",
+  data: { tool: "Bash", tool_use_id: toolUseId },
+});
+
+describe("isActionLeadGroup", () => {
+  it("true for output and thinking event groups", () => {
+    expect(isActionLeadGroup(eventGroup(outputEv("hi")))).toBe(true);
+    expect(isActionLeadGroup(eventGroup(thinkingEv("hmm")))).toBe(true);
+  });
+
+  it("false for tool groups and non-output/thinking events", () => {
+    expect(isActionLeadGroup(toolGroup(toolCallEv("t1")))).toBe(false);
+    expect(isActionLeadGroup(eventGroup({ type: "tool_result", data: {} }))).toBe(false);
+  });
+});
+
+describe("leadText", () => {
+  it("returns output/thought text", () => {
+    expect(leadText(eventGroup(outputEv("hello")))).toBe("hello");
+    expect(leadText(eventGroup(thinkingEv("ponder")))).toBe("ponder");
+  });
+
+  it("returns empty string for missing text or other kinds", () => {
+    expect(leadText(eventGroup(outputEv("")))).toBe("");
+    expect(leadText(eventGroup({ type: "output", data: {} }))).toBe("");
+    expect(leadText(eventGroup({ type: "thinking", data: {} }))).toBe("");
+    expect(leadText(toolGroup(toolCallEv("t1")))).toBe("");
+    expect(leadText(eventGroup({ type: "tool_result", data: {} }))).toBe("");
+  });
+});
+
+describe("isHeadlessLead", () => {
+  it("true for a lead whose text is empty or whitespace-only", () => {
+    expect(isHeadlessLead(eventGroup(outputEv("")))).toBe(true);
+    expect(isHeadlessLead(eventGroup(outputEv("   ")))).toBe(true);
+    expect(isHeadlessLead(eventGroup(thinkingEv("\t")))).toBe(true);
+    expect(isHeadlessLead(eventGroup({ type: "output", data: {} }))).toBe(true);
+  });
+
+  it("false for a lead with real text or a non-lead group", () => {
+    expect(isHeadlessLead(eventGroup(outputEv("real")))).toBe(false);
+    expect(isHeadlessLead(toolGroup(toolCallEv("t1")))).toBe(false);
+  });
+});
+
+describe("isAutoGroupedAction", () => {
+  it("true only for tool groups", () => {
+    expect(isAutoGroupedAction(toolGroup(toolCallEv("t1")))).toBe(true);
+    expect(isAutoGroupedAction(eventGroup(outputEv("hi")))).toBe(false);
+  });
+});
+
+describe("isSubAgentAction", () => {
+  it("true for a tool group with child events under its tool_use_id", () => {
+    const map = new Map<string, WSEvent[]>([["t1", [outputEv("child")]]]);
+    expect(isSubAgentAction(toolGroup(toolCallEv("t1")), map)).toBe(true);
+  });
+
+  it("false for tool without children entry, empty entry, no id, or non-tool", () => {
+    const map = new Map<string, WSEvent[]>([["t1", []]]);
+    const empty = new Map<string, WSEvent[]>();
+    expect(isSubAgentAction(toolGroup(toolCallEv("t1")), map)).toBe(false); // empty children
+    expect(isSubAgentAction(toolGroup(toolCallEv("t2")), map)).toBe(false); // no entry
+    expect(isSubAgentAction(toolGroup(toolCallEv(undefined)), map)).toBe(false); // no id
+    expect(isSubAgentAction(toolGroup({ type: "tool_call", data: { tool: "Bash" } }), map)).toBe(false); // id absent in data
+    expect(isSubAgentAction(eventGroup(outputEv("hi")), map)).toBe(false); // not a tool
+  });
+});
+
+describe("hasLaterActionLead", () => {
+  const lead = eventGroup(outputEv("lead"));
+  const action = toolGroup(toolCallEv("t1"));
+  const other = eventGroup({ type: "tool_result", data: {} });
+
+  it("true when a lead exists at or after startIdx", () => {
+    expect(hasLaterActionLead([action, lead, action], 1)).toBe(true);
+    expect(hasLaterActionLead([action, lead], 1)).toBe(true);
+    expect(hasLaterActionLead([action, action, lead], 1)).toBe(true);
+  });
+
+  it("false when no lead exists at or after startIdx", () => {
+    expect(hasLaterActionLead([action, action], 1)).toBe(false);
+    expect(hasLaterActionLead([], 0)).toBe(false);
+    expect(hasLaterActionLead([lead, action], 1)).toBe(false); // lead only before startIdx
+    expect(hasLaterActionLead([other, other], 0)).toBe(false); // non-output/thinking event is not a lead
   });
 });
