@@ -514,13 +514,20 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         if "internal-runtime" not in configs:
             raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
 
+        # requires_backend_auth MCPs whose extension holds internal_loopback
+        # self-mint a per-extension token (commit 98e8acbb3), so they remain
+        # available to internal runners even when the external internal_token
+        # is blank at structural-plan time.
         missing_token = dict(inputs)
         missing_token["internal_token"] = ""
         configs = extension_store.runtime_mcp_server_configs(
             missing_token, user_facing=False, bare=False
         )
-        if "internal-runtime" in configs:
-            raise AssertionError("internal runtime MCP available without internal token")
+        if "internal-runtime" not in configs:
+            raise AssertionError(
+                "internal runtime MCP unavailable without external token "
+                "(internal_loopback extensions self-mint)"
+            )
     finally:
         extension_store.dependency_plan.active_runtime_python = original_verified
         try:
