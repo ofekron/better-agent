@@ -28,6 +28,7 @@ import os
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 # NOTE: do NOT import `paths` (or any backend module) at module top — standalone
@@ -118,6 +119,33 @@ def install_deletion_guard() -> None:
     os.unlink = _guarded_os_remove
     Path.unlink = _guarded_path_unlink
     _GUARD_INSTALLED = True
+
+
+# --------------------------------------------------------------------------- #
+# Scoped module patches (prevent cross-module leak during pytest collection)
+# --------------------------------------------------------------------------- #
+@contextmanager
+def scoped_patches(patches):
+    """Apply ``(obj, attr, value)`` patches and restore the originals on exit.
+
+    Script-style test modules that patch shared backend callables
+    (``config_store.get_provider``, ``models.available_models``, …) MUST scope
+    those patches to their own tests. A bare module-level assignment leaks:
+    pytest imports every module during collection before any test runs, so a
+    module-top-level patch permanently replaces the callable for every later
+    module — including script-style modules that execute real backend logic at
+    import time. Wrap the patches in a module-scoped autouse fixture (and in a
+    standalone ``main`` runner) with this helper so originals are restored the
+    moment the module's own tests finish.
+    """
+    saved = [(obj, attr, getattr(obj, attr)) for obj, attr, _ in patches]
+    for obj, attr, value in patches:
+        setattr(obj, attr, value)
+    try:
+        yield
+    finally:
+        for obj, attr, original in saved:
+            setattr(obj, attr, original)
 
 
 # --------------------------------------------------------------------------- #

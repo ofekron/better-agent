@@ -8,7 +8,10 @@ import threading
 import sys
 from pathlib import Path
 
+import pytest
+
 import _test_home
+from _test_home import scoped_patches
 _TMP_HOME = _test_home.isolate("bc-test-file-edit-empty-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,8 +76,6 @@ async def _fake_ensure_file_edit_base(cfg):
         return base["id"]
 
 
-file_editor._ensure_file_edit_base = _fake_ensure_file_edit_base  # type: ignore[assignment]
-
 _FAKE_PROVIDER = {
     "id": "test-provider",
     "name": "Test Provider",
@@ -90,14 +91,35 @@ def _fake_provider_record(provider_id: str | None = None) -> dict:
     return dict(_FAKE_PROVIDER)
 
 
-file_editor._provider_record = _fake_provider_record  # type: ignore[assignment]
-file_editor._require_fork_support = lambda provider_id: None  # type: ignore[assignment]
-config_store.get_provider = lambda provider_id: dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None  # type: ignore[assignment]
-models.available_models = lambda provider_id=None: ["test-model"] if provider_id == "test-provider" else []  # type: ignore[assignment]
-models.available_models_including_retired = models.available_models  # type: ignore[assignment]
-session_detail_api._provider_for_required_model = lambda provider_id: dict(_FAKE_PROVIDER)  # type: ignore[assignment]
-session_detail_api._provider_reasoning_effort = lambda *args, **kwargs: ""  # type: ignore[assignment]
-session_detail_api._provider_permission = lambda provider_id, requested, *args, **kwargs: requested or {}  # type: ignore[assignment]
+def _fake_available_models(provider_id=None):
+    return ["test-model"] if provider_id == "test-provider" else []
+
+
+def _fake_get_provider(provider_id):
+    return dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None
+
+
+# Patches scoped to this module's tests only. Applying these at module top
+# level leaks them across the whole pytest session (collection imports every
+# module before any test runs) and poisons later script-style modules that
+# exercise the real config path at import time.
+_MODULE_PATCHES = [
+    (file_editor, "_ensure_file_edit_base", _fake_ensure_file_edit_base),
+    (file_editor, "_provider_record", _fake_provider_record),
+    (file_editor, "_require_fork_support", lambda provider_id: None),
+    (config_store, "get_provider", _fake_get_provider),
+    (models, "available_models", _fake_available_models),
+    (models, "available_models_including_retired", _fake_available_models),
+    (session_detail_api, "_provider_for_required_model", lambda provider_id: dict(_FAKE_PROVIDER)),
+    (session_detail_api, "_provider_reasoning_effort", lambda *args, **kwargs: ""),
+    (session_detail_api, "_provider_permission", lambda provider_id, requested, *args, **kwargs: requested or {}),
+]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _scoped_file_edit_patches():
+    with scoped_patches(_MODULE_PATCHES):
+        yield
 
 
 PASS = "\x1b[32mPASS\x1b[0m"

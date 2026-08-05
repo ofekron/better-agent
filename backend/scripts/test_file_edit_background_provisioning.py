@@ -16,12 +16,15 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 import _test_home
+from _test_home import scoped_patches
 TMP_HOME = Path(_test_home.isolate("bc-test-bg-provision-"))
 
 import config_store  # noqa: E402
@@ -80,8 +83,6 @@ async def _blocking_warm(cfg) -> str:
     return base["id"]
 
 
-file_editor._ensure_file_edit_base = _blocking_warm  # type: ignore[assignment]
-
 _FAKE_PROVIDER = {
     "id": "test-provider",
     "name": "Test Provider",
@@ -92,13 +93,30 @@ _FAKE_PROVIDER = {
     "supports_reasoning_effort": False,
     "supports_fork": True,
 }
-config_store.get_provider = (  # type: ignore[assignment]
-    lambda provider_id: dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None
-)
-models.available_models = (  # type: ignore[assignment]
-    lambda provider_id=None: ["test-model"] if provider_id == "test-provider" else []
-)
-models.available_models_including_retired = models.available_models  # type: ignore[assignment]
+
+
+def _fake_available_models(provider_id=None):
+    return ["test-model"] if provider_id == "test-provider" else []
+
+
+def _fake_get_provider(provider_id):
+    return dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None
+
+
+# Scoped to this module's tests so the global callables are not poisoned for
+# later script-style modules collected in the same pytest session.
+_MODULE_PATCHES = [
+    (file_editor, "_ensure_file_edit_base", _blocking_warm),
+    (config_store, "get_provider", _fake_get_provider),
+    (models, "available_models", _fake_available_models),
+    (models, "available_models_including_retired", _fake_available_models),
+]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _scoped_bg_provision_patches():
+    with scoped_patches(_MODULE_PATCHES):
+        yield
 
 
 def _fake_file_edit_config(*, project_cwd: str, node_id: str = "primary", **_ignored):
@@ -335,7 +353,8 @@ async def run_all() -> None:
 
 def main_run() -> int:
     try:
-        asyncio.run(run_all())
+        with scoped_patches(_MODULE_PATCHES):
+            asyncio.run(run_all())
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     print("PASS file edit background provisioning")
