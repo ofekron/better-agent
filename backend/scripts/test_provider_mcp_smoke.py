@@ -16,6 +16,8 @@ from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from live_llm_test_guard import require_live_llm_tests  # noqa: E402
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -173,6 +175,10 @@ async def _main(home: Path) -> None:
 
 
 if __name__ == "__main__":
+    # This script spawns a real provider model run (AGY) that spends tokens,
+    # so it is LLM-tier and must never run without explicit per-run approval.
+    if not require_live_llm_tests("provider MCP smoke"):
+        raise SystemExit(0)
     home = Path(tempfile.mkdtemp(prefix="bc-provider-mcp-smoke-"))
     os.environ["BETTER_CLAUDE_HOME"] = str(home)
     os.environ["BETTER_AGENT_HOME"] = str(home)
