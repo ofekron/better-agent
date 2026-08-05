@@ -609,7 +609,7 @@ export function fmtSize(n: number): string {
 }
 
 /** Collapsible output block with a header summary */
-function CollapsibleOutput({ label, children, defaultOpen = false }: {
+export function CollapsibleOutput({ label, children, defaultOpen = false }: {
   label: string;
   children: ReactNode;
   defaultOpen?: boolean;
@@ -629,7 +629,7 @@ function CollapsibleOutput({ label, children, defaultOpen = false }: {
 /** Shared collapse/expand block for timeline entities (workers, sub-agents,
  *  delegates). Shows header with arrow + label, renders last event when
  *  collapsed, and full children when expanded. */
-function CollapsibleTimelineBlock({
+export function CollapsibleTimelineBlock({
   anchorId,
   label,
   labelColor,
