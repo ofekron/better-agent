@@ -368,7 +368,6 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     with its own venv on PATH. Uses a self-contained fixture so it does not
     depend on any extension living inside this repo (extensions live in the
     private extensions repo)."""
-    os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
     package = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-ext-")) / "synthetic-runtime-mcp"
     (package / "mcp").mkdir(parents=True)
     manifest = {
@@ -401,17 +400,28 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
 
-    record = extension_store._install_from_package_dir(
-        package_dir=package,
-        source={
-            "type": "test",
-            "repo_url": "",
-            "extension_path": "synthetic-runtime-mcp",
-            "ref": "",
-            "commit_sha": "synthetic-test",
-        },
-        persist=True,
-    )
+    # The synthetic runtime dep is not pip-installable in tests. Skip real
+    # dependency creation during install (the venv is faked below) and restore
+    # immediately so the skip never leaks into later tests that need a real env.
+    previous_skip = os.environ.get("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL")
+    os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
+    try:
+        record = extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "synthetic-runtime-mcp",
+                "ref": "",
+                "commit_sha": "synthetic-test",
+            },
+            persist=True,
+        )
+    finally:
+        if previous_skip is None:
+            os.environ.pop("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL", None)
+        else:
+            os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = previous_skip
     extension_store.set_enabled(record["manifest"]["id"], True)
     if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
         raise AssertionError("python_requirements declaration was not preserved")
