@@ -1886,7 +1886,7 @@ def test_query_activity_counter_survives_normalization_and_open_failures() -> bo
     return ok
 
 
-def test_match_recency_9303_row_materialization_is_measured() -> bool:
+def _check_match_recency_9303_row_materialization_is_measured() -> bool:
     conn = idx._writer_connection()
     start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
     rows = [
@@ -1927,6 +1927,11 @@ def test_match_recency_9303_row_materialization_is_measured() -> bool:
     print(f"{OK if ok else FAIL} 9303-row canonical MATCH query stays bounded "
           f"(rows={len(out.get('rows') or [])}, elapsed_ms={out.get('elapsed_ms')})")
     return ok
+
+
+def test_match_recency_9303_row_materialization_is_measured() -> None:
+    _seed()
+    assert _check_match_recency_9303_row_materialization_is_measured()
 
 
 def test_total_timer_attributes_injected_freshness_delay() -> bool:
@@ -2122,7 +2127,7 @@ def main_run() -> int:
         test_sql_timings_split_sqlite_steps_transform_and_reconcile_overlap,
         test_expensive_aggregate_is_attributed_to_sqlite_work,
         test_query_activity_counter_survives_normalization_and_open_failures,
-        test_match_recency_9303_row_materialization_is_measured,
+        _check_match_recency_9303_row_materialization_is_measured,
         test_total_timer_attributes_injected_freshness_delay,
         test_freshness_wait_is_bounded_by_remaining_query_budget,
         test_materialization_enforces_absolute_deadline_without_partial_content,

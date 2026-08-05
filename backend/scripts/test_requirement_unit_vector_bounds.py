@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+import statistics
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +41,36 @@ def _write_index(path: Path) -> tuple[list[dict[str, str]], np.ndarray]:
         [f"sha-{index}" for index in range(len(records))],
     )
     return records, np.asarray([1.0, 0.0], dtype=np.float32)
+
+
+def _write_large_vector_index(
+    path: Path,
+    *,
+    row_count: int = 20_000,
+    dimension: int = 384,
+) -> tuple[list[dict[str, str]], np.ndarray]:
+    scores = np.arange(row_count, dtype=np.float32) / row_count
+    vectors = np.zeros((row_count, dimension), dtype=np.float32)
+    vectors[:, 0] = scores
+    vectors[:, 1] = np.sqrt(1.0 - scores**2)
+    records = [
+        {
+            "source_key": f"unit-{index:05d}",
+            "text": f"requirement {index}",
+            "cwd": "/allowed" if index % 2 == 0 else "/other",
+        }
+        for index in range(row_count)
+    ]
+    context._write_vector_index_atomic(
+        path,
+        vectors,
+        [record["source_key"] for record in records],
+        [json.dumps([record["cwd"]]) for record in records],
+        [f"sha-{index}" for index in range(row_count)],
+    )
+    query = np.zeros(dimension, dtype=np.float32)
+    query[0] = 1.0
+    return records, query
 
 
 def test_bounded_vector_query_filters_deduplicates_and_ranks(tmp_path: Path) -> None:
@@ -84,6 +117,62 @@ def test_unbounded_vector_query_keeps_thread_search_semantics(tmp_path: Path) ->
         [match["vector_score"] for match in matches],
         reverse=True,
     )
+
+
+def test_large_bounded_vector_query_execution_latency(tmp_path: Path) -> None:
+    row_count = 20_000
+    dimension = 384
+    index_path = tmp_path / "large-vectors.npz"
+    records, query = _write_large_vector_index(
+        index_path,
+        row_count=row_count,
+        dimension=dimension,
+    )
+    query_kwargs = {
+        "db_path": index_path,
+        "records": records,
+        "id_field": "source_key",
+        "query_vec": query,
+        "allowed_cwds": {"/allowed"},
+        "top_k": 25,
+        "min_score": 0.5,
+    }
+    warm_matches, warm_error, warm_total = context._run_vector_query(**query_kwargs)
+    assert warm_error is None
+    assert warm_total == 5_000
+    assert len(warm_matches) == 25
+    expected_ids = [record["source_key"] for record in warm_matches]
+    assert expected_ids == [f"unit-{index:05d}" for index in range(19_998, 19_949, -2)]
+
+    samples_ms: list[float] = []
+    for _ in range(5):
+        started = time.perf_counter()
+        matches, error, total_qualifying = context._run_vector_query(**query_kwargs)
+        samples_ms.append((time.perf_counter() - started) * 1000)
+        assert error is None
+        assert total_qualifying == 5_000
+        assert [record["source_key"] for record in matches] == expected_ids
+        assert [record["vector_score"] for record in matches] == sorted(
+            [record["vector_score"] for record in matches],
+            reverse=True,
+        )
+
+    median_ms = statistics.median(samples_ms)
+    print(
+        "VECTOR_BENCHMARK "
+        + json.dumps(
+            {
+                "corpus_rows": row_count,
+                "dimension": dimension,
+                "top_k": 25,
+                "total_qualifying": warm_total,
+                "query_ms_samples": [round(sample, 3) for sample in samples_ms],
+                "median_query_ms": round(median_ms, 3),
+            },
+            sort_keys=True,
+        )
+    )
+    assert median_ms < 1_000.0
 
 
 def test_unit_vector_search_reports_applied_bounds_and_visible_scores(
