@@ -2449,7 +2449,15 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
     # task genuinely unready is to remove providers entirely. Save/restore the
     # full provider state around the test.
     old_state = config_store._load_state()
-    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
+    # Removing providers also removes the live runtime profiles that reference
+    # them; leaving the profiles orphaned is invalid state the store rejects.
+    config_store._save_state({
+        **old_state,
+        "providers": [],
+        "default_provider_id": None,
+        "runtime_profiles": [],
+        "default_runtime_profile_id": None,
+    })
     loopback = _write_private_extension_package(
         "ofek.loopback-ready",
         "extensions/loopback-ready",
@@ -2502,6 +2510,8 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
                 **current_state,
                 "providers": old_state["providers"],
                 "default_provider_id": old_state["default_provider_id"],
+                "runtime_profiles": old_state["runtime_profiles"],
+                "default_runtime_profile_id": old_state["default_runtime_profile_id"],
             }
         )
         extension_store.uninstall(loopback_record["manifest"]["id"])
@@ -4898,7 +4908,15 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
     # unready (tasks resolve via inheritance from the default provider, so
     # clearing assignments alone no longer gates readiness). Restored below.
     old_state = config_store._load_state()
-    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
+    # Removing providers also removes the live runtime profiles that reference
+    # them; leaving the profiles orphaned is invalid state the store rejects.
+    config_store._save_state({
+        **old_state,
+        "providers": [],
+        "default_provider_id": None,
+        "runtime_profiles": [],
+        "default_runtime_profile_id": None,
+    })
     # Reset any tombstone/record a prior test left: reconcile honors the
     # deleted_extensions tombstone for managed private ids and would otherwise
     # skip re-seeding project-structure, leaving the fixture uninstalled.
@@ -4973,6 +4991,8 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
                 **current_state,
                 "providers": old_state["providers"],
                 "default_provider_id": old_state["default_provider_id"],
+                "runtime_profiles": old_state["runtime_profiles"],
+                "default_runtime_profile_id": old_state["default_runtime_profile_id"],
             }
         )
 
