@@ -2,7 +2,6 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ModelCatalogStatus } from "../src/components/ModelCatalogStatus";
 import type { ModelCatalog } from "../src/types";
-import type { CatalogNetworkState } from "../src/hooks/useProviderModelCatalog";
 
 vi.mock("react-i18next", () => {
   const t = (k: string, opts?: Record<string, unknown>) =>
