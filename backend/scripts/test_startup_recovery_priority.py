@@ -108,8 +108,14 @@ def test_slow_queued_prompt_rehydration_does_not_delay_live_recovery() -> None:
         async def reconcile_lifecycle(*args, **kwargs) -> int:
             return 0
 
-        async def integrate(*args, **kwargs) -> None:
+        async def integrate(
+            *args,
+            **kwargs,
+        ) -> dict[str, run_recovery.RecoveryIntegrationOutcome]:
             live_integrated.set()
+            return {
+                "sid": run_recovery.RecoveryIntegrationOutcome.SUCCESS,
+            }
 
         async def reconcile_lifecycle_projection() -> None:
             return None
@@ -455,7 +461,7 @@ def test_live_recovery_registers_session_gates_and_sorts_priority() -> None:
     register = source.index("register_session_recovery")
     sort = source.index("_sort_recovered_runs_by_session_priority(live)")
     pop = source.index("_pop_next_recovered_session_batch")
-    integrate = source.index("await integrate_recovered_runs(_coordinator_ref, batch)")
+    integrate = source.index("outcomes = await integrate_recovered_runs(")
     mark = source.index("mark_session_recovery_done")
     assert register < sort < pop < integrate < mark
 
@@ -464,7 +470,7 @@ def test_late_priority_is_rechecked_between_live_recovery_batches() -> None:
     source = inspect.getsource(recovery._recover_in_flight_task)
     loop = source.index("while remaining_live:")
     pop = source.index("_pop_next_recovered_session_batch", loop)
-    integrate = source.index("await integrate_recovered_runs(_coordinator_ref, batch)", pop)
+    integrate = source.index("outcomes = await integrate_recovered_runs(", pop)
     assert loop < pop < integrate
 
 
@@ -555,22 +561,36 @@ def test_cold_recovery_uses_reschedulable_session_pending_set() -> None:
     assert "_pop_next_recovered_cold_batch_locked()" in worker
 
 
-def test_selected_session_recovery_has_parallel_fast_lane() -> None:
-    source = inspect.getsource(recovery._promote_recovered_session)
-    assert "_RECOVERED_COLD_PENDING.pop(app_session_id" in source
-    assert "await integrate_recovered_runs(_coordinator_ref, batch)" in source
+def test_selected_session_recovery_uses_shared_demand_path() -> None:
+    source = inspect.getsource(recovery._request_recovered_session_on_main)
+    assert "_RECOVERED_COLD_RETRY_REQUESTED.add(app_session_id)" in source
+    assert "_ensure_recovered_cold_run_worker()" in source
+    assert not hasattr(recovery, "_promote_recovered_session")
     ws_source = inspect.getsource(ws_chat.websocket_chat)
     subscribe = ws_source.index('if msg_type == "subscribe":')
-    task = ws_source.index("_promote_recovered_session", subscribe)
+    task = ws_source.index("_request_subscribed_session_recovery", subscribe)
     assert subscribe < task
 
 
-def test_ws_subscribe_prioritizes_watched_session_recovery() -> None:
+def test_ws_subscribe_calls_shared_recovery_request() -> None:
+    requested: list[str] = []
+    original_request = recovery.request_recovered_session
+
+    async def request(session_id: str) -> None:
+        requested.append(session_id)
+
+    recovery.request_recovered_session = request
+    try:
+        asyncio.run(ws_chat._request_subscribed_session_recovery("watched"))
+    finally:
+        recovery.request_recovered_session = original_request
+
+    assert requested == ["watched"]
     source = inspect.getsource(ws_chat.websocket_chat)
     subscribe = source.index('if msg_type == "subscribe":')
-    priority = source.index("request_session_priority", subscribe)
+    demand = source.index("_request_subscribed_session_recovery", subscribe)
     register = source.index("_register(sub_sid", subscribe)
-    assert subscribe < priority < register
+    assert subscribe < demand < register
 
 
 def test_maintenance_metrics_cover_success_error_and_cancel() -> None:
@@ -679,8 +699,8 @@ def main_test() -> None:
     test_recovery_sort_caches_queued_prompt_counts_per_session()
     test_provider_recovery_splits_likely_running_run_ids_first()
     test_cold_recovery_uses_reschedulable_session_pending_set()
-    test_selected_session_recovery_has_parallel_fast_lane()
-    test_ws_subscribe_prioritizes_watched_session_recovery()
+    test_selected_session_recovery_uses_shared_demand_path()
+    test_ws_subscribe_calls_shared_recovery_request()
     test_maintenance_metrics_cover_success_error_and_cancel()
     test_cancelled_thread_work_is_joined_before_cancellation_returns()
     print("ALL PASS")

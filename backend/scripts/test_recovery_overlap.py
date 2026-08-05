@@ -7,10 +7,9 @@ Locks:
      clears. Pre-fix, the processor started a second CLI subprocess
      concurrently with the recovered one — the interleaved-turns bug.
   2. Interrupt during a recovery overlap both fans the cancel out to
-     the recovered run AND parks a pending cancel that displaces the
-     queued prompt (deliberate dual effect — "displace what's next").
-  3. A pending cancel left unconsumed by an item is cleared in the
-     processor's finally and cannot abort the next prompt.
+     the recovered run AND signals the exact pre-begin prompt claim.
+  3. A cancelled pre-begin claim is released with its item and cannot
+     abort the next prompt.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_recovery_overlap.py
@@ -65,6 +64,11 @@ def _observe_run_barrier(c: Coordinator) -> asyncio.Event:
 async def _quiesce(c: Coordinator) -> None:
     c.turn_manager.active_run_ids.clear()
     await c.quiesce_prompt_processors()
+    loop = asyncio.get_running_loop()
+    if c.turn_manager.lifecycle._loop is loop:
+        await c.turn_manager.lifecycle.close()
+    if c.lifecycle_commands._loop is loop:
+        await c.lifecycle_commands.close()
 
 
 def _run(coro):
@@ -85,6 +89,18 @@ class _UPM:
 
     @staticmethod
     def clear_in_flight_lifecycle_msg_id(sid):
+        pass
+
+    @staticmethod
+    async def emit_user_msg_cancel_terminal(*args, **kwargs):
+        pass
+
+    @staticmethod
+    def pop_done_payload(lifecycle_msg_id):
+        return None
+
+    @staticmethod
+    def _clear_sent(lifecycle_msg_id):
         pass
 
 
@@ -463,58 +479,78 @@ def test_interrupt_during_overlap_fans_out_and_displaces() -> None:
     async def _go() -> tuple[bool, bool]:
         barrier_entered = _observe_run_barrier(c)
         try:
-            c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
+            c.submit_prompt(sid, {
+                "_queued_id": "queue-1",
+                "lifecycle_msg_id": "lifecycle-1",
+                "prompt": "hi",
+                "app_session_id": sid,
+            })
             await _wait_for_event(barrier_entered)
+            claim = c.turn_manager.get_pre_begin_prompt(sid)
             landed = await c.turn_manager.cancel_turn(
                 sid, interrupted_by_msg_id="lm-1",
             )
-            parked = c.turn_manager._pending_cancel.get(sid) == "lm-1"
-            return landed, parked
+            signalled = (
+                claim is not None
+                and claim.queue_item_id == "queue-1"
+                and claim.lifecycle_msg_id == "lifecycle-1"
+                and claim.cancel_event.is_set()
+                and claim.interrupted_by_msg_id == "lm-1"
+            )
+            await _wait_until(lambda: not c.turn_manager.has_pre_begin_prompt(sid))
+            return landed, signalled
         finally:
             await _quiesce(c)
 
-    landed, parked = _run(_go())
+    landed, signalled = _run(_go())
     check("cancel landed", landed is True)
     check("fanout reached recovered run", fanned == ["recovered-run"])
-    check("pending cancel parked for queued prompt", parked)
+    check("exact pre-begin prompt signalled", signalled)
+    check("cancelled prompt never reached provider", c.handled == [])
 
 
-def test_stale_pending_cleared_by_item_finally() -> None:
-    print("T3 stale pending cancel cleared by processor finally")
+def test_cancelled_pre_begin_claim_cannot_abort_next_prompt() -> None:
+    print("T3 cancelled pre-begin claim cannot abort next prompt")
     c = _coord()
     sid = "sid-stale"
+    c.turn_manager.active_run_ids[sid] = ["recovered-run"]
 
     async def _go() -> tuple[bool, bool]:
-        first_entered = asyncio.Event()
-        first_release = asyncio.Event()
-        second_handled = asyncio.Event()
-
-        async def observed_handle_prompt(**params) -> None:
-            c.handled.append(params)
-            if len(c.handled) == 1:
-                first_entered.set()
-                await first_release.wait()
-            else:
-                second_handled.set()
-
-        c.handle_prompt = observed_handle_prompt
+        barrier_entered = _observe_run_barrier(c)
         try:
-            c.submit_prompt(sid, {"prompt": "one", "app_session_id": sid})
-            await _wait_for_event(first_entered)
-            c.turn_manager._pending_cancel[sid] = True
-            first_release.set()
+            c.submit_prompt(sid, {
+                "_queued_id": "queue-first",
+                "lifecycle_msg_id": "lifecycle-first",
+                "prompt": "one",
+                "app_session_id": sid,
+            })
+            await _wait_for_event(barrier_entered)
+            await c.turn_manager.cancel_turn(sid)
+            await _wait_until(
+                lambda: not c.turn_manager.has_pre_begin_prompt(sid)
+            )
             await _wait_until(lambda: sid not in c._in_flight_prompts)
-            cleared = sid not in c.turn_manager._pending_cancel
-            c.submit_prompt(sid, {"prompt": "two", "app_session_id": sid})
-            await _wait_for_event(second_handled)
+            first_displaced = c.handled == []
+            c.turn_manager.active_run_ids.pop(sid, None)
+            c.submit_prompt(sid, {
+                "_queued_id": "queue-second",
+                "lifecycle_msg_id": "lifecycle-second",
+                "prompt": "two",
+                "app_session_id": sid,
+            })
+            await _wait_for_event(c.handled_event)
             await _wait_until(lambda: sid not in c._in_flight_prompts)
-            return cleared, len(c.handled) == 2
+            second_ran = (
+                len(c.handled) == 1
+                and c.handled[0].get("prompt") == "two"
+                and not c.turn_manager.has_pre_begin_prompt(sid)
+            )
+            return first_displaced, second_ran
         finally:
-            first_release.set()
             await _quiesce(c)
 
-    cleared, second_ran = _run(_go())
-    check("pending cleared after item", cleared)
+    first_displaced, second_ran = _run(_go())
+    check("cancelled exact prompt was displaced", first_displaced)
     check("next prompt unaffected", second_ran)
 
 
@@ -670,7 +706,7 @@ def main() -> int:
     test_startup_recovery_gate_first_waiter_foreign_loop_releases_promptly()
     test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly()
     test_interrupt_during_overlap_fans_out_and_displaces()
-    test_stale_pending_cleared_by_item_finally()
+    test_cancelled_pre_begin_claim_cannot_abort_next_prompt()
     test_claimed_queued_prompt_persists_at_delivery_boundary()
     test_blocked_queued_prompt_can_be_cancelled_before_start()
     print()

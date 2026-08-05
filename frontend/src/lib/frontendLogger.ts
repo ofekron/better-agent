@@ -35,6 +35,10 @@ function redactSecrets(value: string): string {
   );
 }
 
+export function sanitizeDiagnosticText(value: string, maxChars: number): string {
+  return redactSecrets(value).slice(0, maxChars);
+}
+
 function postFrontendLog(
   level: FrontendLogLevel,
   source: string,

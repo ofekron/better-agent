@@ -554,8 +554,6 @@ async def _test_promoted_interrupt_does_not_batch_following_prompt() -> None:
     unblock = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, _sid: str) -> None:
             pass
 
@@ -655,8 +653,6 @@ async def _test_team_promoted_interrupt_does_not_batch_following_prompt() -> Non
     unblock = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, _sid: str) -> None:
             pass
 
@@ -748,8 +744,6 @@ async def _test_normal_queued_prompts_deliver_individually() -> None:
     ran = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, _sid: str) -> None:
             pass
 
@@ -879,8 +873,6 @@ async def _test_team_queued_prompts_deliver_individually() -> None:
     ran = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, _sid: str) -> None:
             pass
 
@@ -1019,8 +1011,6 @@ async def _test_alter_rewind_runs_before_replacement_prompt() -> None:
     handled = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, sid: str) -> None:
             calls.append(("wait", sid))
 
@@ -1350,8 +1340,6 @@ async def _test_project_structure_queue_routes_to_maintainer() -> None:
     routed = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, app_session_id: str) -> None:
             calls.append(("wait", app_session_id))
 
@@ -1463,8 +1451,6 @@ async def _test_project_structure_queue_does_not_batch_virtual_prompts() -> None
     unblock = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, app_session_id: str) -> None:
             calls.append(("wait", app_session_id))
 
@@ -1567,8 +1553,6 @@ async def _test_project_structure_queue_duplicate_acks_existing_message() -> Non
     acked = asyncio.Event()
 
     class _ProcessorTurnManager:
-        _pending_cancel = {}
-
         async def wait_for_clear_runs(self, _sid: str) -> None:
             pass
 

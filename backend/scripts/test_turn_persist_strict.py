@@ -50,7 +50,7 @@ def _coordinator():
     global _COORD
     if _COORD is None:
         import orchestrator
-        _COORD = orchestrator.get_active_coordinator() or orchestrator.Coordinator()
+        _COORD = orchestrator.Coordinator()
     return _COORD
 
 
@@ -245,13 +245,17 @@ def test_mid_turn_vanish_cleans_bookkeeping() -> bool:
     return True
 
 
-def test_pending_cancel_cleared_on_abort() -> bool:
-    """Regression: a cancel parked in the dequeue→registration gap must
-    not survive a pre-registration abort — a stale entry would spuriously
-    kill the session's NEXT turn at its cancel-consumption step."""
+def test_pre_begin_claim_cleared_on_abort() -> bool:
+    """A pre-begin claim must not survive a pre-registration abort."""
     tm = _coordinator().turn_manager
     missing = "22222222-dead-beef-0000-000000000000"
-    tm._pending_cancel[missing] = True
+    claim = tm.claim_pre_begin_prompt(missing, "queue-missing", "lifecycle-missing")
+    assert claim is not None
+    claim.cancel_event.set()
+    _coordinator().user_prompt_manager.set_in_flight_lifecycle_msg_id(
+        missing,
+        "lifecycle-missing",
+    )
     ws = _CaptureWS()
 
     async def _drive() -> None:
@@ -267,6 +271,7 @@ def test_pending_cancel_cleared_on_abort() -> bool:
             trace_step_name="native",
             session_id_field="agent_session_id",
             mode="native",
+            queue_item_id="queue-missing",
         )
 
     try:
@@ -276,11 +281,13 @@ def test_pending_cancel_cleared_on_abort() -> bool:
     except KeyError:
         pass
 
-    if missing in tm._pending_cancel:
-        tm._pending_cancel.pop(missing, None)
-        print(f"{FAIL} stale pending cancel survived the pre-registration abort")
-        return False
-    print(f"{PASS} pre-registration abort clears the parked pending cancel")
+    _coordinator().user_prompt_manager.clear_in_flight_lifecycle_msg_id(missing)
+    if tm.has_pre_begin_prompt(missing):
+        tm.release_pre_begin_prompt(missing, claim)
+        raise AssertionError(
+            "stale pre-begin claim survived the pre-registration abort"
+        )
+    print(f"{PASS} pre-registration abort clears the exact pre-begin claim")
     return True
 
 
@@ -346,7 +353,7 @@ def main() -> int:
         test_append_contracts(),
         test_missing_root_aborts_before_registration(),
         test_mid_turn_vanish_cleans_bookkeeping(),
-        test_pending_cancel_cleared_on_abort(),
+        test_pre_begin_claim_cleared_on_abort(),
         test_root_writer_guard(),
     ]
     return 0 if all(results) else 1

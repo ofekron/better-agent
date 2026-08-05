@@ -69,6 +69,29 @@ def configure(*, coordinator: Any) -> None:
     globals()["coordinator"] = coordinator
 
 
+async def _request_subscribed_session_recovery(app_session_id: str) -> None:
+    await recovery.request_recovered_session(app_session_id)
+
+
+async def _handle_stop_message(
+    active_coordinator: Any,
+    app_session_id: str,
+    send,
+) -> bool:
+    cancelled = await active_coordinator.turn_manager.cancel_turn(app_session_id)
+    if not cancelled:
+        await send({
+            "type": "error",
+            "data": {"error": t("error.ws_no_active_turn_to_stop")},
+        })
+        return False
+    await send({
+        "type": "stop_acknowledged",
+        "data": {"app_session_id": app_session_id, "success": True},
+    })
+    return True
+
+
 _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
@@ -680,11 +703,9 @@ async def websocket_chat(websocket: WebSocket):
                 sub_sid = msg.get("app_session_id")
                 if sub_sid:
                     try:
-                        import startup_recovery_gate
                         sub_sid_text = str(sub_sid)
-                        startup_recovery_gate.request_session_priority(sub_sid_text)
                         asyncio.create_task(
-                            recovery._promote_recovered_session(sub_sid_text),
+                            _request_subscribed_session_recovery(sub_sid_text),
                             name=f"recover-selected-{sub_sid_text[:8]}",
                         )
                     except Exception:
@@ -1618,9 +1639,11 @@ async def websocket_chat(websocket: WebSocket):
             elif msg_type == "stop_message":
                 app_session_id = msg.get("app_session_id")
                 if app_session_id:
-                    cancelled = await coordinator.turn_manager.cancel_turn(app_session_id)
-                    if not cancelled:
-                        await ws_callback({"type": "error", "data": {"error": t("error.ws_no_active_turn_to_stop")}})
+                    await _handle_stop_message(
+                        coordinator,
+                        app_session_id,
+                        ws_callback,
+                    )
 
             elif msg_type == "promote_queued":
                 app_session_id = msg.get("app_session_id")

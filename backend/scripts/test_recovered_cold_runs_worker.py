@@ -26,7 +26,9 @@ _test_home.isolate("bc-test-cold-recovery-worker-")
 import recovery  # noqa: E402
 import provider  # noqa: E402
 import runs_dir  # noqa: E402
+import ws_chat  # noqa: E402
 from ingestion_versions import current_ingestion_version  # noqa: E402
+from run_recovery import RecoveryIntegrationOutcome  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -35,7 +37,19 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 def _reset_cold_state() -> None:
     recovery._RECOVERED_COLD_PENDING.clear()
     recovery._RECOVERED_COLD_ACTIVE.clear()
-    recovery._RECOVERED_COLD_READY.clear()
+    failed = getattr(recovery, "_RECOVERED_COLD_FAILED", None)
+    if failed is not None:
+        failed.clear()
+    retry_requested = getattr(
+        recovery,
+        "_RECOVERED_COLD_RETRY_REQUESTED",
+        None,
+    )
+    if retry_requested is not None:
+        retry_requested.clear()
+    recovery._RECOVERED_COLD_READY = asyncio.Event()
+    recovery._RECOVERED_COLD_LOCK = asyncio.Lock()
+    recovery._RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND = True
 
 
 async def test_cold_runs_integrate_immediately_in_serial_session_batches() -> bool:
@@ -49,7 +63,10 @@ async def test_cold_runs_integrate_immediately_in_serial_session_batches() -> bo
     drained = asyncio.Event()
     expected_runs = 5
 
-    async def fake_integrate(_coordinator, batch: list[dict]) -> None:
+    async def fake_integrate(
+        _coordinator,
+        batch: list[dict],
+    ) -> dict[str, RecoveryIntegrationOutcome]:
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
@@ -59,6 +76,9 @@ async def test_cold_runs_integrate_immediately_in_serial_session_batches() -> bo
         active -= 1
         if sum(len(entries) for entries in batches) >= expected_runs:
             drained.set()
+        return {
+            str(batch[0]["app_session_id"]): RecoveryIntegrationOutcome.SUCCESS,
+        }
 
     recovery.integrate_recovered_runs = fake_integrate
     recovery._RECOVERED_COLD_RUN_WORKER_TASK = None
@@ -109,42 +129,117 @@ async def test_cold_runs_integrate_immediately_in_serial_session_batches() -> bo
     return ok
 
 
-async def test_promote_recovered_session_claims_pending_batch() -> bool:
-    """A watched session's cold batch leaves the shared pending map and is
-    marked active, so the background worker cannot integrate it twice."""
+async def test_ws_demand_before_enqueue_preserves_one_retry() -> None:
+    import startup_recovery_gate
+
     original_integrate = recovery.integrate_recovered_runs
+    original_mark_done = startup_recovery_gate.mark_session_recovery_done
     original_task = recovery._RECOVERED_COLD_RUN_WORKER_TASK
-    integrated: list[list[str]] = []
+    attempts = 0
+    ready = asyncio.Event()
+    batch = [{"run_id": "demand-0", "app_session_id": "sid-demand"}]
 
-    async def fake_integrate(_coordinator, batch: list[dict]) -> None:
-        integrated.append([str(item.get("run_id")) for item in batch])
+    async def fail_then_succeed(
+        _coordinator,
+        _batch: list[dict],
+    ) -> dict[str, RecoveryIntegrationOutcome]:
+        nonlocal attempts
+        attempts += 1
+        return {
+            "sid-demand": (
+                RecoveryIntegrationOutcome.SUCCESS
+                if attempts > 1
+                else RecoveryIntegrationOutcome.RETRYABLE
+            ),
+        }
 
-    recovery.integrate_recovered_runs = fake_integrate
-    # No worker: _promote_recovered_session must do the integration itself.
+    def mark_done(session_id: str) -> None:
+        original_mark_done(session_id)
+        if session_id == "sid-demand":
+            ready.set()
+
+    recovery.integrate_recovered_runs = fail_then_succeed
+    startup_recovery_gate.mark_session_recovery_done = mark_done
     recovery._RECOVERED_COLD_RUN_WORKER_TASK = None
     _reset_cold_state()
-    recovery._RECOVERED_COLD_PENDING["sid-a"] = [
-        {"run_id": "a-0", "app_session_id": "sid-a"},
-    ]
-    recovery._RECOVERED_COLD_PENDING["sid-b"] = [
-        {"run_id": "b-0", "app_session_id": "sid-b"},
-    ]
+    startup_recovery_gate.reset_for_tests()
+    startup_recovery_gate.begin_recovery()
+    startup_recovery_gate.register_session_recovery({"sid-demand"})
     try:
-        await recovery._promote_recovered_session("sid-a")
-        claimed = "sid-a" not in recovery._RECOVERED_COLD_PENDING
-        untouched = recovery._RECOVERED_COLD_PENDING.get("sid-b") is not None
+        await ws_chat._request_subscribed_session_recovery("sid-demand")
+        assert attempts == 0
+        assert "sid-demand" in recovery._RECOVERED_COLD_RETRY_REQUESTED
+        recovery._enqueue_recovered_cold_runs(batch)
+        await asyncio.wait_for(ready.wait(), timeout=5.0)
+        assert attempts == 2
+        assert "sid-demand" not in recovery._RECOVERED_COLD_PENDING
+        assert "sid-demand" not in recovery._RECOVERED_COLD_FAILED
     finally:
+        worker = recovery._RECOVERED_COLD_RUN_WORKER_TASK
+        if worker is not None and worker is not original_task:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
         recovery.integrate_recovered_runs = original_integrate
+        startup_recovery_gate.mark_session_recovery_done = original_mark_done
         recovery._RECOVERED_COLD_RUN_WORKER_TASK = original_task
+        startup_recovery_gate.reset_for_tests()
         _reset_cold_state()
 
-    ok = integrated == [["a-0"]] and claimed and untouched
-    print(
-        f"{PASS if ok else FAIL} promoting a watched session claims only its "
-        f"own pending cold batch -- integrated={integrated!r} "
-        f"claimed={claimed} other_session_untouched={untouched}",
-    )
-    return ok
+
+async def test_demand_during_active_failure_schedules_one_retry() -> None:
+    import startup_recovery_gate
+
+    original_integrate = recovery.integrate_recovered_runs
+    original_task = recovery._RECOVERED_COLD_RUN_WORKER_TASK
+    attempts = 0
+    first_attempt_started = asyncio.Event()
+    release_first_attempt = asyncio.Event()
+    retry_completed = asyncio.Event()
+    batch = [{"run_id": "active-0", "app_session_id": "sid-active"}]
+
+    async def fail_then_succeed(
+        _coordinator,
+        _batch: list[dict],
+    ) -> dict[str, RecoveryIntegrationOutcome]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_attempt_started.set()
+            await release_first_attempt.wait()
+            return {"sid-active": RecoveryIntegrationOutcome.RETRYABLE}
+        retry_completed.set()
+        return {"sid-active": RecoveryIntegrationOutcome.SUCCESS}
+
+    recovery.integrate_recovered_runs = fail_then_succeed
+    recovery._RECOVERED_COLD_RUN_WORKER_TASK = None
+    _reset_cold_state()
+    startup_recovery_gate.reset_for_tests()
+    startup_recovery_gate.begin_recovery()
+    startup_recovery_gate.register_session_recovery({"sid-active"})
+    try:
+        recovery._enqueue_recovered_cold_runs(batch)
+        await asyncio.wait_for(first_attempt_started.wait(), timeout=5.0)
+        await ws_chat._request_subscribed_session_recovery("sid-active")
+        assert "sid-active" in recovery._RECOVERED_COLD_RETRY_REQUESTED
+        release_first_attempt.set()
+        await startup_recovery_gate.wait_for_session_recovery_ready(
+            "sid-active",
+            timeout=5.0,
+        )
+        assert retry_completed.is_set()
+        assert attempts == 2
+        assert "sid-active" not in recovery._RECOVERED_COLD_PENDING
+        assert "sid-active" not in recovery._RECOVERED_COLD_FAILED
+        assert "sid-active" not in recovery._RECOVERED_COLD_RETRY_REQUESTED
+    finally:
+        worker = recovery._RECOVERED_COLD_RUN_WORKER_TASK
+        if worker is not None and worker is not original_task:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        recovery.integrate_recovered_runs = original_integrate
+        recovery._RECOVERED_COLD_RUN_WORKER_TASK = original_task
+        startup_recovery_gate.reset_for_tests()
+        _reset_cold_state()
 
 
 async def test_sessionless_terminal_runs_are_reconciled_before_enqueue() -> bool:
@@ -269,7 +364,8 @@ async def test_sessionless_terminal_run_writes_marker_and_index() -> bool:
 async def main_test() -> int:
     results = [
         await test_cold_runs_integrate_immediately_in_serial_session_batches(),
-        await test_promote_recovered_session_claims_pending_batch(),
+        await test_ws_demand_before_enqueue_preserves_one_retry(),
+        await test_demand_during_active_failure_schedules_one_retry(),
         await test_sessionless_terminal_runs_are_reconciled_before_enqueue(),
         await test_sessionless_terminal_run_writes_marker_and_index(),
     ]

@@ -105,7 +105,9 @@ async def wait_for_session_recovery_ready(
     app_session_id: str,
     timeout: float | None = _DEFAULT_WAIT_TIMEOUT_SECONDS,
 ) -> None:
-    request_session_priority(app_session_id)
+    import recovery
+
+    await recovery.request_recovered_session(app_session_id)
     fact = _session_ready.get(app_session_id)
     if fact is None:
         if _pending:

@@ -46,6 +46,7 @@ import threading
 import time as _time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Literal, Optional
@@ -162,6 +163,14 @@ def _missing_event_dicts(existing: list[dict], candidates: list[dict]) -> list[d
 
 class _Cancelled(Exception):
     """Raised when a turn is cancelled by the user."""
+
+
+@dataclass
+class PreBeginPrompt:
+    queue_item_id: str
+    lifecycle_msg_id: str
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    interrupted_by_msg_id: Optional[str] = None
 
 
 # Streaming-eligible run kinds. Worker registrations pointing at the parent
@@ -316,12 +325,7 @@ class TurnManager:
         # success-shaped `done`. run_turn writes, the orchestrator pops and
         # passes it at emit-time.
         self._terminal_error_by_session: dict[str, str] = {}
-        # Pending cancel for the dequeue→cancel_events gap: cancel_turn
-        # writes when no live turn exists but a prompt is in flight;
-        # run_turn consumes right after registering its cancel_event.
-        # Stale entries are popped by the processor (skip path, item
-        # finally, loop exit) in orchestrator.py.
-        self._pending_cancel: dict[str, object] = {}
+        self._pre_begin_prompts: dict[str, PreBeginPrompt] = {}
         self._run_state: dict[str, list[dict]] = {}
         self._forced_context_overflow_once: set[str] = set()
 
@@ -644,6 +648,74 @@ class TurnManager:
     def has_active_turn(self, app_session_id: str) -> bool:
         return app_session_id in self.cancel_events
 
+    def claim_pre_begin_prompt(
+        self,
+        app_session_id: str,
+        queue_item_id: object,
+        lifecycle_msg_id: object,
+    ) -> Optional[PreBeginPrompt]:
+        if not isinstance(queue_item_id, str) or not queue_item_id:
+            return None
+        if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+            return None
+        if app_session_id in self._pre_begin_prompts:
+            raise RuntimeError("session already owns a pre-begin prompt")
+        claim = PreBeginPrompt(queue_item_id, lifecycle_msg_id)
+        self._pre_begin_prompts[app_session_id] = claim
+        return claim
+
+    def has_pre_begin_prompt(self, app_session_id: str) -> bool:
+        return app_session_id in self._pre_begin_prompts
+
+    def get_pre_begin_prompt(
+        self,
+        app_session_id: str,
+        *,
+        queue_item_id: object = None,
+        lifecycle_msg_id: object = None,
+    ) -> Optional[PreBeginPrompt]:
+        claim = self._pre_begin_prompts.get(app_session_id)
+        if claim is None:
+            return None
+        if queue_item_id is not None and claim.queue_item_id != queue_item_id:
+            return None
+        if lifecycle_msg_id is not None and claim.lifecycle_msg_id != lifecycle_msg_id:
+            return None
+        return claim
+
+    def release_pre_begin_prompt(
+        self,
+        app_session_id: str,
+        claim: Optional[PreBeginPrompt],
+    ) -> None:
+        if claim is not None and self._pre_begin_prompts.get(app_session_id) is claim:
+            self._pre_begin_prompts.pop(app_session_id, None)
+
+    async def wait_for_pre_begin_barrier(
+        self,
+        claim: Optional[PreBeginPrompt],
+        operation: Awaitable[Any],
+    ) -> tuple[bool, Any]:
+        if claim is None:
+            return True, await operation
+        operation_task = asyncio.ensure_future(operation)
+        cancel_task = asyncio.create_task(claim.cancel_event.wait())
+        try:
+            await asyncio.wait(
+                (operation_task, cancel_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if claim.cancel_event.is_set():
+                operation_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await operation_task
+                return False, None
+            return True, await operation_task
+        finally:
+            cancel_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_task
+
     def has_active_runs(self, app_session_id: str) -> bool:
         """True iff a turn is in flight OR a queued prompt is pending.
 
@@ -653,6 +725,8 @@ class TurnManager:
         Reaches across to Coordinator for those two.
         """
         if self.active_run_ids.get(app_session_id):
+            return True
+        if self.has_pre_begin_prompt(app_session_id):
             return True
         if getattr(self._c, "_in_flight_prompts", {}).get(app_session_id, 0) > 0:
             return True
@@ -1735,13 +1809,12 @@ class TurnManager:
         owns the turn-scoped fields; reaches to Coordinator only for the
         session-cancelled flag and the static fanout helpers.
 
-        When no live turn exists (no cancel_event), two fallbacks still
+        When no live turn exists (no cancel_event), two exact authorities still
         make the cancel land:
         - fan out to any registered active_run_ids (recovered runs from
           run_recovery have run ids but no cancel_event);
-        - if a dequeued prompt is mid-gap (in-flight counter > 0 but
-          run_turn hasn't registered its cancel_event yet), park a
-          pending cancel that run_turn consumes on registration.
+        - signal the exact dequeued prompt's queue/lifecycle claim before
+          run_turn registers its cancel_event.
         `_session_cancelled` is set only when a cancel actually lands,
         so a pure no-op cancel can't suppress the next turn's
         supervisor verdict.
@@ -1763,13 +1836,10 @@ class TurnManager:
                 self._c._cancel_turn_fanout(run_id)
                 self._schedule_recovered_cancel_escalation(app_session_id, run_id)
                 landed = True
-            in_flight = getattr(self._c, "_in_flight_prompts", {}).get(
-                app_session_id, 0,
-            )
-            if in_flight > 0:
-                self._pending_cancel[app_session_id] = (
-                    interrupted_by_msg_id or True
-                )
+            pre_begin = self._pre_begin_prompts.get(app_session_id)
+            if pre_begin is not None:
+                pre_begin.interrupted_by_msg_id = interrupted_by_msg_id
+                pre_begin.cancel_event.set()
                 landed = True
             if landed:
                 self._c._session_cancelled[app_session_id] = True
@@ -1926,6 +1996,11 @@ class TurnManager:
         lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
             app_session_id,
         )
+        pre_begin = self.get_pre_begin_prompt(
+            app_session_id,
+            queue_item_id=queue_item_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
 
         # Persist phase FIRST, before any turn registration. The user-msg
         # append is strict inside `_init_turn_messages`: if the session
@@ -1956,30 +2031,29 @@ class TurnManager:
             await self._c.user_prompt_manager.notify_user_msg_persisted(
                 ws_callback, persist_to, user_msg,
             )
+            owning_lifecycle_message_id = lifecycle_msg_id or user_msg.get("id")
+            if (
+                not isinstance(owning_lifecycle_message_id, str)
+                or not owning_lifecycle_message_id
+            ):
+                raise RuntimeError(
+                    "turn requires an owning lifecycle message identity"
+                )
         except BaseException:
-            # Pre-registration abort: a cancel parked for THIS prompt
-            # (dequeue→here gap) must not survive to spuriously kill the
-            # session's next turn — the prompt it meant to displace never
-            # ran.
-            self._pending_cancel.pop(app_session_id, None)
+            self.release_pre_begin_prompt(app_session_id, pre_begin)
             raise
-        owning_lifecycle_message_id = lifecycle_msg_id or user_msg.get("id")
-        if (
-            not isinstance(owning_lifecycle_message_id, str)
-            or not owning_lifecycle_message_id
-        ):
-            raise RuntimeError("turn requires an owning lifecycle message identity")
 
         cancel_event = asyncio.Event()
         self.cancel_events[app_session_id] = cancel_event
-        # A cancel may have landed in the dequeue→here gap; consume it
-        # so the interrupt displaces this turn instead of being lost.
-        pending = self._pending_cancel.pop(app_session_id, None)
-        if pending is not None:
-            self._c._session_cancelled[app_session_id] = True
-            if isinstance(pending, str):
-                self._interrupted_by_msg_id[app_session_id] = pending
-            cancel_event.set()
+        if pre_begin is not None:
+            if pre_begin.cancel_event.is_set():
+                self._c._session_cancelled[app_session_id] = True
+                if pre_begin.interrupted_by_msg_id:
+                    self._interrupted_by_msg_id[app_session_id] = (
+                        pre_begin.interrupted_by_msg_id
+                    )
+                cancel_event.set()
+            self.release_pre_begin_prompt(app_session_id, pre_begin)
         # Non-destructive: externally-registered run ids (recovery
         # retries) must survive this turn. Snapshot them so the finally
         # below restores instead of blanket-popping.

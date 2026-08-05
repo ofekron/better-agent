@@ -7,12 +7,12 @@ Locks:
      old unconditional set leaked into the next turn and suppressed
      its supervisor verdict).
   2. cancel_turn with NO live turn but a dequeued prompt mid-gap
-     (_in_flight_prompts > 0) parks a pending cancel and reports True.
+     signals that exact queue/lifecycle claim and reports True.
   3. cancel_turn with NO live turn but registered active_run_ids
      (recovered runs) fans the cancel out to them and reports True.
   4. _evict_stale_runs never evicts an entry whose pid is alive.
   5. _drive_cli_run refuses to spawn when its cancel_event is already
-     set (pending-cancel displaced the turn before spawn).
+     set (pre-begin cancellation displaced the turn before spawn).
   6. wait_for_clear_runs blocks while active_run_ids is non-empty and
      releases when it clears.
 
@@ -40,6 +40,7 @@ import turn_manager as turn_manager_mod  # noqa: E402
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
 from execution_template import prepare_execution  # noqa: E402
 from event_bus import EventBus  # noqa: E402
+from event_bus import bus  # noqa: E402
 from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
 from lifecycle_command_model import (  # noqa: E402
     ExecutionTurnIdentity,
@@ -52,6 +53,7 @@ import config_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
+from orchestrator import Coordinator  # noqa: E402
 
 failures: list[str] = []
 
@@ -249,17 +251,19 @@ def test_noop_cancel_does_not_leak_session_cancelled() -> None:
     ok = asyncio.run(tm.cancel_turn("sid-1"))
     check("returns False", ok is False)
     check("no _session_cancelled leak", "sid-1" not in c._session_cancelled)
-    check("no pending parked", "sid-1" not in tm._pending_cancel)
+    check("no pre-begin owner", not tm.has_pre_begin_prompt("sid-1"))
 
 
-def test_gap_cancel_parks_pending() -> None:
-    print("T2 gap-window cancel parks pending cancel")
+def test_gap_cancel_signals_exact_pre_begin() -> None:
+    print("T2 gap-window cancel signals exact pre-begin claim")
     c = _StubCoordinator()
-    c._in_flight_prompts["sid-2"] = 1
     tm = TurnManager(c)
+    claim = tm.claim_pre_begin_prompt("sid-2", "queue-9", "lm-9")
+    assert claim is not None
     ok = asyncio.run(tm.cancel_turn("sid-2", interrupted_by_msg_id="lm-9"))
     check("returns True", ok is True)
-    check("pending parked with msg id", tm._pending_cancel.get("sid-2") == "lm-9")
+    check("exact claim signalled", claim.cancel_event.is_set())
+    check("interrupt identity retained", claim.interrupted_by_msg_id == "lm-9")
     check("_session_cancelled set", c._session_cancelled.get("sid-2") is True)
 
 
@@ -1964,9 +1968,195 @@ def test_wait_for_clear_runs_blocks_then_releases() -> None:
     check("released when cleared", released)
 
 
+def test_stop_terminally_cancels_exact_prompt_blocked_before_begin() -> None:
+    print("T9 stop terminally cancels exact prompt blocked before begin")
+    coordinator = Coordinator()
+    sid = session_manager.create(
+        name="pre-begin-cancel",
+        cwd="/tmp",
+        model="sonnet",
+        orchestration_mode="native",
+    )["id"]
+    queued_id = "queue-pre-begin"
+    lifecycle_msg_id = "lifecycle-pre-begin"
+    queued_prompt = {
+        "id": queued_id,
+        "content": "must never reach provider",
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "client_id": "client-pre-begin",
+        "kind": "send",
+    }
+    sibling_id = "queue-sibling"
+    sibling_prompt = {
+        "id": sibling_id,
+        "content": "must remain queued",
+        "lifecycle_msg_id": "lifecycle-sibling",
+        "client_id": "client-sibling",
+        "kind": "queued_behind",
+    }
+    session_manager.add_queued_prompt(sid, queued_prompt)
+    session_manager.add_queued_prompt(sid, sibling_prompt)
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait({
+        "_queued_id": queued_id,
+        "prompt": queued_prompt["content"],
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "client_id": queued_prompt["client_id"],
+    })
+    q.put_nowait(None)
+    q.put_nowait({
+        "_queued_id": sibling_id,
+        "prompt": sibling_prompt["content"],
+        "lifecycle_msg_id": sibling_prompt["lifecycle_msg_id"],
+        "client_id": sibling_prompt["client_id"],
+    })
+    coordinator._prompt_queues[sid] = q
+    coordinator._queued_ids[sid] = [queued_id, sibling_id]
+    coordinator.begin_queued_edit(sid, queued_id)
+
+    barrier_entered = asyncio.Event()
+    original_gate = coordinator._defer_if_queued_editing
+
+    async def observed_gate(*args, **kwargs):
+        barrier_entered.set()
+        return await original_gate(*args, **kwargs)
+
+    coordinator._defer_if_queued_editing = observed_gate
+    terminal_events = []
+    terminal_arrived = asyncio.Event()
+
+    async def capture_terminal(event) -> None:
+        if event.sid == sid and event.msg_id == lifecycle_msg_id:
+            terminal_events.append(event)
+            terminal_arrived.set()
+
+    bus.subscribe(
+        "user_message_failed",
+        capture_terminal,
+        name="test_pre_begin_cancel_terminal",
+    )
+
+    async def _go() -> tuple[list[dict], list[dict], list[dict]]:
+        from ws_chat import _handle_stop_message
+
+        stop_frames: list[dict] = []
+
+        async def capture_stop_frame(frame: dict) -> None:
+            stop_frames.append(frame)
+
+        processor = asyncio.create_task(coordinator._run_session_processor(sid))
+        try:
+            try:
+                await asyncio.wait_for(barrier_entered.wait(), timeout=2.0)
+                await asyncio.wait_for(
+                    _handle_stop_message(coordinator, sid, capture_stop_frame),
+                    timeout=2.0,
+                )
+                await asyncio.wait_for(terminal_arrived.wait(), timeout=2.0)
+            except BaseException:
+                processor.cancel()
+                await asyncio.gather(processor, return_exceptions=True)
+                raise
+        finally:
+            coordinator.finish_queued_edit(sid, queued_id)
+            try:
+                if not processor.done():
+                    try:
+                        await asyncio.wait_for(processor, timeout=2.0)
+                    except TimeoutError:
+                        processor.cancel()
+                        await asyncio.gather(processor, return_exceptions=True)
+                        raise
+            finally:
+                await asyncio.wait_for(
+                    coordinator.turn_manager.lifecycle.close(),
+                    timeout=2.0,
+                )
+                await asyncio.wait_for(
+                    coordinator.lifecycle_commands.close(),
+                    timeout=2.0,
+                )
+        durable_queue = list(
+            (session_manager.get(sid) or {}).get("queued_prompts") or []
+        )
+        remaining_queue = []
+        while not q.empty():
+            remaining_queue.append(q.get_nowait())
+        return stop_frames, durable_queue, remaining_queue
+
+    try:
+        stop_frames, durable_queue, remaining_queue = asyncio.run(_go())
+    finally:
+        bus.unsubscribe("test_pre_begin_cancel_terminal")
+
+    check(
+        "successful stop acknowledged",
+        stop_frames == [{
+            "type": "stop_acknowledged",
+            "data": {"app_session_id": sid, "success": True},
+        }],
+    )
+    check(
+        "only exact durable queue row removed",
+        [item.get("id") for item in durable_queue] == [sibling_id],
+    )
+    check(
+        "sibling in-memory identity retained",
+        coordinator._queued_ids.get(sid) == [sibling_id],
+    )
+    check("cancel emitted exactly one terminal", len(terminal_events) == 1)
+    check(
+        "terminal reason is aborted_before_send",
+        bool(terminal_events)
+        and terminal_events[0].payload.get("reason") == "aborted_before_send",
+    )
+    check(
+        "provider-facing user message was never persisted",
+        (session_manager.get(sid) or {}).get("messages") == [],
+    )
+    check(
+        "only sibling remains in processor queue",
+        [item.get("_queued_id") for item in remaining_queue] == [sibling_id],
+    )
+    check("in-flight counter cleared", sid not in coordinator._in_flight_prompts)
+    check("pre-begin owner cleared", not coordinator.turn_manager.has_pre_begin_prompt(sid))
+    check("session cancel flag cleared", sid not in coordinator._session_cancelled)
+
+
+def test_submit_prompt_requests_recovery_before_enqueue() -> None:
+    import recovery
+
+    coordinator = Coordinator.__new__(Coordinator)
+    calls: list[tuple[str, str]] = []
+    original_request = recovery.request_recovered_session
+
+    async def request_recovery(session_id: str) -> None:
+        calls.append(("recovery", session_id))
+
+    def enqueue(session_id: str, _params: dict, **_kwargs) -> str:
+        calls.append(("enqueue", session_id))
+        return "queued"
+
+    recovery.request_recovered_session = request_recovery
+    coordinator.submit_prompt = enqueue
+    try:
+        queued_id = asyncio.run(coordinator.submit_prompt_async(
+            "sid-demand",
+            {"prompt": "continue"},
+        ))
+    finally:
+        recovery.request_recovered_session = original_request
+
+    assert queued_id == "queued"
+    assert calls == [
+        ("recovery", "sid-demand"),
+        ("enqueue", "sid-demand"),
+    ]
+
+
 def main() -> int:
     test_noop_cancel_does_not_leak_session_cancelled()
-    test_gap_cancel_parks_pending()
+    test_gap_cancel_signals_exact_pre_begin()
     test_cancel_fans_out_to_recovered_runs()
     test_recovered_cancel_escalates_when_still_alive()
     test_evict_stale_skips_alive_pid()
@@ -1993,6 +2183,8 @@ def main() -> int:
     test_selector_changes_fence_production_sid_discovery_and_completion()
     test_stale_session_error_clears_authority_before_selector_switch()
     test_wait_for_clear_runs_blocks_then_releases()
+    test_stop_terminally_cancels_exact_prompt_blocked_before_begin()
+    test_submit_prompt_requests_recovery_before_enqueue()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")

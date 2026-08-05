@@ -25,6 +25,8 @@ from lifecycle_command_model import (  # noqa: E402
     UserTurnIdentity,
 )
 import lifecycle_command_store  # noqa: E402
+import loop_affinity  # noqa: E402
+import recovery_manager  # noqa: E402
 import session_manager  # noqa: E402
 import run_recovery  # noqa: E402
 from lifecycle_command_states import LifecycleCommandRejected  # noqa: E402
@@ -290,6 +292,263 @@ async def test_recovery_descriptor_routes_through_lifecycle_authority(
         outcome="failed",
     )
     await engine.close()
+
+
+async def test_recovery_descriptor_attachment_runs_on_lifecycle_owner_loop(
+    monkeypatch,
+) -> None:
+    session_id = "recovery-selector-offloop"
+    projected: list[str] = []
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: (
+            {"orchestration_mode": "native"}
+            if requested_id == session_id
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda _session_id, _mode, native_sid, **_metadata: (
+            projected.append(native_sid) or {"id": session_id}
+        ),
+    )
+    compatibility = _compatibility("-offloop")
+    selector = SelectorIdentity(
+        "provider-offloop",
+        "model-offloop",
+        "runner-offloop",
+    )
+    engine = LifecycleCommandEngine(EventBus())
+    execution, provider_run_id = await _elect(
+        engine,
+        session_id=session_id,
+        suffix="offloop",
+        selector=selector,
+        compatibility=compatibility,
+    )
+    descriptor = {
+        "run_id": provider_run_id,
+        "app_session_id": session_id,
+        "provider_id": selector.provider_id,
+        "model": selector.model,
+        "runner": selector.runner,
+        "native_sid_compatibility": compatibility,
+    }
+    coordinator = SimpleNamespace(lifecycle_commands=engine)
+    manager = recovery_manager.RecoveryManager()
+    manager.start()
+    loop_affinity.bind_main_loop(asyncio.get_running_loop())
+    try:
+        assert await manager.run(
+            lambda: _attach_recovered_selector_sid(
+                coordinator,
+                descriptor,
+                "native-offloop",
+            ),
+        ) == "native-offloop"
+        assert not await manager.run(
+            lambda: _attach_recovered_selector_sid(
+                coordinator,
+                {**descriptor, "runner": "runner-tampered"},
+                "native-tampered-offloop",
+            ),
+        )
+        assert projected == ["native-offloop"]
+    finally:
+        manager.stop()
+        loop_affinity.reset_for_tests()
+        await engine.finish_execution_and_turn(
+            session_id,
+            execution_identity=execution,
+            provider_run_id=provider_run_id,
+            outcome="failed",
+        )
+        await engine.close()
+
+
+async def test_replay_only_integration_retires_exact_lifecycle_on_owner_loop(
+    monkeypatch,
+) -> None:
+    import provider
+    import user_msg_lifecycle
+    from ingestion_versions import current_ingestion_version
+
+    session_id = "recovery-selector-replay-terminal"
+    lifecycle_id = "lifecycle-replay-terminal"
+    assistant_id = "assistant-replay-terminal"
+    execution_turn_id = "execution-replay-terminal"
+    provider_run_id = "provider-run-replay-terminal"
+    native_sid = "native-replay-terminal"
+    compatibility = _compatibility("-replay-terminal")
+    selector = SelectorIdentity(
+        "provider-replay-terminal",
+        "model-replay-terminal",
+        "runner-replay-terminal",
+    )
+    session = {
+        "id": session_id,
+        "orchestration_mode": "native",
+        "agent_session_id": native_sid,
+        "messages": [
+            {
+                "id": "user-replay-terminal",
+                "role": "user",
+                "lifecycle_msg_id": lifecycle_id,
+            },
+            {
+                "id": assistant_id,
+                "role": "assistant",
+                "agent_session_id": native_sid,
+                "completed_at": "2026-08-05T00:00:00Z",
+            },
+        ],
+    }
+    projected: list[str] = []
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: session if requested_id == session_id else None,
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "set_agent_sid",
+        lambda _session_id, _mode, recovered_sid, **_metadata: (
+            projected.append(recovered_sid) or session
+        ),
+    )
+    monkeypatch.setattr(
+        run_recovery.session_manager,
+        "_root_id_for",
+        lambda requested_id: requested_id,
+    )
+    monkeypatch.setattr(
+        run_recovery.session_manager,
+        "flush_root_persist",
+        lambda _session_id: None,
+    )
+    monkeypatch.setattr(run_recovery, "_is_consistent", lambda _sess, _desc: True)
+    monkeypatch.setattr(
+        run_recovery,
+        "_is_provider_capability_change",
+        lambda _run_id: False,
+    )
+    monkeypatch.setattr(
+        run_recovery,
+        "_salvage_complete_payload",
+        lambda _run_id: {"success": True},
+    )
+    monkeypatch.setattr(run_recovery, "_barrier_journal", lambda _sid: None)
+    reconciled: list[str] = []
+
+    async def mark_reconciled(
+        _run_id,
+        _desc,
+        reason,
+        *,
+        summary=None,
+    ):
+        reconciled.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        run_recovery,
+        "_mark_reconciled_terminal_async",
+        mark_reconciled,
+    )
+    terminal_persisted = False
+
+    async def terminal_event(_session_id, _lifecycle_id):
+        return {"type": "user_message_done"} if terminal_persisted else None
+
+    monkeypatch.setattr(
+        user_msg_lifecycle,
+        "terminal_event_for_lifecycle_async",
+        terminal_event,
+    )
+
+    class PromptManager:
+        async def emit_user_msg_done(self, *_args, **_kwargs):
+            nonlocal terminal_persisted
+            terminal_persisted = True
+
+    engine = LifecycleCommandEngine(EventBus())
+    await engine.begin_turn(
+        request_id="begin-replay-terminal",
+        session_id=session_id,
+        identity=UserTurnIdentity(lifecycle_id, lifecycle_id),
+    )
+    execution = ExecutionTurnIdentity(
+        execution_turn_id,
+        assistant_id,
+        "native",
+    )
+    await engine.start_execution(
+        session_id,
+        execution_identity=execution,
+        selector_role="primary",
+    )
+    authority, decision = lifecycle_command_store.persist_admitted_selector_attempt(
+        session_id,
+        target=selector,
+        native_sid_compatibility=compatibility,
+        primary_native_sid=None,
+        supervisor_native_sid=None,
+        primary_native_sid_compatibility=None,
+        supervisor_native_sid_compatibility=None,
+    )
+    assert decision == "admitted"
+    await engine.elect_execution_attempt(
+        session_id,
+        execution_identity=execution,
+        provider_run_id=provider_run_id,
+        selector_generation=authority.generation,
+        native_sid_compatibility=compatibility,
+        selector=selector,
+    )
+    coordinator = SimpleNamespace(
+        lifecycle_commands=engine,
+        user_prompt_manager=PromptManager(),
+    )
+    owner = SimpleNamespace(defunct=False)
+    monkeypatch.setattr(provider, "get_provider", lambda *_args: owner)
+    descriptor = {
+        "run_id": provider_run_id,
+        "app_session_id": session_id,
+        "provider_id": selector.provider_id,
+        "provider_kind": "claude",
+        "model": selector.model,
+        "runner": selector.runner,
+        "native_sid_compatibility": compatibility,
+        "session_id": native_sid,
+        "mode": "native",
+        "target_message_id": assistant_id,
+        "turn_run_id": execution_turn_id,
+        "has_complete_json": True,
+        "alive": False,
+        "ingestion_version": current_ingestion_version("claude"),
+    }
+    manager = recovery_manager.RecoveryManager()
+    manager.start()
+    monkeypatch.setattr(recovery_manager, "manager", manager)
+    loop_affinity.bind_main_loop(asyncio.get_running_loop())
+    try:
+        await run_recovery.integrate_recovered_runs(
+            coordinator,
+            [descriptor],
+        )
+        snapshot = engine.snapshot(session_id)
+        assert snapshot.phase == "idle"
+        assert snapshot.execution is None
+        assert projected == [native_sid]
+        assert terminal_persisted
+        assert reconciled == ["consistent state"]
+    finally:
+        manager.stop()
+        loop_affinity.reset_for_tests()
+        await engine.close()
 
 
 async def test_election_commit_rejects_authority_race_without_rebinding(

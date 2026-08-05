@@ -27,6 +27,7 @@ from provider import (
     take_recovery_scan_ownership,
 )
 from run_recovery import (
+    RecoveryIntegrationOutcome,
     integrate_recovered_runs,
     lifecycle_recovery_candidates,
     mark_recovered_runs_terminal,
@@ -391,6 +392,8 @@ async def _recover_in_flight_task() -> None:
     descriptors asynchronously. The startup gate opens after scan and
     classification; replay/finalization is reactive background work and
     must not block normal prompt start."""
+    global _RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND
+    _RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND = True
     import startup_recovery_gate
     gate_open = False
     startup_tasks: list[asyncio.Task] = []
@@ -493,10 +496,21 @@ async def _recover_in_flight_task() -> None:
                     while remaining_live:
                         batch = _pop_next_recovered_session_batch(remaining_live)
                         try:
-                            await integrate_recovered_runs(_coordinator_ref, batch)
-                        finally:
+                            outcomes = await integrate_recovered_runs(
+                                _coordinator_ref,
+                                batch,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "live recovered-run integration failed",
+                            )
+                            await _retain_failed_recovered_batch(batch)
+                            continue
+                        if _recovered_batch_succeeded(batch, outcomes):
                             for sid in _recovered_run_session_ids(batch):
                                 startup_recovery_gate.mark_session_recovery_done(sid)
+                        else:
+                            await _retain_failed_recovered_batch(batch)
         # The gate protects provider-run ownership: classification and every
         # alive run must be registered before rehydrated prompts can start.
         await _coordinator_ref.turn_manager.reconcile_lifecycle_projection()
@@ -550,6 +564,7 @@ async def _recover_in_flight_task() -> None:
             logger.exception("recover_all_in_flight: background integration failed")
         raise
     finally:
+        await _close_pre_enqueue_recovery_demand_window()
         unfinished = [task for task in startup_tasks if not task.done()]
         for task in unfinished:
             task.cancel()
@@ -560,19 +575,19 @@ async def _recover_in_flight_task() -> None:
 _RECOVERED_COLD_RUN_WORKER_TASK: Optional[asyncio.Task] = None
 _RECOVERED_COLD_PENDING: dict[str, list[dict]] = {}
 _RECOVERED_COLD_ACTIVE: set[str] = set()
+_RECOVERED_COLD_FAILED: set[str] = set()
+_RECOVERED_COLD_RETRY_REQUESTED: set[str] = set()
+_RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND = True
 _RECOVERED_COLD_READY = asyncio.Event()
 _RECOVERED_COLD_LOCK = asyncio.Lock()
 
 
 def _cold_recovery_integration_pending() -> bool:
-    """True while `_recovered_cold_run_worker` has pending or in-flight
-    batches. This background task integrates completed/stale recovered
-    runs outside `turn_manager`'s tracked run state, so restart-cadence
-    busy probes must check it explicitly — otherwise a multi-minute cold
-    batch (e.g. a large post-restart recovery backlog) reads as idle for
-    its entire duration, which can trigger a busy->idle auto-restart mid
-    integration and repeat the cycle on the next boot."""
-    return bool(_RECOVERED_COLD_PENDING) or bool(_RECOVERED_COLD_ACTIVE)
+    """True for active or runnable cold integration, not parked failures."""
+    return bool(_RECOVERED_COLD_ACTIVE) or any(
+        batch and sid not in _RECOVERED_COLD_FAILED
+        for sid, batch in _RECOVERED_COLD_PENDING.items()
+    )
 
 
 def _recovered_run_session_id(desc: dict) -> str:
@@ -581,6 +596,19 @@ def _recovered_run_session_id(desc: dict) -> str:
 
 def _recovered_run_session_ids(recovered: list[dict]) -> set[str]:
     return {sid for sid in (_recovered_run_session_id(desc) for desc in recovered) if sid}
+
+
+def _recovered_batch_succeeded(
+    batch: list[dict],
+    outcomes: object,
+) -> bool:
+    if not isinstance(outcomes, dict):
+        return False
+    session_ids = _recovered_run_session_ids(batch)
+    return bool(session_ids) and all(
+        outcomes.get(session_id) is RecoveryIntegrationOutcome.SUCCESS
+        for session_id in session_ids
+    )
 
 
 def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict]:
@@ -637,6 +665,7 @@ def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     groups = _recovered_run_session_groups(recovered)
     for sid, batch in groups.items():
         _RECOVERED_COLD_PENDING.setdefault(sid, []).extend(batch)
+        _RECOVERED_COLD_FAILED.discard(sid)
     queued = sum(len(batch) for batch in groups.values())
     if not queued:
         return
@@ -669,25 +698,68 @@ async def _recovered_cold_run_worker() -> None:
             batch = _pop_next_recovered_cold_batch_locked()
         if not batch:
             continue
+        succeeded = False
         try:
             # Low priority: yield once before each batch so live recovery,
             # re-enqueue, WS, and REST work scheduled by startup can run first.
             import recovery_priority
             await recovery_priority.admit_recovery_quantum()
             started = time.monotonic()
-            await integrate_recovered_runs(_coordinator_ref, batch)
-            logger.info(
-                "recover_all_in_flight: integrated cold batch of %d run(s) "
-                "in %.3fs",
-                len(batch),
-                time.monotonic() - started,
-            )
+            outcomes = await integrate_recovered_runs(_coordinator_ref, batch)
+            succeeded = _recovered_batch_succeeded(batch, outcomes)
+            if not succeeded:
+                logger.error(
+                    "recovered cold-run integration returned failure for %s",
+                    sorted(_recovered_run_session_ids(batch)),
+                )
+            else:
+                logger.info(
+                    "recover_all_in_flight: integrated cold batch of %d run(s) "
+                    "in %.3fs",
+                    len(batch),
+                    time.monotonic() - started,
+                )
         except Exception:
             logger.exception("recovered cold-run integration failed")
         finally:
             async with _RECOVERED_COLD_LOCK:
                 for sid in _recovered_run_session_ids(batch):
                     _RECOVERED_COLD_ACTIVE.discard(sid)
+                if succeeded:
+                    import startup_recovery_gate
+                    for sid in _recovered_run_session_ids(batch):
+                        _RECOVERED_COLD_RETRY_REQUESTED.discard(sid)
+                        startup_recovery_gate.mark_session_recovery_done(sid)
+                else:
+                    _retain_failed_cold_batch_locked(batch)
+                _refresh_recovered_cold_ready_locked()
+
+
+def _retain_failed_cold_batch_locked(batch: list[dict]) -> None:
+    for sid, failed_batch in _recovered_run_session_groups(batch).items():
+        _RECOVERED_COLD_PENDING.setdefault(sid, []).extend(failed_batch)
+        _RECOVERED_COLD_FAILED.add(sid)
+        if sid in _RECOVERED_COLD_RETRY_REQUESTED:
+            _RECOVERED_COLD_RETRY_REQUESTED.discard(sid)
+            _RECOVERED_COLD_FAILED.discard(sid)
+
+
+async def _retain_failed_recovered_batch(batch: list[dict]) -> None:
+    async with _RECOVERED_COLD_LOCK:
+        _retain_failed_cold_batch_locked(batch)
+        _refresh_recovered_cold_ready_locked()
+
+
+def _refresh_recovered_cold_ready_locked() -> None:
+    if any(
+        batch
+        and sid not in _RECOVERED_COLD_ACTIVE
+        and sid not in _RECOVERED_COLD_FAILED
+        for sid, batch in _RECOVERED_COLD_PENDING.items()
+    ):
+        _RECOVERED_COLD_READY.set()
+        return
+    _RECOVERED_COLD_READY.clear()
 
 
 def _pop_next_recovered_cold_batch_locked() -> list[dict]:
@@ -695,50 +767,60 @@ def _pop_next_recovered_cold_batch_locked() -> list[dict]:
         desc
         for sid, batch in _RECOVERED_COLD_PENDING.items()
         if sid not in _RECOVERED_COLD_ACTIVE
+        and sid not in _RECOVERED_COLD_FAILED
         for desc in batch
     ]
     if not available:
-        if not _RECOVERED_COLD_PENDING:
-            _RECOVERED_COLD_READY.clear()
+        _refresh_recovered_cold_ready_locked()
         return []
     ordered = _sort_recovered_runs_by_session_priority(available)
     next_sid = _recovered_run_session_id(ordered[0])
     batch = _RECOVERED_COLD_PENDING.pop(next_sid, [])
     if batch:
         _RECOVERED_COLD_ACTIVE.add(next_sid)
-    if not _RECOVERED_COLD_PENDING:
-        _RECOVERED_COLD_READY.clear()
+        _RECOVERED_COLD_FAILED.discard(next_sid)
+    _refresh_recovered_cold_ready_locked()
     return batch
 
 
-async def _promote_recovered_session(app_session_id: str) -> None:
+async def request_recovered_session(app_session_id: str) -> None:
+    import loop_affinity
+
+    await loop_affinity.call_on_main(
+        lambda: _request_recovered_session_on_main(app_session_id),
+    )
+
+
+async def _request_recovered_session_on_main(app_session_id: str) -> None:
     import startup_recovery_gate
+
     startup_recovery_gate.request_session_priority(app_session_id)
     async with _RECOVERED_COLD_LOCK:
-        if app_session_id in _RECOVERED_COLD_ACTIVE:
-            return
-        batch = _RECOVERED_COLD_PENDING.pop(app_session_id, [])
-        if batch:
-            _RECOVERED_COLD_ACTIVE.add(app_session_id)
-        if not _RECOVERED_COLD_PENDING:
-            _RECOVERED_COLD_READY.clear()
-    if not batch:
-        return
-    try:
-        started = time.monotonic()
-        await integrate_recovered_runs(_coordinator_ref, batch)
-        logger.info(
-            "recover_all_in_flight: priority-integrated selected session %s "
-            "with %d run(s) in %.3fs",
-            app_session_id[:8],
-            len(batch),
-            time.monotonic() - started,
+        active = app_session_id in _RECOVERED_COLD_ACTIVE
+        pending = bool(_RECOVERED_COLD_PENDING.get(app_session_id))
+        parked = pending and app_session_id in _RECOVERED_COLD_FAILED
+        if parked:
+            _RECOVERED_COLD_FAILED.discard(app_session_id)
+            _RECOVERED_COLD_RETRY_REQUESTED.discard(app_session_id)
+        elif active or pending or _RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND:
+            _RECOVERED_COLD_RETRY_REQUESTED.add(app_session_id)
+        _refresh_recovered_cold_ready_locked()
+    if active or pending:
+        _ensure_recovered_cold_run_worker()
+
+
+async def _close_pre_enqueue_recovery_demand_window() -> None:
+    global _RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND
+    async with _RECOVERED_COLD_LOCK:
+        _RECOVERED_COLD_ACCEPTING_PRE_ENQUEUE_DEMAND = False
+        recoverable_sessions = (
+            set(_RECOVERED_COLD_PENDING)
+            | _RECOVERED_COLD_ACTIVE
         )
-    except Exception:
-        logger.exception("priority recovered session integration failed for %s", app_session_id)
-    finally:
-        async with _RECOVERED_COLD_LOCK:
-            _RECOVERED_COLD_ACTIVE.discard(app_session_id)
+        _RECOVERED_COLD_RETRY_REQUESTED.intersection_update(
+            recoverable_sessions,
+        )
+        _refresh_recovered_cold_ready_locked()
 
 
 async def _scan_recovered_runs(loop, **kwargs) -> list[dict]:
@@ -750,8 +832,9 @@ async def _scan_recovered_runs(loop, **kwargs) -> list[dict]:
     part of recovery that can leave the main loop wholesale, which
     matters because it is also the long pole at startup.
 
-    Only the SCAN moves. Integration stays on the main loop — it reaches
-    loop-bound state (the per-session prompt queue, `turn_manager`'s
+    Only the SCAN moves wholesale. Replay-only integration may use the
+    recovery loop, while narrow helpers route loop-bound state back to the
+    main loop (the per-session prompt queue, `turn_manager`'s
     cancel events, the reattach queue handed to the runner) that cannot
     be awaited from another loop.
 

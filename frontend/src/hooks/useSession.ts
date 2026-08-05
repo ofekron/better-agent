@@ -15,6 +15,7 @@ import { startOp, completeOp, failOp } from "../progress/store";
 import {
   DEFAULT_OFFLINE_REQUEST_TIMEOUT_MS,
   fetchWithTimeout,
+  HttpStatusError,
   responseError,
 } from "src/utils/offlineRequest";
 
@@ -35,12 +36,54 @@ import {
   type BackendAccessError,
 } from "../lib/backendAccess";
 import { sameProjectPath } from "../utils/projectPath";
+import {
+  logDurable,
+  sanitizeDiagnosticText,
+} from "../lib/frontendLogger";
 
 export { sortSessionsForList };
 
 // File-edit session creation waits on server-side git worktree setup, which
 // can far exceed the default offline-detection timeout on a loaded machine.
 const FILE_EDIT_CREATE_TIMEOUT_MS = 60_000;
+const CREATE_FAILURE_DETAIL_MAX_CHARS = 512;
+
+function createFailureDiagnostic(error: unknown): {
+  data: Record<string, unknown>;
+  progressError: string;
+} {
+  if (
+    error instanceof HttpStatusError
+    && Number.isInteger(error.status)
+    && error.status >= 100
+    && error.status <= 599
+  ) {
+    const detail = sanitizeDiagnosticText(
+      error.message || `HTTP ${error.status}`,
+      CREATE_FAILURE_DETAIL_MAX_CHARS,
+    );
+    return {
+      data: { code: "http_error", status: error.status, detail },
+      progressError: detail,
+    };
+  }
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return {
+      data: { code: "request_aborted" },
+      progressError: "request_aborted",
+    };
+  }
+  if (error instanceof TypeError) {
+    return {
+      data: { code: "network_error" },
+      progressError: "network_error",
+    };
+  }
+  return {
+    data: { code: "request_failed" },
+    progressError: "request_failed",
+  };
+}
 
 export interface CreateSessionOptions {
   name: string;
@@ -1658,9 +1701,13 @@ export function useSession(authStatus?: string) {
           ...lastEventSeqBySessionRef.current,
           [session.id]: 0,
         };
-        return session;
-      } finally {
         completeOp("session:create");
+        return session;
+      } catch (error) {
+        const diagnostic = createFailureDiagnostic(error);
+        logDurable("session", "session:create.failed", diagnostic.data);
+        failOp("session:create", diagnostic.progressError);
+        throw error;
       }
     },
     [sortForList, markSessionInserted]

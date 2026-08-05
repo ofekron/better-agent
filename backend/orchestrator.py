@@ -89,6 +89,10 @@ async def _await_cancellation_safe(operation: Awaitable[None]) -> None:
         raise asyncio.CancelledError
 
 
+class _PreBeginPromptCancelled(Exception):
+    pass
+
+
 class _AskCallGate:
     __slots__ = ("lock", "users")
 
@@ -463,13 +467,9 @@ class Coordinator:
         self._prompt_queues: dict[str, asyncio.Queue] = {}
         self._processor_tasks: dict[str, asyncio.Task] = {}
         self._prompt_admission_open = True
-        # A10 TOCTOU closure: counter of prompts that have been
-        # dequeued by `_run_session_processor` but not yet fully
-        # processed (i.e. `handle_prompt` is still running). Stamped
-        # to N>0 IMMEDIATELY after `q.get()` returns, BEFORE the first
-        # subsequent await — closes the window between queue drain
-        # and `_drive_cli_run`'s `active_run_ids` registration that
-        # `has_active_runs` would otherwise miss.
+        # Count prompts past pre-begin readiness gates but not yet fully
+        # processed. The exact TurnManager pre-begin claim covers the
+        # earlier dequeue-to-readiness window in `has_active_runs`.
         self._in_flight_prompts: dict[str, int] = {}
         # INVARIANT: bounded perf-gauge — sums depth across all
         # per-session prompt queues so the rollup line stays a single
@@ -1381,6 +1381,40 @@ class Coordinator:
         except Exception:
             logger.debug("queue_consumed emit failed", exc_info=True)
 
+    async def _terminally_cancel_pre_begin_prompt(
+        self,
+        app_session_id: str,
+        claim,
+    ) -> None:
+        self.cancel_queued(app_session_id, claim.queue_item_id)
+        cancelled = self._cancelled_ids.get(app_session_id)
+        if cancelled is not None:
+            cancelled.discard(claim.queue_item_id)
+            if not cancelled:
+                self._cancelled_ids.pop(app_session_id, None)
+        self._forget_active_prompt_item(claim.queue_item_id)
+        await self._remove_consumed_queue_item(
+            app_session_id,
+            claim.queue_item_id,
+        )
+        await self.user_prompt_manager.emit_user_msg_cancel_terminal(
+            app_session_id,
+            claim.lifecycle_msg_id,
+            "native",
+            interrupted_by_msg_id=claim.interrupted_by_msg_id,
+        )
+        if (
+            self.user_prompt_manager.get_in_flight_lifecycle_msg_id(
+                app_session_id,
+            )
+            == claim.lifecycle_msg_id
+        ):
+            self.user_prompt_manager.clear_in_flight_lifecycle_msg_id(
+                app_session_id,
+            )
+        self._session_cancelled.pop(app_session_id, None)
+        self.turn_manager.release_pre_begin_prompt(app_session_id, claim)
+
     def try_claim_prompt_client_id(
         self,
         app_session_id: str,
@@ -1480,6 +1514,9 @@ class Coordinator:
         *,
         start_processor: bool = True,
     ) -> str:
+        import recovery
+
+        await recovery.request_recovered_session(app_session_id)
         return self.submit_prompt(
             app_session_id,
             params,
@@ -1514,6 +1551,9 @@ class Coordinator:
             self._prompt_queues[app_session_id] = q
         item_id = params.get("_queued_id") or str(uuid.uuid4())
         params["_queued_id"] = item_id
+        lifecycle_msg_id = params.get("lifecycle_msg_id")
+        if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+            params["lifecycle_msg_id"] = str(uuid.uuid4())
         # The WS handler may have already claimed the client_id for this
         # item_id via try_claim_prompt_client_id (atomic admission gate).
         # Re-claiming here would see its own claim and wrongly self-dedup,
@@ -3323,7 +3363,9 @@ class Coordinator:
                 "images": qp.get("images"),
                 "files": qp.get("files"),
                 "client_id": qp.get("client_id"),
-                "lifecycle_msg_id": qp.get("lifecycle_msg_id"),
+                "lifecycle_msg_id": (
+                    qp.get("lifecycle_msg_id") or str(uuid.uuid4())
+                ),
                 "source": qp.get("source"),
                 "team_message": team_message,
                 "disallowed_tools": qp.get("disallowed_tools"),
@@ -3679,18 +3721,71 @@ class Coordinator:
             if params is None:
                 # Sentinel: cancel_session fed this to unblock us.
                 break
-            if await self._defer_if_queued_editing(app_session_id, q, params):
+            pre_begin_claim = self.turn_manager.claim_pre_begin_prompt(
+                app_session_id,
+                params.get("_queued_id") if isinstance(params, dict) else None,
+                params.get("lifecycle_msg_id") if isinstance(params, dict) else None,
+            )
+
+            async def wait_pre_begin(operation):
+                completed, result = await self.turn_manager.wait_for_pre_begin_barrier(
+                    pre_begin_claim,
+                    operation,
+                )
+                if not completed:
+                    raise _PreBeginPromptCancelled()
+                return result
+
+            try:
+                deferred_for_edit = await wait_pre_begin(
+                    self._defer_if_queued_editing(app_session_id, q, params)
+                )
+            except _PreBeginPromptCancelled:
+                if pre_begin_claim is not None:
+                    await self._terminally_cancel_pre_begin_prompt(
+                        app_session_id,
+                        pre_begin_claim,
+                    )
                 continue
-            if await self._gate_on_fork_provisioning(app_session_id, q, params):
+            except BaseException:
+                self.turn_manager.release_pre_begin_prompt(
+                    app_session_id,
+                    pre_begin_claim,
+                )
+                raise
+            if deferred_for_edit:
+                self.turn_manager.release_pre_begin_prompt(
+                    app_session_id,
+                    pre_begin_claim,
+                )
+                continue
+            try:
+                gated_on_provisioning = await wait_pre_begin(
+                    self._gate_on_fork_provisioning(app_session_id, q, params)
+                )
+            except _PreBeginPromptCancelled:
+                if pre_begin_claim is not None:
+                    await self._terminally_cancel_pre_begin_prompt(
+                        app_session_id,
+                        pre_begin_claim,
+                    )
+                continue
+            except BaseException:
+                self.turn_manager.release_pre_begin_prompt(
+                    app_session_id,
+                    pre_begin_claim,
+                )
+                raise
+            if gated_on_provisioning:
+                self.turn_manager.release_pre_begin_prompt(
+                    app_session_id,
+                    pre_begin_claim,
+                )
                 continue
             original_params = copy.deepcopy(params)
-            # A10 TOCTOU closure: stamp the session as "claimed for
-            # processing" the INSTANT we dequeue, BEFORE any other
-            # await. `has_active_runs` reads this counter, so a PATCH
-            # /selectors landing between this point and
-            # `_drive_cli_run`'s `active_run_ids` registration sees
-            # True and 409s. Decremented in the `finally` below
-            # regardless of how the turn ends.
+            # The exact pre-begin claim covers dequeue through readiness.
+            # This counter takes over after those gates and remains set
+            # until the prompt finishes.
             self._in_flight_prompts[app_session_id] = (
                 self._in_flight_prompts.get(app_session_id, 0) + 1
             )
@@ -3713,7 +3808,6 @@ class Coordinator:
                         app_session_id,
                         item_id,
                     )
-                    self.turn_manager._pending_cancel.pop(app_session_id, None)
                     return True
 
                 if await cleanup_cancelled_queue_item():
@@ -3783,26 +3877,32 @@ class Coordinator:
             retry_params = None
             try:
                 import startup_recovery_gate
-                if (
-                    self._startup_recovery_can_overlap_session(app_session_id)
-                    and await asyncio.to_thread(
+                has_recovery_run = False
+                if self._startup_recovery_can_overlap_session(app_session_id):
+                    has_recovery_run = await wait_pre_begin(asyncio.to_thread(
                         self._startup_recovery_session_has_run_dir,
                         app_session_id,
-                    )
-                ):
-                    await startup_recovery_gate.wait_for_session_recovery_ready(
-                        app_session_id,
+                    ))
+                if has_recovery_run:
+                    await wait_pre_begin(
+                        startup_recovery_gate.wait_for_session_recovery_ready(
+                            app_session_id,
+                        )
                     )
                 # Barrier: never start a turn while externally-registered
                 # runs (recovered subprocesses) are still alive for this
                 # session — two CLI subprocesses on one session interleave.
-                await self.turn_manager.wait_for_clear_runs(app_session_id)
+                await wait_pre_begin(
+                    self.turn_manager.wait_for_clear_runs(app_session_id)
+                )
                 if item_id and await cleanup_cancelled_queue_item():
                     logical_turn_outcome = "stopped"
                     continue
                 if logical_turn_identity and logical_request_prefix:
-                    await self.lifecycle_commands.wait_for_phase(
-                        app_session_id, {"idle"},
+                    await wait_pre_begin(
+                        self.lifecycle_commands.wait_for_phase(
+                            app_session_id, {"idle"},
+                        )
                     )
                     lifecycle_session = session_manager.get_fields(
                         app_session_id,
@@ -3819,6 +3919,11 @@ class Coordinator:
                         ),
                     )
                     logical_turn_claimed = True
+                    if (
+                        pre_begin_claim is not None
+                        and pre_begin_claim.cancel_event.is_set()
+                    ):
+                        raise _PreBeginPromptCancelled()
                 if is_review:
                     from orchs.supervisor import request_review
                     await request_review(
@@ -3866,6 +3971,13 @@ class Coordinator:
                                 str(replacement_prompt),
                             )
                     await self.handle_prompt(**_prompt_processor_handle_params(params))
+            except _PreBeginPromptCancelled:
+                logical_turn_outcome = "stopped"
+                if pre_begin_claim is not None:
+                    await self._terminally_cancel_pre_begin_prompt(
+                        app_session_id,
+                        pre_begin_claim,
+                    )
             except asyncio.CancelledError:
                 logical_turn_outcome = "stopped"
                 # Backend shutdown propagating into us; bail.
@@ -3900,6 +4012,10 @@ class Coordinator:
                 ):
                     retry_params = original_params
             finally:
+                self.turn_manager.release_pre_begin_prompt(
+                    app_session_id,
+                    pre_begin_claim,
+                )
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:
                     self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)
@@ -3910,10 +4026,6 @@ class Coordinator:
                     # so `_sent_lifecycle_ids` can never grow unbounded,
                     # even if no terminal emit fired for this prompt.
                     self.user_prompt_manager._clear_sent(lifecycle_msg_id)
-                # A pending cancel set during this item's flight that
-                # run_turn didn't consume is dead once the item ends —
-                # clear it so it can't abort the next unrelated prompt.
-                self.turn_manager._pending_cancel.pop(app_session_id, None)
                 # Decrement the claimed-for-processing counter exactly
                 # once per dequeued item, matched to the increment
                 # immediately after `q.get()` above.
@@ -4016,7 +4128,6 @@ class Coordinator:
         # If the queue is empty, drop ourselves so a future submit can
         # spawn a fresh task. (Don't pop the queue itself — it may have
         # been swapped by a re-spawn race.)
-        self.turn_manager._pending_cancel.pop(app_session_id, None)
         self._processor_tasks.pop(app_session_id, None)
 
     def _startup_recovery_can_overlap_session(self, app_session_id: str) -> bool:
@@ -4836,6 +4947,9 @@ class Coordinator:
         event = self.turn_manager.cancel_events.get(app_session_id)
         if event:
             event.set()
+        pre_begin = self.turn_manager.get_pre_begin_prompt(app_session_id)
+        if pre_begin is not None:
+            pre_begin.cancel_event.set()
 
         seen = set(self.turn_manager.active_run_ids.get(app_session_id, []))
         all_run_ids: set[str] = set()

@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -99,6 +100,11 @@ class AmbiguousRecoveredExecutionIdentityError(RuntimeError):
     correct terminal when it completes; a caller catching this should
     retire the recovered run without emitting anything, never treat this
     as "safe to fabricate a terminal for"."""
+
+
+class RecoveryIntegrationOutcome(str, Enum):
+    SUCCESS = "success"
+    RETRYABLE = "retryable"
 
 
 def _normalize_recovered_started_at(value: object) -> str:
@@ -603,9 +609,9 @@ def _bucket_needs_main_loop(descs: list[dict]) -> bool:
       and plants an `asyncio.Event` in `turn_manager.cancel_events` that
       the main-loop cancel handler sets.
 
-    Everything else — replay, reconcile, terminal markers — is
-    thread-agnostic and serialized by `session_manager.batch`'s per-root
-    RLock, so it can run on the recovery loop.
+    Everything else keeps its replay and filesystem work on the recovery
+    loop. Narrow helpers explicitly hop lifecycle/coordinator mutations to
+    the main loop before touching loop-bound state.
 
     Only the group's latest run reaches `_integrate_one`, so one
     evaluation decides the bucket. Fails CLOSED: anything unreadable or
@@ -713,7 +719,7 @@ async def _integrate_recovered_session_group(
     coordinator,
     descs: list[dict],
     summary: _RecoveryLogSummary,
-) -> None:
+) -> RecoveryIntegrationOutcome:
     """Integrate one session bucket serially.
 
     Recovery may run different session buckets in parallel, but this function
@@ -733,6 +739,7 @@ async def _integrate_recovered_session_group(
     )
     latest = ordered[-1]
     terminal_markers: list[tuple[str, dict, str, int]] = []
+    outcome = RecoveryIntegrationOutcome.SUCCESS
 
     async def flush_terminal_markers() -> None:
         while terminal_markers:
@@ -788,6 +795,7 @@ async def _integrate_recovered_session_group(
                 else:
                     if summary is not None:
                         summary.record_skip("unsafe non-latest replay bound", run_id)
+                    outcome = RecoveryIntegrationOutcome.RETRYABLE
                     continue
             else:
                 terminal_markers.append((run_id, desc, "non-latest skip", 0))
@@ -835,10 +843,19 @@ async def _integrate_recovered_session_group(
                     summary=summary,
                 )
                 continue
-            await _integrate_one(coordinator, owner, desc, summary=summary)
+            integrated = await _integrate_one(
+                coordinator,
+                owner,
+                desc,
+                summary=summary,
+            )
+            if integrated is not RecoveryIntegrationOutcome.SUCCESS:
+                outcome = RecoveryIntegrationOutcome.RETRYABLE
         except Exception:
+            outcome = RecoveryIntegrationOutcome.RETRYABLE
             logger.exception("integrate_recovered_runs: failed for %s", run_id)
     await flush_terminal_markers()
+    return outcome
 
 
 async def _await_uninterruptibly(task: asyncio.Future):
@@ -1868,7 +1885,10 @@ async def reconcile_missing_bound_lifecycle_orphans(
 
 
 @perf.timed_fn("run_recovery.integrate_recovered_runs")
-async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
+async def integrate_recovered_runs(
+    coordinator,
+    recovered: list[dict],
+) -> dict[str, RecoveryIntegrationOutcome]:
     """Integrate recovered runs, dispatching each to the Provider that
     owned it. The descriptor's `provider_id` is the source of truth
     (set by `_write_backend_state` at run-start). Runs whose owner no
@@ -1913,6 +1933,7 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     for session_key, descs in group_items:
         schedule.push(session_key, descs, _run_order_key(_latest_run(descs)))
     recovery_schedule.set_active(schedule)
+    outcomes: dict[str, RecoveryIntegrationOutcome] = {}
 
     async def _drain(worker: int) -> None:
         while True:
@@ -1922,23 +1943,29 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
             session_key, descs = popped
             try:
                 if _bucket_needs_main_loop(descs):
-                    await _integrate_recovered_session_group(
+                    outcome = await _integrate_recovered_session_group(
                         coordinator, descs, summary,
                     )
-                    continue
-                # Replay-only bucket: no reattach, no fresh run, so
-                # nothing here binds this loop. Run it on the recovery
-                # thread, where a full jsonl replay stops competing with
-                # request handlers. Mutual exclusion still holds — the
-                # root lease is a process-wide threading.Lock plus an
-                # flock, and render-tree mutation is serialized by
-                # session_manager.batch's per-root RLock.
-                await recovery_manager.manager.run(
-                    lambda descs=descs: _integrate_recovered_session_group(
-                        coordinator, descs, summary,
-                    ),
+                else:
+                    # Replay-only bucket: no reattach, no fresh run, so
+                    # nothing here binds this loop. Run it on the recovery
+                    # thread, where a full jsonl replay stops competing with
+                    # request handlers. Mutual exclusion still holds — the
+                    # root lease is a process-wide threading.Lock plus an
+                    # flock, and render-tree mutation is serialized by
+                    # session_manager.batch's per-root RLock.
+                    outcome = await recovery_manager.manager.run(
+                        lambda descs=descs: _integrate_recovered_session_group(
+                            coordinator, descs, summary,
+                        ),
+                    )
+                outcomes[session_key] = (
+                    outcome
+                    if outcome is RecoveryIntegrationOutcome.SUCCESS
+                    else RecoveryIntegrationOutcome.RETRYABLE
                 )
             except Exception:
+                outcomes[session_key] = RecoveryIntegrationOutcome.RETRYABLE
                 logger.exception(
                     "integrate_recovered_runs: session bucket %s failed "
                     "(worker %d)",
@@ -1964,6 +1991,7 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
                 len(group_items),
                 time.monotonic() - started,
             )
+    return outcomes
 
 
 # Providers whose runner normalizes its turn into session_events.jsonl
@@ -2449,12 +2477,14 @@ async def _attach_recovered_selector_sid(
     provider_run_id = str(desc.get("run_id") or "")
     if not app_session_id or not provider_run_id:
         return None
-    attached = await lifecycle_commands.attach_recovered_selector_native_sid(
-        app_session_id,
-        provider_run_id=provider_run_id,
-        native_sid=native_sid,
-        native_sid_compatibility=compatibility,
-        selector=selector,
+    attached = await loop_affinity.call_on_main(
+        lambda: lifecycle_commands.attach_recovered_selector_native_sid(
+            app_session_id,
+            provider_run_id=provider_run_id,
+            native_sid=native_sid,
+            native_sid_compatibility=compatibility,
+            selector=selector,
+        ),
     )
     return native_sid if attached else None
 
@@ -2763,10 +2793,10 @@ async def _integrate_one(
     desc: dict,
     *,
     summary: _RecoveryLogSummary | None = None,
-) -> None:
+) -> RecoveryIntegrationOutcome:
     app_sid = desc.get("app_session_id")
     if not app_sid:
-        await _integrate_one_locked(
+        return await _integrate_one_locked(
             coordinator,
             provider,
             desc,
@@ -2774,12 +2804,11 @@ async def _integrate_one(
             recovery_root_id=None,
             root_lease=None,
         )
-        return
     persist_sid = desc.get("persist_to") or app_sid
     root_id = await asyncio.to_thread(session_manager._root_id_for, persist_sid) or persist_sid
     held_lease = await _acquire_recovery_root_lease(root_id)
     try:
-        await _integrate_one_locked(
+        return await _integrate_one_locked(
             coordinator,
             provider,
             desc,
@@ -2799,7 +2828,7 @@ async def _integrate_one_locked(
     summary: _RecoveryLogSummary | None,
     recovery_root_id: str | None,
     root_lease: RecoveryRootLease | None,
-) -> None:
+) -> RecoveryIntegrationOutcome:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     if not app_sid:
@@ -2813,7 +2842,7 @@ async def _integrate_one_locked(
             "missing app session id",
             summary=summary,
         )
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
     # `persist_to` overrides the app session when present (rare; left
     # in for forward-compat with descriptor producers that set it).
     persist_sid = desc.get("persist_to") or app_sid
@@ -2845,7 +2874,8 @@ async def _integrate_one_locked(
                 "missing session",
                 summary=summary,
             )
-        return
+            return RecoveryIntegrationOutcome.SUCCESS
+        return RecoveryIntegrationOutcome.RETRYABLE
 
     if sess.get("kind") == "adv_sync_fork":
         if summary is not None:
@@ -2908,14 +2938,14 @@ async def _integrate_one_locked(
                     run_id,
                     recovered_pid,
                 )
-                return
+                return RecoveryIntegrationOutcome.RETRYABLE
         await _mark_reconciled_terminal_async(
             run_id,
             desc,
             "removed legacy session target",
             summary=summary,
         )
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
 
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = _recovered_run_cancelled(desc)
@@ -2964,7 +2994,7 @@ async def _integrate_one_locked(
             "missing target_message_id",
             summary=summary,
         )
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
 
     if not _ingestion_version_current(desc) and not await asyncio.to_thread(
         _native_source_exists,
@@ -2995,7 +3025,8 @@ async def _integrate_one_locked(
                 "old provider pipeline version and native source missing",
                 summary=summary,
             )
-        return
+            return RecoveryIntegrationOutcome.SUCCESS
+        return RecoveryIntegrationOutcome.RETRYABLE
 
     # `_is_consistent` counts jsonl lines — sync FS I/O, keep it off
     # the event loop.
@@ -3017,10 +3048,10 @@ async def _integrate_one_locked(
             "target no longer latest",
             summary=summary,
         )
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
     if has_complete and _is_provider_capability_change(run_id):
         if target_asst_initial is None:
-            return
+            return RecoveryIntegrationOutcome.RETRYABLE
         await _retry_recovered_run(
             coordinator=coordinator,
             provider=provider,
@@ -3038,7 +3069,7 @@ async def _integrate_one_locked(
             "provider capability continuation started",
             summary=summary,
         )
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
     if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
         _is_consistent, sess, desc,
     ):
@@ -3069,10 +3100,10 @@ async def _integrate_one_locked(
                     run_id, desc, "superseded lifecycle identity",
                     summary=summary,
                 )
-                return
+                return RecoveryIntegrationOutcome.SUCCESS
             await _to_thread_joined(_barrier_journal, persist_sid)
         await _mark_reconciled_terminal_async(run_id, desc, "consistent state")
-        return
+        return RecoveryIntegrationOutcome.SUCCESS
 
     mode = desc.get("mode") or "manager"
     claude_sid = desc.get("session_id")
@@ -3173,6 +3204,16 @@ async def _integrate_one_locked(
         except Exception:
             integration_ok = False
             logger.exception("integrate_recovered_runs: persist failed for %s", persist_sid)
+
+        if not integration_ok:
+            if redigest_backup is not None:
+                await _to_thread_joined(redigest_backup.rollback)
+            logger.warning(
+                "integrate_recovered_runs: leaving %s unreconciled "
+                "for retry on next demand",
+                run_id,
+            )
+            return RecoveryIntegrationOutcome.RETRYABLE
 
         # NOTE: an earlier hardening pass added an explicit
         # `_dispatch_messages_delta` here to cover live frontends
@@ -3359,17 +3400,6 @@ async def _integrate_one_locked(
                         "integrate_recovered_runs: stale-runner sweep "
                         "failed for %s", run_id[:8],
                     )
-            if not integration_ok:
-                # Wholesale replay/persist failure: leave the run
-                # unmarked so the next startup scan retries it. Marking
-                # here would make the loss permanent and silent.
-                if redigest_backup is not None:
-                    await _to_thread_joined(redigest_backup.rollback)
-                logger.warning(
-                    "integrate_recovered_runs: leaving %s unreconciled "
-                    "for retry on next startup", run_id,
-                )
-                return
             # --- Auto-retry for cold-recovered failed runs ---
             # A run that completed with a retryable failure while the
             # backend was down or restarting (e.g. the runner's one-shot
@@ -3420,7 +3450,7 @@ async def _integrate_one_locked(
                     )
                     if redigest_backup is not None:
                         await _to_thread_joined(redigest_backup.commit)
-                    return
+                    return RecoveryIntegrationOutcome.SUCCESS
             if not (alive and not has_complete):
                 live_sess, terminal_asst, _ = await asyncio.to_thread(
                     _recovery_target_snapshot,
@@ -3460,7 +3490,7 @@ async def _integrate_one_locked(
                         )
                         if redigest_backup is not None:
                             await _to_thread_joined(redigest_backup.commit)
-                        return
+                        return RecoveryIntegrationOutcome.SUCCESS
             # The replay's events.jsonl writes are fire-and-forget
             # (timeout=0 shard-executor submits). The marker permanently
             # gates this run out of future replays, so it must not land
@@ -3491,6 +3521,7 @@ async def _integrate_one_locked(
             # here, and commit/rollback both mark the backup settled.
             if redigest_backup is not None and not redigest_backup._settled:
                 await _to_thread_joined(redigest_backup.commit)
+    return RecoveryIntegrationOutcome.SUCCESS
 
 
 def _last_assistant(sess: dict) -> Optional[dict]:
@@ -4386,6 +4417,33 @@ async def _project_admitted_retry(
 
 
 async def _retry_recovered_run(
+    *,
+    coordinator,
+    provider,
+    desc: dict,
+    run_dir: Path,
+    app_sid: str,
+    persist_sid: str,
+    msg_id: str,
+    recovering_msg_id: Optional[str],
+    fresh_continuation_reason: Optional[str] = None,
+) -> None:
+    await loop_affinity.call_on_main(
+        lambda: _retry_recovered_run_on_main(
+            coordinator=coordinator,
+            provider=provider,
+            desc=desc,
+            run_dir=run_dir,
+            app_sid=app_sid,
+            persist_sid=persist_sid,
+            msg_id=msg_id,
+            recovering_msg_id=recovering_msg_id,
+            fresh_continuation_reason=fresh_continuation_reason,
+        ),
+    )
+
+
+async def _retry_recovered_run_on_main(
     *,
     coordinator,
     provider,

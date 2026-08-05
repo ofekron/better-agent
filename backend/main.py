@@ -304,9 +304,15 @@ async def perf_timing(request, call_next):
     import recovery_priority
 
     t0 = time.perf_counter()
+    response_status: Optional[int] = None
     recovery_priority.interactive_request_started()
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        response_status = response.status_code
+        return response
+    except Exception:
+        response_status = 500
+        raise
     finally:
         recovery_priority.interactive_request_finished()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -325,7 +331,10 @@ async def perf_timing(request, call_next):
                 template = f"mount:{type(endpoint).__name__}"
             else:
                 template = "unmatched"
-        perf.record(f"rest.{request.method}.{template}", elapsed_ms)
+        metric_name = f"rest.{request.method}.{template}"
+        perf.record(metric_name, elapsed_ms)
+        if response_status is not None:
+            perf.record_count(f"{metric_name}.status.{response_status}")
 
 
 @app.middleware("http")

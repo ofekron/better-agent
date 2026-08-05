@@ -47,6 +47,8 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def _reset_cold_recovery_state() -> None:
     recovery._RECOVERED_COLD_PENDING.clear()
     recovery._RECOVERED_COLD_ACTIVE.clear()
+    recovery._RECOVERED_COLD_FAILED.clear()
+    recovery._RECOVERED_COLD_RETRY_REQUESTED.clear()
 
 
 def main_() -> int:
@@ -88,7 +90,29 @@ def main_() -> int:
     )
     _reset_cold_recovery_state()
 
-    # 4. Draining back to empty clears the busy signal.
+    # 4. A deliberately parked failed batch is retained for demand but
+    #    does not keep restart cadence permanently busy.
+    recovery._RECOVERED_COLD_PENDING["sid-parked"] = [{"run_id": "r-parked"}]
+    recovery._RECOVERED_COLD_FAILED.add("sid-parked")
+    check(
+        "parked failed batch -> not integration pending",
+        recovery._cold_recovery_integration_pending() is False,
+        "expected False while retained work is waiting for real demand",
+    )
+    check(
+        "parked failed batch -> not restart-blocking",
+        ops_api._has_restart_blocking_agent_work() is False,
+        "expected False: a quarantined failure must not prevent restart",
+    )
+    recovery._RECOVERED_COLD_FAILED.discard("sid-parked")
+    check(
+        "retry-ready failed batch -> integration pending",
+        recovery._cold_recovery_integration_pending() is True,
+        "expected True after demand makes the retained batch runnable",
+    )
+    _reset_cold_recovery_state()
+
+    # 5. Draining back to empty clears the busy signal.
     check(
         "drained cold recovery -> not pending",
         recovery._cold_recovery_integration_pending() is False,
@@ -102,6 +126,11 @@ def main_() -> int:
         print(f"{status}  {name}{suffix}")
         all_ok = all_ok and ok
     return 0 if all_ok else 1
+
+
+def test_restart_busy_cold_recovery() -> None:
+    _results.clear()
+    assert main_() == 0
 
 
 if __name__ == "__main__":
