@@ -91,20 +91,34 @@ def _normalized_physical_path(path):
     return os.path.normcase(os.fspath(path.resolve(strict=False)))
 
 
+def has_main_entry(source: str) -> bool:
+    """True if the module has a top-level ``if __name__ == "__main__":`` guard.
+
+    Used to tell dual-purpose standalone-runner scripts (a ``__main__`` driver
+    that supplies arguments to ``test_*`` helpers) from pure pytest modules.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    return any(_is_main_guard_node(node) for node in tree.body)
+
+
+def _is_main_guard_node(node):
+    return (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+        and any(
+            isinstance(c, ast.Constant) and c.value == "__main__"
+            for c in node.test.comparators
+        )
+    )
+
+
 def _is_unguarded_runner(tree):
     exit_names = ("exit", "sys.exit", "os._exit")
-
-    def _is_main_guard(node):
-        return (
-            isinstance(node, ast.If)
-            and isinstance(node.test, ast.Compare)
-            and isinstance(node.test.left, ast.Name)
-            and node.test.left.id == "__name__"
-            and any(
-                isinstance(c, ast.Constant) and c.value == "__main__"
-                for c in node.test.comparators
-            )
-        )
 
     def _exit_call_name(node):
         fn = node.func
@@ -118,7 +132,7 @@ def _is_unguarded_runner(tree):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
-            this_under_main = under_main or _is_main_guard(child)
+            this_under_main = under_main or _is_main_guard_node(child)
             if isinstance(child, ast.Call) and _exit_call_name(child) in exit_names:
                 if not this_under_main:
                     return True

@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import _test_home
 from live_llm_test_guard import live_llm_skip_message, live_llm_tests_enabled
-from pytest_collection_guard import should_ignore_test_module
+from pytest_collection_guard import has_main_entry, should_ignore_test_module
 
 # Engage at import time — before any backend import in collected test modules.
 # Layers 1+2 (ba_home guard + deletion guard) are always on. Layer 3 (FS lock
@@ -68,20 +69,56 @@ def pytest_collection_modifyitems(config, items):
     if live_llm_tests_enabled():
         return
 
+    # Cache the has-__main__-runner flag per module file across all items.
+    is_runner_cache: dict[str, bool] = {}
     for item in items:
         if item.get_closest_marker("live_llm"):
             item.add_marker(pytest.mark.skip(reason=live_llm_skip_message(item.name)))
-        # Dual-purpose standalone-runner files build a TestClient in `__main__`
-        # and pass it as `client` directly to their `test_*` functions. Under
-        # pytest that `client` parameter is an unresolved fixture (no such
-        # fixture exists), so the item errors at setup. These are e2e/standalone
-        # tests (run via `python scripts/<file>.py`), not unit-tier pytest; skip
-        # them here rather than letting the missing fixture abort the suite.
-        elif "client" in getattr(item, "fixturenames", ()):
+            continue
+        unresolved = _standalone_runner_unresolved_params(item, is_runner_cache)
+        if unresolved:
             item.add_marker(pytest.mark.skip(
-                reason="standalone-runner test: needs __main__-built client; "
-                       "run via `python scripts/<file>.py`",
+                reason="standalone-runner test: parameter(s) "
+                       + ", ".join(sorted(unresolved))
+                       + " are supplied by the module's __main__ runner, not "
+                       "pytest fixtures; run via `python scripts/<file>.py`",
             ))
+
+
+def _standalone_runner_unresolved_params(item, is_runner_cache):
+    """Unresolvable params on a dual-purpose standalone-runner test function.
+
+    Dual-purpose modules expose ``test_*`` helpers that their
+    ``if __name__ == "__main__"`` runner calls with arguments it builds
+    (a TestClient, a ``failures`` list, a temp path, ...). Under pytest those
+    arguments are not fixtures, so the item errors at setup
+    (``fixture 'x' not found``). Detect that precisely and return the param
+    names so the caller can skip the item — turning an inevitable setup ERROR
+    into a deterministic SKIP.
+
+    Gated on a ``__main__`` entry so a missing-fixture typo in a pure pytest
+    module still surfaces as a real setup error rather than being hidden, and
+    so that pollution-only collection failures (a real fixture that resolves in
+    a clean process) are not papered over.
+    """
+    module = getattr(item, "module", None)
+    source_path = getattr(module, "__file__", "") or ""
+    is_runner = is_runner_cache.get(source_path)
+    if is_runner is None:
+        try:
+            is_runner = has_main_entry(
+                Path(source_path).read_text(encoding="utf-8")
+            )
+        except (OSError, SyntaxError, ValueError):
+            is_runner = False
+        is_runner_cache[source_path] = is_runner
+    if not is_runner:
+        return ()
+
+    fixtureinfo = getattr(item, "_fixtureinfo", None)
+    argnames = getattr(fixtureinfo, "argnames", ()) or ()
+    resolved = getattr(fixtureinfo, "name2fixturedefs", {}) or {}
+    return tuple(name for name in argnames if name not in resolved)
 
 
 @pytest.fixture(autouse=True)
