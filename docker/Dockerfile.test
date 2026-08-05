@@ -10,7 +10,9 @@
 #
 # Unlike docker/Dockerfile (the real, runnable app image) this never builds
 # the frontend or installs a provider CLI — backend/scripts tests don't need
-# either (see backend/pyproject.toml's testpaths=["scripts"]).
+# either (see backend/pyproject.toml's testpaths=["scripts"]). It DOES
+# install the nodejs binary: test_cap_sync.py spawns `node` to exercise
+# frontend/scripts/cap-sync.mjs, which needs only node: builtins.
 #
 # Python version matches CI (.github/workflows/installation-mode-parity.yml
 # uses actions/setup-python@v5 with "3.13") and docker/Dockerfile, not
@@ -37,11 +39,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # git: some backend paths shell out to it (repo introspection).
 # build-essential + libffi-dev: argon2-cffi's cffi backend if no wheel
 #   matches this base image's glibc/arch (same reasoning as docker/Dockerfile).
+# nodejs: backend/scripts/test_cap_sync.py spawns `node` to exercise
+#   frontend/scripts/cap-sync.mjs (withMobilePackageJson /
+#   assertNativeRunnerProjection). cap-sync.mjs uses only node: builtins,
+#   so the binary alone suffices — no frontend build, no node_modules.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git \
       build-essential \
       libffi-dev \
+      nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo
