@@ -352,23 +352,25 @@ class ClaudeProvider(Provider):
         # Wind-down gate mutexes, one per native session id.
         self._session_start_locks: dict[str, threading.Lock] = {}
         self._session_start_locks_guard = threading.Lock()
-        # Aggregate gauge: sum of all run-queue depths for this provider
-        # instance. Bounded — one entry regardless of run count. Name
-        # is stashed on the instance so `provider.get_provider` can
-        # `perf.unregister_queue` it when the provider record is deleted
-        # (otherwise the gauge emits `depth=0` lines forever for a
-        # defunct provider) AND re-register it via `_register_perf_gauge`
-        # when the provider is resurrected.
+        # Aggregate gauge: sum of all run-queue depths for this cached
+        # provider/runner instance. Cache activation owns registration so an
+        # unpublished instance has no process-global side effects.
         self._perf_gauge_name = (
-            f"provider.claude.{record.get('id', 'unknown')}.run_q"
+            f"provider.claude.{record.get('id', 'unknown')}."
+            f"{record.get('runner', 'native')}.run_q"
         )
-        self._register_perf_gauge()
 
     def _register_perf_gauge(self) -> None:
         perf.register_queue(
             self._perf_gauge_name,
             lambda: sum(rs.queue.qsize() for rs in self._runs.values()),
         )
+
+    def _activate_cache_resources(self) -> None:
+        self._register_perf_gauge()
+
+    def _deactivate_cache_resources(self) -> None:
+        perf.unregister_queue(self._perf_gauge_name)
 
     # ------------------------------------------------------------------
     # record — kept in sync on the delegate on every reassignment
@@ -566,6 +568,7 @@ class ClaudeProvider(Provider):
             installation_decisions=projection["installation_decisions"],
             package_identities=(sdk_authority,),
             prewarm_results=prewarm.status,
+            machine_id=native_sid_compatibility.node_id,
         )
         return prepare_family_execution(
             authority,

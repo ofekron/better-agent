@@ -221,6 +221,7 @@ class AgyProvider(SessionEventsProvider):
             extension_state=projection["extension_state"],
             installation_decisions=projection["installation_decisions"],
             prewarm_results=prewarm.status,
+            machine_id=native_sid_compatibility.node_id,
         )
         runner_input["agy_config_root"] = str(config_root)
         runner_input["agy_settings"] = agy_settings

@@ -243,6 +243,79 @@ def t_dynamic_audit_context_follows_runtime_skills() -> None:
     check(selected[2]["name"] == "Manual", "manual provider context follows dynamic audit")
 
 
+def test_machine_template_is_specialized_after_neutral_cache_lookup() -> None:
+    skill_md = write_skill(
+        TMP_HOME / "extension-skills",
+        "operate-machine",
+        "Operate only on {{better_agent.machine_id}}.",
+    )
+    original_extension_skills = runtime_skills._extension_runtime_skills
+    runtime_skills._DISCOVERY_CACHE.clear()
+    runtime_skills._extension_runtime_skills = lambda: [{
+        "name": "operate-machine",
+        "dir": str(skill_md.parent),
+        "path": str(skill_md),
+        "template_variables": ["machine_id"],
+    }]
+    try:
+        primary = runtime_skills.runtime_skill_contexts(
+            str(TMP_HOME), machine_id="primary"
+        )[0]["content"]
+        worker = runtime_skills.runtime_skill_contexts(
+            str(TMP_HOME), machine_id="worker-1"
+        )[0]["content"]
+        primary_again = runtime_skills.runtime_skill_contexts(
+            str(TMP_HOME), machine_id="primary"
+        )[0]["content"]
+    finally:
+        runtime_skills._extension_runtime_skills = original_extension_skills
+        runtime_skills._DISCOVERY_CACHE.clear()
+
+    check("primary" in primary and "worker-1" not in primary, "primary context is isolated")
+    check("worker-1" in worker and "primary" not in worker, "worker context is isolated")
+    check(primary_again == primary, "neutral cache supports alternating machine identities")
+
+    runtime_skills._DISCOVERY_CACHE.clear()
+    runtime_skills._extension_runtime_skills = lambda: [{
+        "name": "operate-machine",
+        "dir": str(skill_md.parent),
+        "path": str(skill_md),
+        "template_variables": ["machine_id"],
+    }]
+    try:
+        try:
+            runtime_skills.runtime_skill_contexts(str(TMP_HOME), machine_id="bad/id")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid machine id was accepted")
+    finally:
+        runtime_skills._extension_runtime_skills = original_extension_skills
+        runtime_skills._DISCOVERY_CACHE.clear()
+
+
+def test_unscoped_machine_token_remains_literal() -> None:
+    skill_md = write_skill(
+        TMP_HOME / "extension-skills",
+        "literal-machine-token",
+        "Literal {{better_agent.machine_id}} token.",
+    )
+    original_extension_skills = runtime_skills._extension_runtime_skills
+    runtime_skills._DISCOVERY_CACHE.clear()
+    runtime_skills._extension_runtime_skills = lambda: [{
+        "name": "literal-machine-token",
+        "dir": str(skill_md.parent),
+        "path": str(skill_md),
+        "template_variables": [],
+    }]
+    try:
+        content = runtime_skills.runtime_skill_contexts(str(TMP_HOME))[0]["content"]
+    finally:
+        runtime_skills._extension_runtime_skills = original_extension_skills
+        runtime_skills._DISCOVERY_CACHE.clear()
+    check("{{better_agent.machine_id}}" in content, "unscoped token is untouched")
+
+
 def main() -> None:
     try:
         t_global_runtime_skill_context_includes_get_requirements()
@@ -257,6 +330,8 @@ def main() -> None:
         t_materialize_runtime_skills_copies_skill_dirs()
         t_runtime_context_survives_provider_filtering()
         t_dynamic_audit_context_follows_runtime_skills()
+        test_machine_template_is_specialized_after_neutral_cache_lookup()
+        test_unscoped_machine_token_remains_literal()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
 

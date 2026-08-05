@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable, Literal
+
+from node_id import NODE_ID_RE
 
 
 NativeEngine = Literal[
@@ -21,7 +22,6 @@ _ENGINES = {
     "agy-native",
     "better-agent-runner",
 }
-_NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MAX_CODEX_EVIDENCE_BYTES = 1024 * 1024
 _ADMITTED_NODE_OVERRIDE: ContextVar[str | None] = ContextVar(
     "native_sid_admitted_node_override",
@@ -77,7 +77,7 @@ class NativeSidCompatibility:
         namespace = value["claude_project_namespace"]
         if engine not in _ENGINES:
             raise ValueError("native SID engine is invalid")
-        if not _NODE_ID_RE.fullmatch(node_id):
+        if not NODE_ID_RE.fullmatch(node_id):
             raise ValueError("native SID node is invalid")
         if (
             "\x00" in root
@@ -125,7 +125,7 @@ def derive_admitted_native_sid_compatibility(
 ) -> NativeSidCompatibility:
     if type(engine) is not str or engine not in _ENGINES:
         raise ValueError("native SID engine is invalid")
-    if type(node_id) is not str or not _NODE_ID_RE.fullmatch(node_id):
+    if type(node_id) is not str or not NODE_ID_RE.fullmatch(node_id):
         raise ValueError("native SID node is invalid")
     if engine == "claude-native":
         if (
@@ -165,15 +165,15 @@ def admitted_native_routing_node_id(
     )
     if type(session) is not dict:
         raise ValueError("native SID admitted routing is unavailable")
-    node_id = str(session.get("node_id") or "primary")
-    if not _NODE_ID_RE.fullmatch(node_id):
+    node_id = session.get("node_id")
+    if type(node_id) is not str or not NODE_ID_RE.fullmatch(node_id):
         raise ValueError("native SID admitted routing is invalid")
     return node_id
 
 
 @contextmanager
 def admitted_native_node(node_id: str):
-    if type(node_id) is not str or not _NODE_ID_RE.fullmatch(node_id):
+    if type(node_id) is not str or not NODE_ID_RE.fullmatch(node_id):
         raise ValueError("native SID admitted node is invalid")
     token = _ADMITTED_NODE_OVERRIDE.set(node_id)
     try:

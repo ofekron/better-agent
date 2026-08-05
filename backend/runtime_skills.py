@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Optional
 
 import installation_profile
+from runtime_skill_templates import (
+    MACHINE_ID_TEMPLATE_VARIABLE,
+    normalize_template_variables,
+    specialize_skill_file,
+    specialize_skill_text,
+)
 
 MAX_SKILLS = 50
 CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime-skills"
@@ -33,12 +39,14 @@ def runtime_skill_contexts(
     bare_config: bool = False,
     disabled: Optional[list[str]] = None,
     display_root: str = "",
+    machine_id: str | None = None,
 ) -> list[dict]:
     contexts, _identities = runtime_skill_projection(
         cwd,
         bare_config=bare_config,
         disabled=disabled,
         display_root=display_root,
+        machine_id=machine_id,
     )
     return contexts
 
@@ -49,6 +57,7 @@ def runtime_skill_projection(
     bare_config: bool = False,
     disabled: Optional[list[str]] = None,
     display_root: str = "",
+    machine_id: str | None = None,
 ) -> tuple[list[dict], list[dict[str, str]]]:
     if bare_config or not installation_profile.integrations_enabled():
         return [], []
@@ -67,7 +76,12 @@ def runtime_skill_projection(
         "",
     ]
     for skill in skills:
-        description = f": {skill['description']}" if skill["description"] else ""
+        projected_description = specialize_skill_text(
+            skill["description"],
+            template_variables=skill.get("template_variables"),
+            machine_id=machine_id,
+        )
+        description = f": {projected_description}" if projected_description else ""
         claude_id = f"{CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME}:{skill['name']}"
         display_path = _display_skill_path(skill, display_root)
         lines.append(
@@ -97,6 +111,7 @@ def materialize_runtime_skills(
     *,
     bare_config: bool = False,
     disabled: Optional[list[str]] = None,
+    machine_id: str | None = None,
 ) -> int:
     if bare_config or not installation_profile.integrations_enabled():
         return 0
@@ -108,7 +123,23 @@ def materialize_runtime_skills(
         target = root / skill["name"]
         if target.exists() or target.is_symlink():
             continue
-        shutil.copytree(source, target, symlinks=True)
+        template_variables = normalize_template_variables(
+            skill.get("template_variables")
+        )
+        if MACHINE_ID_TEMPLATE_VARIABLE in template_variables:
+            from local_machine_identity import require_matching_local_machine_id
+
+            require_matching_local_machine_id(machine_id)
+        try:
+            shutil.copytree(source, target, symlinks=True)
+            specialize_skill_file(
+                target / "SKILL.md",
+                template_variables=template_variables,
+                machine_id=machine_id,
+            )
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
         count += 1
     return count
 
@@ -138,6 +169,7 @@ def _discover_skills(cwd: str) -> list[dict]:
             "description": _read_description(skill_md),
             "dir": skill["dir"],
             "path": str(skill_md),
+            "template_variables": list(skill.get("template_variables") or []),
         })
         seen.add(name)
     for root in roots:
@@ -162,6 +194,7 @@ def _discover_skills(cwd: str) -> list[dict]:
                 "description": description,
                 "dir": str(skill_dir),
                 "path": str(skill_md),
+                "template_variables": [],
             })
             seen.add(name)
     return _cache_discovered_skills(cache_key, skills)

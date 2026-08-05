@@ -429,6 +429,12 @@ def prepare_session_events_execution(
         runner_input,
         provider.KIND,
     )
+    from native_sid_compatibility import admitted_native_routing_node_id
+
+    machine_id = admitted_native_routing_node_id(
+        app_session_id=str(start_arguments["app_session_id"]),
+        worker_session_id=start_arguments.get("worker_agent_session_id"),
+    )
     capabilities = snapshot_family_runtime_capabilities(
         family=provider.KIND,
         skill_sources=selected_runtime_skill_sources(
@@ -443,6 +449,7 @@ def prepare_session_events_execution(
         resolved_plan=projection["resolved_plan"],
         extension_state=projection["extension_state"],
         installation_decisions=projection["installation_decisions"],
+        machine_id=machine_id,
     )
     native_sid_compatibility = None
     if runner_input.get("runner") == "better_agent_runner":

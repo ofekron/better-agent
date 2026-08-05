@@ -18,6 +18,7 @@ from provider_runtime_plan_hydration import (
     capture_runtime_hydration,
 )
 from provider_manifest import artifact_family_kinds
+from runtime_skill_templates import RuntimeSkillSource, normalize_template_variables
 
 
 _FAMILIES = artifact_family_kinds()
@@ -117,7 +118,7 @@ def selected_runtime_skill_sources(
     cwd: str,
     bare_config: bool,
     disabled: list[str] | None,
-) -> dict[str, Path]:
+) -> dict[str, RuntimeSkillSource]:
     import installation_profile
 
     if bare_config or not installation_profile.integrations_enabled():
@@ -128,12 +129,17 @@ def selected_runtime_skill_sources(
         runtime_skills._discover_skills(cwd),
         disabled,
     )
-    sources: dict[str, Path] = {}
+    sources: dict[str, RuntimeSkillSource] = {}
     for skill in selected:
         name = str(skill.get("name") or "").strip()
         if not name or name in sources:
             raise ExecutionContractError("runtime skill selection is invalid")
-        sources[name] = _validated_source(skill.get("dir") or "", directory=True)
+        sources[name] = RuntimeSkillSource(
+            root=_validated_source(skill.get("dir") or "", directory=True),
+            template_variables=normalize_template_variables(
+                skill.get("template_variables")
+            ),
+        )
     return sources
 
 

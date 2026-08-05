@@ -29,6 +29,7 @@ from fd_limits import raise_fd_limit
 raise_fd_limit()
 
 from env_compat import get_env
+from local_machine_identity import initialize_primary_machine_id
 from event_bus import BusEvent, bus as event_bus
 import browser_trust
 from paths import ba_home
@@ -45,6 +46,7 @@ from requirements_query_runner import (
 )
 from secret_redaction import install_access_log_redaction
 
+initialize_primary_machine_id()
 install_access_log_redaction()
 
 

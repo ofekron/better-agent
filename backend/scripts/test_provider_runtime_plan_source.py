@@ -28,6 +28,7 @@ from provider_runtime_plan_source import (  # noqa: E402
 from provider_session_events_runner import effective_mcp_servers  # noqa: E402
 from codex_execution_common import ExecutionContractError  # noqa: E402
 from runner import _claude_mcp_variants  # noqa: E402
+from runtime_skill_templates import RuntimeSkillSource  # noqa: E402
 
 
 def _assert_contract_rejected(callable_) -> None:
@@ -169,7 +170,7 @@ def test_selected_sources_are_exact_and_respect_gates() -> None:
                 str(root),
                 bare_config=False,
                 disabled=["drop"],
-            ) == {"keep": skill.resolve()}
+            ) == {"keep": RuntimeSkillSource(root=skill.resolve())}
             assert selected_runtime_agent_sources(
                 "claude",
                 bare_config=False,

@@ -34,6 +34,11 @@ from provider_runtime_capability_model import (
     semantic_fingerprint,
 )
 from provider_manifest import artifact_family_kinds
+from runtime_skill_templates import (
+    MACHINE_ID_TEMPLATE_VARIABLE,
+    RuntimeSkillSource,
+    specialize_skill_text,
+)
 
 
 _FAMILIES = artifact_family_kinds()
@@ -132,11 +137,28 @@ def _entry(
     relative_path: str,
     source: Path,
     source_mode: int,
+    template_variables: tuple[str, ...] = (),
+    machine_id: str | None = None,
 ) -> dict[str, Any]:
     if source.is_symlink():
         raise ExecutionContractError("runtime capability source is a symlink")
     identity = FileIdentity.capture(source)
     contents = _read_identity(identity)
+    if kind == "skill" and relative_path == "SKILL.md":
+        try:
+            if MACHINE_ID_TEMPLATE_VARIABLE in template_variables:
+                from local_machine_identity import require_matching_local_machine_id
+
+                require_matching_local_machine_id(machine_id)
+            contents = specialize_skill_text(
+                contents.decode("utf-8"),
+                template_variables=template_variables,
+                machine_id=machine_id,
+            ).encode("utf-8")
+        except (RuntimeError, UnicodeDecodeError, ValueError) as exc:
+            raise ExecutionContractError(
+                "runtime skill specialization is invalid",
+            ) from exc
     return {
         "kind": kind,
         "owner": owner,
@@ -150,13 +172,21 @@ def _entry(
 
 
 def _skill_entries(
-    sources: Mapping[str, Path],
+    sources: Mapping[str, Path | RuntimeSkillSource],
+    *,
+    machine_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if type(sources) is not dict or len(sources) > MAX_SKILLS:
         raise ExecutionContractError("invalid runtime skill selection")
     entries: list[dict[str, Any]] = []
     for name in sorted(sources):
-        root = Path(sources[name])
+        source = sources[name]
+        spec = (
+            source
+            if isinstance(source, RuntimeSkillSource)
+            else RuntimeSkillSource(root=Path(source))
+        )
+        root = Path(spec.root)
         if type(name) is not str or not _SAFE_OWNER_RE.fullmatch(name):
             raise ExecutionContractError("invalid runtime skill name")
         before = _tree_files(root)
@@ -167,6 +197,8 @@ def _skill_entries(
                 relative_path=relative,
                 source=root / Path(relative),
                 source_mode=mode,
+                template_variables=spec.template_variables,
+                machine_id=machine_id,
             ))
         if _tree_files(root) != before:
             raise ExecutionContractError(
@@ -227,13 +259,14 @@ def _package_payload(
 def snapshot_family_runtime_capabilities(
     *,
     family: str,
-    skill_sources: Mapping[str, Path],
+    skill_sources: Mapping[str, Path | RuntimeSkillSource],
     agent_sources: Mapping[str, Path],
     resolved_plan: Mapping[str, Any],
     extension_state: Mapping[str, Any],
     installation_decisions: Mapping[str, Any],
     package_identities: tuple[CriticalPackageIdentity, ...] = (),
     prewarm_results: Mapping[str, Any] | None = None,
+    machine_id: str | None = None,
 ) -> PreparedRuntimeCapabilities:
     if family not in _FAMILIES:
         raise ExecutionContractError("unsupported runtime capability family")
@@ -253,7 +286,10 @@ def snapshot_family_runtime_capabilities(
         raise ExecutionContractError("invalid runtime capability state")
     prewarm = normalize_prewarm_status(plan, prewarm_results or {})
     packages = _package_payload(package_identities)
-    files = _skill_entries(skill_sources) + _agent_entries(agent_sources)
+    files = _skill_entries(
+        skill_sources,
+        machine_id=machine_id,
+    ) + _agent_entries(agent_sources)
     if (
         len(files) > MAX_FILES
         or sum(entry["size"] for entry in files) > MAX_TOTAL_FILE_BYTES

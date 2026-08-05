@@ -30,6 +30,7 @@ from execution_template import (
     prepare_execution,
 )
 from provider_runner_launch import RunnerLaunch, retarget_runner_launch
+from native_sid_compatibility import NativeSidCompatibility
 
 
 _RUNTIME_POLICY_KEYS = {
@@ -586,6 +587,14 @@ def codex_runtime_policy(artifact: ExecutionArtifact) -> dict[str, Any]:
     for key in ("context_strategy", "working_mode", "worker_working_mode"):
         if policy[key] is not None and type(policy[key]) is not str:
             raise ExecutionAuthorityError("invalid Codex runtime policy")
+    try:
+        native_sid_compatibility = NativeSidCompatibility.from_dict(
+            policy["native_sid_compatibility"],
+        )
+    except ValueError as exc:
+        raise ExecutionAuthorityError("invalid Codex runtime policy") from exc
+    if native_sid_compatibility.engine != "codex-native":
+        raise ExecutionAuthorityError("invalid Codex runtime policy")
     return policy
 
 
@@ -723,6 +732,9 @@ def restore_codex_runner_inputs(
         "context_strategy": policy["context_strategy"],
         "disabled_runtime_skills": policy["disabled_runtime_skills"],
         "permission": policy["permission"],
+        "native_sid_compatibility": dict(
+            policy["native_sid_compatibility"],
+        ),
         "provider_id": artifact.provider_id,
         "provider_kind": artifact.provider_kind,
         "request_user_input_enabled": policy[

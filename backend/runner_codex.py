@@ -363,6 +363,7 @@ def _materialize_codex_run_home(
     runtime_agent_manifest=None,
     bare_config: bool = False,
     disabled_runtime_skills: list | None = None,
+    machine_id: str | None = None,
 ) -> dict[str, str]:
     real_home = Path.home()
     overlay_home = run_dir / "codex-home"
@@ -406,6 +407,7 @@ def _materialize_codex_run_home(
     materialize_runtime_skills(
         skills_root, cwd, bare_config=bare_config,
         disabled=disabled_runtime_skills,
+        machine_id=machine_id,
     )
 
     skills = provider_run_config.get("skills") or {}
@@ -415,6 +417,18 @@ def _materialize_codex_run_home(
     env = {"HOME": str(overlay_home)}
     env["CODEX_HOME"] = str(overlay_codex_home)
     return env
+
+
+def _initialize_codex_runner_machine_identity(inputs: dict) -> str:
+    from local_machine_identity import initialize_local_machine_id
+    from native_sid_compatibility import NativeSidCompatibility
+
+    compatibility = NativeSidCompatibility.from_dict(
+        inputs.get("native_sid_compatibility"),
+    )
+    if compatibility.engine != "codex-native":
+        raise ValueError("Codex runner machine identity is invalid")
+    return initialize_local_machine_id(compatibility.node_id)
 
 
 def _context_strategy_config_overrides(inputs: dict) -> list[str]:
@@ -3461,6 +3475,7 @@ async def _run(run_dir: Path, inputs: dict, execution_contract, launch) -> int:
         cwd=cwd,
         bare_config=bare_config,
         disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
+        machine_id=(inputs.get("native_sid_compatibility") or {}).get("node_id"),
     ))
     backend_url = inputs.get("backend_url") or get_env(
         "BETTER_CLAUDE_BACKEND_URL",
@@ -4080,6 +4095,7 @@ def main(run_dir: Path) -> NoReturn:
             run_dir,
             inputs,
         )
+        _initialize_codex_runner_machine_identity(inputs)
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
         inputs = harness_run_projection.apply_to_inputs(inputs)

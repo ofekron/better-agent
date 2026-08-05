@@ -40,6 +40,7 @@ from backend_instance_lock import (
     acquire_backend_instance_lock,
     release_backend_instance_lock,
 )
+from local_machine_identity import initialize_local_machine_id
 from paths import ba_home
 import config_store
 import runs_dir
@@ -116,6 +117,7 @@ async def _on_startup() -> None:
             f"should run main.py, not main_node.py (set BETTER_CLAUDE_NODE_ID "
             f"to a distinct value)"
         )
+    initialize_local_machine_id(me)
     logger.info("main_node: starting as node=%s primary=%s",
                 me, topology.primary.address)
 

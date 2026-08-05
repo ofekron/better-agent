@@ -11,6 +11,8 @@ import tempfile
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,9 @@ import _test_home  # noqa: E402
 import codex_execution_runtime as execution_runtime  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
 import provider_codex as provider_codex_module  # noqa: E402
+import runtime_skills  # noqa: E402
 
 _TEST_HOME = _test_home.isolate("bc-test-codex-execution-artifact-")
 
@@ -52,6 +56,7 @@ from model_catalog_authority import build_catalog_authority  # noqa: E402
 from model_catalog_cache import build_catalog_snapshot  # noqa: E402
 from model_catalog_refresh_state import CatalogProjection, changed_fact  # noqa: E402
 import model_catalog_read_projection  # noqa: E402
+from native_sid_compatibility import admitted_native_node  # noqa: E402
 
 
 def _write_executable(path: Path, data: bytes) -> None:
@@ -111,11 +116,21 @@ def _arguments(root: Path, *, model: str) -> dict:
     }
 
 
-def _prepare(provider: CodexProvider, root: Path, *, model: str):
+def _prepare(
+    provider: CodexProvider,
+    root: Path,
+    *,
+    model: str,
+    node_id: str = "primary",
+):
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = os.pathsep.join((str(root / "bin"), old_path))
     try:
-        prepared = provider.prepare_run(**_arguments(root, model=model))
+        with (
+            admitted_native_node(node_id),
+            patch("local_machine_identity._local_machine_id", node_id),
+        ):
+            prepared = provider.prepare_run(**_arguments(root, model=model))
     finally:
         os.environ["PATH"] = old_path
     contract = codex_contract_from_artifact(prepared.artifact)
@@ -354,6 +369,7 @@ def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
             CodexProvider(_record(kind="codex", config_dir=config_dir)),
             root,
             model="gpt-5.5",
+            node_id="worker-eu-2",
         )
         (run_dir / "execution.json").write_text(
             json.dumps(prepared.artifact.to_dict()),
@@ -383,6 +399,7 @@ def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
         restored, contract = restore_codex_runner_inputs(run_dir, valid)
         assert restored["model"] == "gpt-5.5"
         assert restored["permission"] == prepared.artifact.runtime_policy["permission"]
+        assert restored["native_sid_compatibility"]["node_id"] == "worker-eu-2"
         assert restored["provider_kind"] == "codex"
         assert contract == codex_contract_from_artifact(prepared.artifact)
         valid["_mcp_prewarm_ready"] = {
@@ -401,6 +418,99 @@ def test_runner_restores_artifact_authority_not_poisoned_input() -> None:
             pass
         else:
             raise AssertionError("poisoned MCP prewarm endpoint was accepted")
+
+
+def test_codex_runner_initializes_machine_before_skill_materialization() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        source = root / "source"
+        source.mkdir()
+        (source / "SKILL.md").write_text(
+            "---\nname: machine\ndescription: Use {{better_agent.machine_id}}.\n---\n",
+            encoding="utf-8",
+        )
+        compatibility = {
+            "schema": 1,
+            "engine": "codex-native",
+            "node_id": "worker-eu-2",
+            "thread_store_root": str((root / "sessions").resolve()),
+            "claude_project_namespace": None,
+        }
+        contract = SimpleNamespace(
+            environment_selectors={"CODEX_HOME": str(root / "config")},
+        )
+
+        def materialize(run_name: str) -> Path:
+            run_dir = root / run_name
+            with (
+                patch.object(runner_codex, "symlink_home_overlay"),
+                patch.object(runner_codex, "_overlay_codex_home_children"),
+                patch.object(
+                    execution_runtime,
+                    "attested_config_files",
+                    return_value=(),
+                ),
+                patch.object(
+                    execution_runtime,
+                    "read_codex_runtime_agent_payload",
+                    return_value=(),
+                ),
+                patch.object(
+                    installation_profile,
+                    "integrations_enabled",
+                    return_value=True,
+                ),
+                patch.object(
+                    runtime_skills,
+                    "_extension_runtime_skills",
+                    return_value=[{
+                        "name": "machine",
+                        "dir": str(source),
+                        "path": str(source / "SKILL.md"),
+                        "template_variables": ["machine_id"],
+                    }],
+                ),
+            ):
+                runtime_skills._DISCOVERY_CACHE.clear()
+                try:
+                    runner_codex._materialize_codex_run_home(
+                        run_dir,
+                        {},
+                        execution_contract=contract,
+                        cwd=str(root),
+                        machine_id=compatibility["node_id"],
+                    )
+                finally:
+                    runtime_skills._DISCOVERY_CACHE.clear()
+            return run_dir / "codex-home" / ".agents" / "skills" / "machine" / "SKILL.md"
+
+        with patch("local_machine_identity._local_machine_id", None):
+            try:
+                materialize("uninitialized")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("uninitialized Codex runner identity was accepted")
+
+            assert (
+                runner_codex._initialize_codex_runner_machine_identity({
+                    "native_sid_compatibility": compatibility,
+                })
+                == "worker-eu-2"
+            )
+            installed = materialize("matched").read_text(encoding="utf-8")
+            assert "worker-eu-2" in installed
+            assert "{{better_agent.machine_id}}" not in installed
+
+        with patch("local_machine_identity._local_machine_id", "worker-us-1"):
+            try:
+                runner_codex._initialize_codex_runner_machine_identity({
+                    "native_sid_compatibility": compatibility,
+                })
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("mismatched Codex runner identity was accepted")
 
 
 def test_fugu_isolation_and_invalid_model_fail_closed() -> None:

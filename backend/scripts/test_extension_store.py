@@ -4051,6 +4051,127 @@ def test_manifest_accepts_skill_entrypoints_and_requires_skill_md() -> None:
         raise AssertionError("missing skill SKILL.md was accepted")
 
 
+def test_manifest_validates_skill_template_variables() -> None:
+    manifest = _validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek.machine-skill",
+        "name": "Machine skill",
+        "version": "1.0.0",
+        "description": "Machine-aware skill.",
+        "surfaces": ["skills"],
+        "entrypoints": {
+            "skills": [{
+                "name": "operate-machine",
+                "path": "skills/operate-machine",
+                "template_variables": ["machine_id"],
+            }],
+        },
+        "permissions": {},
+        "marketplace": {},
+    })
+    skill = manifest["entrypoints"]["skills"][0]
+    if skill.get("template_variables") != ["machine_id"]:
+        raise AssertionError("machine template declaration was not preserved")
+
+    raw = dict(manifest)
+    raw["entrypoints"] = {
+        **manifest["entrypoints"],
+        "skills": [{
+            **skill,
+            "template_variables": ["unknown"],
+        }],
+    }
+    try:
+        extension_store.validate_manifest(raw)
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("unknown skill template variable was accepted")
+
+
+def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> None:
+    import installation_profile
+    import local_machine_identity
+
+    root = Path(tempfile.mkdtemp(prefix="bc-test-machine-skill-ext-"))
+    package = root / "machine-skill"
+    extension_id = "ofek.machine-skill-refresh"
+    original_integrations_enabled = installation_profile.integrations_enabled
+    original_machine_id = local_machine_identity._local_machine_id
+    (package / "skills" / "operate-machine").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": "Machine skill",
+        "version": "0.1.0",
+        "description": "Fixture exercising machine specialization.",
+        "surfaces": ["skills"],
+        "entrypoints": {
+            "skills": [{
+                "name": "operate-machine",
+                "path": "skills/operate-machine",
+                "template_variables": ["machine_id"],
+            }],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "skills" / "operate-machine" / "SKILL.md").write_text(
+        "---\nname: operate-machine\ndescription: Operate {{better_agent.machine_id}}.\n---\n",
+        encoding="utf-8",
+    )
+
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
+    local_machine_identity._local_machine_id = None
+    try:
+        extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "machine-skill",
+                "ref": "",
+                "commit_sha": "machine-skill-test",
+            },
+            persist=True,
+        )
+        extension_store.set_native_harness_exposed(
+            extension_id, "skill", "operate-machine", True
+        )
+        try:
+            extension_store.set_enabled(extension_id, True)
+        except RuntimeError as exc:
+            if "not initialized" not in str(exc):
+                raise
+        else:
+            raise AssertionError("templated native skill installed without machine identity")
+
+        target = Path.home() / ".agents" / "skills" / "operate-machine" / "SKILL.md"
+        local_machine_identity._local_machine_id = "primary"
+        extension_store.reconcile_runtime_skills()
+        if "primary" not in target.read_text(encoding="utf-8"):
+            raise AssertionError("primary native skill was not specialized")
+
+        local_machine_identity._local_machine_id = "worker-1"
+        extension_store.reconcile_runtime_skills()
+        refreshed = target.read_text(encoding="utf-8")
+        if "worker-1" not in refreshed or "primary" in refreshed:
+            raise AssertionError("native skill kept a stale machine identity")
+    finally:
+        local_machine_identity._local_machine_id = original_machine_id
+        try:
+            extension_store.uninstall(extension_id)
+        except extension_store.ExtensionError:
+            pass
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_extension_enable_disable_installs_runtime_skills() -> None:
     import installation_profile
 

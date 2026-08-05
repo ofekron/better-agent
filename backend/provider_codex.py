@@ -473,18 +473,20 @@ class CodexProvider(Provider):
             "working_mode": session_record.get("working_mode"),
         }
         from native_sid_compatibility import (
+            admitted_native_routing_node_id,
             derive_admitted_native_sid_compatibility,
         )
+        from local_machine_identity import require_matching_local_machine_id
 
+        routing_node_id = admitted_native_routing_node_id(
+            app_session_id=app_session_id,
+            worker_session_id=worker_session_id,
+        )
+        require_matching_local_machine_id(routing_node_id)
         runtime_policy["native_sid_compatibility"] = (
             derive_admitted_native_sid_compatibility(
                 engine="codex-native",
-                node_id=str(
-                    (worker_record if worker_session_id else session_record).get(
-                        "node_id"
-                    )
-                    or "primary"
-                ),
+                node_id=routing_node_id,
                 thread_store_root=config_root / "sessions",
             ).to_dict()
         )

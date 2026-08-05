@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -40,6 +41,8 @@ from provider_runtime_payload_codec import (  # noqa: E402
 import provider_runtime_payload_store  # noqa: E402
 import provider_runtime_resolver  # noqa: E402
 import provider  # noqa: E402
+import local_machine_identity  # noqa: E402
+from runtime_skill_templates import RuntimeSkillSource  # noqa: E402
 
 import dataclasses  # noqa: E402
 
@@ -154,6 +157,69 @@ def _snapshot(
         "extensions": extensions,
         "installation": installation,
     }
+
+
+def test_machine_skill_snapshot_specializes_only_declared_source() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        original_machine_id = local_machine_identity._local_machine_id
+        local_machine_identity._local_machine_id = "worker-1"
+        root = Path(raw)
+        machine_skill = root / "machine-skill"
+        literal_skill = root / "literal-skill"
+        template = b"---\nname: skill\ndescription: {{better_agent.machine_id}}\n---\n"
+        _write(machine_skill / "SKILL.md", template)
+        _write(literal_skill / "SKILL.md", template)
+
+        try:
+            prepared = snapshot_family_runtime_capabilities(
+                family="agy",
+                skill_sources={
+                    "machine": RuntimeSkillSource(
+                        root=machine_skill,
+                        template_variables=("machine_id",),
+                    ),
+                    "literal": RuntimeSkillSource(root=literal_skill),
+                },
+                agent_sources={},
+                resolved_plan=_plan(),
+                extension_state={},
+                installation_decisions={"integrations_enabled": True},
+                machine_id="worker-1",
+            )
+            files = json.loads(prepared.payload)["files"]
+            contents = {
+                item["owner"]: base64.b64decode(item["contents"])
+                for item in files
+                if item["path"] == "SKILL.md"
+            }
+            assert b"worker-1" in contents["machine"]
+            assert b"{{better_agent.machine_id}}" not in contents["machine"]
+            assert b"{{better_agent.machine_id}}" in contents["literal"]
+
+            for machine_id in (None, "primary"):
+                try:
+                    snapshot_family_runtime_capabilities(
+                        family="agy",
+                        skill_sources={
+                            "machine": RuntimeSkillSource(
+                                root=machine_skill,
+                                template_variables=("machine_id",),
+                            ),
+                        },
+                        agent_sources={},
+                        resolved_plan=_plan(),
+                        extension_state={},
+                        installation_decisions={"integrations_enabled": True},
+                        machine_id=machine_id,
+                    )
+                except ExecutionContractError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"machine skill snapshot accepted mismatched identity {machine_id!r}"
+                    )
+        finally:
+            local_machine_identity._local_machine_id = original_machine_id
 
 
 def test_snapshot_is_immutable_across_every_authority_drift() -> None:

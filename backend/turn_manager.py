@@ -2903,6 +2903,7 @@ class TurnManager:
             bare_config=harness_bare,
             disabled=(_session_rec or {}).get("disabled_runtime_skills"),
             display_root=_runtime_skill_display_root(provider_kind),
+            machine_id=(_session_rec or {}).get("node_id"),
         )
         if isinstance(resolved_harness_run_config, dict):
             selected_contexts = resolved_harness_run_config.get("raw_capability_contexts") or []
@@ -3083,6 +3084,7 @@ class TurnManager:
                 bare_config=harness_bare_refresh,
                 disabled=_session_rec.get("disabled_runtime_skills"),
                 display_root=_runtime_skill_display_root(provider_kind),
+                machine_id=_session_rec.get("node_id"),
             )
             selected_contexts = (
                 resolved_harness_run_config.get("raw_capability_contexts") or []

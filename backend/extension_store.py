@@ -48,6 +48,7 @@ import installation_profile
 from bundled_extensions import PUBLIC_EXTENSION_PATHS
 import harness_run_projection
 import dependency_plan
+from runtime_skill_templates import normalize_template_variables
 
 logger = logging.getLogger(__name__)
 
@@ -1529,6 +1530,18 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
                 raise ExtensionError(
                     "entrypoints.skills.requires_mcp must be a boolean or a list of MCP server names"
                 )
+        if "template_variables" in item:
+            template_variables = item["template_variables"]
+            if not isinstance(template_variables, list):
+                raise ExtensionError(
+                    "entrypoints.skills.template_variables must be a list of strings"
+                )
+            try:
+                cleaned["template_variables"] = list(
+                    normalize_template_variables(template_variables)
+                )
+            except ValueError as exc:
+                raise ExtensionError(str(exc)) from exc
         items.append(cleaned)
     return items
 
@@ -6017,14 +6030,31 @@ def reconcile_runtime_skills() -> int:
             if not source.is_dir() or not (source / "SKILL.md").is_file():
                 continue
             target = root / item["name"]
-            if _runtime_skill_owner(target) == extension_id and (target / "SKILL.md").is_file():
+            template_variables = item.get("template_variables") or []
+            if (
+                _runtime_skill_owner(target) == extension_id
+                and (target / "SKILL.md").is_file()
+                and (
+                    not template_variables
+                    or _runtime_skill_specialization_is_current(
+                        source,
+                        target,
+                        template_variables=template_variables,
+                    )
+                )
+            ):
                 continue
-            _replace_runtime_skill_dir(source, target, extension_id)
+            _replace_runtime_skill_dir(
+                source,
+                target,
+                extension_id,
+                template_variables=template_variables,
+            )
             installed += 1
     return removed + installed
 
 
-def runtime_skill_entries() -> list[dict[str, str]]:
+def runtime_skill_entries() -> list[dict[str, Any]]:
     skills: list[dict[str, str]] = []
     data = _load()
     settings = _load_ext_settings()
@@ -6048,6 +6078,7 @@ def runtime_skill_entries() -> list[dict[str, str]]:
                 "name": item["name"],
                 "dir": str(source),
                 "path": str(skill_md),
+                "template_variables": list(item.get("template_variables") or []),
             })
     return skills
 
@@ -6140,7 +6171,44 @@ def _assert_runtime_skill_target_available(target: Path, extension_id: str) -> N
     raise ExtensionError(f"Native skill name {target.name!r} already exists outside this extension")
 
 
-def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) -> None:
+def _specialized_runtime_skill_text(
+    source: Path,
+    *,
+    template_variables: list[str],
+) -> str:
+    from local_machine_identity import require_local_machine_id
+    from runtime_skill_templates import specialize_skill_text
+
+    return specialize_skill_text(
+        (source / "SKILL.md").read_text(encoding="utf-8"),
+        template_variables=template_variables,
+        machine_id=require_local_machine_id(),
+    )
+
+
+def _runtime_skill_specialization_is_current(
+    source: Path,
+    target: Path,
+    *,
+    template_variables: list[str],
+) -> bool:
+    try:
+        installed = (target / "SKILL.md").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return installed == _specialized_runtime_skill_text(
+        source,
+        template_variables=template_variables,
+    )
+
+
+def _replace_runtime_skill_dir(
+    source: Path,
+    target: Path,
+    extension_id: str,
+    *,
+    template_variables: list[str] | None = None,
+) -> None:
     """Swap ``target`` to a fresh copy of ``source`` without a partial-content window.
 
     Sessions snapshot this directory concurrently (runtime-skill plugin build,
@@ -6152,8 +6220,23 @@ def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) ->
     retired = target.with_name(f".{target.name}.retired-{os.getpid()}")
     for leftover in (staging, retired):
         _remove_runtime_skill_path(leftover)
-    shutil.copytree(source, staging, symlinks=True)
-    (staging / _RUNTIME_SKILL_OWNER_FILE).write_text(extension_id + "\n", encoding="utf-8")
+    try:
+        shutil.copytree(source, staging, symlinks=True)
+        if template_variables:
+            (staging / "SKILL.md").write_text(
+                _specialized_runtime_skill_text(
+                    source,
+                    template_variables=template_variables,
+                ),
+                encoding="utf-8",
+            )
+        (staging / _RUNTIME_SKILL_OWNER_FILE).write_text(
+            extension_id + "\n",
+            encoding="utf-8",
+        )
+    except BaseException:
+        _remove_runtime_skill_path(staging)
+        raise
     if target.exists() or target.is_symlink():
         os.rename(target, retired)
     os.rename(staging, target)

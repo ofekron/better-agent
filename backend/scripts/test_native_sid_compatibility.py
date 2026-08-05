@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import pytest
 
 from native_sid_compatibility import (
     NativeSidCompatibility,
+    admitted_native_routing_node_id,
     admitted_native_node,
     derive_better_agent_runner_native_sid_compatibility,
     derive_admitted_native_sid_compatibility,
@@ -42,6 +45,21 @@ def test_admitted_compatibility_is_canonical_immutable_and_secret_free(
     )
     with pytest.raises(FrozenInstanceError):
         compatibility.node_id = "other"  # type: ignore[misc]
+
+
+def test_admitted_routing_requires_persisted_node_id(monkeypatch) -> None:
+    manager = types.SimpleNamespace(get_fields=lambda *_args, **_kwargs: {})
+    monkeypatch.setitem(
+        sys.modules,
+        "session_manager",
+        types.SimpleNamespace(manager=manager),
+    )
+
+    with pytest.raises(ValueError, match="routing is invalid"):
+        admitted_native_routing_node_id(
+            app_session_id="session-without-node",
+            worker_session_id=None,
+        )
 
 
 def test_better_agent_runner_second_turn_reuses_exact_native_sid() -> None:

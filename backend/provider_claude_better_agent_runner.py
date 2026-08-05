@@ -308,6 +308,10 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
     )
     runner_input["_mcp_prewarm_ready"] = prewarm.ready_map
     projection = structural_provider_runtime_plan(runner_input, provider.KIND)
+    native_sid_compatibility = derive_better_agent_runner_native_sid_compatibility(
+        app_session_id=start_arguments["app_session_id"],
+        worker_session_id=start_arguments.get("worker_agent_session_id"),
+    )
     capabilities = snapshot_family_runtime_capabilities(
         family=provider.KIND,
         skill_sources=selected_runtime_skill_sources(
@@ -323,6 +327,7 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         extension_state=projection["extension_state"],
         installation_decisions=projection["installation_decisions"],
         prewarm_results=prewarm.status,
+        machine_id=native_sid_compatibility.node_id,
     )
     return prepare_family_execution(
         authority,
@@ -330,10 +335,7 @@ def prepare_better_agent_runner_run(provider: Any, start_arguments: dict[str, An
         runner_input=runner_input,
         launch=launch,
         capabilities=capabilities,
-        native_sid_compatibility=derive_better_agent_runner_native_sid_compatibility(
-            app_session_id=start_arguments["app_session_id"],
-            worker_session_id=start_arguments.get("worker_agent_session_id"),
-        ),
+        native_sid_compatibility=native_sid_compatibility,
     )
 
 
