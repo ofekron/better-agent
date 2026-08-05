@@ -186,7 +186,7 @@ function findScrollParent(el: HTMLElement): HTMLElement | null {
 
 /** Returns true when the text has no rendering payload (only whitespace,
  *  zero-width chars, BOM, etc.). MessageBox uses this to bail. */
-function isEffectivelyEmpty(text: string): boolean {
+export function isEffectivelyEmpty(text: string): boolean {
   // Strip ASCII whitespace, line breaks, zero-width chars, BOM, and the
   // word-joiner / soft-hyphen that JS .trim() leaves alone.
   const stripped = text.replace(/[\s\u200B-\u200D\u2060\uFEFF\u00AD]/g, "");
@@ -209,7 +209,7 @@ function previewEventsForMessage(message: ChatMessage | undefined, mode?: Orches
   return liveEvents;
 }
 
-function decodeEscapedUnicodeForDisplay(text: string): string {
+export function decodeEscapedUnicodeForDisplay(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => {
     const codePoint = Number.parseInt(hex, 16);
     if (!Number.isFinite(codePoint) || codePoint < 0x20) return _match;
@@ -220,7 +220,7 @@ function decodeEscapedUnicodeForDisplay(text: string): string {
 const COLLAPSE_ELLIPSIS = "• • •";
 
 /** First non-empty line, trimmed to ~80 chars, for the collapsed preview. */
-function firstLineSummary(text: string, max = 80): string {
+export function firstLineSummary(text: string, max = 80): string {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
@@ -230,11 +230,11 @@ function firstLineSummary(text: string, max = 80): string {
 }
 
 /** Trimmed full text for an extended (multi-line, CSS-clamped) collapsed preview. */
-function extendedSummary(text: string): string {
+export function extendedSummary(text: string): string {
   return text.trim();
 }
 
-function containsMarkdownSyntax(text: string): boolean {
+export function containsMarkdownSyntax(text: string): boolean {
   return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|```)|\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]]+\]\([^\n)]+\)/.test(text);
 }
 
@@ -372,7 +372,7 @@ function ContinuationPill({ chainDepth }: { chainDepth: number }) {
 const STYLE_SENTINEL_RE = /⁣\[\[bcstyle:([^\]]*)\]\]([\s\S]*?)\[\[\/bcstyle\]\]⁣/;
 const STYLE_SENTINEL_STRIP_RE = /⁣\[\[bcstyle:[^\]]*\]\]|\[\[\/bcstyle\]\]⁣/g;
 
-function parseStyleAttrs(raw: string): {
+export function parseStyleAttrs(raw: string): {
   fontSize?: string;
   background?: string;
   fontWeight?: string;
@@ -403,7 +403,7 @@ function parseStyleAttrs(raw: string): {
   return out;
 }
 
-function hexAlphaToRgba(hex: string, alpha: number): string {
+export function hexAlphaToRgba(hex: string, alpha: number): string {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
   if (!m) return hex;
   const r = parseInt(m[1].slice(0, 2), 16);
@@ -537,7 +537,7 @@ interface Props {
 }
 
 /** Try to extract a human-readable error from raw JSON/text output */
-function parseErrorMessage(raw: string): string | null {
+export function parseErrorMessage(raw: string): string | null {
   // Try to parse JSON error objects
   const jsonMatch = raw.match(/\{[^{}]*"message"\s*:\s*"([^"]+)"[^{}]*\}/);
   if (jsonMatch) return jsonMatch[1];
@@ -553,7 +553,7 @@ function parseErrorMessage(raw: string): string | null {
 }
 
 /** Classify output events for better rendering */
-function classifyOutput(text: string): "session" | "error" | "success" | "text" {
+export function classifyOutput(text: string): "session" | "error" | "success" | "text" {
   if (/^📋\s*Session started:/.test(text)) return "session";
   if (/^❌/.test(text) || /^Failed to authenticate/i.test(text) || /^API Error/i.test(text)) return "error";
   if (/^✅/.test(text)) return "success";
@@ -565,7 +565,7 @@ function classifyOutput(text: string): "session" | "error" | "success" | "text" 
  * before sending events to the WS — we do NOT strip ANSI here, because
  * the lax `\x1b?\[...` pattern used to eat literal text like "[?25h"
  * when it appeared verbatim in a worker's output. */
-function cleanOutput(text: string): string {
+export function cleanOutput(text: string): string {
   const cleaned = text
     // Zero-width chars, BOM, soft hyphen, word joiner — survive .trim().
     .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "")
@@ -578,7 +578,7 @@ function cleanOutput(text: string): string {
 }
 
 /** Try to parse text as JSON, returning the parsed value or null */
-function tryParseJson(text: string): unknown | null {
+export function tryParseJson(text: string): unknown | null {
   const trimmed = text.trim();
   // Must start with { or [ to be JSON
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
@@ -590,7 +590,7 @@ function tryParseJson(text: string): unknown | null {
 }
 
 /** Detect if text is a tool/terminal result (not prose) */
-function isToolResult(text: string): boolean {
+export function isToolResult(text: string): boolean {
   // Starts with Result: or emoji + Result
   if (/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\u200D]*\s*Result:/u.test(text)) return true;
   // Has numbered lines (e.g. "1→ ..." or "  1\t...")
@@ -603,7 +603,7 @@ function isToolResult(text: string): boolean {
 }
 
 /** Format byte count as human-readable */
-function fmtSize(n: number): string {
+export function fmtSize(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
   return n + "";
 }
@@ -891,7 +891,7 @@ function OutputEvent({
   return <MessageBox text={clean} collapsible={collapsible} onFileClick={onFileClick} />;
 }
 
-function fmt(n: number): string {
+export function fmt(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
   return n.toString();
@@ -1095,7 +1095,7 @@ function hasLaterActionLead(groups: EventRenderGroups, startIdx: number): boolea
  */
 type ChildrenMap = Map<string, WSEvent[]>;
 
-function partitionEventsByParent(events: WSEvent[]): {
+export function partitionEventsByParent(events: WSEvent[]): {
   topLevel: WSEvent[];
   children: ChildrenMap;
 } {
@@ -1973,7 +1973,7 @@ function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, content
 
 /** Format a timestamp string. Shows HH:MM:SS for today, MM/DD HH:MM:SS
  *  for older dates. Returns null on falsy input. */
-function fmtTime(ts: string | undefined): string | null {
+export function fmtTime(ts: string | undefined): string | null {
   if (!ts) return null;
   try {
     const d = new Date(ts);
