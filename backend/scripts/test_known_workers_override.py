@@ -7,9 +7,16 @@ import sys
 from types import SimpleNamespace
 
 import _test_home
+import _test_installation
 _TMP_HOME = _test_home.isolate("bc-test-known-workers-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# run_delegation's first guard is assert_orchestration_mode_allowed("team"),
+# which needs an active bootstrap-ready installation profile. Activate one
+# explicitly so the module does not lean on a side effect of an
+# earlier-collected module's setup.
+_test_installation.activate(Path(_TMP_HOME), provider="claude")
 
 from orchestrator import Coordinator
 from orchs.manager import bootstrap
@@ -21,6 +28,41 @@ from sync_wait_graph import SyncWaitGraph
 
 def teardown_module():
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
+
+
+class _OwnerLoopTurnManagerStub:
+    """Minimal TurnManager double providing the owner-loop surface that
+    run_delegation / run_delegation_locked call. Centralized so the
+    delegation unit tests in this module do not each re-declare (and
+    silently drift on) the owner-loop contract. Per-test doubles subclass
+    it and add whatever test-specific recording they assert on."""
+
+    def __init__(self):
+        self.active_run_ids: dict[str, list[str]] = {}
+
+    async def run_state_add_on_owner_loop(self, *args, **kwargs):
+        return {}
+
+    async def run_state_remove_on_owner_loop(self, *args, **kwargs):
+        return []
+
+    async def run_state_set_pid_on_owner_loop(self, *args, **kwargs):
+        pass
+
+    async def active_run_id_add_on_owner_loop(self, app_session_id, run_id):
+        run_ids = self.active_run_ids.setdefault(app_session_id, [])
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+
+    async def active_run_id_remove_on_owner_loop(self, app_session_id, run_id):
+        run_ids = self.active_run_ids.get(app_session_id)
+        if run_ids and run_id in run_ids:
+            run_ids.remove(run_id)
+            if not run_ids:
+                self.active_run_ids.pop(app_session_id, None)
+
+    async def queue_run_state_projection_on_owner_loop(self, *args, **kwargs):
+        pass
 
 
 def test_known_workers_override_replaces_cwd_projection(monkeypatch):
@@ -98,7 +140,7 @@ def test_delegate_uses_known_worker_registry_cwd(monkeypatch):
     caller_cwd = "/tmp/caller-project"
     worker_cwd = str(Path("/tmp/worker-project").resolve())
 
-    class TurnManager:
+    class TurnManager(_OwnerLoopTurnManagerStub):
         cancel_events: dict[str, asyncio.Event] = {}
         current_turn_workers: dict[str, list[dict]] = {}
         current_assistant_msgs: dict[str, dict] = {}
@@ -106,20 +148,11 @@ def test_delegate_uses_known_worker_registry_cwd(monkeypatch):
         def get_turn_save_callback(self, app_session_id: str):
             return None
 
-        def run_state_add(self, *args, **kwargs):
-            pass
-
-        def run_state_remove(self, *args, **kwargs):
-            pass
-
         def in_flight_event_count(self, app_session_id: str):
             return 0
 
         def in_flight_event_count_after_current_event(self, app_session_id: str):
             return 0
-
-        async def emit_run_state(self, app_session_id: str):
-            pass
 
     class FakeCoordinator:
         pair_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -188,7 +221,7 @@ def test_delegate_uses_session_cwd_without_worker_record(monkeypatch):
     caller_cwd = "/tmp/caller-project"
     worker_cwd = str(Path("/tmp/worker-project").resolve())
 
-    class TurnManager:
+    class TurnManager(_OwnerLoopTurnManagerStub):
         cancel_events: dict[str, asyncio.Event] = {}
         current_turn_workers: dict[str, list[dict]] = {}
         current_assistant_msgs: dict[str, dict] = {}
@@ -196,20 +229,11 @@ def test_delegate_uses_session_cwd_without_worker_record(monkeypatch):
         def get_turn_save_callback(self, app_session_id: str):
             return None
 
-        def run_state_add(self, *args, **kwargs):
-            pass
-
-        def run_state_remove(self, *args, **kwargs):
-            pass
-
         def in_flight_event_count(self, app_session_id: str):
             return 0
 
         def in_flight_event_count_after_current_event(self, app_session_id: str):
             return 0
-
-        async def emit_run_state(self, app_session_id: str):
-            pass
 
     class FakeCoordinator:
         pair_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -278,7 +302,7 @@ def test_direct_delegations_to_same_worker_serialize_across_callers(monkeypatch)
     running = 0
     max_running = 0
 
-    class TurnManager:
+    class TurnManager(_OwnerLoopTurnManagerStub):
         cancel_events: dict[str, asyncio.Event] = {}
         current_turn_workers: dict[str, list[dict]] = {}
         current_assistant_msgs: dict[str, dict] = {}
@@ -286,20 +310,11 @@ def test_direct_delegations_to_same_worker_serialize_across_callers(monkeypatch)
         def get_turn_save_callback(self, app_session_id: str):
             return None
 
-        def run_state_add(self, *args, **kwargs):
-            pass
-
-        def run_state_remove(self, *args, **kwargs):
-            pass
-
         def in_flight_event_count(self, app_session_id: str):
             return 0
 
         def in_flight_event_count_after_current_event(self, app_session_id: str):
             return 0
-
-        async def emit_run_state(self, app_session_id: str):
-            pass
 
     class FakeCoordinator:
         def __init__(self):
@@ -394,8 +409,12 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
             self._runs = {}
             self.start_kwargs = None
 
-        def start_run(self, *, run_id, queue, **kwargs):
+        def prepare_run(self, **kwargs):
             self.start_kwargs = kwargs
+            return SimpleNamespace(start_arguments=lambda: kwargs)
+
+        def start_run(self, *, execution, loop, queue):
+            run_id = execution.start_arguments()["run_id"]
             self._runs[run_id] = SimpleNamespace(
                 popen=Popen(),
                 run_dir=Path(_TMP_HOME) / "runs" / run_id,
@@ -408,16 +427,16 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         def cancel_turn(self, run_id):
             raise AssertionError("cancel_turn should not be called")
 
-    class TurnManager:
+    class TurnManager(_OwnerLoopTurnManagerStub):
         def __init__(self):
-            self.active_run_ids = {}
+            super().__init__()
             self.pid_stamps = []
             self.emits = []
 
-        def run_state_set_pid(self, app_session_id, worker_run_id, pid):
+        async def run_state_set_pid_on_owner_loop(self, app_session_id, worker_run_id, pid):
             self.pid_stamps.append((app_session_id, worker_run_id, pid))
 
-        async def emit_run_state(self, app_session_id):
+        async def queue_run_state_projection_on_owner_loop(self, app_session_id, entries, value):
             self.emits.append(app_session_id)
 
         async def _publish_worker_terminal_lifecycle(self, *args, **kwargs):
@@ -445,6 +464,11 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         "agent_session_id": "worker-agent",
         "orchestration_mode": "native",
     })
+    # run_delegation_locked requires the caller to own a root identity and
+    # flushes root persist before spawning. This test drives a synthetic
+    # app_session_id, so satisfy both as no-op boundary stubs.
+    monkeypatch.setattr(_delegation.session_manager, "root_id_for", lambda sid: "root-manager")
+    monkeypatch.setattr(_delegation.session_manager, "flush_root_persist", lambda root_id: None)
 
     coordinator = Coordinator()
     events = []
@@ -499,7 +523,11 @@ def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(
         def __init__(self):
             self._runs = {}
 
-        def start_run(self, *, run_id, queue, **kwargs):
+        def prepare_run(self, **kwargs):
+            return SimpleNamespace(start_arguments=lambda: kwargs)
+
+        def start_run(self, *, execution, loop, queue):
+            run_id = execution.start_arguments()["run_id"]
             run_dir = Path(_TMP_HOME) / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
             jsonl_path = run_dir / "claude.jsonl"
@@ -529,17 +557,7 @@ def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(
         def cancel_turn(self, run_id):
             raise AssertionError("cancel_turn should not be called")
 
-    class TurnManager:
-        def __init__(self):
-            self.active_run_ids = {}
-            self.emits = []
-
-        def run_state_set_pid(self, *_args):
-            pass
-
-        async def emit_run_state(self, app_session_id):
-            self.emits.append(app_session_id)
-
+    class TurnManager(_OwnerLoopTurnManagerStub):
         async def _publish_worker_terminal_lifecycle(self, *_args, **_kwargs):
             pass
 
@@ -685,7 +703,11 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
         def __init__(self):
             self._runs = {}
 
-        def start_run(self, *, run_id, queue, **kwargs):
+        def prepare_run(self, **kwargs):
+            return SimpleNamespace(start_arguments=lambda: kwargs)
+
+        def start_run(self, *, execution, loop, queue):
+            run_id = execution.start_arguments()["run_id"]
             self._runs[run_id] = SimpleNamespace(
                 popen=Popen(),
                 run_dir=Path(_TMP_HOME) / "runs" / run_id,
@@ -702,17 +724,7 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
         def cancel_turn(self, run_id):
             raise AssertionError("cancel_turn should not be called")
 
-    class TurnManager:
-        def __init__(self):
-            self.active_run_ids = {}
-            self.emits = []
-
-        def run_state_set_pid(self, *_args):
-            pass
-
-        async def emit_run_state(self, app_session_id):
-            self.emits.append(app_session_id)
-
+    class TurnManager(_OwnerLoopTurnManagerStub):
         async def _publish_worker_terminal_lifecycle(self, *_args, **_kwargs):
             pass
 
@@ -728,6 +740,9 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
 
         async def broadcast_workers_changed(self, _cwd):
             pass
+
+        async def cancel_session(self, _app_session_id):
+            return 0
 
     monkeypatch.setattr(_delegation, "_compute_jsonl_read_path_off_loop", _fake_jsonl_path)
     monkeypatch.setattr(_delegation, "count_jsonl_lines", lambda _path: 1)

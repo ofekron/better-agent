@@ -1403,9 +1403,9 @@ async def run_delegation_locked(
                         wait_tasks, return_when=asyncio.FIRST_COMPLETED
                     )
                 finally:
-                    for t in (get_task, cancel_task):
-                        if not t.done():
-                            t.cancel()
+                    for wait_task in (get_task, cancel_task):
+                        if not wait_task.done():
+                            wait_task.cancel()
 
                 if cancel_task in done and get_task not in done:
                     cancelled = True
