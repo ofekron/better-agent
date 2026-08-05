@@ -155,7 +155,7 @@ def _project(label: str) -> Path:
     return d
 
 
-async def test_create_returns_before_the_warm_completes() -> str:
+async def step_create_returns_before_the_warm_completes() -> str:
     _RELEASE_WARM.clear()
     project = _project("nonblocking")
     result = await asyncio.wait_for(
@@ -187,7 +187,7 @@ async def test_create_returns_before_the_warm_completes() -> str:
     return sid
 
 
-async def test_binding_lands_and_gate_opens(sid: str) -> None:
+async def step_binding_lands_and_gate_opens(sid: str) -> None:
     _RELEASE_WARM.set()
     for _ in range(200):
         if not session_readiness.is_awaiting_fork_provisioning(sid):
@@ -216,7 +216,7 @@ async def test_binding_lands_and_gate_opens(sid: str) -> None:
     )
 
 
-async def test_gate_defers_then_releases() -> None:
+async def step_gate_defers_then_releases() -> None:
     """The core hand-off: a queued prompt does not dispatch while pending,
     and the SAME item is still queued (never dropped) when it does."""
     coordinator = Coordinator()
@@ -251,7 +251,7 @@ async def test_gate_defers_then_releases() -> None:
     )
 
 
-async def test_failed_provisioning_never_dispatches() -> None:
+async def step_failed_provisioning_never_dispatches() -> None:
     """Fail-closed: a failed binding must NOT fall through to a normal
     dispatch, which would run the turn unforked in the user's real cwd."""
     coordinator = Coordinator()
@@ -283,7 +283,7 @@ async def test_failed_provisioning_never_dispatches() -> None:
     )
 
 
-async def test_restart_rearms_pending_sessions() -> None:
+async def step_restart_rearms_pending_sessions() -> None:
     """A session persisted mid-warm has no live task after a restart; its
     prompts would wait on a resolution nobody would ever deliver."""
     _RELEASE_WARM.clear()
@@ -312,7 +312,7 @@ async def test_restart_rearms_pending_sessions() -> None:
     )
 
 
-async def test_failed_session_can_be_rearmed() -> None:
+async def step_failed_session_can_be_rearmed() -> None:
     """`failed` must not be terminal — the user sending another prompt is
     the natural retry."""
     global _WARM_SHOULD_FAIL
@@ -343,12 +343,19 @@ async def test_failed_session_can_be_rearmed() -> None:
 
 
 async def run_all() -> None:
-    sid = await test_create_returns_before_the_warm_completes()
-    await test_binding_lands_and_gate_opens(sid)
-    await test_gate_defers_then_releases()
-    await test_failed_provisioning_never_dispatches()
-    await test_restart_rearms_pending_sessions()
-    await test_failed_session_can_be_rearmed()
+    sid = await step_create_returns_before_the_warm_completes()
+    await step_binding_lands_and_gate_opens(sid)
+    await step_gate_defers_then_releases()
+    await step_failed_provisioning_never_dispatches()
+    await step_restart_rearms_pending_sessions()
+    await step_failed_session_can_be_rearmed()
+
+
+def test_background_provisioning_lifecycle() -> None:
+    """The provisioning steps are strictly ordered (the binding step consumes
+    the session id produced by the create step), so they cannot be independent
+    pytest cases. Run them as one sequenced scenario via run_all()."""
+    asyncio.run(run_all())
 
 
 def main_run() -> int:
