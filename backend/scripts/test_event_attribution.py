@@ -11,16 +11,11 @@
    `render_tree_hydrate.hydrate_msg_events_from_jsonl`) must bracket
    orphan rows by their journal seq within the owning sid, not pile
    every orphan onto the last finalized message root-wide.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_event_attribution.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
-import shutil
 import sys
 
 # State-isolation rule: set BETTER_CLAUDE_HOME BEFORE importing any
@@ -41,16 +36,11 @@ if _BACKEND not in sys.path:
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from event_bus import bus  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer, publish_event_sync  # noqa: E402
 from jsonl_tailer import OwnedClaudeJsonlTailer  # noqa: E402
 from orchs import get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
-
-
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 # ─── helpers ──────────────────────────────────────────────────────
@@ -121,7 +111,7 @@ def _journal_uuids(root_id: str) -> set[str]:
 
 # ─── tests ────────────────────────────────────────────────────────
 
-async def test_fork_rows_never_graft_on_parent() -> bool:
+async def test_fork_rows_never_graft_on_parent():
     """dim5-F2 end-to-end chain: fork-tailer `_dispatch` with the
     PARENT app_session_id (once while the parent msg streams — the
     explicit-stamp channel; once after finalize with a provider
@@ -159,15 +149,11 @@ async def test_fork_rows_never_graft_on_parent() -> bool:
     fork_uuids = {"fork-uuid-1", "fork-uuid-2"}
     grafted = fork_uuids & _msg_event_uuids(sid, msg_id)
     retained = fork_uuids - _journal_uuids(root_id)
-
-    ok = not grafted and not retained
-    print(f"{PASS if ok else FAIL} test_fork_rows_never_graft_on_parent: "
-          f"grafted-on-parent={sorted(grafted)} (must be empty); "
-          f"missing-from-events.jsonl={sorted(retained)} (must be empty)")
-    return ok
+    assert not grafted, f"fork rows grafted onto parent render tree: {sorted(grafted)}"
+    assert not retained, f"fork rows missing from events.jsonl: {sorted(retained)}"
 
 
-async def test_legacy_claude_tailer_rows_still_render() -> bool:
+async def test_legacy_claude_tailer_rows_still_render():
     """Before the fork-identity discriminator, the PRIMARY tailer also
     stamped rows `source="claude_tailer"` (+msg_id). Real disks hold
     such legacy rows as the SOLE copy of primary content. They must
@@ -198,13 +184,11 @@ async def test_legacy_claude_tailer_rows_still_render() -> bool:
         for r in read_rows
     )
 
-    ok = rendered and readable
-    print(f"{PASS if ok else FAIL} test_legacy_claude_tailer_rows_still_render: "
-          f"hydrated-on-msg={rendered}; message-read-returns-row={readable}")
-    return ok
+    assert rendered, "legacy claude_tailer row not hydrated onto its stamped msg"
+    assert readable, "legacy claude_tailer row not returned by message read"
 
 
-async def test_warm_reconcile_brackets_by_journal_seq() -> bool:
+async def test_warm_reconcile_brackets_by_journal_seq():
     """dim6-H1: seed events.jsonl with two finalized msgs' named rows
     (seqs 1-2 and 5-6), an orphan between them (seq 3), and a
     foreign-sid orphan (seq 4). The warm reconcile must attach the
@@ -240,25 +224,21 @@ async def test_warm_reconcile_brackets_by_journal_seq() -> bool:
     m1_uuids = _msg_event_uuids(sid, m1)
     m2_uuids = _msg_event_uuids(sid, m2)
 
-    on_correct_msg = "orphan-mid" in m1_uuids
-    not_on_last = "orphan-mid" not in m2_uuids
-    foreign_excluded = "orphan-foreign" not in (m1_uuids | m2_uuids)
-
-    ok = on_correct_msg and not_on_last and foreign_excluded
-    print(f"{PASS if ok else FAIL} test_warm_reconcile_brackets_by_journal_seq: "
-          f"orphan-on-msg1={on_correct_msg}; not-on-last-msg={not_on_last}; "
-          f"foreign-sid-excluded={foreign_excluded}")
-    return ok
+    assert "orphan-mid" in m1_uuids, "seq-bracketed orphan not attached to msg1"
+    assert "orphan-mid" not in m2_uuids, "orphan piled onto the last msg"
+    assert "orphan-foreign" not in (m1_uuids | m2_uuids), (
+        "foreign-sid orphan leaked into this node"
+    )
 
 
-# ─── runner ───────────────────────────────────────────────────────
+# ─── bracketing unit tests ─────────────────────────────────────────
 
 def _bracket(assistant_msgs, by_msg_id, orphan_raw):
     from render_tree_hydrate import _bracket_orphan_rows
     return _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
 
 
-def test_orphan_not_swallowed_across_empty_neighbor_into_later_turn() -> bool:
+def test_orphan_not_swallowed_across_empty_neighbor_into_later_turn():
     # A(named@10)  B(empty — its events are still transient orphans mid
     # resolution)  C(named@100). An orphan at seq 150 belongs to C. The
     # old unbounded ceil (neighbor B had no named rows) made A swallow
@@ -266,42 +246,35 @@ def test_orphan_not_swallowed_across_empty_neighbor_into_later_turn() -> bool:
     assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"}), (2, {"id": "C"})]
     by_msg_id = {"A": [{"seq": 10}], "C": [{"seq": 100}]}
     out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
-    if 150 in {r["seq"] for r in out.get("A", [])}:
-        print(f"  orphan 150 wrongly attributed to earlier turn A: {out}")
-        return False
-    if 150 not in {r["seq"] for r in out.get("C", [])}:
-        print(f"  orphan 150 not attributed to its owning turn C: {out}")
-        return False
-    print("PASS  orphan not swallowed across empty neighbor into later turn")
-    return True
+    assert 150 not in {r["seq"] for r in out.get("A", [])}, (
+        f"orphan 150 wrongly attributed to earlier turn A: {out}"
+    )
+    assert 150 in {r["seq"] for r in out.get("C", [])}, (
+        f"orphan 150 not attributed to its owning turn C: {out}"
+    )
 
 
-def test_orphan_assigned_to_exactly_one_turn() -> bool:
+def test_orphan_assigned_to_exactly_one_turn():
     # No orphan may render under two turns (single-owner attribution).
     assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"}), (2, {"id": "C"})]
     by_msg_id = {"A": [{"seq": 10}], "C": [{"seq": 100}]}
     out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
     assigned = [r["seq"] for rows in out.values() for r in rows]
-    if len(assigned) != len(set(assigned)):
-        print(f"  orphan double-assigned across turns: {out}")
-        return False
-    print("PASS  orphan assigned to exactly one turn")
-    return True
+    assert len(assigned) == len(set(assigned)), (
+        f"orphan double-assigned across turns: {out}"
+    )
 
 
-def test_normal_bracketing_unchanged() -> bool:
+def test_normal_bracketing_unchanged():
     # Every message has named rows: attribution must be unchanged.
     assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"})]
     by_msg_id = {"A": [{"seq": 10}], "B": [{"seq": 100}]}
     out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
-    if {r["seq"] for r in out.get("A", [])} != {50} or {r["seq"] for r in out.get("B", [])} != {150}:
-        print(f"  normal bracketing changed: {out}")
-        return False
-    print("PASS  normal bracketing unchanged")
-    return True
+    assert {r["seq"] for r in out.get("A", [])} == {50}, f"normal bracketing changed: {out}"
+    assert {r["seq"] for r in out.get("B", [])} == {150}, f"normal bracketing changed: {out}"
 
 
-def test_parent_uuid_chain_owns_orphans_over_timestamp_guess() -> None:
+def test_parent_uuid_chain_owns_orphans_over_timestamp_guess():
     """Orphan rows inherit ownership along a non-sidechain parentUuid chain.
 
     Without this rung a backfilled row carrying no message_id, causal key or
@@ -352,14 +325,10 @@ def test_parent_uuid_chain_owns_orphans_over_timestamp_guess() -> None:
     ]
     for label, expected, payload in cases:
         got = owner(payload)
-        if got != expected:
-            print(f"  {label}: expected {expected!r}, got {got!r}")
-            return False
-    print("PASS  parentUuid chain owns orphans over timestamp guess")
-    return True
+        assert got == expected, f"{label}: expected {expected!r}, got {got!r}"
 
 
-def test_orphan_below_every_floor_is_never_dropped() -> None:
+def test_orphan_below_every_floor_is_never_dropped():
     """No orphan may be silently discarded by bracketing.
 
     A row whose seq sits below every message's floor matched no window and
@@ -375,51 +344,17 @@ def test_orphan_below_every_floor_is_never_dropped() -> None:
 
     out = bracket(msgs, named, [{"seq": 5}, {"seq": 50}, {"seq": 150}])
     placed = [row["seq"] for rows in out.values() for row in rows]
-    if sorted(placed) != [5, 50, 150]:
-        print(f"  orphans dropped or duplicated: {out}")
-        return False
-    if out.get("A") != [{"seq": 5}, {"seq": 50}] or out.get("B") != [{"seq": 150}]:
-        print(f"  unexpected ownership: {out}")
-        return False
+    assert sorted(placed) == [5, 50, 150], f"orphans dropped or duplicated: {out}"
+    assert out.get("A") == [{"seq": 5}, {"seq": 50}], f"unexpected ownership: {out}"
+    assert out.get("B") == [{"seq": 150}], f"unexpected ownership: {out}"
 
     # Nothing named yet anywhere: everything belongs to the only message
     # that could own it rather than vanishing.
     out = bracket(msgs, {}, [{"seq": 5}, {"seq": 50}])
-    if [row["seq"] for row in out.get("A", [])] != [5, 50]:
-        print(f"  unnamed-tree orphans lost: {out}")
-        return False
+    assert [row["seq"] for row in out.get("A", [])] == [5, 50], (
+        f"unnamed-tree orphans lost: {out}"
+    )
 
-    if bracket([], named, [{"seq": 5}]) != {}:
-        print("  bracketing without messages should yield nothing")
-        return False
-    print("PASS  orphan below every floor is never dropped")
-    return True
-
-
-async def _run() -> int:
-    event_journal_writer.register(bus)
-    results = [
-        test_parent_uuid_chain_owns_orphans_over_timestamp_guess(),
-        test_orphan_below_every_floor_is_never_dropped(),
-        await test_fork_rows_never_graft_on_parent(),
-        await test_legacy_claude_tailer_rows_still_render(),
-        await test_warm_reconcile_brackets_by_journal_seq(),
-        test_orphan_not_swallowed_across_empty_neighbor_into_later_turn(),
-        test_orphan_assigned_to_exactly_one_turn(),
-        test_normal_bracketing_unchanged(),
-    ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{total} tests passed")
-    return 0 if passed == total else 1
-
-
-def main() -> int:
-    try:
-        return asyncio.run(_run())
-    finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert bracket([], named, [{"seq": 5}]) == {}, (
+        "bracketing without messages should yield nothing"
+    )

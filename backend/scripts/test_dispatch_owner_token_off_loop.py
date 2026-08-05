@@ -22,9 +22,6 @@ This test proves:
   3. Dispatch semantics are unchanged: `_dispatch` still returns without
      ingesting when the token is None, and still ingests when a token
      is obtained.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_dispatch_owner_token_off_loop.py
 """
 
 from __future__ import annotations
@@ -49,13 +46,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from session_manager import manager  # noqa: E402
-from event_bus import bus  # noqa: E402
-from event_ingester import event_ingester  # noqa: E402
-from event_journal import event_journal_writer  # noqa: E402
 from jsonl_tailer import OwnedClaudeJsonlTailer  # noqa: E402
-
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 SLOW_TOKEN_SECONDS = 0.6
 
@@ -93,7 +84,7 @@ def _make_tailer() -> OwnedClaudeJsonlTailer:
     )
 
 
-async def test_offloaded_token_does_not_block_loop() -> bool:
+async def test_offloaded_token_does_not_block_loop():
     tailer = _make_tailer()
 
     class _FakeToken:
@@ -128,16 +119,14 @@ async def test_offloaded_token_does_not_block_loop() -> bool:
         if orig_ingest_orphan is not None:
             strategy.ingest_orphan = orig_ingest_orphan
 
-    ok = ticks >= 10 and len(ingested) == 1
-    print(
-        f"{PASS if ok else FAIL} _dispatch via asyncio.to_thread: loop ticks "
-        f"during a {SLOW_TOKEN_SECONDS}s slow token acquire = {ticks} "
-        f"(want >=10), ingested={len(ingested)}/1"
+    assert ticks >= 10, (
+        f"loop froze during {SLOW_TOKEN_SECONDS}s slow token acquire: "
+        f"ticks={ticks} (want >=10)"
     )
-    return ok
+    assert len(ingested) == 1, f"expected 1 ingest, got {len(ingested)}"
 
 
-async def test_direct_token_blocks_loop_control() -> bool:
+async def test_direct_token_blocks_loop_control():
     """Control: prove the OLD (bare, non-to_thread) call pattern really
     does freeze the loop, so a false pass above isn't hiding a no-op."""
     tailer = _make_tailer()
@@ -155,21 +144,15 @@ async def test_direct_token_blocks_loop_control() -> bool:
         return token
 
     tailer._ensure_owner_token = _slow_ensure_token  # type: ignore[method-assign]
-    try:
-        ticks, _ = await _count_ticks_while(_direct_dispatch())
-    finally:
-        pass
+    ticks, _ = await _count_ticks_while(_direct_dispatch())
 
-    ok = ticks == 0
-    print(
-        f"{PASS if ok else FAIL} control - bare (non-to_thread) token "
-        f"acquire: loop ticks during a {SLOW_TOKEN_SECONDS}s slow acquire = "
-        f"{ticks} (want ==0, proves slow acquire is real blocking, not a no-op)"
+    assert ticks == 0, (
+        f"bare (non-to_thread) acquire should freeze the loop: ticks={ticks} "
+        f"(want ==0, proves slow acquire is real blocking, not a no-op)"
     )
-    return ok
 
 
-async def test_none_token_still_returns_without_ingest() -> bool:
+async def test_none_token_still_returns_without_ingest():
     """Semantics unchanged: a None token still short-circuits _dispatch
     without ingesting."""
     tailer = _make_tailer()
@@ -191,14 +174,10 @@ async def test_none_token_still_returns_without_ingest() -> bool:
         if orig_ingest_orphan is not None:
             strategy.ingest_orphan = orig_ingest_orphan
 
-    ok = len(ingested) == 0
-    print(
-        f"{PASS if ok else FAIL} None token -> no ingest (ingested={len(ingested)}/0)"
-    )
-    return ok
+    assert len(ingested) == 0, f"None token should not ingest, got {len(ingested)}"
 
 
-def test_dispatch_uses_to_thread_for_ensure_owner_token() -> bool:
+def test_dispatch_uses_to_thread_for_ensure_owner_token():
     """Static guard: both `_dispatch` call sites must route through
     `_ensure_owner_token_off_loop` (which only pays a thread hop on a
     cache miss), not call `_ensure_owner_token` bare."""
@@ -212,31 +191,8 @@ def test_dispatch_uses_to_thread_for_ensure_owner_token() -> bool:
         OwnedClaudeJsonlTailer._ensure_owner_token_off_loop,
     )
     wrapper_uses_to_thread = "asyncio.to_thread(self._ensure_owner_token)" in wrapper_src
-    ok = off_loop_calls == 2 and not bare_calls and wrapper_uses_to_thread
-    print(
-        f"{PASS if ok else FAIL} _dispatch routes _ensure_owner_token off-loop at "
-        f"both call sites (off_loop_calls={off_loop_calls}, bare_calls_left="
-        f"{len(bare_calls)}, wrapper_uses_to_thread={wrapper_uses_to_thread})"
+    assert off_loop_calls == 2, (
+        f"expected 2 off-loop call sites, got {off_loop_calls}"
     )
-    return ok
-
-
-def main() -> int:
-    event_journal_writer.register(bus)
-    orig_ingest = event_ingester.ingest
-    event_ingester.ingest = lambda *a, **k: 0
-    try:
-        results = []
-        results.append(asyncio.run(test_offloaded_token_does_not_block_loop()))
-        results.append(asyncio.run(test_direct_token_blocks_loop_control()))
-        results.append(asyncio.run(test_none_token_still_returns_without_ingest()))
-        results.append(test_dispatch_uses_to_thread_for_ensure_owner_token())
-    finally:
-        event_ingester.ingest = orig_ingest
-    ok = all(results)
-    print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not bare_calls, f"bare _ensure_owner_token calls remain: {bare_calls}"
+    assert wrapper_uses_to_thread, "off-loop wrapper does not use asyncio.to_thread"
