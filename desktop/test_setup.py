@@ -242,13 +242,28 @@ def test_normalize_primary_address() -> bool:
     return True
 
 
+def test_durable_node_address_requires_wss() -> bool:
+    if _setup._require_durable_primary_address(
+        "https://primary.example:8443"
+    ) != "wss://primary.example:8443":
+        return False
+    for raw in ("primary.local", "ws://primary.local:8000", "http://primary.local"):
+        try:
+            _setup._require_durable_primary_address(raw)
+        except ValueError:
+            continue
+        print(f"  insecure durable node address was accepted: {raw}")
+        return False
+    return True
+
+
 def test_ensure_node_topology_prompts_once() -> bool:
     path = _setup._topology_path()
     path.unlink(missing_ok=True)
     calls = []
     orig_prompt, orig_alert = _setup._prompt, _setup._alert
     orig_post_json, orig_get_json = _setup._post_json, _setup._get_json
-    answers = iter(["primary.local", "alice", "secret"])
+    answers = iter(["https://primary.local", "alice", "secret"])
 
     def prompt(*a, **k):
         calls.append(a[0])
@@ -270,13 +285,13 @@ def test_ensure_node_topology_prompts_once() -> bool:
         _setup._post_json, _setup._get_json = orig_post_json, orig_get_json
         path.unlink(missing_ok=True)
     if not first or not second or calls != [
-        "Enter the primary machine address or IP (port 8000 is used when omitted):",
+        "Enter the verified HTTPS/WSS primary address:",
         "Primary username:",
         "Primary password:",
     ]:
         print(f"  expected prompt once and success, got {first}, {second}, {calls}")
         return False
-    if "address: ws://primary.local:8000" not in content:
+    if "address: wss://primary.local:8000" not in content:
         print(f"  topology content missing normalized address: {content}")
         return False
     if os.environ.get("BETTER_CLAUDE_TOPOLOGY_PATH") != str(path):
@@ -291,7 +306,7 @@ def test_ensure_node_topology_blocks_when_primary_lacks_extension() -> bool:
     alerts = []
     orig_prompt, orig_alert = _setup._prompt, _setup._alert
     orig_post_json, orig_get_json = _setup._post_json, _setup._get_json
-    answers = iter(["primary.local", "alice", "secret"])
+    answers = iter(["https://primary.local", "alice", "secret"])
     _setup._prompt = lambda *a, **k: next(answers)
     _setup._alert = lambda msg: alerts.append(msg)
     _setup._post_json = lambda url, payload, *, token="": (
@@ -383,6 +398,7 @@ TESTS = [
     ("port conflict alternate choice validates selected port", test_resolve_port_conflict_alternate_port),
     ("invalid desktop role fails closed", test_invalid_desktop_role_fails_closed),
     ("primary address normalization adds scheme and port", test_normalize_primary_address),
+    ("durable node setup requires verified WSS", test_durable_node_address_requires_wss),
     ("node topology generation prompts only when missing", test_ensure_node_topology_prompts_once),
     ("node topology blocks when primary lacks Machine nodes",
      test_ensure_node_topology_blocks_when_primary_lacks_extension),

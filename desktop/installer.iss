@@ -59,6 +59,9 @@ Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"
 ; Offer to launch after install.
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
+[UninstallRun]
+Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-node-service"; Flags: runhidden; RunOnceId: "RemoveNodeService"
+
 [Code]
 function WebView2Missing(): Boolean;
 var

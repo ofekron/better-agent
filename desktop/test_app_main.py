@@ -33,6 +33,9 @@ def test_role_dispatch() -> None:
         ("--run-dir", "/runs/x"): "backend",
         ("--run-dir", "/runs/x", "--runner-kind", "agy"): "backend",
         ("--frozen-artifact-smoke", "--output", "/tmp/result"): "backend",
+        ("--node-launcher", "--state-root", "/tmp/home"): "node_launcher",
+        ("--uninstall-node-service",): "node_service",
+        ("--restart-node-service",): "node_service",
     }
     for argv, expected in cases.items():
         got = _role(list(argv))
@@ -53,6 +56,45 @@ def test_diagnostic_watchdog_has_an_exit_owner() -> None:
     source = inspect.getsource(app_main._run_main)
     assert "finally:" in source
     assert "_stop_diagnostics()" in source
+
+
+def test_main_dispatches_node_launcher_without_role_flag() -> None:
+    import node_source_launcher
+
+    with (
+        mock.patch.object(
+            sys,
+            "argv",
+            ["Better Agent", "--node-launcher", "--state-root", "/tmp/node"],
+        ),
+        mock.patch.object(node_source_launcher, "main", return_value=7) as launch,
+    ):
+        assert app_main.main() == 7
+    launch.assert_called_once_with(["--state-root", "/tmp/node"])
+
+
+def test_main_dispatches_node_service_removal() -> None:
+    import node_service
+
+    manager = mock.Mock()
+    with (
+        mock.patch.object(sys, "argv", ["Better Agent", "--uninstall-node-service"]),
+        mock.patch.object(node_service, "NodeServiceManager", return_value=manager),
+    ):
+        assert app_main.main() == 0
+    manager.remove.assert_called_once_with()
+
+
+def test_main_dispatches_explicit_node_service_restart() -> None:
+    import node_service
+
+    manager = mock.Mock()
+    with (
+        mock.patch.object(sys, "argv", ["Better Agent", "--restart-node-service"]),
+        mock.patch.object(node_service, "NodeServiceManager", return_value=manager),
+    ):
+        assert app_main.main() == 0
+    manager.restart.assert_called_once_with()
 
 
 def test_run_main_reports_unexpected_failure_before_diagnostics_close() -> None:
@@ -115,6 +157,12 @@ TESTS = [
      test_diagnostic_argv_redacts_pair_intent),
     ("app_main always stops its diagnostic watchdog",
      test_diagnostic_watchdog_has_an_exit_owner),
+    ("app_main dispatches the durable node launcher",
+     test_main_dispatches_node_launcher_without_role_flag),
+    ("app_main dispatches durable node service removal",
+     test_main_dispatches_node_service_removal),
+    ("app_main dispatches explicit durable node restart",
+     test_main_dispatches_explicit_node_service_restart),
     ("app_main records unexpected failures before closing diagnostics",
      test_run_main_reports_unexpected_failure_before_diagnostics_close),
     ("app_main preserves process-control exceptions",

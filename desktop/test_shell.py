@@ -15,7 +15,13 @@ import urllib.error
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 import paths
+
+if "webview" not in sys.modules:
+    sys.modules["webview"] = MagicMock()
+
 import shell
 
 
@@ -358,7 +364,15 @@ def _make_env(monkeypatch, tmp_path):
         error_calls=[],
         start_calls_closing=False,
         apply_calls=[],
+        node_manager=MagicMock(),
     )
+    env.node_manager.status.return_value = {
+        "desired": "enabled",
+        "transition": "applied",
+        "launcher": "running",
+        "connection": "connected",
+    }
+    env.node_manager.prepare_update.return_value = True
 
     # --- sys.modules fakes for main()'s inner imports ---
     setup_mod = types.ModuleType("setup")
@@ -372,6 +386,10 @@ def _make_env(monkeypatch, tmp_path):
     auth_mod = types.ModuleType("auth_secrets")
     auth_mod.needs_bootstrap = lambda: env.needs_bootstrap
     monkeypatch.setitem(sys.modules, "auth_secrets", auth_mod)
+
+    node_service_mod = types.ModuleType("node_service")
+    node_service_mod.NodeServiceManager = lambda: env.node_manager
+    monkeypatch.setitem(sys.modules, "node_service", node_service_mod)
 
     mac_mod = types.ModuleType("macos_url_handler")
     mac_mod.install_macos_url_handler = lambda cb: env.mac_handlers.append(cb)
@@ -403,6 +421,7 @@ def _make_env(monkeypatch, tmp_path):
     monkeypatch.setattr(shell, "webview", webview)
 
     monkeypatch.setattr(shell, "_watch_for_restart", lambda *a, **k: None)
+    monkeypatch.setattr(shell, "_watch_node_status", lambda *a, **k: None)
     monkeypatch.setattr(shell, "start_background_check", lambda cb: env.background_cbs.append(cb))
 
     def fake_submit(local_url, event):
@@ -488,6 +507,17 @@ def test_main_node_happy_uses_node_window(monkeypatch, tmp_path):
     env = _make_env(monkeypatch, tmp_path)
     env.role = "node"
     assert shell.main() == 0
+    env.node_manager.reconcile.assert_called_once_with()
+    env.node_manager.prepare_update.assert_not_called()
+
+
+def test_main_node_service_failure_is_reported(monkeypatch, tmp_path):
+    env = _make_env(monkeypatch, tmp_path)
+    env.role = "node"
+    env.node_manager.reconcile.side_effect = RuntimeError("service failed")
+    assert shell.main() == 1
+    assert env.error_calls == ["service failed"]
+    assert _FakeActivationServer.last.closed is True
 
 
 def test_main_primary_bind_failure(monkeypatch, tmp_path):
@@ -628,3 +658,69 @@ def test_on_update_available_accept(monkeypatch, tmp_path):
     assert env.apply_calls == [True]
     # accepted -> _on_update shutdown leaves runners alive (the last shutdown call)
     assert sups[0].shuts[-1] is False
+
+
+def test_node_update_stops_and_reconciles_service(monkeypatch, tmp_path):
+    env = _make_env(monkeypatch, tmp_path)
+    env.role = "node"
+    env.window.dialog = True
+    shell.main()
+    env.background_cbs[0]("1.2.3")
+    assert env.apply_calls == [True]
+    env.node_manager.prepare_update.assert_called_once_with("1.2.3")
+    env.node_manager.restore_after_failed_update.assert_called_once_with()
+
+
+def test_node_update_failure_restarts_service(monkeypatch, tmp_path):
+    env = _make_env(monkeypatch, tmp_path)
+    env.role = "node"
+    env.window.dialog = True
+    monkeypatch.setattr(
+        shell.updater,
+        "apply_and_relaunch",
+        MagicMock(side_effect=RuntimeError("update failed")),
+    )
+    shell.main()
+    with pytest.raises(RuntimeError, match="update failed"):
+        env.background_cbs[0]("1.2.3")
+    env.node_manager.prepare_update.assert_called_once_with("1.2.3")
+    env.node_manager.restore_after_failed_update.assert_called_once_with()
+
+
+def test_node_status_html_reflects_authoritative_states() -> None:
+    rendered = shell._node_status_html({
+        "desired": "removed",
+        "transition": "applied",
+        "launcher": "circuit_open",
+        "connection": "unreachable",
+    })
+    assert "node is running" not in rendered
+    for value in ("removed", "applied", "circuit_open", "unreachable"):
+        assert value in rendered
+    assert "window.updateNodeStatus" in rendered
+
+
+def test_node_status_watcher_pushes_projection(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    watchfiles = types.ModuleType("watchfiles")
+    watchfiles.watch = lambda *args, **kwargs: iter([
+        {("modified", "first")},
+        {("modified", "second")},
+    ])
+    monkeypatch.setitem(sys.modules, "watchfiles", watchfiles)
+    manager = MagicMock()
+    manager.spec.state_root = tmp_path
+    manager.status.return_value = {
+        "desired": "enabled",
+        "transition": "applied",
+        "launcher": "running",
+        "connection": "unreachable",
+    }
+    window = MagicMock()
+    window.evaluate_js.side_effect = [RuntimeError("page not ready"), None]
+    shell._watch_node_status(manager, window, threading.Event())
+    assert window.evaluate_js.call_count == 2
+    script = window.evaluate_js.call_args_list[-1].args[0]
+    assert '"connection":"unreachable"' in script

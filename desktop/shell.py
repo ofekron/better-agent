@@ -1,9 +1,7 @@
-"""Better Agent desktop shell — native macOS window + backend supervisor.
+"""Better Agent desktop shell — native window + durable role ownership.
 
-This is the macOS app's main process. It supervises the FastAPI backend
-as a child process, shows the backend-served UI in a native window,
-respawns the backend on `/api/admin/restart`, and on close asks whether
-to kill the running provider runner subprocesses.
+The primary role supervises its FastAPI backend as a child process. The
+node role projects a same-user OS service and only presents its status window.
 
 GUI-independent logic lives in `supervisor.py` / `shell_env.py` (unit
 tested); this module is the thin pywebview wiring.
@@ -13,6 +11,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -167,6 +166,71 @@ def _submit_marketplace_activation(local_url: str, event: ActivationEvent) -> bo
         return False
 
 
+def _node_status_html(status: dict[str, object]) -> str:
+    from i18n import t
+
+    fields = (
+        ("desired", t("desktop.node.status_desired")),
+        ("transition", t("desktop.node.status_transition")),
+        ("launcher", t("desktop.node.status_launcher")),
+        ("connection", t("desktop.node.status_connection")),
+    )
+    rows = "".join(
+        "<dt>"
+        + html.escape(label)
+        + "</dt><dd id='node-"
+        + key
+        + "'>"
+        + html.escape(str(status.get(key, "unknown")))
+        + "</dd>"
+        for key, label in fields
+    )
+    return (
+        "<style>body{font:14px -apple-system,sans-serif;padding:2em}"
+        "dl{display:grid;grid-template-columns:max-content 1fr;gap:.7em 1.2em}"
+        "dt{font-weight:600}dd{margin:0;transition:color .25s ease,opacity .25s ease}"
+        "</style><h2>"
+        + html.escape(t("desktop.node.status_title"))
+        + "</h2><p>"
+        + html.escape(t("desktop.node.status_description"))
+        + "</p><dl>"
+        + rows
+        + "<dt>"
+        + html.escape(t("desktop.node.status_health"))
+        + "</dt><dd><code>http://127.0.0.1:8002/readyz</code></dd></dl>"
+        "<script>window.updateNodeStatus=(s)=>{for(const k of "
+        "['desired','transition','launcher','connection']){const e="
+        "document.getElementById('node-'+k);if(e){e.style.opacity='.35';"
+        "requestAnimationFrame(()=>{e.textContent=String(s[k]??'unknown');"
+        "e.style.opacity='1';});}}};</script>"
+    )
+
+
+def _watch_node_status(
+    manager,
+    window,
+    stopping: threading.Event,
+    ready: threading.Event | None = None,
+) -> None:
+    from watchfiles import watch
+
+    if ready is not None:
+        while not stopping.is_set() and not ready.wait(0.1):
+            pass
+        if stopping.is_set():
+            return
+    for _ in watch(str(manager.spec.state_root), stop_event=stopping):
+        status = manager.status()
+        try:
+            window.evaluate_js(
+                "window.updateNodeStatus("
+                + json.dumps(status, separators=(",", ":"))
+                + ")"
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("node status update failed")
+
+
 def main(initial_activation: ActivationEvent | None = None) -> int:
     _configure_logging()
     pending_activations = [initial_activation] if initial_activation else []
@@ -212,19 +276,77 @@ def main(initial_activation: ActivationEvent | None = None) -> int:
         if not ensure_node_topology():
             activation_server.close()
             return 1
-    else:
-        if not ensure_primary_network_bind():
+        from node_service import NodeServiceManager
+
+        manager = NodeServiceManager()
+        try:
+            manager.reconcile()
+        except RuntimeError as e:
+            _error_window(str(e))
             activation_server.close()
             return 1
-        # Primary first run: the backend cannot boot until the keychain
-        # holds the credential entries (SessionMiddleware reads the secret
-        # at import time), so collect them before starting the backend.
-        import auth_secrets
-        if auth_secrets.needs_bootstrap():
-            from setup import run_setup
-            if not run_setup():
-                activation_server.close()
-                return 1  # user closed setup without creating an account
+        window = webview.create_window(
+            "Better Agent Node",
+            html=_node_status_html(manager.status()),
+        )
+        status_ready = threading.Event()
+
+        def _deliver_node_activations() -> None:
+            status_ready.set()
+            with activation_lock:
+                active_window["value"] = window
+                queued_activations = list(pending_activations)
+                pending_activations.clear()
+            for event in queued_activations:
+                if event.get("type") == "activate":
+                    _emit_activation(window, event)
+
+        window.events.loaded += _deliver_node_activations
+        status_stopping = threading.Event()
+        status_thread = threading.Thread(
+            target=_watch_node_status,
+            args=(manager, window, status_stopping, status_ready),
+            daemon=True,
+            name="node-status",
+        )
+        status_thread.start()
+
+        def _on_node_update_available(version: str) -> None:
+            if not window.create_confirmation_dialog(
+                "Update available",
+                f"Better Agent {version} is available. Restart to update now?",
+            ):
+                return
+            restore_service = manager.prepare_update(version)
+            try:
+                updater.apply_and_relaunch()
+            except Exception:
+                if restore_service:
+                    manager.restore_after_failed_update()
+                raise
+            if restore_service:
+                manager.restore_after_failed_update()
+
+        start_background_check(_on_node_update_available)
+        try:
+            webview.start()
+        finally:
+            status_stopping.set()
+            status_thread.join()
+            activation_server.close()
+        return 0
+    if not ensure_primary_network_bind():
+        activation_server.close()
+        return 1
+    # Primary first run: the backend cannot boot until the keychain
+    # holds the credential entries (SessionMiddleware reads the secret
+    # at import time), so collect them before starting the backend.
+    import auth_secrets
+    if auth_secrets.needs_bootstrap():
+        from setup import run_setup
+        if not run_setup():
+            activation_server.close()
+            return 1  # user closed setup without creating an account
 
     sup = BackendSupervisor(role=role)
     try:
@@ -250,24 +372,12 @@ def main(initial_activation: ActivationEvent | None = None) -> int:
     desktop_api = DesktopNotificationApi()
     quitting = threading.Event()
     kill_on_quit = {"value": False}
-    if role == "node":
-        window = webview.create_window(
-            "Better Agent Node",
-            html=(
-                "<body style='font:14px -apple-system,sans-serif;padding:2em'>"
-                "<h2>Better Agent node is running</h2>"
-                "<p>This machine is waiting for the primary machine to approve "
-                "or use it as a node.</p>"
-                f"<p>Local node health: <code>{sup.health_url}</code></p>"
-                "</body>"
-            ),
-        )
-    else:
-        window = webview.create_window(
-            "Better Agent",
-            local_url,
-            js_api=desktop_api,
-        )
+    window = webview.create_window(
+        "Better Agent",
+        local_url,
+        js_api=desktop_api,
+    )
+
     def _deliver_initial_activations() -> None:
         with activation_lock:
             active_window["value"] = window

@@ -24,6 +24,7 @@ from urllib import request as urlrequest
 
 import auth_secrets
 from env_compat import dual_env, get_env
+from i18n import t
 
 _TITLE = "Better Agent Setup"
 DesktopRole = Literal["primary", "node"]
@@ -362,6 +363,15 @@ def _normalize_primary_address(raw: str) -> str:
     return value
 
 
+def _require_durable_primary_address(raw: str) -> str:
+    value = _normalize_primary_address(raw)
+    if not value.startswith("wss://"):
+        raise ValueError(
+            t("desktop.node.wss_required")
+        )
+    return value
+
+
 def _primary_http_url(primary_address: str) -> str:
     if primary_address.startswith("ws://"):
         return "http://" + primary_address[len("ws://"):].rstrip("/")
@@ -446,6 +456,8 @@ def _verify_primary_for_node(primary_address: str) -> bool:
 
 
 def _write_node_topology(primary_address: str) -> None:
+    from paths import make_private_file
+
     path = _topology_path()
     if not path.is_absolute():
         raise RuntimeError(
@@ -461,10 +473,7 @@ def _write_node_topology(primary_address: str) -> None:
         "nodes: {}\n"
     )
     path.write_text(content, encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    make_private_file(path)
 
 
 def ensure_node_topology() -> bool:
@@ -473,18 +482,36 @@ def ensure_node_topology() -> bool:
     path = _topology_path()
     os.environ.update(dual_env("BETTER_CLAUDE_TOPOLOGY_PATH", str(path)))
     if path.exists():
-        return True
+        try:
+            from topology import load_topology
+            from node_service import attest_durable_topology, require_durable_topology
+
+            primary_address = _require_durable_primary_address(
+                load_topology(force_reload=True).primary.address
+            )
+            try:
+                require_durable_topology()
+            except RuntimeError:
+                if not _verify_primary_for_node(primary_address):
+                    return False
+                attest_durable_topology(primary_address)
+            return True
+        except Exception as e:  # noqa: BLE001
+            _alert(str(e))
+            return False
     raw = _prompt(
-        "Enter the primary machine address or IP "
-        "(port 8000 is used when omitted):"
+        t("desktop.node.primary_prompt")
     )
     if raw is None:
         return False
     try:
-        primary_address = _normalize_primary_address(raw)
+        primary_address = _require_durable_primary_address(raw)
         if not _verify_primary_for_node(primary_address):
             return False
         _write_node_topology(primary_address)
+        from node_service import attest_durable_topology
+
+        attest_durable_topology(primary_address)
     except Exception as e:  # noqa: BLE001
         _alert(str(e))
         return False

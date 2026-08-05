@@ -1,10 +1,13 @@
 """Unified PyInstaller entrypoint for the Better Agent macOS app.
 
-One frozen binary, three roles, chosen by argv:
+One frozen binary, five roles, chosen by argv:
   - `--run-dir <dir>`  → run a worker runner (delegates to `app_entry`).
   - `--serve`          → run the FastAPI backend server (via `app_entry`).
   - `--serve-node`     → run the worker-node backend (via `app_entry`).
   - `--operation-cli`  → run the generated operation CLI dispatcher.
+  - `--node-launcher`  → run the durable worker-node launcher.
+  - `--uninstall-node-service` → remove the current user's node service.
+  - `--restart-node-service` → explicitly clear the circuit and restart it.
   - `--frozen-artifact-smoke` → verify the built onedir execution artifact.
   - (no args)          → run the desktop shell — what double-clicking the
                          `.app` does.
@@ -91,6 +94,10 @@ def _stop_diagnostics() -> None:
 def _role(argv: list[str]) -> str:
     """Classify the invocation. `--run-dir` or `--serve` → 'backend'
     (server/runner, both handled by `app_entry`); otherwise → 'shell'."""
+    if "--node-launcher" in argv:
+        return "node_launcher"
+    if "--uninstall-node-service" in argv or "--restart-node-service" in argv:
+        return "node_service"
     if (
         "--run-dir" in argv
         or "--serve" in argv
@@ -104,9 +111,23 @@ def _role(argv: list[str]) -> str:
 
 def main() -> int:
     argv = sys.argv[1:]
-    if _role(argv) == "backend":
+    role = _role(argv)
+    if role == "backend":
         from app_entry import _main as backend_main
         return backend_main(argv)
+    if role == "node_launcher":
+        from node_source_launcher import main as node_main
+
+        return node_main([arg for arg in argv if arg != "--node-launcher"])
+    if role == "node_service":
+        from node_service import NodeServiceManager
+
+        manager = NodeServiceManager()
+        if "--restart-node-service" in argv:
+            manager.restart()
+        else:
+            manager.remove()
+        return 0
     try:
         pair_link = deep_link_from_argv(argv)
     except DeepLinkError:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import signal
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -54,6 +55,10 @@ class FakeSupervisor:
 
 
 def test_default_launcher_injects_node_credential_authority(monkeypatch) -> None:
+    import credential_session
+    import node_credential_store
+    import supervisor as supervisor_module
+
     store = object()
     broker = object()
     supervisor = FakeSupervisor(
@@ -65,7 +70,7 @@ def test_default_launcher_injects_node_credential_authority(monkeypatch) -> None
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(
-        node_source_launcher,
+        node_credential_store,
         "node_provider_credential_store",
         lambda: store,
     )
@@ -83,12 +88,12 @@ def test_default_launcher_injects_node_credential_authority(monkeypatch) -> None
         return supervisor
 
     monkeypatch.setattr(
-        node_source_launcher,
+        credential_session,
         "ProviderCredentialBroker",
         credential_broker,
     )
     monkeypatch.setattr(
-        node_source_launcher,
+        supervisor_module,
         "BackendSupervisor",
         backend_supervisor,
     )
@@ -274,11 +279,12 @@ def test_signal_handlers_installed_restored_and_stop_closure(monkeypatch) -> Non
 def test_main_valid_port_invokes_run(monkeypatch) -> None:
     seen = {}
 
-    def fake_run(port, **kw):
+    def fake_run(state_root, port, **kw):
+        seen["state_root"] = state_root
         seen["port"] = port
         return 42
 
-    monkeypatch.setattr(node_source_launcher, "run", fake_run)
+    monkeypatch.setattr(node_source_launcher, "_run_owned", fake_run)
     assert node_source_launcher.main(["--port", "9000"]) == 42
     assert seen["port"] == 9000
 
@@ -286,16 +292,126 @@ def test_main_valid_port_invokes_run(monkeypatch) -> None:
 def test_main_default_port_is_8002(monkeypatch) -> None:
     seen = {}
 
-    def fake_run(port, **kw):
+    def fake_run(state_root, port, **kw):
         seen["port"] = port
         return 0
 
-    monkeypatch.setattr(node_source_launcher, "run", fake_run)
+    monkeypatch.setattr(node_source_launcher, "_run_owned", fake_run)
     node_source_launcher.main([])
     assert seen["port"] == 8002
 
 
 def test_main_invalid_port_exits(monkeypatch) -> None:
-    monkeypatch.setattr(node_source_launcher, "run", lambda port, **kw: 0)
+    monkeypatch.setattr(node_source_launcher, "_run_owned", lambda root, port: 0)
     with pytest.raises(SystemExit):
         node_source_launcher.main(["--port", "0"])
+
+
+def test_main_defers_missing_topology_to_owned_launcher(monkeypatch, tmp_path) -> None:
+    state_root = tmp_path / "missing-home"
+    topology = tmp_path / "missing-topology.yaml"
+    seen = {}
+
+    def owned(root, port):
+        seen["root"] = root
+        seen["topology"] = Path(
+            node_source_launcher.os.environ["BETTER_AGENT_TOPOLOGY_PATH"]
+        )
+        return 1
+
+    monkeypatch.setattr(node_source_launcher, "_run_owned", owned)
+    assert node_source_launcher.main([
+        "--state-root", str(state_root),
+        "--topology-path", str(topology),
+    ]) == 1
+    assert seen == {"root": state_root, "topology": topology}
+
+
+def test_owned_launcher_publishes_lifecycle(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import node_service
+    import paths
+
+    state_root = tmp_path / "home"
+    state_root.mkdir(mode=0o700)
+    paths.make_private_directory(state_root)
+    states: list[str] = []
+    monkeypatch.setattr(
+        node_service, "require_durable_topology", lambda *args: "wss://primary"
+    )
+    monkeypatch.setattr(node_service, "begin_launcher_attempt", lambda root: True)
+    monkeypatch.setattr(node_service, "mark_launcher_healthy", lambda root: None)
+    monkeypatch.setattr(
+        node_service,
+        "publish_launcher_status",
+        lambda root, state, **kwargs: states.append(state),
+    )
+    def run_node(port, *, stopping, on_healthy):
+        on_healthy()
+        return 0
+
+    assert node_source_launcher._run_owned(
+        state_root,
+        8002,
+        run_node=run_node,
+    ) == 0
+    assert states == ["starting", "running", "stopped"]
+
+
+def test_owned_launcher_records_topology_failure_as_failed_attempt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import node_service
+    import paths
+
+    state_root = tmp_path / "home"
+    state_root.mkdir(mode=0o700)
+    paths.make_private_directory(state_root)
+    states: list[str] = []
+    monkeypatch.setattr(node_service, "begin_launcher_attempt", lambda root: True)
+    monkeypatch.setattr(
+        node_service,
+        "require_durable_topology",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("bad topology")),
+    )
+    monkeypatch.setattr(
+        node_service,
+        "publish_launcher_status",
+        lambda root, state, **kwargs: states.append(state),
+    )
+
+    with pytest.raises(RuntimeError, match="bad topology"):
+        node_source_launcher._run_owned(state_root, 8002)
+    assert states == ["starting", "failed"]
+
+
+def test_owned_launcher_keeps_circuit_open_until_stopped(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import node_service
+    import paths
+
+    state_root = tmp_path / "home"
+    state_root.mkdir(mode=0o700)
+    paths.make_private_directory(state_root)
+    stopping = threading.Event()
+    stopping.set()
+    states: list[str] = []
+    monkeypatch.setattr(node_service, "require_durable_topology", lambda: "wss://primary")
+    monkeypatch.setattr(node_service, "begin_launcher_attempt", lambda root: False)
+    monkeypatch.setattr(
+        node_service,
+        "publish_launcher_status",
+        lambda root, state, **kwargs: states.append(state),
+    )
+
+    assert node_source_launcher._run_owned(
+        state_root,
+        8002,
+        stopping=stopping,
+    ) == 1
+    assert states == ["circuit_open"]

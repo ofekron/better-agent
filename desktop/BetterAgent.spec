@@ -59,7 +59,9 @@ hiddenimports = [
     "deep_link", "activation_server", "macos_url_handler",
     "updater", "update_delta", "pyxdelta", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
-    "node_registry_store", "node_rpc_handlers", "node_store", "topology",
+    "node_connection_status", "node_launcher_lease", "node_registry_store",
+    "node_rpc_handlers", "node_service", "node_source_launcher", "node_store",
+    "topology",
     # `i18n` is a Python package (`from i18n import t`) — listed so it
     # enters the frozen module graph; it must NOT be bundled as `datas`
     # (raw file copies are never `import`-able).

@@ -1,4 +1,14 @@
 TRANSLATIONS: dict[str, str] = {
+    "desktop.node.wss_required": "Durable node mode requires a verified HTTPS/WSS primary address.",
+    "desktop.node.wss_attestation_required": "Durable node mode requires this WSS primary address to be verified by node setup.",
+    "desktop.node.primary_prompt": "Enter the verified HTTPS/WSS primary address:",
+    "desktop.node.status_title": "Better Agent node",
+    "desktop.node.status_description": "This window reflects the durable node service owned by your user account.",
+    "desktop.node.status_desired": "Desired state",
+    "desktop.node.status_transition": "Transition",
+    "desktop.node.status_launcher": "Launcher",
+    "desktop.node.status_connection": "Primary connection",
+    "desktop.node.status_health": "Local health",
     # --- HTTP / REST errors ---
     "error.session_not_found": "Session not found",
     "error.provider_not_found": "provider not found",

@@ -30,6 +30,7 @@ import repository_alignment
 import node_identity
 import node_rpc_handlers as rpc_handlers
 import perf
+import node_connection_status
 from node_protocol import PROTOCOL_VERSION
 from topology import load_topology
 
@@ -79,6 +80,7 @@ class NodeClient:
         until `stop()`."""
         if self._sender_task is not None:
             raise RuntimeError("NodeClient already started")
+        await self._publish_connection_state("starting")
         self._sender_task = asyncio.create_task(self._reconnect_loop(), name="node-client")
         logger.info("node_client: started")
 
@@ -98,6 +100,7 @@ class NodeClient:
             self._sender_task = None
         await self._cancel_and_drain_tasks(self._rpc_tasks)
         await self._cancel_and_drain_tasks(self._incident_replay_tasks)
+        await self._publish_connection_state("stopped")
 
     # ----- Outbound API for node code ------------------------------------
 
@@ -278,6 +281,10 @@ class NodeClient:
                 backoff_idx = 0  # successful connect resets backoff
             except Exception as e:
                 logger.warning("node_client: connect failed: %s", e)
+                await self._publish_connection_state(
+                    "unreachable",
+                    detail=type(e).__name__,
+                )
             if self._stop.is_set():
                 break
             delay = _BACKOFF_LADDER[min(backoff_idx, len(_BACKOFF_LADDER) - 1)]
@@ -357,6 +364,7 @@ class NodeClient:
             self._connection_generation += 1
             connection_generation = self._connection_generation
             self._connected.set()
+            await self._publish_connection_state("connected")
             logger.info("node_client: connected to primary as %s", my_id)
 
             sender = asyncio.create_task(self._sender_loop(ws), name="node-sender")
@@ -400,6 +408,26 @@ class NodeClient:
                     self._connection_generation += 1
                 self._connected.clear()
                 self._ws = None
+                await self._publish_connection_state("unreachable")
+
+    async def _publish_connection_state(
+        self,
+        state: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                node_connection_status.publish,
+                state,
+                generation=self._connection_generation,
+                detail=detail,
+            )
+        except Exception:
+            logger.warning(
+                "node_client: could not persist connection status",
+                exc_info=True,
+            )
 
     async def _cancel_and_drain_tasks(
         self,

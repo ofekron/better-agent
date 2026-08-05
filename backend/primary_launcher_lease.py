@@ -19,12 +19,11 @@ from paths import (
 from portable_lock import try_lock_ex, unlock
 
 
-_LOCK_NAME = "primary-launcher.lock"
 _HANDOFF_FD_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_FD"
 _HANDOFF_ID_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_ID"
 _HANDOFF_TOKEN_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_TOKEN"
 _HANDOFF_ENV_KEYS = (_HANDOFF_FD_ENV, _HANDOFF_ID_ENV, _HANDOFF_TOKEN_ENV)
-_HELD_LEASES: dict[str, "PrimaryLauncherLease"] = {}
+_HELD_LEASES: dict[tuple[str, str], "PrimaryLauncherLease"] = {}
 _HELD_LEASES_LOCK = threading.Lock()
 
 
@@ -151,6 +150,10 @@ def _write_metadata(fd: int, payload: dict[str, object]) -> None:
 
 
 class PrimaryLauncherLease:
+    role = "primary"
+    lock_name = "primary-launcher.lock"
+    handoff_env_keys = _HANDOFF_ENV_KEYS
+
     def __init__(
         self,
         *,
@@ -173,12 +176,13 @@ class PrimaryLauncherLease:
         checkout: Path | None = None,
     ) -> "PrimaryLauncherLease":
         resolved, canonical = _canonical_home(state_root or bc_home())
-        path = resolved / _LOCK_NAME
+        path = resolved / cls.lock_name
         checkout_path = Path(checkout or Path.cwd()).resolve(strict=False)
+        held_key = (cls.role, canonical)
         with _HELD_LEASES_LOCK:
-            if canonical in _HELD_LEASES:
+            if held_key in _HELD_LEASES:
                 raise PrimaryLauncherBusyError(
-                    f"another primary launcher already owns {canonical}"
+                    f"another {cls.role} launcher already owns {canonical}"
                 )
             fd = _open_lock_file(path)
             acquired = False
@@ -186,7 +190,7 @@ class PrimaryLauncherLease:
                 acquired = try_lock_ex(fd)
                 if not acquired:
                     raise PrimaryLauncherBusyError(
-                        f"another primary launcher already owns {canonical}"
+                        f"another {cls.role} launcher already owns {canonical}"
                     )
                 lease_id = uuid.uuid4().hex
                 _write_metadata(
@@ -207,7 +211,7 @@ class PrimaryLauncherLease:
                     canonical_home=canonical,
                     lease_id=lease_id,
                 )
-                _HELD_LEASES[canonical] = lease
+                _HELD_LEASES[held_key] = lease
                 return lease
             except Exception:
                 if acquired:
@@ -232,11 +236,12 @@ class PrimaryLauncherLease:
                 "primary launcher descriptor adoption is POSIX-only"
             )
         resolved, canonical = _canonical_home(state_root)
-        path = resolved / _LOCK_NAME
+        path = resolved / cls.lock_name
+        held_key = (cls.role, canonical)
         with _HELD_LEASES_LOCK:
-            if canonical in _HELD_LEASES:
+            if held_key in _HELD_LEASES:
                 raise PrimaryLauncherBusyError(
-                    f"primary launcher lease already adopted for {canonical}"
+                    f"{cls.role} launcher lease already adopted for {canonical}"
                 )
             try:
                 expected_offset = int(handoff_token, 16)
@@ -265,7 +270,7 @@ class PrimaryLauncherLease:
                 canonical_home=canonical,
                 lease_id=lease_id,
             )
-            _HELD_LEASES[canonical] = lease
+            _HELD_LEASES[held_key] = lease
             return lease
 
     @property
@@ -287,7 +292,7 @@ class PrimaryLauncherLease:
         if canonical != self._canonical_home or self._fd is None:
             raise PrimaryLauncherLeaseError("primary launcher lease does not own this home")
         with _HELD_LEASES_LOCK:
-            if _HELD_LEASES.get(canonical) is not self:
+            if _HELD_LEASES.get((type(self).role, canonical)) is not self:
                 raise PrimaryLauncherLeaseError("primary launcher lease is not active")
         _validate_lock_file(self._path, self._fd)
 
@@ -305,22 +310,19 @@ class PrimaryLauncherLease:
             )
         token = self.prepare_handoff()
         os.set_inheritable(self.fileno, True)
-        return {
-            _HANDOFF_FD_ENV: str(self.fileno),
-            _HANDOFF_ID_ENV: self.lease_id,
-            _HANDOFF_TOKEN_ENV: token,
-        }
+        fd_key, id_key, token_key = type(self).handoff_env_keys
+        return {fd_key: str(self.fileno), id_key: self.lease_id, token_key: token}
 
     @classmethod
     def adopt_from_environment(
         cls,
         state_root: Path,
     ) -> "PrimaryLauncherLease | None":
-        values = [os.environ.get(key) for key in _HANDOFF_ENV_KEYS]
+        values = [os.environ.get(key) for key in cls.handoff_env_keys]
         if not any(values):
             return None
         if not all(values):
-            for key in _HANDOFF_ENV_KEYS:
+            for key in cls.handoff_env_keys:
                 os.environ.pop(key, None)
             raise PrimaryLauncherLeaseError(
                 "primary launcher handoff environment is incomplete"
@@ -330,7 +332,7 @@ class PrimaryLauncherLease:
             if fd < 0:
                 raise ValueError
         except (TypeError, ValueError) as exc:
-            for key in _HANDOFF_ENV_KEYS:
+            for key in cls.handoff_env_keys:
                 os.environ.pop(key, None)
             raise PrimaryLauncherLeaseError(
                 "primary launcher handoff descriptor is invalid"
@@ -343,7 +345,7 @@ class PrimaryLauncherLease:
                 handoff_token=str(values[2]),
             )
         finally:
-            for key in _HANDOFF_ENV_KEYS:
+            for key in cls.handoff_env_keys:
                 os.environ.pop(key, None)
 
     def detach_after_transfer(self) -> None:
@@ -369,9 +371,10 @@ class PrimaryLauncherLease:
             raise PrimaryLauncherLeaseError("primary launcher lease is released")
         fd = self._fd
         self._fd = None
+        held_key = (type(self).role, self._canonical_home)
         with _HELD_LEASES_LOCK:
-            if _HELD_LEASES.get(self._canonical_home) is self:
-                del _HELD_LEASES[self._canonical_home]
+            if _HELD_LEASES.get(held_key) is self:
+                del _HELD_LEASES[held_key]
         return fd
 
     def __enter__(self) -> "PrimaryLauncherLease":

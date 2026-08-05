@@ -1,4 +1,14 @@
 TRANSLATIONS: dict[str, str] = {
+    "desktop.node.wss_required": "מצב צומת עמיד דורש כתובת HTTPS/WSS מאומתת של המחשב הראשי.",
+    "desktop.node.wss_attestation_required": "מצב צומת עמיד דורש אימות של כתובת ה-WSS הזאת בהגדרת הצומת.",
+    "desktop.node.primary_prompt": "הזינו כתובת HTTPS/WSS מאומתת של המחשב הראשי:",
+    "desktop.node.status_title": "צומת Better Agent",
+    "desktop.node.status_description": "החלון משקף את שירות הצומת העמיד שבבעלות חשבון המשתמש שלכם.",
+    "desktop.node.status_desired": "מצב רצוי",
+    "desktop.node.status_transition": "מעבר",
+    "desktop.node.status_launcher": "מפעיל",
+    "desktop.node.status_connection": "חיבור למחשב הראשי",
+    "desktop.node.status_health": "תקינות מקומית",
     # --- HTTP / REST errors ---
     "error.session_not_found": "סשן לא נמצא",
     "error.provider_not_found": "ספק לא נמצא",
