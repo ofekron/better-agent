@@ -1389,7 +1389,7 @@ export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
  * children below it with the same renderGroupedEvents pipeline so they
  * look identical to the main session view.
  */
-function SubAgentBlock({
+export function SubAgentBlock({
   toolEvent,
   result,
   childEvents,
@@ -1477,7 +1477,7 @@ function SubAgentBlock({
   );
 }
 
-function jumpToParentEl(el: HTMLElement) {
+export function jumpToParentEl(el: HTMLElement) {
   const container = el.closest(".chat-messages, .supervisor-timeline") as HTMLElement | null;
   if (container) {
     const elBox = el.getBoundingClientRect();
