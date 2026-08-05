@@ -30,6 +30,7 @@ import communicate_mcp  # noqa: E402
 import extension_jobs  # noqa: E402
 import extension_store  # noqa: E402
 import main as backend_main  # noqa: E402
+from provider_runtime_plan_hydration import RUNNER_OPERATION_BROKER_REF  # noqa: E402
 
 
 FAILURES: list[str] = []
@@ -39,6 +40,20 @@ def check(condition: bool, message: str) -> None:
     print(f"  {'✓' if condition else '✗'} {message}")
     if not condition:
         FAILURES.append(message)
+
+
+@pytest.fixture(autouse=True)
+def _active_runtime_python() -> Any:
+    """The test container exposes no managed backend dependency environment, so
+    resolve extension runtime launch to this interpreter."""
+    original = extension_store.dependency_plan.active_runtime_python
+    extension_store.dependency_plan.active_runtime_python = (
+        lambda _backend_dir: Path(sys.executable)
+    )
+    try:
+        yield
+    finally:
+        extension_store.dependency_plan.active_runtime_python = original
 
 
 class _ReusableHTTPServer(ThreadingHTTPServer):
@@ -397,7 +412,9 @@ async def test_core_mcp_process_survives_backend_restart() -> None:
     try:
         backend.start(1)
         inputs = _run_inputs(backend)
-        config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"]["capabilities"]
+        config = builtin_mcp_config.with_builtin_mcp_servers(
+            inputs, {}, runtime_broker=RUNNER_OPERATION_BROKER_REF,
+        )["mcp_servers"]["capabilities"]
         await _assert_process_survives_restart(
             "core capabilities MCP",
             config,

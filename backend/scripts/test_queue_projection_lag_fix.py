@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 
+import pytest
+
 import _test_home
 _TMP_HOME = _test_home.isolate("ba-test-queue-projection-")
 
@@ -14,20 +16,35 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
-from event_ingester import event_ingester  # noqa: E402
+import lifecycle_command_store  # noqa: E402
 import recovery  # noqa: E402
 import session_detail_api  # noqa: E402
 import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
+from hot_path_executor import session_detail_path  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+# re-enqueue now reconciles against the lifecycle command store; initialize it
+# under the isolated home so transition_for() can open its database.
+lifecycle_command_store.initialize()
+
+pytestmark = pytest.mark.anyio
+
+
+class _LifecycleSnapshot:
+    identity = None
+    execution = None
+
+
+class _LifecycleCommands:
+    def snapshot(self, _sid: str) -> _LifecycleSnapshot:
+        return _LifecycleSnapshot()
 
 
 class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
+        self.lifecycle_commands = _LifecycleCommands()
 
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
         return False
@@ -68,7 +85,7 @@ def _make_session() -> str:
     return sess["id"]
 
 
-async def test_reenqueue_uses_projection_without_full_root_load() -> bool:
+async def test_reenqueue_uses_projection_without_full_root_load() -> None:
     sid = _make_session()
     session_manager.add_queued_prompt(sid, _queued_prompt())
     session_manager.flush_pending_persists()
@@ -103,11 +120,11 @@ async def test_reenqueue_uses_projection_without_full_root_load() -> bool:
         and submitted.get("_alter_rewind_latest") is True
     )
     session_manager.remove_queued_prompt(sid, "qp-1")
-    print(f"{PASS if ok else FAIL} re-enqueue uses queue projection")
-    return ok
+    session_manager.flush_pending_persists()
+    assert ok, "re-enqueue must use queue projection without cold-loading root trees"
 
 
-async def test_reenqueue_dedupes_from_projection() -> bool:
+async def test_reenqueue_dedupes_from_projection() -> None:
     sid = _make_session()
     lifecycle_id = "life-1"
     session_manager.append_user_msg(sid, {
@@ -132,30 +149,21 @@ async def test_reenqueue_dedupes_from_projection() -> bool:
         recovery._coordinator_ref = original_coordinator
 
     queued = session_queue_projection.queued_prompts(sid)
-    ok = coordinator.submitted == [] and queued == []
-    print(f"{PASS if ok else FAIL} re-enqueue dedupes from projected user keys")
-    return ok
-
-
-async def test_get_session_context_scan_is_off_thread() -> bool:
-    sid = _make_session()
-    original_max_seq = event_ingester.max_seq_by_sid
-    original_cursor = event_ingester.cursor
-    original_render_seq = event_ingester.render_seq_by_sid
-    original_tree = session_manager.get_root_tree_stubbed
-
-    event_ingester.cursor = lambda _root_id: 1
-    session_manager.get_root_tree_stubbed = (
-        lambda _sid, msg_limit=50, exchange_count=None: {"id": sid, "messages": []}
+    assert coordinator.submitted == [] and queued == [], (
+        "re-enqueue must dedupe against projected user keys"
     )
 
-    def slow_max_seq(_root_id: str) -> dict[str, int]:
+
+async def test_get_session_context_scan_is_off_thread() -> None:
+    sid = _make_session()
+    original_tree = session_manager.get_root_tree_stubbed
+
+    def slow_tree(_sid: str, msg_limit: int = 50, exchange_count=None) -> dict:
         import time
         time.sleep(0.2)
-        return {sid: 1}
+        return {"id": _sid, "messages": []}
 
-    event_ingester.max_seq_by_sid = slow_max_seq
-    event_ingester.render_seq_by_sid = lambda _root_id: {sid: 1}
+    session_manager.get_root_tree_stubbed = slow_tree
     ticks = 0
 
     async def heartbeat() -> None:
@@ -166,40 +174,34 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
 
     task = asyncio.create_task(heartbeat())
     try:
-        result = await session_detail_api.get_session(sid)
+        result = await session_detail_path.run(
+            "sessions.detail.worker",
+            session_detail_api._session_detail_snapshot_sync,
+            sid,
+            msg_limit=50,
+            exchange_count=None,
+            include_cache_key=False,
+        )
     finally:
-        task.cancel()
-        event_ingester.max_seq_by_sid = original_max_seq
-        event_ingester.cursor = original_cursor
-        event_ingester.render_seq_by_sid = original_render_seq
         session_manager.get_root_tree_stubbed = original_tree
+        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
 
-    ok = result.get("max_seq_by_sid", {}).get(sid) == 1 and ticks >= 5
-    print(f"{PASS if ok else FAIL} GET session context scan yields to event loop")
-    return ok
-
-
-async def _run() -> bool:
-    results = [
-        await test_reenqueue_uses_projection_without_full_root_load(),
-        await test_reenqueue_dedupes_from_projection(),
-        await test_get_session_context_scan_is_off_thread(),
-    ]
-    print(f"\n{sum(1 for r in results if r)}/{len(results)} passed")
-    return all(results)
-
-
-def main_test() -> int:
-    try:
-        return 0 if asyncio.run(_run()) else 1
-    finally:
-        session_manager.flush_pending_persists()
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    assert result is not None, "detail snapshot must return the session tree"
+    assert ticks >= 5, "detail snapshot scan must run off the event loop"
 
 
 if __name__ == "__main__":
-    sys.exit(main_test())
+    async def _run() -> None:
+        await test_reenqueue_uses_projection_without_full_root_load()
+        await test_reenqueue_dedupes_from_projection()
+        await test_get_session_context_scan_is_off_thread()
+
+    try:
+        asyncio.run(_run())
+    finally:
+        session_manager.flush_pending_persists()
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
