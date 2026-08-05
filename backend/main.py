@@ -735,6 +735,63 @@ except Exception:
 from native_files_manager import native_files
 native_files.bind()
 
+
+def _wire_surface_adapter() -> None:
+    """Compose the Chat Surface Contract adapter (ADR 0006) onto its
+    versioned transport (backend/adapter_api.py).
+
+    CONSTRAINT: this backend imports its modules bare (`from event_bus
+    import bus`), while backend/adapters/* and backend/adapter_api.py
+    import dotted (`backend.event_bus`) per the boundary enforced by
+    backend/scripts/test_adapter_boundaries.py. Left alone, that mismatch
+    mints a second EventBus (etc.) singleton under the "backend.*" module
+    keys, so ChatSurfaceAdapter.bind() would subscribe on a bus nothing
+    ever publishes to. Alias the seven bare infra modules the adapter
+    boundary allows onto their "backend.*" sys.modules keys BEFORE the
+    first `backend.adapters`/`backend.surface_contract` import, so every
+    dotted import of them resolves to the SAME already-bare-imported
+    instance instead of loading a fresh module.
+    """
+    import importlib
+    import sys
+    import types
+    from pathlib import Path
+
+    if "backend" not in sys.modules:
+        try:
+            importlib.import_module("backend")
+        except ImportError:
+            backend_pkg = types.ModuleType("backend")
+            backend_pkg.__path__ = [str(Path(__file__).resolve().parent)]
+            sys.modules["backend"] = backend_pkg
+
+    import event_bus as _event_bus
+    import event_journal as _event_journal
+    import event_ingester as _event_ingester
+    import jsonl_tailer as _jsonl_tailer
+    import paths as _paths
+    import i18n as _i18n
+    import user_msg_lifecycle as _user_msg_lifecycle
+
+    sys.modules["backend.event_bus"] = _event_bus
+    sys.modules["backend.event_journal"] = _event_journal
+    sys.modules["backend.event_ingester"] = _event_ingester
+    sys.modules["backend.jsonl_tailer"] = _jsonl_tailer
+    sys.modules["backend.paths"] = _paths
+    sys.modules["backend.i18n"] = _i18n
+    sys.modules["backend.user_msg_lifecycle"] = _user_msg_lifecycle
+
+    from backend.adapters.chat_adapter import ChatSurfaceAdapter
+    import adapter_api
+
+    chat_surface_adapter = ChatSurfaceAdapter()
+    chat_surface_adapter.bind()
+    adapter_api.configure(chat=chat_surface_adapter)
+    app.include_router(adapter_api.router)
+
+
+_wire_surface_adapter()
+
 # Working-mode owners subscribe to `session.parent_deleted` and route by
 # `working_mode`; cascade-delete only publishes the fact.
 import working_mode as _working_mode_mod
