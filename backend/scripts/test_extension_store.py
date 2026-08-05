@@ -256,6 +256,7 @@ def _write_private_extension_package(
         "surfaces": manifest.get("surfaces") or [],
         "entrypoints": manifest.get("entrypoints") or {},
         "permissions": manifest.get("permissions") or {},
+        "core_roles": manifest.get("core_roles") or [],
         "protocol": manifest.get("protocol") or _default_protocol(manifest.get("entrypoints") or {}),
         "marketplace": manifest.get("marketplace") or {},
     }
@@ -4821,6 +4822,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         {
             "name": "Assistant",
             "surfaces": ["backend_feature"],
+            "core_roles": ["assistant"],
             "permissions": {"session_state": True},
         },
         files={"prompts/system.md": "Assistant role prompt."},
@@ -4836,6 +4838,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(assistant_id, True)
 
     sess = assistant_ui.ensure_singleton("board")
     sid = sess["id"]
