@@ -14,6 +14,9 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -28,6 +31,20 @@ os.environ["HOME"] = _TMP_OS_HOME
 import extension_store  # noqa: E402
 import native_mcp_grants  # noqa: E402
 import installation_profile  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _active_runtime_python() -> Any:
+    """The test container exposes no managed backend dependency environment, so
+    resolve extension runtime launch to this interpreter."""
+    original = extension_store.dependency_plan.active_runtime_python
+    extension_store.dependency_plan.active_runtime_python = (
+        lambda _backend_dir: Path(sys.executable)
+    )
+    try:
+        yield
+    finally:
+        extension_store.dependency_plan.active_runtime_python = original
 
 # Bare test homes have no installation.json -- _record_active() gates on
 # installation_profile.integrations_enabled(), which is False without one.

@@ -28,6 +28,10 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 import _test_home
 _TMP_HOME = _test_home.isolate_installed("bc-test-harness-profile-mcp-effect-")
@@ -55,6 +59,21 @@ from session_manager import manager as session_manager  # noqa: E402
 # activation gate, not a fake install, decides whether these real
 # extensions are considered "active" in an isolated test home.
 installation_profile.integrations_enabled = lambda: True
+
+
+@pytest.fixture(autouse=True)
+def _active_runtime_python() -> Any:
+    """The test container exposes no managed backend dependency environment, so
+    resolve extension runtime launch to this interpreter."""
+    original = extension_store.dependency_plan.active_runtime_python
+    extension_store.dependency_plan.active_runtime_python = (
+        lambda _backend_dir: Path(sys.executable)
+    )
+    try:
+        yield
+    finally:
+        extension_store.dependency_plan.active_runtime_python = original
+
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"

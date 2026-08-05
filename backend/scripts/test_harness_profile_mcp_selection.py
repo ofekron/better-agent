@@ -17,6 +17,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
 if str(BACKEND) not in sys.path:
@@ -169,6 +171,14 @@ def _run_inputs(snapshot: dict | None = None) -> dict:
     return inputs
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _install_fixtures() -> None:
+    """These tests' setup lived in main(), which pytest never calls. Install
+    both fixtures once so the server set is populated for every test."""
+    _install_fixture(KEPT_EXT, KEPT_SERVER)
+    _install_fixture(DROPPED_EXT, DROPPED_SERVER)
+
+
 def test_default_offers_every_fixture_server() -> None:
     servers = _runtime_servers(harness_profile_store.DEFAULT_PROFILE_ID)
     assert KEPT_SERVER in servers, f"Default dropped {KEPT_SERVER}: {sorted(servers)}"
@@ -195,8 +205,8 @@ def test_disabled_extension_is_absent_from_authoritative_projection() -> None:
     profile = harness_profile_store.upsert_profile({
         **profile,
         "secret_refs": {
-            DROPPED_EXT: ["extension-setting:dropped:token"],
-            KEPT_EXT: ["extension-setting:kept:token"],
+            DROPPED_EXT: [f"extension-setting:{DROPPED_EXT}:token"],
+            KEPT_EXT: [f"extension-setting:{KEPT_EXT}:token"],
         },
     }, profile["id"])
     harness_profile_store.apply_override_patch(
@@ -237,7 +247,7 @@ def test_disabled_extension_is_absent_from_authoritative_projection() -> None:
     assert KEPT_EXT in snapshot["extension_setting_overlays"], snapshot[
         "extension_setting_overlays"
     ]
-    assert snapshot["secret_refs"][KEPT_EXT] == ["extension-setting:kept:token"]
+    assert snapshot["secret_refs"][KEPT_EXT] == [f"extension-setting:{KEPT_EXT}:token"]
     assert f"INSTRUCTION FROM {KEPT_EXT}" in json.dumps(
         snapshot["capability_contexts"]
     )

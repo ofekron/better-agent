@@ -5,6 +5,9 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
@@ -31,8 +34,34 @@ import runner_agy  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_qwen  # noqa: E402
 
+# Bare test homes have no installation.json -- the activation gate that decides
+# whether extensions are "active" must be bypassed, same as the sibling parity
+# tests.
+installation_profile.integrations_enabled = lambda: True
+
 EXTENSION_ID = "ofek.testape"
 SERVER_NAME = "testape"
+
+
+@pytest.fixture(autouse=True)
+def _active_runtime_python() -> Any:
+    """The test container exposes no managed backend dependency environment, so
+    resolve extension runtime launch to this interpreter."""
+    original = extension_store.dependency_plan.active_runtime_python
+    extension_store.dependency_plan.active_runtime_python = (
+        lambda _backend_dir: Path(sys.executable)
+    )
+    try:
+        yield
+    finally:
+        extension_store.dependency_plan.active_runtime_python = original
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _install_testape_once() -> None:
+    """Setup lived in main(), which pytest never calls. Install the fixture
+    once so the projection resolves the testape server."""
+    _install_testape_fixture()
 
 
 def _install_testape_fixture() -> None:
