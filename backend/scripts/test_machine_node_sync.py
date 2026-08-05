@@ -41,6 +41,19 @@ import provider_remote  # noqa: E402
 logging.disable(logging.CRITICAL)
 
 
+@pytest.fixture(autouse=True)
+def _reset_provider_config_state():
+    """config_store._state_cache and its on-disk file are module-global and
+    survive across tests; a projected state left by one test (e.g. an import
+    via _fresh_provider_sync) would trip _save_state's primary-owned
+    projection fence in any later test that writes providers directly. Reset
+    to a clean baseline before every test so each owns its provider state."""
+    config_store._config_path().unlink(missing_ok=True)
+    with config_store._state_cache_lock:
+        config_store._state_cache = None
+    yield
+
+
 def _provider_record(
     provider_id: str,
     name: str,
@@ -594,7 +607,7 @@ async def test_node_runtime_readiness_waits_across_reconnect() -> None:
         address="ws://node",
         cwd_roots=("/tmp",),
     )
-    first = await node_store.register(spec, SimpleNamespace())
+    first = await node_store.register(spec, SimpleNamespace(), repository_alignment_ready=True)
     waiter = asyncio.create_task(
         node_store.wait_for_runtime_ready("runtime-ready-node"),
     )
@@ -602,7 +615,7 @@ async def test_node_runtime_readiness_waits_across_reconnect() -> None:
     assert not waiter.done()
 
     await node_store.unregister("runtime-ready-node")
-    second = await node_store.register(spec, SimpleNamespace())
+    second = await node_store.register(spec, SimpleNamespace(), repository_alignment_ready=True)
     assert node_store.mark_runtime_ready("runtime-ready-node", first) is False
     assert not waiter.done()
     assert node_store.mark_runtime_ready("runtime-ready-node", second) is True
