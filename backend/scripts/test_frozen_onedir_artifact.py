@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -15,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_execution_common import ExecutionContractError
 from codex_execution_identity import FileIdentity
+import provider_frozen_artifact_smoke
+import provider_frozen_bundle
+import private_diagnostics
 from provider_claude_execution import (
     attest_embedded_claude_sdk,
     capture_embedded_claude_sdk,
@@ -236,6 +240,13 @@ def test_artifact_workflow_installs_backend_relative_requirements() -> None:
     assert "Start-Process" in windows_smoke["run"]
     assert "-PassThru" in windows_smoke["run"]
     assert "$Smoke.WaitForExit(1000)" in windows_smoke["run"]
+    assert "[DateTime]::UtcNow.AddMinutes(5)" in windows_smoke["run"]
+    assert "taskkill.exe" in windows_smoke["run"]
+    assert "/T" in windows_smoke["run"]
+    assert "/F" in windows_smoke["run"]
+    assert "$Smoke.WaitForExit(5000)" in windows_smoke["run"]
+    assert "$Smoke.WaitForExit()" not in windows_smoke["run"]
+    assert windows_smoke["run"].count("Show-SmokeDiagnostics") == 3
     assert 'Filter "result.progress.*.json"' in windows_smoke["run"]
     assert "ConvertFrom-Json" in windows_smoke["run"]
     assert "artifact-smoke-progress" in windows_smoke["run"]
@@ -327,6 +338,137 @@ def test_artifact_smoke_failure_is_structured() -> None:
                 "status": "failed",
             },
         ]
+
+
+def test_materialization_normalizes_operational_exceptions() -> None:
+    with tempfile.TemporaryDirectory(prefix="materialization-errors-") as raw:
+        bundle, _, _ = _capture(Path(raw))
+        destination = Path(raw) / "destination"
+        for failure in (
+            OSError("private filesystem detail"),
+            RuntimeError("private runtime detail"),
+            AttributeError("private platform detail"),
+        ):
+            with mock.patch.object(
+                provider_frozen_bundle,
+                "_materialize_frozen_bundle",
+                side_effect=failure,
+            ):
+                try:
+                    materialize_frozen_bundle(bundle, destination)
+                except ExecutionContractError as exc:
+                    assert str(exc) == "frozen bundle materialization failed"
+                    assert exc.__cause__ is failure
+                else:
+                    raise AssertionError(
+                        f"{type(failure).__name__} escaped materialization",
+                    )
+        with mock.patch.object(
+            provider_frozen_bundle,
+            "_materialize_frozen_bundle",
+            side_effect=KeyboardInterrupt(),
+        ):
+            try:
+                materialize_frozen_bundle(bundle, destination)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("KeyboardInterrupt was normalized")
+
+
+def test_artifact_smoke_unexpected_failure_is_structured() -> None:
+    with tempfile.TemporaryDirectory(prefix="artifact-unexpected-") as raw:
+        root = Path(raw)
+        state_root = root / "state"
+        state_root.mkdir()
+        output = root / "result.json"
+        failure = RuntimeError("private runtime detail")
+        with (
+            mock.patch.object(
+                provider_frozen_artifact_smoke,
+                "ba_home",
+                return_value=state_root,
+            ),
+            mock.patch.object(
+                private_diagnostics,
+                "ba_home",
+                return_value=state_root,
+            ),
+            mock.patch.object(sys, "frozen", True, create=True),
+            mock.patch.object(sys, "_MEIPASS", str(root), create=True),
+            mock.patch.object(
+                provider_frozen_artifact_smoke,
+                "_materialize_snapshot",
+                side_effect=failure,
+            ),
+        ):
+            result = artifact_smoke_main(
+                ["--frozen-artifact-smoke", "--output", str(output)],
+            )
+        assert result == 1
+        assert json.loads(output.read_text(encoding="utf-8")) == {
+            "error": "artifact smoke failed",
+            "exception_type": "RuntimeError",
+        }
+        checkpoints = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(root.glob("result.progress.*.json"))
+        ]
+        assert {"stage": "temp-cleanup", "status": "completed"} in checkpoints
+        assert checkpoints[-1] == {
+            "error": "artifact smoke failed (RuntimeError)",
+            "stage": "smoke",
+            "status": "failed",
+        }
+        assert "private runtime detail" not in json.dumps(checkpoints)
+        diagnostic = (state_root / "faulthandler.log").read_text(
+            encoding="utf-8",
+        )
+        assert "RuntimeError: private runtime detail" in diagnostic
+
+
+def test_private_diagnostic_log_rejects_redirects() -> None:
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory(prefix="private-diagnostics-") as raw:
+        root = Path(raw)
+        victim = root / "victim"
+        victim.write_text("unchanged", encoding="utf-8")
+        (root / "faulthandler.log").symlink_to(victim)
+        with mock.patch.object(private_diagnostics, "ba_home", return_value=root):
+            try:
+                private_diagnostics.append_private_exception(
+                    RuntimeError("must not reach victim"),
+                    context="test",
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("redirecting diagnostic path was accepted")
+        assert victim.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_private_diagnostic_log_preserves_exception_chain() -> None:
+    with tempfile.TemporaryDirectory(prefix="diagnostic-chain-") as raw:
+        root = Path(raw)
+        with mock.patch.object(private_diagnostics, "ba_home", return_value=root):
+            try:
+                try:
+                    raise OSError("inner operation detail")
+                except OSError as cause:
+                    raise ExecutionContractError("outer contract") from cause
+            except ExecutionContractError as exc:
+                private_diagnostics.append_private_exception(
+                    exc,
+                    context="test chain",
+                )
+        diagnostic = (root / "faulthandler.log").read_text(encoding="utf-8")
+        assert "OSError: inner operation detail" in diagnostic
+        assert "ExecutionContractError: outer contract" in diagnostic
+        if os.name != "nt":
+            assert stat.S_IMODE(
+                (root / "faulthandler.log").stat().st_mode,
+            ) == 0o600
 
 
 def test_source_add_change_remove_and_mode_tamper_are_rejected() -> None:
@@ -432,6 +574,10 @@ def main() -> None:
     test_frozen_bundle_excludes_optional_mcp_cli_surface()
     test_windows_materialization_uses_acl_authority()
     test_artifact_smoke_failure_is_structured()
+    test_materialization_normalizes_operational_exceptions()
+    test_artifact_smoke_unexpected_failure_is_structured()
+    test_private_diagnostic_log_rejects_redirects()
+    test_private_diagnostic_log_preserves_exception_chain()
     test_source_add_change_remove_and_mode_tamper_are_rejected()
     test_materialized_add_change_remove_and_mode_tamper_are_rejected()
     print("frozen onedir artifact tests passed")

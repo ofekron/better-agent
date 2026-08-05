@@ -6,8 +6,10 @@ Run with:
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent / "backend"
@@ -53,6 +55,59 @@ def test_diagnostic_watchdog_has_an_exit_owner() -> None:
     assert "_stop_diagnostics()" in source
 
 
+def test_run_main_reports_unexpected_failure_before_diagnostics_close() -> None:
+    events: list[str] = []
+
+    class OrderedLog(io.StringIO):
+        def write(self, value: str) -> int:
+            events.append("write")
+            return super().write(value)
+
+    log = OrderedLog()
+    with (
+        mock.patch.object(
+            app_main,
+            "main",
+            side_effect=RuntimeError("frozen backend failure"),
+        ),
+        mock.patch.object(app_main, "_fh", log),
+        mock.patch.object(
+            app_main,
+            "_stop_diagnostics",
+            side_effect=lambda: events.append("stop"),
+        ),
+    ):
+        result = app_main._run_main()
+        recorded = log.getvalue()
+    assert result == 1
+    assert "RuntimeError: frozen backend failure" in recorded
+    assert events[-1] == "stop"
+
+
+def test_run_main_does_not_consume_process_control_exceptions() -> None:
+    stopped = False
+
+    def stop() -> None:
+        nonlocal stopped
+        stopped = True
+
+    with (
+        mock.patch.object(
+            app_main,
+            "main",
+            side_effect=KeyboardInterrupt(),
+        ),
+        mock.patch.object(app_main, "_stop_diagnostics", side_effect=stop),
+    ):
+        try:
+            app_main._run_main()
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("KeyboardInterrupt was consumed")
+    assert stopped
+
+
 TESTS = [
     ("app_main._role classifies shell vs backend invocations",
      test_role_dispatch),
@@ -60,6 +115,10 @@ TESTS = [
      test_diagnostic_argv_redacts_pair_intent),
     ("app_main always stops its diagnostic watchdog",
      test_diagnostic_watchdog_has_an_exit_owner),
+    ("app_main records unexpected failures before closing diagnostics",
+     test_run_main_reports_unexpected_failure_before_diagnostics_close),
+    ("app_main preserves process-control exceptions",
+     test_run_main_does_not_consume_process_control_exceptions),
 ]
 
 

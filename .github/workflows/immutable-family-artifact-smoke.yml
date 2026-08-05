@@ -78,10 +78,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $ArtifactRoot "state") | Out-Null
           $env:BETTER_AGENT_HOME = Join-Path $ArtifactRoot "state"
           $Result = Join-Path $ArtifactRoot "result.json"
+          $FailureLog = Join-Path $ArtifactRoot "state\faulthandler.log"
+          function Show-SmokeDiagnostics {
+              if (Test-Path $Result) {
+                  Get-Content $Result
+              }
+              if (Test-Path $FailureLog) {
+                  Get-Content $FailureLog
+              }
+          }
           $Smoke = Start-Process `
             -FilePath "desktop\dist\Better Agent\Better Agent.exe" `
             -ArgumentList "--frozen-artifact-smoke", "--output", $Result `
             -PassThru
+          $Deadline = [DateTime]::UtcNow.AddMinutes(5)
           $SeenProgress = @{}
           do {
               $Exited = $Smoke.WaitForExit(1000)
@@ -106,15 +116,18 @@ jobs:
                   Write-Host "artifact-smoke-progress $ProgressLine"
                   $SeenProgress[$ProgressFile.Name] = $true
               }
+              if (-not $Exited -and [DateTime]::UtcNow -ge $Deadline) {
+                  Write-Host "artifact smoke exceeded its five-minute safety bound"
+                  & taskkill.exe /PID $($Smoke.Id) /T /F
+                  if (-not $Smoke.WaitForExit(5000)) {
+                      Write-Host "artifact smoke process tree did not terminate"
+                  }
+                  Show-SmokeDiagnostics
+                  throw "frozen artifact smoke did not exit"
+              }
           } while (-not $Exited)
           if ($Smoke.ExitCode -ne 0) {
-              if (Test-Path $Result) {
-                  Get-Content $Result
-              }
-              $FailureLog = Join-Path $ArtifactRoot "state\faulthandler.log"
-              if (Test-Path $FailureLog) {
-                  Get-Content $FailureLog
-              }
+              Show-SmokeDiagnostics
               throw "frozen artifact smoke failed"
           }
           python -c "import json,sys; value=json.load(open(sys.argv[1], encoding='utf-8')); assert set(value['families']) == {'claude', 'agy'}; assert value['windows_wrapper'] == 'rejected'" $Result

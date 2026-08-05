@@ -17,9 +17,33 @@ from __future__ import annotations
 
 import os
 import sys
+from types import TracebackType
 
 from deep_link import DeepLinkError, deep_link_from_argv, redact_argv
 from paths import ba_home
+from private_diagnostics import (
+    open_private_diagnostics_log,
+    write_private_exception,
+)
+
+
+def _record_exception(
+    exc_type: type[BaseException],
+    exc: BaseException,
+    tb: TracebackType | None,
+    *,
+    context: str = "uncaught",
+) -> None:
+    try:
+        write_private_exception(
+            _fh,
+            exc_type,
+            exc,
+            tb,
+            context=context,
+        )
+    except Exception:
+        pass
 
 # Early-startup diagnostics. A windowed `.app` has no stdout/stderr —
 # without this, a hang during `import main` leaves us nothing to debug.
@@ -27,11 +51,9 @@ from paths import ba_home
 # Python stacks to disk on a timer, so a stuck process drops a complete
 # dump into `ba_home()/faulthandler.log`.
 try:
-    _home = ba_home()
     import faulthandler
     import threading as _th
-    import traceback as _tb
-    _fh = (_home / "faulthandler.log").open("a", buffering=1)
+    _fh = open_private_diagnostics_log()
     _fh.write(
         f"=== app_main pid={os.getpid()} argv={redact_argv(sys.argv)} ===\n"
     )
@@ -39,27 +61,17 @@ try:
     faulthandler.dump_traceback_later(15, repeat=True, file=_fh)
 
     def _excepthook(exc_type, exc, tb):
-        try:
-            _fh.write(f"=== uncaught {exc_type.__name__}: {exc} ===\n")
-            _tb.print_exception(exc_type, exc, tb, file=_fh)
-            _fh.write("\n")
-        except Exception:
-            pass
+        _record_exception(exc_type, exc, tb)
         sys.__excepthook__(exc_type, exc, tb)
     sys.excepthook = _excepthook
 
     def _thread_excepthook(args):
-        try:
-            _fh.write(
-                f"=== uncaught in thread {args.thread.name}: "
-                f"{args.exc_type.__name__} ===\n"
-            )
-            _tb.print_exception(
-                args.exc_type, args.exc_value, args.exc_traceback, file=_fh,
-            )
-            _fh.write("\n")
-        except Exception:
-            pass
+        _record_exception(
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+            context=f"uncaught in thread {args.thread.name}",
+        )
     _th.excepthook = _thread_excepthook
 except Exception:
     pass
@@ -110,6 +122,9 @@ def main() -> int:
 def _run_main() -> int:
     try:
         return main()
+    except Exception as exc:
+        _record_exception(type(exc), exc, exc.__traceback__)
+        return 1
     finally:
         _stop_diagnostics()
 

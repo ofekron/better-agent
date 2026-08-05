@@ -25,12 +25,22 @@ from provider_launch_identity import capture_cli_launch
 from provider_pinned_launch import open_pinned_runner_launch
 from provider_runner_launch import RunnerLaunch, capture_runner_launch
 from paths import ba_home
+from private_diagnostics import append_private_exception
 
 
 _RUNNERS = {
     "claude": ("runner", Path(__file__).with_name("runner.py")),
     "agy": ("runner_agy", Path(__file__).with_name("runner_agy.py")),
 }
+
+
+def _failure_type(exc: Exception) -> str:
+    cause: BaseException = exc
+    seen: set[int] = set()
+    while cause.__cause__ is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        cause = cause.__cause__
+    return type(cause).__name__
 
 
 def _safe_output_parent(path: Path, label: str) -> Path:
@@ -239,8 +249,16 @@ def _materialize_snapshot(
         elapsed_ms=capture_ms,
     )
     progress.record(stage="materialize", status="started")
-    with open_pinned_runner_launch(runner) as pinned:
-        materialized_executable = Path(pinned.argv[0])
+    try:
+        with open_pinned_runner_launch(runner) as pinned:
+            materialized_executable = Path(pinned.argv[0])
+    except Exception as exc:
+        progress.record(
+            stage="materialize",
+            status="failed",
+            error=f"materialization failed ({_failure_type(exc)})",
+        )
+        raise
     materialized = time.perf_counter_ns()
     materialize_ms = (materialized - captured) // 1_000_000
     progress.record(
@@ -443,13 +461,31 @@ def main(argv: list[str] | None = None) -> int:
         result = _execute(args, progress)
         progress.record(stage="smoke", status="completed")
         return result
-    except ExecutionContractError as exc:
+    except Exception as exc:
+        try:
+            append_private_exception(
+                exc,
+                context="artifact smoke failure",
+            )
+        except Exception:
+            pass
+        unexpected = not isinstance(exc, ExecutionContractError)
+        error = str(exc) if not unexpected else "artifact smoke failed"
+        exception_type = _failure_type(exc)
+        has_cause = exc.__cause__ is not None
         progress.record(
             stage="smoke",
             status="failed",
-            error=str(exc),
+            error=(
+                f"{error} ({exception_type})"
+                if unexpected or has_cause
+                else error
+            ),
         )
-        _write_result(args.output, {"error": str(exc)})
+        payload = {"error": error}
+        if unexpected or has_cause:
+            payload["exception_type"] = exception_type
+        _write_result(args.output, payload)
         return 1
 
 

@@ -985,7 +985,14 @@ def materialize_frozen_bundle(
     destination: str | Path,
 ) -> Path:
     with timed_contract_step("provider.frozen_bundle.materialize"):
-        return _materialize_frozen_bundle(bundle, destination)
+        try:
+            return _materialize_frozen_bundle(bundle, destination)
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError(
+                "frozen bundle materialization failed",
+            ) from exc
 
 
 def _materialize_frozen_bundle(
