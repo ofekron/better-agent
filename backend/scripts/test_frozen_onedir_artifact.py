@@ -177,6 +177,28 @@ def test_descriptor_copy_accepts_metadata_only_drift() -> None:
             os.close(descriptor)
 
 
+def test_materialized_mtime_uses_supported_platform_operation() -> None:
+    target = Path("materialized-entry")
+    with mock.patch.object(provider_frozen_bundle.os, "utime") as utime:
+        provider_frozen_bundle._set_materialized_mtime(
+            target,
+            123,
+            platform="nt",
+        )
+        utime.assert_called_once_with(target, ns=(123, 123))
+        utime.reset_mock()
+        provider_frozen_bundle._set_materialized_mtime(
+            target,
+            456,
+            platform="posix",
+        )
+        utime.assert_called_once_with(
+            target,
+            ns=(456, 456),
+            follow_symlinks=False,
+        )
+
+
 def test_macos_default_bundle_root_preserves_app_layout() -> None:
     if sys.platform != "darwin":
         return
@@ -569,6 +591,7 @@ def test_materialized_add_change_remove_and_mode_tamper_are_rejected() -> None:
 
 def main() -> None:
     test_complete_bundle_round_trip_and_materialization()
+    test_materialized_mtime_uses_supported_platform_operation()
     test_macos_default_bundle_root_preserves_app_layout()
     test_artifact_workflow_installs_backend_relative_requirements()
     test_frozen_bundle_excludes_optional_mcp_cli_surface()

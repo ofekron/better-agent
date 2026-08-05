@@ -780,6 +780,19 @@ def _materialized_bundle_attestation_failure(
         return "destination is unreadable"
 
 
+def _set_materialized_mtime(
+    path: Path,
+    mtime_ns: int,
+    *,
+    platform: str = os.name,
+) -> None:
+    timestamps = (mtime_ns, mtime_ns)
+    if platform == "nt":
+        os.utime(path, ns=timestamps)
+        return
+    os.utime(path, ns=timestamps, follow_symlinks=False)
+
+
 def _copy_attested_file(
     entry: FrozenBundleEntry,
     destination: Path,
@@ -844,11 +857,7 @@ def _copy_attested_file(
             # __pycache__ entries stale, so executing the copy would
             # regenerate them in place and break later attestation of
             # the shared cache entry.
-            os.utime(
-                destination,
-                ns=(identity.mtime_ns, identity.mtime_ns),
-                follow_symlinks=False,
-            )
+            _set_materialized_mtime(destination, identity.mtime_ns)
         finally:
             os.close(source)
     except ExecutionContractError:
