@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from i18n import t
-from session_manager import manager as session_manager
 import perf
 import session_store
 
