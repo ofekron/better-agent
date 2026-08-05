@@ -60,7 +60,7 @@ def load_prompts_by_project(sessions_dir: Optional[Path] = None) -> dict[str, li
         if f.name.endswith(".summary.json"):
             continue
         try:
-            session = json.loads(f.read_text())
+            session = json.loads(f.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         cwd = session.get("cwd")

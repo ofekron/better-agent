@@ -648,7 +648,7 @@ async def _tail_run_events_into_queue(ctx: _RemoteRunCtx, run_dir: Path) -> None
     events_path = run_dir / "events.jsonl"
     pid: Optional[int] = None
     try:
-        pid = int((run_dir / "pid").read_text().strip())
+        pid = int((run_dir / "pid").read_text(encoding="utf-8").strip())
     except Exception:
         pass
 
@@ -1322,7 +1322,7 @@ def _rpc_get_run_status(params: dict) -> dict:
         state = _read_run_json(rd, "state.json") or {}
         pid: Optional[int] = None
         try:
-            pid = int((rd / "pid").read_text().strip())
+            pid = int((rd / "pid").read_text(encoding="utf-8").strip())
         except Exception:
             pass
         alive = bool(pid) and complete is None and _pid_alive(pid)

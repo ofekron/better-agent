@@ -9,7 +9,7 @@ from project_match.matcher import (
 
 
 def _write_session(sessions, name, cwd, messages):
-    (sessions / name).write_text(json.dumps({"id": name, "cwd": cwd, "messages": messages}))
+    (sessions / name).write_text(json.dumps({"id": name, "cwd": cwd, "messages": messages}), encoding="utf-8")
 
 
 def test_load_groups_prompts_by_cwd():
@@ -25,7 +25,7 @@ def test_load_groups_prompts_by_cwd():
             {"role": "user", "content": "fix the css"},
             {"role": "user", "content": ""},  # empty -> skipped
         ])
-        (sessions / "a.summary.json").write_text("{}")  # sidecar -> ignored
+        (sessions / "a.summary.json").write_text("{}", encoding="utf-8")  # sidecar -> ignored
         by = load_prompts_by_project(sessions)
         assert by["/proj/a"] == ["deploy the backend", "scale workers"]
         assert by["/proj/b"] == ["fix the css"]

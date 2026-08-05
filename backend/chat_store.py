@@ -73,7 +73,7 @@ def _locked(chat_id: str) -> Iterator[None]:
         yield
         return
     _root().mkdir(parents=True, exist_ok=True)
-    lock = open(_root() / f".{clean}.lock", "w")
+    lock = open(_root() / f".{clean}.lock", "w", encoding="utf-8")
     try:
         _fcntl.flock(lock.fileno(), _fcntl.LOCK_EX)
         yield
