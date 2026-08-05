@@ -70,6 +70,16 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+def _no_in_flight(_sid: str):
+    """Steady-state stand-in for the production default
+    `coordinator.turn_manager.get_in_flight_assistant_msg` when no turn is
+    streaming. The windowing tests below set up only finalized messages, so
+    passing this explicitly keeps the module self-sufficient instead of
+    depending on `session_detail_api.configure` (app-level wiring) having
+    run as a side effect of another module's collection."""
+    return None
+
+
 # ─── Setup helpers ──────────────────────────────────────────────────
 
 
@@ -340,7 +350,7 @@ def test_ws_replay_cap_at_msg_limit() -> bool:
 
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
-    delta = _build_messages_replay_delta(sid, 0, limit=50)
+    delta = _build_messages_replay_delta(sid, 0, limit=50, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -368,7 +378,7 @@ def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
             "id": str(uuid.uuid4()), "role": "assistant", "content": f"a{i}",
             "events": [], "isStreaming": False,
         })
-    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    delta = _build_messages_replay_delta(sid, 0, limit=1, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -399,7 +409,7 @@ def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
         "id": str(uuid.uuid4()), "role": "assistant", "content": "a2",
         "events": [], "isStreaming": False,
     })
-    delta = _build_messages_replay_delta(sid, 0, limit=1)
+    delta = _build_messages_replay_delta(sid, 0, limit=1, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -434,7 +444,7 @@ def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
         "id": str(uuid.uuid4()), "role": "assistant", "content": "a",
         "events": [], "isStreaming": False,
     })
-    delta = _build_messages_replay_delta(sid, int(user["seq"]), limit=1)
+    delta = _build_messages_replay_delta(sid, int(user["seq"]), limit=1, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -484,8 +494,8 @@ def test_incremental_ws_replay_reuses_identical_window() -> bool:
 
     session_manager._compute_messages_window = counted
     try:
-        first = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
-        second = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        first = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
+        second = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
         if calls != 1:
             print(f"  identical replay rebuilt {calls} windows")
             return False
@@ -493,7 +503,7 @@ def test_incremental_ws_replay_reuses_identical_window() -> bool:
             print("  replay delta unexpectedly None")
             return False
         first["messages"][0]["content"] = "mutated"
-        third = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        third = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
         if not third or third["messages"][0].get("content") == "mutated":
             print("  cached replay returned shared mutable data")
             return False
@@ -505,7 +515,7 @@ def test_incremental_ws_replay_reuses_identical_window() -> bool:
             source="test",
             msg_id=assistant_id,
         )
-        _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
         if calls != 2:
             print(f"  render event did not invalidate window cache, calls={calls}")
             return False
@@ -555,7 +565,7 @@ def test_ws_replay_survives_stale_historical_projection() -> bool:
 
     sid, msg_id, _seen_seq = _session_with_completed_replay_target(event_count=2)
     with patch.dict(sys.modules, {"historical_children_projection": projection}):
-        delta = _build_messages_replay_delta(sid, 0, limit=50)
+        delta = _build_messages_replay_delta(sid, 0, limit=50, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -577,7 +587,7 @@ def test_ws_replay_excludes_completed_seen_message() -> bool:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sid, msg_id, seen_seq = _session_with_completed_replay_target()
-    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
+    delta = _build_messages_replay_delta(sid, seen_seq, limit=50, get_in_flight=_no_in_flight)
     if delta is None:
         print("  replay delta unexpectedly None")
         return False
@@ -722,7 +732,7 @@ def test_ws_replay_stale_debug_is_debug_gated() -> bool:
     peek — `session_manager.is_reconcile_dirty`/`_reconcile_gen`, retired
     with the async dirty-flag reconcile subsystem) stay behind the DEBUG
     gate, and no reconcile probe of any kind runs on the normal path."""
-    source = Path(_BACKEND, "main.py").read_text(encoding="utf-8")
+    source = Path(_BACKEND, "ws_chat.py").read_text(encoding="utf-8")
     start = source.index('await ws_callback({\n                                "type": "messages_replay"')
     end = source.index('                    except Exception:\n                        logger.exception("messages_replay on subscribe failed")', start)
     replay_tail = source[start:end]

@@ -19,12 +19,19 @@ import tempfile
 from pathlib import Path
 
 import _test_home
+import _test_installation
+
 _TMP_HOME = _test_home.isolate("bc-test-bareproj-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+# Activate a real installation profile so orchestration-mode validation in
+# session_manager.create succeeds without leaning on a side effect of another
+# module's collection having run first.
+_test_installation.activate(Path(_TMP_HOME), provider="claude")
 
 import project_store  # noqa: E402
 import session_store  # noqa: E402
