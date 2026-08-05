@@ -75,7 +75,7 @@ import perf
 
 logger = logging.getLogger(__name__)
 
-from paths import ba_home
+from paths import ba_home, is_test_mode
 
 _lock = threading.RLock()
 _worker_count_cache: dict[tuple[str, tuple[int, int]], int] = {}
@@ -98,6 +98,20 @@ def _workers_dir() -> Path:
         cached = ba_home() / "workers"
         _workers_dir_cache = cached
     return cached
+
+
+def reset_for_test_home() -> None:
+    global _worker_count_cache_until, _registry_cache_signature
+    global _registry_cache, _workers_dir_cache, _registry_revision
+    if not is_test_mode():
+        raise RuntimeError("worker-store test-home reset requires test mode")
+    with _lock:
+        _worker_count_cache.clear()
+        _worker_count_cache_until = 0.0
+        _registry_cache_signature = None
+        _registry_cache = None
+        _workers_dir_cache = None
+        _registry_revision += 1
 
 
 SCHEMA_VERSION = 8
@@ -237,12 +251,73 @@ def list_workers(cwd: str) -> list[dict]:
     Returns the raw on-disk records — does NOT inject Better Agent session names
     (callers that need names should resolve via session_store).
     """
+    workers, _signature = _list_workers_snapshot(cwd)
+    return workers
+
+
+def _list_workers_snapshot(cwd: str) -> tuple[list[dict], tuple[int, int] | None]:
     with _lock_for():
         workers = list(_read().get("workers", []))
+        signature = _registry_cache_signature
     if cwd:
-        workers = [w for w in workers if w.get("cwd") == cwd]
-    workers.sort(key=lambda w: w.get("last_active", ""), reverse=True)
-    return workers
+        workers = [worker for worker in workers if worker.get("cwd") == cwd]
+    workers.sort(key=lambda worker: worker.get("last_active", ""), reverse=True)
+    return workers, signature
+
+
+def _remove_session_records(
+    registry: dict,
+    agent_session_ids: set[str],
+    *,
+    remove_callers: bool,
+) -> tuple[bool, bool]:
+    workers = registry.get("workers", [])
+    registry["workers"] = [
+        worker
+        for worker in workers
+        if worker.get("agent_session_id") not in agent_session_ids
+    ]
+    removed_worker = len(registry["workers"]) != len(workers)
+    changed = removed_worker
+    forks = registry.get("forks") or {}
+    if remove_callers:
+        for agent_session_id in agent_session_ids:
+            if forks.pop(agent_session_id, None) is not None:
+                changed = True
+    for caller_sid, by_worker in list(forks.items()):
+        retained = {
+            worker_id: record
+            for worker_id, record in by_worker.items()
+            if worker_id not in agent_session_ids
+        }
+        if len(retained) != len(by_worker):
+            changed = True
+        if retained:
+            forks[caller_sid] = retained
+        else:
+            forks.pop(caller_sid, None)
+    registry["forks"] = forks
+    return changed, removed_worker
+
+
+def _prune_missing_worker_records(
+    agent_session_ids: set[str],
+    expected_signature: tuple[int, int] | None,
+) -> None:
+    if not agent_session_ids:
+        return
+    with _lock_for():
+        registry = _read()
+        if _registry_cache_signature != expected_signature:
+            return
+        changed, removed_worker = _remove_session_records(
+            registry,
+            agent_session_ids,
+            remove_callers=True,
+        )
+        if not changed:
+            return
+        _write("", registry, refresh_worker_summaries=removed_worker)
 
 
 def worker_count(cwd: str = "") -> int:
@@ -285,34 +360,34 @@ def list_worker_projection(cwd: str, limit: int = 20) -> list[dict]:
     A worker whose Better Agent session was deleted out from under us is skipped
     so the manager doesn't see references to dead sessions.
     """
+    workers, registry_signature = _list_workers_snapshot(cwd)
+    worker_ids = [
+        str(worker.get("agent_session_id") or "")
+        for worker in workers
+        if worker.get("agent_session_id")
+    ]
+    fields_by_sid = _sm.get_fields_many(worker_ids, ("cwd", "name"))
+    missing_ids = set(worker_ids).difference(fields_by_sid)
+    _prune_missing_worker_records(missing_ids, registry_signature)
+
     out: list[dict] = []
-    workers = list_workers(cwd)
-    chunk_size = max(limit * 2, 20)
-    for start in range(0, len(workers), chunk_size):
-        chunk = workers[start:start + chunk_size]
-        fields_by_sid = _sm.get_fields_many(
-            [str(w.get("agent_session_id") or "") for w in chunk],
-            ("cwd", "name"),
-        )
-        for w in chunk:
-            agent_session_id = w.get("agent_session_id")
-            if not agent_session_id:
-                continue
-            bc = fields_by_sid.get(agent_session_id)
-            if not bc:
-                continue
-            out.append({
-                "agent_session_id": agent_session_id,
-                "registry_cwd": w.get("cwd") or bc.get("cwd") or cwd,
-                "cwd": w.get("cwd") or bc.get("cwd") or "",
-                "description": bc.get("name") or "(untitled)",
-                "orchestration_mode": w.get("orchestration_mode"),
-                "node_id": w.get("node_id") or "primary",
-                "last_active": w.get("last_active", ""),
-                "delegation_count": w.get("delegation_count", 0),
-            })
-            if len(out) >= limit:
-                return out
+    for worker in workers:
+        agent_session_id = worker.get("agent_session_id")
+        bc = fields_by_sid.get(agent_session_id)
+        if not bc:
+            continue
+        out.append({
+            "agent_session_id": agent_session_id,
+            "registry_cwd": worker.get("cwd") or bc.get("cwd") or cwd,
+            "cwd": worker.get("cwd") or bc.get("cwd") or "",
+            "description": bc.get("name") or "(untitled)",
+            "orchestration_mode": worker.get("orchestration_mode"),
+            "node_id": worker.get("node_id") or "primary",
+            "last_active": worker.get("last_active", ""),
+            "delegation_count": worker.get("delegation_count", 0),
+        })
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -495,19 +570,14 @@ def touch_worker(
 def remove_worker(cwd: str, agent_session_id: str) -> bool:
     with _lock_for():
         registry = _read()
-        before = len(registry["workers"])
-        registry["workers"] = [
-            w for w in registry["workers"] if w.get("agent_session_id") != agent_session_id
-        ]
-        if len(registry["workers"]) == before:
+        changed, removed_worker = _remove_session_records(
+            registry,
+            {agent_session_id},
+            remove_callers=False,
+        )
+        if not changed:
             return False
-        forks = registry.get("forks") or {}
-        for caller_sid, by_worker in list(forks.items()):
-            by_worker.pop(agent_session_id, None)
-            if not by_worker:
-                forks.pop(caller_sid, None)
-        registry["forks"] = forks
-        _write(cwd, registry)
+        _write(cwd, registry, refresh_worker_summaries=removed_worker)
         return True
 
 
@@ -520,26 +590,11 @@ def remove_worker_everywhere(agent_session_id: str) -> int:
     """
     with _lock_for():
         raw = _read()
-        changed = False
-        before = len(raw.get("workers", []))
-        raw["workers"] = [
-            w for w in raw.get("workers", [])
-            if w.get("agent_session_id") != agent_session_id
-        ]
-        removed_worker = len(raw["workers"]) != before
-        if removed_worker:
-            changed = True
-        forks = raw.get("forks") or {}
-        if agent_session_id in forks:
-            forks.pop(agent_session_id, None)
-            changed = True
-        for caller_sid, by_worker in list(forks.items()):
-            if agent_session_id in by_worker:
-                by_worker.pop(agent_session_id, None)
-                changed = True
-                if not by_worker:
-                    forks.pop(caller_sid, None)
-        raw["forks"] = forks
+        changed, removed_worker = _remove_session_records(
+            raw,
+            {agent_session_id},
+            remove_callers=True,
+        )
         if changed:
             _write("", raw, refresh_worker_summaries=removed_worker)
             return 1

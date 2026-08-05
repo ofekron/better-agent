@@ -26,6 +26,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypeVar
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc_test_gating_")
@@ -55,13 +56,98 @@ import session_store  # noqa: E402
 import user_prefs  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 
-failures: list[str] = []
+_T = TypeVar("_T")
 
 
 def check(name: str, ok: bool) -> None:
     print(("  PASS" if ok else "  FAIL") + f": {name}")
-    if not ok:
-        failures.append(name)
+    assert ok, name
+
+
+def _run_with_lifecycle(
+    tm: TurnManager,
+    body: Callable[[], Awaitable[_T]],
+) -> _T:
+    async def _bound() -> _T:
+        await tm.lifecycle.bind()
+        try:
+            return await body()
+        finally:
+            await tm.lifecycle.close()
+
+    return asyncio.run(_bound())
+
+
+async def _start_drive_lifecycle(
+    tm: TurnManager,
+    *,
+    session_id: str,
+    turn_run_id: str,
+    lifecycle_message_id: str,
+    assistant_message_id: str | None = None,
+) -> None:
+    assistant_id = (
+        assistant_message_id
+        or str(
+            (tm.current_assistant_msgs.get(session_id) or {}).get("id")
+            or f"{lifecycle_message_id}-assistant"
+        )
+    )
+    current_assistant = tm.current_assistant_msgs.get(session_id)
+    if (
+        not isinstance(current_assistant, dict)
+        or current_assistant.get("id") != assistant_id
+    ):
+        tm.current_assistant_msgs[session_id] = {"id": assistant_id}
+    await tm.lifecycle.publish(
+        "lifecycle.turn_start",
+        root_id=session_id,
+        session_id=session_id,
+        payload={
+            "user_turn_id": lifecycle_message_id,
+            "execution_turn_id": turn_run_id,
+            "lifecycle_message_id": lifecycle_message_id,
+            "assistant_message_id": assistant_id,
+        },
+    )
+
+
+async def _finish_drive_lifecycle(
+    tm: TurnManager,
+    session_id: str,
+) -> None:
+    identity = tm.lifecycle.active_turn_identity(session_id)
+    if identity is None:
+        return
+    await tm.lifecycle.publish(
+        "lifecycle.turn_complete",
+        root_id=session_id,
+        session_id=session_id,
+        payload=identity,
+    )
+
+
+def _run_drive_with_lifecycle(
+    tm: TurnManager,
+    body: Callable[[], Awaitable[_T]],
+    *,
+    session_id: str,
+    turn_run_id: str,
+    lifecycle_message_id: str,
+) -> _T:
+    async def _seeded() -> _T:
+        await _start_drive_lifecycle(
+            tm,
+            session_id=session_id,
+            turn_run_id=turn_run_id,
+            lifecycle_message_id=lifecycle_message_id,
+        )
+        try:
+            return await body()
+        finally:
+            await _finish_drive_lifecycle(tm, session_id)
+
+    return _run_with_lifecycle(tm, _seeded)
 
 
 class _StubCoordinator:
@@ -95,16 +181,68 @@ class _LifecycleCommands:
     def __init__(self) -> None:
         self.handoffs: dict[str, tuple[str, SelectorIdentity]] = {}
         self.selector_attempt_decisions: list[str] = []
+        self.selector_attempts: dict[
+            tuple[str, int, str], SelectorIdentity
+        ] = {}
+        self.next_selector_generation = 1
 
     async def selector_handoff_source(self, sid: str, *, role: str):
         return self.handoffs.get(f"{sid}:{role}")
 
-    async def admit_prepared_selector_attempt(self, *args, **kwargs):
-        if self.selector_attempt_decisions:
-            return self.selector_attempt_decisions.pop(0), 0
-        return "admitted", 0
+    async def admit_prepared_selector_attempt(
+        self,
+        session_id: str,
+        *,
+        selector: SelectorIdentity,
+        role: str,
+        **_kwargs,
+    ):
+        decision = (
+            self.selector_attempt_decisions.pop(0)
+            if self.selector_attempt_decisions
+            else "admitted"
+        )
+        generation = self.next_selector_generation
+        self.next_selector_generation += 1
+        if decision == "admitted":
+            self.selector_attempts[(session_id, generation, role)] = selector
+        return decision, generation
 
-    async def attach_selector_native_sid(self, *args, **kwargs) -> bool:
+    async def attach_selector_native_sid(
+        self,
+        session_id: str,
+        *,
+        selector_generation: int,
+        role: str,
+        native_sid: str,
+        **_kwargs,
+    ) -> bool:
+        selector = self.selector_attempts.pop(
+            (session_id, selector_generation, role),
+            None,
+        )
+        if selector is None:
+            return False
+        orchestration_mode = await asyncio.to_thread(
+            session_manager.get_field,
+            session_id,
+            "orchestration_mode",
+        )
+        if not isinstance(orchestration_mode, str) or not orchestration_mode:
+            return False
+        await asyncio.to_thread(
+            session_manager.set_agent_sid,
+            session_id,
+            (
+                "supervisor"
+                if role == "supervisor"
+                else orchestration_mode
+            ),
+            native_sid,
+            provider_id=selector.provider_id,
+            model=selector.model,
+            runner=selector.runner,
+        )
         return True
 
     async def clear_selector_native_sid(self, *args, **kwargs) -> bool:
@@ -133,12 +271,14 @@ class _RetryProvider:
         native_sid_compatibility: dict | None = None,
         compatibility_mismatches: int = 0,
         before_discovery: Callable[[], Awaitable[None]] | None = None,
+        on_start: Callable[[dict], None] | None = None,
     ) -> None:
         self._runs: dict = {}
         self.outcomes = outcomes
         self.prompts: list[str] = []
         self.session_ids: list[str | None] = []
         self.continuation_chains: list[list[str] | None] = []
+        self.start_arguments: list[dict] = []
         self.cancelled: list[str] = []
         self.prepared = 0
         self.discarded = 0
@@ -163,6 +303,7 @@ class _RetryProvider:
         }
         self.compatibility_mismatches = compatibility_mismatches
         self.before_discovery = before_discovery
+        self.on_start = on_start
 
     def prepare_run(self, **kw):
         self.prepared += 1
@@ -192,6 +333,9 @@ class _RetryProvider:
         execution._mark_spawn_completed()
         kw = execution.start_arguments()
         kw.update({"loop": loop, "queue": queue})
+        self.start_arguments.append(dict(kw))
+        if self.on_start is not None:
+            self.on_start(kw)
         self.prompts.append(kw["prompt"])
         self.session_ids.append(kw.get("session_id"))
         self.continuation_chains.append(kw.get("continuation_chain"))
@@ -248,7 +392,7 @@ def test_noop_cancel_does_not_leak_session_cancelled() -> None:
     print("T1 pure no-op cancel: False + no _session_cancelled leak")
     c = _StubCoordinator()
     tm = TurnManager(c)
-    ok = asyncio.run(tm.cancel_turn("sid-1"))
+    ok = _run_with_lifecycle(tm, lambda: tm.cancel_turn("sid-1"))
     check("returns False", ok is False)
     check("no _session_cancelled leak", "sid-1" not in c._session_cancelled)
     check("no pre-begin owner", not tm.has_pre_begin_prompt("sid-1"))
@@ -260,7 +404,10 @@ def test_gap_cancel_signals_exact_pre_begin() -> None:
     tm = TurnManager(c)
     claim = tm.claim_pre_begin_prompt("sid-2", "queue-9", "lm-9")
     assert claim is not None
-    ok = asyncio.run(tm.cancel_turn("sid-2", interrupted_by_msg_id="lm-9"))
+    ok = _run_with_lifecycle(
+        tm,
+        lambda: tm.cancel_turn("sid-2", interrupted_by_msg_id="lm-9"),
+    )
     check("returns True", ok is True)
     check("exact claim signalled", claim.cancel_event.is_set())
     check("interrupt identity retained", claim.interrupted_by_msg_id == "lm-9")
@@ -272,7 +419,7 @@ def test_cancel_fans_out_to_recovered_runs() -> None:
     c = _StubCoordinator()
     tm = TurnManager(c)
     tm.active_run_ids["sid-3"] = ["run-r1", "run-r2"]
-    ok = asyncio.run(tm.cancel_turn("sid-3"))
+    ok = _run_with_lifecycle(tm, lambda: tm.cancel_turn("sid-3"))
     check("returns True", ok is True)
     check("fanout hit both runs", c.fanned_out == ["run-r1", "run-r2"])
     check("_session_cancelled set", c._session_cancelled.get("sid-3") is True)
@@ -301,7 +448,7 @@ def test_recovered_cancel_escalates_when_still_alive() -> None:
         await asyncio.sleep(0)
 
     try:
-        asyncio.run(_go())
+        _run_with_lifecycle(tm, _go)
     finally:
         turn_manager_mod._RECOVERED_CANCEL_ESCALATE_AFTER_S = original
     check("soft fanout happened", c.fanned_out == [run_id])
@@ -442,7 +589,7 @@ def test_drive_cli_run_pre_spawn_guard() -> None:
             lifecycle_message_id="lifecycle-5",
         )
 
-    result = asyncio.run(_go())
+    result = _run_with_lifecycle(tm, _go)
     check("no spawn happened", spawned == [])
     check("result is cancelled-failure", result.get("success") is False)
 
@@ -452,26 +599,12 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
     c = _StubCoordinator()
     tm = TurnManager(c)
     sid = session_manager.create(name="team-target", cwd="/tmp", model="sonnet")["id"]
-    captured: list[dict] = []
-
-    class _Provider:
-        KIND = "codex"
-        _runs: dict = {}
-
-        def start_run(self, **kw):
-            captured.append(kw)
-            kw["loop"].call_soon_threadsafe(
-                kw["queue"].put_nowait,
-                type("E", (), {
-                    "type": "complete",
-                    "data": {"success": True, "session_id": None, "token_usage": None},
-                })(),
-            )
-
-        def is_running(self, _run_id: str) -> bool:
-            return False
-
-    c.provider_for_session = lambda _sid: _Provider()
+    provider = _RetryProvider([{
+        "success": True,
+        "session_id": None,
+        "token_usage": None,
+    }])
+    c.provider_for_session = lambda _sid: provider
     c.user_prompt_manager = _UPM()
 
     async def _ws(_e):
@@ -493,15 +626,24 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
             lifecycle_message_id="lifecycle-loopback",
         )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-loopback",
+        lifecycle_message_id="lifecycle-loopback",
+    )
     check("result success", result.get("success") is True)
-    check("provider spawned", len(captured) == 1)
-    backend_url = str(captured[0].get("backend_url") or "")
+    check("provider spawned", len(provider.start_arguments) == 1)
+    backend_url = str(provider.start_arguments[0].get("backend_url") or "")
     check(
         "loopback backend_url forwarded",
         backend_url.startswith("http://localhost:") or backend_url.startswith("http://127.0.0.1:"),
     )
-    check("internal_token forwarded", captured[0].get("internal_token") == "test-token")
+    check(
+        "internal_token forwarded",
+        provider.start_arguments[0].get("internal_token") == "test-token",
+    )
 
 
 def test_drive_cli_run_flushes_target_before_spawn() -> None:
@@ -530,49 +672,49 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
     tm._load_task_start_silence_seconds = _load_threshold
     c.broadcast_session = _capture_broadcast
 
-    class _Provider:
-        KIND = "codex"
-        _runs: dict = {}
-
-        def start_run(self, **kw):
-            target_message_id = kw.get("target_message_id")
-            root = session_store.get_root_tree(sid) or {}
-            durable_checks.append(
-                any(
-                    m.get("id") == target_message_id
-                    for m in root.get("messages") or []
-                )
+    def _capture_start(arguments: dict) -> None:
+        target_message_id = arguments.get("target_message_id")
+        root = session_store.get_root_tree(sid) or {}
+        durable_checks.append(
+            any(
+                message.get("id") == target_message_id
+                for message in root.get("messages") or []
             )
-            kw["loop"].call_soon_threadsafe(
-                kw["queue"].put_nowait,
-                type("E", (), {
-                    "type": "complete",
-                    "data": {"success": True, "session_id": None, "token_usage": None},
-                })(),
-            )
+        )
 
-        def is_running(self, _run_id: str) -> bool:
-            return False
-
-    c.provider_for_session = lambda _sid: _Provider()
+    provider = _RetryProvider([{
+        "success": True,
+        "session_id": None,
+        "token_usage": None,
+    }], on_start=_capture_start)
+    c.provider_for_session = lambda _sid: provider
     c.user_prompt_manager = _UPM()
 
     async def _ws(_e):
         pass
 
-    result = asyncio.run(tm._drive_cli_run(
-        prompt="p",
-        cwd="/tmp",
-        model="sonnet",
-        session_id=None,
-        ws_callback=_ws,
-        app_session_id=sid,
-        cancel_event=asyncio.Event(),
-        session_id_field="agent_session_id",
-        mode="native",
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="p",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id=turn_run_id,
+            lifecycle_message_id="lifecycle-flush-target",
+        )
+
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
         turn_run_id=turn_run_id,
         lifecycle_message_id="lifecycle-flush-target",
-    ))
+    )
     submitted_state = tm._run_state[sid][0]
     check("result success", result.get("success") is True)
     check("target assistant durable before start_run", durable_checks == [True])
@@ -638,7 +780,13 @@ def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
         result = await asyncio.wait_for(task, timeout=3)
         return no_terminal, active, pid_cleared, result
 
-    no_terminal, active, pid_cleared, result = asyncio.run(_go())
+    no_terminal, active, pid_cleared, result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id="sid-rl-cancel",
+        turn_run_id="turn-rl-cancel",
+        lifecycle_message_id="lifecycle-rl-cancel",
+    )
     check("no complete emitted during retry wait", no_terminal)
     check("active run id retained during retry wait", active)
     check("dead attempt pid cleared during retry wait", pid_cleared)
@@ -685,7 +833,13 @@ def test_rate_limit_retry_spawns_once_then_emits_terminal() -> None:
             lifecycle_message_id="lifecycle-rl-success",
         )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id="sid-rl-success",
+        turn_run_id="turn-rl-success",
+        lifecycle_message_id="lifecycle-rl-success",
+    )
     terminals = [e for e in ws_events if e.get("type") == "complete"]
     check("original prompt sent exactly once per attempt", provider.prompts == ["p", "p"])
     check("exactly one terminal complete emitted", len(terminals) == 1)
@@ -752,7 +906,13 @@ def test_rate_limit_wait_can_continue_immediately() -> None:
         result = await asyncio.wait_for(task, timeout=3)
         return {"landed": landed, **result}
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-rl-continue",
+        lifecycle_message_id="lifecycle-rl-continue",
+    )
     check("immediate continuation landed", result.get("landed") is True)
     check("turn succeeds after continuation", result.get("success") is True)
     check("fresh prompt is continuation-wrapped", "Previous provider session ids: agent-rate-limited" in provider.prompts[-1])
@@ -793,7 +953,13 @@ def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
             lifecycle_message_id="lifecycle-forced-overflow",
         )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-forced-overflow",
+        lifecycle_message_id="lifecycle-forced-overflow",
+    )
     fresh = session_manager.get(sid) or {}
     check("provider spawned once", len(provider.prompts) == 1)
     check("real spawn is fresh", provider.session_ids == [None])
@@ -874,7 +1040,13 @@ def test_capability_change_retries_as_fresh_continuation() -> None:
             lifecycle_message_id="lifecycle-capability-drift",
         )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-capability-drift",
+        lifecycle_message_id="lifecycle-capability-drift",
+    )
     fresh = session_manager.get(sid) or {}
     check("provider retried once", len(provider.prompts) == 2)
     check("retry starts a fresh provider thread", provider.session_ids == ["old-provider", None])
@@ -958,7 +1130,13 @@ def test_context_continuation_start_runs_off_loop() -> None:
         session_manager.get = _recording_get
         turn_manager_mod.start_continuation_for = _recording_start
         user_prefs.get_context_strategy = _recording_strategy
-        result = asyncio.run(_go())
+        result = _run_drive_with_lifecycle(
+            tm,
+            _go,
+            session_id=sid,
+            turn_run_id="turn-continuation-off-loop",
+            lifecycle_message_id="lifecycle-continuation-off-loop",
+        )
     finally:
         session_manager.get = original_get
         turn_manager_mod.start_continuation_for = original_start
@@ -990,6 +1168,64 @@ def test_context_continuation_start_runs_off_loop() -> None:
     check("provider spawned once", len(provider.prompts) == 1)
     check("real spawn is fresh", provider.session_ids == [None])
     check("result success", result.get("success") is True)
+
+
+def test_selector_native_sid_projection_runs_off_loop() -> None:
+    print("T7d selector native SID projection runs off loop")
+    engine = LifecycleCommandEngine(EventBus())
+    loop_thread: dict[str, int] = {}
+    read_threads: list[int] = []
+    write_threads: list[int] = []
+    original_get_field = session_manager.get_field
+    original_set_agent_sid = session_manager.set_agent_sid
+    original_ack = lifecycle_command_store.acknowledge_native_sid_projection
+
+    def recording_get_field(*_args, **_kwargs):
+        read_threads.append(threading.get_ident())
+        return "native"
+
+    def recording_set_agent_sid(*_args, **_kwargs):
+        write_threads.append(threading.get_ident())
+        return {"id": "projection-session"}
+
+    async def _go() -> bool:
+        loop_thread["id"] = threading.get_ident()
+        return await engine._apply_selector_projection(
+            "projection-session",
+            {
+                "kind": "native_sid",
+                "generation": 1,
+                "identity": SelectorIdentity(
+                    provider_id="claude",
+                    model="sonnet",
+                    runner="native",
+                ).to_dict(),
+                "role": "primary",
+                "native_sid": "native-session",
+            },
+        )
+
+    try:
+        session_manager.get_field = recording_get_field
+        session_manager.set_agent_sid = recording_set_agent_sid
+        lifecycle_command_store.acknowledge_native_sid_projection = (
+            lambda *_args, **_kwargs: True
+        )
+        projected = asyncio.run(_go())
+    finally:
+        session_manager.get_field = original_get_field
+        session_manager.set_agent_sid = original_set_agent_sid
+        lifecycle_command_store.acknowledge_native_sid_projection = original_ack
+
+    check("selector native SID projected", projected)
+    check(
+        "selector projection read off event loop",
+        bool(read_threads) and read_threads[0] != loop_thread.get("id"),
+    )
+    check(
+        "selector projection write off event loop",
+        bool(write_threads) and write_threads[0] != loop_thread.get("id"),
+    )
 
 
 def test_codex_context_fill_preempts_native_compaction() -> None:
@@ -1027,7 +1263,13 @@ def test_codex_context_fill_preempts_native_compaction() -> None:
             lifecycle_message_id="lifecycle-codex-preempt",
         )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-codex-preempt",
+        lifecycle_message_id="lifecycle-codex-preempt",
+    )
     fresh = session_manager.get(sid) or {}
     check("provider spawned once", len(provider.prompts) == 1)
     check("real spawn is fresh", provider.session_ids == [None])
@@ -1098,9 +1340,31 @@ def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
             lifecycle_message_id="lifecycle-codex-usage-2",
         )
 
-    first = asyncio.run(_first())
-    after_first = session_manager.get(sid) or {}
-    second = asyncio.run(_second())
+    async def _go() -> tuple[dict, dict, dict]:
+        await _start_drive_lifecycle(
+            tm,
+            session_id=sid,
+            turn_run_id="turn-codex-usage-1",
+            lifecycle_message_id="lifecycle-codex-usage-1",
+            assistant_message_id="lifecycle-codex-usage-1-assistant",
+        )
+        first = await _first()
+        after_first = session_manager.get(sid) or {}
+        await _finish_drive_lifecycle(tm, sid)
+        await _start_drive_lifecycle(
+            tm,
+            session_id=sid,
+            turn_run_id="turn-codex-usage-2",
+            lifecycle_message_id="lifecycle-codex-usage-2",
+            assistant_message_id="lifecycle-codex-usage-2-assistant",
+        )
+        try:
+            second = await _second()
+        finally:
+            await _finish_drive_lifecycle(tm, sid)
+        return first, after_first, second
+
+    first, after_first, second = _run_with_lifecycle(tm, _go)
     fresh = session_manager.get(sid) or {}
     check("first result success", first.get("success") is True)
     check("context window persisted", after_first.get("context_window") == 1000)
@@ -1166,25 +1430,27 @@ def test_lazy_selector_change_continuation() -> None:
         pass
 
     async def _go() -> dict:
-        await tm.lifecycle.bind()
-        try:
-            return await tm._drive_cli_run(
-                prompt="continue on new model",
-                cwd="/tmp",
-                model="haiku",
-                session_id="old-provider-sid",
-                ws_callback=_ws,
-                app_session_id=sid,
-                cancel_event=asyncio.Event(),
-                session_id_field="agent_session_id",
-                mode="native",
-                turn_run_id="turn-lazy-selector",
-                lifecycle_message_id="lifecycle-lazy-selector",
-            )
-        finally:
-            await tm.lifecycle.close()
+        return await tm._drive_cli_run(
+            prompt="continue on new model",
+            cwd="/tmp",
+            model="haiku",
+            session_id="old-provider-sid",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-lazy-selector",
+            lifecycle_message_id="lifecycle-lazy-selector",
+        )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        tm,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-lazy-selector",
+        lifecycle_message_id="lifecycle-lazy-selector",
+    )
     fresh = session_manager.get(sid) or {}
     check("provider spawned once", len(provider.prompts) == 1)
     check("real spawn is fresh", provider.session_ids == [None])
@@ -1475,25 +1741,27 @@ def test_stale_prepared_selector_attempt_is_discarded_and_retried() -> None:
         return None
 
     async def _go() -> dict:
-        await manager.lifecycle.bind()
-        try:
-            return await manager._drive_cli_run(
-                prompt="continue",
-                cwd="/tmp",
-                model="sonnet",
-                session_id=None,
-                ws_callback=_ws,
-                app_session_id=sid,
-                cancel_event=asyncio.Event(),
-                session_id_field="agent_session_id",
-                mode="native",
-                turn_run_id="turn-stale-selector",
-                lifecycle_message_id="lifecycle-stale-selector",
-            )
-        finally:
-            await manager.lifecycle.close()
+        return await manager._drive_cli_run(
+            prompt="continue",
+            cwd="/tmp",
+            model="sonnet",
+            session_id=None,
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-stale-selector",
+            lifecycle_message_id="lifecycle-stale-selector",
+        )
 
-    result = asyncio.run(_go())
+    result = _run_drive_with_lifecycle(
+        manager,
+        _go,
+        session_id=sid,
+        turn_run_id="turn-stale-selector",
+        lifecycle_message_id="lifecycle-stale-selector",
+    )
     check("stale attempt was prepared", provider.prepared == 2)
     check("stale attempt released provider staging", provider.discarded == 1)
     check("only current selector attempt launched", len(provider.prompts) == 1)
@@ -1597,6 +1865,13 @@ def test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid() -> None:
                         if index
                         else None
                     )
+                    await _start_drive_lifecycle(
+                        manager,
+                        session_id=sid,
+                        turn_run_id=f"two-turn-run-{label}-{index}",
+                        lifecycle_message_id=turn_identity.lifecycle_message_id,
+                        assistant_message_id=execution_identity.assistant_message_id,
+                    )
                     result = await manager._drive_cli_run(
                         prompt="continue",
                         cwd="/tmp",
@@ -1611,6 +1886,7 @@ def test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid() -> None:
                         lifecycle_message_id=turn_identity.lifecycle_message_id,
                         execution_identity=execution_identity,
                     )
+                    await _finish_drive_lifecycle(manager, sid)
                     check(f"{label} turn {index + 1} succeeded", result["success"])
                     assert result["success"]
                     execution = engine.snapshot(sid).execution
@@ -1644,6 +1920,8 @@ def test_actual_two_turn_discovery_reuses_better_agent_and_remote_sid() -> None:
                     lifecycle_message_id=turn_identity.lifecycle_message_id,
                     outcome="complete",
                 )
+                await manager.lifecycle.close()
+                turn_lifecycles.remove(manager.lifecycle)
         finally:
             for lifecycle in turn_lifecycles:
                 await lifecycle.close()
@@ -1733,6 +2011,13 @@ def test_selector_changes_fence_production_sid_discovery_and_completion() -> Non
                     return None
 
                 try:
+                    await _start_drive_lifecycle(
+                        manager,
+                        session_id=sid,
+                        turn_run_id=f"selector-race-run-{phase}",
+                        lifecycle_message_id=turn_identity.lifecycle_message_id,
+                        assistant_message_id=execution_identity.assistant_message_id,
+                    )
                     result = await manager._drive_cli_run(
                         prompt="continue",
                         cwd="/tmp",
@@ -1749,6 +2034,7 @@ def test_selector_changes_fence_production_sid_discovery_and_completion() -> Non
                     )
                 finally:
                     engine.attach_selector_native_sid = original_attach
+                await _finish_drive_lifecycle(manager, sid)
 
                 authority = lifecycle_command_store.selector_authority_snapshot(sid)
                 current = session_manager.get(sid) or {}
@@ -1787,6 +2073,8 @@ def test_selector_changes_fence_production_sid_discovery_and_completion() -> Non
                     lifecycle_message_id=turn_identity.lifecycle_message_id,
                     outcome="complete",
                 )
+                await manager.lifecycle.close()
+                turn_lifecycles.remove(manager.lifecycle)
         finally:
             for lifecycle in turn_lifecycles:
                 await lifecycle.close()
@@ -1858,6 +2146,13 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 execution_identity=first_execution,
                 selector_role="primary",
             )
+            await _start_drive_lifecycle(
+                manager,
+                session_id=sid,
+                turn_run_id="stale-session-run-1",
+                lifecycle_message_id=turn_identity.lifecycle_message_id,
+                assistant_message_id=first_execution.assistant_message_id,
+            )
             first = await manager._drive_cli_run(
                 prompt="start",
                 cwd="/tmp",
@@ -1872,6 +2167,7 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 lifecycle_message_id=turn_identity.lifecycle_message_id,
                 execution_identity=first_execution,
             )
+            await _finish_drive_lifecycle(manager, sid)
             assert first["success"] is True
             first_snapshot = engine.snapshot(sid).execution
             assert first_snapshot is not None
@@ -1893,6 +2189,13 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 execution_identity=second_execution,
                 selector_role="primary",
             )
+            await _start_drive_lifecycle(
+                manager,
+                session_id=sid,
+                turn_run_id="stale-session-run-2",
+                lifecycle_message_id=turn_identity.lifecycle_message_id,
+                assistant_message_id=second_execution.assistant_message_id,
+            )
             second = await manager._drive_cli_run(
                 prompt="resume",
                 cwd="/tmp",
@@ -1907,6 +2210,7 @@ def test_stale_session_error_clears_authority_before_selector_switch() -> None:
                 lifecycle_message_id=turn_identity.lifecycle_message_id,
                 execution_identity=second_execution,
             )
+            await _finish_drive_lifecycle(manager, sid)
             assert second["success"] is False
             cleared = lifecycle_command_store.selector_authority_snapshot(sid)
             assert cleared is not None
@@ -2174,6 +2478,7 @@ def main() -> int:
     test_forced_context_overflow_retries_as_fresh_continuation()
     test_capability_change_retries_as_fresh_continuation()
     test_context_continuation_start_runs_off_loop()
+    test_selector_native_sid_projection_runs_off_loop()
     test_codex_context_fill_preempts_native_compaction()
     test_codex_context_usage_persists_then_preempts_next_turn()
     test_lazy_selector_change_continuation()
@@ -2186,9 +2491,6 @@ def main() -> int:
     test_stop_terminally_cancels_exact_prompt_blocked_before_begin()
     test_submit_prompt_requests_recovery_before_enqueue()
     print()
-    if failures:
-        print(f"FAILED: {len(failures)} check(s): {failures}")
-        return 1
     print("ALL PASS")
     return 0
 

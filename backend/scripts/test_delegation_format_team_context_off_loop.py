@@ -9,6 +9,11 @@ def test_delegation_format_team_context_is_off_loop() -> None:
     ).read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n            manager_bootstrap.format_team_context," in source
     assert "worker_prompt = \"\\n\\n\".join([\n            manager_bootstrap.format_team_context(" not in source
+    provider_index = source.index("provider = await resolve_provider_with_restart(")
+    context_index = source.index("manager_bootstrap.format_team_context,")
+    milestone = 'stage="delegation_team_context_resolving"'
+    milestone_index = source.index(milestone)
+    assert provider_index < milestone_index < context_index
 
 
 if __name__ == "__main__":

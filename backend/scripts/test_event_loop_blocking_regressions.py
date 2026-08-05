@@ -513,7 +513,7 @@ def test_continuation_start_boundary_runs_off_loop() -> None:
 
     context_source = source[
         context_async_start:
-        source.index("        def _should_preempt_selector_change_continuation_sync()", context_async_start)
+        source.index("        applied_selector_handoffs: set[str] = set()", context_async_start)
     ]
     assert "continuation = await _to_turn_dispatch_thread(\n                _start_continuation_sync," in context_source
     assert "start_continuation_for(" not in context_source
@@ -1578,53 +1578,37 @@ def test_known_worker_projection_uses_field_reads() -> None:
     assert "_sm.get_fields(agent_session_id" not in projection_source
     assert "_sm.get(agent_session_id)" not in projection_source
     assert "_sm.get_lite(agent_session_id)" not in projection_source
-    # Real bug found via live telemetry: `list_workers("")` ignored the
-    # function's own `cwd` argument, forcing every call to scan the
-    # entire global worker registry (thousands of accumulated, mostly
-    # stale entries) instead of just the target's own cwd.
-    assert "workers = list_workers(cwd)" in projection_source
+    assert "workers, registry_signature = _list_workers_snapshot(cwd)" in projection_source
+    assert "_prune_missing_worker_records(missing_ids, registry_signature)" in projection_source
     assert 'workers = list_workers("")' not in projection_source
 
 
 def test_session_exists_uses_index_without_cold_root_load() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    resolve_start = source.index("    def _root_id_for(self, sid: str)")
+    resolve_start = source.index("    def _root_ids_for(")
     resolve_end = source.index("    def root_id_for(", resolve_start)
     resolve_source = source[resolve_start:resolve_end]
     start = source.index("    def exists(self, sid: str) -> bool:")
     end = source.index("    def get_field(", start)
     exists_source = source[start:end]
     assert "rid = self._root_id_for(sid)" in exists_source
-    assert "self._root_repository.loaded_root_id_for(sid)" in resolve_source
-    assert "self._root_repository.root_version(sid)" in resolve_source
-    assert "self._root_repository.resolve_root_id(sid)" in resolve_source
-    assert resolve_source.index("self._root_repository.loaded_root_id_for(sid)") < resolve_source.index(
-        "self._root_repository.root_version(sid)"
-    )
-    assert resolve_source.index("self._root_repository.root_version(sid)") < resolve_source.index(
-        "self._root_repository.resolve_root_id(sid)"
-    )
+    assert "self._root_repository.resolve_root_ids(unresolved)" in resolve_source
+    assert "def _root_id_for(self, sid: str)" in resolve_source
+    assert "return self._root_ids_for((sid,)).get(sid)" in resolve_source
     assert "self._load_root(" not in exists_source
     assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
 
 
 def test_root_id_resolution_caches_successful_store_lookup() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("    def _root_id_for(")
+    start = source.index("    def _root_ids_for(")
     end = source.index("    def _lock_for_root(", start)
     helper_source = source[start:end]
     assert "rid = self._node_root_id.get(sid)" in helper_source
-    assert "self._root_repository.loaded_root_id_for(sid)" in helper_source
-    assert "self._root_repository.root_version(sid)" in helper_source
-    assert helper_source.index("self._root_repository.loaded_root_id_for(sid)") < helper_source.index(
-        "self._root_repository.root_version(sid)"
-    )
-    assert helper_source.index("self._root_repository.root_version(sid)") < helper_source.index(
-        "rid = self._root_repository.resolve_root_id(sid)"
-    )
     assert "self._node_root_missing_until.get(sid, 0.0) > now" in helper_source
-    assert "rid = self._root_repository.resolve_root_id(sid)" in helper_source
-    assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
+    assert "newly_resolved = self._root_repository.resolve_root_ids(unresolved)" in helper_source
+    assert "rid = newly_resolved.get(sid)" in helper_source
+    assert "self._node_root_id[sid] = rid" in helper_source
     assert "self._node_root_missing_until[sid] = (" in helper_source
     assert "_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0" in source
     index_start = source.index("    def _index_root(")
@@ -1636,8 +1620,8 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
 
 def test_unknown_root_resolution_uses_owner_projection_without_request_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    resolve_start = source.index("def _resolve_root_id(")
-    resolve_end = source.index("def _session_path(", resolve_start)
+    resolve_start = source.index("def _resolve_root_ids(")
+    resolve_end = source.index("def _resolve_root_id(", resolve_start)
     resolve_source = source[resolve_start:resolve_end]
     assert "_wait_root_change_owner_ready()" in resolve_source
     assert "generation = binding.owner.observation_generation" in resolve_source
@@ -1657,7 +1641,7 @@ def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
     assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in refresh_source
     assert "_write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)" not in refresh_source
     ensure_start = source.index("def _ensure_index(")
-    ensure_end = source.index("def _resolve_root_id(", ensure_start)
+    ensure_end = source.index("def _resolve_root_ids(", ensure_start)
     ensure_source = source[ensure_start:ensure_end]
     assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in ensure_source
 
@@ -2585,13 +2569,21 @@ def test_sidebar_decoration_uses_bulk_cached_state() -> None:
 
 
 def test_session_discovery_reads_mode_without_deepcopy() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index('if event.type == "session_discovered":')
-    end = source.index('if event.type in ("complete", "error"):', start)
-    discovery_source = source[start:end]
-    assert 'session_manager.get_field(' in discovery_source
-    assert '"orchestration_mode"' in discovery_source
-    assert 'session_manager.get(' not in discovery_source
+    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    start = turn_source.index('if event.type == "session_discovered":')
+    end = turn_source.index('if event.type in ("complete", "error"):', start)
+    discovery_source = turn_source[start:end]
+    assert "self._c.lifecycle_commands.attach_selector_native_sid(" in discovery_source
+    assert "session_manager.get" not in discovery_source
+
+    owner_source = (ROOT / "lifecycle_command_engine.py").read_text(encoding="utf-8")
+    start = owner_source.index("    async def _project_native_sid(")
+    end = owner_source.index("    @staticmethod", start)
+    projection_source = owner_source[start:end]
+    assert "session_manager.manager.get_field," in projection_source
+    assert '"orchestration_mode"' in projection_source
+    assert "await asyncio.to_thread(\n            session_manager.manager.set_agent_sid," in projection_source
+    assert "session_manager.manager.get," not in projection_source
 
 
 def test_project_aggregates_use_event_driven_read_model() -> None:
@@ -3491,22 +3483,26 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
 
 def test_root_resolution_consults_loaded_index_before_filesystem_shortcut() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def _resolve_root_id(")
-    end = source.index("def _session_path(", start)
+    start = source.index("def _currently_resolved_root_ids(")
+    resolve_start = source.index("def _resolve_root_ids(", start)
+    end = source.index("def _resolve_root_id(", resolve_start)
     helper_source = source[start:end]
+    current_source = source[start:resolve_start]
+    resolve_source = source[resolve_start:end]
     loaded_start = source.index("def _loaded_root_id_for(")
-    loaded_end = source.index("def _resolve_root_id(", loaded_start)
+    loaded_end = source.index("def _resolve_root_ids(", loaded_start)
     loaded_source = source[loaded_start:loaded_end]
     assert "_root_file_path(sid).exists()" in helper_source
     assert "_ensure_index()" in helper_source
-    assert "_loaded_root_id_for(sid)" in helper_source
+    assert "_currently_resolved_root_ids(unique_sids)" in helper_source
+    assert "_loaded_root_ids_for(sids)" in current_source
     assert "if not _index_loaded:" in loaded_source
     assert "sid in _root_index_signatures" in loaded_source
     assert "_fork_index.get(sid)" in loaded_source
-    assert helper_source.index("_loaded_root_id_for(sid)") < helper_source.index(
+    assert current_source.index("_loaded_root_ids_for(sids)") < current_source.index(
         "_root_file_path(sid).exists()"
     )
-    assert helper_source.index("_root_file_path(sid).exists()") < helper_source.index(
+    assert resolve_source.index("_currently_resolved_root_ids(unique_sids)") < resolve_source.index(
         "_ensure_index()"
     )
 
@@ -3905,9 +3901,7 @@ def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> 
     scan = recover_source.index("candidate_task = asyncio.create_task(")
     register = recover_source.index("startup_recovery_gate.register_session_recovery")
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
-    integrate = recover_source.index(
-        "await integrate_recovered_runs(_coordinator_ref, batch)",
-    )
+    integrate = recover_source.index("outcomes = await integrate_recovered_runs(")
     # Re-enqueue is awaited inline once live integration is done, so no
     # rehydrated prompt starts before its run is registered on the gate.
     reenqueue = recover_source.index(

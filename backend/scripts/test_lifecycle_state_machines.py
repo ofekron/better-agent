@@ -36,6 +36,7 @@ def _execution():
             "kind": "codex",
             "generation": "0a1f0f6c-f19f-4b9d-93d1-45d2db3af620",
             "revision": 1,
+            "execution_revision": 1,
         },
         run_id="provider-run",
         turn_run_id="turn-run",

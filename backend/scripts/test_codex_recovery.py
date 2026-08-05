@@ -48,6 +48,8 @@ from provider_execution_contract import provider_family_contract  # noqa: E402
 from provider_runner_launch import capture_runner_launch  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 from provider import schedule_loop_task  # noqa: E402
+from event_bus import EventBus  # noqa: E402
+from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
 from event_shape import extract_output_text as _extract_output_text  # noqa: E402
@@ -58,6 +60,7 @@ import turn_manager as turn_manager_mod  # noqa: E402
 from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
 from run_recovery import (  # noqa: E402
     _codex_replay_bound,
+    _finalize_sync,
     _integrate_one,
     _last_assistant,
     _replay_and_apply,
@@ -145,6 +148,7 @@ def _seed_codex_run(
         "kind": "codex",
         "generation": "e5ef524a-58ae-44cf-bfee-80be44e5da9e",
         "revision": 1,
+        "execution_revision": 1,
         "mode": "subscription",
         "config_dir": str(config_root),
     }
@@ -329,15 +333,12 @@ def test_codex_replay_reads_native_rollout_jsonl() -> bool:
         app_sid=app_sid, codex_sid=codex_sid, pid=0, events=events, complete=True,
     )
 
-    sess = session_manager.get(app_sid)
-    last_asst = _last_assistant(sess)
+    last_asst = _last_assistant(session_manager.get(app_sid))
     _replay_and_apply(
         persist_sid=app_sid,
         run_id=run_id,
         mode="native",
         claude_sid=codex_sid,
-        sess=sess,
-        last_asst=last_asst,
         msg_id=last_asst["id"],
     )
 
@@ -1536,6 +1537,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                     "kind": self.KIND,
                     "generation": "e5ef524a-58ae-44cf-bfee-80be44e5da9e",
                     "revision": 1,
+                    "execution_revision": 1,
                 },
                 **kwargs,
             )
@@ -1608,7 +1610,11 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         app_sid = sess["id"]
         codex_sid = str(uuid.uuid4())
         provider = _FakeCodexProvider(app_sid, codex_sid)
-        tm = TurnManager(_Coordinator(provider))
+        coordinator = _Coordinator(provider)
+        lifecycle_commands = LifecycleCommandEngine(EventBus())
+        coordinator.lifecycle_commands = lifecycle_commands
+        tm = TurnManager(coordinator)
+        await lifecycle_commands.bind()
         await tm.lifecycle.bind()
         ws_events: list[dict] = []
 
@@ -1624,7 +1630,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 prompt="do it",
                 cwd="/tmp",
                 model="gpt-5.5",
-                session_id=codex_sid,
+                session_id=None,
                 ws_callback=ws_callback,
                 app_session_id=app_sid,
                 cancel_event=asyncio.Event(),
@@ -1636,7 +1642,10 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         finally:
             turn_manager_mod.runtime_skill_projection = original_runtime
             turn_manager_mod.extension_audit_context = original_audit
-            await tm.lifecycle.close()
+            try:
+                await tm.lifecycle.close()
+            finally:
+                await lifecycle_commands.close()
         events = result.get("events") or []
         if result.get("success") is not True:
             print(f"  expected success result, got {result!r}")
@@ -1775,16 +1784,13 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
         and child_completions.get(f"codex_subagent_{unresolved_child_sid}") is False
     ), f"child_completions={child_completions!r}"
 
-    sess = session_manager.get(app_sid) or {}
-    last_asst = next(m for m in sess.get("messages", []) if m.get("id") == asst_id)
-    _replay_and_apply(
+    _finalize_sync(
         persist_sid=app_sid,
         run_id=run_id,
         mode="native",
         claude_sid=parent_sid,
-        sess=sess,
-        last_asst=last_asst,
         msg_id=asst_id,
+        cancelled=False,
     )
     hydrated = session_manager.get(app_sid) or {}
     msg = next(m for m in hydrated.get("messages", []) if m.get("id") == asst_id)
@@ -1900,8 +1906,6 @@ def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
         print("  missing derived worker events")
         return False
 
-    sess = session_manager.get(app_sid) or {}
-    last_asst = next(m for m in sess.get("messages", []) if m.get("id") == asst_id)
     orig_resolve = codex_native.resolve_rollout_path
     codex_native.resolve_rollout_path = lambda sid: child_path if sid == child_sid else None  # type: ignore
     try:
@@ -1910,21 +1914,13 @@ def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
             run_id=run_id,
             mode="native",
             claude_sid=parent_sid,
-            sess=sess,
-            last_asst=last_asst,
             msg_id=asst_id,
-        )
-        hydrated_once = session_manager.get(app_sid) or {}
-        hydrated_asst = next(
-            m for m in hydrated_once.get("messages", []) if m.get("id") == asst_id
         )
         _replay_and_apply(
             persist_sid=app_sid,
             run_id=run_id,
             mode="native",
             claude_sid=parent_sid,
-            sess=hydrated_once,
-            last_asst=hydrated_asst,
             msg_id=asst_id,
         )
     finally:
@@ -2052,15 +2048,11 @@ def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
         if len(worker_starts) != 2:
             print(f"  worker_starts={worker_starts!r}")
             return False
-        sess = session_manager.get(app_sid) or {}
-        last_asst = next(m for m in sess.get("messages", []) if m.get("id") == asst_id)
         _replay_and_apply(
             persist_sid=app_sid,
             run_id=run_id,
             mode="native",
             claude_sid=parent_sid,
-            sess=sess,
-            last_asst=last_asst,
             msg_id=asst_id,
         )
     finally:

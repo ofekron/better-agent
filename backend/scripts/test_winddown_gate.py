@@ -48,6 +48,7 @@ def _make_provider() -> ClaudeProvider:
         "kind": "claude",
         "generation": PROVIDER_GENERATION,
         "revision": 1,
+        "execution_revision": 1,
     }
     provider = ClaudeProvider(record)
 

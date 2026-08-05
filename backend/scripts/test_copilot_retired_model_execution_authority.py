@@ -50,6 +50,7 @@ _PROVIDER = {
     "kind": "copilot",
     "generation": str(uuid.uuid4()),
     "revision": 0,
+    "execution_revision": 0,
 }
 
 _REQUIRED_ARGUMENTS = {

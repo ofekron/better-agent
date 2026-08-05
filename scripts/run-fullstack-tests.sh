@@ -85,17 +85,40 @@ docker_test_cleanup
 BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
-  IMAGE_TAG="better-agent-fullstack-tests:${COMMIT_SHA}"
-  echo "run-fullstack-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
+  IMAGE_FINGERPRINT="$(docker_test_value_fingerprint "fullstack-ref:$COMMIT_SHA")"
+  IMAGE_TAG="better-agent-fullstack-tests:ref-${IMAGE_FINGERPRINT}"
+  echo "run-fullstack-tests: materializing $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   DOCKER_TEST_IMAGE_KIND=ref
-  git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker_test_build -f docker/Dockerfile.fullstack-test --target full -t "$IMAGE_TAG" -
+  ARCHIVE_PATH="$DOCKER_TEST_RUN_DIR/context"
+  docker_test_snapshot_git_ref "$REPO_ROOT" "$COMMIT_SHA" "$ARCHIVE_PATH"
+  docker_test_materialize_image "$IMAGE_FINGERPRINT" "$IMAGE_TAG" \
+    -f "$ARCHIVE_PATH/docker/Dockerfile.fullstack-test" --target full -t "$IMAGE_TAG" "$ARCHIVE_PATH"
 else
-  IMAGE_TAG="better-agent-fullstack-tests:deps"
+  SNAPSHOT_PATH="$DOCKER_TEST_RUN_DIR/context"
+  docker_test_snapshot_context "$REPO_ROOT" "$SNAPSHOT_PATH" \
+    "$REPO_ROOT/.dockerignore" \
+    "$DOCKERFILE" \
+    "$REPO_ROOT/sdk/runtime-requirements.txt" \
+    "$REPO_ROOT/vendor" \
+    "$REPO_ROOT/frontend/package.json" \
+    "$REPO_ROOT/frontend/package-lock.json" \
+    "$REPO_ROOT/frontend/scripts" \
+    "$REPO_ROOT/docker/fullstack-test-entrypoint.sh"
+  IMAGE_FINGERPRINT="$(docker_test_fingerprint "$SNAPSHOT_PATH" \
+    "$SNAPSHOT_PATH/.dockerignore" \
+    "$SNAPSHOT_PATH/docker/Dockerfile.fullstack-test" \
+    "$SNAPSHOT_PATH/sdk/runtime-requirements.txt" \
+    "$SNAPSHOT_PATH/vendor" \
+    "$SNAPSHOT_PATH/frontend/package.json" \
+    "$SNAPSHOT_PATH/frontend/package-lock.json" \
+    "$SNAPSHOT_PATH/frontend/scripts" \
+    "$SNAPSHOT_PATH/docker/fullstack-test-entrypoint.sh")"
+  IMAGE_TAG="better-agent-fullstack-tests:deps-${IMAGE_FINGERPRINT}"
   BIND_MOUNT_REPO=1
-  echo "run-fullstack-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
+  echo "run-fullstack-tests: materializing $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
   DOCKER_TEST_IMAGE_KIND=deps
-  docker_test_build -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker_test_materialize_image "$IMAGE_FINGERPRINT" "$IMAGE_TAG" \
+    -f "$SNAPSHOT_PATH/docker/Dockerfile.fullstack-test" --target deps -t "$IMAGE_TAG" "$SNAPSHOT_PATH"
 fi
 
 RUN_ARGS=(--rm)

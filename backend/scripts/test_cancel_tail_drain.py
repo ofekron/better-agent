@@ -92,6 +92,7 @@ class _TailProvider:
                 "kind": "claude",
                 "generation": "00000000-0000-4000-8000-000000000001",
                 "revision": 1,
+                "execution_revision": 1,
             },
             **arguments,
         )

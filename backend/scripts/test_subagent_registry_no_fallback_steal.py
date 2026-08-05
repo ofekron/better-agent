@@ -350,9 +350,6 @@ def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
             "complete": False,
         }))
 
-        sess_live = session_manager.get(app_sid)
-        last_asst = next(m for m in sess_live["messages"] if m["id"] == asst_id)
-
         def _count_orphan_rows() -> tuple[int, set]:
             rows, _, _ = event_ingester.read_events(root_id, limit=1000)
             orphan = [r for r in rows if r.get("type") == "subagent_unmatched"]
@@ -361,8 +358,7 @@ def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
         with session_manager.batch(app_sid, bump_updated_at=False):
             _replay_and_apply(
                 persist_sid=app_sid, run_id=run_id, mode="native",
-                claude_sid=claude_sid, sess=sess_live,
-                last_asst=last_asst, msg_id=asst_id,
+                claude_sid=claude_sid, msg_id=asst_id,
             )
         from event_journal import event_journal_writer
         event_journal_writer.barrier_sync(root_id)
@@ -387,10 +383,7 @@ def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
         with session_manager.batch(app_sid, bump_updated_at=False):
             _replay_and_apply(
                 persist_sid=app_sid, run_id=run_id, mode="native",
-                claude_sid=claude_sid, sess=session_manager.get(app_sid),
-                last_asst=next(m for m in session_manager.get(app_sid)["messages"]
-                               if m["id"] == asst_id),
-                msg_id=asst_id,
+                claude_sid=claude_sid, msg_id=asst_id,
             )
         event_journal_writer.barrier_sync(root_id)
         n2, _ = _count_orphan_rows()

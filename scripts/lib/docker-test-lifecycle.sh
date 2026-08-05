@@ -3,7 +3,11 @@
 DOCKER_TEST_BUILDER="better-agent-tests"
 DOCKER_TEST_LABEL_PREFIX="com.better-agent.test"
 DOCKER_TEST_DEFAULT_REF_IMAGE_LIMIT=3
+DOCKER_TEST_DEFAULT_DEPS_IMAGE_LIMIT=2
 DOCKER_TEST_DEFAULT_CACHE_LIMIT="10GB"
+DOCKER_TEST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCKER_TEST_MATERIALIZER="$DOCKER_TEST_LIB_DIR/docker-test-materialize-image.sh"
+DOCKER_TEST_EXIT_NORMALIZER="$DOCKER_TEST_LIB_DIR/docker-test-normalize-exit.sh"
 
 docker_test_process_start() {
   ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
@@ -11,6 +15,7 @@ docker_test_process_start() {
 
 docker_test_lifecycle_init() {
   DOCKER_TEST_FAMILY="$1"
+  docker_test_require_local_daemon
   DOCKER_TEST_HOST="$(hostname)"
   DOCKER_TEST_OWNER_START="$(docker_test_process_start "$$")"
   [ -n "$DOCKER_TEST_HOST" ] || return 1
@@ -20,8 +25,23 @@ docker_test_lifecycle_init() {
   DOCKER_TEST_RUN_ID="$(basename "$DOCKER_TEST_RUN_DIR")-$$"
   DOCKER_TEST_CONTAINER_NAME="better-agent-test-${DOCKER_TEST_FAMILY}-${DOCKER_TEST_RUN_ID}"
   DOCKER_TEST_CIDFILE="$DOCKER_TEST_RUN_DIR/container.cid"
+  DOCKER_TEST_IMAGE_LEASE=""
   DOCKER_TEST_CURRENT_CONTAINER=""
   trap 'docker_test_remove_current_container' EXIT
+}
+
+docker_test_require_local_daemon() {
+  local endpoint="${DOCKER_HOST:-}"
+  if [ -z "$endpoint" ]; then
+    endpoint="$(docker context inspect --format '{{(index .Endpoints "docker").Host}}')"
+  fi
+  case "$endpoint" in
+    unix://*|npipe://*) return 0 ;;
+    *)
+      echo "docker-test-lifecycle: coordinated materialization requires a local Docker daemon" >&2
+      return 1
+      ;;
+  esac
 }
 
 docker_test_owner_is_alive() {
@@ -62,14 +82,176 @@ docker_test_ensure_builder() {
     || docker buildx inspect "$DOCKER_TEST_BUILDER" >/dev/null 2>&1
 }
 
-docker_test_build() {
+docker_test_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+    return
+  fi
+  echo "docker-test-lifecycle: sha256sum or shasum is required" >&2
+  return 1
+}
+
+docker_test_platform() {
+  docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+}
+
+docker_test_fingerprint() {
+  local root="$1"
+  shift
+  (
+    printf 'platform\0%s\0' "$(docker_test_platform)"
+    find "$@" \( -type f -o -type l \) -print0 \
+      | LC_ALL=C sort -z \
+      | while IFS= read -r -d '' path; do
+      printf 'path\0%s\0executable\0' "${path#"$root"/}"
+      if [ -x "$path" ]; then printf '1\0'; else printf '0\0'; fi
+      if [ -L "$path" ]; then
+        printf 'symlink\0'
+        readlink -n "$path"
+        printf '\0'
+      else
+        printf 'file\0'
+        docker_test_sha256 < "$path"
+      fi
+    done
+  ) | docker_test_sha256
+}
+
+docker_test_snapshot_context() {
+  local root="$1"
+  local destination="$2"
+  local input relative
+  shift 2
+  mkdir -p "$destination"
+  for input in "$@"; do
+    case "$input" in
+      "$root"/*) relative="${input#"$root"/}" ;;
+      *)
+        echo "docker-test-lifecycle: snapshot input escapes repository: $input" >&2
+        return 1
+        ;;
+    esac
+    tar -C "$root" -cf - "$relative" | tar -C "$destination" -xf -
+  done
+}
+
+docker_test_snapshot_git_ref() {
+  local repository="$1"
+  local commit_sha="$2"
+  local destination="$3"
+  mkdir -p "$destination"
+  git -C "$repository" archive "$commit_sha" | tar -x -C "$destination"
+}
+
+docker_test_value_fingerprint() {
+  printf 'platform\0%s\0value\0%s\0' "$(docker_test_platform)" "$1" \
+    | docker_test_sha256
+}
+
+docker_test_materialize_image() {
+  local fingerprint="$1"
+  local image_tag="$2"
   local image_kind="${DOCKER_TEST_IMAGE_KIND:-deps}"
+  shift 2
+
+  docker_test_prepare_lock_root
+  DOCKER_TEST_IMAGE_LEASE="$DOCKER_TEST_LEASE_DIR/$DOCKER_TEST_RUN_ID"
+  if docker_test_with_state_lock "$DOCKER_TEST_MATERIALIZER" check \
+    "$DOCKER_TEST_BUILDER" "$DOCKER_TEST_FAMILY" "$image_kind" \
+    "$fingerprint" "$image_tag" "$DOCKER_TEST_IMAGE_LEASE" \
+    "$image_tag|$DOCKER_TEST_HOST|$$|$DOCKER_TEST_OWNER_START" "$@"; then
+    return 0
+  else
+    local check_status=$?
+    [ "$check_status" -eq 75 ] || return "$check_status"
+  fi
   docker_test_ensure_builder
-  docker buildx build --builder "$DOCKER_TEST_BUILDER" --load \
-    --label "${DOCKER_TEST_LABEL_PREFIX}.owner=true" \
-    --label "${DOCKER_TEST_LABEL_PREFIX}.family=${DOCKER_TEST_FAMILY}" \
-    --label "${DOCKER_TEST_LABEL_PREFIX}.kind=${image_kind}" \
-    "$@"
+  docker_test_with_builder_lock "$DOCKER_TEST_MATERIALIZER" materialize \
+    "$DOCKER_TEST_BUILDER" "$DOCKER_TEST_FAMILY" "$image_kind" \
+    "$fingerprint" "$image_tag" "$DOCKER_TEST_IMAGE_LEASE" \
+    "$image_tag|$DOCKER_TEST_HOST|$$|$DOCKER_TEST_OWNER_START" "$@"
+}
+
+docker_test_prepare_lock_root() {
+  local uid
+  uid="$(id -u)"
+  DOCKER_TEST_LOCK_ROOT="/tmp/better-agent-docker-build-locks-$uid"
+  if [ -L "$DOCKER_TEST_LOCK_ROOT" ]; then
+    echo "docker-test-lifecycle: refusing symlink lock directory: $DOCKER_TEST_LOCK_ROOT" >&2
+    return 1
+  fi
+  if [ -e "$DOCKER_TEST_LOCK_ROOT" ]; then
+    [ -d "$DOCKER_TEST_LOCK_ROOT" ] && [ -O "$DOCKER_TEST_LOCK_ROOT" ] || {
+      echo "docker-test-lifecycle: unsafe lock directory: $DOCKER_TEST_LOCK_ROOT" >&2
+      return 1
+    }
+  else
+    (umask 077 && mkdir "$DOCKER_TEST_LOCK_ROOT" 2>/dev/null) || {
+      [ ! -L "$DOCKER_TEST_LOCK_ROOT" ] \
+        && [ -d "$DOCKER_TEST_LOCK_ROOT" ] \
+        && [ -O "$DOCKER_TEST_LOCK_ROOT" ] || return 1
+    }
+  fi
+  chmod 700 "$DOCKER_TEST_LOCK_ROOT"
+  DOCKER_TEST_LEASE_DIR="$DOCKER_TEST_LOCK_ROOT/leases"
+  if [ -L "$DOCKER_TEST_LEASE_DIR" ]; then
+    echo "docker-test-lifecycle: refusing symlink lease directory: $DOCKER_TEST_LEASE_DIR" >&2
+    return 1
+  fi
+  if [ -e "$DOCKER_TEST_LEASE_DIR" ]; then
+    [ -d "$DOCKER_TEST_LEASE_DIR" ] && [ -O "$DOCKER_TEST_LEASE_DIR" ] || return 1
+  else
+    (umask 077 && mkdir "$DOCKER_TEST_LEASE_DIR" 2>/dev/null) || {
+      [ ! -L "$DOCKER_TEST_LEASE_DIR" ] \
+        && [ -d "$DOCKER_TEST_LEASE_DIR" ] \
+        && [ -O "$DOCKER_TEST_LEASE_DIR" ] || return 1
+    }
+  fi
+}
+
+docker_test_with_lock() {
+  local lock_file="$1"
+  local wait_mode="$2"
+  shift 2
+  docker_test_prepare_lock_root
+
+  if command -v flock >/dev/null 2>&1; then
+    if [ "$wait_mode" = try ]; then
+      flock -E 75 -n "$lock_file" "$DOCKER_TEST_EXIT_NORMALIZER" "$@"
+      return
+    fi
+    flock "$lock_file" "$@"
+    return
+  fi
+  if command -v lockf >/dev/null 2>&1; then
+    if [ "$wait_mode" = try ]; then
+      lockf -s -t 0 -k "$lock_file" "$DOCKER_TEST_EXIT_NORMALIZER" "$@"
+      return
+    fi
+    lockf -k "$lock_file" "$@"
+    return
+  fi
+  echo "docker-test-lifecycle: flock or lockf is required for safe image materialization" >&2
+  return 1
+}
+
+docker_test_with_builder_lock() {
+  docker_test_prepare_lock_root
+  docker_test_with_lock "$DOCKER_TEST_LOCK_ROOT/${DOCKER_TEST_BUILDER}.lock" wait "$@"
+}
+
+docker_test_try_with_builder_lock() {
+  docker_test_prepare_lock_root
+  docker_test_with_lock "$DOCKER_TEST_LOCK_ROOT/${DOCKER_TEST_BUILDER}.lock" try "$@"
+}
+
+docker_test_with_state_lock() {
+  docker_test_prepare_lock_root
+  docker_test_with_lock "$DOCKER_TEST_LOCK_ROOT/state.lock" wait "$@"
 }
 
 docker_test_remove_current_container() {
@@ -79,6 +261,10 @@ docker_test_remove_current_container() {
   fi
   if [ -n "${DOCKER_TEST_RUN_DIR:-}" ] && [ -d "$DOCKER_TEST_RUN_DIR" ]; then
     rm -rf "$DOCKER_TEST_RUN_DIR"
+  fi
+  if [ -n "${DOCKER_TEST_IMAGE_LEASE:-}" ]; then
+    rm -f "$DOCKER_TEST_IMAGE_LEASE"
+    DOCKER_TEST_IMAGE_LEASE=""
   fi
 }
 
@@ -108,10 +294,28 @@ docker_test_run() {
   return "$status"
 }
 
-docker_test_prune_images() {
-  local limit="${BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT:-$DOCKER_TEST_DEFAULT_REF_IMAGE_LIMIT}"
-  local index=0 line image_id seen=" "
+docker_test_prune_images_for_kind() {
+  local image_kind="$1"
+  local limit="$2"
+  local index=0 line image_id seen=" " protected=" " lease lease_data
   case "$limit" in *[!0-9]*|'') return 1 ;; esac
+
+  docker_test_prepare_lock_root
+  for lease in "$DOCKER_TEST_LEASE_DIR"/*; do
+    [ -f "$lease" ] || continue
+    lease_data="$(cat "$lease" 2>/dev/null || true)"
+    IFS='|' read -r image_tag host owner_pid owner_start <<EOF
+$lease_data
+EOF
+    case "$owner_pid" in *[!0-9]*|'') rm -f "$lease"; continue ;; esac
+    if [ "$host" = "$DOCKER_TEST_HOST" ] \
+      && docker_test_owner_is_alive "$owner_pid" "$owner_start"; then
+      image_id="$(docker image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null || true)"
+      [ -n "$image_id" ] && protected="$protected$image_id "
+    else
+      rm -f "$lease"
+    fi
+  done
 
   while IFS= read -r line; do
     image_id="${line#*|}"
@@ -120,6 +324,7 @@ docker_test_prune_images() {
     seen="$seen$image_id "
     index=$((index + 1))
     [ "$index" -le "$limit" ] && continue
+    case "$protected" in *" $image_id "*) continue ;; esac
     if [ -z "$(docker ps -aq --filter "ancestor=$image_id")" ]; then
       docker image rm "$image_id" >/dev/null 2>&1 || true
     fi
@@ -127,18 +332,63 @@ docker_test_prune_images() {
 $(docker image ls \
   --filter "label=${DOCKER_TEST_LABEL_PREFIX}.owner=true" \
   --filter "label=${DOCKER_TEST_LABEL_PREFIX}.family=${DOCKER_TEST_FAMILY}" \
-  --filter "label=${DOCKER_TEST_LABEL_PREFIX}.kind=ref" \
+  --filter "label=${DOCKER_TEST_LABEL_PREFIX}.kind=${image_kind}" \
   --format '{{.CreatedAt}}|{{.ID}}' | sort -r)
 EOF
 }
 
-docker_test_prune_build_cache() {
+docker_test_prune_images() {
+  local ref_limit="${BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT:-$DOCKER_TEST_DEFAULT_REF_IMAGE_LIMIT}"
+  local deps_limit="${BETTER_AGENT_DOCKER_DEPS_IMAGE_LIMIT:-$DOCKER_TEST_DEFAULT_DEPS_IMAGE_LIMIT}"
+  docker_test_prune_images_for_kind ref "$ref_limit"
+  docker_test_prune_images_for_kind deps "$deps_limit"
+}
+
+docker_test_prune_build_cache_unlocked() {
   local cache_limit="${BETTER_AGENT_DOCKER_CACHE_LIMIT:-$DOCKER_TEST_DEFAULT_CACHE_LIMIT}"
   docker buildx inspect "$DOCKER_TEST_BUILDER" >/dev/null 2>&1 || return 0
-  docker buildx prune --builder "$DOCKER_TEST_BUILDER" --force --max-used-space "$cache_limit"
+  [ -n "$(docker ps -q --filter "name=buildx_buildkit_${DOCKER_TEST_BUILDER}")" ] \
+    || return 0
+  docker buildx prune --builder "$DOCKER_TEST_BUILDER" \
+    --force --max-used-space "$cache_limit"
+}
+
+docker_test_prune_build_cache() {
+  docker_test_with_builder_lock env \
+    BETTER_AGENT_DOCKER_CACHE_LIMIT="${BETTER_AGENT_DOCKER_CACHE_LIMIT:-}" \
+    bash -c 'source "$1"; docker_test_prune_build_cache_unlocked' _ \
+    "$DOCKER_TEST_LIB_DIR/docker-test-lifecycle.sh"
+}
+
+docker_test_cleanup_locked() {
+  docker_test_with_state_lock env \
+    DOCKER_TEST_FAMILY="$DOCKER_TEST_FAMILY" \
+    DOCKER_TEST_HOST="$DOCKER_TEST_HOST" \
+    BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT="${BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT:-}" \
+    BETTER_AGENT_DOCKER_DEPS_IMAGE_LIMIT="${BETTER_AGENT_DOCKER_DEPS_IMAGE_LIMIT:-}" \
+    bash -c 'source "$1"; docker_test_prune_images' _ \
+    "$DOCKER_TEST_LIB_DIR/docker-test-lifecycle.sh" || return
+  docker_test_prune_build_cache_unlocked
 }
 
 docker_test_cleanup() {
-  docker_test_prune_images || echo "docker-test-lifecycle: image cleanup skipped" >&2
-  docker_test_prune_build_cache || echo "docker-test-lifecycle: cache cleanup skipped" >&2
+  local cleanup_status
+  if docker_test_try_with_builder_lock env \
+    DOCKER_TEST_FAMILY="$DOCKER_TEST_FAMILY" \
+    DOCKER_TEST_HOST="$DOCKER_TEST_HOST" \
+    BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT="${BETTER_AGENT_DOCKER_REF_IMAGE_LIMIT:-}" \
+    BETTER_AGENT_DOCKER_DEPS_IMAGE_LIMIT="${BETTER_AGENT_DOCKER_DEPS_IMAGE_LIMIT:-}" \
+    BETTER_AGENT_DOCKER_CACHE_LIMIT="${BETTER_AGENT_DOCKER_CACHE_LIMIT:-}" \
+    bash -c 'source "$1"; docker_test_cleanup_locked' _ \
+    "$DOCKER_TEST_LIB_DIR/docker-test-lifecycle.sh"; then
+    return 0
+  else
+    cleanup_status=$?
+  fi
+  if [ "$cleanup_status" -eq 75 ]; then
+    echo "docker-test-lifecycle: cleanup deferred while builder is busy" >&2
+    return 0
+  fi
+  echo "docker-test-lifecycle: cleanup failed with status $cleanup_status" >&2
+  return "$cleanup_status"
 }

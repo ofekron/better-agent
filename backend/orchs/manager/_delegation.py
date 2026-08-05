@@ -1187,14 +1187,12 @@ async def run_delegation_locked(
     if machine_completion:
         worker_prompt = instructions
     else:
+        await delegation_status_store.write_status_async(
+            delegation_id,
+            stage="delegation_team_context_resolving",
+        )
         from orchs.manager import bootstrap as manager_bootstrap
         manager_session = await asyncio.to_thread(session_manager.get, app_session_id) or {}
-        # format_team_context -> worker_store.list_worker_projection ->
-        # session_manager.get_fields_many resolves one root per worker sid;
-        # an unindexed sid blocks synchronously up to root_change_wal's
-        # observation timeout (default 50ms) each. With up to `limit`
-        # workers this can hold the event loop for ~1-2s per delegation —
-        # offload it the same way the sibling calls above do.
         team_context = await asyncio.to_thread(
             manager_bootstrap.format_team_context,
             cwd=cwd,

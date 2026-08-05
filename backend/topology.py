@@ -206,6 +206,17 @@ def local_node_id() -> str:
     return node_id
 
 
+def local_node_id_or_primary() -> str:
+    """Resolve local identity for optional-topology primary deployments."""
+    raw_path = get_env("BETTER_CLAUDE_TOPOLOGY_PATH")
+    if not raw_path:
+        return "primary"
+    path = _resolve_path()
+    if not path.exists():
+        return "primary"
+    return local_node_id()
+
+
 def remove_node(node_id: str) -> bool:
     """Remove a static worker-node from topology.yaml and invalidate cache.
     Cannot remove the primary. Returns True if a node was removed.

@@ -39,7 +39,6 @@ from datetime import datetime, timezone
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-selector-flap-")
-os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -47,20 +46,12 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import turn_manager  # noqa: E402
-import installation_profile  # noqa: E402
-import session_manager as _sm_mod  # noqa: E402
-import session_queue_projection  # noqa: E402
 import config_store  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from provider import StreamEvent, prepare_execution  # noqa: E402
 from lifecycle_command_model import UserTurnIdentity  # noqa: E402
-
-_sm_mod.PERSIST_DEBOUNCE_S = 0.0
-installation_profile.integrations_enabled = lambda: True
-installation_profile.assert_orchestration_mode_allowed = lambda _mode: None
-session_queue_projection.note_persisted_tree = lambda *_args, **_kwargs: 0
-session_manager.flush_root_persist = lambda _root_id: None
+from scripts.standalone_turn_test_runtime import scoped_turn_test_runtime  # noqa: E402
 
 _MODEL_A = "claude-opus-5"
 _MODEL_B = "claude-sonnet-5"
@@ -139,6 +130,7 @@ class _FlappingModelProvider:
                 "kind": self.KIND,
                 "generation": "00000000-0000-4000-8000-000000000001",
                 "revision": 1,
+                "execution_revision": 1,
             },
             **arguments,
         )
@@ -170,7 +162,7 @@ class _FlappingModelProvider:
         return True
 
 
-async def test_selector_change_flapping_is_bounded() -> bool:
+async def check_selector_change_flapping_is_bounded() -> bool:
     shutil.rmtree(os.path.join(_TMP_HOME, "sessions"), ignore_errors=True)
 
     selector_cap = 2
@@ -235,15 +227,16 @@ async def test_selector_change_flapping_is_bounded() -> bool:
 
 async def run_tests() -> bool:
     global _coordinator
-    _coordinator = Coordinator()
-    await _coordinator.turn_manager.lifecycle.bind()
-    await _coordinator.lifecycle_commands.bind()
-    try:
-        return await test_selector_change_flapping_is_bounded()
-    finally:
-        await _coordinator.quiesce_prompt_processors()
-        await _coordinator.lifecycle_commands.close()
-        await _coordinator.turn_manager.lifecycle.close()
+    with scoped_turn_test_runtime():
+        _coordinator = Coordinator()
+        await _coordinator.turn_manager.lifecycle.bind()
+        await _coordinator.lifecycle_commands.bind()
+        try:
+            return await check_selector_change_flapping_is_bounded()
+        finally:
+            await _coordinator.quiesce_prompt_processors()
+            await _coordinator.lifecycle_commands.close()
+            await _coordinator.turn_manager.lifecycle.close()
 
 
 if __name__ == "__main__":

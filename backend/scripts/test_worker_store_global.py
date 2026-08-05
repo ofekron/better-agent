@@ -201,6 +201,36 @@ def test_worker_registry_read_cache_is_fingerprinted_and_isolated() -> None:
         worker_store.remove_worker("/repo/a", "worker-read-cache")
 
 
+def test_worker_projection_prunes_missing_session_records_atomically() -> None:
+    cwd = "/repo/projection-prune"
+    worker_store.upsert_worker(cwd, "worker-live", "native", "agent-live")
+    worker_store.upsert_worker(cwd, "worker-stale", "native", "agent-stale")
+    worker_store.set_fork(cwd, "caller", "worker-stale", "fork-stale")
+    original_get_fields_many = worker_store._sm.get_fields_many
+
+    def live_only(sids, fields):
+        check(set(sids) == {"worker-live", "worker-stale"}, "projection did not batch candidates")
+        check(set(fields) == {"cwd", "name"}, "projection requested unexpected fields")
+        return {"worker-live": {"cwd": cwd, "name": "live"}}
+
+    worker_store._sm.get_fields_many = live_only
+    try:
+        projected = worker_store.list_worker_projection(cwd, limit=20)
+    finally:
+        worker_store._sm.get_fields_many = original_get_fields_many
+
+    check(
+        [worker["agent_session_id"] for worker in projected] == ["worker-live"],
+        "projection included a missing session",
+    )
+    check(worker_store.get_worker(cwd, "worker-stale") is None, "stale worker was not pruned")
+    check(
+        worker_store.get_fork_record(cwd, "caller", "worker-stale") is None,
+        "stale worker fork was not pruned",
+    )
+    worker_store.remove_worker(cwd, "worker-live")
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
@@ -210,6 +240,7 @@ def main() -> int:
         test_worker_count_neutral_writes_do_not_refresh_session_summaries()
         test_worker_count_hot_cache_skips_fingerprint()
         test_worker_registry_read_cache_is_fingerprinted_and_isolated()
+        test_worker_projection_prunes_missing_session_records_atomically()
         print("ALL PASS")
         return 0
     finally:

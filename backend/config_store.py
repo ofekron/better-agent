@@ -78,7 +78,13 @@ import runtime_profile
 from filelock import FileLock
 
 from json_store import read_json, write_json
-from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
+from paths import (
+    ba_home,
+    is_test_mode,
+    resolve_claude_config_dir,
+    resolve_provider_config_dir,
+    user_home,
+)
 from provider_env import is_ollama_base_url
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -378,6 +384,18 @@ _api_key_cache: dict[str, str] = {}
 _api_key_cache_lock = threading.Lock()
 _api_key_read_locks: dict[str, threading.Lock] = {}
 _credential_status: dict[str, str] = {}
+
+
+def reset_for_test_home() -> None:
+    global _state_cache
+    if not is_test_mode():
+        raise RuntimeError("config-store test-home reset requires test mode")
+    with _state_cache_lock:
+        _state_cache = None
+    with _api_key_cache_lock:
+        _api_key_cache.clear()
+        _api_key_read_locks.clear()
+        _credential_status.clear()
 
 
 def _api_key_read_lock(provider_id: str) -> threading.Lock:

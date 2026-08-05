@@ -3841,8 +3841,6 @@ def _finalize_sync(
     run_id: str,
     mode: str,
     claude_sid: Optional[str],
-    sess: dict,
-    last_asst: dict,
     msg_id: str,
     cancelled: bool,
 ) -> None:
@@ -3862,8 +3860,6 @@ def _finalize_sync(
             run_id=run_id,
             mode=mode,
             claude_sid=claude_sid,
-            sess=sess,
-            last_asst=last_asst,
             msg_id=msg_id,
         )
         _apply_completion_state(
@@ -3907,8 +3903,6 @@ def _apply_integration_sync(
                 run_id=run_id,
                 mode=mode,
                 claude_sid=claude_sid,
-                sess=live_sess,
-                last_asst=last_asst,
                 msg_id=msg_id,
                 replay_end_byte=replay_end_byte,
             )
@@ -4147,8 +4141,6 @@ def _replay_and_apply(
     run_id: str,
     mode: str,
     claude_sid: Optional[str],
-    sess: dict,
-    last_asst: dict,
     msg_id: str,
     replay_end_byte: Optional[int] = None,
 ) -> None:
@@ -4158,6 +4150,35 @@ def _replay_and_apply(
     would have. Falls back to _read_sdk_output when jsonl is
     missing or text-empty.
     """
+    with session_manager.message_batch(
+        persist_sid,
+        msg_id,
+        bump_updated_at=False,
+        hydrate_events=False,
+    ) as (sess, last_asst):
+        _replay_and_apply_live_ref(
+            persist_sid=persist_sid,
+            run_id=run_id,
+            mode=mode,
+            claude_sid=claude_sid,
+            sess=sess,
+            last_asst=last_asst,
+            msg_id=msg_id,
+            replay_end_byte=replay_end_byte,
+        )
+
+
+def _replay_and_apply_live_ref(
+    *,
+    persist_sid: str,
+    run_id: str,
+    mode: str,
+    claude_sid: Optional[str],
+    sess: dict,
+    last_asst: dict,
+    msg_id: str,
+    replay_end_byte: Optional[int],
+) -> None:
     run_dir = _runs_root() / run_id
     desc = None
     bs_path = run_dir / "backend_state.json"
@@ -5030,8 +5051,6 @@ async def _finalize_when_done(
                     run_id=run_id,
                     mode=desc.get("mode") or "native",
                     claude_sid=approved_recovered_sid,
-                    sess=sess,
-                    last_asst=last_asst,
                     msg_id=msg_id,
                     cancelled=cancelled,
                 )

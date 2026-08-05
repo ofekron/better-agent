@@ -50,6 +50,16 @@ def test_primary_identity_defaults_only_when_topology_is_absent() -> None:
     assert local_machine_identity.initialize_primary_machine_id() == "primary"
 
 
+def test_primary_identity_defaults_when_launcher_path_is_absent(
+    monkeypatch, tmp_path,
+) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    monkeypatch.setenv("BETTER_AGENT_TOPOLOGY_PATH", str(topology_path))
+    monkeypatch.setenv("BETTER_CLAUDE_TOPOLOGY_PATH", str(topology_path))
+
+    assert local_machine_identity.initialize_primary_machine_id() == "primary"
+
+
 def test_primary_identity_uses_declared_topology_id(monkeypatch, tmp_path) -> None:
     topology_path = tmp_path / "topology.yaml"
     topology_path.write_text(
@@ -72,6 +82,27 @@ def test_configured_invalid_topology_fails_without_initializing(monkeypatch, tmp
     monkeypatch.setenv("BETTER_AGENT_TOPOLOGY_PATH", str(topology_path))
 
     with pytest.raises(topology.TopologyError):
+        local_machine_identity.initialize_primary_machine_id()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        local_machine_identity.require_local_machine_id()
+
+
+def test_configured_topology_rejects_undeclared_local_node(
+    monkeypatch, tmp_path,
+) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        yaml.safe_dump({
+            "schema_version": 1,
+            "primary": {"id": "studio-mac", "address": "ws://studio:8001"},
+            "nodes": {},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BETTER_AGENT_TOPOLOGY_PATH", str(topology_path))
+    monkeypatch.setenv("BETTER_AGENT_NODE_ID", "undeclared")
+
+    with pytest.raises(topology.TopologyError, match="not declared"):
         local_machine_identity.initialize_primary_machine_id()
     with pytest.raises(RuntimeError, match="not initialized"):
         local_machine_identity.require_local_machine_id()

@@ -842,7 +842,40 @@ class Provider(ABC):
         self.suspended: bool = config_store.provider_suspended(self.id)
         self._parked_runs: dict[str, ParkedRun] = {}
         self._park_seq: int = 0
+        self._cache_active = False
         self._apply_capability_overrides()
+
+    def _activate_cache_resources(self) -> None:
+        pass
+
+    def _deactivate_cache_resources(self) -> None:
+        pass
+
+    def _activate_cache(self) -> None:
+        if self._cache_active:
+            return
+        try:
+            self._activate_cache_resources()
+        except BaseException:
+            try:
+                self._deactivate_cache_resources()
+            except BaseException:
+                logger.exception("provider cache activation cleanup failed")
+            raise
+        self._cache_active = True
+
+    def _deactivate_cache(self) -> None:
+        if not self._cache_active:
+            return
+        try:
+            self._deactivate_cache_resources()
+        except BaseException:
+            try:
+                self._activate_cache_resources()
+            except BaseException:
+                logger.exception("provider cache deactivation rollback failed")
+            raise
+        self._cache_active = False
 
     # Per-provider capability overrides (record `capabilities` map) win
     # over the kind/subclass ClassVar defaults. Applied as instance attrs
@@ -1915,6 +1948,58 @@ _PROVIDER_CACHE: dict[tuple[str, str], Provider] = {}
 _CACHE_LOCK = threading.Lock()
 
 
+class _ProviderKeyLock:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
+
+
+_PROVIDER_KEY_LOCKS: dict[tuple[str, str], _ProviderKeyLock] = {}
+
+
+def reset_provider_cache_for_test_home() -> None:
+    import paths
+
+    if not paths.is_test_mode():
+        raise RuntimeError("provider-cache test-home reset requires test mode")
+    with _CACHE_LOCK:
+        if _PROVIDER_KEY_LOCKS:
+            raise RuntimeError("provider resolution is active during test-home reset")
+        cached = dict(_PROVIDER_CACHE)
+    for instance in cached.values():
+        if instance.active_runs():
+            raise RuntimeError("provider run is active during test-home reset")
+        instance._deactivate_cache()
+    with _CACHE_LOCK:
+        if _PROVIDER_CACHE != cached:
+            raise RuntimeError("provider cache changed during test-home reset")
+        _PROVIDER_CACHE.clear()
+
+
+@contextmanager
+def _provider_key_guard(cache_key: tuple[str, str]):
+    with _CACHE_LOCK:
+        entry = _PROVIDER_KEY_LOCKS.get(cache_key)
+        if entry is None:
+            entry = _ProviderKeyLock()
+            _PROVIDER_KEY_LOCKS[cache_key] = entry
+        entry.users += 1
+    started = time.perf_counter()
+    entry.lock.acquire()
+    try:
+        perf.record(
+            "provider.resolve.key_wait",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        yield
+    finally:
+        entry.lock.release()
+        with _CACHE_LOCK:
+            entry.users -= 1
+            if entry.users == 0 and _PROVIDER_KEY_LOCKS.get(cache_key) is entry:
+                _PROVIDER_KEY_LOCKS.pop(cache_key, None)
+
+
 def prepare_and_start_run(provider: Provider, **start_arguments: Any) -> PreparedExecution:
     try:
         loop = start_arguments.pop("loop")
@@ -1962,6 +2047,95 @@ def _provider_runtime_kind(record: dict) -> str:
     return runtime_profile.runtime_kind(record, record.get("runner"))
 
 
+def _provider_authority_token(record: dict) -> tuple[object, ...]:
+    return (
+        record.get("generation"),
+        record.get("revision"),
+        record.get("execution_revision"),
+        record.get("kind"),
+        record.get("mode"),
+        record.get("suspended") is True,
+        record.get("runner"),
+        _provider_runtime_kind(record),
+    )
+
+
+def _provider_record_for_runner(record: dict, runner: Optional[str]) -> dict:
+    import runtime_profile
+
+    return runtime_profile.provider_record_for_runner(record, runner)
+
+
+def _provider_record_matches(
+    current: dict,
+    expected: dict,
+    runner: Optional[str],
+) -> bool:
+    if current.get("suspended") is True:
+        return False
+    try:
+        normalized = _provider_record_for_runner(current, runner)
+    except (RuntimeError, ValueError):
+        return False
+    return _provider_authority_token(normalized) == _provider_authority_token(expected)
+
+
+def _cached_provider_candidates(
+    provider_id: str,
+) -> list[tuple[tuple[str, str], Provider]]:
+    with _CACHE_LOCK:
+        return [
+            (cache_key, cached)
+            for cache_key, cached in _PROVIDER_CACHE.items()
+            if cache_key[0] == provider_id
+        ]
+
+
+def _resolve_unavailable_provider(
+    provider_id: str,
+    runner: Optional[str],
+) -> Provider | None:
+    requested_runner = str(runner or "").strip()
+    with config_store.provider_state_read_transaction():
+        with perf.timed("provider.resolve.config_read"):
+            current = config_store.get_provider_with_key(provider_id)
+        if current is not None:
+            return None
+        suspended = config_store.provider_suspended(provider_id)
+        candidates = _cached_provider_candidates(provider_id)
+        selected: Provider | None = None
+        cleanup_failures: list[BaseException] = []
+        for cache_key, cached in candidates:
+            if selected is None and (
+                not requested_runner or cache_key[1] == requested_runner
+            ):
+                selected = cached
+            if suspended:
+                cached.suspended = True
+                cached.defunct = False
+            else:
+                try:
+                    cached._deactivate_cache()
+                except BaseException as exc:
+                    cleanup_failures.append(exc)
+                cached.defunct = True
+                cached.suspended = False
+        if cleanup_failures:
+            first_failure = cleanup_failures[0]
+            for failure in cleanup_failures[1:]:
+                first_failure.add_note(
+                    f"additional provider cache cleanup failure: {failure!r}"
+                )
+            raise first_failure
+        if selected is not None:
+            return selected
+        if suspended:
+            raise ProviderSuspendedError(
+                f"provider {provider_id} is suspended; cannot start runs"
+            )
+        raise KeyError(provider_id)
+
+
 def get_provider(provider_id: str, runner: Optional[str] = None) -> Provider:
     """Return the cached `Provider` for `provider_id`, refreshing its
     record from disk on every call so config edits are visible.
@@ -1971,74 +2145,101 @@ def get_provider(provider_id: str, runner: Optional[str] = None) -> Provider:
     its runs cleanly. Only a provider that was *never* loaded raises
     `KeyError`.
 
-    Concurrency: the cache mutation is locked so two parallel first-
-    lookups can't each create their own instance and lose run state on
-    the loser. Subsequent record refreshes go through the instance's
-    `record` setter which atomically replaces the record dict.
+    Concurrency is scoped to one provider/runner key. Parallel first lookups
+    for the same key publish one instance, while unrelated providers and
+    runners resolve independently. Config authority is revalidated atomically
+    with each in-memory refresh or publication.
     """
-    record = config_store.get_provider_with_key(provider_id)
-    suspended_record = record is None and config_store.provider_suspended(provider_id)
-    with _CACHE_LOCK:
-        if record is not None:
-            import runtime_profile
-            record = runtime_profile.provider_record_for_runner(record, runner)
-            cache_key = (provider_id, record["runner"])
-        else:
-            requested_runner = str(runner or "").strip()
-            candidates = [
-                item for (pid, cached_runner), item in _PROVIDER_CACHE.items()
-                if pid == provider_id and (not requested_runner or cached_runner == requested_runner)
-            ]
-            cache_key = (provider_id, requested_runner)
-        cached = _PROVIDER_CACHE.get(cache_key) if record is not None else (candidates[0] if candidates else None)
+    while True:
+        with perf.timed("provider.resolve.config_read"):
+            record = config_store.get_provider_with_key(provider_id)
         if record is None:
-            if cached is not None:
-                if suspended_record:
-                    cached.suspended = True
+            unavailable = _resolve_unavailable_provider(provider_id, runner)
+            if unavailable is not None:
+                return unavailable
+            continue
+        with perf.timed("provider.resolve.runner"):
+            record = _provider_record_for_runner(record, runner)
+        cache_key = (provider_id, record["runner"])
+        planned_authority = _provider_authority_token(record)
+        with perf.timed("provider.resolve.runtime_class"):
+            cls = _resolve_class(_provider_runtime_kind(record))
+        with _provider_key_guard(cache_key):
+            with perf.timed("provider.resolve.config_read"):
+                current = config_store.get_provider_with_key(provider_id)
+            if current is None:
+                continue
+            current = _provider_record_for_runner(current, runner)
+            if (
+                (provider_id, current["runner"]) != cache_key
+                or _provider_authority_token(current) != planned_authority
+            ):
+                continue
+            with _CACHE_LOCK:
+                cached = _PROVIDER_CACHE.get(cache_key)
+            if cached is not None and isinstance(cached, cls):
+                was_defunct = cached.defunct
+
+                def refresh() -> None:
+                    if was_defunct:
+                        cached._activate_cache()
+                    try:
+                        cached.record = current
+                    except BaseException:
+                        if was_defunct:
+                            cached._deactivate_cache()
+                        raise
                     cached.defunct = False
+                    cached.suspended = False
+
+                with perf.timed("provider.resolve.refresh"):
+                    matched = config_store.apply_if_provider_matches(
+                        provider_id,
+                        lambda value: _provider_record_matches(value, current, runner),
+                        refresh,
+                    )
+                if matched:
                     return cached
-                cached.defunct = True
-                cached.suspended = config_store.provider_suspended(provider_id)
-                # Unregister the perf depth gauge so a deleted
-                # provider stops emitting `q.provider.*.run_q
-                # depth=0` lines on every rollup. Idempotent
-                # (`unregister_queue` is a `dict.pop(..., None)`).
-                gauge_name = getattr(cached, "_perf_gauge_name", None)
-                if gauge_name:
-                    import perf as _perf
-                    _perf.unregister_queue(gauge_name)
-                return cached
-            if suspended_record:
-                raise ProviderSuspendedError(
-                    f"provider {provider_id} is suspended; cannot start runs"
-                )
-            raise KeyError(provider_id)
-        kind = _provider_runtime_kind(record)
-        cls = _resolve_class(kind)
-        if cached is not None and isinstance(cached, cls):
-            was_defunct = cached.defunct
-            cached.record = record
-            cached.defunct = False
-            # Re-register the perf gauge if the provider was resurrected
-            # (its gauge was unregistered when it went defunct, and
-            # `_register_perf_gauge` is idempotent — `register_queue`
-            # is a dict assignment).
-            if was_defunct and hasattr(cached, "_register_perf_gauge"):
-                cached._register_perf_gauge()
-            return cached
-        if cached is not None:
-            active_runs = []
-            try:
+                continue
+            if cached is not None:
                 active_runs = cached.active_runs()
-            except Exception:
-                active_runs = []
-            if active_runs:
-                raise RuntimeError(
-                    f"provider {provider_id} runner changed while runs are active"
-                )
-        instance = cls(record)
-        _PROVIDER_CACHE[cache_key] = instance
-        return instance
+                if active_runs:
+                    raise RuntimeError(
+                        f"provider {provider_id} runtime changed while runs are active"
+                    )
+            with perf.timed("provider.resolve.construct"):
+                instance = cls(current)
+
+            def publish() -> None:
+                instance._activate_cache()
+                with _CACHE_LOCK:
+                    if _PROVIDER_CACHE.get(cache_key) is not cached:
+                        instance._deactivate_cache()
+                        raise RuntimeError("provider cache authority changed during publish")
+                    _PROVIDER_CACHE[cache_key] = instance
+                if cached is not None:
+                    try:
+                        cached._deactivate_cache()
+                    except BaseException:
+                        with _CACHE_LOCK:
+                            if _PROVIDER_CACHE.get(cache_key) is instance:
+                                _PROVIDER_CACHE[cache_key] = cached
+                        instance._deactivate_cache()
+                        raise
+
+            try:
+                with perf.timed("provider.resolve.publish"):
+                    matched = config_store.apply_if_provider_matches(
+                        provider_id,
+                        lambda value: _provider_record_matches(value, current, runner),
+                        publish,
+                    )
+            except BaseException:
+                instance._deactivate_cache()
+                raise
+            if matched:
+                return instance
+            instance._deactivate_cache()
 
 
 

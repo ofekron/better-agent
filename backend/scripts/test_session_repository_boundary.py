@@ -31,11 +31,8 @@ class RecordingRepository:
     def register_writer_guard(self, guard):
         return self._call("register_writer_guard", guard)
 
-    def loaded_root_id_for(self, session_id: str):
-        return self._call("loaded_root_id_for", session_id)
-
-    def resolve_root_id(self, session_id: str):
-        return self._call("resolve_root_id", session_id)
+    def resolve_root_ids(self, session_ids):
+        return self._call("resolve_root_ids", session_ids)
 
     def root_version(self, session_id: str):
         return self._call("root_version", session_id)

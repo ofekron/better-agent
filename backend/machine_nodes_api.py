@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException
 import perf
 from i18n import t
 from internal_guards import require_role_internal
+from topology import local_node_id_or_primary
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +46,6 @@ async def internal_get_nodes(
         logger.exception("get_nodes failed")
         return []
 
-def _local_node_id_or_primary() -> str:
-    """Resolve the local node's id without raising. Single-machine
-    deploys (no topology.yaml) get the legacy `"primary"` sentinel."""
-    try:
-        from topology import local_node_id as _lid
-        return _lid()
-    except Exception:
-        return "primary"
 
 @router.post("/api/internal/machine-nodes/local-node-id")
 async def internal_get_local_node_id(
@@ -63,7 +56,7 @@ async def internal_get_local_node_id(
     """Tells the frontend which node snapshot entry corresponds
     to "this backend's host" — used to render the "(host)"
     badge in pickers and to compute `is_local` for default-pick rules."""
-    return {"node_id": _local_node_id_or_primary()}
+    return {"node_id": local_node_id_or_primary()}
 
 @router.post("/api/internal/machine-nodes/pending")
 async def internal_list_pending_nodes(

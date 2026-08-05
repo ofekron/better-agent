@@ -25,38 +25,32 @@ if _BACKEND not in sys.path:
 from session_manager import manager as session_manager  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from run_recovery import _replay_and_apply, _should_retry_rate_limit  # noqa: E402
-import paths  # noqa: E402
-
-failures: list[str] = []
-
+import config_store  # noqa: E402
+from scripts import _runtime_profile_test_helpers  # noqa: E402
 
 def check(name: str, ok: bool) -> None:
     print(("  PASS" if ok else "  FAIL") + f": {name}")
-    if not ok:
-        failures.append(name)
+    assert ok, name
 
 
-def _seed_config_store() -> None:
-    # Directly write configuration to config.json in the sandboxed home
-    cfg_path = paths.ba_home() / "config.json"
-    cfg = {
-        "default_provider_id": "test-agy-prov",
-        "providers": [
-            {
-                "id": "test-agy-prov",
-                "name": "Test Agy",
-                "kind": "agy",
-                "model": "agy-test"
-            }
-        ]
-    }
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+def _seed_config_store() -> str:
+    provider = config_store.add_provider({
+        "name": "Test Agy",
+        "kind": "agy",
+        "mode": "subscription",
+        "default_model": "agy-test",
+        "custom_models": ["agy-test"],
+    })
+    _runtime_profile_test_helpers.activate_provider(provider["id"])
+    return provider["id"]
 
 
-def _seed_session_with_streaming_assistant() -> tuple[str, str, str]:
+def _seed_session_with_streaming_assistant(
+    provider_id: str,
+) -> tuple[str, str, str]:
     sess = session_manager.create(
         name="test-session", model="agy-test", cwd="/tmp", orchestration_mode="native",
-        provider_id="test-agy-prov"
+        provider_id=provider_id,
     )
     sid = sess["id"]
     user_msg = {
@@ -82,6 +76,7 @@ def _seed_agy_run(
     app_sid: str,
     target_msg_id: str,
     *,
+    provider_id: str,
     events_content: list[dict] | None = None,
     write_events_file: bool = True,
 ) -> str:
@@ -118,15 +113,16 @@ def _seed_agy_run(
         "processed_line": 0,
         "cancelled": False,
         "target_message_id": target_msg_id,
-        "provider_id": "test-agy-prov"
+        "provider_id": provider_id,
+        "provider_kind": "agy",
     }))
     (run_dir / "pid").write_text("0")
     return run_id
 
 
 def test_agy_recovery_with_events() -> None:
-    _seed_config_store()
-    app_sid, _, asst_id = _seed_session_with_streaming_assistant()
+    provider_id = _seed_config_store()
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant(provider_id)
     raw_events = [
         {
             "type": "agent_message",
@@ -156,19 +152,20 @@ def test_agy_recovery_with_events() -> None:
         }
     ]
 
-    run_id = _seed_agy_run(app_sid, asst_id, events_content=raw_events)
+    run_id = _seed_agy_run(
+        app_sid,
+        asst_id,
+        provider_id=provider_id,
+        events_content=raw_events,
+    )
     run_dir = _runs_root() / run_id
 
     # 1. Test _replay_and_apply
-    session = session_manager.get(app_sid)
-    last_asst = session["messages"][-1]
     _replay_and_apply(
         persist_sid=app_sid,
         run_id=run_id,
         mode="native",
         claude_sid="test-agent-sess",
-        sess=session,
-        last_asst=last_asst,
         msg_id=asst_id
     )
 
@@ -186,15 +183,17 @@ def test_agy_recovery_with_events() -> None:
 
 
 def test_agy_recovery_missing_events_file() -> None:
-    _seed_config_store()
-    app_sid, _, asst_id = _seed_session_with_streaming_assistant()
+    provider_id = _seed_config_store()
+    app_sid, _, asst_id = _seed_session_with_streaming_assistant(provider_id)
 
     # Seed a run without writing the session_events.jsonl file (represents an early crash)
-    run_id = _seed_agy_run(app_sid, asst_id, write_events_file=False)
+    run_id = _seed_agy_run(
+        app_sid,
+        asst_id,
+        provider_id=provider_id,
+        write_events_file=False,
+    )
     run_dir = _runs_root() / run_id
-
-    session = session_manager.get(app_sid)
-    last_asst = session["messages"][-1]
 
     # Replay should execute without throwing FileNotFoundError or fallback to Claude jsonl parser
     try:
@@ -203,8 +202,6 @@ def test_agy_recovery_missing_events_file() -> None:
             run_id=run_id,
             mode="native",
             claude_sid="test-agent-sess",
-            sess=session,
-            last_asst=last_asst,
             msg_id=asst_id
         )
         passed = True
@@ -226,9 +223,6 @@ def main() -> None:
         session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
-    if failures:
-        print(f"\nFAILED: {len(failures)} check(s)")
-        sys.exit(1)
     print("\nAll integration checks passed")
 
 

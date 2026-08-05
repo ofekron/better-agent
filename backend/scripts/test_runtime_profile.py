@@ -50,14 +50,33 @@ def test_provider_cache_is_runner_scoped(monkeypatch) -> None:
         "api_key": "secret",
     }
     monkeypatch.setattr(provider.config_store, "get_provider_with_key", lambda _provider_id: dict(record))
+
+    def apply_if_matches(_provider_id, predicate, apply) -> bool:
+        if not predicate(record):
+            return False
+        apply()
+        return True
+
+    monkeypatch.setattr(
+        provider.config_store,
+        "apply_if_provider_matches",
+        apply_if_matches,
+    )
     provider._PROVIDER_CACHE.clear()
-    native = provider.get_provider("fugu", "native")
-    better_agent = provider.get_provider("fugu", "better_agent_runner")
-    assert native is not better_agent
-    assert native.KIND == "fugu"
-    assert better_agent.KIND == "openai"
-    assert provider.get_provider("fugu", "native") is native
-    assert provider.get_provider("fugu", "better_agent_runner") is better_agent
+    provider._PROVIDER_KEY_LOCKS.clear()
+    try:
+        native = provider.get_provider("fugu", "native")
+        better_agent = provider.get_provider("fugu", "better_agent_runner")
+        assert native is not better_agent
+        assert native.KIND == "fugu"
+        assert better_agent.KIND == "openai"
+        assert provider.get_provider("fugu", "native") is native
+        assert provider.get_provider("fugu", "better_agent_runner") is better_agent
+    finally:
+        for cached in provider._PROVIDER_CACHE.values():
+            cached._deactivate_cache()
+        provider._PROVIDER_CACHE.clear()
+        provider._PROVIDER_KEY_LOCKS.clear()
 
 
 def test_default_provider_is_resolved_before_orchestration_validation() -> None:

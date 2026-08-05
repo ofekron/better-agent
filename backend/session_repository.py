@@ -15,9 +15,10 @@ class SessionRootRepository(Protocol):
 
     def register_writer_guard(self, guard: RootWriterGuard) -> None: ...
 
-    def loaded_root_id_for(self, session_id: str) -> Optional[str]: ...
-
-    def resolve_root_id(self, session_id: str) -> Optional[str]: ...
+    def resolve_root_ids(
+        self,
+        session_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, str]: ...
 
     def root_version(self, session_id: str) -> Optional[RootVersion]: ...
 
@@ -44,11 +45,11 @@ class JsonSessionRootRepository:
     def register_writer_guard(self, guard: RootWriterGuard) -> None:
         session_store.register_root_writer_guard(guard)
 
-    def loaded_root_id_for(self, session_id: str) -> Optional[str]:
-        return session_store._loaded_root_id_for(session_id)
-
-    def resolve_root_id(self, session_id: str) -> Optional[str]:
-        return session_store._resolve_root_id(session_id)
+    def resolve_root_ids(
+        self,
+        session_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, str]:
+        return session_store._resolve_root_ids(session_ids)
 
     def root_version(self, session_id: str) -> Optional[RootVersion]:
         return session_store.session_file_fingerprint(session_id)

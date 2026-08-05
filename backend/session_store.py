@@ -65,7 +65,7 @@ from permission import normalize_permission
 # session_manager → session_store → orchs.manager.* → session_manager
 # cycle.
 
-from paths import assert_state_root_safe, ba_home
+from paths import assert_state_root_safe, ba_home, is_test_mode
 
 _logger = logging.getLogger(__name__)
 
@@ -617,6 +617,20 @@ def shutdown_durability_writer() -> None:
         with _index_sidecar_write_lock:
             _index_sidecar_accepting = True
             _index_sidecar_write_lock.notify_all()
+
+
+def quiesce_for_test_home() -> None:
+    if not is_test_mode():
+        raise RuntimeError("test-home quiescence requires test mode")
+    shutdown_root_change_owner()
+    _summary_sidecar_write_queue.join()
+    shutdown_durability_writer()
+
+
+def reset_for_test_home() -> None:
+    if not is_test_mode():
+        raise RuntimeError("test-home reset requires test mode")
+    _sessions_dir()
 
 
 def _apply_root_change(change: RootChange) -> bool | None:
@@ -3910,43 +3924,79 @@ def _loaded_root_id_for(sid: str) -> Optional[str]:
         return root_id
 
 
+def _loaded_root_ids_for(sids: tuple[str, ...]) -> dict[str, str]:
+    wait_started = time.perf_counter()
+    with _index_lock:
+        acquired_at = time.perf_counter()
+        resolved = (
+            {
+                sid: sid if sid in _root_index_signatures else _fork_index[sid]
+                for sid in sids
+                if sid in _root_index_signatures or sid in _fork_index
+            }
+            if _index_loaded
+            else {}
+        )
+        perf.record(
+            "store.session.index.lookup_many.lock_wait",
+            (acquired_at - wait_started) * 1000.0,
+        )
+        perf.record(
+            "store.session.index.lookup_many.lock_hold",
+            (time.perf_counter() - acquired_at) * 1000.0,
+        )
+        return resolved
+
+
+def _currently_resolved_root_ids(sids: tuple[str, ...]) -> dict[str, str]:
+    resolved = _loaded_root_ids_for(sids)
+    resolved.update({
+        sid: sid
+        for sid in sids
+        if sid not in resolved and _root_file_path(sid).exists()
+    })
+    return resolved
+
+
+def _resolve_root_ids(sids: list[str] | tuple[str, ...]) -> dict[str, str]:
+    """Resolve root and fork ids with at most one observation wait."""
+    unique_sids = tuple(dict.fromkeys(sid for sid in sids if sid))
+    if not unique_sids:
+        return {}
+
+    resolved = _currently_resolved_root_ids(unique_sids)
+    unresolved = [sid for sid in unique_sids if sid not in resolved]
+    if not unresolved:
+        return resolved
+
+    _wait_root_change_owner_ready()
+    _ensure_index()
+    resolved.update(_currently_resolved_root_ids(tuple(unresolved)))
+    unresolved = [sid for sid in unresolved if sid not in resolved]
+    if not unresolved:
+        return resolved
+
+    binding = _root_change_binding_for_read()
+    if binding is None:
+        return resolved
+    generation = binding.owner.observation_generation
+    resolved.update(_currently_resolved_root_ids(tuple(unresolved)))
+    unresolved = [sid for sid in unresolved if sid not in resolved]
+    if not unresolved:
+        return resolved
+
+    _wait_root_change_observation(generation)
+    resolved.update(_currently_resolved_root_ids(tuple(unresolved)))
+    return resolved
+
+
 def _resolve_root_id(sid: str) -> Optional[str]:
-    """Return the root id for any session id (root or fork). None if
-    the id is unknown.
+    """Return the root id for any session id (root or fork), if known.
 
     Cross-process changes are projected by the root-change owner. An unknown
     id waits briefly for one already-in-progress observation cycle, then
     returns None under the truthful eventual-consistency contract."""
-    loaded_root_id = _loaded_root_id_for(sid)
-    if loaded_root_id is not None:
-        return loaded_root_id
-    if _root_file_path(sid).exists():
-        return sid
-    _wait_root_change_owner_ready()
-    _ensure_index()
-    with _index_lock:
-        if sid in _root_index_signatures:
-            return sid
-        if sid in _fork_index:
-            return _fork_index[sid]
-    binding = _root_change_binding_for_read()
-    if binding is not None:
-        generation = binding.owner.observation_generation
-        loaded_root_id = _loaded_root_id_for(sid)
-        if loaded_root_id is not None:
-            return loaded_root_id
-        if _root_file_path(sid).exists():
-            return sid
-        _wait_root_change_observation(generation)
-        loaded_root_id = _loaded_root_id_for(sid)
-        if loaded_root_id is not None:
-            return loaded_root_id
-        if _root_file_path(sid).exists():
-            return sid
-    # The ready root-change owner has completed a fenced disk observation.
-    # Subsequent external changes are projected by that single owner; misses
-    # never re-scan the sessions directory on the request path.
-    return None
+    return _resolve_root_ids((sid,)).get(sid)
 
 
 def _session_path(sid: str) -> Path:

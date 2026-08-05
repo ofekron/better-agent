@@ -439,12 +439,9 @@ def test_recovery_finalize_does_not_bump_updated_at() -> bool:
     )
 
     before = session_manager.get(app_sid)["updated_at"]
-    sess = session_manager.get(app_sid)
-    last_asst = next(m for m in sess["messages"] if m.get("role") == "assistant")
-
     _finalize_sync(
         persist_sid=app_sid, run_id=run_id, mode="native",
-        claude_sid=claude_sid, sess=sess, last_asst=last_asst,
+        claude_sid=claude_sid,
         msg_id=asst_id, cancelled=False,
     )
 
@@ -542,11 +539,9 @@ def test_reingest_repairs_spurious_updated_at() -> bool:
     ev["timestamp"] = "2024-01-01T00:00:00.000000"  # older than real_last
     run_id = _seed_orphan_run(app_sid, claude_sid, [ev], mode="native")
 
-    sess = session_manager.get(app_sid)
-    last_asst = next(m for m in sess["messages"] if m.get("role") == "assistant")
     _finalize_sync(
         persist_sid=app_sid, run_id=run_id, mode="native",
-        claude_sid=claude_sid, sess=sess, last_asst=last_asst,
+        claude_sid=claude_sid,
         msg_id=asst_id, cancelled=False,
     )
 

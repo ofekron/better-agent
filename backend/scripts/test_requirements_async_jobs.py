@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import tempfile
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -18,15 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_TMP_HOME = tempfile.mkdtemp(prefix="ba-req-jobs-test-")
+import _test_home  # noqa: E402
 
-import paths  # noqa: E402
-
-paths.engage_test_home(_TMP_HOME)
-
-import _test_installation  # noqa: E402
-
-_test_installation.activate(Path(_TMP_HOME), provider="claude")
+_TMP_HOME = _test_home.isolate_installed(
+    "ba-req-jobs-test-",
+    provider="claude",
+)
 
 import extension_jobs as jobs  # noqa: E402
 import delegation_status_store  # noqa: E402

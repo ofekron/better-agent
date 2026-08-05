@@ -71,20 +71,57 @@ def test_unknown_sid_resolution_never_rescans_warm_index_on_request_path() -> No
 def test_session_manager_unknown_sid_resolution_is_negative_cached() -> None:
     _reset_index()
     calls = 0
-    original_resolve = session_store._resolve_root_id  # type: ignore[attr-defined]
+    original_resolve = session_store._resolve_root_ids  # type: ignore[attr-defined]
 
-    def counted_resolve(sid: str) -> str | None:
+    def counted_resolve(sids) -> dict[str, str]:
         nonlocal calls
         calls += 1
-        return original_resolve(sid)
+        return original_resolve(sids)
 
-    session_store._resolve_root_id = counted_resolve  # type: ignore[attr-defined]
+    session_store._resolve_root_ids = counted_resolve  # type: ignore[attr-defined]
     try:
         assert session_manager._root_id_for("missing-sid") is None  # type: ignore[attr-defined]
         assert session_manager._root_id_for("missing-sid") is None  # type: ignore[attr-defined]
         assert calls == 1
     finally:
-        session_store._resolve_root_id = original_resolve  # type: ignore[attr-defined]
+        session_store._resolve_root_ids = original_resolve  # type: ignore[attr-defined]
+
+
+def test_batch_unknown_sid_resolution_waits_for_one_observation() -> None:
+    _reset_index()
+    session_store._ensure_index()  # type: ignore[attr-defined]
+    waits = 0
+    original_wait = session_store._wait_root_change_observation  # type: ignore[attr-defined]
+    original_binding = session_store._root_change_binding_for_read  # type: ignore[attr-defined]
+
+    class _Owner:
+        observation_generation = 7
+
+        @staticmethod
+        def wait_ready() -> None:
+            return None
+
+    class _Binding:
+        owner = _Owner()
+
+    def counted_wait(generation: int, timeout: float = 0.05) -> bool:
+        nonlocal waits
+        assert generation == 7
+        assert timeout == 0.05
+        waits += 1
+        return False
+
+    session_store._root_change_binding_for_read = lambda: _Binding()  # type: ignore[attr-defined]
+    session_store._wait_root_change_observation = counted_wait  # type: ignore[attr-defined]
+    try:
+        resolved = session_store._resolve_root_ids(  # type: ignore[attr-defined]
+            [f"missing-{index}" for index in range(200)]
+        )
+        assert resolved == {}
+        assert waits == 1
+    finally:
+        session_store._wait_root_change_observation = original_wait  # type: ignore[attr-defined]
+        session_store._root_change_binding_for_read = original_binding  # type: ignore[attr-defined]
 
 
 def test_session_store_root_sid_skips_index_load() -> None:
@@ -176,6 +213,7 @@ def test_loaded_fork_mapping_wins_over_stray_root_file() -> None:
 if __name__ == "__main__":
     test_unknown_sid_resolution_never_rescans_warm_index_on_request_path()
     test_session_manager_unknown_sid_resolution_is_negative_cached()
+    test_batch_unknown_sid_resolution_waits_for_one_observation()
     test_active_run_sid_is_never_negative_cached()
     test_session_store_root_sid_skips_index_load()
     test_loaded_fork_mapping_wins_over_stray_root_file()

@@ -13,6 +13,7 @@ _DELEGATION_STAGE_MILESTONES = frozenset({
     "delegation_lock_acquired",
     "delegation_fork_resolving",
     "delegation_provider_resolving",
+    "delegation_team_context_resolving",
     "delegation_recovery_waiting",
     "delegation_root_persist_flushing",
     "delegation_runner_starting",

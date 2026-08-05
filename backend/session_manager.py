@@ -1220,6 +1220,19 @@ class SessionManager:
                 self._clear_home_scoped_state()
             self._close_home_scoped_event_ingester()
 
+    def reset_for_test_home(self) -> None:
+        import paths
+
+        if not paths.is_test_mode():
+            raise RuntimeError("session-manager test-home reset requires test mode")
+        sessions_dir = self._root_repository.storage_identity()
+        with self._home_transition_lock:
+            with self._cache_guard:
+                self._home_sessions_dir = sessions_dir
+                self._clear_home_scoped_state()
+            self._close_home_scoped_event_ingester()
+            self.start_persistence()
+
     def _clear_home_scoped_state(self) -> None:
         callbacks = [
             callback
@@ -1274,42 +1287,48 @@ class SessionManager:
         except Exception:
             logger.exception("failed to close event ingester on state-home switch")
 
-    def _root_id_for(self, sid: str) -> Optional[str]:
+    def _root_ids_for(
+        self,
+        sids: list[str] | tuple[str, ...],
+    ) -> dict[str, str]:
         self._ensure_home_current()
-        rid = self._node_root_id.get(sid)
-        if rid is not None:
-            return rid
-        rid = self._root_repository.loaded_root_id_for(sid)
-        if rid is not None:
-            self._node_root_id[sid] = rid
-            self._node_root_missing_until.pop(sid, None)
-            return rid
-        if self._root_repository.root_version(sid) is not None:
-            self._node_root_id[sid] = sid
-            self._node_root_missing_until.pop(sid, None)
-            return sid
-        has_active_run = (
-            self._active_run_gate is not None and self._active_run_gate(sid)
-        )
         now = time.monotonic()
-        if self._node_root_missing_until.get(sid, 0.0) > now:
-            if not has_active_run:
-                return None
-            # A turn is actively writing to this sid — a session with an
-            # in-flight run cannot be genuinely missing, so a prior negative
-            # result was a transient eventual-consistency miss, not a real
-            # absence. Clear the poison and re-resolve now instead of
-            # blacking out for the rest of the TTL window.
-            self._node_root_missing_until.pop(sid, None)
-        rid = self._root_repository.resolve_root_id(sid)
-        if rid is not None:
+        resolved: dict[str, str] = {}
+        unresolved: list[str] = []
+        active_by_sid: dict[str, bool] = {}
+        for sid in dict.fromkeys(sid for sid in sids if sid):
+            rid = self._node_root_id.get(sid)
+            if rid is not None:
+                resolved[sid] = rid
+                continue
+            has_active_run = bool(
+                self._active_run_gate is not None and self._active_run_gate(sid)
+            )
+            active_by_sid[sid] = has_active_run
+            if self._node_root_missing_until.get(sid, 0.0) > now:
+                if not has_active_run:
+                    continue
+                self._node_root_missing_until.pop(sid, None)
+            unresolved.append(sid)
+
+        if not unresolved:
+            return resolved
+        newly_resolved = self._root_repository.resolve_root_ids(unresolved)
+        for sid in unresolved:
+            rid = newly_resolved.get(sid)
+            if rid is None:
+                if not active_by_sid[sid]:
+                    self._node_root_missing_until[sid] = (
+                        now + _NEGATIVE_NODE_ROOT_TTL_SECONDS
+                    )
+                continue
             self._node_root_id[sid] = rid
             self._node_root_missing_until.pop(sid, None)
-        elif not has_active_run:
-            self._node_root_missing_until[sid] = (
-                now + _NEGATIVE_NODE_ROOT_TTL_SECONDS
-            )
-        return rid
+            resolved[sid] = rid
+        return resolved
+
+    def _root_id_for(self, sid: str) -> Optional[str]:
+        return self._root_ids_for((sid,)).get(sid)
 
     def root_id_for(self, sid: str) -> Optional[str]:
         """Public: resolve any node id — a BA app_session_id, or a provider's
@@ -2511,10 +2530,9 @@ class SessionManager:
         fields: set[str] | tuple[str, ...] | list[str],
     ) -> dict[str, dict]:
         by_root: dict[str, list[str]] = {}
-        for sid in sids:
-            rid = self._root_id_for(sid)
-            if rid is not None:
-                by_root.setdefault(rid, []).append(sid)
+        root_ids = self._root_ids_for(sids)
+        for sid, rid in root_ids.items():
+            by_root.setdefault(rid, []).append(sid)
         out: dict[str, dict] = {}
         for rid, root_sids in by_root.items():
             with self._lock_for_root(rid):

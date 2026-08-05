@@ -6,7 +6,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/docker-test-lifecycle.sh"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/better-agent-docker-test.XXXXXX")"
-trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+TEST_LOCK_ROOT="/tmp/better-agent-docker-build-locks-test-$$"
+trap 'rm -rf "$TMP_ROOT" "$TEST_LOCK_ROOT"' EXIT HUP INT TERM
 LOG="$TMP_ROOT/docker.log"
 
 fail() {
@@ -27,7 +28,10 @@ assert_not_logged() {
 docker() {
   printf '%s\n' "$*" >> "$LOG"
   case "$1 $2" in
+    "context inspect") printf '%s\n' unix:///tmp/fake-docker.sock ;;
+    "version --format") printf '%s\n' linux/amd64 ;;
     "ps --filter") printf '%s\n' orphan live foreign ;;
+    "ps -q") printf '%s\n' running-builder ;;
     "inspect --format")
       case "$4" in
         orphan) printf '%s\n' 'host-a|999999|dead-start' ;;
@@ -35,6 +39,7 @@ docker() {
         foreign) printf '%s\n' 'host-b|999999|dead-start' ;;
       esac
       ;;
+    "image inspect") printf '%s\n' old ;;
     "image ls")
       printf '%s\n' '2026-08-03T00:00:00Z|new' '2026-08-02T00:00:00Z|kept' '2026-08-01T00:00:00Z|old'
       ;;
@@ -51,6 +56,14 @@ docker_test_process_start() {
 
 hostname() {
   printf '%s\n' host-a
+}
+
+id() {
+  [ "${1:-}" = -u ] && printf 'test-%s\n' "$$"
+}
+
+docker_test_with_builder_lock() {
+  "$@"
 }
 
 : > "$LOG"
@@ -70,16 +83,18 @@ assert_not_logged "image rm new"
 assert_not_logged "image rm kept"
 
 : > "$LOG"
-docker_test_prune_build_cache
+docker_test_prepare_lock_root
+printf 'leased-tag|host-a|%s|%s\n' "$$" "$DOCKER_TEST_OWNER_START" \
+  > "$DOCKER_TEST_LEASE_DIR/live-lease"
+docker_test_prune_images_for_kind deps 0
+assert_not_logged "image rm old"
+rm -f "$DOCKER_TEST_LEASE_DIR/live-lease"
+
+: > "$LOG"
+docker_test_prune_build_cache_unlocked
 assert_logged "buildx prune --builder better-agent-tests --force --max-used-space 10GB"
 assert_not_logged "volume"
 assert_not_logged "system prune"
-
-: > "$LOG"
-docker_test_build --target deps -t example .
-assert_logged "buildx build --builder better-agent-tests --load"
-assert_logged "--label com.better-agent.test.owner=true"
-assert_logged "--label com.better-agent.test.family=backend"
 
 : > "$LOG"
 docker_test_run --rm example -k smoke
@@ -90,14 +105,89 @@ assert_not_logged "volume rm"
 for runner in "$HERE/run-backend-tests.sh" "$HERE/run-fullstack-tests.sh"; do
   grep -F 'source "$HERE/lib/docker-test-lifecycle.sh"' "$runner" >/dev/null \
     || fail "$runner does not source the shared lifecycle"
-  grep -F 'docker_test_build ' "$runner" >/dev/null \
-    || fail "$runner bypasses the shared build owner"
+  grep -F 'docker_test_materialize_image ' "$runner" >/dev/null \
+    || fail "$runner bypasses content-addressed image materialization"
   grep -F 'docker_test_run ' "$runner" >/dev/null \
     || fail "$runner bypasses the shared run owner"
   if grep -E '^[[:space:]]*docker (build|run) ' "$runner" >/dev/null; then
     fail "$runner retains a direct Docker build/run path"
   fi
 done
+
+FINGERPRINT_ROOT="$TMP_ROOT/fingerprint"
+mkdir -p "$FINGERPRINT_ROOT"
+printf 'one\n' > "$FINGERPRINT_ROOT/input.txt"
+first_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT/input.txt")"
+touch "$FINGERPRINT_ROOT/input.txt"
+mtime_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT/input.txt")"
+[ "$first_fingerprint" = "$mtime_fingerprint" ] || fail "mtime changed dependency fingerprint"
+printf 'two\n' > "$FINGERPRINT_ROOT/input.txt"
+content_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT/input.txt")"
+[ "$first_fingerprint" != "$content_fingerprint" ] || fail "content change did not invalidate dependency fingerprint"
+
+ln -s target "$FINGERPRINT_ROOT/symlink"
+plain_symlink_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT/symlink")"
+rm "$FINGERPRINT_ROOT/symlink"
+ln -s $'target\n' "$FINGERPRINT_ROOT/symlink"
+newline_symlink_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT/symlink")"
+[ "$plain_symlink_fingerprint" != "$newline_symlink_fingerprint" ] \
+  || fail "trailing newline in symlink target was lost from fingerprint"
+
+printf 'newline\n' > "$FINGERPRINT_ROOT/line
+break.txt"
+newline_fingerprint="$(docker_test_fingerprint "$FINGERPRINT_ROOT" "$FINGERPRINT_ROOT")"
+[ -n "$newline_fingerprint" ] || fail "newline-containing path broke fingerprint enumeration"
+
+SOURCE_ROOT="$TMP_ROOT/source"
+SNAPSHOT_ROOT="$TMP_ROOT/snapshot"
+mkdir -p "$SOURCE_ROOT/deps"
+printf 'before\n' > "$SOURCE_ROOT/deps/input.txt"
+docker_test_snapshot_context "$SOURCE_ROOT" "$SNAPSHOT_ROOT" "$SOURCE_ROOT/deps"
+printf 'after\n' > "$SOURCE_ROOT/deps/input.txt"
+[ "$(cat "$SNAPSHOT_ROOT/deps/input.txt")" = before ] || fail "dependency snapshot followed later source mutation"
+
+GIT_ROOT="$TMP_ROOT/git"
+REF_ROOT="$TMP_ROOT/ref"
+git init -q "$GIT_ROOT"
+git -C "$GIT_ROOT" config user.email test@example.invalid
+git -C "$GIT_ROOT" config user.name test
+printf 'selected\n' > "$GIT_ROOT/value.txt"
+git -C "$GIT_ROOT" add value.txt
+git -C "$GIT_ROOT" commit -qm selected
+SELECTED_COMMIT="$(git -C "$GIT_ROOT" rev-parse HEAD)"
+printf 'later\n' > "$GIT_ROOT/value.txt"
+git -C "$GIT_ROOT" commit -qam later
+docker_test_snapshot_git_ref "$GIT_ROOT" "$SELECTED_COMMIT" "$REF_ROOT"
+[ "$(cat "$REF_ROOT/value.txt")" = selected ] || fail "ref snapshot did not use selected commit"
+
+DOCKER_TEST_RUN_DIR="$TMP_ROOT/cleanup-run"
+DOCKER_TEST_IMAGE_LEASE="$TMP_ROOT/cleanup-lease"
+mkdir -p "$DOCKER_TEST_RUN_DIR"
+: > "$DOCKER_TEST_IMAGE_LEASE"
+docker_test_remove_current_container
+[ ! -e "$DOCKER_TEST_RUN_DIR" ] || fail "run context was not cleaned"
+[ ! -e "$TMP_ROOT/cleanup-lease" ] || fail "image lease was not cleaned"
+
+rm -rf "$TEST_LOCK_ROOT"
+UNSAFE_TARGET="$TMP_ROOT/unsafe-target"
+mkdir "$UNSAFE_TARGET"
+chmod 755 "$UNSAFE_TARGET"
+ln -s "$UNSAFE_TARGET" "$TEST_LOCK_ROOT"
+if docker_test_prepare_lock_root; then
+  fail "symlink lock root was accepted"
+fi
+[ "$(stat -f '%Lp' "$UNSAFE_TARGET" 2>/dev/null || stat -c '%a' "$UNSAFE_TARGET")" = 755 ] \
+  || fail "symlink target permissions were mutated"
+rm -f "$TEST_LOCK_ROOT"
+
+docker_test_with_state_lock() { return 19; }
+docker_test_prune_build_cache_unlocked() { return 0; }
+if docker_test_cleanup_locked; then
+  fail "image-prune failure was hidden by later cache cleanup"
+else
+  cleanup_failure_status=$?
+fi
+[ "$cleanup_failure_status" -eq 19 ] || fail "cleanup failure status was not preserved"
 
 rm -rf "$TMP_ROOT"
 echo "PASS: Docker test lifecycle preserves live/foreign resources and bounds owned cache/images"

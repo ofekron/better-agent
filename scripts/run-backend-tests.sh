@@ -128,17 +128,38 @@ docker_test_cleanup
 BIND_MOUNT_REPO=0
 if [ -n "$REF" ]; then
   COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify "$REF")"
-  IMAGE_TAG="better-agent-backend-tests:${COMMIT_SHA}"
-  echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
+  IMAGE_FINGERPRINT="$(docker_test_value_fingerprint "backend-ref:$COMMIT_SHA")"
+  IMAGE_TAG="better-agent-backend-tests:ref-${IMAGE_FINGERPRINT}"
+  echo "run-backend-tests: materializing $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   DOCKER_TEST_IMAGE_KIND=ref
-  git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker_test_build -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
+  ARCHIVE_PATH="$DOCKER_TEST_RUN_DIR/context"
+  docker_test_snapshot_git_ref "$REPO_ROOT" "$COMMIT_SHA" "$ARCHIVE_PATH"
+  docker_test_materialize_image "$IMAGE_FINGERPRINT" "$IMAGE_TAG" \
+    -f "$ARCHIVE_PATH/docker/Dockerfile.test" --target full -t "$IMAGE_TAG" "$ARCHIVE_PATH"
 else
-  IMAGE_TAG="better-agent-backend-tests:deps"
+  SNAPSHOT_PATH="$DOCKER_TEST_RUN_DIR/context"
+  docker_test_snapshot_context "$REPO_ROOT" "$SNAPSHOT_PATH" \
+    "$REPO_ROOT/.dockerignore" \
+    "$DOCKERFILE" \
+    "$REPO_ROOT/sdk/runtime-requirements.txt" \
+    "$REPO_ROOT/vendor" \
+    "$REPO_ROOT/backend/requirements.txt" \
+    "$REPO_ROOT/backend/requirements-claude.txt" \
+    "$REPO_ROOT/backend/requirements-test.txt"
+  IMAGE_FINGERPRINT="$(docker_test_fingerprint "$SNAPSHOT_PATH" \
+    "$SNAPSHOT_PATH/.dockerignore" \
+    "$SNAPSHOT_PATH/docker/Dockerfile.test" \
+    "$SNAPSHOT_PATH/sdk/runtime-requirements.txt" \
+    "$SNAPSHOT_PATH/vendor" \
+    "$SNAPSHOT_PATH/backend/requirements.txt" \
+    "$SNAPSHOT_PATH/backend/requirements-claude.txt" \
+    "$SNAPSHOT_PATH/backend/requirements-test.txt")"
+  IMAGE_TAG="better-agent-backend-tests:deps-${IMAGE_FINGERPRINT}"
   BIND_MOUNT_REPO=1
-  echo "run-backend-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
+  echo "run-backend-tests: materializing $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
   DOCKER_TEST_IMAGE_KIND=deps
-  docker_test_build -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker_test_materialize_image "$IMAGE_FINGERPRINT" "$IMAGE_TAG" \
+    -f "$SNAPSHOT_PATH/docker/Dockerfile.test" --target deps -t "$IMAGE_TAG" "$SNAPSHOT_PATH"
 fi
 
 RUN_ARGS=(--rm --cpus=2)

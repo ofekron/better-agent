@@ -246,11 +246,9 @@ def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bo
     claude_sid = str(_uuid.uuid4())
     run_id = _seed_orphan_run_from_fixture(sid, fixture, claude_sid)
     with session_manager.batch(sid, bump_updated_at=False):
-        sess = session_manager.get(sid)
-        last_asst = next(m for m in sess["messages"] if m["id"] == asst_id)
         _replay_and_apply(
             persist_sid=sid, run_id=run_id, mode="native",
-            claude_sid=claude_sid, sess=sess, last_asst=last_asst,
+            claude_sid=claude_sid,
             msg_id=asst_id,
         )
     session_manager.set_streaming(sid, asst_id, False)

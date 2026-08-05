@@ -599,6 +599,7 @@ async def executable_real_proxy_start() -> None:
         "kind": "claude",
         "generation": str(uuid.uuid4()),
         "revision": 1,
+        "execution_revision": 1,
     }
     proxy = RemoteProviderProxy("node-proxy-proof")
     proxy.execution_authority_record = lambda _arguments: authority

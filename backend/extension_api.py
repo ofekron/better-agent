@@ -105,11 +105,8 @@ def _local_node_id_or_primary_cached() -> str:
     cached = _local_node_id_cache
     if cached is not None:
         return cached
-    try:
-        from topology import local_node_id
-        node_id = local_node_id()
-    except Exception:
-        node_id = "primary"
+    from topology import local_node_id_or_primary
+    node_id = local_node_id_or_primary()
     _local_node_id_cache = node_id
     return node_id
 

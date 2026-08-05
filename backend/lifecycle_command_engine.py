@@ -806,26 +806,13 @@ class LifecycleCommandEngine:
                         f"persisted handoff projection {field} is invalid"
                     ) from exc
             target = SelectorIdentity.from_dict(projection["target"])
-            import session_manager
-
-            session = await asyncio.to_thread(session_manager.manager.get, session_id)
-            if session is None:
-                return False
-            projection_mode = (
-                "supervisor"
-                if role == "supervisor"
-                else str(session.get("orchestration_mode") or "manager")
-            )
-            projected = await asyncio.to_thread(
-                session_manager.manager.set_agent_sid,
+            projected = await self._project_native_sid(
                 session_id,
-                projection_mode,
-                projection["native_sid"],
-                provider_id=target.provider_id,
-                model=target.model,
-                runner=target.runner,
+                role=role,
+                identity=target,
+                native_sid=projection["native_sid"],
             )
-            if projected is None:
+            if not projected:
                 return False
             return await asyncio.to_thread(
                 lifecycle_command_store.acknowledge_handoff_projection,
@@ -849,28 +836,13 @@ class LifecycleCommandEngine:
                 not isinstance(native_sid, str) or not native_sid
             ):
                 raise RuntimeError("persisted native SID projection value is invalid")
-            import session_manager
-
-            session = await asyncio.to_thread(
-                session_manager.manager.get,
+            projected = await self._project_native_sid(
                 session_id,
+                role=role,
+                identity=identity,
+                native_sid=native_sid,
             )
-            if session is None:
-                return False
-            projection_mode = (
-                "supervisor"
-                if role == "supervisor"
-                else str(session.get("orchestration_mode") or "manager")
-            )
-            projected = session_manager.manager.set_agent_sid(
-                session_id,
-                projection_mode,
-                native_sid,
-                provider_id=identity.provider_id,
-                model=identity.model,
-                runner=identity.runner,
-            )
-            if projected is None:
+            if not projected:
                 return False
             return await asyncio.to_thread(
                 lifecycle_command_store.acknowledge_native_sid_projection,
@@ -900,6 +872,34 @@ class LifecycleCommandEngine:
             session_id,
             target,
         )
+
+    async def _project_native_sid(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        identity: SelectorIdentity,
+        native_sid: str | None,
+    ) -> bool:
+        import session_manager
+
+        orchestration_mode = await asyncio.to_thread(
+            session_manager.manager.get_field,
+            session_id,
+            "orchestration_mode",
+        )
+        if not isinstance(orchestration_mode, str) or not orchestration_mode:
+            return False
+        projected = await asyncio.to_thread(
+            session_manager.manager.set_agent_sid,
+            session_id,
+            "supervisor" if role == "supervisor" else orchestration_mode,
+            native_sid,
+            provider_id=identity.provider_id,
+            model=identity.model,
+            runner=identity.runner,
+        )
+        return projected is not None
 
     @staticmethod
     def _legacy_native_compatibility(

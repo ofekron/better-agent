@@ -71,6 +71,7 @@ _PROCESSOR_MILESTONE_MESSAGES = {
     "delegation_lock_acquired": "Requirements delegation ownership acquired",
     "delegation_fork_resolving": "Resolving requirements processor fork",
     "delegation_provider_resolving": "Resolving requirements processor provider",
+    "delegation_team_context_resolving": "Building requirements processor team context",
     "delegation_recovery_waiting": "Waiting for provider recovery readiness",
     "delegation_root_persist_flushing": "Persisting requirements processor session state",
     "delegation_runner_starting": "Starting requirements processor runner",

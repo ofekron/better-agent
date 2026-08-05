@@ -79,8 +79,12 @@ def test_openai_permission_options_and_default():
 
 def test_frozen_dispatch_accepts_openai():
     app_entry = _mod("app_entry")
-    mode, kind, _ = app_entry._dispatch(["--run-dir", "/tmp/x", "--runner-kind", "openai"])
-    assert (mode, kind) == ("runner", "openai"), (mode, kind)
+    mode, kind, run_dir, runner_module = app_entry._dispatch(
+        ["--run-dir", "/tmp/x", "--runner-kind", "openai"]
+    )
+    assert (mode, kind, run_dir, runner_module) == (
+        "runner", "openai", Path("/tmp/x"), "",
+    )
 
 
 def test_event_emitter_shapes():
@@ -313,6 +317,7 @@ def test_openai_team_execution_freezes_manager_runner_semantics():
             "kind": "openai",
             "generation": "00000000-0000-4000-8000-000000000001",
             "revision": 1,
+            "execution_revision": 1,
         },
         run_id="openai-team-run",
         prompt="coordinate",
@@ -805,7 +810,7 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
 
 def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools():
     runner = _mod("runner_better_agent")
-    original_list = runner._mcp_list_tools
+    original_list = runner._mcp_list_required_tools
     configs = {
         "better-agent-session-control": {"command": sys.executable},
     }
@@ -814,7 +819,7 @@ def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools(
         raise RuntimeError("MCP server closed stdout: import failed")
 
     try:
-        runner._mcp_list_tools = fake_list
+        runner._mcp_list_required_tools = fake_list
         with pytest.raises(
             RuntimeError,
             match=(
@@ -828,7 +833,7 @@ def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools(
                 used_names=set(),
             ))
     finally:
-        runner._mcp_list_tools = original_list
+        runner._mcp_list_required_tools = original_list
 
 
 def test_openai_runner_keeps_ambient_mcp_failures_isolated():
@@ -866,14 +871,14 @@ def test_openai_runner_keeps_ambient_mcp_failures_isolated():
 
 def test_openai_runner_rejects_profile_selected_mcp_without_tools():
     runner = _mod("runner_better_agent")
-    original_list = runner._mcp_list_tools
+    original_list = runner._mcp_list_required_tools
     configs = {"empty": {"command": sys.executable}}
 
     async def fake_list(server_name, config):
         return []
 
     try:
-        runner._mcp_list_tools = fake_list
+        runner._mcp_list_required_tools = fake_list
         with pytest.raises(
             RuntimeError,
             match="required extension MCP 'empty' advertised no tools",
@@ -884,7 +889,7 @@ def test_openai_runner_rejects_profile_selected_mcp_without_tools():
                 used_names=set(),
             ))
     finally:
-        runner._mcp_list_tools = original_list
+        runner._mcp_list_required_tools = original_list
 
 
 def test_openai_runner_fails_closed_when_required_mcp_selection_cannot_resolve():
@@ -902,14 +907,14 @@ def test_openai_runner_fails_closed_when_required_mcp_selection_cannot_resolve()
 
 def test_openai_runner_propagates_mcp_discovery_cancellation():
     runner = _mod("runner_better_agent")
-    original_list = runner._mcp_list_tools
+    original_list = runner._mcp_list_required_tools
     configs = {"cancelled": {"command": sys.executable}}
 
     async def fake_list(server_name, config):
         raise asyncio.CancelledError()
 
     try:
-        runner._mcp_list_tools = fake_list
+        runner._mcp_list_required_tools = fake_list
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(runner._extension_mcp_tools_for_run(
                 configs,
@@ -917,7 +922,7 @@ def test_openai_runner_propagates_mcp_discovery_cancellation():
                 used_names=set(),
             ))
     finally:
-        runner._mcp_list_tools = original_list
+        runner._mcp_list_required_tools = original_list
 
 
 def test_openai_runner_lists_real_profile_selected_session_control_tools():

@@ -35,6 +35,22 @@ from pathlib import Path
 # Import it lazily inside the functions that need the prod-home reference.
 _GUARD_INSTALLED = False
 _PROD_LOCK_COUNT = 0
+_PYTEST_MODULE_HOMES: dict[str, str] = {}
+
+
+def _register_importing_module_home(home: str) -> None:
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_globals.get("__name__") == __name__:
+        frame = frame.f_back
+    if frame is None or frame.f_code.co_name != "<module>":
+        return
+    module_name = frame.f_globals.get("__name__")
+    if isinstance(module_name, str) and module_name:
+        _PYTEST_MODULE_HOMES[module_name] = home
+
+
+def pytest_home_for_module(module_name: str) -> str | None:
+    return _PYTEST_MODULE_HOMES.get(module_name)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,14 +185,59 @@ def engage(home: str, lock: bool = False) -> str:
         sys.path.insert(0, backend_dir)
     import paths
     requested = Path(home).expanduser().resolve()
+    current = paths.ba_home().resolve()
+    switching = paths.is_test_mode() and current != requested
+    if switching:
+        _quiesce_loaded_home_owners()
     paths.engage_test_home(str(requested))
+    if switching:
+        _reset_loaded_home_owners()
     resolved = paths.ba_home()
     if resolved != requested:
         raise RuntimeError("test home did not resolve to the requested root")
     install_deletion_guard()
     if lock:
         lock_prod_home()
-    return str(resolved)
+    resolved_text = str(resolved)
+    _register_importing_module_home(resolved_text)
+    return resolved_text
+
+
+def _loaded(name: str):
+    return sys.modules.get(name)
+
+
+def _quiesce_loaded_home_owners() -> None:
+    provider = _loaded("provider")
+    if provider is not None:
+        provider.reset_provider_cache_for_test_home()
+    session_manager = _loaded("session_manager")
+    if session_manager is not None:
+        session_manager.manager.shutdown_persistence()
+    session_store = _loaded("session_store")
+    if session_store is not None:
+        session_store.quiesce_for_test_home()
+    projection = _loaded("session_queue_projection")
+    runtime = _loaded("session_queue_projection_runtime")
+    if projection is not None and runtime is not None:
+        identity = runtime.registry.bound_identity()
+        if identity is not None:
+            projection.shutdown(storage_identity=identity, timeout=5.0)
+
+
+def _reset_loaded_home_owners() -> None:
+    session_store = _loaded("session_store")
+    if session_store is not None:
+        session_store.reset_for_test_home()
+    session_manager = _loaded("session_manager")
+    if session_manager is not None:
+        session_manager.manager.reset_for_test_home()
+    worker_store = _loaded("stores.worker_store")
+    if worker_store is not None:
+        worker_store.reset_for_test_home()
+    config_store = _loaded("config_store")
+    if config_store is not None:
+        config_store.reset_for_test_home()
 
 
 # Crash-safety: never leave the prod home immutable if the process dies
@@ -264,5 +325,8 @@ class TestHome:
             raise RuntimeError(
                 f"TestHome.release refusing prod-rooted path ({self.path})"
             )
+        for module_name, home in tuple(_PYTEST_MODULE_HOMES.items()):
+            if home == self.path:
+                _PYTEST_MODULE_HOMES.pop(module_name, None)
         _ORIG_RMTREE(self.path, ignore_errors=True)
         unlock_prod_home()

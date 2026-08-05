@@ -41,18 +41,11 @@ from typing import Any, Awaitable, Callable, Optional
 import app_version
 from env_compat import get_env
 from paths import ba_home
-from topology import NodeSpec, load_topology, local_node_id
-
-
-def _local_node_id_or_primary() -> str:
-    """The local host's node id, falling back to the legacy `"primary"`
-    sentinel when topology.yaml is absent (dynamic-only deploy). Mirrors
-    `main._local_node_id_or_primary` — duplicated here because `main`
-    imports `node_store` (circular import). Keep these in sync."""
-    try:
-        return local_node_id()
-    except Exception:
-        return "primary"
+from topology import (
+    NodeSpec,
+    load_topology,
+    local_node_id_or_primary as _local_node_id_or_primary,
+)
 
 logger = logging.getLogger(__name__)
 

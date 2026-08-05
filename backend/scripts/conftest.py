@@ -12,12 +12,12 @@ A test wanting its own fresh home (instead of the session ROOT) calls
 
 from __future__ import annotations
 
-import ast
 import os
 import tempfile
 
 import _test_home
 from live_llm_test_guard import live_llm_skip_message, live_llm_tests_enabled
+from pytest_collection_guard import should_ignore_test_module
 
 # Engage at import time — before any backend import in collected test modules.
 # Layers 1+2 (ba_home guard + deletion guard) are always on. Layer 3 (FS lock
@@ -61,68 +61,7 @@ def pytest_ignore_collect(collection_path, config):
     any file with a module-scope exit call not guarded by the ``__main__``
     check is ignored, since pytest cannot import it side-effect-free.
     """
-    name = collection_path.name
-    if not name.startswith("test_") or not name.endswith(".py"):
-        return None
-    try:
-        tree = ast.parse(collection_path.read_text(encoding="utf-8"))
-    except (SyntaxError, ValueError):
-        return None
-    if _is_unguarded_runner(tree):
-        return True
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
-            return None
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            return None
-    return True
-
-
-def _is_unguarded_runner(tree):
-    """True if the module calls exit()/sys.exit() at module scope outside any
-    ``if __name__ == "__main__":`` guard.
-
-    Such a module executes its standalone runner on import, so pytest cannot
-    collect it without side effects (process spawns, filesystem mutation, and
-    a ``SystemExit`` that aborts the collection run). Real pytest modules
-    never exit at module scope; standalone runners guard their exit behind
-    the ``__main__`` check, so only the unguarded ones match.
-    """
-    exit_names = ("exit", "sys.exit", "os._exit")
-
-    def _is_main_guard(node):
-        return (
-            isinstance(node, ast.If)
-            and isinstance(node.test, ast.Compare)
-            and isinstance(node.test.left, ast.Name)
-            and node.test.left.id == "__name__"
-            and any(
-                isinstance(c, ast.Constant) and c.value == "__main__"
-                for c in node.test.comparators
-            )
-        )
-
-    def _exit_call_name(node):
-        fn = node.func
-        if isinstance(fn, ast.Name):
-            return fn.id
-        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
-            return f"{fn.value.id}.{fn.attr}"
-        return None
-
-    def _walk(node, under_main):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue  # inside a def/class body — not module-execution scope
-            this_under_main = under_main or _is_main_guard(child)
-            if isinstance(child, ast.Call) and _exit_call_name(child) in exit_names:
-                if not this_under_main:
-                    return True
-            if _walk(child, this_under_main):
-                return True
-        return False
-
-    return _walk(tree, False)
+    return should_ignore_test_module(collection_path, config)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -146,8 +85,10 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def _ensure_ba_home_dirs():
+def _ensure_ba_home_dirs(request):
     import paths
+    module_home = _test_home.pytest_home_for_module(request.module.__name__)
+    _test_home.engage(module_home or _SESSION_ROOT)
     home = paths.ba_home()
     for sub in ("sessions", "runs", "ask-status", "delegate-status"):
         (home / sub).mkdir(parents=True, exist_ok=True)

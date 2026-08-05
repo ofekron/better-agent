@@ -444,15 +444,11 @@ def _run_c2(fixture_path: Path) -> tuple[str, str]:
     claude_sid = str(uuid.uuid4())
     run_id = _seed_orphan_run_from_fixture(sid, fixture_path, claude_sid)
     with session_manager.batch(sid, bump_updated_at=False):
-        sess = session_manager.get(sid)
-        last_asst = next(m for m in sess["messages"] if m["id"] == asst_id)
         _replay_and_apply(
             persist_sid=sid,
             run_id=run_id,
             mode="native",
             claude_sid=claude_sid,
-            sess=sess,
-            last_asst=last_asst,
             msg_id=asst_id,
         )
     # _replay_and_apply writes content via update_running_content; match

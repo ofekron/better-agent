@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 
-from env_compat import get_env
 from node_id import validate_node_id
 
 
@@ -21,11 +20,9 @@ def initialize_local_machine_id(node_id: object) -> str:
 
 
 def initialize_primary_machine_id() -> str:
-    if get_env("BETTER_CLAUDE_TOPOLOGY_PATH"):
-        from topology import local_node_id
+    from topology import local_node_id_or_primary
 
-        return initialize_local_machine_id(local_node_id())
-    return initialize_local_machine_id("primary")
+    return initialize_local_machine_id(local_node_id_or_primary())
 
 
 def require_local_machine_id() -> str:

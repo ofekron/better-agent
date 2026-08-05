@@ -50,6 +50,7 @@ def _write_execution_artifact(
             "kind": kind,
             "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
             "revision": 2,
+            "execution_revision": 2,
         },
         run_id=run_id,
         prompt=payload.get("prompt", ""),
@@ -657,6 +658,7 @@ def test_family_retry_clones_exact_runtime_capabilities() -> None:
         "kind": "agy",
         "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
         "revision": 2,
+        "execution_revision": 2,
     }
     downstream = run_dir / "agy"
     downstream.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -1153,6 +1155,7 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
                     "kind": "codex",
                     "generation": "d5e1419b-d509-4c6c-a318-338961e75cf4",
                     "revision": 2,
+                    "execution_revision": 2,
                 },
                 runtime_policy={"fresh_capabilities": True},
                 **kwargs,

@@ -166,15 +166,12 @@ def test_agy_replay_lands_events_on_assistant() -> bool:
     events = [_agy_agent_message("Hello", agy_sid), _agy_agent_message("world", agy_sid)]
     run_id = _seed_agy_run(app_sid=app_sid, agy_sid=agy_sid, events=events)
 
-    sess = session_manager.get(app_sid)
-    last_asst = _last_assistant(sess)
+    last_asst = _last_assistant(session_manager.get(app_sid))
     _replay_and_apply(
         persist_sid=app_sid,
         run_id=run_id,
         mode="native",
         claude_sid=agy_sid,
-        sess=sess,
-        last_asst=last_asst,
         msg_id=last_asst["id"],
     )
 

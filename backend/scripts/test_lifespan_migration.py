@@ -58,18 +58,14 @@ def _child(home: Path) -> None:
         b"@echo off\r\nexit /b 0\r\n" if os.name == "nt" else b"#!/bin/sh\nexit 0\n"
     )
     launcher.chmod(0o700)
-    (home / "config.json").write_text(
-        '{"default_provider_id": "claude-id", "providers": ['
-        '{"id": "claude-id", "kind": "claude", "suspended": false}]}',
-        encoding="utf-8",
-    )
     profile = installation_profile.new_active_profile(
         mode=installation_profile.DEFAULT,
         provider="claude",
         provider_identity=provider_setup.executable_identity(str(launcher.absolute())),
     )
     installation_profile.stage_activation(profile)
-    installation_profile.mark_selection_applied()
+    import config_store
+    config_store.apply_installation_profile_selection(make_default=True)
 
     # This import is the point of the test: under -W error::DeprecationWarning
     # it would raise if any @app.on_event decorator remained.
