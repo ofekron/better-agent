@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
-import * as React from "react";
 import {
   CollapsibleOutput,
   CollapsibleTimelineBlock,
