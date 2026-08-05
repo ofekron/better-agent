@@ -24,19 +24,22 @@ from backend.surface_contract.nodes import ChildManifest, Node, Run, Sidecar
 
 
 # The `...` control exists iff manifest.renderable_child_count > 0 —
-# derived, not a second field.
+# derived, not a second field. runtime_change rides along without counting
+# against the N-turn window (at most one per turn).
 @dataclass(frozen=True, slots=True)
 class CompactTurn:
     turn: Node
     prompt: Node
     results: tuple[Node, ...]
     manifest: ChildManifest
+    runtime_change: Node | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class CompactSessionSnapshot:
     session_id: SessionId
     surface_id: SurfaceId
+    instruction_widget: Node | None
     turns: tuple[CompactTurn, ...]
     live_turn_nodes: tuple[Node, ...]
     runs: tuple[Run, ...]

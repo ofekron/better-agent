@@ -18,20 +18,27 @@ from backend.surface_contract.identity import (
 
 
 class NodeKind(StrEnum):
+    INSTRUCTION_WIDGET = "instruction_widget"
     TURN = "turn"
     TYPED_PROMPT = "typed_prompt"
     EXPLANATION = "explanation"
     ASSISTANT_TEXT = "assistant_text"
     THINKING = "thinking"
     TOOL_INTERACTION = "tool_interaction"
+    WORKER_INTERACTION = "worker_interaction"
     STEERING_MESSAGE = "steering_message"
     NATIVE_SUBAGENT_TURN = "native_subagent_turn"
     WORKER_TURN = "worker_turn"
+    SUB_SESSION_TURN = "sub_session_turn"
+    SESSION_TURN = "session_turn"
     MODEL_CHANGE = "model_change"
+    HARNESS_CHANGE = "harness_change"
     RESULT = "result"
     COMPACTION = "compaction"
+    CONTINUATION_SESSION = "continuation_session"
+    FAILURE = "failure"
     DIAGNOSTIC = "diagnostic"
-    OTHER_TYPED_WORK = "other_typed_work"
+    UNKNOWN = "unknown"
 
 
 STRUCTURAL_KINDS = frozenset(
@@ -40,9 +47,24 @@ STRUCTURAL_KINDS = frozenset(
         NodeKind.EXPLANATION,
         NodeKind.NATIVE_SUBAGENT_TURN,
         NodeKind.WORKER_TURN,
+        NodeKind.SUB_SESSION_TURN,
+        NodeKind.SESSION_TURN,
         NodeKind.RESULT,
     }
 )
+
+# SubAgentTurn family: one render contract, four sourcing modes.
+SUBAGENT_TURN_KINDS = frozenset(
+    {
+        NodeKind.NATIVE_SUBAGENT_TURN,
+        NodeKind.WORKER_TURN,
+        NodeKind.SUB_SESSION_TURN,
+        NodeKind.SESSION_TURN,
+    }
+)
+
+# RuntimeChanged family: boundary nodes rendered before their affected turn.
+RUNTIME_CHANGED_KINDS = frozenset({NodeKind.MODEL_CHANGE, NodeKind.HARNESS_CHANGE})
 
 
 class ContentStatus(StrEnum):
@@ -64,6 +86,7 @@ class PromptOrigin(StrEnum):
     USER = "user"
     QUEUED = "queued"
     OFFLINE_SYNC = "offline_sync"
+    SESSION_ASK = "session_ask"
 
 
 class ResultKind(StrEnum):
@@ -88,13 +111,22 @@ class Attachment:
     ref: str
 
 
+# Always the originator's verbatim text — never backend-synthesized fixed
+# text (that is instruction_widget).
 @dataclass(frozen=True, slots=True)
 class TypedPromptPayload:
     text: str
     attachments: tuple[Attachment, ...] = ()
     send_mode: SendMode = SendMode.QUEUE
     origin: PromptOrigin = PromptOrigin.USER
+    source_session_ref: str | None = None  # set when origin=session_ask
     intent_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionWidgetPayload:
+    text: str
+    action: dict[str, object] | None = None  # forward-compat {kind, label, payload}
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,15 +163,48 @@ class ModelChangePayload:
     source: ModelChangeSource
 
 
+# User-initiated only: harness_profile_id never changes mid-turn without
+# user action.
+@dataclass(frozen=True, slots=True)
+class HarnessChangePayload:
+    from_harness_profile_id: str | None
+    to_harness_profile_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerInteractionPayload:
+    fact_kind: str  # worker_start | worker_event | worker_complete
+    fact: dict[str, object]
+
+
 @dataclass(frozen=True, slots=True)
 class ResultPayload:
     result_kind: ResultKind
 
 
+class CompactionOrigin(StrEnum):
+    NATIVE = "native"
+    BETTER_AGENT = "better_agent"
+
+
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
+    origin: CompactionOrigin
     summary: str
     replaced_node_ids: tuple[NodeId, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationSessionPayload:
+    session_ref: str
+    summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FailurePayload:
+    code: str
+    text: str
+    data: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,10 +215,9 @@ class DiagnosticPayload:
     data: dict[str, object] | None = None
 
 
-# Also carries WorkerInteraction facts (worker_start/worker_event/
-# worker_complete) verbatim — the grammar gives them no dedicated shape.
+# Forward-compat sink for anything not recognized (yet).
 @dataclass(frozen=True, slots=True)
-class OtherTypedWorkPayload:
+class UnknownPayload:
     label: str
     payload: dict[str, object]
 
@@ -165,18 +229,31 @@ class ChildManifest:
 
 
 NodePayload = (
-    TypedPromptPayload
+    InstructionWidgetPayload
+    | TypedPromptPayload
     | AssistantTextPayload
     | ThinkingPayload
     | ToolInteractionPayload
+    | WorkerInteractionPayload
     | SteeringMessagePayload
     | ModelChangePayload
+    | HarnessChangePayload
     | ResultPayload
     | CompactionPayload
+    | ContinuationSessionPayload
+    | FailurePayload
     | DiagnosticPayload
-    | OtherTypedWorkPayload
+    | UnknownPayload
     | None
 )
+
+
+# Backend-issued address of an embedded turn in another session; never
+# client-suppliable, authorization-checked on every access (ADR 0006 §0).
+@dataclass(frozen=True, slots=True)
+class TargetRef:
+    session_id: str
+    turn_id: TurnId
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +270,7 @@ class Node:
     payload: NodePayload = None
     run_ref: RunRef | None = None
     sidecar_ref: SidecarRef | None = None
+    target_ref: TargetRef | None = None
     child_manifest: ChildManifest | None = None
 
 
@@ -200,6 +278,7 @@ class Node:
 class Run:
     run_ref: RunRef
     provider_id: str
+    account_name: str | None
     model: str
     reasoning_effort: str | None
     runner: str
