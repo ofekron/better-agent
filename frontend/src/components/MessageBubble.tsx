@@ -897,7 +897,7 @@ export function fmt(n: number): string {
   return n.toString();
 }
 
-function TodosSnapshotEvent({ todos }: { todos: TodoItem[] }) {
+export function TodosSnapshotEvent({ todos }: { todos: TodoItem[] }) {
   if (!todos || todos.length === 0) return null;
   return (
     <div className="todos-snapshot">
