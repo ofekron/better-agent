@@ -93,6 +93,26 @@ async def _elect(
     return execution, provider_run_id
 
 
+def _patch_session(monkeypatch, session_id: str, session: dict) -> None:
+    """Fake a session for the selector-projection path.
+
+    _project_native_sid reads the session via Manager.get_field (single field),
+    not Manager.get (whole dict); patch both accessors against the same fake
+    session so the projection is actually exercised."""
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get",
+        lambda requested_id: (session if requested_id == session_id else None),
+    )
+    monkeypatch.setattr(
+        session_manager.manager,
+        "get_field",
+        lambda requested_id, field: (
+            session.get(field) if requested_id == session_id else None
+        ),
+    )
+
+
 async def test_recovery_selector_attachment_is_generation_fenced_and_crash_safe(
     monkeypatch,
 ) -> None:
@@ -100,15 +120,7 @@ async def test_recovery_selector_attachment_is_generation_fenced_and_crash_safe(
     projected: list[tuple[str, str, str | None]] = []
     fail_projection = False
 
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
-        lambda requested_id: (
-            {"orchestration_mode": "native"}
-            if requested_id == session_id
-            else None
-        ),
-    )
+    _patch_session(monkeypatch, session_id, {"orchestration_mode": "native"})
 
     def set_agent_sid(requested_id, mode, native_sid, **_metadata):
         if fail_projection:
@@ -230,15 +242,7 @@ async def test_recovery_descriptor_routes_through_lifecycle_authority(
 ) -> None:
     session_id = "recovery-selector-descriptor"
     projected: list[str] = []
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
-        lambda requested_id: (
-            {"orchestration_mode": "native"}
-            if requested_id == session_id
-            else None
-        ),
-    )
+    _patch_session(monkeypatch, session_id, {"orchestration_mode": "native"})
     monkeypatch.setattr(
         session_manager.manager,
         "set_agent_sid",
@@ -299,15 +303,7 @@ async def test_recovery_descriptor_attachment_runs_on_lifecycle_owner_loop(
 ) -> None:
     session_id = "recovery-selector-offloop"
     projected: list[str] = []
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
-        lambda requested_id: (
-            {"orchestration_mode": "native"}
-            if requested_id == session_id
-            else None
-        ),
-    )
+    _patch_session(monkeypatch, session_id, {"orchestration_mode": "native"})
     monkeypatch.setattr(
         session_manager.manager,
         "set_agent_sid",
@@ -407,11 +403,7 @@ async def test_replay_only_integration_retires_exact_lifecycle_on_owner_loop(
         ],
     }
     projected: list[str] = []
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
-        lambda requested_id: session if requested_id == session_id else None,
-    )
+    _patch_session(monkeypatch, session_id, session)
     monkeypatch.setattr(
         session_manager.manager,
         "set_agent_sid",
