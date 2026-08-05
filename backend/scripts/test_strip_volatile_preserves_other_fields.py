@@ -1,15 +1,11 @@
 """Locks `_strip_volatile_from_tree` SRP: it strips EXACTLY the
 volatile fields (`isStreaming`, `events`, `workers[*].events`) plus
 node-level sidecar fields (`draft_input`, `draft_input_seq`,
-`draft_images`, `last_opened_at`) and
-leaves every other field byte-identical across the strip → write →
-restore cycle.
+`draft_images`, `last_opened_at`) and leaves every other field
+byte-identical across the strip -> write -> restore cycle.
 
 If a future regression accidentally pops a non-events field (e.g. a
 new `msg.workers[panel].metadata` dict), this test catches it.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_strip_volatile_preserves_other_fields.py
 """
 
 from __future__ import annotations
@@ -17,11 +13,10 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shutil
 import sys
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-strip-")
+_test_home.isolate("bc-test-strip-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -30,8 +25,15 @@ if _BACKEND not in sys.path:
 
 import session_store  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+# Fields the strip is contracted to remove from every node/message/panel.
+_VOLATILE_SKIP = {
+    "isStreaming",
+    "events",
+    "draft_input",
+    "draft_input_seq",
+    "draft_images",
+    "last_opened_at",
+}
 
 
 def _build_rich_tree() -> dict:
@@ -132,6 +134,7 @@ def _frozen_view(node: dict, skip_fields: set) -> str:
     every msg / panel / mgr dict. Lets the test assert that
     EVERYTHING ELSE is byte-identical."""
     clone = copy.deepcopy(node)
+
     def visit(n: dict):
         for f in skip_fields:
             n.pop(f, None)
@@ -144,89 +147,41 @@ def _frozen_view(node: dict, skip_fields: set) -> str:
                         w.pop(f, None)
         for f in n.get("forks") or []:
             visit(f)
+
     visit(clone)
     return json.dumps(clone, sort_keys=True)
 
 
-def _run() -> bool:
-    results: list[tuple[str, bool, str]] = []
+def test_strip_volatile_preserves_other_fields():
     tree = _build_rich_tree()
     original = copy.deepcopy(tree)
 
     popped = session_store._strip_volatile_from_tree(tree)
 
-    # 1) After strip: every events list is absent in the live tree.
+    # 1) After strip: every events list + isStreaming absent in the live tree.
     msg_a = tree["messages"][1]
-    ok = "events" not in msg_a and "isStreaming" not in msg_a
-    results.append(("strip removes msg.events + isStreaming",
-                    ok, f"msg.events-in-keys={'events' in msg_a} "
-                    f"isStreaming-in-keys={'isStreaming' in msg_a}"))
-
-    ok = "events" not in msg_a["workers"][0]
-    results.append(("strip removes msg.workers[0].events",
-                    ok, f"keys={sorted(msg_a['workers'][0].keys())}"))
+    assert "events" not in msg_a
+    assert "isStreaming" not in msg_a
+    assert "events" not in msg_a["workers"][0]
 
     # 2) After strip: every NON-volatile field is byte-identical.
-    skip = {
-        "isStreaming",
-        "events",
-        "draft_input",
-        "draft_input_seq",
-        "draft_images",
-        "last_opened_at",
-    }
-    ok = _frozen_view(tree, skip) == _frozen_view(original, skip)
-    results.append(
-        ("non-volatile fields byte-identical after strip", ok,
-         "diff in non-volatile fields"))
+    assert _frozen_view(tree, _VOLATILE_SKIP) == _frozen_view(original, _VOLATILE_SKIP)
 
     # 3) After restore: tree is byte-identical to original.
     session_store._restore_volatile_to_tree(popped)
-    ok = json.dumps(tree, sort_keys=True) == json.dumps(original, sort_keys=True)
-    results.append(
-        ("restore reproduces original tree byte-identically", ok,
-         "tree diverges from original after restore"))
+    assert json.dumps(tree, sort_keys=True) == json.dumps(original, sort_keys=True)
 
     # 4) Through write_session_full: tree is restored after the write.
+    #    updated_at is NOT bumped, so the live tree stays EXACTLY the original.
     session_store._ensure_dir()
     session_store.write_session_full(tree, bump_updated_at=False)
-    # `updated_at` was NOT bumped, so the live tree should be EXACTLY
-    # the original. Validate.
-    ok = json.dumps(tree, sort_keys=True) == json.dumps(original, sort_keys=True)
-    results.append(
-        ("post-write_session_full: in-memory tree unchanged", ok,
-         "live tree mutated by write_session_full"))
+    assert json.dumps(tree, sort_keys=True) == json.dumps(original, sort_keys=True)
 
-    # 5) On-disk file omits event-list fields.
-    on_disk = json.loads(open(session_store._session_path("root-1")).read())
-    ok = "events" not in on_disk["messages"][1]
-    results.append(("on-disk msg.events absent after write", ok,
-                    f"keys={sorted(on_disk['messages'][1].keys())}"))
-    ok = "events" not in on_disk["messages"][1]["workers"][0]
-    results.append(("on-disk msg.workers[0].events absent after write", ok, ""))
-    ok = "events" not in on_disk["forks"][0]["messages"][0]
-    results.append(("on-disk fork msg.events absent after write", ok, ""))
-    # And isStreaming was stripped.
-    ok = "isStreaming" not in on_disk["messages"][1]
-    results.append(("on-disk msg has no isStreaming", ok, ""))
-    ok = "last_opened_at" not in on_disk and "last_opened_at" not in on_disk["forks"][0]
-    results.append(("on-disk nodes have no last_opened_at", ok, ""))
-
-    passed = sum(1 for _, ok, _ in results if ok)
-    for name, ok, msg in results:
-        tag = PASS if ok else FAIL
-        print(f"  {tag} {name}{'' if ok else ' — ' + msg}")
-    print(f"\n{passed}/{len(results)} checks passed")
-    return passed == len(results)
-
-
-def main() -> int:
-    try:
-        ok = _run()
-        return 0 if ok else 1
-    finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    # 5) On-disk file omits volatile fields.
+    on_disk = json.loads(session_store._session_path("root-1").read_text())
+    assert "events" not in on_disk["messages"][1]
+    assert "events" not in on_disk["messages"][1]["workers"][0]
+    assert "events" not in on_disk["forks"][0]["messages"][0]
+    assert "isStreaming" not in on_disk["messages"][1]
+    assert "last_opened_at" not in on_disk
+    assert "last_opened_at" not in on_disk["forks"][0]
