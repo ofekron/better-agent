@@ -392,6 +392,102 @@ def parse_processor_requirements(text: str) -> list[dict[str, Any]]:
     return []
 
 
+def _normalized_requirement_text(row: dict[str, Any]) -> str:
+    return " ".join(str(row.get("text") or "").split()).casefold()
+
+
+def _processor_evidence_identity(evidence: dict[str, Any]) -> tuple[object, ...] | None:
+    unit_source_key = evidence.get("unit_source_key")
+    if isinstance(unit_source_key, str) and unit_source_key.strip():
+        return ("unit", unit_source_key)
+    transcript_identity = (
+        evidence.get("path"),
+        evidence.get("element_index"),
+        evidence.get("sid"),
+        evidence.get("ts_utc"),
+    )
+    if (
+        isinstance(transcript_identity[0], str)
+        and transcript_identity[0]
+        and isinstance(transcript_identity[1], int)
+        and not isinstance(transcript_identity[1], bool)
+        and isinstance(transcript_identity[2], str)
+        and transcript_identity[2]
+        and isinstance(transcript_identity[3], str)
+        and transcript_identity[3]
+    ):
+        return ("transcript", *transcript_identity)
+    return None
+
+
+def _processor_requirement_dedupe_key(row: dict[str, Any]) -> tuple[object, ...]:
+    evidence = row.get("evidence")
+    if isinstance(evidence, dict):
+        evidence_identity = _processor_evidence_identity(evidence)
+        if evidence_identity and evidence_identity[0] == "unit":
+            return (
+                *evidence_identity,
+                row.get("kind"),
+                row.get("origin"),
+                row.get("polarity"),
+            )
+        if evidence_identity:
+            return (
+                *evidence_identity,
+                _normalized_requirement_text(row),
+                row.get("kind"),
+                row.get("origin"),
+                row.get("polarity"),
+            )
+    return ("exact", json.dumps(row, sort_keys=True, separators=(",", ":")))
+
+
+def dedupe_processor_requirements(
+    requirements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[object, ...]] = set()
+    for row in requirements:
+        key = _processor_requirement_dedupe_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def dedupe_processor_output_text(text: str) -> str:
+    stripped = (text or "").strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict) or not isinstance(payload.get("requirements"), list):
+        return text
+    requirements = payload["requirements"]
+    if not all(isinstance(row, dict) for row in requirements):
+        return text
+    if any(
+        not isinstance(row.get("text"), str)
+        or not isinstance(row.get("evidence"), dict)
+        or _processor_evidence_identity(row["evidence"]) is None
+        or any(
+            not isinstance(row.get(field), str)
+            for field in ("kind", "origin", "polarity")
+        )
+        for row in requirements
+    ):
+        return text
+    deduped = dedupe_processor_requirements(requirements)
+    if len(deduped) == len(requirements):
+        return text
+    return json.dumps(
+        {**payload, "requirements": deduped},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def persist_processor_findings(text: str) -> dict[str, Any]:
     """Queue transcript-evidence findings for canonical unit extraction.
 
@@ -432,6 +528,7 @@ def build_processed_requirements_response(
     text = processed.get("text") if isinstance(processed, dict) else ""
     if not isinstance(text, str):
         text = ""
+    text = dedupe_processor_output_text(text)
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
     response = {
         "success": not bool(error),
