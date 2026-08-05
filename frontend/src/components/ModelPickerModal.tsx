@@ -49,6 +49,7 @@ export function ModelPickerModal({
   const sessionView = sessionProfileView(session, snapshot);
   const [draft, setDraft] = useState<SelectorDraft>(() => makeDraft(session, snapshot));
   const [error, setError] = useState<string | null>(null);
+  const [harnessProfilesReady, setHarnessProfilesReady] = useState(false);
 
   // Re-anchor the initial draft once the snapshot lands (the hook starts
   // null; `makeDraft` on null leaves runtime_profile_id empty for sessions
@@ -102,7 +103,7 @@ export function ModelPickerModal({
   };
 
   const confirm = () => {
-    if (!draft || busy) return;
+    if (!draft || busy || !harnessProfilesReady) return;
     if (!draft.model) {
       setError(t("sessionSelector.noModelForProfile", "No model is available for this runtime profile."));
       return;
@@ -295,6 +296,7 @@ export function ModelPickerModal({
             onChange={(harness_profile_id) =>
               setDraft({ ...draft, harness_profile_id })
             }
+            onReadyChange={setHarnessProfilesReady}
           />
           {error ? <div className="session-model-picker-error">{error}</div> : null}
         </div>
@@ -308,6 +310,7 @@ export function ModelPickerModal({
             onClick={confirm}
             disabled={
               busy
+              || !harnessProfilesReady
               || !draft.model
               || catalogBlocksSelection
               || !selectedModelValid

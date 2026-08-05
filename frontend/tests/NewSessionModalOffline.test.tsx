@@ -284,6 +284,145 @@ describe("NewSessionModal offline provider cache", () => {
     expect(getByRole("combobox", { name: "Harness profile" })).toBeTruthy();
   });
 
+  it("creates with Default after a saved harness profile was deleted", async () => {
+    seedOfflineCaches();
+    localStorage.setItem(
+      "better-agent-new-session-defaults",
+      JSON.stringify({
+        orchestrationMode: "native",
+        main: { runtimeProfileId: profile.id, model: "cached-default", permission: {} },
+        harnessProfileId: "deleted-profile",
+      }),
+    );
+    let resolveProfiles!: (response: Response) => void;
+    const profilesResponse = new Promise<Response>((resolve) => {
+      resolveProfiles = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/harness-profiles")) {
+        return profilesResponse;
+      }
+      return Promise.reject(new TypeError("offline"));
+    });
+    const onCreate = vi.fn<(config: SessionConfig) => void>();
+
+    const modal = await renderSettled(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+      />,
+    );
+
+    const createButton = modal.container.querySelector(
+      ".modal-footer .btn-primary",
+    ) as HTMLButtonElement;
+    expect(createButton.disabled).toBe(true);
+    fireEvent.click(createButton);
+    expect(onCreate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveProfiles({
+        ok: true,
+        status: 200,
+        json: async () => ({ profiles: [{ id: "default", name: "Default" }] }),
+      } as Response);
+    });
+    await waitFor(() => {
+      expect((modal.getByRole("combobox", { name: "Harness profile" }) as HTMLSelectElement).value)
+        .toBe("default");
+      expect(createButton.disabled).toBe(false);
+    });
+    await clickSettled(createButton);
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ harnessProfileId: "default" }),
+      undefined,
+      "send-and-open",
+    );
+  });
+
+  it("blocks an immediate create while revalidating a reopened modal", async () => {
+    seedOfflineCaches();
+    localStorage.setItem(
+      "better-agent-new-session-defaults",
+      JSON.stringify({
+        orchestrationMode: "native",
+        main: { runtimeProfileId: profile.id, model: "cached-default", permission: {} },
+        harnessProfileId: "soon-deleted",
+      }),
+    );
+    let resolveReopen!: (response: Response) => void;
+    const reopenResponse = new Promise<Response>((resolve) => {
+      resolveReopen = resolve;
+    });
+    let listRequest = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!url.endsWith("/api/harness-profiles")) {
+        return Promise.reject(new TypeError("offline"));
+      }
+      listRequest += 1;
+      if (listRequest === 1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            profiles: [
+              { id: "default", name: "Default" },
+              { id: "soon-deleted", name: "Soon deleted" },
+            ],
+          }),
+        } as Response);
+      }
+      return reopenResponse;
+    });
+    const onCreate = vi.fn<(config: SessionConfig) => void>();
+    const content = (open: boolean) => (
+      <NewSessionModal
+        open={open}
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+      />
+    );
+    const modal = await renderSettled(content(true));
+    const createButton = modal.container.querySelector(
+      ".modal-footer .btn-primary",
+    ) as HTMLButtonElement;
+
+    await waitFor(() => expect(createButton.disabled).toBe(false));
+    modal.rerender(content(false));
+    modal.rerender(content(true));
+
+    const reopenedCreateButton = modal.container.querySelector(
+      ".modal-footer .btn-primary",
+    ) as HTMLButtonElement;
+    expect(reopenedCreateButton.disabled).toBe(true);
+    fireEvent.click(reopenedCreateButton);
+    expect(onCreate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveReopen({
+        ok: true,
+        status: 200,
+        json: async () => ({ profiles: [{ id: "default", name: "Default" }] }),
+      } as Response);
+    });
+    await waitFor(() => expect(reopenedCreateButton.disabled).toBe(false));
+    await clickSettled(reopenedCreateButton);
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ harnessProfileId: "default" }),
+      undefined,
+      "send-and-open",
+    );
+  });
+
   it("creates with cached runtime profile and model when fetches fail", async () => {
     seedOfflineCaches();
     localStorage.setItem(

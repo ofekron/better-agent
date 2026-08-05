@@ -663,6 +663,7 @@ export function NewSessionModal({
     clearFilesDraft();
   }, [clearPromptDraft, clearImagesDraft, clearFilesDraft]);
   const [harnessProfileId, setHarnessProfileId] = useState("");
+  const [harnessProfilesReady, setHarnessProfilesReady] = useState(false);
   // File Edit's availability derives purely from whether the
   // "ofek-dev.file-edit" extension is enabled on the currently selected
   // harness profile (Default when none is picked) — refetched whenever the
@@ -763,6 +764,7 @@ export function NewSessionModal({
       setInitialFiles(investigation.files ?? []);
     }
     setHarnessProfileId(defaults.harnessProfileId ?? "");
+    setHarnessProfilesReady(false);
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
     // Re-run on every open so reopening with a new shortcut doesn't show
@@ -975,9 +977,10 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.runtimeProfileId || (effectiveOrchestrationMode === "team" && !worker.runtimeProfileId);
   const createDisabled = !(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig);
+  const createBlocked = createDisabled || !harnessProfilesReady;
 
   const handleCreate = async (action: NewSessionCreationAction, promptOverride?: string) => {
-    if (creatingRef.current || createDisabled) return;
+    if (creatingRef.current || createBlocked) return;
     creatingRef.current = true;
     setCreating(true);
     try {
@@ -1021,7 +1024,7 @@ export function NewSessionModal({
     if (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     event.preventDefault();
-    if (createDisabled) return;
+    if (createBlocked) return;
     void handleCreate(creationAction);
   };
 
@@ -1356,6 +1359,7 @@ export function NewSessionModal({
               className="ns-modal-row harness-profile-selector"
               disabled={creating}
               onChange={setHarnessProfileId}
+              onReadyChange={setHarnessProfilesReady}
             />
           </div>
 
@@ -1387,7 +1391,7 @@ export function NewSessionModal({
               "send-and-open": t("newSession.createAndSendAndOpen"),
             }}
             loadingLabel={t("newSession.creating")}
-            disabled={createDisabled}
+            disabled={createBlocked}
             creating={creating}
             onAction={handleCreate}
           />
