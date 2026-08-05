@@ -26,7 +26,7 @@ npm run build
 Pop-Location
 
 Write-Host "==> Installing build dependencies into the backend venv"
-& $Pip install -q pyinstaller pywebview tufup "pyxdelta>=0.2.3,<0.3"
+& $Pip install -q pyinstaller -r (Join-Path $Dir "requirements.txt")
 
 $Version = (& $Python -c "import sys; sys.path.insert(0, 'desktop'); from _version import __version__; print(__version__)").Trim()
 $BcHome = (& $Python -c "import sys; sys.path.insert(0, 'backend'); from paths import ba_home; print(ba_home())").Trim()

@@ -812,18 +812,20 @@ def _seed_default_state() -> dict:
 
 
 @_serialized_provider_mutation
-def apply_installation_profile_selection(make_default: bool = False) -> dict:
+def apply_installation_profile_selection(
+    make_default: bool = False,
+    seed_ui_only_harness: bool = False,
+) -> dict:
     """Make the installer's selection available, and default when it is a
     fresh choice.
 
-    Two callers, two intents. Setup passes `make_default` because the user just
-    answered which provider they want. A boot-time re-commit of the same
-    installation passes nothing: it must never move a default the user changed
-    afterwards. Neither one withdraws providers the user configured.
+    Setup passes its explicit first-activation choices. A boot-time re-commit
+    passes neither flag, preserving later provider and harness choices.
     """
     import installation_profile
 
-    kind = installation_profile.load().get("provider")
+    profile = installation_profile.load()
+    kind = profile.get("provider")
     if not kind:
         installation_profile.mark_selection_applied()
         return list_provider_ui_state()
@@ -872,7 +874,18 @@ def apply_installation_profile_selection(make_default: bool = False) -> dict:
         _reconcile_default_runtime_profile(state)
     elif target_changed:
         _advance_provider_revision(target, execution_changed=True)
-    if created or target_changed or default_changed:
+    harness_changed = False
+    if seed_ui_only_harness and profile.get("mode") != installation_profile.DEFAULT:
+        import bundled_extensions
+
+        disabled = _normalize_disabled_builtin_extensions(
+            list(bundled_extensions.PUBLIC_EXTENSION_PATHS)
+        )
+        harness_changed = state.get("disabled_builtin_extensions") != disabled
+        if harness_changed:
+            state["disabled_builtin_extensions"] = disabled
+    state_changed = created or target_changed or default_changed or harness_changed
+    if state_changed:
         _save_state(state)
     installation_profile.mark_selection_applied()
     if created or target_changed or default_changed:

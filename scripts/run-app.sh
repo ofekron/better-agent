@@ -44,8 +44,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile"
 SECRETS_DIR="$REPO_ROOT/docker/secrets"
-# shellcheck source=lib/docker-platform.sh
-source "$HERE/lib/docker-platform.sh"
 
 REF=""
 PORT="28765"
@@ -129,8 +127,6 @@ if [ "$FRESH_DATA" = "1" ]; then
   docker volume rm "$VOLUME_NAME" 2>/dev/null || true
 fi
 
-docker_platform_detect
-
 # ensure_docker_secrets: bootstrap docker/secrets/{password_hash,session_secret}
 # on first use. Shared across every ref/port — matches docker-compose.yml's
 # single-secrets model (one login for the whole app, not per-ref).
@@ -174,13 +170,13 @@ ensure_docker_secrets() {
     # only ever runs via Docker, never a host venv, since those drift).
     local deps_image="better-agent-backend-tests:deps"
     echo "run-app: building $deps_image (only if not already cached) to hash the new password"
-    docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" \
+    docker build \
       -f "$REPO_ROOT/docker/Dockerfile.test" --target deps -t "$deps_image" "$REPO_ROOT" >/dev/null
 
     # --entrypoint python3 overrides the deps image's ENTRYPOINT (`python -m
     # pytest`, see docker/Dockerfile.test) — without it, this command's args
     # get appended to pytest's argv instead of replacing it.
-    docker run --rm "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" \
+    docker run --rm \
       --entrypoint python3 \
       -v "$REPO_ROOT:/repo" \
       -v "$pw_dir/pw:/tmp/pw:ro" \
@@ -213,14 +209,14 @@ fi
 if [ -n "$REF" ]; then
   echo "run-app: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" \
+    | docker build \
         -f docker/Dockerfile \
         --build-arg "BETTER_AGENT_INSTALL_MODE=${INSTALL_MODE}" \
         --build-arg "BETTER_AGENT_PROVIDER=${PROVIDER}" \
         -t "$IMAGE_TAG" -
 else
   echo "run-app: building $IMAGE_TAG from the live working tree (uncommitted changes included)"
-  docker build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" \
+  docker build \
     -f "$DOCKERFILE" \
     --build-arg "BETTER_AGENT_INSTALL_MODE=${INSTALL_MODE}" \
     --build-arg "BETTER_AGENT_PROVIDER=${PROVIDER}" \
@@ -233,7 +229,6 @@ docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 echo "run-app: starting $CONTAINER_NAME on port $PORT"
 docker run -d --rm --name "$CONTAINER_NAME" \
-  "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" \
   -p "${PORT}:18765" \
   -e BETTER_AGENT_BACKEND_PORT=18765 \
   -e "BETTER_AGENT_USERNAME=${USERNAME}" \

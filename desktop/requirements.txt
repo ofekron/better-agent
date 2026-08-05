@@ -1,0 +1,3 @@
+pywebview
+tufup>=0.10.0
+pyxdelta>=0.2.3,<0.3

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import backend_launch_authority as bla
+import paths
 from backend_instance_lock import reserve_primary_backend_instance_lock
 from primary_launcher_lease import PrimaryLauncherLease
 
@@ -21,7 +22,7 @@ def checkout() -> Path:
 def real_home(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("BETTER_AGENT_HOME", str(tmp_path))
     monkeypatch.setenv("BETTER_CLAUDE_HOME", str(tmp_path))
-    return tmp_path
+    return paths.ba_home()
 
 
 @pytest.fixture

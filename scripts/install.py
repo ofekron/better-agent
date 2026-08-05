@@ -19,8 +19,6 @@ import installation_profile
 import dependency_plan
 import provider_setup
 import install_channel
-import config_store
-import bundled_extensions
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -75,28 +73,6 @@ def _resolve_args(args: argparse.Namespace) -> tuple[str, str]:
     return mode, provider
 
 
-def seed_ui_only_harness(mode: str) -> None:
-    """Ship an empty default harness for the modes that advertise it.
-
-    "Desktop UI only" / "Mobile + Desktop UI only" both promise "no Better
-    Agent extensions, skills, MCPs, or agent additions" (see the --mode
-    choice labels in ``_resolve_args``). The only point that promise can
-    actually be kept is first provisioning: disable every bundled/
-    first-party extension up front, via the same lever a user has later
-    through Settings (``config_store``'s ``disabled_builtin_extensions``,
-    read by ``harness_profile_resolver.resolve_for_session``, which fully
-    excludes a disabled extension's instructions/skills/tools rather than
-    just hiding them in the UI). Nothing auto-installs a NEW (non-bundled)
-    extension regardless of mode, so this alone makes the harness genuinely
-    empty by default for these modes.
-    """
-    if mode == installation_profile.DEFAULT:
-        return
-    config_store.set_disabled_builtin_extensions(
-        sorted(bundled_extensions.PUBLIC_EXTENSION_PATHS)
-    )
-
-
 async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
     async def report(event: str, payload: dict) -> None:
         if event == "provider_install_progress" and payload.get("text"):
@@ -138,13 +114,13 @@ async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
             provider=provider,
             provider_identity=verified_identity,
         )
-        seed_ui_only_harness(mode)
         environment = dependency_plan.prepare_installation(uv, profile)
         dependency_plan.activate_prepared_installation(
             environment,
             profile,
             uv,
             make_default=not adopt,
+            seed_ui_only_harness=mode != installation_profile.DEFAULT,
         )
 
     channel = install_channel.record_install_channel(mode)

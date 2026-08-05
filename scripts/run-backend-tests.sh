@@ -56,8 +56,6 @@ export DOCKER_BUILDKIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.test"
-# shellcheck source=lib/docker-platform.sh
-source "$HERE/lib/docker-platform.sh"
 # shellcheck source=lib/docker-test-lifecycle.sh
 source "$HERE/lib/docker-test-lifecycle.sh"
 
@@ -123,7 +121,6 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
-docker_platform_detect
 docker_test_lifecycle_init backend
 docker_test_reap_orphans
 docker_test_cleanup
@@ -135,19 +132,16 @@ if [ -n "$REF" ]; then
   echo "run-backend-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   DOCKER_TEST_IMAGE_KIND=ref
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
+    | docker_test_build -f docker/Dockerfile.test --target full -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-backend-tests:deps"
   BIND_MOUNT_REPO=1
   echo "run-backend-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
   DOCKER_TEST_IMAGE_KIND=deps
-  docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker_test_build -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
-# ${arr[@]+"${arr[@]}"} (not plain "${arr[@]}") because macOS's default
-# /bin/bash is 3.2, where an empty array under `set -u` throws "unbound
-# variable" on plain expansion — this guard is a no-op on bash >=4.4.
-RUN_ARGS=(--rm --cpus=2 "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
+RUN_ARGS=(--rm --cpus=2)
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi

@@ -381,7 +381,11 @@ def assert_provider_runtime_ready(kind: str) -> None:
     )
 
 
-def _commit_activation(python: Path, make_default: bool = False) -> None:
+def _commit_activation(
+    python: Path,
+    make_default: bool = False,
+    seed_ui_only_harness: bool = False,
+) -> None:
     if not installation_profile.selection_pending():
         return
     if installation_profile.refresh_activation_receipt():
@@ -392,6 +396,7 @@ def _commit_activation(python: Path, make_default: bool = False) -> None:
             str(Path(__file__).resolve()),
             "apply-selection",
             *(("--make-default",) if make_default else ()),
+            *(("--seed-ui-only-harness",) if seed_ui_only_harness else ()),
         ],
         cwd=BACKEND,
         check=True,
@@ -503,6 +508,7 @@ def activate_prepared_installation(
     uv: str,
     *,
     make_default: bool = True,
+    seed_ui_only_harness: bool = False,
 ) -> Path:
     """Activate a prepared installation.
 
@@ -520,7 +526,11 @@ def activate_prepared_installation(
     installation_profile.stage_activation(profile)
     _write_pointer(env_dir)
     try:
-        _commit_activation(_python_in(env_dir), make_default=make_default)
+        _commit_activation(
+            _python_in(env_dir),
+            make_default=make_default,
+            seed_ui_only_harness=seed_ui_only_harness,
+        )
         if installation_profile.selection_pending():
             raise DependencyPlanError(
                 "installation activation receipt was not committed"
@@ -568,6 +578,7 @@ def main() -> int:
     )
     parser.add_argument("--uv")
     parser.add_argument("--make-default", action="store_true")
+    parser.add_argument("--seed-ui-only-harness", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "activate":
@@ -579,6 +590,7 @@ def main() -> int:
 
             value = config_store.apply_installation_profile_selection(
                 make_default=args.make_default,
+                seed_ui_only_harness=args.seed_ui_only_harness,
             )
         elif args.command == "active":
             value = str(active_env())

@@ -17,7 +17,9 @@ if str(BACKEND) not in sys.path:
 if str(SDK) not in sys.path:
     sys.path.insert(0, str(SDK))
 
-os.environ["BETTER_AGENT_TEST_MODE"] = "1"
+from _test_home import TestHome as _TestHome
+
+_TEST_HOME = _TestHome.acquire("ba-install-modes-session-")
 
 import _test_installation
 import builtin_mcp_config
@@ -25,6 +27,7 @@ import capability_contexts
 import extension_applied_config
 import extension_store
 import installation_admission
+import installation_capabilities
 import installation_profile
 import provider_setup
 import runner_codex
@@ -51,7 +54,11 @@ def _with_home():
 
 def _activate(root: Path, mode: str, provider: str = "codex") -> dict:
     profile = _test_installation.activate(root, mode=mode, provider=provider)
-    installation_profile.capture_active_capabilities()
+    with patch.dict(
+        installation_capabilities._PROBES,
+        {installation_capabilities.MOBILE: ()},
+    ):
+        installation_profile.capture_active_capabilities()
     return profile
 
 

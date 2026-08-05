@@ -168,11 +168,15 @@ def engage(home: str, lock: bool = False) -> str:
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
     import paths
-    resolved = paths.engage_test_home(home)
+    requested = Path(home).expanduser().resolve()
+    paths.engage_test_home(str(requested))
+    resolved = paths.ba_home()
+    if resolved != requested:
+        raise RuntimeError("test home did not resolve to the requested root")
     install_deletion_guard()
     if lock:
         lock_prod_home()
-    return resolved
+    return str(resolved)
 
 
 # Crash-safety: never leave the prod home immutable if the process dies
@@ -239,15 +243,6 @@ class TestHome:
         home = tempfile.mkdtemp(prefix=prefix)
         handle = cls(engage(home, lock=lock))
         atexit.register(handle.release)
-        return handle
-
-    @classmethod
-    def acquire_installed(
-        cls, prefix: str = "ba-test-", lock: bool = False, **kwargs
-    ) -> "TestHome":
-        """`acquire()` for tests that drive the ASGI app. See `isolate_installed`."""
-        handle = cls.acquire(prefix, lock=lock)
-        _activate_installation(handle.path, **kwargs)
         return handle
 
     @classmethod

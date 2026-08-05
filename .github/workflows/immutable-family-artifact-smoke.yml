@@ -52,7 +52,10 @@ jobs:
           python -m pip install
           -r requirements.txt
           -r requirements-claude.txt
-          pyinstaller pywebview
+          -r ../desktop/requirements.txt
+          pyinstaller pytest
+      - name: Verify desktop update delta
+        run: python -m pytest desktop/test_update_delta.py
       - name: Build PyInstaller onedir
         working-directory: desktop
         run: python -m PyInstaller --noconfirm BetterAgent.spec

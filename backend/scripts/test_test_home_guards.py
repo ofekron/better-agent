@@ -53,6 +53,31 @@ def main() -> int:
     ok &= _check(paths.is_test_mode(), "test mode sentinel is set")
     ok &= _check(prod != Path("/tmp"), "prod home resolved from pwd (not a literal)")
 
+    active_home = (
+        os.environ.get("BETTER_AGENT_HOME"),
+        os.environ.get("BETTER_CLAUDE_HOME"),
+    )
+    immediate = _test_home.TestHome.acquire("bc-test-home-private-")
+    try:
+        try:
+            paths.require_private_directory(Path(immediate.path))
+            private_immediately = True
+        except PermissionError:
+            private_immediately = False
+        ok &= _check(
+            private_immediately,
+            "TestHome.acquire returns a production-hardened root immediately",
+        )
+    finally:
+        immediate.release()
+        for key, value in zip(
+            ("BETTER_AGENT_HOME", "BETTER_CLAUDE_HOME"), active_home, strict=True
+        ):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     # ba_home() returns the tempdir, never the prod home.
     home = paths.ba_home()
     ok &= _check(prod not in home.resolve().parents and home != prod,

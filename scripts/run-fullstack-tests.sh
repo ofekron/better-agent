@@ -37,20 +37,6 @@ export DOCKER_BUILDKIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 DOCKERFILE="$REPO_ROOT/docker/Dockerfile.fullstack-test"
-# Same --platform linux/amd64 forcing as run-backend-tests.sh, for the same
-# reason (see lib/docker-platform.sh): pyxdelta (backend/requirements.txt)
-# has no linux/arm64 wheel and its sdist can't build from source either
-# (missing xdelta3.c — reproduced while validating this script, on an
-# Apple Silicon host, at container-run time when dependency_plan.py
-# resolved the venv). Applying it consistently to BOTH build and run here
-# matters more than in Dockerfile.test: Playwright's browser binaries are
-# downloaded for the image's BUILD-time arch, and only launch successfully
-# if the container later RUNS under that same arch — a build/run platform
-# mismatch fails browserType.launch with "Executable doesn't exist" (also
-# reproduced while validating this script, from an earlier, inconsistent
-# version of this wrapper).
-# shellcheck source=lib/docker-platform.sh
-source "$HERE/lib/docker-platform.sh"
 # shellcheck source=lib/docker-test-lifecycle.sh
 source "$HERE/lib/docker-test-lifecycle.sh"
 
@@ -92,7 +78,6 @@ if [ ! -f "$DOCKERFILE" ]; then
   exit 1
 fi
 
-docker_platform_detect
 docker_test_lifecycle_init fullstack
 docker_test_reap_orphans
 docker_test_cleanup
@@ -104,16 +89,16 @@ if [ -n "$REF" ]; then
   echo "run-fullstack-tests: building $IMAGE_TAG pinned to commit $COMMIT_SHA (ref: $REF)"
   DOCKER_TEST_IMAGE_KIND=ref
   git -C "$REPO_ROOT" archive "$COMMIT_SHA" \
-    | docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f docker/Dockerfile.fullstack-test --target full -t "$IMAGE_TAG" -
+    | docker_test_build -f docker/Dockerfile.fullstack-test --target full -t "$IMAGE_TAG" -
 else
   IMAGE_TAG="better-agent-fullstack-tests:deps"
   BIND_MOUNT_REPO=1
   echo "run-fullstack-tests: building $IMAGE_TAG (deps only; live working tree is bind-mounted at run time)"
   DOCKER_TEST_IMAGE_KIND=deps
-  docker_test_build "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}" -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
+  docker_test_build -f "$DOCKERFILE" --target deps -t "$IMAGE_TAG" "$REPO_ROOT"
 fi
 
-RUN_ARGS=(--rm "${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"}")
+RUN_ARGS=(--rm)
 
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   RUN_ARGS+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")

@@ -12,7 +12,7 @@ echo "==> Building the frontend (npm run build)"
 ( cd "$REPO/frontend" && npm run build )
 
 echo "==> Installing build dependencies into the backend venv"
-"$VENV/bin/pip" install -q pyinstaller pywebview tufup "pyxdelta>=0.2.3,<0.3"
+"$VENV/bin/pip" install -q pyinstaller -r "$DIR/requirements.txt"
 
 VERSION="$(cd "$REPO" && "$VENV/bin/python" -c 'import sys; sys.path.insert(0, "desktop"); from _version import __version__; print(__version__)')"
 BA_HOME="$(cd "$REPO" && "$VENV/bin/python" -c 'import sys; sys.path.insert(0, "backend"); from paths import ba_home; print(ba_home())')"

@@ -32,6 +32,7 @@ from primary_launcher_lease import PrimaryLauncherLease  # noqa: E402
 @pytest.fixture(autouse=True)
 def _clean_lock_state():
     """No module-global lock state leaks between tests."""
+    _test_home.engage(_TMP_HOME)
     release_backend_instance_lock()
     yield
     release_backend_instance_lock()

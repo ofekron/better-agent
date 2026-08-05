@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from contextlib import nullcontext
@@ -15,7 +16,9 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-os.environ["BETTER_AGENT_TEST_MODE"] = "1"
+from _test_home import TestHome as _TestHome
+
+_TEST_HOME = _TestHome.acquire("ba-install-transaction-session-")
 
 import dependency_plan
 import installation_profile
@@ -158,7 +161,8 @@ def test_successful_setup_orders_verification_environment_and_activation() -> No
         events.append("prepare")
         return Path("/prepared")
 
-    def activate(_environment: Path, _profile: dict, **_kwargs):
+    def activate(_environment: Path, _profile: dict, _uv: str, **kwargs):
+        assert kwargs["seed_ui_only_harness"] is False
         events.append("activate")
 
     with (
@@ -179,6 +183,27 @@ def test_successful_setup_orders_verification_environment_and_activation() -> No
             )
         )
     assert events == ["verify", "verify", "prepare", "activate"]
+
+
+def test_installer_bootstrap_imports_without_runtime_site_packages() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-S", str(ROOT / "scripts" / "install.py"), "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_base_runtime_excludes_desktop_updater_dependencies() -> None:
+    backend_requirements = (BACKEND / "requirements.txt").read_text(encoding="utf-8")
+    desktop_requirements = (ROOT / "desktop" / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    for package in ("tufup", "pyxdelta"):
+        assert package not in backend_requirements
+        assert package in desktop_requirements
 
 
 def test_interrupted_commit_restores_pointer_and_leaves_setup_incomplete() -> None:
@@ -250,5 +275,7 @@ def test_interrupted_commit_restores_pointer_and_leaves_setup_incomplete() -> No
 if __name__ == "__main__":
     test_failure_and_cancellation_before_commit_preserve_previous_profile()
     test_successful_setup_orders_verification_environment_and_activation()
+    test_installer_bootstrap_imports_without_runtime_site_packages()
+    test_base_runtime_excludes_desktop_updater_dependencies()
     test_interrupted_commit_restores_pointer_and_leaves_setup_incomplete()
     print("installation setup transaction tests passed")

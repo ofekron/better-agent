@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import paths  # noqa: E402
 from primary_launcher_lease import (  # noqa: E402
     PrimaryLauncherBusyError,
     PrimaryLauncherLease,
@@ -26,9 +27,17 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 def _private_home(root: Path, name: str = "home") -> Path:
     home = root / name
     home.mkdir(mode=0o700)
-    if os.name != "nt":
-        home.chmod(0o700)
+    paths.make_private_directory(home)
     return home
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
+def test_unhardened_windows_temp_home_is_rejected(tmp_path: Path) -> None:
+    home = tmp_path / "unhardened"
+    home.mkdir()
+
+    with pytest.raises(PrimaryLauncherLeaseError):
+        PrimaryLauncherLease.acquire(home, checkout=tmp_path)
 
 
 def _child_env() -> dict[str, str]:
