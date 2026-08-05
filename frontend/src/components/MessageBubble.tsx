@@ -818,7 +818,7 @@ function renderLastEventPreview(
   );
 }
 
-function OutputEvent({
+export function OutputEvent({
   text,
   nested = false,
   collapsible = true,
