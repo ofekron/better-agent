@@ -4237,6 +4237,7 @@ function AppMain({
     const hasNotes = (currentSession.notes?.length ?? 0) > 0;
     if (!hasComments && !hasNotes) return;
     if (isMobile) {
+      setMobileSidebarOpen(false);
       setMobileRightOpen(true);
       return;
     }
