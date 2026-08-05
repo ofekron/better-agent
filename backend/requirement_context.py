@@ -497,16 +497,20 @@ def analyze_processor_output(text: str) -> tuple[str, dict[str, Any]]:
     schema_valid = len(rows) == len(requirements) and all(
         isinstance(row.get("text"), str)
         and bool(row["text"].strip())
-        and row.get("kind") in {"explicit", "confirmed", "refined", "rejected", "bug_report"}
-        and row.get("origin") in {
+        and isinstance(row.get("kind"), str)
+        and row["kind"] in {"explicit", "confirmed", "refined", "rejected", "bug_report"}
+        and isinstance(row.get("origin"), str)
+        and row["origin"] in {
             "user_prompt",
             "user_confirmed_assistant_proposal",
             "user_refined_assistant_proposal",
             "user_rejection",
             "user_bug_report",
         }
-        and row.get("polarity") in {"positive", "negative", ""}
-        and row.get("strength") in {"high", "medium"}
+        and isinstance(row.get("polarity"), str)
+        and row["polarity"] in {"positive", "negative", ""}
+        and isinstance(row.get("strength"), str)
+        and row["strength"] in {"high", "medium"}
         and isinstance(row.get("source"), str)
         and isinstance(row.get("cwd"), str)
         and isinstance(row.get("evidence"), dict)
