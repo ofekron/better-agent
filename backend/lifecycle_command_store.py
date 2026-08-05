@@ -23,7 +23,7 @@ from paths import ba_home
 from process_identity import ProcessIdentity, process_identity_is_proven_dead
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _STATUSES = {
     "planned",
     "effects_applied",
@@ -34,6 +34,21 @@ _INIT_LOCK = threading.Lock()
 _INITIALIZED_PATHS: set[Path] = set()
 _OPEN_CONNECTIONS = 0
 _OPEN_CONNECTIONS_LOCK = threading.Lock()
+_EXECUTION_SELECTOR_ROLES_DDL = """
+CREATE TABLE {if_not_exists}execution_selector_roles (
+    session_id TEXT NOT NULL,
+    execution_turn_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
+    PRIMARY KEY (session_id, execution_turn_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+        ON DELETE CASCADE
+) STRICT
+"""
+_EXECUTION_SELECTOR_ROLE_COLUMNS = {
+    "session_id": ("TEXT", 1, None, 1),
+    "execution_turn_id": ("TEXT", 1, None, 2),
+    "role": ("TEXT", 1, None, 0),
+}
 
 
 class TransitionConflict(RuntimeError):
@@ -196,14 +211,6 @@ def _migrate(connection: sqlite3.Connection) -> None:
                     REFERENCES transitions(session_id, request_id)
                     ON DELETE CASCADE
             ) STRICT;
-            CREATE TABLE execution_selector_roles (
-                session_id TEXT NOT NULL,
-                execution_turn_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
-                PRIMARY KEY (session_id, execution_turn_id),
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-                    ON DELETE CASCADE
-            ) STRICT;
             CREATE TABLE execution_selector_attempts (
                 session_id TEXT NOT NULL,
                 execution_turn_id TEXT NOT NULL,
@@ -220,7 +227,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
             for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
-            connection.execute("PRAGMA user_version = 8")
+            _create_execution_selector_roles(connection)
+            connection.execute("PRAGMA user_version = 9")
         elif version == 1:
             _migrate_v1_to_v2(connection)
             version = 2
@@ -242,6 +250,10 @@ def _migrate(connection: sqlite3.Connection) -> None:
         if version == 7:
             _migrate_v7_to_v8(connection)
             version = 8
+        if version == 8:
+            _migrate_v8_to_v9(connection)
+            version = 9
+        _validate_execution_selector_roles_schema(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -439,18 +451,7 @@ def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
         ) STRICT
         """
     )
-    connection.execute(
-        """
-        CREATE TABLE execution_selector_roles (
-            session_id TEXT NOT NULL,
-            execution_turn_id TEXT NOT NULL,
-            role TEXT NOT NULL CHECK (role IN ('primary', 'supervisor')),
-            PRIMARY KEY (session_id, execution_turn_id),
-            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-                ON DELETE CASCADE
-        ) STRICT
-        """
-    )
+    _create_execution_selector_roles(connection)
     connection.execute("PRAGMA user_version = 7")
 
 
@@ -472,6 +473,71 @@ def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("PRAGMA user_version = 8")
+
+
+def _migrate_v8_to_v9(connection: sqlite3.Connection) -> None:
+    _create_execution_selector_roles(connection, if_not_exists=True)
+    connection.execute("PRAGMA user_version = 9")
+
+
+def _create_execution_selector_roles(
+    connection: sqlite3.Connection,
+    *,
+    if_not_exists: bool = False,
+) -> None:
+    connection.execute(
+        _EXECUTION_SELECTOR_ROLES_DDL.format(
+            if_not_exists="IF NOT EXISTS " if if_not_exists else "",
+        )
+    )
+
+
+def _validate_execution_selector_roles_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    columns = {
+        row[1]: (row[2].upper(), row[3], row[4], row[5])
+        for row in connection.execute(
+            "PRAGMA table_info(execution_selector_roles)"
+        ).fetchall()
+    }
+    foreign_keys = {
+        (row[2], row[3], row[4], row[5].upper(), row[6].upper())
+        for row in connection.execute(
+            "PRAGMA foreign_key_list(execution_selector_roles)"
+        ).fetchall()
+    }
+    table = connection.execute(
+        """
+        SELECT strict, sql
+        FROM pragma_table_list
+        JOIN sqlite_master USING (name)
+        WHERE pragma_table_list.schema = 'main'
+          AND pragma_table_list.name = 'execution_selector_roles'
+          AND sqlite_master.type = 'table'
+        """
+    ).fetchone()
+    expected_sql = " ".join(
+        _EXECUTION_SELECTOR_ROLES_DDL.format(if_not_exists="").lower().split()
+    )
+    normalized_sql = "" if table is None else " ".join(table[1].lower().split())
+    normalized_sql = normalized_sql.replace(
+        "create table if not exists ",
+        "create table ",
+        1,
+    )
+    valid = (
+        columns == _EXECUTION_SELECTOR_ROLE_COLUMNS
+        and foreign_keys
+        == {("sessions", "session_id", "session_id", "NO ACTION", "CASCADE")}
+        and table is not None
+        and table[0] == 1
+        and normalized_sql == expected_sql
+    )
+    if not valid:
+        raise RuntimeError(
+            "invalid lifecycle command schema: execution_selector_roles"
+        )
 
 
 def _logical_identity(value: Any) -> dict[str, str]:

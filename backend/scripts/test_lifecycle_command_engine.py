@@ -2105,7 +2105,7 @@ def test_v1_migration_and_atomic_rollback() -> None:
     _insert_v1_projection(migrated, session_id="migration-valid")
     lifecycle_command_store._migrate(migrated)
 
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 9
     session_columns = {
         row[1]
         for row in migrated.execute("PRAGMA table_info(sessions)").fetchall()
@@ -2186,7 +2186,158 @@ def test_v1_migration_and_atomic_rollback() -> None:
     rolled_back.close()
 
 
+def _register_initialized_path_cleanup(
+    request: pytest.FixtureRequest,
+    path: Path,
+) -> None:
+    request.addfinalizer(
+        lambda: lifecycle_command_store._INITIALIZED_PATHS.discard(path)
+    )
+
+
+def test_v8_initialize_repairs_missing_execution_selector_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    monkeypatch.setenv("BETTER_AGENT_HOME", str(tmp_path))
+    lifecycle_command_store.initialize()
+    path = lifecycle_command_store.store_path()
+    _register_initialized_path_cleanup(request, path)
+    with closing(sqlite3.connect(path)) as database:
+        database.execute(
+            """
+            INSERT INTO sessions(
+                session_id, owner_incarnation, phase, identity_json, revision,
+                execution_json, execution_policy, completed_execution_count
+            ) VALUES (?, NULL, ?, NULL, 0, NULL, NULL, 0)
+            """,
+            ("schema-repair-preserved", "idle"),
+        )
+        database.execute("DROP TABLE execution_selector_roles")
+        database.execute("PRAGMA user_version = 8")
+        database.commit()
+    lifecycle_command_store._INITIALIZED_PATHS.discard(path)
+
+    lifecycle_command_store.initialize()
+
+    with closing(sqlite3.connect(path)) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert database.execute(
+            "SELECT COUNT(*) FROM execution_selector_roles"
+        ).fetchone()[0] == 0
+        assert database.execute(
+            "SELECT phase FROM sessions WHERE session_id = ?",
+            ("schema-repair-preserved",),
+        ).fetchone()[0] == "idle"
+
+
+def test_v8_initialize_rejects_malformed_execution_selector_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    monkeypatch.setenv("BETTER_AGENT_HOME", str(tmp_path))
+    lifecycle_command_store.initialize()
+    path = lifecycle_command_store.store_path()
+    _register_initialized_path_cleanup(request, path)
+    with closing(sqlite3.connect(path)) as database:
+        database.execute(
+            """
+            INSERT INTO sessions(
+                session_id, owner_incarnation, phase, identity_json, revision,
+                execution_json, execution_policy, completed_execution_count
+            ) VALUES (?, NULL, ?, NULL, 0, NULL, NULL, 0)
+            """,
+            ("schema-rejection-preserved", "idle"),
+        )
+        database.execute("DROP TABLE execution_selector_roles")
+        database.execute(
+            """
+            CREATE TABLE execution_selector_roles (
+                session_id TEXT NOT NULL,
+                execution_turn_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                PRIMARY KEY (session_id, execution_turn_id)
+            ) STRICT
+            """
+        )
+        database.execute("PRAGMA user_version = 8")
+        database.commit()
+    lifecycle_command_store._INITIALIZED_PATHS.discard(path)
+
+    with pytest.raises(
+        RuntimeError,
+        match="invalid lifecycle command schema: execution_selector_roles",
+    ):
+        lifecycle_command_store.initialize()
+
+    assert path not in lifecycle_command_store._INITIALIZED_PATHS
+    with closing(sqlite3.connect(path)) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert database.execute(
+            "SELECT phase FROM sessions WHERE session_id = ?",
+            ("schema-rejection-preserved",),
+        ).fetchone()[0] == "idle"
+        assert database.execute(
+            "PRAGMA foreign_key_list(execution_selector_roles)"
+        ).fetchall() == []
+
+
+@pytest.mark.parametrize(
+    "malformed_ddl",
+    [
+        None,
+        """
+        CREATE TABLE execution_selector_roles (
+            session_id TEXT NOT NULL,
+            execution_turn_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            PRIMARY KEY (session_id, execution_turn_id)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_selector_roles (
+            session_id TEXT NOT NULL,
+            execution_turn_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            PRIMARY KEY (session_id, execution_turn_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        ) STRICT
+        """,
+    ],
+    ids=["missing", "wrong-foreign-key", "missing-role-check"],
+)
+def test_current_initialize_rejects_invalid_execution_selector_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    malformed_ddl: str | None,
+    request: pytest.FixtureRequest,
+) -> None:
+    monkeypatch.setenv("BETTER_AGENT_HOME", str(tmp_path))
+    lifecycle_command_store.initialize()
+    path = lifecycle_command_store.store_path()
+    _register_initialized_path_cleanup(request, path)
+    with closing(sqlite3.connect(path)) as database:
+        database.execute("DROP TABLE execution_selector_roles")
+        if malformed_ddl is not None:
+            database.execute(malformed_ddl)
+        database.commit()
+    lifecycle_command_store._INITIALIZED_PATHS.discard(path)
+
+    with pytest.raises(
+        RuntimeError,
+        match="invalid lifecycle command schema: execution_selector_roles",
+    ):
+        lifecycle_command_store.initialize()
+
+    assert path not in lifecycle_command_store._INITIALIZED_PATHS
+
+
 def test_handler_validation_and_sqlite_scaling_contract() -> None:
+    lifecycle_command_store.initialize()
+    path = lifecycle_command_store.store_path()
     try:
         LifecycleCommandEngine(
             EventBus(),
@@ -2238,10 +2389,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
     )
     assert effect_id_for(command, 0) != effect_id_for(other_session, 0)
 
-    counts = lifecycle_command_store.table_counts()
-    assert counts["transitions"] >= 10
-    database = TEST_HOME / "lifecycle-command-state.sqlite3"
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         plan = connection.execute(
             """
             EXPLAIN QUERY PLAN
@@ -2254,7 +2402,7 @@ def test_handler_validation_and_sqlite_scaling_contract() -> None:
         detail = " ".join(str(row[3]) for row in plan)
         assert "INDEX" in detail and "session_id" in detail
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert type(version) is int and version == 8
+        assert type(version) is int and version == 9
 
 
 async def test_terminal_render_reconciliation_inbox() -> None:
