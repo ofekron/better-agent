@@ -13,6 +13,66 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+// recharts' ResponsiveContainer renders with 0 size under happy-dom (no real
+// layout), so its children — and the tickFormatter/formatter callbacks bound
+// to XAxis/YAxis/Tooltip/Brush — never execute. The pure helpers (fmtPct,
+// tickFormatter, tooltipFmt) are only reachable through those callbacks, and
+// the Pie Cell maps / HBar body only render as ResponsiveContainer children.
+// This stub renders children and invokes each formatter callback with
+// representative inputs, capturing the formatted outputs for assertions.
+const { captured } = vi.hoisted(() => ({
+  captured: { ticks: [] as string[], yvals: [] as string[], tips: [] as string[] },
+}));
+
+vi.mock("recharts", () => {
+  type FC = (props: Record<string, unknown>) => unknown;
+  const TICKS = [["2026-07-01 12:00"], ["2026-07-01"], ["jul"], ["short"]];
+  const YVALS = [[0], [50], [99.9], [1234], [2_500_000]];
+  const TIPS = [[1500, "n"], [0, "z"]];
+  const run = (fn: unknown, samples: unknown[][], bucket: string[]) => {
+    if (typeof fn !== "function") return;
+    for (const args of samples) {
+      const res = (fn as (...a: unknown[]) => unknown)(...args);
+      if (typeof res === "string") bucket.push(res);
+      else if (Array.isArray(res)) bucket.push(String(res[0]));
+    }
+  };
+  const passthrough: FC = ({ children }) => children ?? null;
+  const XAxis: FC = ({ tickFormatter }) => {
+    run(tickFormatter, TICKS, captured.ticks);
+    return null;
+  };
+  const Brush: FC = ({ tickFormatter }) => {
+    run(tickFormatter, TICKS, captured.ticks);
+    return null;
+  };
+  const YAxis: FC = ({ tickFormatter }) => {
+    run(tickFormatter, YVALS, captured.yvals);
+    return null;
+  };
+  const Tooltip: FC = ({ formatter }) => {
+    run(formatter, TIPS, captured.tips);
+    return null;
+  };
+  return {
+    ResponsiveContainer: passthrough,
+    PieChart: passthrough,
+    ComposedChart: passthrough,
+    BarChart: passthrough,
+    Pie: passthrough,
+    XAxis,
+    YAxis,
+    Brush,
+    Tooltip,
+    Cell: () => null,
+    Bar: () => null,
+    Line: () => null,
+    CartesianGrid: () => null,
+    Legend: () => null,
+    ReferenceArea: () => null,
+  };
+});
+
 const emptyReport = {
   range: { start: "2000-01-01T00:00:00", end: "2026-07-06T23:59:59", granularity: "month" },
   providers: [],
@@ -93,9 +153,73 @@ function makeReport(overrides: Partial<AnalyticsReport> = {}): AnalyticsReport {
   };
 }
 
+/** A fully-populated report that mounts every chart surface: sessions/turns/
+ * llm time-series, the user-ratio line chart (valueFormatter=fmtPct), the
+ * by-orchestration and token-breakdown pies, and the by-provider HBars. */
+function richReport(granularity: string): AnalyticsReport {
+  return makeReport({
+    range: { start: "2026-01-01T00:00:00", end: "2026-07-06T23:59:59", granularity },
+    sessions: {
+      total: 10,
+      user_total: 6,
+      messages_total: 30,
+      series: [
+        { t: "2026-07-01", count: 4, user_count: 2 },
+        { t: "2026-07-02", count: 6, user_count: 3 },
+        { t: "2026-07-03", count: 2, user_count: 1 },
+        { t: "2026-07-04", count: 8, user_count: 5 },
+      ],
+      by_provider: [
+        { kind: "claude", name: "Claude", count: 5 },
+        { kind: "codex", name: "Codex", count: 3 },
+      ],
+      by_model: [{ kind: "claude", model: "haiku", count: 4 }],
+      by_orchestration: [
+        { mode: "manager", count: 4 },
+        { mode: "native", count: 2 },
+      ],
+    },
+    turns: {
+      total: 20,
+      series: [
+        { t: "2026-07-01", count: 5, user_count: 2, duration_ms: 100 },
+        { t: "2026-07-02", count: 8, user_count: 4, duration_ms: 200 },
+        { t: "2026-07-03", count: 7, user_count: 3, duration_ms: 150 },
+      ],
+      by_provider: [{ kind: "claude", name: "Claude", turns: 12 }],
+      by_model: [{ kind: "claude", model: "haiku", turns: 8 }],
+      duration_avg_ms: 500,
+      duration_p50_ms: 400,
+    },
+    llm_calls: {
+      total: 9,
+      token_usage: {
+        input_tokens: 1500,
+        output_tokens: 800,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 200,
+        total_tokens: 2500,
+      },
+      series: [
+        { t: "2026-07-01", count: 3, input_tokens: 500, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 800 },
+        { t: "2026-07-02", count: 4, input_tokens: 600, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 100, total_tokens: 1000 },
+        { t: "2026-07-03", count: 2, input_tokens: 400, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 100, total_tokens: 700 },
+      ],
+      by_provider: [{ provider_id: "p1", kind: "claude", name: "Claude", calls: 5, total_tokens: 1500 }],
+      by_model: [{ kind: "claude", model: "haiku", calls: 4, total_tokens: 1200 }],
+      by_source: [{ source: "ui", calls: 6, total_tokens: 1800 }],
+      by_reason: [{ reason: "review", calls: 3, total_tokens: 900 }],
+      recent: [],
+    },
+  });
+}
+
 describe("AnalyticsPage", () => {
   afterEach(() => {
     vi.resetAllMocks();
+    captured.ticks.length = 0;
+    captured.yvals.length = 0;
+    captured.tips.length = 0;
   });
 
   function statValue(label: string): string | null {
@@ -396,4 +520,34 @@ describe("AnalyticsPage", () => {
       ),
     );
   });
+
+  it.each([
+    ["month", "2026-07-01 12:00"],
+    ["hour", "12:00"],
+    ["day", "07-01 12:00"],
+  ] as const)(
+    "mounts every chart and tick-formats axis labels for %s granularity",
+    async (granularity, expectedTick) => {
+      vi.mocked(fetchAnalytics).mockResolvedValue(richReport(granularity));
+
+      render(<AnalyticsPage onBack={() => undefined} />);
+      await screen.findByText("analytics.byOrchestration");
+
+      // Every chart surface mounted: pies (Cell maps), HBars, time-series.
+      expect(screen.getByText("analytics.byOrchestration")).toBeTruthy();
+      expect(screen.getByText("analytics.sessionsByProvider")).toBeTruthy();
+      expect(screen.getByText("analytics.llmTokensBreakdown")).toBeTruthy();
+      expect(screen.getByText("analytics.userPromptRatioOverTime")).toBeTruthy();
+
+      // tickFormatter branch for this granularity (axisFmt via XAxis + Brush).
+      expect(captured.ticks).toContain(expectedTick);
+
+      // fmtPct covers all three of its branches through the user-ratio YAxis:
+      // <=0 -> "0%", middle band -> "N.N%", >=99.95 -> "100%".
+      expect(captured.yvals).toEqual(expect.arrayContaining(["0%", "50.0%", "100%"]));
+
+      // tooltipFmt runs the value through fmt: fmt(1500) -> "1.5k".
+      expect(captured.tips).toContain("1.5k");
+    },
+  );
 });
