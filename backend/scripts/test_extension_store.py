@@ -35,7 +35,29 @@ import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
 import password_manager  # noqa: E402
 import personal_harness_extension  # noqa: E402
+import installation_profile  # noqa: E402
 from json_store import read_json, write_json  # noqa: E402
+import pytest  # noqa: E402
+
+
+# This module exercises the integrations/extension subsystem, which gates
+# active records on installation_profile.integrations_enabled(). Bare test
+# homes carry no installation.json, so the gate is False by default; the
+# standalone __main__ runner forces it True globally. Mirror that baseline so
+# pytest sees the same precondition every test here was designed against.
+@pytest.fixture(autouse=True)
+def _enable_integrations_baseline(monkeypatch):
+    monkeypatch.setattr(installation_profile, "integrations_enabled", lambda: True)
+    # Bare test homes have no bootstrapped installation, so dependency_plan
+    # cannot resolve a "verified" active runtime python. The __main__ runner
+    # stubs active_runtime_python to a fixed path; mirror that so the runtime
+    # extension paths that call _extension_python(has_dependency_environment=False)
+    # resolve instead of raising.
+    monkeypatch.setattr(
+        extension_store.dependency_plan,
+        "active_runtime_python",
+        lambda _backend_dir: Path("/authoritative/backend/python"),
+    )
 
 
 def _record_testape_internal_runtime_mcp() -> Path:
@@ -742,16 +764,10 @@ def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> 
 
 def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
     import config_store
-    import installation_profile
 
     _record_testape_internal_runtime_mcp()
     extension_store.grant_native_mcp_server("ofek.testape-internal", "testape", "global")
     original_has_permission = extension_store.has_permission
-    original_integrations_enabled = installation_profile.integrations_enabled
-    # Bare test homes have no installation.json -- _record_active() gates on
-    # integrations_enabled(), which is False without one. resolve_native_mcp_servers_for_context
-    # depends on _record_active, so patch it for the whole test body.
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store.has_permission = lambda _record, permission: permission == "internal_loopback"  # type: ignore[assignment]
     try:
         ambient_config = extension_store.resolve_native_mcp_server_config(
@@ -773,20 +789,17 @@ def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
             raise AssertionError(resolved_disabled)
     finally:
         extension_store.has_permission = original_has_permission  # type: ignore[assignment]
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         config_store.set_disabled_builtin_extensions([])
 
 
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
-    import installation_profile
 
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     stale = extension_store._load()
     root = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-"))
     package = root / "headroom-like"
     extension_id = "ofek.concurrent-headroom"
-    original_integrations_enabled = installation_profile.integrations_enabled
     original_extension_python = extension_store._extension_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
@@ -817,7 +830,6 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     (package / "mcp" / "server.py").write_text("print('headroom')\n", encoding="utf-8")
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store._extension_python = lambda *_args, **_kwargs: sys.executable  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
@@ -864,7 +876,6 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
         except extension_store.ExtensionError:
             pass
         extension_store._extension_python = original_extension_python  # type: ignore[assignment]
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1020,13 +1031,11 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
 
 
 def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy() -> None:
-    import installation_profile
     import runtime_skills
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-skill-ext-"))
     package = root / "synthetic-skill"
     extension_id = "ofek.synthetic-skill"
-    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "synthetic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -1051,7 +1060,6 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         encoding="utf-8",
     )
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
             package_dir=package,
@@ -1100,18 +1108,15 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
-    import installation_profile
     import runtime_skills
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-atomic-skill-ext-"))
     package = root / "atomic-skill"
     extension_id = "ofek.atomic-skill"
-    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "atomic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -1135,7 +1140,6 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
         "---\nname: atomic-skill\ndescription: From package\n---\n",
         encoding="utf-8",
     )
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
             package_dir=package,
@@ -1200,7 +1204,6 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -2865,12 +2868,9 @@ def test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts() -> None:
 
 
 def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
-    import installation_profile
     import lag_incident_queue
 
     work = _private_monorepo_test_work()
-    original_integrations_enabled = installation_profile.integrations_enabled
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     receipt_path = work / "receipts.jsonl"
     old_receipt_path = os.environ.get("LEGACY_LAG_RECEIPT_PATH")
     os.environ["LEGACY_LAG_RECEIPT_PATH"] = str(receipt_path)
@@ -3007,7 +3007,6 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
         if len(receipts) != 1 or lag_incident_queue.depth() != 0:
             raise AssertionError((receipts, lag_incident_queue.depth()))
     finally:
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         extension_backend_loader.evict_persistent_backend("ofek-dev.assistant")
         for extension_id in ("ofek-dev.assistant", "ofek-dev.agent-board"):
             try:
@@ -4090,13 +4089,11 @@ def test_manifest_validates_skill_template_variables() -> None:
 
 
 def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> None:
-    import installation_profile
     import local_machine_identity
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-machine-skill-ext-"))
     package = root / "machine-skill"
     extension_id = "ofek.machine-skill-refresh"
-    original_integrations_enabled = installation_profile.integrations_enabled
     original_machine_id = local_machine_identity._local_machine_id
     (package / "skills" / "operate-machine").mkdir(parents=True)
     manifest = {
@@ -4126,7 +4123,6 @@ def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> N
         encoding="utf-8",
     )
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     local_machine_identity._local_machine_id = None
     try:
         extension_store._install_from_package_dir(
@@ -4168,17 +4164,13 @@ def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> N
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_extension_enable_disable_installs_runtime_skills() -> None:
-    import installation_profile
-
     work = _private_monorepo_test_work()
     home = Path(tempfile.mkdtemp(prefix="bc-test-extension-skills-home-"))
     original_home = os.environ.get("HOME")
-    original_integrations_enabled = installation_profile.integrations_enabled
     repo = work / "skill-repo"
     package = repo / "extensions" / "skillful"
     package.mkdir(parents=True)
@@ -4215,7 +4207,6 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
     _git(repo, "commit", "-m", "skill extension")
     try:
         os.environ["HOME"] = str(home)
-        installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
         target = home / ".agents" / "skills" / "get-requirements"
         record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
@@ -4243,7 +4234,6 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
             except extension_store.ExtensionError:
                 pass
         finally:
-            installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
             if original_home is None:
                 os.environ.pop("HOME", None)
             else:
