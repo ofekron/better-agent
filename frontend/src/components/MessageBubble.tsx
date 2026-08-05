@@ -1525,7 +1525,7 @@ function wrapWithTs(
   );
 }
 
-function AutoActionGroup({
+export function AutoActionGroup({
   lead,
   actions,
   childrenMap,
