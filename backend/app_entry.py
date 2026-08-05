@@ -37,6 +37,16 @@ def _env_port(name: str, default: int) -> int:
     return port
 
 
+def _primary_bind_host() -> str:
+    configured = get_env("BETTER_AGENT_BACKEND_BIND_HOST")
+    if configured is None:
+        import user_prefs
+        return user_prefs.get_network_bind_address()
+    if configured not in {"127.0.0.1", "0.0.0.0"}:
+        raise RuntimeError("BETTER_AGENT_BACKEND_BIND_HOST is invalid")
+    return configured
+
+
 def _dispatch(
     argv: list[str],
 ) -> tuple[str, Optional[str], Optional[Path], Optional[str]]:
@@ -126,8 +136,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
         runner_main = importlib.import_module(module).main
         return runner_main(run_dir)
     if mode == "server":
-        from backend_launch_authority import assert_primary_backend_launch_authorized
-        assert_primary_backend_launch_authorized()
+        from backend_instance_lock import adopt_primary_backend_instance_lock
+        adopt_primary_backend_instance_lock()
     import uvicorn
     from server_config import graceful_shutdown_timeout_seconds
 
@@ -144,10 +154,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
         )
         return 0
     import main
-    import user_prefs
     uvicorn.run(
         main.app,
-        host=user_prefs.get_network_bind_address(),
+        host=_primary_bind_host(),
         port=_env_port("BETTER_CLAUDE_BACKEND_PORT", 8000),
         proxy_headers=False,
         timeout_graceful_shutdown=timeout_graceful_shutdown,

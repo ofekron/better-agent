@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -26,6 +26,15 @@ pytest.importorskip("credential_session")
 import credential_session  # noqa: E402
 import provider_credentials  # noqa: E402
 from desktop.browser_backend_supervisor import BrowserBackendSupervisor  # noqa: E402
+from primary_launcher_lease import (  # noqa: E402
+    PrimaryLauncherBusyError,
+    PrimaryLauncherLease,
+)
+
+
+@pytest.fixture
+def temp_root(tmp_path: Path) -> Path:
+    return tmp_path
 
 
 def _free_port() -> int:
@@ -77,6 +86,27 @@ def _fake_checkout(
         "raise SystemExit(0 if sys.argv[1:] == ['assert-active-plan'] else 2)\n",
         encoding="utf-8",
     )
+    (backend / "backend_bootstrap.py").write_text(
+        "import os, site\n"
+        "from backend_instance_lock import adopt_primary_backend_instance_lock\n"
+        "adopt_primary_backend_instance_lock()\n"
+        "site.main()\n"
+        "import uvicorn, main\n"
+        "uvicorn.run(main.app, host='127.0.0.1', "
+        "port=int(os.environ['BETTER_AGENT_BACKEND_PORT']), proxy_headers=False, "
+        "timeout_graceful_shutdown=float(os.environ.get("
+        "'BETTER_AGENT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS', '30')))\n",
+        encoding="utf-8",
+    )
+    for module in (
+        "backend_instance_lock.py",
+        "backend_launch_authority.py",
+        "env_compat.py",
+        "paths.py",
+        "portable_lock.py",
+        "primary_launcher_lease.py",
+    ):
+        shutil.copy2(ROOT / "backend" / module, backend / module)
     operation = "read" if read else "status"
     descendant_setup = ""
     if descendant_pid_path is not None:
@@ -101,6 +131,7 @@ def _fake_checkout(
         "'child_available': child.stdout.strip(), 'response': response, "
         "'launch_token': os.environ.get('BETTER_AGENT_BACKEND_LAUNCH_TOKEN'), "
         "'launch_generation': os.environ.get('BETTER_AGENT_BACKEND_LAUNCH_GENERATION'), "
+        "'reservation': os.environ.get('BETTER_AGENT_BACKEND_RESERVATION_ID'), "
         "'active_checkout': os.environ.get('BETTER_AGENT_ACTIVE_CHECKOUT')}) + '\\n')\n"
         "import asyncio\n"
         "async def app(scope, receive, send):\n"
@@ -124,6 +155,12 @@ def _fake_checkout(
 
 
 def _pid_running(pid: int) -> bool:
+    if sys.platform.startswith("linux"):
+        try:
+            status = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        return status.split()[2] != "Z"
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "stat="],
@@ -142,6 +179,145 @@ def _stop_generation(supervisor: BrowserBackendSupervisor) -> None:
     supervisor.handle({"op": "signal", "signal": "TERM"})
     _wait_until(
         lambda: supervisor.handle({"op": "status"}).get("terminal") is True
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="run.sh lease guard is POSIX-only")
+def test_launcher_guard_holds_lease_across_supervisor_exec(temp_root: Path) -> None:
+    state_root = temp_root / "state"
+    state_root.mkdir(mode=0o700)
+    control_root = temp_root / "control"
+    control_root.mkdir(mode=0o700)
+    ready = control_root / "ready.json"
+    gate = control_root / "activate.fifo"
+    target_ready = control_root / "target-ready"
+    os.mkfifo(gate, mode=0o600)
+    target_code = (
+        "import pathlib,sys,time; "
+        "from primary_launcher_lease import PrimaryLauncherLease; "
+        "lease=PrimaryLauncherLease.adopt_from_environment(pathlib.Path(sys.argv[1])); "
+        "assert lease is not None; pathlib.Path(sys.argv[2]).write_text(lease.lease_id); "
+        "time.sleep(60)"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{ROOT / 'backend'}:{ROOT / 'desktop'}:{ROOT}",
+    }
+    guard = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "desktop" / "launcher_lease_guard.py"),
+            "--state-root",
+            str(state_root),
+            "--checkout",
+            str(ROOT),
+            "--controller-pid",
+            str(os.getpid()),
+            "--ready-file",
+            str(ready),
+            "--gate-fifo",
+            str(gate),
+            "--",
+            sys.executable,
+            "-c",
+            target_code,
+            str(state_root),
+            str(target_ready),
+        ],
+        env=env,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_until(ready.exists)
+        with pytest.raises(PrimaryLauncherBusyError):
+            PrimaryLauncherLease.acquire(state_root)
+        gate.write_text("exec\n", encoding="utf-8")
+        _wait_until(target_ready.exists)
+        with pytest.raises(PrimaryLauncherBusyError):
+            PrimaryLauncherLease.acquire(state_root)
+    finally:
+        guard.terminate()
+        guard.wait(timeout=10)
+
+    lease = PrimaryLauncherLease.acquire(state_root)
+    lease.release()
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="launcher controller death monitoring is Linux/macOS-only",
+)
+def test_launcher_guard_releases_lease_when_controller_dies_before_activation(
+    temp_root: Path,
+) -> None:
+    state_root = temp_root / "orphan-state"
+    state_root.mkdir(mode=0o700)
+    control_root = temp_root / "orphan-control"
+    control_root.mkdir(mode=0o700)
+    ready = control_root / "ready.json"
+    gate = control_root / "activate.fifo"
+    guard_pid_path = control_root / "guard.pid"
+    os.mkfifo(gate, mode=0o600)
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{ROOT / 'backend'}:{ROOT / 'desktop'}:{ROOT}",
+    }
+    controller_code = """
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+guard = subprocess.Popen([
+    sys.executable, sys.argv[1],
+    '--state-root', sys.argv[2],
+    '--checkout', sys.argv[3],
+    '--controller-pid', str(os.getpid()),
+    '--ready-file', sys.argv[4],
+    '--gate-fifo', sys.argv[5],
+    '--', sys.executable, '-c', 'pass',
+], env=os.environ)
+pathlib.Path(sys.argv[6]).write_text(str(guard.pid))
+deadline = time.monotonic() + 10
+while not pathlib.Path(sys.argv[4]).exists():
+    if guard.poll() is not None:
+        raise SystemExit(guard.returncode)
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.02)
+"""
+    controller = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            controller_code,
+            str(ROOT / "desktop" / "launcher_lease_guard.py"),
+            str(state_root),
+            str(ROOT),
+            str(ready),
+            str(gate),
+            str(guard_pid_path),
+        ],
+        env=env,
+        check=True,
+    )
+    assert controller.returncode == 0
+    guard_pid = int(guard_pid_path.read_text(encoding="utf-8"))
+    _wait_until(lambda: not _pid_running(guard_pid))
+    lease = PrimaryLauncherLease.acquire(state_root)
+    lease.release()
+
+
+def test_run_sh_reserves_launcher_before_destructive_startup() -> None:
+    source = (ROOT / "run.sh").read_text(encoding="utf-8")
+    startup = source[source.index("\nensure_base_prereqs\n") :]
+    assert startup.index("reserve_credential_backend_supervisor") < startup.index(
+        "kill_backend_lock_holder"
+    )
+    assert startup.index("reserve_credential_backend_supervisor") < startup.index(
+        "sync_npm_project_deps"
     )
 
 
@@ -194,23 +370,14 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
         assert all(row["fd_before"] is True for row in rows)
         assert all(row["fd_after"] is False for row in rows)
         assert all(row["child_available"] == "False" for row in rows)
-        assert all(isinstance(row["launch_token"], str) and row["launch_token"] for row in rows)
-        assert [row["launch_generation"] for row in rows] == generation_ids
+        assert all(row["launch_token"] is None for row in rows)
+        assert all(row["launch_generation"] is None for row in rows)
+        assert all(row["reservation"] is None for row in rows)
         assert all(
             Path(row["active_checkout"]).resolve() == checkout.resolve()
             for row in rows
         )
-        authority = json.loads(
-            (temp_root / "state" / "backend_launch_authority.json").read_text(
-                encoding="utf-8",
-            )
-        )
-        assert authority["generation"] == generation_ids[-1]
-        assert Path(authority["checkout"]).resolve() == checkout.resolve()
-        assert Path(authority["state_root"]).resolve() == (temp_root / "state").resolve()
-        assert authority["token_sha256"] == hashlib.sha256(
-            rows[-1]["launch_token"].encode("utf-8")
-        ).hexdigest()
+        assert not (temp_root / "state" / "backend_launch_authority.json").exists()
     finally:
         supervisor.shutdown()
         provider_credentials.oskeychain.native_get = real_get
@@ -420,13 +587,7 @@ def test_controller_crash_stops_supervisor_and_backend(temp_root: Path) -> None:
         controller.wait(timeout=10)
 
         def stopped() -> bool:
-            for pid in (manager_pid, backend_pid):
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    continue
-                return False
-            return True
+            return not any(_pid_running(pid) for pid in (manager_pid, backend_pid))
 
         _wait_until(stopped, timeout=15)
     finally:

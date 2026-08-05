@@ -25,6 +25,7 @@ SOURCES=(
   "$REPO/backend/headless_keyring.py"
   "$REPO/backend/provider_credentials.py"
   "$REPO/backend/oskeychain.py"
+  "$REPO/backend/primary_launcher_lease.py"
 )
 
 needs_build=0

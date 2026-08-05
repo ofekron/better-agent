@@ -99,7 +99,12 @@ def _arm_controller_death(controller_pid: int, on_death: Any) -> None:
     raise RuntimeError("controller death monitoring is unavailable")
 
 
-def backend_launch_env(base_env: dict[str, str], checkout: Path, port: int) -> dict[str, str]:
+def backend_launch_env(
+    base_env: dict[str, str],
+    checkout: Path,
+    port: int,
+    host: str = "127.0.0.1",
+) -> dict[str, str]:
     """Env for the spawned uvicorn backend: checkout/port wiring plus the
     checkout's sdk/ on PYTHONPATH (the backend imports better_agent_sdk)."""
     from sdk_pythonpath import apply_sdk_pythonpath
@@ -109,6 +114,7 @@ def backend_launch_env(base_env: dict[str, str], checkout: Path, port: int) -> d
         "BETTER_AGENT_ACTIVE_CHECKOUT": str(checkout),
         "BETTER_AGENT_BACKEND_PORT": str(port),
         "BETTER_AGENT_BACKEND_URL": f"http://127.0.0.1:{port}",
+        "BETTER_AGENT_BACKEND_BIND_HOST": host,
         "BETTER_CLAUDE_BACKEND_PORT": str(port),
         "BETTER_CLAUDE_BACKEND_URL": f"http://127.0.0.1:{port}",
         "BA_BACKEND_PORT": str(port),
@@ -137,6 +143,21 @@ class BrowserBackendSupervisor:
         self._last_generation_id = ""
         self._lock = threading.RLock()
         self._stopping = threading.Event()
+        from paths import bc_home, make_private_directory
+        from primary_launcher_lease import PrimaryLauncherLease
+
+        configured_home = self._base_env.get("BETTER_AGENT_HOME") or self._base_env.get(
+            "BETTER_CLAUDE_HOME"
+        )
+        state_root = Path(configured_home) if configured_home else bc_home()
+        state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        make_private_directory(state_root)
+        self._launcher_lease = PrimaryLauncherLease.adopt_from_environment(
+            state_root
+        ) or PrimaryLauncherLease.acquire(
+            state_root,
+            checkout=self._launcher_root,
+        )
 
     def handle(self, request: object) -> dict[str, Any]:
         if not isinstance(request, dict):
@@ -163,8 +184,6 @@ class BrowserBackendSupervisor:
         return checkout
 
     def _start(self, request: dict[str, Any]) -> dict[str, Any]:
-        from server_config import graceful_shutdown_timeout_seconds
-
         host = request.get("host")
         port = request.get("port")
         requested_checkout = request.get("checkout")
@@ -185,8 +204,11 @@ class BrowserBackendSupervisor:
             session = self._broker.open_session()
             session.start()
             generation_id = uuid.uuid4().hex
+            from backend_instance_lock import reserve_primary_backend_instance_lock
+
+            reservation = reserve_primary_backend_instance_lock(self._launcher_lease)
             env = {
-                **backend_launch_env(self._base_env, checkout, port),
+                **backend_launch_env(self._base_env, checkout, port, host),
                 **session.backend_env(),
             }
             from backend_launch_authority import issue_primary_backend_launch
@@ -194,39 +216,38 @@ class BrowserBackendSupervisor:
             env.update(
                 issue_primary_backend_launch(
                     checkout=checkout,
+                    state_root=Path(self._launcher_lease.canonical_home),
                     generation=generation_id,
+                    launcher_lease=self._launcher_lease,
+                    backend_reservation=reservation,
                 )
             )
             command = [
                 str(python),
-                "-m",
-                "uvicorn",
-                "main:app",
-                "--host",
-                host,
-                "--port",
-                str(port),
-                "--no-proxy-headers",
-                "--timeout-graceful-shutdown",
-                str(graceful_shutdown_timeout_seconds()),
-                "--ws-per-message-deflate",
-                "false",
+                "-S",
+                str(checkout / "backend" / "backend_bootstrap.py"),
             ]
             proc: subprocess.Popen[str] | None = None
             try:
-                proc = subprocess.Popen(
-                    command,
-                    cwd=checkout / "backend",
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    **BackendProcessOwner.spawn_kwargs(),
-                    **session.backend_popen_kwargs(),
-                )
+                with reservation.child_spawn_kwargs(
+                    session.backend_popen_kwargs()
+                ) as inheritance_kwargs:
+                    proc = subprocess.Popen(
+                        command,
+                        cwd=checkout / "backend",
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        **BackendProcessOwner.spawn_kwargs(),
+                        **inheritance_kwargs,
+                    )
+                reservation.await_adoption(proc)
+                reservation.detach_after_transfer()
                 owner = BackendProcessOwner(proc)
             except Exception:
+                reservation.release()
                 if proc is not None and proc.poll() is None:
                     try:
                         if os.name == "nt":
@@ -364,6 +385,7 @@ class BrowserBackendSupervisor:
         with self._lock:
             self._retire_generation_locked()
             self._broker.clear()
+            self._launcher_lease.release()
 
     @property
     def stopping(self) -> bool:

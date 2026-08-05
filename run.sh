@@ -395,6 +395,8 @@ DAEMON_HOST_PID=""
 CREDENTIAL_BACKEND_SUPERVISOR_PID=""
 CREDENTIAL_BACKEND_CONTROL_DIR=""
 CREDENTIAL_BACKEND_CONTROL=""
+CREDENTIAL_BACKEND_GUARD_READY=""
+CREDENTIAL_BACKEND_GUARD_GATE=""
 
 tracked_child_is_running() {
   local pid="$1"
@@ -497,25 +499,51 @@ $parsed
 EOF
 }
 
-start_credential_backend_supervisor() {
+reserve_credential_backend_supervisor() {
   local attempts=0
   CREDENTIAL_BACKEND_CONTROL_DIR="$(mktemp -d "/tmp/ba-bs.XXXXXX")"
   chmod 700 "$CREDENTIAL_BACKEND_CONTROL_DIR"
   CREDENTIAL_BACKEND_CONTROL="$CREDENTIAL_BACKEND_CONTROL_DIR/control.sock"
+  CREDENTIAL_BACKEND_GUARD_READY="$CREDENTIAL_BACKEND_CONTROL_DIR/lease-ready.json"
+  CREDENTIAL_BACKEND_GUARD_GATE="$CREDENTIAL_BACKEND_CONTROL_DIR/activate.fifo"
+  mkfifo -m 600 "$CREDENTIAL_BACKEND_GUARD_GATE"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    SUPERVISOR_COMMAND=("$CREDENTIAL_AUTHORITY")
+  else
+    SUPERVISOR_COMMAND=("$BOOTSTRAP_PYTHON" -m desktop.browser_backend_supervisor)
+  fi
+  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop:$DIR/sdk" "$BOOTSTRAP_PYTHON" \
+    "$DIR/desktop/launcher_lease_guard.py" \
+    --state-root "$BA_HOME" \
+    --checkout "$DIR" \
+    --controller-pid "$$" \
+    --ready-file "$CREDENTIAL_BACKEND_GUARD_READY" \
+    --gate-fifo "$CREDENTIAL_BACKEND_GUARD_GATE" \
+    -- "${SUPERVISOR_COMMAND[@]}" \
+    --control "$CREDENTIAL_BACKEND_CONTROL" \
+    --launcher-root "$DIR" \
+    --controller-pid "$$" &
+  CREDENTIAL_BACKEND_SUPERVISOR_PID=$!
+  while [ ! -f "$CREDENTIAL_BACKEND_GUARD_READY" ]; do
+    if ! tracked_child_is_running "$CREDENTIAL_BACKEND_SUPERVISOR_PID"; then
+      echo "Primary launcher lease guard failed to start." >&2
+      return 1
+    fi
+    if [ "$attempts" -ge 40 ]; then
+      echo "Primary launcher lease guard startup timed out." >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+}
+
+start_credential_backend_supervisor() {
+  local attempts=0
   if [ "$(uname -s)" = "Darwin" ]; then
     "$DIR/desktop/build_credential_authority.sh" >/dev/null
-    "$CREDENTIAL_AUTHORITY" \
-      --control "$CREDENTIAL_BACKEND_CONTROL" \
-      --launcher-root "$DIR" \
-      --controller-pid "$$" &
-  else
-    PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop:$DIR/sdk" "$PY" \
-      -m desktop.browser_backend_supervisor \
-      --control "$CREDENTIAL_BACKEND_CONTROL" \
-      --launcher-root "$DIR" \
-      --controller-pid "$$" &
   fi
-  CREDENTIAL_BACKEND_SUPERVISOR_PID=$!
+  printf 'exec\n' > "$CREDENTIAL_BACKEND_GUARD_GATE"
   while [ ! -S "$CREDENTIAL_BACKEND_CONTROL" ]; do
     if ! tracked_child_is_running "$CREDENTIAL_BACKEND_SUPERVISOR_PID"; then
       echo "Credential backend supervisor failed to start." >&2
@@ -536,10 +564,14 @@ stop_credential_backend_supervisor() {
   fi
   stop_child_process "credential backend supervisor" "$CREDENTIAL_BACKEND_SUPERVISOR_PID"
   [ -n "$CREDENTIAL_BACKEND_CONTROL" ] && rm -f "$CREDENTIAL_BACKEND_CONTROL"
+  [ -n "$CREDENTIAL_BACKEND_GUARD_READY" ] && rm -f "$CREDENTIAL_BACKEND_GUARD_READY"
+  [ -n "$CREDENTIAL_BACKEND_GUARD_GATE" ] && rm -f "$CREDENTIAL_BACKEND_GUARD_GATE"
   [ -n "$CREDENTIAL_BACKEND_CONTROL_DIR" ] && rmdir "$CREDENTIAL_BACKEND_CONTROL_DIR" 2>/dev/null || true
   CREDENTIAL_BACKEND_SUPERVISOR_PID=""
   CREDENTIAL_BACKEND_CONTROL=""
   CREDENTIAL_BACKEND_CONTROL_DIR=""
+  CREDENTIAL_BACKEND_GUARD_READY=""
+  CREDENTIAL_BACKEND_GUARD_GATE=""
 }
 
 shutdown_children() {
@@ -567,6 +599,7 @@ shutdown_children() {
 
 trap 'shutdown_children INT' INT
 trap 'shutdown_children TERM' TERM
+trap 'stop_credential_backend_supervisor' EXIT
 
 if [ "${BETTER_AGENT_RUN_SH_TEST_SIGNAL_CLEANUP:-0}" = "1" ]; then
   ((sleep 30 & wait) & wait) &
@@ -683,6 +716,15 @@ stop_known_better_agent_port_users() {
 
 ensure_base_prereqs
 
+BOOTSTRAP_PYTHON="$(command -v python3 || command -v python || true)"
+if [ -z "$BOOTSTRAP_PYTHON" ]; then
+  echo "Python is required to resolve installation dependencies." >&2
+  exit 1
+fi
+if [ "${BETTER_AGENT_RUN_SH_TEST_NORMAL_EXIT_CLEANUP:-0}" != "1" ]; then
+  reserve_credential_backend_supervisor
+fi
+
 echo "Checking startup ports..."
 kill_backend_lock_holder
 BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
@@ -747,12 +789,6 @@ sync_npm_project_deps() {
   fi
   printf '%s' "$current" > "$stamp"
 }
-
-BOOTSTRAP_PYTHON="$(command -v python3 || command -v python || true)"
-if [ -z "$BOOTSTRAP_PYTHON" ]; then
-  echo "Python is required to resolve installation dependencies." >&2
-  exit 1
-fi
 
 # A state home with no installation profile has nothing to serve. Adopt an
 # already-installed provider CLI so a fresh home boots usable; never install a

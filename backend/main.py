@@ -1,9 +1,5 @@
 """Better Agent — FastAPI backend with WebSocket streaming and REST APIs."""
 
-from backend_launch_authority import assert_primary_backend_launch_authorized
-
-assert_primary_backend_launch_authorized()
-
 import asyncio
 from contextlib import asynccontextmanager
 import faulthandler

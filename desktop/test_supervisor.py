@@ -56,24 +56,24 @@ def _source_checkout(name: str, *, interpreter: Path | None = None) -> tuple[Pat
         python.symlink_to(interpreter)
     (root / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
     (root / "backend" / "app_entry.py").write_text("", encoding="utf-8")
+    (root / "backend" / "backend_bootstrap.py").write_text("", encoding="utf-8")
     (root / "backend" / "main.py").write_text("", encoding="utf-8")
     return root, python
 
 
 def test_backend_argv_dev() -> bool:
-    """Dev (not frozen): argv runs `backend/app_entry.py --serve` on the
-    current interpreter."""
+    """Dev primary starts through the isolated admission bootstrap."""
     checkout, python = _source_checkout("argv-dev", interpreter=Path(sys.executable))
     argv = backend_argv(checkout=checkout)
-    expected_tail = ["app_entry.py", "--serve"]
+    expected_tail = ["-S", "backend_bootstrap.py"]
     if Path(argv[0]).resolve() != python.resolve():
         print(f"  argv[0] expected {python}, got {argv[0]}")
         return False
-    if Path(argv[1]).name != "app_entry.py" or argv[2] != "--serve":
+    if argv[1] != "-S" or Path(argv[2]).name != "backend_bootstrap.py":
         print(f"  expected ...{expected_tail}, got {argv}")
         return False
-    if not Path(argv[1]).exists():
-        print(f"  app_entry.py path does not exist: {argv[1]}")
+    if not Path(argv[2]).exists():
+        print(f"  backend_bootstrap.py path does not exist: {argv[2]}")
         return False
     return True
 
@@ -260,6 +260,8 @@ def test_start_uses_prompt_handler_alternate_port() -> bool:
         if sup._proc is not None and sup._proc.poll() is None:
             sup._proc.kill()
             sup._proc.wait()
+        if sup._launcher_lease is not None:
+            sup._launcher_lease.release()
 
 
 def test_restart_flag_detected_and_consumed() -> bool:
@@ -635,6 +637,9 @@ def test_backend_argv_uses_target_checkout_interpreter() -> bool:
 
 
 def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
+    import contextlib
+    import backend_launch_authority
+    import backend_instance_lock
     import provider_credentials
     import supervisor as supervisor_module
 
@@ -643,6 +648,8 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
     real_get = provider_credentials.oskeychain.native_get
     real_cli_get = provider_credentials.oskeychain.get
     real_popen = supervisor_module.subprocess.Popen
+    real_reserve = backend_instance_lock.reserve_primary_backend_instance_lock
+    real_issue = backend_launch_authority.issue_primary_backend_launch
     sup = BackendSupervisor()
     checkout, _ = _source_checkout("packaged-restart")
     (checkout / "frontend" / "dist").mkdir(parents=True)
@@ -664,9 +671,39 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
         spawns.append(kwargs)
         return FakeProcess()
 
+    class FakeReservation:
+        def __init__(self, lease):
+            self.canonical_home = lease.canonical_home
+            self.reservation_id = "a" * 32
+            self.lock_identity = "test-lock"
+
+        def assert_owner(self, lease):
+            lease.assert_owner(Path(self.canonical_home))
+
+        def child_env(self):
+            return {
+                "BETTER_AGENT_PRIMARY_LAUNCHER_LEASE_ID": sup._launcher_lease.lease_id,
+                "BETTER_AGENT_BACKEND_RESERVATION_ID": self.reservation_id,
+            }
+
+        @contextlib.contextmanager
+        def child_spawn_kwargs(self, existing):
+            yield existing
+
+        def await_adoption(self, _process):
+            return None
+
+        def detach_after_transfer(self):
+            return None
+
+        def release(self):
+            return None
+
     provider_credentials.oskeychain.native_get = denied_get
     provider_credentials.oskeychain.get = denied_get
     supervisor_module.subprocess.Popen = fake_popen
+    backend_instance_lock.reserve_primary_backend_instance_lock = FakeReservation
+    backend_launch_authority.issue_primary_backend_launch = lambda **_kwargs: {}
     try:
         request = {
             "op": "read",
@@ -693,9 +730,13 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
     finally:
         sup._close_credential_session()
         sup._credential_broker.clear()
+        if sup._launcher_lease is not None:
+            sup._launcher_lease.release()
         provider_credentials.oskeychain.native_get = real_get
         provider_credentials.oskeychain.get = real_cli_get
         supervisor_module.subprocess.Popen = real_popen
+        backend_instance_lock.reserve_primary_backend_instance_lock = real_reserve
+        backend_launch_authority.issue_primary_backend_launch = real_issue
 
 
 def test_backend_contract_resolves_before_credential_session_opens() -> bool:
@@ -766,7 +807,7 @@ def test_source_switch_rejects_missing_frontend() -> bool:
 
 
 TESTS = [
-    ("backend_argv dev form runs app_entry.py --serve", test_backend_argv_dev),
+    ("backend_argv dev form runs isolated bootstrap", test_backend_argv_dev),
     ("backend_argv dev node form runs app_entry.py --serve-node", test_backend_argv_dev_node),
     ("port_is_free reports a held port as not free", test_port_is_free),
     ("kill_port_listeners terminates a child listener",

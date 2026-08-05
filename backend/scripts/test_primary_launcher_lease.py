@@ -172,6 +172,26 @@ lease.release()
         acquired.release()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor handoff")
+def test_environment_handoff_is_consumed_and_keeps_descriptor_private() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        home = _private_home(root)
+        lease = PrimaryLauncherLease.acquire(home, checkout=root)
+        transfer = lease.prepare_handoff_environment()
+        transferred = os.dup(lease.fileno)
+        os.set_inheritable(transferred, True)
+        transfer["BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_FD"] = str(transferred)
+        os.environ.update(transfer)
+        lease.detach_after_transfer()
+
+        adopted = PrimaryLauncherLease.adopt_from_environment(home)
+        assert adopted is not None
+        assert not os.get_inheritable(adopted.fileno)
+        assert all(key not in os.environ for key in transfer)
+        adopted.release()
+
+
 def test_lock_file_is_private_regular_and_metadata_is_diagnostic() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

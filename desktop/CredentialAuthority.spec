@@ -14,6 +14,7 @@ hiddenimports = [
     "daemonhost.pointer",
     "headless_keyring",
     "keyring.backends.macOS.api",
+    "primary_launcher_lease",
 ]
 
 analysis = Analysis(  # noqa: F821

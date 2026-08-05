@@ -28,8 +28,13 @@ jobs:
           -r requirements-claude.txt
           -r requirements-mobile.txt
           pytest==8.4.2
-      - name: Prove primary launcher lease on the host OS
-        run: python -m pytest backend/scripts/test_primary_launcher_lease.py -q
+      - name: Prove launcher lease and backend admission on the host OS
+        run: >-
+          python -m pytest
+          backend/scripts/test_primary_launcher_lease.py
+          backend/scripts/test_backend_instance_lock.py
+          backend/scripts/test_backend_launch_authority.py
+          -q
       - name: Run installation mode matrix
         run: python backend/scripts/test_installation_modes.py
       - name: Run transactional setup matrix

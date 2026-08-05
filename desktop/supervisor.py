@@ -248,19 +248,19 @@ def backend_argv(role: BackendRole = "primary", checkout: Path | None = None) ->
 
     Frozen: re-exec the single app binary with `--serve` — `app_main.py`
     dispatches that to the server role.
-    Dev: run `backend/app_entry.py --serve` on the current interpreter.
+    Dev primary: run the isolated admission bootstrap. Node: run app_entry.
     """
     if getattr(sys, "frozen", False):
         return [sys.executable, "--serve-node" if role == "node" else "--serve"]
     checkout = (checkout or _REPO_ROOT).resolve()
-    app_entry = checkout / "backend" / "app_entry.py"
-    if not app_entry.is_file():
+    entrypoint = checkout / "backend" / (
+        "app_entry.py" if role == "node" else "backend_bootstrap.py"
+    )
+    if not entrypoint.is_file():
         raise RuntimeError(f"Line checkout has no backend entrypoint: {checkout}")
-    return [
-        str(_checkout_python(checkout)),
-        str(app_entry),
-        "--serve-node" if role == "node" else "--serve",
-    ]
+    if role == "primary":
+        return [str(_checkout_python(checkout)), "-S", str(entrypoint)]
+    return [str(_checkout_python(checkout)), str(entrypoint), "--serve-node"]
 
 
 def backend_child_env(base_env: dict[str, str], checkout: Path) -> dict[str, str]:
@@ -422,6 +422,23 @@ class BackendSupervisor:
             "BETTER_AGENT_CREDENTIAL_SESSION_FD",
         ):
             self._env.pop(key, None)
+        self._launcher_lease = None
+
+    def _ensure_launcher_lease(self) -> None:
+        if self.role != "primary" or self._launcher_lease is not None:
+            return
+        from primary_launcher_lease import PrimaryLauncherLease
+
+        self._launcher_lease = PrimaryLauncherLease.acquire(
+            _ba_home(),
+            checkout=_REPO_ROOT,
+        )
+
+    def _release_launcher_lease_if_idle(self) -> None:
+        if self._proc is not None or self._launcher_lease is None:
+            return
+        self._launcher_lease.release()
+        self._launcher_lease = None
 
     def start(
         self, on_port_conflict: Optional[PortConflictHandler] = None,
@@ -430,17 +447,22 @@ class BackendSupervisor:
         caller. Desktop startup must not kill arbitrary listeners without
         explicit user permission."""
         self._stopping.clear()
+        self._ensure_launcher_lease()
         if self.role == "primary" and not kill_backend_lock_holder():
+            self._release_launcher_lease_if_idle()
             raise RuntimeError("Another Better Agent backend is already using this state directory.")
         while not port_is_free(self.port):
             listeners = port_listener_details(self.port)
             if on_port_conflict is None:
+                self._release_launcher_lease_if_idle()
                 raise RuntimeError(self._port_conflict_message(listeners))
             resolution = on_port_conflict(self.port, listeners)
             if resolution is None:
+                self._release_launcher_lease_if_idle()
                 raise RuntimeError(self._port_conflict_message(listeners))
             if resolution["action"] == "kill":
                 if not kill_port_listeners(self.port):
+                    self._release_launcher_lease_if_idle()
                     raise RuntimeError(self._port_conflict_message(listeners))
                 continue
             self.port = resolution["port"]
@@ -457,6 +479,7 @@ class BackendSupervisor:
         except Exception:
             self._close_credential_session()
             self._credential_broker.clear()
+            self._release_launcher_lease_if_idle()
             raise
         if self.role == "primary" and installation_profile.integrations_enabled():
             self._start_daemon_host()
@@ -723,12 +746,22 @@ class BackendSupervisor:
         session = self._credential_broker.open_session()
         session.start()
         from backend_launch_authority import issue_primary_backend_launch
+        from backend_instance_lock import reserve_primary_backend_instance_lock
 
         launch_generation = uuid.uuid4().hex if self.role == "primary" else ""
+        self._ensure_launcher_lease()
+        reservation = (
+            reserve_primary_backend_instance_lock(self._launcher_lease)
+            if self._launcher_lease is not None
+            else None
+        )
         launch_env = (
             issue_primary_backend_launch(
                 checkout=checkout,
+                state_root=Path(self._launcher_lease.canonical_home),
                 generation=launch_generation,
+                launcher_lease=self._launcher_lease,
+                backend_reservation=reservation,
             )
             if launch_generation
             else {}
@@ -739,13 +772,28 @@ class BackendSupervisor:
             **session.backend_env(),
         }
         try:
-            proc = subprocess.Popen(
-                command, env=child_env, cwd=checkout / "backend",
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,  # line-buffered text stream
-                **session.backend_popen_kwargs(),
-            )
+            if reservation is None:
+                proc = subprocess.Popen(
+                    command, env=child_env, cwd=checkout / "backend",
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                    **session.backend_popen_kwargs(),
+                )
+            else:
+                with reservation.child_spawn_kwargs(
+                    session.backend_popen_kwargs()
+                ) as inheritance_kwargs:
+                    proc = subprocess.Popen(
+                        command, env=child_env, cwd=checkout / "backend",
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1,
+                        **inheritance_kwargs,
+                    )
+                reservation.await_adoption(proc)
+                reservation.detach_after_transfer()
         except Exception:
+            if reservation is not None:
+                reservation.release()
             session.stop()
             raise
         self._pending_launch_generation = launch_generation
@@ -860,6 +908,8 @@ class BackendSupervisor:
         self._stopping.set()
         with self._lifecycle_lock:
             self._shutdown_locked(kill_runners=kill_runners)
+        if self._launcher_lease is not None:
+            self._launcher_lease.release()
 
     def _shutdown_locked(self, *, kill_runners: bool) -> None:
         self._stop_daemon_host()

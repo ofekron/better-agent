@@ -1,281 +1,115 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
-import socket
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
-import backend_launch_authority
+from backend_instance_lock import reserve_primary_backend_instance_lock
+from backend_launch_authority import issue_primary_backend_launch, launch_env_keys
+from primary_launcher_lease import PrimaryLauncherLease
 
 
 CHILD = """
-import socket
-import sys
-import time
-import os
+import os, sys
 sys.path.insert(0, sys.argv[1])
-from backend_instance_lock import acquire_backend_instance_lock
-acquire_backend_instance_lock()
-sock = socket.socket()
-sock.bind(("127.0.0.1", int(sys.argv[2])))
-sock.listen()
-print("READY:" + str("BETTER_AGENT_BACKEND_LAUNCH_TOKEN" in os.environ), flush=True)
-time.sleep(30)
+from backend_instance_lock import adopt_primary_backend_instance_lock
+adopt_primary_backend_instance_lock()
+assert "BETTER_AGENT_BACKEND_LAUNCH_TOKEN" not in os.environ
+assert "BETTER_AGENT_BACKEND_LAUNCH_GENERATION" not in os.environ
+assert "BETTER_AGENT_BACKEND_RESERVATION_ID" not in os.environ
+print("READY", flush=True)
+sys.stdin.read(1)
 """
-
-
-def _port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _base_env(home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["BETTER_AGENT_HOME"] = str(home)
     env["BETTER_CLAUDE_HOME"] = str(home)
-    for key in backend_launch_authority.launch_env_keys():
-        env.pop(key, None)
     env.pop("BETTER_AGENT_TEST_MODE", None)
+    for key in launch_env_keys():
+        env.pop(key, None)
     return env
 
 
-def _authorized_env(home: Path) -> dict[str, str]:
+def _assert_unreserved_entrypoint_rejected(home: Path) -> None:
     env = _base_env(home)
-    env.update(
-        backend_launch_authority.issue_primary_backend_launch(
-            checkout=ROOT,
-            state_root=home,
-        )
-    )
-    return env
-
-
-def _spawn(home: Path, env: dict[str, str]) -> tuple[subprocess.Popen[str], int]:
-    port = _port()
-    proc = subprocess.Popen(
-        [sys.executable, "-c", CHILD, str(BACKEND), str(port)],
+    env["BETTER_CLAUDE_BACKEND_PORT"] = "18791"
+    proc = subprocess.run(
+        [sys.executable, str(BACKEND / "app_entry.py"), "--serve"],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
+        timeout=10,
+        check=False,
     )
-    return proc, port
-
-
-def _wait_ready(proc: subprocess.Popen[str]) -> None:
-    assert proc.stdout is not None
-    assert proc.stdout.readline().strip() == "READY:False"
-
-
-def _stop(proc: subprocess.Popen[str]) -> None:
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-
-
-def _assert_rejected(
-    proc: subprocess.Popen[str],
-    home: Path,
-    *,
-    lock_may_exist: bool = False,
-) -> None:
-    stdout, stderr = proc.communicate(timeout=10)
-    assert proc.returncode
-    assert "backend launch authority" in stderr.lower(), (stdout, stderr)
-    if not lock_may_exist:
-        assert not (home / "backend.lock").exists()
-
-
-def _assert_port_closed(port: int) -> None:
-    with socket.socket() as sock:
-        sock.settimeout(0.1)
-        assert sock.connect_ex(("127.0.0.1", port)) != 0
+    assert proc.returncode != 0
+    assert "reservation environment is missing" in proc.stderr
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-launch-authority-") as raw:
-        base = Path(raw)
+        home = Path(raw)
+        _assert_unreserved_entrypoint_rejected(home)
 
-        unauthorized_home = base / "unauthorized"
-        unauthorized_home.mkdir()
-        proc, _ = _spawn(unauthorized_home, _base_env(unauthorized_home))
-        _assert_rejected(proc, unauthorized_home)
-
-        entry_home = base / "entry"
-        entry_home.mkdir()
-        entry_env = _base_env(entry_home)
-        entry_env["BETTER_CLAUDE_BACKEND_PORT"] = str(_port())
-        proc = subprocess.Popen(
-            [sys.executable, str(BACKEND / "app_entry.py"), "--serve"],
-            env=entry_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        _assert_rejected(proc, entry_home)
-
-        uvicorn_home = base / "uvicorn"
-        uvicorn_home.mkdir()
-        uvicorn_port = _port()
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "main:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(uvicorn_port),
-            ],
-            cwd=BACKEND,
-            env=_base_env(uvicorn_home),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        while proc.poll() is None:
-            _assert_port_closed(uvicorn_port)
-            time.sleep(0.01)
-        _assert_rejected(proc, uvicorn_home)
-        _assert_port_closed(uvicorn_port)
-
-        corrupt_home = base / "corrupt"
-        corrupt_home.mkdir()
-        corrupt_env = _authorized_env(corrupt_home)
-        (corrupt_home / "backend_launch_authority.json").write_text(
-            '{"version":1,"unexpected":true}',
-            encoding="utf-8",
-        )
-        proc, _ = _spawn(corrupt_home, corrupt_env)
-        _assert_rejected(proc, corrupt_home)
-
-        symlink_home = base / "symlink"
-        symlink_home.mkdir()
-        symlink_env = _authorized_env(symlink_home)
-        authority_path = symlink_home / "backend_launch_authority.json"
-        authority_copy = symlink_home / "authority-copy.json"
-        authority_path.replace(authority_copy)
-        authority_path.symlink_to(authority_copy)
-        proc, _ = _spawn(symlink_home, symlink_env)
-        _assert_rejected(proc, symlink_home)
-
-        dangling_home = base / "dangling-pointer"
-        dangling_home.mkdir()
-        dangling_env = _authorized_env(dangling_home)
-        (dangling_home / "active_checkout.json").symlink_to(
-            dangling_home / "missing-pointer-target.json"
-        )
-        proc, _ = _spawn(dangling_home, dangling_env)
-        _assert_rejected(proc, dangling_home)
-
-        test_home = base / "test"
-        test_home.mkdir()
-        test_env = _base_env(test_home)
-        test_env["BETTER_AGENT_TEST_MODE"] = "1"
-        proc, _ = _spawn(test_home, test_env)
+        lease = PrimaryLauncherLease.acquire(home, checkout=ROOT)
+        reservation = reserve_primary_backend_instance_lock(lease)
+        env = {
+            **_base_env(home),
+            **issue_primary_backend_launch(
+                checkout=ROOT,
+                state_root=home,
+                launcher_lease=lease,
+                backend_reservation=reservation,
+            ),
+        }
+        child = None
         try:
-            _wait_ready(proc)
-        finally:
-            _stop(proc)
-
-        official_home = base / "official"
-        official_home.mkdir()
-        proc, _ = _spawn(official_home, _authorized_env(official_home))
-        try:
-            _wait_ready(proc)
-        finally:
-            _stop(proc)
-
-        mismatch_home = base / "mismatch"
-        mismatch_home.mkdir()
-        mismatch_env = _authorized_env(mismatch_home)
-        mismatch_env["BETTER_AGENT_ACTIVE_CHECKOUT"] = str(base)
-        proc, _ = _spawn(mismatch_home, mismatch_env)
-        _assert_rejected(proc, mismatch_home)
-
-        for status, pointer_active, accepted in (
-            ("active", ROOT, True),
-            ("switching", ROOT, True),
-            ("reverted", ROOT, True),
-            ("failed", base, True),
-            ("active", base, False),
-            ("unknown", ROOT, False),
-        ):
-            pointer_home = base / f"pointer-{status}-{accepted}"
-            pointer_home.mkdir()
-            (pointer_home / "active_checkout.json").write_text(
-                json.dumps({"status": status, "active": str(pointer_active)}),
-                encoding="utf-8",
-            )
-            proc, _ = _spawn(pointer_home, _authorized_env(pointer_home))
-            if accepted:
-                try:
-                    _wait_ready(proc)
-                finally:
-                    _stop(proc)
-            else:
-                _assert_rejected(proc, pointer_home)
-
-        stale_home = base / "stale"
-        stale_home.mkdir()
-        holder_env = _authorized_env(stale_home)
-        holder, _ = _spawn(stale_home, holder_env)
-        _wait_ready(holder)
-        waiting_env = _authorized_env(stale_home)
-        contender, _ = _spawn(stale_home, waiting_env)
-        try:
-            time.sleep(0.5)
-            assert contender.poll() is None
-            current_env = _authorized_env(stale_home)
-            _stop(holder)
-            _assert_rejected(contender, stale_home, lock_may_exist=True)
-            current, _ = _spawn(stale_home, current_env)
+            with reservation.child_spawn_kwargs() as popen_kwargs:
+                child = subprocess.Popen(
+                    [sys.executable, "-c", CHILD, str(BACKEND)],
+                    env=env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    **popen_kwargs,
+                )
+            reservation.await_adoption(child)
+            reservation.detach_after_transfer()
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "READY"
+            assert not (home / "backend_launch_authority.json").exists()
             try:
-                _wait_ready(current)
-            finally:
-                _stop(current)
+                PrimaryLauncherLease.acquire(home, checkout=ROOT)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("second launcher acquired the same state home")
         finally:
-            _stop(holder)
+            if child is not None and child.poll() is None:
+                assert child.stdin is not None
+                child.stdin.write("x")
+                child.stdin.flush()
+                child.wait(timeout=10)
+            reservation.release()
+            lease.release()
 
-        pointer_race_home = base / "pointer-race"
-        pointer_race_home.mkdir()
-        (pointer_race_home / "active_checkout.json").write_text(
-            json.dumps({"status": "active", "active": str(ROOT)}),
-            encoding="utf-8",
-        )
-        holder_env = _authorized_env(pointer_race_home)
-        holder, _ = _spawn(pointer_race_home, holder_env)
-        _wait_ready(holder)
-        waiting_env = _authorized_env(pointer_race_home)
-        contender, _ = _spawn(pointer_race_home, waiting_env)
-        try:
-            time.sleep(0.5)
-            assert contender.poll() is None
-            (pointer_race_home / "active_checkout.json").write_text(
-                json.dumps({"status": "active", "active": str(base)}),
-                encoding="utf-8",
-            )
-            _stop(holder)
-            _assert_rejected(contender, pointer_race_home, lock_may_exist=True)
-        finally:
-            _stop(holder)
+        next_lease = PrimaryLauncherLease.acquire(home, checkout=ROOT)
+        next_reservation = reserve_primary_backend_instance_lock(next_lease)
+        next_reservation.release()
+        next_lease.release()
 
-    print("backend launch authority integration: ok")
+
+def test_backend_launch_authority_integration() -> None:
+    main()
 
 
 if __name__ == "__main__":

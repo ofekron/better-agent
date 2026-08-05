@@ -15,6 +15,10 @@ from portable_lock import try_lock_ex, unlock
 
 
 _LOCK_NAME = "primary-launcher.lock"
+_HANDOFF_FD_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_FD"
+_HANDOFF_ID_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_ID"
+_HANDOFF_TOKEN_ENV = "BETTER_AGENT_PRIMARY_LAUNCHER_HANDOFF_TOKEN"
+_HANDOFF_ENV_KEYS = (_HANDOFF_FD_ENV, _HANDOFF_ID_ENV, _HANDOFF_TOKEN_ENV)
 _HELD_LEASES: dict[str, "PrimaryLauncherLease"] = {}
 _HELD_LEASES_LOCK = threading.Lock()
 
@@ -263,6 +267,54 @@ class PrimaryLauncherLease:
         os.lseek(fd, int(token, 16), os.SEEK_SET)
         self._handoff_token = token
         return token
+
+    def prepare_handoff_environment(self) -> dict[str, str]:
+        if os.name == "nt":
+            raise PrimaryLauncherLeaseError(
+                "primary launcher descriptor handoff is POSIX-only"
+            )
+        token = self.prepare_handoff()
+        os.set_inheritable(self.fileno, True)
+        return {
+            _HANDOFF_FD_ENV: str(self.fileno),
+            _HANDOFF_ID_ENV: self.lease_id,
+            _HANDOFF_TOKEN_ENV: token,
+        }
+
+    @classmethod
+    def adopt_from_environment(
+        cls,
+        state_root: Path,
+    ) -> "PrimaryLauncherLease | None":
+        values = [os.environ.get(key) for key in _HANDOFF_ENV_KEYS]
+        if not any(values):
+            return None
+        if not all(values):
+            for key in _HANDOFF_ENV_KEYS:
+                os.environ.pop(key, None)
+            raise PrimaryLauncherLeaseError(
+                "primary launcher handoff environment is incomplete"
+            )
+        try:
+            fd = int(values[0])
+            if fd < 0:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            for key in _HANDOFF_ENV_KEYS:
+                os.environ.pop(key, None)
+            raise PrimaryLauncherLeaseError(
+                "primary launcher handoff descriptor is invalid"
+            ) from exc
+        try:
+            return cls.adopt(
+                fd,
+                state_root,
+                lease_id=str(values[1]),
+                handoff_token=str(values[2]),
+            )
+        finally:
+            for key in _HANDOFF_ENV_KEYS:
+                os.environ.pop(key, None)
 
     def detach_after_transfer(self) -> None:
         if self._handoff_token is None:
