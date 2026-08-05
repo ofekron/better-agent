@@ -101,14 +101,14 @@ def test_node_acquire_writes_holder_and_releases() -> None:
     assert bil._LOCK_FD is not None
     assert bil._LOCK_PATH == Path(_TMP_HOME) / "node-backend.lock"
 
+    release_backend_instance_lock()
+    assert bil._LOCK_FD is None
+    assert bil._LOCK_PATH is None
+
     content = (Path(_TMP_HOME) / "node-backend.lock").read_text(encoding="utf-8")
     payload = __import__("json").loads(content)
     assert payload["pid"] == os.getpid()
     assert payload["role"] == "node"
-
-    release_backend_instance_lock()
-    assert bil._LOCK_FD is None
-    assert bil._LOCK_PATH is None
 
 
 def test_node_acquire_skips_primary_authority() -> None:

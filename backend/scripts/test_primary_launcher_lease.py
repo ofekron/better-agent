@@ -206,18 +206,18 @@ def test_lock_file_is_private_regular_and_metadata_is_diagnostic() -> None:
         root = Path(tmp)
         home = _private_home(root)
         lease = PrimaryLauncherLease.acquire(home, checkout=root)
+        lock_path = home / "primary-launcher.lock"
         try:
-            lock_path = home / "primary-launcher.lock"
             observed = lock_path.lstat()
             assert stat.S_ISREG(observed.st_mode)
             paths.require_private_file(lock_path)
             if os.name != "nt":
                 assert stat.S_IMODE(observed.st_mode) == 0o600
-            metadata = json.loads(lock_path.read_text(encoding="utf-8"))
-            assert metadata["lease_id"] == lease.lease_id
-            assert metadata["home"] == lease.canonical_home
         finally:
             lease.release()
+        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert metadata["lease_id"] == lease.lease_id
+        assert metadata["home"] == lease.canonical_home
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
