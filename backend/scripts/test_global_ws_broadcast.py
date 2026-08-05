@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import _test_home
 _test_home.isolate("bc-test-global-ws-")
 
@@ -23,11 +25,10 @@ from ws_serialization import (  # noqa: E402
     shutdown_ws_json_executor,
 )
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+pytestmark = pytest.mark.anyio
 
 
-async def test_global_broadcast_reaches_unsubscribed_ws() -> bool:
+async def test_global_broadcast_reaches_unsubscribed_ws() -> None:
     coordinator = Coordinator()
     received: list[dict] = []
 
@@ -40,12 +41,10 @@ async def test_global_broadcast_reaches_unsubscribed_ws() -> bool:
     while not received and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
 
-    ok = received == [{"type": "projects_changed", "data": {}}]
-    print(f"{PASS if ok else FAIL} global broadcast reaches unsubscribed WS")
-    return ok
+    assert received == [{"type": "projects_changed", "data": {}}]
 
 
-async def test_global_broadcast_dedupes_session_subscribed_ws() -> bool:
+async def test_global_broadcast_dedupes_session_subscribed_ws() -> None:
     coordinator = Coordinator()
     received: list[dict] = []
 
@@ -59,12 +58,11 @@ async def test_global_broadcast_dedupes_session_subscribed_ws() -> bool:
     while not received and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
 
-    ok = len(received) == 1 and received[0]["type"] == "projects_changed"
-    print(f"{PASS if ok else FAIL} global broadcast dedupes subscribed WS")
-    return ok
+    assert len(received) == 1
+    assert received[0]["type"] == "projects_changed"
 
 
-async def test_global_broadcast_shares_serialization_task() -> bool:
+async def test_global_broadcast_shares_serialization_task() -> None:
     coordinator = Coordinator()
     task_ids: list[int] = []
 
@@ -83,38 +81,25 @@ async def test_global_broadcast_shares_serialization_task() -> bool:
     while len(task_ids) < 2 and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
 
-    ok = len(task_ids) == 2 and task_ids[0] == task_ids[1] and task_ids[0] != 0
-    print(f"{PASS if ok else FAIL} global broadcast shares serialization task")
-    return ok
+    assert len(task_ids) == 2
+    assert task_ids[0] == task_ids[1]
+    assert task_ids[0] != 0
 
 
-async def test_invalid_global_event_rejects_before_task_creation() -> bool:
+async def test_invalid_global_event_rejects_before_task_creation() -> None:
     coordinator = Coordinator()
     before = set(asyncio.all_tasks())
-    try:
+    with pytest.raises(ValueError):
         coordinator.schedule_global("not_registered", {})
-    except ValueError:
-        await asyncio.sleep(0)
-        ok = set(asyncio.all_tasks()) == before
-    else:
-        ok = False
-    try:
+    await asyncio.sleep(0)
+    assert set(asyncio.all_tasks()) == before
+    with pytest.raises(ValueError):
         coordinator.schedule_global("projects_changed", {"bad": float("nan")})
-    except ValueError:
-        pass
-    else:
-        ok = False
-    try:
+    with pytest.raises(ValueError):
         coordinator.schedule_global("projects_changed", {"bad": object()})
-    except ValueError:
-        pass
-    else:
-        ok = False
-    print(f"{PASS if ok else FAIL} invalid event rejects synchronously")
-    return ok
 
 
-async def test_global_broadcast_drain_owns_delivery() -> bool:
+async def test_global_broadcast_drain_owns_delivery() -> None:
     coordinator = Coordinator()
     delivered = asyncio.Event()
 
@@ -125,55 +110,29 @@ async def test_global_broadcast_drain_owns_delivery() -> bool:
     coordinator.register_global_ws(callback)
     coordinator.schedule_global("projects_changed", {})
     await coordinator.drain_global_broadcasts()
-    ok = delivered.is_set() and not coordinator._global_broadcast_tasks
-    print(f"{PASS if ok else FAIL} global broadcast drain owns delivery")
-    return ok
+    assert delivered.is_set()
+    assert not coordinator._global_broadcast_tasks
 
 
-async def test_extension_event_validation() -> bool:
+async def test_extension_event_validation() -> None:
     coordinator = Coordinator()
     event_type, payload = extension_event("reviews.ext", "marker_changed", {"n": 1})
     coordinator.prepare_global_event(event_type, payload)
-    try:
+    with pytest.raises(ValueError):
         extension_event("../escape", "marker_changed", {})
-    except ValueError:
-        ok = True
-    else:
-        ok = False
-    try:
+    with pytest.raises(ValueError):
         extension_event("reviews.ext", "marker_changed", {"bad": float("inf")})
-    except ValueError:
-        pass
-    else:
-        ok = False
-    print(f"{PASS if ok else FAIL} extension envelope validation")
-    return ok
 
 
-async def test_extension_change_topic_validation() -> bool:
+async def test_extension_change_topic_validation() -> None:
     coordinator = Coordinator()
-    ok = True
-    try:
-        for topic in EXTENSION_CHANGE_TOPICS:
-            coordinator.prepare_global_event(topic, {})
-    except Exception as exc:
-        print(f"  allowed extension topic raised: {exc}")
-        ok = False
-    try:
+    for topic in EXTENSION_CHANGE_TOPICS:
+        coordinator.prepare_global_event(topic, {})
+    with pytest.raises(ValueError):
         coordinator.prepare_global_event("extension.config.typo", {})
-    except ValueError:
-        pass
-    except Exception as exc:
-        print(f"  expected ValueError, got {type(exc).__name__}: {exc}")
-        ok = False
-    else:
-        print("  unknown extension topic did NOT raise")
-        ok = False
-    print(f"{PASS if ok else FAIL} extension change topic validation")
-    return ok
 
 
-async def test_owned_task_exception_is_retrieved() -> bool:
+async def test_owned_task_exception_is_retrieved() -> None:
     coordinator = Coordinator()
     loop = asyncio.get_running_loop()
     unhandled: list[dict] = []
@@ -192,14 +151,13 @@ async def test_owned_task_exception_is_retrieved() -> bool:
             coordinator.schedule_global("projects_changed", {})
             await coordinator.drain_global_broadcasts()
             await asyncio.sleep(0)
-        ok = not unhandled and not coordinator._global_broadcast_tasks
+        assert not unhandled
+        assert not coordinator._global_broadcast_tasks
     finally:
         loop.set_exception_handler(previous_handler)
-    print(f"{PASS if ok else FAIL} owned task exception is retrieved")
-    return ok
 
 
-async def test_cross_thread_schedule_is_drained() -> bool:
+async def test_cross_thread_schedule_is_drained() -> None:
     coordinator = Coordinator()
     delivered = asyncio.Event()
 
@@ -216,12 +174,10 @@ async def test_cross_thread_schedule_is_drained() -> bool:
     thread.start()
     thread.join()
     await coordinator.drain_global_broadcasts()
-    ok = delivered.is_set()
-    print(f"{PASS if ok else FAIL} cross-thread schedule is drained")
-    return ok
+    assert delivered.is_set()
 
 
-async def test_drain_closes_validation_submission_race() -> bool:
+async def test_drain_closes_validation_submission_race() -> None:
     coordinator = Coordinator()
     loop = asyncio.get_running_loop()
     validation_entered = threading.Event()
@@ -255,25 +211,22 @@ async def test_drain_closes_validation_submission_race() -> bool:
             release_validation.set()
             thread.join(timeout=2)
             await asyncio.sleep(0)
-            ok = (
-                len(errors) == 1
-                and isinstance(errors[0], RuntimeError)
-                and not coordinator._global_broadcast_tasks
-                and not coordinator._global_broadcast_futures
-                and not unhandled
-                and record_count.call_args_list
-                and record_count.call_args_list[-1].args
-                == ("ws.broadcast_global.rejected_shutdown",)
+            assert len(errors) == 1
+            assert isinstance(errors[0], RuntimeError)
+            assert not coordinator._global_broadcast_tasks
+            assert not coordinator._global_broadcast_futures
+            assert not unhandled
+            assert record_count.call_args_list
+            assert record_count.call_args_list[-1].args == (
+                "ws.broadcast_global.rejected_shutdown",
             )
     finally:
         release_validation.set()
         thread.join(timeout=2)
         loop.set_exception_handler(previous_handler)
-    print(f"{PASS if ok else FAIL} drain closes validation/submission race")
-    return ok
 
 
-async def test_admission_snapshots_nested_payload() -> bool:
+async def test_admission_snapshots_nested_payload() -> None:
     coordinator = Coordinator()
     received: list[dict] = []
 
@@ -285,12 +238,10 @@ async def test_admission_snapshots_nested_payload() -> bool:
     coordinator.schedule_global("projects_changed", payload)
     payload["nested"]["items"].append(2)
     await coordinator.drain_global_broadcasts()
-    ok = received[0]["data"] == {"nested": {"items": [1]}}
-    print(f"{PASS if ok else FAIL} admission snapshots nested payload")
-    return ok
+    assert received[0]["data"] == {"nested": {"items": [1]}}
 
 
-async def test_same_process_lifespan_reopens_after_drain() -> bool:
+async def test_same_process_lifespan_reopens_after_drain() -> None:
     coordinator = Coordinator()
     received: list[dict] = []
 
@@ -308,25 +259,21 @@ async def test_same_process_lifespan_reopens_after_drain() -> bool:
         coordinator.reopen_global_broadcasts()
         coordinator.schedule_global("projects_changed", {"generation": 2})
         await coordinator.drain_global_broadcasts()
-        ok = [event["data"]["generation"] for event in received] == [1, 2]
+        assert [event["data"]["generation"] for event in received] == [1, 2]
     finally:
         reopen_ws_json_executor()
-    print(f"{PASS if ok else FAIL} same-process lifespan reopens after drain")
-    return ok
 
 
-async def test_shutdown_drains_before_serializer_shutdown() -> bool:
+async def test_shutdown_drains_before_serializer_shutdown() -> None:
     source = (Path(_BACKEND) / "app_lifecycle.py").read_text()
     shutdown = source[source.index("async def on_shutdown():"):]
     unsubscribe_pos = shutdown.index("unbind_session_ws_broadcaster()")
-    drain_pos = shutdown.index("await coordinator.drain_global_broadcasts()")
+    drain_pos = shutdown.index("drain_global_broadcasts()")
     serializer_pos = shutdown.index("shutdown_ws_json_executor()")
-    ok = unsubscribe_pos < drain_pos < serializer_pos
-    print(f"{PASS if ok else FAIL} shutdown detaches producer before broadcast drain")
-    return ok
+    assert unsubscribe_pos < drain_pos < serializer_pos
 
 
-async def test_shutdown_unsubscribes_session_broadcast_producer() -> bool:
+async def test_shutdown_unsubscribes_session_broadcast_producer() -> None:
     from event_bus import BusEvent, bus
     from event_bus_subscribers import (
         bind_session_ws_broadcaster,
@@ -350,15 +297,14 @@ async def test_shutdown_unsubscribes_session_broadcast_producer() -> bool:
         payload={"kind": "archived_set", "value": True},
         persist=False,
     ))
-    ok = not broadcaster.changes and "session_ws_broadcaster_on_change" not in {
+    assert not broadcaster.changes
+    assert "session_ws_broadcaster_on_change" not in {
         sub["name"] for sub in bus.describe()
     }
-    print(f"{PASS if ok else FAIL} shutdown detaches session broadcast producer")
-    return ok
 
 
-async def main_runner() -> int:
-    tests = [
+if __name__ == "__main__":
+    for test in [
         test_global_broadcast_reaches_unsubscribed_ws,
         test_global_broadcast_dedupes_session_subscribed_ws,
         test_global_broadcast_shares_serialization_task,
@@ -373,16 +319,5 @@ async def main_runner() -> int:
         test_same_process_lifespan_reopens_after_drain,
         test_shutdown_unsubscribes_session_broadcast_producer,
         test_shutdown_drains_before_serializer_shutdown,
-    ]
-    results = [await test() for test in tests]
-    failed = sum(1 for result in results if not result)
-    print()
-    if failed:
-        print(f"{FAIL} {failed}/{len(results)} tests failed")
-        return 1
-    print(f"{PASS} all {len(results)} tests passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main_runner()))
+    ]:
+        asyncio.run(test())
