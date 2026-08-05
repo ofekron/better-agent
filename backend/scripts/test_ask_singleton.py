@@ -109,11 +109,15 @@ def test_ask_result_rehydration_survives() -> None:
     carry the right shape."""
     sid = session_search.ASK_SINGLETON_ID
     msg_id = "asst-rehydrate-1"
+    # user_initiated=True is required: session_search._build_index filters
+    # out non-user-initiated sessions, so without it "abc" never reaches
+    # propose_sessions' results and the rehydration shape is lost.
     session_manager.create(
         id="abc",
         name="Target",
         cwd="/repo",
         orchestration_mode="native",
+        user_initiated=True,
     )
     virtual_session_store.replace_messages(
         session_search.ASK_EXTENSION_ID,
