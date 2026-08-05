@@ -513,6 +513,7 @@ def test_payload_round_trip_and_tamper_are_strict() -> None:
                 "kind": "claude",
                 "generation": "generation-1",
                 "revision": 3,
+                "execution_revision": 3,
             },
             attestation,
         )
