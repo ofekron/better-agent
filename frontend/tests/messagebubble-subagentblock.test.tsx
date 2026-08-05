@@ -176,6 +176,98 @@ describe("jumpToParentEl DOM helper", () => {
   });
 });
 
+describe("renderLastEventPreview nested-tool + outerToolResultById branches", () => {
+  // SubAgentBlock's collapsed preview (renderLastEventPreview) walks the
+  // grouped pipeline and, when the last top-level group is a tool, recurses
+  // into that tool's descendant events (includeDescendantEvents) before
+  // falling back to the tool call itself. It also merges the caller-supplied
+  // toolResultById (outerToolResultById) into the locally-flattened map so a
+  // pre-flattened child stream — which carries no tool_result blocks of its
+  // own — can still pair tool_call results from the parent's map.
+  //
+  // ToolCall is lazy (Suspense fallback null); a tool-call fallback preview
+  // therefore renders wrapWithTs chrome + the Suspense wrapper (truthy, so the
+  // ellipsis shows) but no tool content text. A descendant output preview
+  // renders the descendant's actual text.
+
+  const nestedToolChildEvents = (descendant: WSEvent) => [
+    ev({ type: "tool_call", data: { tool: "Bash", tool_use_id: "inner", args: {} }, _ts: TS }),
+    descendant,
+  ];
+
+  it("recurses into a nested tool's descendant and shows the descendant preview", () => {
+    // partitionEventsByParent nests the output under the tool_call, so the only
+    // top-level group is the tool; the tool branch recurses and the descendant
+    // output becomes the preview.
+    const c = renderBlock({
+      defaultOpen: false,
+      childEvents: nestedToolChildEvents(
+        ev({
+          type: "output",
+          data: { output: "descendant preview text", parent_tool_use_id: "inner" },
+          _ts: TS,
+        }),
+      ),
+    });
+    expect(c.querySelector(".collapse-ellipsis")).not.toBeNull();
+    expect(c.textContent).toContain("descendant preview text");
+  });
+
+  it("falls back to the tool-call preview when the descendant recurses to null", () => {
+    // The descendant is a `complete` event — filtered out by
+    // COLLAPSED_PREVIEW_NON_USER_FACING — so the recursion returns null and the
+    // tool branch falls through to wrapWithTs(ToolCall). ToolCall is suspended,
+    // so the preview chrome (ellipsis) renders but no descendant text appears.
+    const c = renderBlock({
+      defaultOpen: false,
+      childEvents: nestedToolChildEvents(
+        ev({ type: "complete", data: { parent_tool_use_id: "inner" }, _ts: TS }),
+      ),
+    });
+    expect(c.querySelector(".collapse-ellipsis")).not.toBeNull();
+    expect(c.textContent).not.toContain("complete");
+  });
+
+  it("falls back to the tool-call preview when the nested tool has no child entry", () => {
+    // A lone top-level tool_call with no descendant events: children.get() is
+    // undefined, so the `childEvents && childEvents.length > 0` guard
+    // short-circuits straight to the tool-call fallback.
+    const c = renderBlock({
+      defaultOpen: false,
+      childEvents: [
+        ev({ type: "tool_call", data: { tool: "Bash", tool_use_id: "inner", args: {} }, _ts: TS }),
+      ],
+    });
+    expect(c.querySelector(".collapse-ellipsis")).not.toBeNull();
+    expect(c.querySelector(".sub-agent-collapsed-count")?.textContent).toContain("1 event");
+  });
+
+  it("forwards the caller toolResultById into the preview pipeline (outerToolResultById merge)", () => {
+    // SubAgentBlock forwards its toolResultById prop as renderLastEventPreview's
+    // outerToolResultById. The merge loop runs (the flat child stream yields an
+    // empty local map, so the outer key is new and is set), and the descendant
+    // preview still renders. Locks the production config — every SubAgentBlock
+    // receives toolResultById from renderTreeLevel — not the merge's internal
+    // dedup branch, which is dead at this call site (the local map is always
+    // empty for pre-flattened child streams).
+    const toolResultById = new Map<string, string>([["unrelated", "result-text"]]);
+    const c = renderBlock({
+      defaultOpen: false,
+      toolResultById,
+      childEvents: [
+        ev({ type: "tool_call", data: { tool: "Bash", tool_use_id: "inner", args: {} }, _ts: TS }),
+        ev({
+          type: "output",
+          data: { output: "descendant via forwarded map", parent_tool_use_id: "inner" },
+          _ts: TS,
+        }),
+      ],
+    });
+    expect(c.querySelector(".collapse-ellipsis")).not.toBeNull();
+    expect(c.textContent).toContain("descendant via forwarded map");
+  });
+});
+
 describe("wrapWithTs jump-to-parent button invokes jumpToParentEl", () => {
   it("clicking the jump button flashes the resolved parent element", () => {
     // renderTreeEntry wires parentId from parent_tool_use_id; the button's
