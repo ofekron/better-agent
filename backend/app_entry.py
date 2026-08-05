@@ -38,8 +38,8 @@ def _env_port(name: str, default: int) -> int:
 
 
 def _primary_bind_host() -> str:
-    configured = get_env("BETTER_AGENT_BACKEND_BIND_HOST")
-    if configured is None:
+    configured = get_env("BETTER_CLAUDE_BACKEND_BIND_HOST")
+    if not configured:
         import user_prefs
         return user_prefs.get_network_bind_address()
     if configured not in {"127.0.0.1", "0.0.0.0"}:
