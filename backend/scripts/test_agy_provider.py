@@ -5,6 +5,7 @@ import stat
 import sqlite3
 import sys
 import tempfile
+import unittest.mock
 import uuid
 from pathlib import Path
 
@@ -799,33 +800,44 @@ def test_agy_run_home_overlay_carries_library_for_auth() -> None:
     # hard-wires $HOME/.gemini/antigravity-cli. The scoped run HOME must mirror
     # the real home top-level — carrying Library — or agy can't authenticate and
     # every run fails with "authentication timed out" (seen in backend logs).
+    # $HOME/Library only exists on macOS, so drive the overlay from a fake real
+    # home carrying a Library sentinel. The contract under test is "the overlay
+    # symlinks the real home's top-level, Library included" — not "the host is
+    # macOS" — so the test stays deterministic on Linux runners too.
+    fake_home = Path(tempfile.mkdtemp(prefix="agy-real-home-"))
+    real_library = fake_home / "Library"
+    real_library.mkdir()
+    config_root = fake_home / ".gemini" / "antigravity-cli"
     run_dir = Path(tempfile.mkdtemp(prefix="agy-overlay-"))
-    real_home = Path.home()
-    scoped = _materialize_agy_run_home(
-        run_dir,
-        {"mcp_servers": {"x": {"command": "echo", "args": []}}},
-        config_root=real_home / ".gemini" / "antigravity-cli",
-        settings={},
-        mcp_servers={"x": {"command": "echo", "args": []}},
-        skill_dirs={},
-    )
-    check(scoped is not None, "overlay is materialized when an mcp server is present")
-    overlay = Path(scoped["HOME"])
-    library = overlay / "Library"
-    check(library.is_symlink(), "overlay HOME mirrors real ~/Library so agy can authenticate")
-    check(
-        library.resolve() == (real_home / "Library").resolve(),
-        "overlay Library points at the real home Library",
-    )
-    # .gemini stays the dedicated overlay: per-run merged settings.json lives
-    # here as a real file, not the raw real-home antigravity-cli symlink.
-    merged_settings = overlay / ".gemini" / "antigravity-cli" / "settings.json"
-    check(merged_settings.is_file() and not merged_settings.is_symlink(), "per-run agy settings.json is a real overlay file")
-    check(
-        json.loads(merged_settings.read_text())["mcpServers"]["x"]["command"] == "echo",
-        "merged overlay settings carry the run-local mcp server",
-    )
-    shutil.rmtree(run_dir, ignore_errors=True)
+    with unittest.mock.patch.object(Path, "home", return_value=fake_home):
+        scoped = _materialize_agy_run_home(
+            run_dir,
+            {"mcp_servers": {"x": {"command": "echo", "args": []}}},
+            config_root=config_root,
+            settings={},
+            mcp_servers={"x": {"command": "echo", "args": []}},
+            skill_dirs={},
+        )
+    try:
+        check(scoped is not None, "overlay is materialized when an mcp server is present")
+        overlay = Path(scoped["HOME"])
+        library = overlay / "Library"
+        check(library.is_symlink(), "overlay HOME mirrors real ~/Library so agy can authenticate")
+        check(
+            library.resolve() == real_library.resolve(),
+            "overlay Library points at the real home Library",
+        )
+        # .gemini stays the dedicated overlay: per-run merged settings.json lives
+        # here as a real file, not the raw real-home antigravity-cli symlink.
+        merged_settings = overlay / ".gemini" / "antigravity-cli" / "settings.json"
+        check(merged_settings.is_file() and not merged_settings.is_symlink(), "per-run agy settings.json is a real overlay file")
+        check(
+            json.loads(merged_settings.read_text())["mcpServers"]["x"]["command"] == "echo",
+            "merged overlay settings carry the run-local mcp server",
+        )
+    finally:
+        shutil.rmtree(fake_home, ignore_errors=True)
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def main() -> int:
