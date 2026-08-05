@@ -360,6 +360,7 @@ class TurnManager:
         lifecycle_message_id: str,
         assistant_message_id: str,
         manager_session_id: Optional[str] = None,
+        prompt_uuid: Optional[str] = None,
     ) -> None:
         self._validate_lifecycle_identity(
             user_turn_id=user_turn_id,
@@ -380,6 +381,8 @@ class TurnManager:
             }
             if manager_session_id is not None:
                 payload["manager_session_id"] = manager_session_id
+            if prompt_uuid is not None:
+                payload["prompt_uuid"] = prompt_uuid
             await bus.publish(BusEvent(
                 type="lifecycle.turn_start",
                 root_id=root_id,
@@ -405,6 +408,7 @@ class TurnManager:
         trace_id: Optional[str] = None,
         reason: Optional[str] = None,
         provider_kind: Optional[str] = None,
+        prompt_uuid: Optional[str] = None,
     ) -> None:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
@@ -441,6 +445,8 @@ class TurnManager:
                 payload["reason"] = reason
             if provider_kind is not None:
                 payload["provider_kind"] = provider_kind
+            if prompt_uuid is not None:
+                payload["prompt_uuid"] = prompt_uuid
             event_type = (
                 "lifecycle.turn_complete" if kind == "complete"
                 else "lifecycle.turn_stopped"
@@ -512,6 +518,23 @@ class TurnManager:
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"lifecycle fact requires {name}")
+
+    @staticmethod
+    def _resolve_prompt_uuid(user_msg: dict) -> Optional[str]:
+        """The initiating user prompt's journal-row uuid, when known.
+
+        Populated onto `user_msg["agent_message_uuid"]` by
+        `OrchestrationStrategy.apply_event` (orchs/base.py) once the
+        provider's own CLI-echoed `type: "user"` row has been folded —
+        see `session_manager.set_user_agent_uuid`. `user_msg` is the
+        SAME dict object session_manager holds (returned by
+        `_init_turn_messages`/`append_user_msg`), so this always reads
+        the freshest known value at call time. Genuinely unset (None)
+        before that fold has happened — e.g. at turn_start, before the
+        provider has run — never guessed/synthesized here.
+        """
+        value = user_msg.get("agent_message_uuid")
+        return value if isinstance(value, str) and value else None
 
     # ======================================================================
     # The `user_message_*` lifecycle (requested / queued / sent /
@@ -2271,6 +2294,7 @@ class TurnManager:
                 lifecycle_message_id=owning_lifecycle_message_id,
                 assistant_message_id=new_msg["id"],
                 manager_session_id=session.get(session_id_field),
+                prompt_uuid=self._resolve_prompt_uuid(user_msg),
             )
             turn_lifecycle_started = True
 
@@ -2489,6 +2513,7 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
                 )
             else:
                 await finish_execution("failed")
@@ -2504,6 +2529,7 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
                 )
 
         except _Cancelled:
@@ -2560,6 +2586,7 @@ class TurnManager:
                 provider_kind=(
                     primary_result.get("provider_kind") or frozen_provider_kind
                 ),
+                prompt_uuid=self._resolve_prompt_uuid(user_msg),
             )
 
         except asyncio.CancelledError:
@@ -2702,6 +2729,7 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
                 )
 
         finally:

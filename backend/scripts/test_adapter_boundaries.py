@@ -41,6 +41,18 @@ ADAPTERS_ALLOWLIST = (
     "backend.user_msg_lifecycle",
 )
 
+# backend/adapters/store_access.py is the ONE place adapters may reach
+# persistent stores (see its module docstring) — a per-file extension of
+# the general adapters allowlist above, which every other adapter file
+# still must not exceed.
+STORE_ACCESS_PY = ADAPTERS_DIR / "store_access.py"
+STORE_ACCESS_ALLOWLIST = (
+    "backend.session_store",
+    "backend.config_store",
+    "backend.project_store",
+    "backend.runs_dir",
+)
+
 _STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 _SKIP_DIR_NAMES = {"__pycache__", "node_modules"}
 
@@ -152,7 +164,10 @@ def _surface_contract_violations() -> list[str]:
 def _adapters_violations() -> list[str]:
     violations = []
     for path in _iter_py_files(ADAPTERS_DIR):
-        violations += _collect_violations(path, ADAPTERS_ALLOWLIST)
+        allowed = ADAPTERS_ALLOWLIST
+        if path == STORE_ACCESS_PY:
+            allowed = ADAPTERS_ALLOWLIST + STORE_ACCESS_ALLOWLIST
+        violations += _collect_violations(path, allowed)
     return violations
 
 

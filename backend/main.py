@@ -781,12 +781,11 @@ def _wire_surface_adapter() -> None:
     sys.modules["backend.i18n"] = _i18n
     sys.modules["backend.user_msg_lifecycle"] = _user_msg_lifecycle
 
-    from backend.adapters.chat_adapter import ChatSurfaceAdapter
+    from backend.adapters import build_adapter
     import adapter_api
 
-    chat_surface_adapter = ChatSurfaceAdapter()
-    chat_surface_adapter.bind()
-    adapter_api.configure(chat=chat_surface_adapter)
+    surface_adapter = build_adapter()
+    adapter_api.configure(surface_adapter)
     app.include_router(adapter_api.router)
 
 

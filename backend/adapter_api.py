@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 import auth
 import browser_trust
 from backend.adapters.serialize import to_wire
+from backend.surface_contract.adapter import BetterAgentAdapter
 from backend.surface_contract.chat_surface import ChatSurface
 from backend.surface_contract.identity import (
     CONTRACT_VERSION,
@@ -50,6 +51,9 @@ from backend.surface_contract.intents import (
     TransportAck,
 )
 from backend.surface_contract.nodes import Attachment
+from backend.surface_contract.provider_config_surface import ProviderConfigSurface
+from backend.surface_contract.runs_surface import RunsSurface
+from backend.surface_contract.session_surface import SessionSurface
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +65,34 @@ router = APIRouter()
 _REST_PREFIX = "/api/v2/surface"
 
 chat: ChatSurface | None = None
+sessions: SessionSurface | None = None
+providers: ProviderConfigSurface | None = None
+runs: RunsSurface | None = None
 
 
-def configure(*, chat: ChatSurface) -> None:
+def configure(
+    adapter: BetterAgentAdapter | None = None,
+    *,
+    chat: ChatSurface | None = None,
+    sessions: SessionSurface | None = None,
+    providers: ProviderConfigSurface | None = None,
+    runs: RunsSurface | None = None,
+) -> None:
+    """Wire the module-level surface singletons the routes below dispatch
+    to. `configure(composed_adapter)` sets all four at once (the
+    composition-root call in `backend/main.py`); the keyword form
+    (`configure(chat=...)`) sets individual surfaces directly and stays
+    valid standalone — pre-existing callers that only ever wired `chat`
+    keep working unchanged."""
+    if adapter is not None:
+        chat = chat if chat is not None else adapter.chat
+        sessions = sessions if sessions is not None else adapter.sessions
+        providers = providers if providers is not None else adapter.providers
+        runs = runs if runs is not None else adapter.runs
     globals()["chat"] = chat
+    globals()["sessions"] = sessions
+    globals()["providers"] = providers
+    globals()["runs"] = runs
 
 
 # ---- id validation (fail closed: no traversal, no separators, bounded) ----
@@ -111,13 +139,20 @@ def _decode_cursor(token: str) -> PageCursor:
         raise HTTPException(status_code=400, detail="malformed cursor")
 
 
+_CURSOR_FIELDS = ("older_cursor", "next_cursor")
+
+
 def _serialize_with_cursor(value: object) -> object:
-    """`to_wire` plus: any `older_cursor: PageCursor | None` field becomes
-    the opaque string `?cursor=` expects, instead of a nested object."""
+    """`to_wire` plus: any `PageCursor | None` field named in
+    `_CURSOR_FIELDS` becomes the opaque string `?cursor=` expects,
+    instead of a nested object."""
     body = to_wire(value)
-    if isinstance(body, dict) and "older_cursor" in body:
-        cursor = getattr(value, "older_cursor", None)
-        body["older_cursor"] = _encode_cursor(cursor) if cursor is not None else None
+    if isinstance(body, dict):
+        for field in _CURSOR_FIELDS:
+            if field not in body:
+                continue
+            cursor = getattr(value, field, None)
+            body[field] = _encode_cursor(cursor) if cursor is not None else None
     return body
 
 
@@ -138,10 +173,42 @@ def _result_body(result: object) -> dict:
     raise AssertionError(f"unhandled ProjectionResult variant: {result!r}")
 
 
+# ---- plain (non-ProjectionResult) surface reads -> same envelope shape ----
+# ProviderConfigSurface methods return bare values (ADR 0007 has no
+# rebuilding/stale-cursor state to project) — wrap them the same way
+# `_result_body`'s Ok branch does, so every /api/v2/surface/* response
+# shares one envelope shape.
+
+def _envelope(value: object) -> dict:
+    body = to_wire(value)
+    if not isinstance(body, dict):
+        body = {"value": body}
+    body["kind"] = "ok"
+    return body
+
+
 def _require_chat() -> ChatSurface:
     if chat is None:
         raise HTTPException(status_code=503, detail="surface adapter not wired")
     return chat
+
+
+def _require_sessions() -> SessionSurface:
+    if sessions is None:
+        raise HTTPException(status_code=503, detail="surface adapter not wired")
+    return sessions
+
+
+def _require_providers() -> ProviderConfigSurface:
+    if providers is None:
+        raise HTTPException(status_code=503, detail="surface adapter not wired")
+    return providers
+
+
+def _require_runs() -> RunsSurface:
+    if runs is None:
+        raise HTTPException(status_code=503, detail="surface adapter not wired")
+    return runs
 
 
 # ---- REST read plane -------------------------------------------------
@@ -175,6 +242,52 @@ async def get_older(session_id: str, cursor: str) -> JSONResponse:
 async def get_search(session_id: str, q: str = "") -> JSONResponse:
     session_id = _validate_id(session_id, field="session_id")
     result = _require_chat().search(session_id, q)
+    return JSONResponse(_result_body(result))
+
+
+# ---- REST read plane: session/project/provider/runs surfaces -------------
+
+@router.get(f"{_REST_PREFIX}/sessions")
+async def list_sessions(cursor: str | None = None, q: str | None = None) -> JSONResponse:
+    page_cursor = _decode_cursor(cursor) if cursor else None
+    result = _require_sessions().list_sessions(page_cursor, q)
+    return JSONResponse(_result_body(result))
+
+
+@router.get(f"{_REST_PREFIX}/projects")
+async def list_projects() -> JSONResponse:
+    result = _require_sessions().projects()
+    return JSONResponse(_result_body(result))
+
+
+@router.get(f"{_REST_PREFIX}/providers")
+async def list_providers() -> JSONResponse:
+    return JSONResponse(_envelope(_require_providers().list_providers()))
+
+
+@router.get(f"{_REST_PREFIX}/providers/{{provider_id}}/models")
+async def get_provider_models(provider_id: str) -> JSONResponse:
+    provider_id = _validate_id(provider_id, field="provider_id")
+    return JSONResponse(_envelope(_require_providers().model_catalog(provider_id)))
+
+
+@router.get(f"{_REST_PREFIX}/runtime-profiles")
+async def list_runtime_profiles() -> JSONResponse:
+    return JSONResponse(_envelope(_require_providers().runtime_profiles()))
+
+
+@router.get(f"{_REST_PREFIX}/runs")
+async def list_runs(session_id: str | None = None) -> JSONResponse:
+    if session_id is not None:
+        session_id = _validate_id(session_id, field="session_id")
+    result = _require_runs().list_runs(session_id, None)
+    return JSONResponse(_result_body(result))
+
+
+@router.get(f"{_REST_PREFIX}/runs/{{run_id}}")
+async def get_run_detail(run_id: str) -> JSONResponse:
+    run_id = _validate_id(run_id, field="run_id")
+    result = _require_runs().run_detail(run_id)
     return JSONResponse(_result_body(result))
 
 
@@ -301,6 +414,13 @@ def _parse_surface_cursors(raw: dict) -> tuple[tuple[SurfaceCursor, ...], Focus]
     return cursors, focus
 
 
+_FEED_SURFACES = ("sessions", "providers", "runs")
+
+
+def _feed_surface(name: str):
+    return {"sessions": sessions, "providers": providers, "runs": runs}[name]
+
+
 @router.websocket("/ws/v2/surface")
 async def ws_surface(websocket: WebSocket) -> None:
     if not await _authenticate(websocket):
@@ -309,6 +429,12 @@ async def ws_surface(websocket: WebSocket) -> None:
     loop = asyncio.get_running_loop()
     send_queue: asyncio.Queue = asyncio.Queue()
     subscription = None
+    # Non-cursor live feeds (SessionSurface/ProviderConfigSurface/
+    # RunsSurface `subscribe(emit)` — no per-surface cursor, unlike the
+    # chat surface's `subscribe(cursors, focus, emit)`), keyed by feed
+    # name so re-sending `{"feeds": [...]}` can add/remove individual
+    # feeds without disturbing the chat `subscription` above.
+    feed_subscriptions: dict[str, object] = {}
 
     def emit(frame: object) -> None:
         body = to_wire(frame)
@@ -340,6 +466,20 @@ async def ws_surface(websocket: WebSocket) -> None:
                 if subscription is not None:
                     subscription.close()
                 subscription = _require_chat().subscribe(cursors, focus, emit)
+                continue
+            if "feeds" in raw:
+                requested = raw.get("feeds")
+                if not isinstance(requested, list):
+                    await websocket.close(code=1003)
+                    return
+                requested_set = {f for f in requested if f in _FEED_SURFACES}
+                for name in list(feed_subscriptions):
+                    if name not in requested_set:
+                        feed_subscriptions.pop(name).close()
+                for name in requested_set - feed_subscriptions.keys():
+                    surface = _feed_surface(name)
+                    if surface is not None:
+                        feed_subscriptions[name] = surface.subscribe(emit)
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -352,3 +492,5 @@ async def ws_surface(websocket: WebSocket) -> None:
             pass
         if subscription is not None:
             subscription.close()
+        for feed_subscription in feed_subscriptions.values():
+            feed_subscription.close()

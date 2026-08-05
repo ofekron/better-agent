@@ -32,6 +32,8 @@ from backend.surface_contract.nodes import (
     Node,
     NodeKind,
     PromptOrigin,
+    ResultKind,
+    ResultPayload,
     SendMode,
     ThinkingPayload,
     ToolInteractionPayload,
@@ -93,6 +95,16 @@ def _uuid_of(row: dict) -> str | None:
 
 def _fallback_id(row: dict, label: str) -> str:
     return f"seq:{_seq(row)}:{label}"
+
+
+def typed_prompt_node_id(uuid_value: str | None) -> str | None:
+    """Contract node_id for a TYPED_PROMPT node given a known row uuid —
+    identity passthrough when non-empty (matching `_uuid_of`'s validity
+    contract), None when not derivable. Shared so any caller holding a
+    bare uuid (not a full row, e.g. a lifecycle fact's `prompt_uuid`)
+    derives the SAME node_id `_handle_user` would from the row itself,
+    instead of duplicating the validity check ad hoc."""
+    return uuid_value if isinstance(uuid_value, str) and uuid_value else None
 
 
 def _tool_node_id(tool_use_id: str) -> str:
@@ -187,6 +199,8 @@ def _handle_agent_message(row: dict, data: dict, node: partial) -> list[Node]:
         return _handle_user(row, data, node)
     if mtype == "assistant":
         return _handle_assistant(row, data, node)
+    if mtype == "result":
+        return [_handle_result(row, data, node)]
 
     uuid = _uuid_of(row) or _fallback_id(row, "diagnostic")
     return [
@@ -230,6 +244,22 @@ def _handle_lifecycle_notice(row: dict, data: dict, node: partial) -> Node:
     )
 
 
+def _handle_result(row: dict, data: dict, node: partial) -> Node:
+    """Provider-emitted terminal `result` row (Claude CLI session jsonl
+    `type: "result"`, journaled via the primary CLI tailer's `ingest_orphan`
+    backup path — the live SDK-callback path consumes the SDK's
+    `ResultMessage` internally in `runner.py` and never forwards it to
+    `save_ws_callback`, so this is the only channel that reaches
+    events.jsonl). Maps to a structural RESULT/PROVIDER node so
+    `derive.resolve_result`'s provider branch (`_is_marked_final`) activates
+    instead of falling back to the trailing-assistant-text heuristic."""
+    uuid = _uuid_of(row) or _fallback_id(row, "result")
+    return node(
+        node_id=uuid, kind=NodeKind.RESULT, status=None,
+        payload=ResultPayload(result_kind=ResultKind.PROVIDER),
+    )
+
+
 def _handle_user(row: dict, data: dict, node: partial) -> list[Node]:
     inner = data.get("message")
     content = inner.get("content") if isinstance(inner, dict) else None
@@ -266,7 +296,7 @@ def _handle_user(row: dict, data: dict, node: partial) -> list[Node]:
         if isinstance(a, dict)
     )
     status = ContentStatus.QUEUED if origin == PromptOrigin.QUEUED else ContentStatus.COMPLETE
-    uuid = _uuid_of(row) or _fallback_id(row, "typed_prompt")
+    uuid = typed_prompt_node_id(_uuid_of(row)) or _fallback_id(row, "typed_prompt")
     return [
         node(
             node_id=uuid, kind=NodeKind.TYPED_PROMPT, status=status,

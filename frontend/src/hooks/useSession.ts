@@ -20,6 +20,8 @@ import {
 } from "src/utils/offlineRequest";
 
 import { API } from "../api";
+import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
+import { useSurfaceSession } from "../adapter/useSurfaceSession";
 import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
@@ -3128,6 +3130,46 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  // ---- Chat Surface Contract v2 thin client (OFF by default) --------
+  //
+  // Behind `ba.surface_v2` (frontend/src/adapter/flag.ts). OFF: the block
+  // below is inert (surfaceSessionId is always null, useSurfaceSession is
+  // a no-op, and the two gated wrappers just delegate straight through —
+  // byte-identical behavior to calling applyMessagesReplay/applyLiveEvent
+  // directly). ON: the currently-open session's CHAT content plane
+  // (hydration + live) is owned by useSurfaceSession instead of the
+  // legacy messages_replay/agent_message WS ingestion; every other event
+  // type (run_state, worker_*, session_metadata_updated, ...) and all
+  // commands stay on the legacy `/ws/chat` path untouched.
+  const surfaceSessionId = readSurfaceV2Flag() ? wsTargetSessionId : null;
+
+  const applySurfaceUpsert = useCallback(
+    (sid: string, message: ChatMessage) => applyMessagesReplay(sid, [message]),
+    [applyMessagesReplay]
+  );
+
+  useSurfaceSession({
+    sessionId: surfaceSessionId,
+    onSnapshot: replaceMessages,
+    onUpsertMessage: applySurfaceUpsert,
+  });
+
+  const gatedApplyMessagesReplay = useCallback(
+    (sessionId: string, messages: ChatMessage[]) => {
+      if (surfaceSessionId && sessionId === surfaceSessionId) return;
+      applyMessagesReplay(sessionId, messages);
+    },
+    [applyMessagesReplay, surfaceSessionId]
+  );
+
+  const gatedApplyLiveEvent = useCallback(
+    (sessionId: string, event: WSEvent) => {
+      if (surfaceSessionId && sessionId === surfaceSessionId) return;
+      applyLiveEvent(sessionId, event);
+    },
+    [applyLiveEvent, surfaceSessionId]
+  );
+
   return {
     sessions,
     sessionsLoaded,
@@ -3148,7 +3190,7 @@ export function useSession(authStatus?: string) {
     deleteSession,
     addMessages,
     replaceMessages,
-    applyMessagesReplay,
+    applyMessagesReplay: gatedApplyMessagesReplay,
     getSinceSeq,
     getEventsFromSeq,
     getEventsCursorKnown,
@@ -3171,7 +3213,7 @@ export function useSession(authStatus?: string) {
     dropSessionIfPresent,
     runStateBySession,
     applyRunState,
-    applyLiveEvent,
+    applyLiveEvent: gatedApplyLiveEvent,
     markTurnTerminal,
     markTurnDetached,
     applyMessageRecovering,

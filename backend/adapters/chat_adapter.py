@@ -30,6 +30,7 @@ from backend.adapters.normalize import (
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
+    typed_prompt_node_id,
 )
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection
 from backend.event_bus import BusEvent
@@ -538,7 +539,19 @@ class ChatSurfaceAdapter(ChatSurface):
             default_reason = TerminalReason.OK if phase == TurnPhase.COMPLETED else TerminalReason.USER_STOPPED
             reason = reason_by_payload.get(event.payload.get("reason"), default_reason)
 
-        turn_id = event.payload.get("execution_turn_id") or event.payload.get("user_turn_id") or ""
+        # Prefer the contract-derivation from `prompt_uuid` — the SAME
+        # node_id `_segment_turns`/normalize.py would assign the TYPED_PROMPT
+        # row this turn is anchored on — so a lifecycle frame's turn_id
+        # matches the turn_id turns get when built from raw journal rows.
+        # Falls back to the pre-existing execution/user_turn_id fields when
+        # `prompt_uuid` isn't yet known (e.g. turn_start, before the
+        # provider's user-row echo has been folded).
+        turn_id = (
+            typed_prompt_node_id(event.payload.get("prompt_uuid"))
+            or event.payload.get("execution_turn_id")
+            or event.payload.get("user_turn_id")
+            or ""
+        )
 
         with state.lock:
             render_rev = state.projection.bump_render()

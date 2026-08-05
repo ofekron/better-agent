@@ -1,0 +1,534 @@
+// Pure mapping: Chat Surface Contract v2 nodes/turns -> the EXISTING
+// legacy render model (ChatMessage + flat WSEvent shapes), so
+// MessageBubble / agentMessages.ts render surface-v2 content unchanged.
+//
+// Mapping table (NodeKind -> legacy shape):
+//   typed_prompt        -> a role:"user" ChatMessage
+//   assistant_text      -> WSEvent{type:"output", data:{output, node_id}}
+//   thinking            -> WSEvent{type:"thinking", data:{thought, node_id}}
+//   tool_interaction     -> WSEvent{type:"tool_call", ...} (+ a paired
+//                          WSEvent{type:"tool_result", ...} when
+//                          payload.result is set — legacy's flattened
+//                          "tool_interaction -> tool_call + tool_result"
+//                          shape, produced here directly instead of at
+//                          render time)
+//   model_change(source=provider) -> WSEvent{type:"model_fallback", ...}
+//   model_change(source=user)   -> GAP: no legacy inline rendering of a
+//                          user-initiated model switch (selector-only
+//                          concern); dropped (mapNodeToEvent -> null)
+//   harness_change       -> GAP: no legacy equivalent; dropped
+//   diagnostic           -> WSEvent{type:"diagnostic", ...}
+//   failure              -> WSEvent{type:"diagnostic", data:{kind:"failure",...}}
+//                          (chosen per spec: "failure -> diagnostic-style
+//                          events"); ALSO patches ChatMessage.error/errorText
+//   lifecycle_notice     -> WSEvent{type:"lifecycle_notice", ...} (exact
+//                          legacy shape — flattenClaudeMessages already
+//                          special-cases this mtype identically)
+//   compaction           -> WSEvent{type:"diagnostic", data:{kind:"compaction",...}}
+//                          (no dedicated legacy visual; diagnostic fallback)
+//   fact(kind="pr_link")  -> WSEvent{type:"pr_link", ...}
+//   fact(other kinds)     -> WSEvent{type:"diagnostic", data:{kind:"fact.<kind>",...}}
+//                          (no generic legacy "fact chip" renderer yet)
+//   user_interaction      -> GAP: legacy renders pending approvals via
+//                          separate PendingApproval/ToolApproval/
+//                          UserInputRequest state, never inline in
+//                          message.events; diagnostic fallback only for
+//                          visibility, not full interactivity
+//   unknown               -> WSEvent{type:"diagnostic", data:{kind:"unknown.<label>",...}}
+//                          (the existing unknown-event rendering path)
+//   worker_interaction     -> folded into ChatMessage.workers (WorkerPanel[])
+//                          by fact_kind (worker_start/worker_event/worker_complete)
+//   worker_turn / native_subagent_turn / sub_session_turn / session_turn
+//                        -> GAP (documented, not a silent drop): these are
+//                          structural containers with NO payload — a full
+//                          WorkerPanel needs their `sidecar_ref` resolved
+//                          via ChatSurface.fetch_sidecar, which
+//                          backend/adapters/chat_adapter.py currently
+//                          returns Rebuilding for unconditionally (not
+//                          implemented yet). Left unmapped here rather
+//                          than faked.
+//   instruction_widget    -> GAP: session-level, not per-turn; no
+//                          ChatMessage equivalent exists (legacy has no
+//                          "instruction banner" message type). Handled
+//                          by the caller only for completeness (ignored).
+//   turn / explanation / result -> structural; never produce a WSEvent
+//                          directly. `turn` seeds the assistant
+//                          ChatMessage's timestamp/status; `result`
+//                          finalizes it (isStreaming/completed_at/content);
+//                          `explanation` is transparently unwrapped by
+//                          `SurfaceClient.fetchTurnBody`, never seen here.
+//   continuation_session   -> patches ChatMessage.continuation_active
+//                          (chain_depth) — not a WSEvent, an existing
+//                          dedicated ChatMessage field.
+//   steering_message       -> WSEvent{type:"steer_prompt", data:{text,target}}
+
+import type {
+  ChatMessage,
+  MessageFile,
+  MessageImage,
+  ProviderRunner,
+  WorkerPanel,
+  WSEvent,
+} from "../types";
+import type {
+  AssistantTextPayloadWire,
+  CompactionPayloadWire,
+  CompactTurnWire,
+  ContentStatusWire,
+  ContinuationSessionPayloadWire,
+  DiagnosticPayloadWire,
+  FactPayloadWire,
+  FailurePayloadWire,
+  LifecycleNoticePayloadWire,
+  ModelChangePayloadWire,
+  NodeWire,
+  ResultPayloadWire,
+  RunWire,
+  SteeringMessagePayloadWire,
+  ThinkingPayloadWire,
+  ToolInteractionPayloadWire,
+  TurnLifecycleFrame,
+  TypedPromptPayloadWire,
+  UnknownPayloadWire,
+  WorkerInteractionPayloadWire,
+} from "./wire";
+
+export type RunsById = ReadonlyMap<string, RunWire>;
+
+// ---- deterministic ids --------------------------------------------------
+//
+// Legacy ChatMessage ids are backend-generated uuid4()s with NO derivable
+// relationship to the contract's node_id space (confirmed against
+// backend/orchestrator.py's user/assistant scaffold construction). Surface
+// v2 messages therefore live in their own namespaced id space; callers
+// must fully replace (never id-merge with) whatever legacy messages were
+// present for a surface-owned session — see useSurfaceSession.ts.
+
+export function surfaceUserMessageId(turnId: string): string {
+  return `surface:${turnId}:prompt`;
+}
+
+export function surfaceAssistantMessageId(turnId: string): string {
+  return `surface:${turnId}:assistant`;
+}
+
+function tsToIso(ts: number): string {
+  return new Date(ts * 1000).toISOString();
+}
+
+function sortNodes(nodes: NodeWire[]): NodeWire[] {
+  return [...nodes].sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+}
+
+// ---- node_id-keyed upsert (mirrors Strategy.ts's uuid dedup, but keyed
+// by the contract's node_id, stamped into every mapped event's
+// `data.node_id`) -----------------------------------------------------
+
+export function upsertEventByNodeId(events: WSEvent[], event: WSEvent): WSEvent[] {
+  const nodeId = (event.data as { node_id?: unknown } | undefined)?.node_id;
+  if (typeof nodeId !== "string") return [...events, event];
+  const idx = events.findIndex(
+    (e) => (e.data as { node_id?: unknown } | undefined)?.node_id === nodeId,
+  );
+  if (idx === -1) return [...events, event];
+  const next = [...events];
+  next[idx] = event;
+  return next;
+}
+
+// ---- Node -> flat WSEvent -------------------------------------------
+
+function toolResultOutput(result: ToolInteractionPayloadWire["result"]): string {
+  if (!result) return "";
+  const output = (result as { output?: unknown }).output;
+  if (typeof output === "string") return output;
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result);
+  }
+}
+
+/** Maps one content node to zero or more flat legacy WSEvents. Most kinds
+ * produce exactly one; `tool_interaction` with a resolved result produces
+ * two (tool_call + tool_result, mirroring how the legacy render pipeline
+ * flattens a single provider tool_use+tool_result pair today). Returns
+ * `[]` for structural/unmapped kinds (see the module-level gap list). */
+export function mapNodeToEvents(node: NodeWire): WSEvent[] {
+  const base = { node_id: node.node_id };
+  switch (node.kind) {
+    case "assistant_text": {
+      const p = node.payload as AssistantTextPayloadWire;
+      return [{ type: "output", data: { ...base, output: p.text, parent_tool_use_id: null } }];
+    }
+    case "thinking": {
+      const p = node.payload as ThinkingPayloadWire;
+      return [{ type: "thinking", data: { ...base, thought: p.text, parent_tool_use_id: null } }];
+    }
+    case "tool_interaction": {
+      const p = node.payload as ToolInteractionPayloadWire;
+      const events: WSEvent[] = [
+        {
+          type: "tool_call",
+          data: { ...base, tool: p.tool_name, args: p.args, tool_use_id: node.node_id, parent_tool_use_id: null },
+        },
+      ];
+      if (p.result) {
+        events.push({
+          type: "tool_result",
+          data: {
+            ...base,
+            output: toolResultOutput(p.result),
+            tool_use_id: node.node_id,
+            paired_tool_result: true,
+            orphan_tool_result: false,
+          },
+        });
+      }
+      return events;
+    }
+    case "steering_message": {
+      const p = node.payload as SteeringMessagePayloadWire;
+      return [{ type: "steer_prompt", data: { ...base, text: p.text, target: p.target } }];
+    }
+    case "model_change": {
+      const p = node.payload as ModelChangePayloadWire;
+      if (p.source !== "provider") return [];
+      return [
+        {
+          type: "model_fallback",
+          data: { ...base, from_model: p.from_run_ref ?? "", to_model: p.to_run_ref },
+        },
+      ];
+    }
+    case "lifecycle_notice": {
+      const p = node.payload as LifecycleNoticePayloadWire;
+      return [{ type: "lifecycle_notice", data: { ...base, kind: p.kind, ...(p.data ?? {}) } }];
+    }
+    case "compaction": {
+      const p = node.payload as CompactionPayloadWire;
+      return [
+        {
+          type: "diagnostic",
+          data: { ...base, kind: "compaction", origin: p.origin, summary: p.summary },
+        },
+      ];
+    }
+    case "failure": {
+      const p = node.payload as FailurePayloadWire;
+      return [
+        { type: "diagnostic", data: { ...base, kind: "failure", code: p.code, text: p.text, raw: p.data } },
+      ];
+    }
+    case "diagnostic": {
+      const p = node.payload as DiagnosticPayloadWire;
+      return [
+        { type: "diagnostic", data: { ...base, kind: p.code, severity: p.severity, text: p.text, raw: p.data } },
+      ];
+    }
+    case "fact": {
+      const p = node.payload as FactPayloadWire;
+      if (p.kind === "pr_link") return [{ type: "pr_link", data: { ...base, ...p.data } }];
+      return [{ type: "diagnostic", data: { ...base, kind: `fact.${p.kind}`, raw: p.data } }];
+    }
+    case "user_interaction": {
+      return [{ type: "diagnostic", data: { ...base, kind: "user_interaction", raw: node.payload } }];
+    }
+    case "unknown": {
+      const p = node.payload as UnknownPayloadWire;
+      return [{ type: "diagnostic", data: { ...base, kind: `unknown.${p.label}`, raw: p.payload } }];
+    }
+    // Structural / handled-elsewhere kinds, plus the two documented GAPs
+    // (user-sourced model/harness change, and the sidecar-dependent
+    // SubAgentTurn family) — see the module docstring: no direct WSEvent.
+    case "turn":
+    case "explanation":
+    case "result":
+    case "typed_prompt":
+    case "worker_interaction":
+    case "continuation_session":
+    case "instruction_widget":
+    case "harness_change":
+    case "worker_turn":
+    case "native_subagent_turn":
+    case "sub_session_turn":
+    case "session_turn":
+      return [];
+    default:
+      return [];
+  }
+}
+
+// ---- typed_prompt -> user ChatMessage --------------------------------
+
+export function mapPromptToUserMessage(prompt: NodeWire): ChatMessage {
+  const p = prompt.payload as TypedPromptPayloadWire;
+  const images: MessageImage[] = [];
+  const files: MessageFile[] = [];
+  for (const a of p.attachments) {
+    if (a.media_type.startsWith("image/")) {
+      images.push({ filename: a.name, media_type: a.media_type });
+    } else {
+      // GAP: Attachment{name, media_type, ref} carries no byte size — the
+      // v2 REST surface has no blob-metadata/resolve endpoint yet.
+      files.push({ name: a.name, media_type: a.media_type, size: 0 });
+    }
+  }
+  return {
+    id: surfaceUserMessageId(prompt.turn_id),
+    role: "user",
+    content: p.text,
+    cli_prompt: p.sent_text ?? undefined,
+    events: [],
+    timestamp: tsToIso(prompt.ts),
+    isStreaming: false,
+    images: images.length > 0 ? images : undefined,
+    files: files.length > 0 ? files : undefined,
+  };
+}
+
+// ---- worker_interaction facts -> WorkerPanel[] ------------------------
+
+interface WorkerStartFact {
+  delegation_id: string;
+  worker_session_id: string | null;
+  worker_description: string;
+  panel_kind?: WorkerPanel["panel_kind"];
+  started_at?: string;
+  insert_at?: number;
+  is_new: boolean;
+  instructions_preview: string;
+  orchestration_mode?: WorkerPanel["orchestration_mode"];
+  provider_id?: string | null;
+  model?: string | null;
+  reasoning_effort?: WorkerPanel["reasoning_effort"];
+  run_mode?: string;
+}
+
+interface WorkerEventFact {
+  delegation_id: string;
+  event?: WSEvent;
+}
+
+interface WorkerCompleteFact {
+  delegation_id: string;
+  worker_session_id?: string | null;
+  jsonl_path?: string | null;
+  new_byte_offset?: number;
+  token_usage?: WorkerPanel["token_usage"];
+  success?: boolean;
+  error?: string | null;
+  fork_agent_sid?: string | null;
+  run_mode?: string;
+}
+
+/** Reduces a turn's WORKER_INTERACTION fact log into WorkerPanel[],
+ * mirroring Strategy.ts's worker_start/worker_event/worker_complete live
+ * handling — same fact shape, replayed here from journal-sourced nodes
+ * instead of one-at-a-time WS frames. */
+export function reduceWorkerInteractions(nodes: NodeWire[]): WorkerPanel[] {
+  let panels: WorkerPanel[] = [];
+  for (const node of sortNodes(nodes)) {
+    if (node.kind !== "worker_interaction") continue;
+    const p = node.payload as WorkerInteractionPayloadWire;
+    if (p.fact_kind === "worker_start") {
+      const d = p.fact as unknown as WorkerStartFact;
+      if (panels.some((panel) => panel.delegation_id === d.delegation_id)) continue;
+      panels = [
+        ...panels,
+        {
+          delegation_id: d.delegation_id,
+          worker_session_id: d.worker_session_id ?? "",
+          worker_description: d.worker_description,
+          panel_kind: d.panel_kind,
+          started_at: d.started_at,
+          insert_at: d.insert_at,
+          is_new: d.is_new,
+          instructions_preview: d.instructions_preview,
+          orchestration_mode: d.orchestration_mode,
+          provider_id: d.provider_id,
+          model: d.model,
+          reasoning_effort: d.reasoning_effort,
+          run_mode: d.run_mode,
+          events: [],
+        },
+      ];
+    } else if (p.fact_kind === "worker_event") {
+      const d = p.fact as unknown as WorkerEventFact;
+      if (!d.event) continue;
+      const idx = panels.findIndex((panel) => panel.delegation_id === d.delegation_id);
+      if (idx === -1) continue;
+      const next = [...panels];
+      next[idx] = { ...next[idx], events: upsertEventByNodeId(next[idx].events, d.event) };
+      panels = next;
+    } else if (p.fact_kind === "worker_complete") {
+      const d = p.fact as unknown as WorkerCompleteFact;
+      const idx = panels.findIndex((panel) => panel.delegation_id === d.delegation_id);
+      if (idx === -1) continue;
+      const next = [...panels];
+      const panel = { ...next[idx] };
+      if (d.worker_session_id) panel.worker_session_id = d.worker_session_id;
+      panel.jsonl_path = d.jsonl_path ?? null;
+      panel.new_byte_offset = d.new_byte_offset;
+      panel.token_usage = d.token_usage;
+      panel.success = d.success;
+      panel.error = d.error ?? null;
+      if (d.fork_agent_sid) panel.fork_agent_sid = d.fork_agent_sid;
+      if (d.run_mode) panel.run_mode = d.run_mode;
+      next[idx] = panel;
+      panels = next;
+    }
+  }
+  return panels;
+}
+
+// ---- turn -> assistant ChatMessage ------------------------------------
+
+function statusToStreaming(status: ContentStatusWire | null): boolean {
+  return status === "streaming" || status === "queued" || status === "partial";
+}
+
+function resultText(results: NodeWire[]): string {
+  return results
+    .filter((n) => n.kind === "assistant_text")
+    .map((n) => (n.payload as AssistantTextPayloadWire).text)
+    .join("\n");
+}
+
+function resultKindOf(results: NodeWire[]): ResultPayloadWire["result_kind"] | null {
+  const marker = results.find((n) => n.kind === "result");
+  return marker ? (marker.payload as ResultPayloadWire).result_kind : null;
+}
+
+function runMetaFor(
+  ordered: NodeWire[],
+  runsById: RunsById,
+): ChatMessage["run_meta"] {
+  const withRun = ordered.find((n) => n.run_ref);
+  if (!withRun || !withRun.run_ref) return undefined;
+  const run = runsById.get(withRun.run_ref);
+  if (!run) return undefined;
+  return {
+    provider_id: run.provider_id,
+    model: run.model,
+    reasoning_effort: run.reasoning_effort,
+    runner: run.runner as ProviderRunner,
+  };
+}
+
+/** Builds the assistant-role ChatMessage for one compact turn, given its
+ * fully-resolved body (see SurfaceClient.fetchTurnBody). `results` (part
+ * of the CompactTurn itself, no extra fetch) supplies the finalized text
+ * and completion marker per backend/adapters/derive.py::resolve_result.
+ * `runsById` (from the snapshot's/live `run_upsert`-fed `runs[]`) is used
+ * only to stamp the existing `run_meta` display field — best-effort, a
+ * missing entry just omits it. */
+export function mapTurnToAssistantMessage(
+  turn: CompactTurnWire,
+  bodyNodes: NodeWire[],
+  runsById: RunsById = new Map(),
+): ChatMessage {
+  const ordered = sortNodes(bodyNodes);
+  const events = ordered.flatMap(mapNodeToEvents);
+  const workers = reduceWorkerInteractions(ordered);
+  const runtimeChangeEvents = turn.runtime_change ? mapNodeToEvents(turn.runtime_change) : [];
+  const allEvents = [...runtimeChangeEvents, ...events];
+
+  const bodyText = ordered
+    .filter((n) => n.kind === "assistant_text")
+    .map((n) => (n.payload as AssistantTextPayloadWire).text)
+    .join("\n");
+  const finalText = resultText(turn.results) || bodyText;
+
+  const isTerminal = resultKindOf(turn.results) !== null;
+  const isStreaming = !isTerminal && statusToStreaming(turn.turn.status);
+  const failed = ordered.some((n) => n.kind === "failure");
+  const failureNode = ordered.find((n) => n.kind === "failure");
+
+  const msg: ChatMessage = {
+    id: surfaceAssistantMessageId(turn.turn.turn_id),
+    role: "assistant",
+    content: finalText,
+    events: allEvents,
+    timestamp: tsToIso(turn.turn.ts),
+    isStreaming,
+    workers: workers.length > 0 ? workers : undefined,
+    run_meta: runMetaFor(ordered, runsById) ?? undefined,
+  };
+  if (isTerminal) msg.completed_at = tsToIso(turn.turn.ts);
+  if (turn.turn.status === "stopped") msg.stopped_at = tsToIso(turn.turn.ts);
+  if (failed && failureNode) {
+    const p = failureNode.payload as FailurePayloadWire;
+    msg.error = true;
+    msg.errorText = p.text;
+  }
+  const continuation = ordered.find((n) => n.kind === "continuation_session");
+  if (continuation) {
+    const p = continuation.payload as ContinuationSessionPayloadWire;
+    msg.continuation_active = p.chain_depth;
+  }
+  return msg;
+}
+
+/** Full mapping for one compact turn: the user prompt message (when
+ * present — a turn always has one in steady state per chat_adapter.py's
+ * segmentation, but a still-forming live turn may not yet) plus the
+ * assistant message. Ordering: caller concatenates in (ts,seq) turn
+ * order; within a turn, prompt always precedes its assistant reply. */
+export function mapTurnToMessages(
+  turn: CompactTurnWire,
+  bodyNodes: NodeWire[],
+  runsById: RunsById = new Map(),
+): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  if (turn.prompt) out.push(mapPromptToUserMessage(turn.prompt));
+  out.push(mapTurnToAssistantMessage(turn, bodyNodes, runsById));
+  return out;
+}
+
+// ---- live-frame node-table patches --------------------------------------
+//
+// useSurfaceSession.ts keeps each turn's body as NodeWire[] (the same
+// shape hydration produces) and re-derives the assistant ChatMessage from
+// scratch on every frame via mapTurnToAssistantMessage — these two
+// helpers patch that node table in place for the two frame kinds whose
+// payload isn't itself a full Node.
+
+/** `text_delta` targets `assistant_text`/`thinking` nodes — the only two
+ * kinds whose payload carries a plain `text` field appended to
+ * incrementally by the provider stream. */
+export function applyTextDeltaToNode(node: NodeWire, appendedText: string): NodeWire {
+  if (node.kind !== "assistant_text" && node.kind !== "thinking") return node;
+  const payload = node.payload as AssistantTextPayloadWire | ThinkingPayloadWire;
+  return { ...node, payload: { ...payload, text: payload.text + appendedText } };
+}
+
+export function applyNodeStatusToNode(node: NodeWire, status: NodeWire["status"]): NodeWire {
+  return node.status === status ? node : { ...node, status };
+}
+
+export function turnPhaseToMessagePatch(
+  frame: Pick<TurnLifecycleFrame, "phase" | "reason" | "usage">,
+): Partial<ChatMessage> {
+  const patch: Partial<ChatMessage> = {};
+  if (frame.phase === "completed" || frame.phase === "failed" || frame.phase === "stopped") {
+    patch.isStreaming = false;
+  } else if (frame.phase === "running" || frame.phase === "starting" || frame.phase === "queued") {
+    patch.isStreaming = true;
+  }
+  if (frame.phase === "stopped") patch.stopped_at = new Date().toISOString();
+  if (frame.phase === "completed") patch.completed_at = new Date().toISOString();
+  if (frame.phase === "failed") {
+    patch.error = true;
+    if (frame.reason) patch.errorText = frame.reason;
+  }
+  if (frame.usage) {
+    patch.tokenUsage = {
+      input_tokens: frame.usage.input_tokens ?? 0,
+      output_tokens: frame.usage.output_tokens ?? 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    };
+  }
+  return patch;
+}

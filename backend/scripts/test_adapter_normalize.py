@@ -10,11 +10,13 @@ from backend.adapters.normalize import (
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
+    typed_prompt_node_id,
 )
 from backend.surface_contract.nodes import (
     ContentStatus,
     NodeKind,
     PromptOrigin,
+    ResultKind,
 )
 
 SURFACE = "surf-1"
@@ -267,6 +269,45 @@ def test_resolve_parents_uses_parent_tool_use_id():
     resolved = resolve_parents(all_nodes, links)
     child = next(n for n in resolved if n.node_id == "cu1")
     assert child.parent_id == "tool:agentcall1"
+
+
+def test_result_row_maps_to_result_provider_node():
+    row = {
+        "type": "agent_message",
+        "seq": 3,
+        "ts": "2026-01-01T00:00:02+00:00",
+        "data": {
+            "type": "result",
+            "uuid": "r1",
+            "subtype": "success",
+            "is_error": False,
+            "result": "done",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    assert nodes[0].kind == NodeKind.RESULT
+    assert nodes[0].node_id == "r1"
+    assert nodes[0].status is None
+    assert nodes[0].payload.result_kind == ResultKind.PROVIDER
+
+
+def test_result_row_without_uuid_falls_back_to_seq_id():
+    row = {
+        "type": "agent_message",
+        "seq": 4,
+        "ts": "2026-01-01T00:00:03+00:00",
+        "data": {"type": "result", "subtype": "success", "is_error": False},
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].kind == NodeKind.RESULT
+    assert nodes[0].node_id == "seq:4:result"
+
+
+def test_typed_prompt_node_id_identity_and_none():
+    assert typed_prompt_node_id("abc-123") == "abc-123"
+    assert typed_prompt_node_id(None) is None
+    assert typed_prompt_node_id("") is None
 
 
 def test_derive_link_extracts_sidechain_fields():
