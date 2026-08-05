@@ -949,7 +949,7 @@ export function CompleteEvent({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
+export function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const { t } = useTranslation();
   const model = typeof data.model === "string" ? data.model : "";
   const providerId = typeof data.provider_id === "string" ? data.provider_id : "";
