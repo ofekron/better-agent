@@ -38,6 +38,9 @@ class NodeKind(StrEnum):
     CONTINUATION_SESSION = "continuation_session"
     FAILURE = "failure"
     DIAGNOSTIC = "diagnostic"
+    USER_INTERACTION = "user_interaction"
+    LIFECYCLE_NOTICE = "lifecycle_notice"
+    FACT = "fact"
     UNKNOWN = "unknown"
 
 
@@ -86,7 +89,8 @@ class PromptOrigin(StrEnum):
     USER = "user"
     QUEUED = "queued"
     OFFLINE_SYNC = "offline_sync"
-    SESSION_ASK = "session_ask"
+    ASK = "ask"
+    SUPERVISOR = "supervisor"
 
 
 class ResultKind(StrEnum):
@@ -119,7 +123,10 @@ class TypedPromptPayload:
     attachments: tuple[Attachment, ...] = ()
     send_mode: SendMode = SendMode.QUEUE
     origin: PromptOrigin = PromptOrigin.USER
-    source_session_ref: str | None = None  # set when origin=session_ask
+    source_session_ref: str | None = None  # set when origin=ask
+    # Actually-dispatched prompt when harness wrapping diverges from text;
+    # rendered on demand only (full-prompt affordance), never inline.
+    sent_text: str | None = None
     intent_id: str | None = None
 
 
@@ -194,9 +201,11 @@ class CompactionPayload:
     replaced_node_ids: tuple[NodeId, ...] = ()
 
 
+# Fresh provider execution continuing the same app session's turn.
 @dataclass(frozen=True, slots=True)
 class ContinuationSessionPayload:
-    session_ref: str
+    execution_ref: str
+    chain_depth: int
     summary: str | None = None
 
 
@@ -213,6 +222,44 @@ class DiagnosticPayload:
     code: DiagnosticCode
     text: str
     data: dict[str, object] | None = None
+
+
+class UserInteractionState(StrEnum):
+    PENDING = "pending"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+
+
+# UI that requests user input (tool/worker-creation approval, credential
+# consent, memory proposal, request-user-input…). kind-extensible.
+@dataclass(frozen=True, slots=True)
+class UserInteractionPayload:
+    kind: str
+    request: dict[str, object]
+    state: UserInteractionState = UserInteractionState.PENDING
+    response: dict[str, object] | None = None
+
+
+class LifecycleNoticeKind(StrEnum):
+    RETRYING = "retrying"
+    DETACHED = "detached"
+    RECOVERING = "recovering"
+    AUTO_RETRIED = "auto_retried"
+    RATE_LIMITED = "rate_limited"
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleNoticePayload:
+    kind: LifecycleNoticeKind
+    data: dict[str, object] | None = None
+
+
+# Backend-synthesized structured fact rendered as a compact chip
+# (e.g. kind="pr_link": PR number + repository).
+@dataclass(frozen=True, slots=True)
+class FactPayload:
+    kind: str
+    data: dict[str, object]
 
 
 # Forward-compat sink for anything not recognized (yet).
@@ -243,6 +290,9 @@ NodePayload = (
     | ContinuationSessionPayload
     | FailurePayload
     | DiagnosticPayload
+    | UserInteractionPayload
+    | LifecycleNoticePayload
+    | FactPayload
     | UnknownPayload
     | None
 )
