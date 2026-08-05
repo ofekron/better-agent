@@ -1621,7 +1621,7 @@ export function AutoActionGroup({
   );
 }
 
-function renderTreeEntry(
+export function renderTreeEntry(
   g: EventRenderGroup,
   childrenMap: ChildrenMap,
   onFileClick?: (p: string, focus?: FileFocus) => void,
@@ -1789,7 +1789,7 @@ function renderTreeLevel(
   return rows;
 }
 
-function renderGroupedEvents(
+export function renderGroupedEvents(
   events: WSEvent[],
   onFileClick?: (p: string, focus?: FileFocus) => void,
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
