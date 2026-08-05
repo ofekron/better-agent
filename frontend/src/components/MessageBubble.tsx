@@ -1266,7 +1266,7 @@ function SteerPromptEvent({
   );
 }
 
-function PrLinkEvent({
+export function PrLinkEvent({
   prNumber,
   prUrl,
   prRepository,
