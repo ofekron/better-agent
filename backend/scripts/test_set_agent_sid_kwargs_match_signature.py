@@ -9,27 +9,20 @@ cascading into a failed delegation approval flow. It went unnoticed
 because the only thing that exercises it is the manager-delegation E2E,
 which couldn't run (REST 401). This AST guard catches the whole class
 statically — no subprocess needed.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_set_agent_sid_kwargs_match_signature.py
 """
-
 from __future__ import annotations
 
 import ast
 import inspect
 import os
-import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
+import _test_home
+
+_test_home.isolate("ba-set-agent-sid-kwargs-")
 
 from session_manager import SessionManager  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _accepted_kwargs() -> set[str]:
@@ -52,7 +45,7 @@ def _iter_backend_py() -> list[str]:
     return out
 
 
-def _run() -> bool:
+def test_all_set_agent_sid_call_sites_use_valid_kwargs() -> None:
     accepted = _accepted_kwargs()
     violations: list[str] = []
 
@@ -74,20 +67,7 @@ def _run() -> bool:
                     rel = os.path.relpath(path, _BACKEND)
                     violations.append(f"{rel}:{node.lineno} -> {kw.arg}=")
 
-    ok = not violations
-    tag = PASS if ok else FAIL
-    print(f"  {tag} all set_agent_sid call sites use valid kwargs "
-          f"(accepted: {sorted(accepted)})")
-    if violations:
-        for v in violations:
-            print(f"      stale kwarg: {v}")
-    print(f"\n{'1/1' if ok else '0/1'} checks passed")
-    return ok
-
-
-def main() -> int:
-    return 0 if _run() else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not violations, (
+        f"stale set_agent_sid kwargs (accepted: {sorted(accepted)}):\n  "
+        + "\n  ".join(violations)
+    )

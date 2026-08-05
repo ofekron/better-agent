@@ -1,31 +1,20 @@
 """Locks the tag-rule render pass: wrapper stripping, bold, font sentinel,
 empty-registry identity, and the no-'<' fast path.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_tag_strip_style.py
 """
 from __future__ import annotations
 
-import os
-import shutil
-import sys
-
 import _test_home
 
-_TMP_HOME = _test_home.isolate("bc-test-tag-style-")
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
+_test_home.isolate("bc-test-tag-style-")
 
 import file_ref_resolver  # noqa: E402
 
 
-def main() -> int:
+def test_tag_strip_style_pass() -> None:
+    # Defensive: clear any global tag rules leaked from a sibling module.
+    file_ref_resolver.set_tag_rules([])
     try:
         # Empty registry -> identity.
-        file_ref_resolver.set_tag_rules([])
         src = "<NEEDS_USER_DECISION>hi</NEEDS_USER_DECISION>"
         assert file_ref_resolver._apply_tag_rules(src) == src, "empty registry must be identity"
 
@@ -49,7 +38,7 @@ def main() -> int:
         assert "[[bcstyle:" in out and "[[/bcstyle]]" in out, \
             f"style sentinel missing: {out!r}"
         assert "b=1" in out, f"bold attr missing from sentinel: {out!r}"
-        assert "s=1.3" in out, f"font-scale attr missing: {out!r}"
+        assert "s=1.3" in out, f"font-scale attr missing from sentinel: {out!r}"
         assert "bg=#ff8c00" in out and "a=0.18" in out, \
             f"highlight attrs missing: {out!r}"
 
@@ -82,13 +71,5 @@ def main() -> int:
         think = [{"type": "thinking", "thinking": src}]
         file_ref_resolver._rewrite_content_blocks(think, cwd=None)
         assert think[0]["thinking"] == src, "thinking must not be tag-stripped"
-
-        file_ref_resolver.set_tag_rules([])
-        print("PASS test_tag_strip_style")
-        return 0
     finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        file_ref_resolver.set_tag_rules([])
