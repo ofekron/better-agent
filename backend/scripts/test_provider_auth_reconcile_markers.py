@@ -686,8 +686,6 @@ def test_reap_sweeps_stale_tmp_and_malformed_markers():
 def test_reap_force_kill_failure_is_swallowed():
     """Identity confirmed but force_kill raises -> logged + swallowed; the
     marker is unlinked BEFORE the kill so a partial state is still safe."""
-    import proc_control as pc_mod
-
     real_pc = provider_auth.process_control
     provider_auth._procs.clear()
 
