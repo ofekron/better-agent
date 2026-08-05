@@ -583,6 +583,13 @@ async def on_startup():
     startup_task_registry.bind(_coordinator_ref, loop)
     startup_task_registry.reset()
 
+    # Same bind/reset contract for the background work registry: re-epoch so
+    # a tab held open across a --reload discards its map instead of merging
+    # this process's items into the previous process's state.
+    from background_work import background_work_registry
+    background_work_registry.bind(_coordinator_ref, loop)
+    background_work_registry.reset()
+
     # Schedule every long-running step as a tracked background task.
     # `on_startup` returns the moment these are dispatched —
     # "Application startup complete" fires within milliseconds.

@@ -31,6 +31,7 @@ import type {
   Session,
   SessionStatusKey,
   StartupTask,
+  BackgroundWorkItem,
   ToolApproval,
   UserInteractionRequest,
 } from "../types";
@@ -152,6 +153,10 @@ export interface BusEventMap {
   startup_task_changed:
     | { cleared: true }
     | { task: StartupTask };
+  background_work_changed:
+    | { epoch: string; cleared: true }
+    | { epoch: string; item: BackgroundWorkItem }
+    | { epoch: string; seq: number; removed_id: string };
   // Pre-existing frames the registry cares about — listed so the
   // typed dispatch helpers in `useWebSocket` can `eventBus.publish(...)`
   // them with payload safety.

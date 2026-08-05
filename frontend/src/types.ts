@@ -278,6 +278,11 @@ export type WSEventType =
   // `StartupTasksBanner` subscribes to; the banner's authoritative
   // snapshot comes from `GET /api/startup_tasks` on mount.
   | "startup_task_changed"
+  // Deltas from the backend's background work registry. The manager's
+  // authoritative snapshot is `GET /api/background-work`; a delta whose
+  // epoch differs from the snapshot's means the registry was rebuilt and
+  // the client re-fetches instead of merging.
+  | "background_work_changed"
   // Stamped into events.jsonl by the REST middleware and the CLI
   // bridge BEFORE the handler runs, so every mutation has a
   // traceable origin. Not rendered — the bubble filters it.
@@ -1578,4 +1583,58 @@ export interface StartupTask {
   started_at: string;
   finished_at: string | null;
   error: string | null;
+}
+
+/** One row in the background work manager. Authoritative state lives in
+ * the backend's in-memory `background_work_registry`; the frontend holds a
+ * projection built from `GET /api/background-work` plus
+ * `background_work_changed` deltas.
+ *
+ * `progress: null` means indeterminate. A null `total` carries a count but
+ * still renders indeterminate — a percentage is never inferred. `unknown`
+ * status means a durable record outlived a restart and no owner has
+ * re-registered it, so it is shown as state-unknown rather than running. */
+export type BackgroundWorkStatus =
+  | "pending" | "running" | "succeeded" | "failed" | "cancelled" | "unknown";
+
+export interface BackgroundWorkProgress {
+  completed: number;
+  total: number | null;
+  unit: string;
+}
+
+export interface BackgroundWorkAction {
+  kind: "cancel" | "retry" | "open_session" | "open_url";
+  target: string;
+}
+
+export interface BackgroundWorkItem {
+  id: string;
+  kind: "work";
+  owner_kind: "core" | "extension";
+  owner_id: string;
+  label: string;
+  status: BackgroundWorkStatus;
+  seq: number;
+  started_at: string;
+  updated_at: string;
+  /** Attribution for grouping and labelling only — never an authorization
+   * boundary. Every item is broadcast globally. */
+  session_id: string | null;
+  title_key: string | null;
+  title_params: Record<string, unknown>;
+  detail: string | null;
+  phase: string | null;
+  error: string | null;
+  progress: BackgroundWorkProgress | null;
+  actions: BackgroundWorkAction[];
+  finished_at: string | null;
+  dismissible: boolean;
+  retention_ms: number;
+}
+
+export interface BackgroundWorkSnapshot {
+  epoch: string;
+  seq: number;
+  items: BackgroundWorkItem[];
 }

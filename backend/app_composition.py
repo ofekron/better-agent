@@ -46,6 +46,9 @@ def wire(
     misc_api.configure(git_sha=git_sha)
     app.include_router(misc_api.router)
 
+    import background_work_api
+    app.include_router(background_work_api.router)
+
     import providers_api
     providers_api.configure(coordinator.broadcast_global)
     app.include_router(providers_api.router)

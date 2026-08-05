@@ -65,6 +65,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "session_marker_changed", "session_status_changed",
     ),
     "startup_tasks": ("startup_task_changed",),
+    "background_work": ("background_work_changed",),
     "switch_control": ("switch_control_state_changed",),
     "machine_nodes": (
         "node_state_changed", "node_registration_requested",
@@ -84,6 +85,11 @@ GLOBAL_EVENT_TYPES = frozenset(GLOBAL_EVENT_SPECS)
 _EXTENSION_TOKEN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 _EXTENSION_SOURCE_PREFIX = "extension:"
 _MAX_EXTENSION_EVENT_BYTES = 256 * 1024
+# Defense in depth only. The authoritative per-field caps live in the
+# background_work registry's mutation funnel, which is the one chokepoint
+# every producer routes through; this boundary never sees an item that was
+# reported but not broadcast globally.
+_MAX_BACKGROUND_WORK_EVENT_BYTES = 16 * 1024
 
 
 def validate_global_event(event_type: str, data: dict) -> dict:
@@ -106,6 +112,8 @@ def validate_global_event(event_type: str, data: dict) -> dict:
     snapshot = json.loads(serialized)
     if event_type == "extension_event":
         _validate_extension_event(snapshot)
+    elif event_type == "background_work_changed":
+        _validate_background_work_event(serialized)
     return snapshot
 
 
@@ -152,6 +160,11 @@ def canonicalize_extension_session_event(
             if data.get("extension_id") == extension_id:
                 return event_type, data
     return extension_event(extension_id, event_type, data)
+
+
+def _validate_background_work_event(serialized: str) -> None:
+    if len(serialized.encode("utf-8")) > _MAX_BACKGROUND_WORK_EVENT_BYTES:
+        raise ValueError("background_work_changed payload is too large")
 
 
 def _validate_extension_event(payload: dict) -> None:

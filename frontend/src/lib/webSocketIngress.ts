@@ -186,6 +186,43 @@ function startupTaskChangedPayload(data: Record<string, unknown>): boolean {
     && isNullableString(task.error);
 }
 
+const BACKGROUND_WORK_STATUSES = new Set([
+  "pending", "running", "succeeded", "failed", "cancelled", "unknown",
+]);
+
+function backgroundWorkProgressValid(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const total = value.total;
+  return typeof value.completed === "number"
+    && (total === null || typeof total === "number")
+    && typeof value.unit === "string";
+}
+
+function backgroundWorkChangedPayload(data: Record<string, unknown>): boolean {
+  if (!hasString(data, "epoch")) return false;
+  if (data.cleared === true) return true;
+  if (typeof data.removed_id === "string") return typeof data.seq === "number";
+  const item = data.item;
+  return isRecord(item)
+    && hasString(item, "id")
+    && hasString(item, "owner_kind")
+    && hasString(item, "owner_id")
+    && hasString(item, "label")
+    && typeof item.status === "string"
+    && BACKGROUND_WORK_STATUSES.has(item.status)
+    && typeof item.seq === "number"
+    && hasString(item, "started_at")
+    && hasString(item, "updated_at")
+    && isNullableString(item.detail)
+    && isNullableString(item.phase)
+    && isNullableString(item.error)
+    && isNullableString(item.finished_at)
+    && isNullableString(item.session_id)
+    && backgroundWorkProgressValid(item.progress)
+    && Array.isArray(item.actions);
+}
+
 const SESSION_STATUS_KEY_SET = new Set<string>(SESSION_STATUS_KEYS);
 
 function projectAggregateRecord(value: unknown): boolean {
@@ -492,6 +529,7 @@ export const knownCoreEventValidators: Readonly<
   provider_install_finished: providerInstallFinishedPayload,
   models_catalog_changed: (data) => hasString(data, "provider_id"),
   startup_task_changed: startupTaskChangedPayload,
+  background_work_changed: backgroundWorkChangedPayload,
   schedules_updated: (data) =>
     hasString(data, "app_session_id") && hasArray(data, "schedules"),
   schedules_changed: noFieldPayload,
