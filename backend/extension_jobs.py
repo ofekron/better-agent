@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import threading
@@ -367,6 +368,31 @@ def persist_running(owner: str, operation: str, job_id: str, **fields: Any) -> d
         record["updated_at"] = time.time()
         _write_record(owner, operation, job_id, record)
     return response_from_record(record)
+
+
+def persist_projection(
+    owner: str,
+    operation: str,
+    job_id: str,
+    projection: str,
+    reducer: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    if not projection or projection in _RESERVED_RECORD_KEYS:
+        raise ValueError("extension job projection key is invalid")
+    with _RECORD_LOCK:
+        record = read_record_strict(owner, operation, job_id)
+        if record is None:
+            raise KeyError(f"unknown extension job: {job_id}")
+        current = record.get(projection)
+        if current is not None and not isinstance(current, dict):
+            raise TypeError(f"extension job projection is not an object: {projection}")
+        updated = reducer(copy.deepcopy(current) if isinstance(current, dict) else {})
+        if not isinstance(updated, dict):
+            raise TypeError("extension job projection reducer must return an object")
+        record[projection] = updated
+        record["updated_at"] = time.time()
+        _write_record(owner, operation, job_id, record)
+    return copy.deepcopy(updated)
 
 
 def persist_owner_receipt(

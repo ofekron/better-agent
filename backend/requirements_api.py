@@ -24,6 +24,7 @@ from fastapi import APIRouter, Header, HTTPException
 import extension_jobs
 import extension_store
 import perf
+import requirements_run_metrics
 from internal_guards import require_builtin_runtime_extension, require_internal
 from requirements_query_runner import (
     PROCESSOR_RESULT_TIMEOUT_SECONDS,
@@ -41,6 +42,7 @@ router = APIRouter(tags=["requirements"])
 
 _PROCESSOR_MILESTONE_MESSAGES = {
     "processor_started": "Requirements processor worker started",
+    "processor_attempt_started": "Requirements processor attempt started",
     "provisioning_started": "Resolving requirements processor runtime",
     "configuration_resolved": "Requirements processor runtime resolved",
     "lifecycle_started": "Preparing requirements processor session",
@@ -88,6 +90,7 @@ _PROCESSOR_MILESTONE_FIELDS = frozenset({
     "worker_pid",
     "worker_agent_session_id",
     "native_session_id",
+    "attempt",
 })
 
 
@@ -245,19 +248,26 @@ async def _run_processed_requirements_payload(
         "finalizing",
         "Finalizing processed requirements",
     )
-    return await run_requirements_query(
+    response, output_report = await run_requirements_query(
         "requirements.processed.finalize",
-        requirement_context.build_processed_requirements_response,
+        requirement_context.build_processed_requirements_response_with_report,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         **payload,
         processed=processed,
     )
+    await asyncio.to_thread(
+        requirements_run_metrics.record_output,
+        request_id,
+        output_report,
+    )
+    return response
 
 
 async def _mark_requirements_job_phase(request_id: str, phase: str, message: str) -> None:
     if not request_id:
         return
     try:
+        queue_fields = _requirements_processor_queue_fields()
         await asyncio.to_thread(
             extension_jobs.persist_phase,
             "requirements",
@@ -265,7 +275,13 @@ async def _mark_requirements_job_phase(request_id: str, phase: str, message: str
             request_id,
             phase,
             message,
-            **_requirements_processor_queue_fields(),
+            **queue_fields,
+        )
+        await asyncio.to_thread(
+            requirements_run_metrics.record_milestone,
+            request_id,
+            phase,
+            queue_fields,
         )
     except (OSError, TypeError, ValueError):
         logger.warning(
@@ -307,6 +323,11 @@ def _persist_requirements_processor_milestone(
             message,
             **safe_fields,
             **_requirements_processor_queue_fields(),
+        )
+        requirements_run_metrics.record_milestone(
+            request_id,
+            milestone,
+            safe_fields,
         )
     except (OSError, TypeError, ValueError):
         logger.warning(
@@ -369,12 +390,17 @@ async def _recover_requirements_async_result(
         "finalizing",
         "Finalizing processed requirements",
     )
-    result = await run_requirements_query(
+    result, output_report = await run_requirements_query(
         "requirements.processed.recover_finalize",
-        requirement_context.build_processed_requirements_response,
+        requirement_context.build_processed_requirements_response_with_report,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         **payload,
         processed=recovered,
+    )
+    await asyncio.to_thread(
+        requirements_run_metrics.record_output,
+        request_id,
+        output_report,
     )
     return await asyncio.to_thread(
         extension_jobs.persist_complete,
@@ -456,6 +482,7 @@ async def fire_processed_requirements_for_caller(
         "delegation_id": delegation_id,
         "phase": "created",
         "message": "Requirements job created",
+        "requirements_metrics": requirements_run_metrics.new_metrics(),
         **_requirements_processor_queue_fields(),
     }
     if idempotency_key:

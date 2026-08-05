@@ -602,6 +602,7 @@ def test_processor_forwards_milestone_callback_to_provisioning() -> None:
     assert processed.get("error") is None
     assert [name for name, _fields in observed] == [
         "processor_started",
+        "processor_attempt_started",
         "provisioning_started",
     ]
 

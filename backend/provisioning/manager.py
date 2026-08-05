@@ -43,6 +43,7 @@ class ProvisionedResult:
     base_session_id: str
     caller_session_id: str
     dispatch_result: dict
+    timings_ms: dict[str, float]
 
 
 async def ensure_warm_base(
@@ -218,6 +219,7 @@ async def run(
         base_session_id=base_session_id,
         caller_session_id=caller_session_id,
         dispatch_result=result,
+        timings_ms=timings_ms,
     )
 
 

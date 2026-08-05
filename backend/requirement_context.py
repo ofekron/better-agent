@@ -24,6 +24,7 @@ import extension_jobs
 import provisioning
 import extension_package_loader
 import extension_store
+import requirements_run_metrics
 import transcript_text_collapse
 from provisioning.progress import MilestoneCallback, emit_milestone
 from requirements_vector_contract import validate_unit_vector_bounds
@@ -457,35 +458,75 @@ def dedupe_processor_requirements(
 
 
 def dedupe_processor_output_text(text: str) -> str:
+    return analyze_processor_output(text)[0]
+
+
+def analyze_processor_output(text: str) -> tuple[str, dict[str, Any]]:
+    report: dict[str, Any] = {
+        "raw_count": None,
+        "final_count": None,
+        "dedup_removed": None,
+        "schema_valid": False,
+        "provenance_valid": None,
+        "identified_evidence_count": None,
+        "unit_evidence_count": None,
+        "transcript_evidence_count": None,
+    }
     stripped = (text or "").strip()
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
-        return text
+        return text, report
     if not isinstance(payload, dict) or not isinstance(payload.get("requirements"), list):
-        return text
+        return text, report
     requirements = payload["requirements"]
-    if not all(isinstance(row, dict) for row in requirements):
-        return text
-    if any(
-        not isinstance(row.get("text"), str)
-        or not isinstance(row.get("evidence"), dict)
-        or _processor_evidence_identity(row["evidence"]) is None
-        or any(
-            not isinstance(row.get(field), str)
-            for field in ("kind", "origin", "polarity")
-        )
-        for row in requirements
-    ):
-        return text
+    report["raw_count"] = len(requirements)
+    rows = [row for row in requirements if isinstance(row, dict)]
+    evidence_identities = [
+        _processor_evidence_identity(row["evidence"])
+        for row in rows
+        if isinstance(row.get("evidence"), dict)
+    ]
+    identified = [identity for identity in evidence_identities if identity is not None]
+    report.update(
+        identified_evidence_count=len(identified),
+        unit_evidence_count=sum(identity[0] == "unit" for identity in identified),
+        transcript_evidence_count=sum(identity[0] == "transcript" for identity in identified),
+        provenance_valid=len(rows) == len(requirements) and len(identified) == len(requirements),
+    )
+    schema_valid = len(rows) == len(requirements) and all(
+        isinstance(row.get("text"), str)
+        and bool(row["text"].strip())
+        and row.get("kind") in {"explicit", "confirmed", "refined", "rejected", "bug_report"}
+        and row.get("origin") in {
+            "user_prompt",
+            "user_confirmed_assistant_proposal",
+            "user_refined_assistant_proposal",
+            "user_rejection",
+            "user_bug_report",
+        }
+        and row.get("polarity") in {"positive", "negative", ""}
+        and row.get("strength") in {"high", "medium"}
+        and isinstance(row.get("source"), str)
+        and isinstance(row.get("cwd"), str)
+        and isinstance(row.get("evidence"), dict)
+        for row in rows
+    )
+    report["schema_valid"] = schema_valid
+    if not schema_valid or report["provenance_valid"] is not True:
+        report["final_count"] = len(requirements)
+        report["dedup_removed"] = 0
+        return text, report
     deduped = dedupe_processor_requirements(requirements)
+    report["final_count"] = len(deduped)
+    report["dedup_removed"] = len(requirements) - len(deduped)
     if len(deduped) == len(requirements):
-        return text
+        return text, report
     return json.dumps(
         {**payload, "requirements": deduped},
         ensure_ascii=False,
         separators=(",", ":"),
-    )
+    ), report
 
 
 def persist_processor_findings(text: str) -> dict[str, Any]:
@@ -524,11 +565,28 @@ def build_processed_requirements_response(
     all_projects: bool = False,
     processed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    return build_processed_requirements_response_with_report(
+        query=query,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        processed=processed,
+    )[0]
+
+
+def build_processed_requirements_response_with_report(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    processed: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     processed = processed or {"text": "", "error": "processor_failed"}
     text = processed.get("text") if isinstance(processed, dict) else ""
     if not isinstance(text, str):
         text = ""
-    text = dedupe_processor_output_text(text)
+    text, report = analyze_processor_output(text)
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
     response = {
         "success": not bool(error),
@@ -536,7 +594,7 @@ def build_processed_requirements_response(
     }
     if error:
         response["error"] = error
-    return response
+    return response, report
 
 
 def processor_failure_result(exc: Exception) -> dict[str, Any]:
@@ -580,9 +638,19 @@ def _run_requirements_processor(
         else {}
     )
     for _attempt in range(PROCESSOR_ATTEMPTS):
+        emit_milestone(
+            milestone_callback,
+            "processor_attempt_started",
+            {"attempt": _attempt + 1},
+        )
         try:
             result = asyncio.run(provisioning.run(spec, query, ctx, **run_kwargs))
         except Exception as exc:
+            requirements_run_metrics.record_processor_attempt(
+                debug_request_id,
+                _attempt + 1,
+                error=type(exc).__name__,
+            )
             recovered = recover_processed_requirements_from_delegation(
                 request_id=debug_request_id,
                 payload={
@@ -602,6 +670,11 @@ def _run_requirements_processor(
                     type(exc).__name__,
                 )
             return processor_failure_result(exc)
+        requirements_run_metrics.record_processor_attempt(
+            debug_request_id,
+            _attempt + 1,
+            result=result,
+        )
         text = str(getattr(result, "text", "") or "")
         if debug_request_id:
             logger.info(
