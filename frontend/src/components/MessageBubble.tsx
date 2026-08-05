@@ -160,11 +160,11 @@ function AssistantRunMeta({
   );
 }
 
-function workerPanelComplete(worker: WorkerPanel): boolean {
+export function workerPanelComplete(worker: WorkerPanel): boolean {
   return worker.success !== undefined || worker.error != null;
 }
 
-function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
+export function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
   if (isCreationPanelKind(worker.panel_kind)) return false;
   return activeWorkerIds.has(worker.delegation_id) && !workerPanelComplete(worker);
 }
@@ -193,7 +193,7 @@ export function isEffectivelyEmpty(text: string): boolean {
   return stripped.length === 0;
 }
 
-function previewEventsForMessage(message: ChatMessage | undefined, mode?: OrchestrationMode): WSEvent[] {
+export function previewEventsForMessage(message: ChatMessage | undefined, mode?: OrchestrationMode): WSEvent[] {
   if (!message) return [];
   const stubEvents = message.stub?.last_events;
   const liveEvents = getStrategy(mode).getEvents(message);
@@ -251,7 +251,7 @@ function TeamMessageFrom({ message }: { message: ChatMessage }) {
   );
 }
 
-function normalizeAssistantContentText(text: string): string {
+export function normalizeAssistantContentText(text: string): string {
   return cleanOutput(text)
     .replace(/\r\n?/g, "\n")
     .split("\n")
@@ -261,7 +261,7 @@ function normalizeAssistantContentText(text: string): string {
     .trim();
 }
 
-function visibleAssistantOutputTexts(events: WSEvent[]): string[] {
+export function visibleAssistantOutputTexts(events: WSEvent[]): string[] {
   const { flat } = flattenClaudeMessages(events);
   const texts: string[] = [];
   for (const event of flat) {
@@ -275,7 +275,7 @@ function visibleAssistantOutputTexts(events: WSEvent[]): string[] {
   return texts;
 }
 
-function visibleEventsRepresentAssistantContent(events: WSEvent[], content: string): boolean {
+export function visibleEventsRepresentAssistantContent(events: WSEvent[], content: string): boolean {
   const normalizedContent = normalizeAssistantContentText(content);
   if (!normalizedContent) return false;
   const normalizedOutputs = visibleAssistantOutputTexts(events)
@@ -1934,7 +1934,7 @@ function routeLeakedWorkerEvents(message: ChatMessage): ChatMessage {
 }
 
 /** Build a short summary from manager events for the collapsed view */
-function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, contentFallback?: string): string {
+export function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, contentFallback?: string): string {
   // Flatten agent_message events to legacy shape so the tool_call /
   // output / thinking counts and previews work on both pre- and
   // post-refactor persisted sessions.
@@ -2392,7 +2392,7 @@ function renderManagerStreamLegacy(
  */
 type LazyFetchedMessage = { key: string; message: ChatMessage };
 
-function messageWithHydratedRenderPayload(
+export function messageWithHydratedRenderPayload(
   current: ChatMessage,
   hydrated: ChatMessage,
 ): ChatMessage {

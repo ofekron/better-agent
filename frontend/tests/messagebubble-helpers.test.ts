@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTurnSummary,
   classifyOutput,
   cleanOutput,
   containsMarkdownSyntax,
@@ -12,15 +13,36 @@ import {
   hexAlphaToRgba,
   isEffectivelyEmpty,
   isToolResult,
+  messageWithHydratedRenderPayload,
+  normalizeAssistantContentText,
   parseErrorMessage,
   parseStyleAttrs,
   partitionEventsByParent,
+  previewEventsForMessage,
   tryParseJson,
+  visibleAssistantOutputTexts,
+  visibleEventsRepresentAssistantContent,
+  workerPanelComplete,
+  workerPanelDefaultOpen,
 } from "../src/components/MessageBubble";
-import type { WSEvent } from "../src/types";
+import type { ChatMessage, WSEvent, WorkerPanel } from "../src/types";
 
 const ev = (type: string, data: Record<string, unknown>): WSEvent =>
   ({ type, data } as unknown as WSEvent);
+
+const worker = (over: Partial<WorkerPanel> = {}): WorkerPanel =>
+  ({
+    delegation_id: "d1",
+    worker_session_id: "ws1",
+    worker_description: "desc",
+    is_new: false,
+    instructions_preview: "",
+    events: [],
+    ...over,
+  }) as WorkerPanel;
+
+const msg = (over: Partial<ChatMessage> = {}): ChatMessage =>
+  ({ ...over } as unknown as ChatMessage);
 
 describe("isEffectivelyEmpty", () => {
   it("treats empty and pure-whitespace strings as empty", () => {
@@ -342,5 +364,213 @@ describe("partitionEventsByParent", () => {
     const { topLevel, children } = partitionEventsByParent([tool, c1, c2]);
     expect(topLevel).toEqual([tool]);
     expect(children.get("p")).toEqual([c1, c2]);
+  });
+});
+
+describe("workerPanelComplete", () => {
+  it("is complete when success is explicitly true or false", () => {
+    expect(workerPanelComplete(worker({ success: true }))).toBe(true);
+    expect(workerPanelComplete(worker({ success: false }))).toBe(true);
+  });
+
+  it("is complete when an error string is present", () => {
+    expect(workerPanelComplete(worker({ error: "boom" }))).toBe(true);
+  });
+
+  it("is not complete when error is null and success is unset", () => {
+    expect(workerPanelComplete(worker({ error: null }))).toBe(false);
+    expect(workerPanelComplete(worker({}))).toBe(false);
+  });
+});
+
+describe("workerPanelDefaultOpen", () => {
+  const active = new Set(["d1"]);
+
+  it("never auto-opens a creation-kind panel, even when active", () => {
+    expect(
+      workerPanelDefaultOpen(worker({ delegation_id: "d1", panel_kind: "session_created" }), active),
+    ).toBe(false);
+    expect(
+      workerPanelDefaultOpen(worker({ delegation_id: "d1", panel_kind: "sub_session_created" }), active),
+    ).toBe(false);
+  });
+
+  it("opens only when the worker is active and not yet complete", () => {
+    expect(workerPanelDefaultOpen(worker({ delegation_id: "d1" }), active)).toBe(true);
+  });
+
+  it("stays closed when complete even if active", () => {
+    expect(workerPanelDefaultOpen(worker({ delegation_id: "d1", success: true }), active)).toBe(false);
+  });
+
+  it("stays closed when not in the active set", () => {
+    expect(workerPanelDefaultOpen(worker({ delegation_id: "d2" }), active)).toBe(false);
+  });
+});
+
+describe("normalizeAssistantContentText", () => {
+  it("trims each line, drops empties, and collapses CRLF", () => {
+    expect(normalizeAssistantContentText("  hello  \r\n  world  ")).toBe("hello\nworld");
+  });
+
+  it("strips the speech-bubble prefix via cleanOutput before normalizing", () => {
+    expect(normalizeAssistantContentText("\u{1F4AC} hi there")).toBe("hi there");
+  });
+
+  it("returns empty string for whitespace-only input", () => {
+    expect(normalizeAssistantContentText("  \n\t \r\n")).toBe("");
+  });
+});
+
+describe("visibleAssistantOutputTexts", () => {
+  it("collects top-level plain-text outputs", () => {
+    const out = visibleAssistantOutputTexts([
+      ev("output", { output: "first answer line" }),
+      ev("output", { output: "second answer line" }),
+    ]);
+    expect(out).toEqual(["first answer line", "second answer line"]);
+  });
+
+  it("skips outputs nested under a tool_use and non-text / empty outputs", () => {
+    const out = visibleAssistantOutputTexts([
+      ev("output", { parent_tool_use_id: "t1", output: "nested result" }),
+      ev("output", { output: "❌ boom" }),
+      ev("output", { output: "   " }),
+      ev("output", { output: "real prose answer" }),
+    ]);
+    expect(out).toEqual(["real prose answer"]);
+  });
+});
+
+describe("visibleEventsRepresentAssistantContent", () => {
+  it("is true when a single visible output equals the content", () => {
+    const events = [ev("output", { output: "the answer is here" })];
+    expect(visibleEventsRepresentAssistantContent(events, "the answer is here")).toBe(true);
+  });
+
+  it("is true when the joined outputs equal the content", () => {
+    const events = [
+      ev("output", { output: "part one" }),
+      ev("output", { output: "part two" }),
+    ];
+    expect(visibleEventsRepresentAssistantContent(events, "part one\npart two")).toBe(true);
+  });
+
+  it("is false for empty content", () => {
+    expect(visibleEventsRepresentAssistantContent([ev("output", { output: "x" })], "")).toBe(false);
+  });
+
+  it("is false when content does not match the outputs", () => {
+    const events = [ev("output", { output: "something else entirely" })];
+    expect(visibleEventsRepresentAssistantContent(events, "totally different content")).toBe(false);
+  });
+});
+
+describe("buildTurnSummary", () => {
+  it("returns 'No output' when there is nothing to summarize and no fallback", () => {
+    expect(buildTurnSummary([], 0)).toBe("No output");
+  });
+
+  it("returns 'Response' when only a short fallback is present", () => {
+    expect(buildTurnSummary([], 0, "short")).toBe("Response");
+  });
+
+  it("uses a long fallback (>10 chars) when there are no events", () => {
+    expect(buildTurnSummary([], 0, "a meaningful fallback")).toBe("a meaningful fallback");
+  });
+
+  it("counts workers and tool calls", () => {
+    const tool = ev("tool_call", { tool_use_id: "t1", name: "Bash" });
+    expect(buildTurnSummary([tool], 2)).toBe("2 workers — 1 tool call");
+    expect(buildTurnSummary([tool], 0)).toBe("1 tool call");
+  });
+
+  it("appends the last long-enough text output, skipping short and non-text", () => {
+    const events = [
+      ev("output", { output: "tiny" }),
+      ev("output", { output: "❌ error shown here" }),
+      ev("output", { output: "The final real answer text" }),
+    ];
+    expect(buildTurnSummary(events, 0)).toBe("The final real answer text");
+  });
+});
+
+describe("messageWithHydratedRenderPayload", () => {
+  it("merges events from hydrated and current without losing either", () => {
+    const a = ev("output", { output: "from hydrated" });
+    const b = ev("output", { output: "from current" });
+    const next = messageWithHydratedRenderPayload(
+      msg({ events: [b] }),
+      msg({ events: [a] }),
+    );
+    expect(next.events).toHaveLength(2);
+    expect(next.events.map((e) => (e.data as { output: string }).output).sort()).toEqual([
+      "from current",
+      "from hydrated",
+    ]);
+  });
+
+  it("overrides current worker fields with hydrated ones, merging events", () => {
+    const curEvt = ev("output", { output: "current worker event" });
+    const hydEvt = ev("output", { output: "hydrated worker event" });
+    const next = messageWithHydratedRenderPayload(
+      msg({
+        workers: [worker({ delegation_id: "d1", events: [curEvt], worker_description: "old" })],
+      }),
+      msg({
+        workers: [worker({ delegation_id: "d1", events: [hydEvt], success: true })],
+      }),
+    );
+    expect(next.workers).toHaveLength(1);
+    const w = next.workers![0];
+    expect(w.success).toBe(true);
+    expect(w.worker_description).toBe("desc");
+    expect(w.events).toHaveLength(2);
+  });
+
+  it("keeps current-only workers and appends hydrated-only workers", () => {
+    const next = messageWithHydratedRenderPayload(
+      msg({ workers: [worker({ delegation_id: "d1" })] }),
+      msg({ workers: [worker({ delegation_id: "d2" })] }),
+    );
+    const ids = next.workers!.map((w) => w.delegation_id).sort();
+    expect(ids).toEqual(["d1", "d2"]);
+  });
+
+  it("leaves workers undefined when neither side has any", () => {
+    const next = messageWithHydratedRenderPayload(msg({ events: [] }), msg({ events: [] }));
+    expect(next.workers).toBeUndefined();
+  });
+});
+
+describe("previewEventsForMessage", () => {
+  it("returns [] for no message", () => {
+    expect(previewEventsForMessage(undefined)).toEqual([]);
+  });
+
+  it("returns live events when there is no stub snapshot", () => {
+    const live = ev("output", { output: "live text" });
+    expect(previewEventsForMessage(msg({ events: [live] }))).toEqual([live]);
+  });
+
+  it("returns the stub snapshot when there are no live events", () => {
+    const stubEvt = ev("output", { output: "stub text" });
+    const out = previewEventsForMessage(
+      msg({ events: [], stub: { event_count: 1, last_events: [stubEvt] } }),
+    );
+    expect(out).toEqual([stubEvt]);
+  });
+
+  it("merges stub and live events so a late live append is not lost", () => {
+    const stubEvt = ev("output", { output: "stub text" });
+    const liveEvt = ev("output", { output: "late live text" });
+    const out = previewEventsForMessage(
+      msg({ events: [liveEvt], stub: { event_count: 1, last_events: [stubEvt] } }),
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((e) => (e.data as { output: string }).output).sort()).toEqual([
+      "late live text",
+      "stub text",
+    ]);
   });
 });
