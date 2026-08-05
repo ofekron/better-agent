@@ -23,6 +23,7 @@ _BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND))
 
 import runner_better_agent  # noqa: E402
+import installation_profile  # noqa: E402
 
 
 def _sse_lines(*, content: str) -> bytes:
@@ -212,7 +213,10 @@ def _make_run_dir(parent: Path, inputs: dict) -> Path:
     return rd
 
 
-def _run_turn(stub_port: str, tmp: Path, app_sid: str, resume_sid, prompt: str, **overrides):
+def _base_inputs(tmp: Path, app_sid: str, prompt: str, **overrides) -> dict:
+    """Canonical runner inputs. `_capability_plan` is the frozen no-MCP plan
+    `runner_better_agent._run` now requires; every run goes through here so it
+    has exactly one home."""
     inputs = {
         "prompt": prompt,
         "images": [], "files": [],
@@ -220,12 +224,18 @@ def _run_turn(stub_port: str, tmp: Path, app_sid: str, resume_sid, prompt: str, 
         "model": "stub-model",
         "reasoning_effort": None,
         "permission": {"default": "bypass"},  # CLI vocab {axis: mode}
-        "session_id": resume_sid,
+        "session_id": None,
         "mode": "native",
         "app_session_id": app_sid,
         "backend_url": "", "internal_token": "",
+        "_capability_plan": {"mcp_servers": []},
     }
     inputs.update(overrides)
+    return inputs
+
+
+def _run_turn(tmp: Path, app_sid: str, resume_sid, prompt: str, **overrides):
+    inputs = _base_inputs(tmp, app_sid, prompt, session_id=resume_sid, **overrides)
     rd = _make_run_dir(tmp, inputs)
     rc = asyncio.run(runner_better_agent._run(rd, inputs))
     assert rc == 0, f"runner exited {rc}"
@@ -245,10 +255,10 @@ def test_better_agent_runner_resumes_history_across_turns(monkeypatch):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_cwd_"))
 
-        sid1 = _run_turn(None, tmp, "sid-app-1", None, "Q1-prompt")
+        sid1 = _run_turn(tmp, "sid-app-1", None, "Q1-prompt")
         assert sid1, "turn 1 produced no session_id"
 
-        sid2 = _run_turn(None, tmp, "sid-app-1", sid1, "Q2-prompt")
+        sid2 = _run_turn(tmp, "sid-app-1", sid1, "Q2-prompt")
         assert sid2 == sid1, f"session_id changed across turns: {sid1} -> {sid2}"
 
         with stub.lock:
@@ -284,13 +294,7 @@ def test_run_populates_token_usage_duration_ms(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_dur_cwd_"))
-        inputs = {
-            "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"default": "bypass"}, "session_id": None,
-            "mode": "native", "app_session_id": "dur-app-1",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(tmp, "dur-app-1", "Q")
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0, f"runner exited {rc}"
@@ -338,12 +342,12 @@ def test_fork_copies_history_to_isolated_child(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_fork_"))
-        parent_sid = _run_turn(None, tmp, "sid-app-f", None, "parent-Q")
+        parent_sid = _run_turn(tmp, "sid-app-f", None, "parent-Q")
         child_sid = _run_turn(
-            None, tmp, "sid-app-f", parent_sid, "child-Q", fork=True,
+            tmp, "sid-app-f", parent_sid, "child-Q", fork=True,
         )
         assert child_sid and child_sid != parent_sid
-        _run_turn(None, tmp, "sid-app-f", parent_sid, "parent-Q2")
+        _run_turn(tmp, "sid-app-f", parent_sid, "parent-Q2")
         parent_history = json.loads(
             runner_better_agent._session_path(parent_sid).read_text())["messages"]
         child_history = json.loads(
@@ -367,7 +371,7 @@ def test_images_files_and_reasoning_are_sent(monkeypatch):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_mm_"))
         _run_turn(
-            None, tmp, "sid-app-mm", None, "describe",
+            tmp, "sid-app-mm", None, "describe",
             files=[{
                 "name": "a.txt",
                 "media_type": "text/plain",
@@ -376,7 +380,6 @@ def test_images_files_and_reasoning_are_sent(monkeypatch):
             }],
             images=[{"media_type": "image/png", "data": img_payload}],
             reasoning_effort="medium",
-            _capability_plan={"mcp_servers": []},
         )
         with stub.lock:
             payload = stub.payloads[0]
@@ -422,14 +425,10 @@ def test_steer_payload_drained_before_next_round(monkeypatch):
     monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", steering_bash)
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_steer_"))
-        inputs = {
-            "prompt": "use tool", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": None,
-            "mode": "native", "app_session_id": "sid-app-steer",
-            "backend_url": "", "internal_token": "",
-            "_capability_plan": {"mcp_servers": []},
-        }
+        inputs = _base_inputs(
+            tmp, "sid-app-steer", "use tool",
+            permission={"mode": "bypassPermissions"},
+        )
         rd = _make_run_dir(tmp, inputs)
         monkeypatch.setenv("OPENAI_TEST_RUN_DIR", str(rd))
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
@@ -451,13 +450,7 @@ def test_zai_incremental_deltas_concatenated_verbatim(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
     tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_incremental_"))
-    inputs = {
-        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-        "model": "stub-model", "reasoning_effort": None,
-        "permission": {"default": "bypass"}, "session_id": None,
-        "mode": "native", "app_session_id": "zai-incremental-app",
-        "backend_url": "", "internal_token": "",
-    }
+    inputs = _base_inputs(tmp, "zai-incremental-app", "Q")
     rd = _make_run_dir(tmp, inputs)
 
     async def fake_stream(*_args, **_kwargs):
@@ -489,13 +482,7 @@ def test_zai_normal_deltas_still_concatenate(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
     tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_delta_"))
-    inputs = {
-        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-        "model": "stub-model", "reasoning_effort": None,
-        "permission": {"default": "bypass"}, "session_id": None,
-        "mode": "native", "app_session_id": "zai-delta-app",
-        "backend_url": "", "internal_token": "",
-    }
+    inputs = _base_inputs(tmp, "zai-delta-app", "Q")
     rd = _make_run_dir(tmp, inputs)
 
     async def fake_stream(*_args, **_kwargs):
@@ -547,13 +534,7 @@ def test_zai_incremental_tool_args_concatenated_verbatim(monkeypatch):
     monkeypatch.setattr(runner_better_agent, "_stream_chat", fake_stream)
     monkeypatch.setitem(runner_better_agent.TOOL_HANDLERS, "Bash", fake_bash)
     tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_tool_args_"))
-    inputs = {
-        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-        "model": "stub-model", "reasoning_effort": None,
-        "permission": {"default": "bypass"}, "session_id": None,
-        "mode": "native", "app_session_id": "zai-tool-args-app",
-        "backend_url": "", "internal_token": "",
-    }
+    inputs = _base_inputs(tmp, "zai-tool-args-app", "Q")
     rd = _make_run_dir(tmp, inputs)
     rc = asyncio.run(runner_better_agent._run(rd, inputs))
 
@@ -568,13 +549,7 @@ def test_non_zai_prefix_looking_deltas_are_not_rewritten(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_prefix_delta_"))
-        inputs = {
-            "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"default": "bypass"}, "session_id": None,
-            "mode": "native", "app_session_id": "prefix-delta-app",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(tmp, "prefix-delta-app", "Q")
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0, f"runner exited {rc}"
@@ -594,13 +569,7 @@ def test_zai_non_coding_prefix_looking_deltas_are_not_rewritten(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.z.ai/api/paas/v4")
     tmp = Path(tempfile.mkdtemp(prefix="openai_resume_zai_non_coding_delta_"))
-    inputs = {
-        "prompt": "Q", "images": [], "files": [], "cwd": str(tmp),
-        "model": "stub-model", "reasoning_effort": None,
-        "permission": {"default": "bypass"}, "session_id": None,
-        "mode": "native", "app_session_id": "zai-non-coding-delta-app",
-        "backend_url": "", "internal_token": "",
-    }
+    inputs = _base_inputs(tmp, "zai-non-coding-delta-app", "Q")
     rd = _make_run_dir(tmp, inputs)
 
     async def fake_stream(*_args, **_kwargs):
@@ -636,7 +605,7 @@ def test_reasoning_only_round_is_not_persisted_as_null(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_reason_"))
-        sid1 = _run_turn(None, tmp, "sid-app-r", None, "Q-reason")
+        sid1 = _run_turn(tmp, "sid-app-r", None, "Q-reason")
 
         # inspect the persisted better_agent_sessions history directly
         hist_path = runner_better_agent._session_path(sid1)
@@ -646,7 +615,7 @@ def test_reasoning_only_round_is_not_persisted_as_null(monkeypatch):
         )
 
         # and the same invariant holds in what turn 2 actually POSTs
-        _run_turn(None, tmp, "sid-app-r", sid1, "Q-reason-2")
+        _run_turn(tmp, "sid-app-r", sid1, "Q-reason-2")
         with stub.lock:
             posted = stub.requests[-1]
     finally:
@@ -674,13 +643,10 @@ def test_cancel_after_partial_stream_is_failure(monkeypatch):
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_cancel_"))
-        inputs = {
-            "prompt": "cancel-me", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": None,
-            "mode": "native", "app_session_id": "sid-app-c",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(
+            tmp, "sid-app-c", "cancel-me",
+            permission={"mode": "bypassPermissions"},
+        )
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
@@ -708,7 +674,7 @@ def test_tool_call_then_text_preserves_both(monkeypatch):
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_tool_"))
-        sid1 = _run_turn(None, tmp, "sid-app-t", None, "use-a-tool")
+        sid1 = _run_turn(tmp, "sid-app-t", None, "use-a-tool")
         history = json.loads(
             runner_better_agent._session_path(sid1).read_text())["messages"]
     finally:
@@ -831,13 +797,10 @@ def test_inflight_turn_persists_context_before_completion(monkeypatch):
         # Pre-seed empty history so _load_history_for_run resumes a known sid,
         # keeping the on-disk path deterministic for the mid-run snapshot.
         runner_better_agent._save_history(sid_preset, [])
-        inputs = {
-            "prompt": "important-task", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-inflight",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(
+            tmp, "sid-app-inflight", "important-task",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+        )
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0
@@ -902,13 +865,10 @@ def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_resume_mid_"))
         # ---- turn 1: dies mid-flight (cancelled) ----
-        inputs1 = {
-            "prompt": "important-task", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-resume-mid",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs1 = _base_inputs(
+            tmp, "sid-app-resume-mid", "important-task",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+        )
         rd1 = tmp / "run_turn1"
         rd1.mkdir(parents=True, exist_ok=True)
         (rd1 / "input.json").write_text(json.dumps(inputs1), encoding="utf-8")
@@ -927,13 +887,10 @@ def test_second_run_resumes_mid_flight_history_and_proceeds(monkeypatch):
         assert _no_dangling_tool_calls(mid_disk), mid_disk
 
         # ---- turn 2: a REAL second _run resumes the same session ----
-        inputs2 = {
-            "prompt": "follow-up", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-resume-mid",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs2 = _base_inputs(
+            tmp, "sid-app-resume-mid", "follow-up",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+        )
         rd2 = tmp / "run_turn2"
         rd2.mkdir(parents=True, exist_ok=True)
         (rd2 / "input.json").write_text(json.dumps(inputs2), encoding="utf-8")
@@ -968,6 +925,11 @@ def test_capability_context_excluded_from_durable_history(monkeypatch):
     stub.start()
     monkeypatch.setenv("OPENAI_API_KEY", "stub-key")
     monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{stub.port}")
+    # Capability context is delivered only when the installation has the
+    # integrations capability active (see installation_profile.integrations_enabled).
+    # The isolated test home has no profile, so enable it here to exercise the
+    # delivery-then-exclude mechanics this test is about.
+    monkeypatch.setattr(installation_profile, "integrations_enabled", lambda: True)
 
     sid_preset = "capexclsid000000000000000000000a"
     disk_snapshots: list[list[dict]] = []
@@ -988,16 +950,13 @@ def test_capability_context_excluded_from_durable_history(monkeypatch):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cap_excl_"))
         runner_better_agent._save_history(sid_preset, [])
-        inputs = {
-            "prompt": "do-the-thing", "images": [], "files": [], "cwd": str(tmp),
-            "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-cap-excl",
-            "backend_url": "", "internal_token": "",
-            "capability_contexts": [
+        inputs = _base_inputs(
+            tmp, "sid-app-cap-excl", "do-the-thing",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+            capability_contexts=[
                 {"name": "TestCap", "category": "capability", "content": secret},
             ],
-        }
+        )
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         assert rc == 0
@@ -1050,13 +1009,10 @@ def test_cancel_path_persists_balanced_context(monkeypatch):
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_cancel_persist_"))
-        inputs = {
-            "prompt": "cancel-but-keep-context", "images": [], "files": [],
-            "cwd": str(tmp), "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-cancel-persist",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(
+            tmp, "sid-app-cancel-persist", "cancel-but-keep-context",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+        )
         rd = _make_run_dir(tmp, inputs)
         monkeypatch.setenv("OPENAI_CANCEL_RUN_DIR", str(rd))
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
@@ -1095,13 +1051,10 @@ def test_exception_path_persists_accumulated_context(monkeypatch):
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="openai_exc_persist_"))
-        inputs = {
-            "prompt": "keep-me-on-crash", "images": [], "files": [],
-            "cwd": str(tmp), "model": "stub-model", "reasoning_effort": None,
-            "permission": {"mode": "bypassPermissions"}, "session_id": sid_preset,
-            "mode": "native", "app_session_id": "sid-app-exc-persist",
-            "backend_url": "", "internal_token": "",
-        }
+        inputs = _base_inputs(
+            tmp, "sid-app-exc-persist", "keep-me-on-crash",
+            permission={"mode": "bypassPermissions"}, session_id=sid_preset,
+        )
         rd = _make_run_dir(tmp, inputs)
         rc = asyncio.run(runner_better_agent._run(rd, inputs))
         complete = json.loads((rd / "complete.json").read_text())
