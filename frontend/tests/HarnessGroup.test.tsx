@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 
 // react-i18next: return the key by default, but honor `defaultValue` (so the
 // groupHint arm renders "" for unseeded groups and a real hint for the one
