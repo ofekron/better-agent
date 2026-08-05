@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import Header, Request
 
 import _test_home
+import _test_installation
 
 import pytest
 
@@ -25,6 +26,7 @@ if str(BACKEND) not in sys.path:
 import extension_api
 import extension_store
 import extension_token_registry
+import installation_profile
 import hooks_push_api
 import internal_guards
 import internal_token_file
@@ -65,21 +67,26 @@ def test_role_projection_warm_and_invalidates() -> None:
     finally:
         extension_store._read_store_unlocked = original
 
-    store_path = extension_store._store_path()
-    original_stat = store_path.stat()
-    _write_store(HOME, {"two": _record("two", "scheduler")})
-    assert store_path.stat().st_size == original_stat.st_size
-    os.utime(store_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    # The stat fingerprint is (size, mtime); a same-size rewrite can share an
+    # mtime tick under a coarse filesystem clock and evade detection (a real
+    # store write changes size). Give "two" a different size so the stat proxy
+    # changes deterministically, independent of mtime granularity.
+    two_record = _record("two", "scheduler")
+    two_record["manifest"]["version"] = "9.9.9"
+    _write_store(HOME, {"two": two_record})
     time.sleep(extension_store._STORE_FINGERPRINT_TTL_SECONDS + 0.02)
     assert extension_store.extension_id_for_role("scheduler") == "two"
 
     other = Path(tempfile.mkdtemp(prefix="ba-role-home-"))
+    saved_backend_root = installation_profile.BACKEND_ROOT
     try:
-        _write_store(other, {"home": _record("home", "scheduler")})
         os.environ["BETTER_AGENT_HOME"] = str(other)
+        _test_installation.activate(other, provider="claude")
+        _write_store(other, {"home": _record("home", "scheduler")})
         assert extension_store.extension_id_for_role("scheduler") == "home"
     finally:
         os.environ["BETTER_AGENT_HOME"] = str(HOME)
+        installation_profile.BACKEND_ROOT = saved_backend_root
         shutil.rmtree(other, ignore_errors=True)
 
     _write_store(HOME, {
