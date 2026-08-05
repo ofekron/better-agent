@@ -1813,7 +1813,7 @@ function eventUuid(event: WSEvent): string | undefined {
   return typeof data?.uuid === "string" ? data.uuid : undefined;
 }
 
-function routeLeakedWorkerEvents(message: ChatMessage): ChatMessage {
+export function routeLeakedWorkerEvents(message: ChatMessage): ChatMessage {
   const events = message.events ?? [];
   if (!events.some((e) => e.type === "worker_event" || unwrapTypedAgentMessageEnvelope(e))) return message;
 

@@ -19,6 +19,7 @@ import {
   parseStyleAttrs,
   partitionEventsByParent,
   previewEventsForMessage,
+  routeLeakedWorkerEvents,
   tryParseJson,
   visibleAssistantOutputTexts,
   visibleEventsRepresentAssistantContent,
@@ -572,5 +573,181 @@ describe("previewEventsForMessage", () => {
       "late live text",
       "stub text",
     ]);
+  });
+});
+
+// Envelope constructors matching utils/workerEventEnvelope.ts shapes:
+// type-form  -> { type:"agent_message", data:{ type:"worker_*", data: payload } }
+// message-form -> { type:"agent_message", data:{ type:"event", message:{ type:"worker_*", payload } } }
+const startEnv = (payload: Record<string, unknown>) =>
+  ev("agent_message", { type: "worker_start", data: payload });
+const completeEnv = (payload: Record<string, unknown>) =>
+  ev("agent_message", { type: "worker_complete", data: payload });
+const workerEventEnv = (payload: Record<string, unknown>) =>
+  ev("agent_message", { type: "worker_event", data: payload });
+
+describe("routeLeakedWorkerEvents", () => {
+  it("returns the same message reference when there are no worker events", () => {
+    const plain = ev("output", { output: "hi" });
+    const withEvents = msg({ events: [plain], workers: [] });
+    expect(routeLeakedWorkerEvents(withEvents)).toBe(withEvents);
+    // missing events array entirely
+    const empty = msg({});
+    expect(routeLeakedWorkerEvents(empty)).toBe(empty);
+  });
+
+  it("routes a worker_start envelope into a new panel and strips it from events", () => {
+    const plain = ev("output", { output: "answer" });
+    const start = startEnv({
+      delegation_id: "d1",
+      worker_session_id: "ws1",
+      worker_description: "doing work",
+      panel_kind: "task",
+      is_new: true,
+      instructions_preview: "preview",
+      run_mode: "fork",
+    });
+    const out = routeLeakedWorkerEvents(msg({ events: [plain, start], workers: [] }));
+    expect(out.events).toEqual([plain]);
+    expect(out.workers).toHaveLength(1);
+    expect(out.workers![0]).toMatchObject({
+      delegation_id: "d1",
+      worker_session_id: "ws1",
+      worker_description: "doing work",
+      panel_kind: "task",
+      is_new: true,
+      instructions_preview: "preview",
+      run_mode: "fork",
+      events: [],
+    });
+  });
+
+  it("accepts the message-form envelope (type:event / message.payload)", () => {
+    const start = ev("agent_message", {
+      type: "event",
+      message: { type: "worker_start", payload: { delegation_id: "d2" } },
+    });
+    const out = routeLeakedWorkerEvents(msg({ events: [start] }));
+    expect(out.events).toEqual([]);
+    expect(out.workers!.map((w) => w.delegation_id)).toEqual(["d2"]);
+  });
+
+  it("drops a worker_start that lacks a delegation_id or duplicates an existing one", () => {
+    const noId = startEnv({ worker_description: "nope" });
+    const dup = startEnv({ delegation_id: "d1" });
+    const out = routeLeakedWorkerEvents(
+      msg({ events: [noId, dup], workers: [worker({ delegation_id: "d1" })] }),
+    );
+    expect(out.events).toEqual([]); // both stripped, neither routed
+    expect(out.workers).toHaveLength(1);
+    expect(out.workers![0].delegation_id).toBe("d1");
+  });
+
+  it("updates an existing worker via worker_complete with field fallbacks", () => {
+    const complete = completeEnv({
+      delegation_id: "d1",
+      worker_session_id: "ws-new",
+      jsonl_path: "/p/x.jsonl",
+      token_usage: { input: 5 },
+      success: true,
+      fork_agent_sid: "fork1",
+      run_mode: "fork",
+    });
+    const out = routeLeakedWorkerEvents(
+      msg({
+        events: [complete],
+        workers: [worker({ delegation_id: "d1", worker_session_id: "old", fork_agent_sid: "oldfork", run_mode: "direct" })],
+      }),
+    );
+    expect(out.events).toEqual([]);
+    const w = out.workers![0];
+    expect(w.worker_session_id).toBe("ws-new"); // overridden
+    expect(w.jsonl_path).toBe("/p/x.jsonl");
+    expect(w.success).toBe(true);
+    expect(w.fork_agent_sid).toBe("fork1"); // overridden
+    expect(w.run_mode).toBe("fork"); // overridden
+  });
+
+  it("skips worker_complete without delegation_id or for an unknown delegation_id", () => {
+    const noId = completeEnv({ success: true });
+    const unknown = completeEnv({ delegation_id: "ghost", success: true });
+    const existing = worker({ delegation_id: "d1", success: undefined });
+    const out = routeLeakedWorkerEvents(
+      msg({ events: [noId, unknown], workers: [existing] }),
+    );
+    expect(out.events).toEqual([]); // both stripped
+    expect(out.workers![0].success).toBeUndefined(); // untouched
+  });
+
+  it("appends a generic worker_event payload (no uuid) to the worker's events", () => {
+    const inner = ev("output", { output: "worker said" });
+    const evt = workerEventEnv({ delegation_id: "d1", event: inner });
+    const out = routeLeakedWorkerEvents(
+      msg({ events: [evt], workers: [worker({ delegation_id: "d1", events: [] })] }),
+    );
+    expect(out.events).toEqual([]);
+    expect(out.workers![0].events).toEqual([inner]);
+  });
+
+  it("dedupes generic worker_event payloads by uuid, replacing in place", () => {
+    const oldEvt = ev("output", { uuid: "u1", output: "old" });
+    const newEvt = ev("output", { uuid: "u1", output: "new" });
+    const extra = ev("output", { uuid: "u2", output: "keep" });
+    const out = routeLeakedWorkerEvents(
+      msg({
+        events: [workerEventEnv({ delegation_id: "d1", event: newEvt })],
+        workers: [worker({ delegation_id: "d1", events: [oldEvt, extra] })],
+      }),
+    );
+    const events = out.workers![0].events;
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => (e.data as { output: string }).output).sort()).toEqual([
+      "keep",
+      "new",
+    ]);
+  });
+
+  it("skips a generic worker_event missing delegation_id or an inner event", () => {
+    const noId = workerEventEnv({ event: ev("output", { output: "x" }) });
+    const noInner = workerEventEnv({ delegation_id: "d1" });
+    const out = routeLeakedWorkerEvents(
+      msg({ events: [noId, noInner], workers: [worker({ delegation_id: "d1", events: [] })] }),
+    );
+    expect(out.events).toEqual([]); // stripped
+    expect(out.workers![0].events).toEqual([]); // untouched
+  });
+
+  it("routes a bare top-level worker_event type event (no envelope)", () => {
+    const inner = ev("output", { output: "bare" });
+    const bare = ev("worker_event", { delegation_id: "d1", event: inner });
+    const out = routeLeakedWorkerEvents(
+      msg({ events: [bare], workers: [worker({ delegation_id: "d1", events: [] })] }),
+    );
+    expect(out.events).toEqual([]);
+    expect(out.workers![0].events).toEqual([inner]);
+  });
+
+  it("leaves workers as the original reference when no worker mutation path fires", () => {
+    const originalWorkers = [worker({ delegation_id: "d1", events: [] })];
+    const out = routeLeakedWorkerEvents(
+      msg({
+        events: [
+          startEnv({ delegation_id: "d1" }),
+          completeEnv({ delegation_id: "ghost" }),
+          workerEventEnv({ delegation_id: "d1" }),
+        ],
+        workers: originalWorkers,
+      }),
+    );
+    expect(out.workers).toBe(originalWorkers); // workersChanged stayed false
+    expect(out.events).toEqual([]); // worker envelopes still stripped
+  });
+
+  it("unwraps a typed agent_message envelope (non-worker) into cleanEvents", () => {
+    // agent_message wrapping agent_message -> unwrapTypedAgentMessageEnvelope returns the inner;
+    // it is not a worker envelope, so it lands in cleanEvents unwrapped.
+    const wrapped = ev("agent_message", { type: "agent_message", data: { text: "inner" } });
+    const out = routeLeakedWorkerEvents(msg({ events: [wrapped] }));
+    expect(out.events).toEqual([{ type: "agent_message", data: { text: "inner" } }]);
   });
 });
