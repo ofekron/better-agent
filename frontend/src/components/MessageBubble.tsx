@@ -1124,7 +1124,7 @@ export function partitionEventsByParent(events: WSEvent[]): {
   return { topLevel, children };
 }
 
-function renderSingleEvent(
+export function renderSingleEvent(
   event: WSEvent,
   idx: number,
   onFileClick?: (p: string, focus?: FileFocus) => void,
