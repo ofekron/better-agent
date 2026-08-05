@@ -908,7 +908,7 @@ function TodosSnapshotEvent({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-function CompleteEvent({ data }: { data: Record<string, unknown> }) {
+export function CompleteEvent({ data }: { data: Record<string, unknown> }) {
   const success = data.success as boolean;
   const error = data.error as string | undefined;
   const tu = data.token_usage as Record<string, number> | undefined;
