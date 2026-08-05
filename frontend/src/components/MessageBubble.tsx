@@ -1236,7 +1236,7 @@ function renderSingleEvent(
   }
 }
 
-function SteerPromptEvent({
+export function SteerPromptEvent({
   prompt,
   images,
   sessionId,
