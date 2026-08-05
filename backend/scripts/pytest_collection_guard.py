@@ -25,12 +25,36 @@ def should_ignore_test_module(collection_path, config):
         return None
     if _is_unguarded_runner(tree):
         return True
+    has_async_test = False
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
             return None
         if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             return None
+        # Async tests are `ast.AsyncFunctionDef`, a sibling of FunctionDef
+        # rather than a subclass, so they need their own branch.
+        if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("test_"):
+            has_async_test = True
+    # An async-only module runs under pytest only via an async plugin marker,
+    # which requires importing pytest. Without that import the module is a
+    # standalone runner script (it drives its own `asyncio.run` under a
+    # `__main__` guard), so collecting it would report every coroutine as an
+    # unsupported-async failure.
+    if has_async_test and _imports_pytest(tree):
+        return None
     return True
+
+
+def _imports_pytest(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "pytest" or alias.name.startswith("pytest.")
+                   for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "pytest" or (node.module or "").startswith("pytest."):
+                return True
+    return False
 
 
 def _explicit_python_test_paths(config):
