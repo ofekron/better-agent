@@ -1303,7 +1303,7 @@ function PrLinkEvent({
   );
 }
 
-function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
+export function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
   const [open, setOpen] = useState(false);
   let pretty: string;
   try {
