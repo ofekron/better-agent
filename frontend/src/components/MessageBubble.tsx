@@ -461,7 +461,7 @@ function ScaledMarkdown({
  * highlighting + table styling. Memoized on `text` so historical messages
  * don't re-parse markdown on every WS tick from the streaming turn.
  */
-const MessageBox = memo(function MessageBox({
+export const MessageBox = memo(function MessageBox({
   text,
   defaultOpen = true,
   collapsible = true,
