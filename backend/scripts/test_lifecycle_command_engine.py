@@ -57,6 +57,23 @@ def identity(suffix: str) -> UserTurnIdentity:
     )
 
 
+def _patch_session_get(monkeypatch, resolve) -> None:
+    """Patch manager.get AND manager.get_field against the same fake resolver.
+
+    _project_native_sid reads the session via manager.get_field(sid,
+    "orchestration_mode") — the single-field accessor that does NOT delegate to
+    get(). Patching only get() leaves the projection reading None, so the
+    selector never attaches. Route every fake-session lookup through here so
+    both accessors stay consistent.
+    """
+    def _get_field(requested_id, field, *_args, **_kwargs):
+        session = resolve(requested_id)
+        return None if session is None else session.get(field)
+
+    monkeypatch.setattr(session_manager.manager, "get", resolve)
+    monkeypatch.setattr(session_manager.manager, "get_field", _get_field)
+
+
 def test_corrupt_serialized_snapshot_fails_closed() -> None:
     corrupt = {
         "phase": "running",
@@ -211,9 +228,8 @@ def test_selector_authority_transition_contract() -> None:
 async def test_selector_native_sid_attachment_fences(monkeypatch) -> None:
     session_id = "selector-attachment-fences"
     projected: list[tuple[str, str, str | None]] = []
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
+    _patch_session_get(
+        monkeypatch,
         lambda requested_id: (
             {"orchestration_mode": "native"}
             if requested_id == session_id
@@ -310,9 +326,8 @@ async def test_native_sid_projection_replays_after_crash(monkeypatch) -> None:
         "primary": "selector-crash-primary",
         "supervisor": "selector-crash-supervisor",
     }
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
+    _patch_session_get(
+        monkeypatch,
         lambda requested_id: (
             {"orchestration_mode": "native"}
             if requested_id in session_ids.values()
@@ -506,9 +521,8 @@ async def test_successful_handoff_finalizer_crash_replays_both_roles(
     projected: list[tuple[str, str, str | None]] = []
     fail_projection = True
 
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
+    _patch_session_get(
+        monkeypatch,
         lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
     )
 
@@ -597,9 +611,8 @@ async def test_successful_handoff_finalizer_crash_replays_both_roles(
 
 
 async def test_handoff_finalizer_requires_exact_current_success(monkeypatch) -> None:
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
+    _patch_session_get(
+        monkeypatch,
         lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
     )
     monkeypatch.setattr(
@@ -701,9 +714,8 @@ async def test_failed_execution_outer_cleanup_retains_handoff() -> None:
 
 
 async def test_elected_slot_consumes_only_its_handoff_role(monkeypatch) -> None:
-    monkeypatch.setattr(
-        session_manager.manager,
-        "get",
+    _patch_session_get(
+        monkeypatch,
         lambda requested_id: {"id": requested_id, "orchestration_mode": "native"},
     )
     monkeypatch.setattr(
