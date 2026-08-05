@@ -358,6 +358,23 @@ const CORE_PAYLOAD_CASES = [
     invalid: { node_id: "node-a", status: "pending" },
   },
   {
+    type: "node_provider_credentials_changed",
+    valid: {
+      node_id: "node-a",
+      provider_credentials: [
+        {
+          node_id: "node-a",
+          provider_id: "claude",
+          provider_name: "Claude",
+          status: "synced",
+          authorized_at: "2026-08-04T10:00:00Z",
+          updated_at: "2026-08-04T10:00:00Z",
+        },
+      ],
+    },
+    invalid: { node_id: "node-a" },
+  },
+  {
     type: "user_input_requested",
     valid: {
       request_id: "request-a",
