@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AnalyticsPage } from "../src/components/AnalyticsPage";
 import { fetchAnalytics, type AnalyticsReport } from "../src/api";
@@ -20,8 +20,28 @@ vi.mock("react-i18next", () => ({
 // the Pie Cell maps / HBar body only render as ResponsiveContainer children.
 // This stub renders children and invokes each formatter callback with
 // representative inputs, capturing the formatted outputs for assertions.
+type ComposedHandlers = {
+  data: Record<string, unknown>[];
+  onMouseDown: ((st: { activeLabel?: string | number }) => void) | undefined;
+  onMouseMove: ((st: { activeLabel?: string | number }) => void) | undefined;
+  onMouseUp: (() => void) | undefined;
+  onMouseLeave: (() => void) | undefined;
+};
+
 const { captured } = vi.hoisted(() => ({
-  captured: { ticks: [] as string[], yvals: [] as string[], tips: [] as string[] },
+  captured: {
+    ticks: [] as string[],
+    yvals: [] as string[],
+    tips: [] as string[],
+    // One entry per ComposedChart render — drag/zoom interactions are driven
+    // by invoking these captured handlers directly inside act().
+    charts: [] as ComposedHandlers[],
+    // Latest Brush render's committed window (startIndex/endIndex) — the
+    // authoritative readout of the chart's zoom state for clamp assertions.
+    brush: null as { start: number; end: number } | null,
+    // Latest Brush onChange handler — invoked directly to drive onBrushChange.
+    brushChange: null as ((range: { startIndex?: number; endIndex?: number }) => void) | null,
+  },
 }));
 
 vi.mock("recharts", () => {
@@ -38,12 +58,29 @@ vi.mock("recharts", () => {
     }
   };
   const passthrough: FC = ({ children }) => children ?? null;
+  // ComposedChart renders its children (so XAxis/YAxis/Tooltip formatters
+  // still run) AND records its mouse handlers + data so tests can drive the
+  // drag-select / zoom interactions by invoking the latest matching entry.
+  const ComposedChart: FC = (props) => {
+    captured.charts.push({
+      data: (props.data as Record<string, unknown>[]) ?? [],
+      onMouseDown: props.onMouseDown as ComposedHandlers["onMouseDown"],
+      onMouseMove: props.onMouseMove as ComposedHandlers["onMouseMove"],
+      onMouseUp: props.onMouseUp as ComposedHandlers["onMouseUp"],
+      onMouseLeave: props.onMouseLeave as ComposedHandlers["onMouseLeave"],
+    });
+    return props.children ?? null;
+  };
   const XAxis: FC = ({ tickFormatter }) => {
     run(tickFormatter, TICKS, captured.ticks);
     return null;
   };
-  const Brush: FC = ({ tickFormatter }) => {
+  const Brush: FC = ({ tickFormatter, startIndex, endIndex, onChange }) => {
     run(tickFormatter, TICKS, captured.ticks);
+    if (typeof startIndex === "number" && typeof endIndex === "number") {
+      captured.brush = { start: startIndex, end: endIndex };
+    }
+    if (typeof onChange === "function") captured.brushChange = onChange as typeof captured.brushChange;
     return null;
   };
   const YAxis: FC = ({ tickFormatter }) => {
@@ -57,7 +94,7 @@ vi.mock("recharts", () => {
   return {
     ResponsiveContainer: passthrough,
     PieChart: passthrough,
-    ComposedChart: passthrough,
+    ComposedChart,
     BarChart: passthrough,
     Pie: passthrough,
     XAxis,
@@ -214,13 +251,54 @@ function richReport(granularity: string): AnalyticsReport {
   });
 }
 
+/** A report whose ONLY populated time-series is `sessions` with the given `t`
+ * labels, so exactly one ComposedChart mounts — keeping captured handler
+ * identity unambiguous for drag/zoom interaction tests. */
+function sessionsOnlyReport(labels: string[]): AnalyticsReport {
+  return makeReport({
+    sessions: {
+      total: labels.length,
+      user_total: 0,
+      messages_total: 0,
+      series: labels.map((t, i) => ({ t, count: i + 1, user_count: 0 })),
+      by_provider: [],
+      by_model: [],
+      by_orchestration: [],
+    },
+  });
+}
+
 describe("AnalyticsPage", () => {
   afterEach(() => {
     vi.resetAllMocks();
     captured.ticks.length = 0;
     captured.yvals.length = 0;
     captured.tips.length = 0;
+    captured.charts.length = 0;
+    captured.brush = null;
+    captured.brushChange = null;
   });
+
+  /** Latest captured ComposedChart render whose data matches `pred`. Handlers
+   * are re-read on each call because re-renders (state changes from a prior
+   * interaction) push fresh entries with updated closures. */
+  function chartMatching(pred: (data: Record<string, unknown>[]) => boolean): ComposedHandlers {
+    for (let i = captured.charts.length - 1; i >= 0; i--) {
+      if (pred(captured.charts[i].data)) return captured.charts[i];
+    }
+    throw new Error("no captured ComposedChart matched the predicate");
+  }
+
+  /** Drag-select helper: press at the label for `a`, move to the label for `b`,
+   * then release — mirroring a real drag across the chart surface. The chart is
+   * re-resolved before each step because ComposedChart's handlers (notably
+   * onMouseUp = commitSelection, which closes over `sel`) get fresh identities
+   * on every render, and each setSel here triggers a re-render. */
+  function dragSelect(pred: (data: Record<string, unknown>[]) => boolean, a: string, b?: string) {
+    act(() => chartMatching(pred).onMouseDown?.({ activeLabel: a }));
+    if (b !== undefined) act(() => chartMatching(pred).onMouseMove?.({ activeLabel: b }));
+    act(() => chartMatching(pred).onMouseUp?.());
+  }
 
   function statValue(label: string): string | null {
     const node = screen.getByText(label);
@@ -550,4 +628,150 @@ describe("AnalyticsPage", () => {
       expect(captured.tips).toContain("1.5k");
     },
   );
+
+  it("resets the zoom window when the reset button is clicked", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    const chart = await screen.findByTestId("analytics-time-series-chart");
+
+    fireEvent.wheel(chart, { deltaY: -100 });
+    const reset = await screen.findByRole("button", { name: "analytics.resetZoom" });
+    expect(captured.brush).toEqual({ start: 1, end: 4 });
+
+    fireEvent.click(reset);
+
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+    expect(captured.brush).toEqual({ start: 0, end: 4 });
+  });
+
+  it("zooms into a drag selection and renders the selection area", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    const chart = chartMatching(() => true);
+    dragSelect(() => true, "d0", "d2");
+
+    expect(captured.brush).toEqual({ start: 0, end: 2 });
+    expect(screen.getByRole("button", { name: "analytics.resetZoom" })).toBeTruthy();
+  });
+
+  it("swaps a reversed drag selection so the window is ascending", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    dragSelect(() => true, "d2", "d0");
+
+    expect(captured.brush).toEqual({ start: 0, end: 2 });
+  });
+
+  it("ignores a drag selection where start and end land on the same point", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    dragSelect(() => true, "d1", "d1");
+
+    expect(captured.brush).toEqual({ start: 0, end: 3 });
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+  });
+
+  it("ignores a drag selection whose labels are not in the data", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    dragSelect(() => true, "nope", "nada");
+
+    expect(captured.brush).toEqual({ start: 0, end: 3 });
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+  });
+
+  it("clears an in-progress drag on mouse leave without committing", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    const chart = chartMatching(() => true);
+    // mouseMove with no prior mouseDown exercises the no-op (cur === null) arm.
+    act(() => chart.onMouseMove?.({ activeLabel: "d1" }));
+    act(() => chart.onMouseDown?.({ activeLabel: "d0" }));
+    act(() => chart.onMouseMove?.({ activeLabel: "d2" }));
+    act(() => chart.onMouseLeave?.());
+    act(() => chart.onMouseUp?.());
+
+    expect(captured.brush).toEqual({ start: 0, end: 3 });
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+  });
+
+  it("does not zoom when the series has fewer than three points", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    const chart = await screen.findByTestId("analytics-time-series-chart");
+
+    fireEvent.wheel(chart, { deltaY: -100 });
+
+    expect(captured.brush).toBeNull();
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+  });
+
+  it("clamps a zoom-out so the window cannot run past the last point", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4", "d5"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    // Drag to an end-anchored window {3,5}, then zoom out: the naive next-end
+    // would be 6 (> lastIndex 5), so the clamp pins ne=5 and pulls ns back.
+    dragSelect(() => true, "d3", "d5");
+    fireEvent.wheel(screen.getByTestId("analytics-time-series-chart"), { deltaY: 100 });
+
+    expect(captured.brush).toEqual({ start: 2, end: 5 });
+  });
+
+  it("clamps a zoom-out so the window cannot run before the first point", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(
+      sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"]),
+    );
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    // Drag to {0,5}, then zoom out: the naive next-start computes negative,
+    // so the clamp pins ns=0 and extends ne to nextSpan.
+    dragSelect(() => true, "d0", "d5");
+    fireEvent.wheel(screen.getByTestId("analytics-time-series-chart"), { deltaY: 100 });
+
+    expect(captured.brush).toEqual({ start: 0, end: 7 });
+  });
+
+  it("commits a window from a brush selection", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValue(sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    await screen.findByTestId("analytics-time-series-chart");
+
+    expect(captured.brushChange).not.toBeNull();
+    act(() => captured.brushChange!({ startIndex: 1, endIndex: 3 }));
+
+    expect(captured.brush).toEqual({ start: 1, end: 3 });
+    expect(screen.getByRole("button", { name: "analytics.resetZoom" })).toBeTruthy();
+  });
+
+  it("resets the zoom window when the underlying data identity changes", async () => {
+    vi.mocked(fetchAnalytics).mockResolvedValueOnce(sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4"]));
+    render(<AnalyticsPage onBack={() => undefined} />);
+    const chart = await screen.findByTestId("analytics-time-series-chart");
+
+    fireEvent.wheel(chart, { deltaY: -100 });
+    await screen.findByRole("button", { name: "analytics.resetZoom" });
+    expect(captured.brush).toEqual({ start: 1, end: 4 });
+
+    // Changing granularity triggers a reload with a fresh series array; the
+    // TimeSeriesChart stays mounted but its `data` prop changes identity, so
+    // the render-phase reset restores the full window.
+    vi.mocked(fetchAnalytics).mockResolvedValueOnce(sessionsOnlyReport(["d0", "d1", "d2", "d3", "d4"]));
+    fireEvent.click(screen.getByRole("button", { name: "analytics.granularityDay" }));
+
+    await waitFor(() => expect(captured.brush).toEqual({ start: 0, end: 4 }));
+    expect(screen.queryByRole("button", { name: "analytics.resetZoom" })).toBeNull();
+  });
 });
