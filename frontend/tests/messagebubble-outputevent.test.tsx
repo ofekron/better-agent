@@ -117,3 +117,46 @@ describe("OutputEvent prose path", () => {
     has(container, ".message-box.message-box-static");
   });
 });
+
+// The collapsible MessageBox chrome: a header toggle (L497-505) flips open
+// state, and the collapsed preview body (L510-517) is itself a button that
+// re-opens. These tests lock the toggle handler (setOpen toggle) and the
+// collapsed-body click handler (setOpen(true)) — the two interaction
+// branches the prose-path rendering alone never fires.
+describe("OutputEvent MessageBox collapsible toggle", () => {
+  const toggle = (c: HTMLElement) => c.querySelector<HTMLButtonElement>(".message-box-toggle")!;
+  const collapsedBody = (c: HTMLElement) =>
+    c.querySelector<HTMLButtonElement>(".message-box-collapsed-body")!;
+
+  it("collapses via the toggle and shows the first-line preview, then re-expands via the collapsed body", () => {
+    const { container } = renderOutput("First line of reply.\nSecond line.");
+    // Starts open: markdown body mounted, no collapsed preview.
+    expect(toggle(container).getAttribute("aria-expanded")).toBe("true");
+    has(container, ".message-box-body");
+    missing(container, ".message-box-collapsed-body");
+
+    // Toggle closes: body unmounts, collapsed preview shows the first line.
+    fireEvent.click(toggle(container));
+    expect(toggle(container).getAttribute("aria-expanded")).toBe("false");
+    missing(container, ".message-box-body");
+    expect(collapsedBody(container).textContent).toBe("First line of reply.");
+
+    // Clicking the collapsed preview re-opens: body remounts.
+    fireEvent.click(collapsedBody(container));
+    expect(toggle(container).getAttribute("aria-expanded")).toBe("true");
+    has(container, ".message-box-body");
+    missing(container, ".message-box-collapsed-body");
+    cleanup();
+  });
+
+  it("flips the toggle arrow and aria-label with open state", () => {
+    const { container } = renderOutput("An answer.");
+    expect(toggle(container).querySelector(".collapse-arrow")!.textContent).toBe("▼");
+    expect(toggle(container).getAttribute("aria-label")).toBe("message.collapseMessageAria");
+
+    fireEvent.click(toggle(container));
+    expect(toggle(container).querySelector(".collapse-arrow")!.textContent).toBe("▶");
+    expect(toggle(container).getAttribute("aria-label")).toBe("message.expandMessageAria");
+    cleanup();
+  });
+});
