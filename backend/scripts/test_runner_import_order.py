@@ -1,21 +1,13 @@
-import os
-import shutil
-import sys
+"""Locks that ``runner`` is importable before any execution path runs.
+
+A standalone ``import runner`` exercising module top-level side effects
+(import-order regressions, missing optional deps) without driving a turn.
+"""
 
 import _test_home
-TMP_HOME = _test_home.isolate("bc-test-runner-import-")
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-
-def main() -> int:
-    try:
-        import runner  # noqa: F401
-    finally:
-        shutil.rmtree(TMP_HOME, ignore_errors=True)
-    print("PASS runner imports before executing")
-    return 0
+_test_home.isolate("bc-test-runner-import-")
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def test_runner_imports_before_executing() -> None:
+    import runner  # noqa: F401

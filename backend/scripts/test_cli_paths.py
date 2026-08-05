@@ -1,16 +1,15 @@
 """Regression test for CLI lookup outside launchd's minimal PATH.
 
-Run with:
-    cd backend && .venv/bin/python scripts/test_cli_paths.py
+``resolve_cli_binary`` must find ``codex``/``agy`` in an explicit non-PATH
+dir (npm-global style) and, on Windows, prefer the ``.exe`` suffix from
+PATH.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import sys
-import tempfile
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,55 +17,39 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import pytest  # noqa: E402
+
 from cli_paths import resolve_cli_binary  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
+
+def _make_exe(path: Path) -> None:
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def main() -> int:
-    tmp = tempfile.mkdtemp(prefix="bc-test-cli-paths-")
-    old_path = os.environ.get("PATH", "")
-    try:
-        bin_dir = Path(tmp) / "npm-global" / "bin"
-        bin_dir.mkdir(parents=True)
-        codex_exe = bin_dir / "codex"
-        codex_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        codex_exe.chmod(codex_exe.stat().st_mode | stat.S_IXUSR)
-        agy_exe = bin_dir / "agy"
-        agy_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        agy_exe.chmod(agy_exe.stat().st_mode | stat.S_IXUSR)
-        os.environ["PATH"] = "/usr/bin:/bin"
+def test_resolves_clis_from_explicit_non_path_dir(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    bin_dir = tmp_path / "npm-global" / "bin"
+    bin_dir.mkdir(parents=True)
 
-        codex_found = resolve_cli_binary("codex", extra_dirs=[str(bin_dir)])
-        agy_found = resolve_cli_binary("agy", extra_dirs=[str(bin_dir)])
-        ok = codex_found == str(codex_exe) and agy_found == str(agy_exe)
-        print(
-            f"{PASS if ok else FAIL} resolves CLIs from explicit non-PATH dir -- "
-            f"{codex_found=} {agy_found=}"
-        )
-        if os.name == "nt":
-            path_dir = Path(tmp) / "path-bin"
-            path_dir.mkdir()
-            (path_dir / "codex").write_text("", encoding="utf-8")
-            codex_win_exe = path_dir / "codex.exe"
-            codex_win_exe.write_text("", encoding="utf-8")
-            os.environ["PATH"] = str(path_dir)
-            codex_path_found = resolve_cli_binary("codex")
-            ok_win = (
-                codex_path_found is not None
-                and os.path.normcase(codex_path_found) == os.path.normcase(str(codex_win_exe))
-            )
-            print(
-                f"{PASS if ok_win else FAIL} prefers Windows executable suffix -- "
-                f"{codex_path_found=}"
-            )
-            ok = ok and ok_win
-        return 0 if ok else 1
-    finally:
-        os.environ["PATH"] = old_path
-        shutil.rmtree(tmp, ignore_errors=True)
+    codex_exe = bin_dir / "codex"
+    agy_exe = bin_dir / "agy"
+    _make_exe(codex_exe)
+    _make_exe(agy_exe)
+
+    assert resolve_cli_binary("codex", extra_dirs=[str(bin_dir)]) == str(codex_exe)
+    assert resolve_cli_binary("agy", extra_dirs=[str(bin_dir)]) == str(agy_exe)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+@pytest.mark.skipif(os.name != "nt", reason="Windows executable-suffix behavior")
+def test_prefers_windows_executable_suffix_from_path(tmp_path, monkeypatch) -> None:
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    (path_dir / "codex").write_text("", encoding="utf-8")
+    codex_win_exe = path_dir / "codex.exe"
+    codex_win_exe.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(path_dir))
+
+    found = resolve_cli_binary("codex")
+    assert found is not None
+    assert os.path.normcase(found) == os.path.normcase(str(codex_win_exe))
