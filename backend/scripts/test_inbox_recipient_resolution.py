@@ -86,20 +86,15 @@ def _make_root_and_sub() -> tuple[str, str]:
     return root["id"], sub["id"]
 
 
-def test_sub_session_resolves_in_a_cold_reader() -> bool:
+def test_sub_session_resolves_in_a_cold_reader() -> None:
     root_id, sub_id = _make_root_and_sub()
     _forget_process_caches()
 
     resolved = session_store._resolve_root_id(sub_id)
-    ok = resolved == root_id
-    print(
-        f"{PASS if ok else FAIL} sub-session resolves to its root in a cold reader"
-        f"{'' if ok else f' resolved={resolved!r} expected={root_id!r}'}"
-    )
-    return ok
+    assert resolved == root_id, f"resolved={resolved!r} expected={root_id!r}"
 
 
-def test_sub_session_is_a_valid_inbox_recipient() -> bool:
+def test_sub_session_is_a_valid_inbox_recipient() -> None:
     root_id, sub_id = _make_root_and_sub()
     _forget_process_caches()
 
@@ -114,15 +109,10 @@ def test_sub_session_is_a_valid_inbox_recipient() -> bool:
         receipt = {}
         error = str(exc)
 
-    ok = bool(receipt.get("sent")) and not error
-    print(
-        f"{PASS if ok else FAIL} hidden sub-session accepted as inbox recipient"
-        f"{'' if ok else f' error={error!r}'}"
-    )
-    return ok
+    assert bool(receipt.get("sent")) and not error, f"error={error!r}"
 
 
-def test_sub_session_reads_its_own_inbox() -> bool:
+def test_sub_session_reads_its_own_inbox() -> None:
     root_id, sub_id = _make_root_and_sub()
     inbox_store.send(
         sender_session_id=root_id,
@@ -138,15 +128,10 @@ def test_sub_session_reads_its_own_inbox() -> bool:
         unread = {}
         error = str(exc)
 
-    ok = unread.get("count") == 1 and not error
-    print(
-        f"{PASS if ok else FAIL} hidden sub-session reads its own inbox"
-        f"{'' if ok else f' error={error!r} unread={unread!r}'}"
-    )
-    return ok
+    assert unread.get("count") == 1 and not error, f"error={error!r} unread={unread!r}"
 
 
-def test_unknown_recipient_is_still_rejected() -> bool:
+def test_unknown_recipient_is_still_rejected() -> None:
     root_id, _ = _make_root_and_sub()
     _forget_process_caches()
 
@@ -160,11 +145,10 @@ def test_unknown_recipient_is_still_rejected() -> bool:
     except inbox_store.InboxStoreError:
         rejected = True
 
-    print(f"{PASS if rejected else FAIL} unknown recipient is still rejected")
-    return rejected
+    assert rejected, "unknown recipient was not rejected"
 
 
-def test_exists_and_get_lite_agree_inside_negative_window() -> bool:
+def test_exists_and_get_lite_agree_inside_negative_window() -> None:
     """`exists` and `get_lite` must answer from one resolution ladder. They
     used to diverge on negative caching: a miss made `get_lite` cache "not
     here" for the negative TTL while `exists` kept answering out-of-band, so
@@ -175,15 +159,10 @@ def test_exists_and_get_lite_agree_inside_negative_window() -> bool:
     missed = manager.get_lite(sub_id)
     agree = manager.exists(sub_id) == (manager.get_lite(sub_id) is not None)
 
-    ok = missed is not None and agree
-    print(
-        f"{PASS if ok else FAIL} exists and get_lite agree inside the negative window"
-        f"{'' if ok else f' resolved={missed is not None} agree={agree}'}"
-    )
-    return ok
+    assert missed is not None and agree, f"resolved={missed is not None} agree={agree}"
 
 
-def test_fork_set_survives_repeated_cold_builds() -> bool:
+def test_fork_set_survives_repeated_cold_builds() -> None:
     """The summary's complete fork set must not flip off when a cold build
     repairs the summary in place: an absent field forces a full parse of
     every root, so losing it every other build silently reinstates the
@@ -199,27 +178,35 @@ def test_fork_set_survives_repeated_cold_builds() -> bool:
             "all_fork_ids" in json.loads(summary_path.read_text(encoding="utf-8")),
         )
 
-    ok = all(present)
-    print(
-        f"{PASS if ok else FAIL} fork set survives repeated cold summary builds"
-        f"{'' if ok else f' present={present!r}'}"
-    )
-    return ok
+    assert all(present), f"present={present!r}"
 
 
 def main() -> int:
     try:
         checks = [
-            test_sub_session_resolves_in_a_cold_reader(),
-            test_sub_session_is_a_valid_inbox_recipient(),
-            test_sub_session_reads_its_own_inbox(),
-            test_unknown_recipient_is_still_rejected(),
-            test_exists_and_get_lite_agree_inside_negative_window(),
-            test_fork_set_survives_repeated_cold_builds(),
+            ("sub-session resolves to its root in a cold reader", test_sub_session_resolves_in_a_cold_reader),
+            ("hidden sub-session accepted as inbox recipient", test_sub_session_is_a_valid_inbox_recipient),
+            ("hidden sub-session reads its own inbox", test_sub_session_reads_its_own_inbox),
+            ("unknown recipient is still rejected", test_unknown_recipient_is_still_rejected),
+            ("exists and get_lite agree inside the negative window", test_exists_and_get_lite_agree_inside_negative_window),
+            ("fork set survives repeated cold summary builds", test_fork_set_survives_repeated_cold_builds),
         ]
-        passed = sum(1 for ok in checks if ok)
-        print(f"\n{passed}/{len(checks)} checks passed")
-        return 0 if passed == len(checks) else 1
+        import traceback
+        failed = 0
+        for name, fn in checks:
+            try:
+                fn()
+            except AssertionError as exc:
+                print(f"{FAIL} {name}: {exc}")
+                failed += 1
+            except Exception:
+                print(f"{FAIL} {name}: unexpected")
+                traceback.print_exc()
+                failed += 1
+            else:
+                print(f"{PASS} {name}")
+        print(f"\n{len(checks) - failed}/{len(checks)} checks passed")
+        return 0 if not failed else 1
     finally:
         session_store._get_durability_writer().drain(timeout=30)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
