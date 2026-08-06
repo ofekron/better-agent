@@ -215,7 +215,6 @@ _MARKETPLACE_PREVIEW_TTL_SECONDS = 5 * 60.0
 _MAX_MARKETPLACE_PREVIEWS = 256
 _MARKETPLACE_PREVIEWS: dict[str, tuple[float, str, dict[str, Any]]] = {}
 _MARKETPLACE_PREVIEWS_LOCK = threading.Lock()
-_required_artifact_update_checked: set[str] = set()
 
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
@@ -4162,22 +4161,6 @@ def _install_required_marketplace_from_ofekdev(extension_id: str) -> dict[str, A
         persist=False,
     )
     return record
-
-
-def _required_artifact_update_needed(extension_id: str, record: dict[str, Any]) -> bool:
-    if extension_id in _required_artifact_update_checked:
-        return False
-    _required_artifact_update_checked.add(extension_id)
-    source = record.get("source") or {}
-    if source.get("type") != "better_agent_signed":
-        return False
-    installed_sha = str(source.get("artifact_sha256") or source.get("commit_sha") or "").strip().lower()
-    try:
-        metadata = _fetch_json(_required_marketplace_metadata_url(extension_id))
-    except ExtensionError:
-        return False
-    published_sha = str(metadata.get("artifact_sha256") or "").strip().lower()
-    return bool(published_sha and published_sha != installed_sha)
 
 
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
