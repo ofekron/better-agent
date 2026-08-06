@@ -981,55 +981,6 @@ def _configure_worker_roots(raw: str) -> None:
     ))
 
 
-def _under_root(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _stat_walk() -> list[tuple[Path, str, float, int]]:
-    """Cheap glob+stat over every native root. No content reads (no codex
-    first-line peek) so this is the freshness check, not the parse.
-
-    Symlink-escape guard: ``rglob`` yields in-root symlinked files (every
-    CPython) and recurses into in-root directory symlinks (3.10-3.12), so a
-    symlink planted inside a root could otherwise pull in foreign transcripts.
-    Each match is resolved and must stay under one of the walked real roots;
-    anything that escapes is skipped. ``stat(follow_symlinks=False)`` avoids
-    stat-ing through a symlink as a second layer of defense.
-    """
-    _native_roots, _, _, is_native_transcript_path = _roots_and_resolver()
-    real_roots: list[tuple[Path, str]] = []
-    for root, tag in _native_roots():
-        if not root.exists():
-            continue
-        try:
-            real_roots.append((root.resolve(), tag))
-        except OSError:
-            continue
-    real_targets = [root for root, _ in real_roots]
-    out: list[tuple[Path, str, float, int]] = []
-    for resolved_root, tag in real_roots:
-        pattern = "*.pb" if tag == "windsurf" else "*.jsonl"
-        for path in resolved_root.rglob(pattern):
-            if not is_native_transcript_path(path, tag):
-                continue
-            try:
-                resolved_file = path.resolve()
-            except OSError:
-                continue
-            if not any(_under_root(resolved_file, r) for r in real_targets):
-                continue
-            try:
-                st = path.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            out.append((path, tag, st.st_mtime, st.st_size))
-    return out
-
-
 # ─── indexing ──────────────────────────────────────────────────────────────
 
 def _timestamp_utc(ts: str) -> str:

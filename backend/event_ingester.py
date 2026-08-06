@@ -2390,26 +2390,6 @@ class EventIngester:
                     entry, line_start, line_end, tail,
                 )
 
-    def _rebuild_seq_offsets_locked(self, path: Path, root_id: str) -> None:
-        seq_offsets: list[int] = []
-        with open(path, "rb") as f:
-            while True:
-                line_start = f.tell()
-                raw = f.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                if not line.strip():
-                    continue
-                try:
-                    json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                seq_offsets.append(line_start)
-        self._seq_offsets[root_id] = seq_offsets
-        self._seq[root_id] = len(seq_offsets)
-        self._next_offset[root_id] = path.stat().st_size
-
     def _scan_summaries(
         self, path: Path, root_id: str, tail: int,
     ) -> tuple[dict[str, dict], dict[int, str]]:

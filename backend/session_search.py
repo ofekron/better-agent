@@ -93,42 +93,6 @@ _SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS = 0.05
 # ── Index building ─────────────────────────────────────────────────────
 
 
-def _extract_first_user_prompt(messages: list) -> str:
-    """Find the first user message and return its text content truncated
-    to `_USER_PROMPT_TRUNCATE`. Content may be a plain string or a list
-    of typed blocks (claude's content-block shape); both are flattened
-    into a single string. Returns empty string when no user message
-    exists.
-    """
-    if not isinstance(messages, list):
-        return ""
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        if m.get("role") != "user":
-            continue
-        content = m.get("content")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    parts.append(block)
-            text = "\n".join(parts)
-        else:
-            text = ""
-        text = text.strip()
-        if not text:
-            continue
-        if len(text) > _USER_PROMPT_TRUNCATE:
-            return text[:_USER_PROMPT_TRUNCATE] + "…"
-        return text
-    return ""
-
-
 def _project_name(cwd: str) -> str:
     """Last path segment, mirrors the frontend `projectName(cwd)` util.
     Empty string when cwd is missing — matches what the index user sees

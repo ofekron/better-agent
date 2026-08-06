@@ -96,11 +96,6 @@ def _run_state_cache_get(root_key: str, agent_sid: str) -> Optional[Path] | bool
         return False
 
 
-def _run_state_cache_put(root_key: str, agent_sid: str, path: Optional[Path]) -> None:
-    with _RUN_STATE_LOOKUP_CACHE_LOCK:
-        _RUN_STATE_LOOKUP_CACHE[(root_key, agent_sid)] = (time.monotonic(), path)
-
-
 def _claim_run_state_lookup(root_key: str, agent_sid: str) -> tuple[threading.Event, bool]:
     key = (root_key, agent_sid)
     with _RUN_STATE_LOOKUP_CACHE_LOCK:
