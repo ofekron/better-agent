@@ -103,7 +103,7 @@ def _write_summary(
         os.utime(session_path, None)
 
 
-def test_root_id_resolves_without_cold_scan() -> bool:
+def test_root_id_resolves_without_cold_scan() -> None:
     _reset_home()
     _write(_record("target-root"))
     for i in range(20):
@@ -123,12 +123,12 @@ def test_root_id_resolves_without_cold_scan() -> bool:
     finally:
         session_store._build_index_snapshot = original_build
 
-    ok = resolved == "target-root" and calls == 0 and session_store._index_loaded is False
-    print(f"{PASS if ok else FAIL} root sid resolves without cold fork-index scan")
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert calls == 0, f"cold-scan build invoked calls={calls}"
+    assert session_store._index_loaded is False, "index was loaded"
 
 
-def test_fork_id_still_uses_index() -> bool:
+def test_fork_id_still_uses_index() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -138,16 +138,12 @@ def test_fork_id_still_uses_index() -> bool:
     _write(_record("target-root", forks=[fork]))
 
     resolved = session_store._resolve_root_id("child-fork")
-    ok = (
-        resolved == "target-root"
-        and session_store._index_loaded is True
-        and session_store._fork_index.get("child-fork") == "target-root"
-    )
-    print(f"{PASS if ok else FAIL} fork sid still resolves through fork index")
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert session_store._index_loaded is True, "index not loaded"
+    assert session_store._fork_index.get("child-fork") == "target-root", "fork index missing child-fork"
 
 
-def test_concurrent_fork_misses_singleflight_cold_build() -> bool:
+def test_concurrent_fork_misses_singleflight_cold_build() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -183,15 +179,10 @@ def test_concurrent_fork_misses_singleflight_cold_build() -> bool:
     finally:
         session_store._build_index_snapshot = original_build
 
-    ok = calls == 1
-    print(
-        f"{PASS if ok else FAIL} concurrent fork misses singleflight cold build"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert calls == 1, f"singleflight build called calls={calls} times"
 
 
-def test_fresh_zero_fork_summaries_skip_full_parse() -> bool:
+def test_fresh_zero_fork_summaries_skip_full_parse() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -215,15 +206,11 @@ def test_fresh_zero_fork_summaries_skip_full_parse() -> bool:
     finally:
         session_store.json.loads = original_loads
 
-    ok = resolved is None and parsed_roots == []
-    print(
-        f"{PASS if ok else FAIL} fresh zero-fork summaries skip full root parses"
-        f"{'' if ok else ' parsed=' + repr(parsed_roots[:10])}"
-    )
-    return ok
+    assert resolved is None, f"resolved={resolved!r}"
+    assert parsed_roots == [], f"parsed roots={parsed_roots[:10]!r}"
 
 
-def test_fresh_fork_summary_builds_index_without_root_parse() -> bool:
+def test_fresh_fork_summary_builds_index_without_root_parse() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -248,15 +235,11 @@ def test_fresh_fork_summary_builds_index_without_root_parse() -> bool:
     finally:
         session_store.json.loads = original_loads
 
-    ok = resolved == "target-root" and parsed_roots == []
-    print(
-        f"{PASS if ok else FAIL} fresh fork summary builds index without root parse"
-        f"{'' if ok else ' parsed=' + repr(parsed_roots[:10])}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert parsed_roots == [], f"parsed roots={parsed_roots[:10]!r}"
 
 
-def test_fork_index_sidecar_builds_index_without_root_or_summary_parse() -> bool:
+def test_fork_index_sidecar_builds_index_without_root_or_summary_parse() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -288,15 +271,12 @@ def test_fork_index_sidecar_builds_index_without_root_or_summary_parse() -> bool
     finally:
         session_store.json.loads = original_loads
 
-    ok = first == "target-root" and second == "target-root" and parsed_session_json == []
-    print(
-        f"{PASS if ok else FAIL} fork-index sidecar avoids root parses"
-        f"{'' if ok else ' parsed=' + repr(parsed_session_json[:10])}"
-    )
-    return ok
+    assert first == "target-root", f"first={first!r}"
+    assert second == "target-root", f"second={second!r}"
+    assert parsed_session_json == [], f"parsed={parsed_session_json[:10]!r}"
 
 
-def test_index_sidecar_write_happens_outside_index_lock() -> bool:
+def test_index_sidecar_write_happens_outside_index_lock() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -323,15 +303,12 @@ def test_index_sidecar_write_happens_outside_index_lock() -> bool:
     finally:
         session_store._write_index_sidecar = original_write
 
-    ok = resolved == "target-root" and lock_states and not any(lock_states)
-    print(
-        f"{PASS if ok else FAIL} fork-index sidecar writes outside index lock"
-        f"{'' if ok else ' lock_states=' + repr(lock_states)}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert lock_states, "no sidecar writes observed"
+    assert not any(lock_states), f"index lock held during write lock_states={lock_states!r}"
 
 
-def test_fork_index_scan_avoids_path_glob() -> bool:
+def test_fork_index_scan_avoids_path_glob() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -355,15 +332,11 @@ def test_fork_index_scan_avoids_path_glob() -> bool:
     finally:
         Path.glob = original_glob
 
-    ok = resolved == "target-root" and calls == 0
-    print(
-        f"{PASS if ok else FAIL} fork-index scan avoids Path.glob"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert calls == 0, f"Path.glob called calls={calls}"
 
 
-def test_missing_sid_never_scans_directory_fingerprint() -> bool:
+def test_missing_sid_never_scans_directory_fingerprint() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -387,15 +360,11 @@ def test_missing_sid_never_scans_directory_fingerprint() -> bool:
     finally:
         session_store._dir_fingerprint = original_fingerprint
 
-    ok = resolved is None and calls == 0
-    print(
-        f"{PASS if ok else FAIL} missing sid never scans dir fingerprint"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert resolved is None, f"resolved={resolved!r}"
+    assert calls == 0, f"dir fingerprint scanned calls={calls}"
 
 
-def test_projection_between_miss_and_generation_capture_resolves() -> bool:
+def test_projection_between_miss_and_generation_capture_resolves() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -425,15 +394,10 @@ def test_projection_between_miss_and_generation_capture_resolves() -> bool:
         resolved = session_store._resolve_root_id("racing-fork")
     finally:
         session_store._root_change_binding = original_binding
-    ok = resolved == "target-root"
-    print(
-        f"{PASS if ok else FAIL} projection before generation capture resolves"
-        f"{'' if ok else ' resolved=' + repr(resolved)}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
 
 
-def test_projection_during_timed_out_observation_wait_resolves() -> bool:
+def test_projection_during_timed_out_observation_wait_resolves() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -460,12 +424,10 @@ def test_projection_during_timed_out_observation_wait_resolves() -> bool:
         resolved = session_store._resolve_root_id("timeout-fork")
     finally:
         session_store._root_change_binding = original_binding
-    ok = resolved == "target-root"
-    print(f"{PASS if ok else FAIL} projection during timed-out wait resolves")
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
 
 
-def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
+def test_concurrent_missing_sid_refresh_attempts_singleflight() -> None:
     _reset_home()
     _write(_record("target-root"))
 
@@ -503,15 +465,10 @@ def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
         session_store._build_index_snapshot = original_build
         session_store._dir_fingerprint = original_fingerprint
 
-    ok = calls == 1
-    print(
-        f"{PASS if ok else FAIL} unstable index refresh performs one full build"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert calls == 1, f"singleflight build called calls={calls} times"
 
 
-def test_concurrent_dir_fingerprint_cache_singleflights() -> bool:
+def test_concurrent_dir_fingerprint_cache_singleflights() -> None:
     _reset_home()
     _write(_record("target-root"))
 
@@ -543,15 +500,10 @@ def test_concurrent_dir_fingerprint_cache_singleflights() -> bool:
         session_store._dir_fingerprint = original_fingerprint
         session_store._dir_fingerprint_cache = None
 
-    ok = calls == 1
-    print(
-        f"{PASS if ok else FAIL} concurrent dir fingerprint cache singleflights"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert calls == 1, f"fingerprint computed calls={calls} times"
 
 
-def test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive() -> bool:
+def test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive() -> None:
     _reset_home()
     root = _record("target-root")
     _write(root)
@@ -594,20 +546,13 @@ def test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive() -
         lookup.join(timeout=2)
         session_store._fingerprint_after_root_write_locked = original_after_write
 
-    ok = (
-        responsive
-        and result.get("resolved") == "target-root"
-        and not writer.is_alive()
-        and not lookup.is_alive()
-    )
-    print(
-        f"{PASS if ok else FAIL} blocked fingerprint publish keeps index lookup responsive"
-        f"{'' if ok else f' responsive={responsive} result={result!r}'}"
-    )
-    return ok
+    assert responsive, "lookup did not complete while fingerprint publish was blocked"
+    assert result.get("resolved") == "target-root", f"result={result!r}"
+    assert not writer.is_alive(), "writer still alive"
+    assert not lookup.is_alive(), "lookup still alive"
 
 
-def test_mutation_between_scan_and_publish_rejects_stale_fingerprint() -> bool:
+def test_mutation_between_scan_and_publish_rejects_stale_fingerprint() -> None:
     _reset_home()
     root = _record("target-root")
     _write(root)
@@ -632,18 +577,12 @@ def test_mutation_between_scan_and_publish_rejects_stale_fingerprint() -> bool:
         stale_fingerprint,
         stale_generation,
     )
-    ok = (
-        not published
-        and session_store._index_fingerprint == current_fingerprint
-        and session_store._dir_fingerprint_cache is None
-    )
-    print(
-        f"{PASS if ok else FAIL} stale fingerprint publication is rejected"
-    )
-    return ok
+    assert not published, "stale fingerprint was published"
+    assert session_store._index_fingerprint == current_fingerprint, "fingerprint overwritten"
+    assert session_store._dir_fingerprint_cache is None, "dir fingerprint cache populated"
 
 
-def test_sidecar_scan_retries_after_concurrent_index_mutation() -> bool:
+def test_sidecar_scan_retries_after_concurrent_index_mutation() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -667,15 +606,11 @@ def test_sidecar_scan_retries_after_concurrent_index_mutation() -> bool:
     payload = session_store._read_index_sidecar_payload()
     parsed = session_store._parse_index_sidecar(payload) if payload else None
     sidecar_signatures = parsed[2] if parsed is not None else {}
-    ok = calls == 0 and "target-root" in sidecar_signatures
-    print(
-        f"{PASS if ok else FAIL} sidecar snapshot performs no fingerprint scan"
-        f"{'' if ok else f' calls={calls} signatures={sidecar_signatures!r}'}"
-    )
-    return ok
+    assert calls == 0, f"dir fingerprint scanned calls={calls}"
+    assert "target-root" in sidecar_signatures, f"signatures={sidecar_signatures!r}"
 
 
-def test_external_fork_write_reconciles_before_sidecar_publish() -> bool:
+def test_external_fork_write_reconciles_before_sidecar_publish() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -702,15 +637,10 @@ def test_external_fork_write_reconciles_before_sidecar_publish() -> bool:
     session_store._dir_fingerprint_cache = None
 
     resolved = session_store._resolve_root_id("external-fork")
-    ok = resolved == "target-root"
-    print(
-        f"{PASS if ok else FAIL} external fork is reconciled before sidecar publish"
-        f"{'' if ok else f' resolved={resolved!r}'}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
 
 
-def test_preserved_mtime_size_topology_rewrite_invalidates_sidecar() -> bool:
+def test_preserved_mtime_size_topology_rewrite_invalidates_sidecar() -> None:
     _reset_home()
     original_change_identity = session_store._file_change_identity
     change_identity = {"value": 101}
@@ -767,15 +697,11 @@ def test_preserved_mtime_size_topology_rewrite_invalidates_sidecar() -> bool:
         old_owner = session_store._resolve_root_id("old-fork-id")
     finally:
         session_store._file_change_identity = original_change_identity
-    ok = new_owner == "target-root" and old_owner is None
-    print(
-        f"{PASS if ok else FAIL} preserved-metadata topology rewrite invalidates sidecar"
-        f"{'' if ok else f' new={new_owner!r} old={old_owner!r}'}"
-    )
-    return ok
+    assert new_owner == "target-root", f"new_owner={new_owner!r}"
+    assert old_owner is None, f"old_owner={old_owner!r}"
 
 
-def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
+def test_write_session_full_updates_loaded_fork_index_sidecar() -> None:
     _reset_home()
     root = _record("target-root")
     _write(root)
@@ -811,15 +737,11 @@ def test_write_session_full_updates_loaded_fork_index_sidecar() -> bool:
     finally:
         session_store.json.loads = original_loads
 
-    ok = resolved == "target-root" and parsed_session_json == []
-    print(
-        f"{PASS if ok else FAIL} write_session_full refreshes fork-index sidecar"
-        f"{'' if ok else ' parsed=' + repr(parsed_session_json[:10])}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert parsed_session_json == [], f"parsed={parsed_session_json[:10]!r}"
 
 
-def test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan() -> bool:
+def test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan() -> None:
     _reset_home()
     root = _record("target-root")
     _write(root)
@@ -849,15 +771,11 @@ def test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan() -> bool:
     finally:
         session_store._dir_fingerprint = original_fingerprint
 
-    ok = calls == 0 and session_store._resolve_root_id("child-fork") == "target-root"
-    print(
-        f"{PASS if ok else FAIL} loaded fork sidecar update skips dir fingerprint scan"
-        f"{'' if ok else ' calls=' + repr(calls)}"
-    )
-    return ok
+    assert calls == 0, f"dir fingerprint scanned calls={calls}"
+    assert session_store._resolve_root_id("child-fork") == "target-root", "child-fork did not resolve"
 
 
-def test_loaded_fork_metadata_write_skips_fork_index_sidecar() -> bool:
+def test_loaded_fork_metadata_write_skips_fork_index_sidecar() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -877,15 +795,11 @@ def test_loaded_fork_metadata_write_skips_fork_index_sidecar() -> bool:
     session_store._index_sidecar_write_queue.join()
     after = sidecar.stat().st_mtime_ns
 
-    ok = before == after and session_store._resolve_root_id("child-fork") == "target-root"
-    print(
-        f"{PASS if ok else FAIL} loaded fork metadata write skips fork-index sidecar"
-        f"{'' if ok else f' before={before} after={after}'}"
-    )
-    return ok
+    assert before == after, f"sidecar rewritten before={before} after={after}"
+    assert session_store._resolve_root_id("child-fork") == "target-root", "child-fork did not resolve"
 
 
-def test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write() -> bool:
+def test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write() -> None:
     _reset_home()
     root = _record("target-root")
     _write(root)
@@ -899,15 +813,10 @@ def test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write() -
     session_store.write_session_full(root, bump_updated_at=False)
     after = sidecar.stat().st_mtime_ns
 
-    ok = before == after
-    print(
-        f"{PASS if ok else FAIL} metadata-only write skips fork-index sidecar"
-        f"{'' if ok else f' before={before} after={after}'}"
-    )
-    return ok
+    assert before == after, f"sidecar rewritten before={before} after={after}"
 
 
-def test_write_session_full_updates_unloaded_fork_index_sidecar() -> bool:
+def test_write_session_full_updates_unloaded_fork_index_sidecar() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -949,15 +858,12 @@ def test_write_session_full_updates_unloaded_fork_index_sidecar() -> bool:
     finally:
         session_store.json.loads = original_loads
 
-    ok = first == "target-root" and resolved == "target-root" and parsed_session_json == []
-    print(
-        f"{PASS if ok else FAIL} unloaded write refreshes fork-index sidecar"
-        f"{'' if ok else ' parsed=' + repr(parsed_session_json[:10])}"
-    )
-    return ok
+    assert first == "target-root", f"first={first!r}"
+    assert resolved == "target-root", f"resolved={resolved!r}"
+    assert parsed_session_json == [], f"parsed={parsed_session_json[:10]!r}"
 
 
-def test_legacy_summary_backfills_all_fork_ids() -> bool:
+def test_legacy_summary_backfills_all_fork_ids() -> None:
     """A summary written before the complete-fork-set field existed carries
     only the kind-filtered `fork_ids`. It must be rebuilt from the root, not
     trusted — otherwise every non-user fork stays unresolvable."""
@@ -979,15 +885,11 @@ def test_legacy_summary_backfills_all_fork_ids() -> bool:
     session_store._ensure_summary_index(blocking=True)
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    ok = summary.get("all_fork_ids") == ["child-fork"] and "fork_ids" not in summary
-    print(
-        f"{PASS if ok else FAIL} legacy summary backfills all_fork_ids"
-        f"{'' if ok else f' summary={summary!r}'}"
-    )
-    return ok
+    assert summary.get("all_fork_ids") == ["child-fork"], f"summary={summary!r}"
+    assert "fork_ids" not in summary, f"summary={summary!r}"
 
 
-def test_sub_session_fork_resolves_through_summary() -> bool:
+def test_sub_session_fork_resolves_through_summary() -> None:
     """The fork index resolves ids for EVERY fork kind. `fork_count` counts
     user forks only, so a root whose sole child is a sub-session reports
     zero — that must not be read as "this root has no forks"."""
@@ -1002,15 +904,10 @@ def test_sub_session_fork_resolves_through_summary() -> bool:
     _write_summary("target-root", 0, all_fork_ids=["hidden-sub"])
 
     resolved = session_store._resolve_root_id("hidden-sub")
-    ok = resolved == "target-root"
-    print(
-        f"{PASS if ok else FAIL} sub-session fork resolves through summary"
-        f"{'' if ok else f' resolved={resolved!r}'}"
-    )
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
 
 
-def test_stale_zero_fork_summary_still_scans_root() -> bool:
+def test_stale_zero_fork_summary_still_scans_root() -> None:
     _reset_home()
     fork = {
         **_record("child-fork"),
@@ -1021,12 +918,10 @@ def test_stale_zero_fork_summary_still_scans_root() -> bool:
     _write_summary("target-root", 0, stale=True)
 
     resolved = session_store._resolve_root_id("child-fork")
-    ok = resolved == "target-root"
-    print(f"{PASS if ok else FAIL} stale zero-fork summary still scans root")
-    return ok
+    assert resolved == "target-root", f"resolved={resolved!r}"
 
 
-def test_summary_build_refreshes_stale_summary_file() -> bool:
+def test_summary_build_refreshes_stale_summary_file() -> None:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0, stale=True)
@@ -1036,15 +931,11 @@ def test_summary_build_refreshes_stale_summary_file() -> bool:
     session_store._ensure_summary_index(blocking=True)
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    ok = (
-        summary.get("id") == "target-root"
-        and summary_path.stat().st_mtime_ns >= path.stat().st_mtime_ns
-    )
-    print(f"{PASS if ok else FAIL} summary build refreshes stale summary file")
-    return ok
+    assert summary.get("id") == "target-root", f"summary={summary!r}"
+    assert summary_path.stat().st_mtime_ns >= path.stat().st_mtime_ns, "summary not refreshed"
 
 
-def test_root_change_projection_accepts_only_vanished_upsert() -> bool:
+def test_root_change_projection_accepts_only_vanished_upsert() -> None:
     _reset_home()
     sid = "vanished-root"
     _write(_record(sid))
@@ -1085,49 +976,62 @@ def test_root_change_projection_accepts_only_vanished_upsert() -> bool:
         ),
     )
 
-    ok = checkpoint == 2 and malformed is False
-    print(f"{PASS if ok else FAIL} projection accepts only vanished WAL upsert")
-    return ok
+    assert checkpoint == 2, f"checkpoint={checkpoint}"
+    assert malformed is False, f"malformed={malformed!r}"
 
 
-def main() -> int:
+def main() -> None:
+    checks = [
+        ("root sid resolves without cold fork-index scan", test_root_id_resolves_without_cold_scan),
+        ("fork sid still resolves through fork index", test_fork_id_still_uses_index),
+        ("concurrent fork misses singleflight cold build", test_concurrent_fork_misses_singleflight_cold_build),
+        ("fresh zero-fork summaries skip full root parses", test_fresh_zero_fork_summaries_skip_full_parse),
+        ("fresh fork summary builds index without root parse", test_fresh_fork_summary_builds_index_without_root_parse),
+        ("fork-index sidecar avoids root parses", test_fork_index_sidecar_builds_index_without_root_or_summary_parse),
+        ("fork-index sidecar writes outside index lock", test_index_sidecar_write_happens_outside_index_lock),
+        ("fork-index scan avoids Path.glob", test_fork_index_scan_avoids_path_glob),
+        ("missing sid never scans dir fingerprint", test_missing_sid_never_scans_directory_fingerprint),
+        ("projection before generation capture resolves", test_projection_between_miss_and_generation_capture_resolves),
+        ("projection during timed-out wait resolves", test_projection_during_timed_out_observation_wait_resolves),
+        ("unstable index refresh performs one full build", test_concurrent_missing_sid_refresh_attempts_singleflight),
+        ("concurrent dir fingerprint cache singleflights", test_concurrent_dir_fingerprint_cache_singleflights),
+        ("blocked fingerprint publish keeps index lookup responsive", test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive),
+        ("stale fingerprint publication is rejected", test_mutation_between_scan_and_publish_rejects_stale_fingerprint),
+        ("sidecar snapshot performs no fingerprint scan", test_sidecar_scan_retries_after_concurrent_index_mutation),
+        ("external fork is reconciled before sidecar publish", test_external_fork_write_reconciles_before_sidecar_publish),
+        ("preserved-metadata topology rewrite invalidates sidecar", test_preserved_mtime_size_topology_rewrite_invalidates_sidecar),
+        ("write_session_full refreshes fork-index sidecar", test_write_session_full_updates_loaded_fork_index_sidecar),
+        ("loaded fork sidecar update skips dir fingerprint scan", test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan),
+        ("loaded fork metadata write skips fork-index sidecar", test_loaded_fork_metadata_write_skips_fork_index_sidecar),
+        ("metadata-only write skips fork-index sidecar", test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write),
+        ("unloaded write refreshes fork-index sidecar", test_write_session_full_updates_unloaded_fork_index_sidecar),
+        ("legacy summary backfills all_fork_ids", test_legacy_summary_backfills_all_fork_ids),
+        ("sub-session fork resolves through summary", test_sub_session_fork_resolves_through_summary),
+        ("stale zero-fork summary still scans root", test_stale_zero_fork_summary_still_scans_root),
+        ("summary build refreshes stale summary file", test_summary_build_refreshes_stale_summary_file),
+        ("projection accepts only vanished WAL upsert", test_root_change_projection_accepts_only_vanished_upsert),
+    ]
+    failures: list[str] = []
     try:
-        checks = [
-            test_root_id_resolves_without_cold_scan(),
-            test_fork_id_still_uses_index(),
-            test_concurrent_fork_misses_singleflight_cold_build(),
-            test_fresh_zero_fork_summaries_skip_full_parse(),
-            test_fresh_fork_summary_builds_index_without_root_parse(),
-            test_fork_index_sidecar_builds_index_without_root_or_summary_parse(),
-            test_index_sidecar_write_happens_outside_index_lock(),
-            test_fork_index_scan_avoids_path_glob(),
-            test_missing_sid_never_scans_directory_fingerprint(),
-            test_projection_between_miss_and_generation_capture_resolves(),
-            test_projection_during_timed_out_observation_wait_resolves(),
-            test_concurrent_missing_sid_refresh_attempts_singleflight(),
-            test_concurrent_dir_fingerprint_cache_singleflights(),
-            test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive(),
-            test_mutation_between_scan_and_publish_rejects_stale_fingerprint(),
-            test_sidecar_scan_retries_after_concurrent_index_mutation(),
-            test_external_fork_write_reconciles_before_sidecar_publish(),
-            test_preserved_mtime_size_topology_rewrite_invalidates_sidecar(),
-            test_write_session_full_updates_loaded_fork_index_sidecar(),
-            test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan(),
-            test_loaded_fork_metadata_write_skips_fork_index_sidecar(),
-            test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
-            test_write_session_full_updates_unloaded_fork_index_sidecar(),
-            test_legacy_summary_backfills_all_fork_ids(),
-            test_sub_session_fork_resolves_through_summary(),
-            test_stale_zero_fork_summary_still_scans_root(),
-            test_summary_build_refreshes_stale_summary_file(),
-            test_root_change_projection_accepts_only_vanished_upsert(),
-        ]
-        passed = sum(1 for ok in checks if ok)
-        print(f"\n{passed}/{len(checks)} checks passed")
-        return 0 if passed == len(checks) else 1
+        for label, fn in checks:
+            try:
+                fn()
+            except AssertionError as exc:
+                failures.append(label)
+                print(f"{FAIL} {label}: {exc}")
+            except Exception:
+                import traceback
+                failures.append(label)
+                print(f"{FAIL} {label}: unexpected")
+                traceback.print_exc()
+            else:
+                print(f"{PASS} {label}")
+        print(f"\n{len(checks) - len(failures)}/{len(checks)} checks passed")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
