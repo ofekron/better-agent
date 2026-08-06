@@ -54,6 +54,10 @@ case "${1:-} ${2:-}" in
       previous="$arg"
     done
     printf 'build %s %s\n' "$tag" "$fingerprint" >> "$DOCKER_TEST_FAKE_STATE/builds"
+    if [ -n "${DOCKER_TEST_FAKE_STALL_BUILD:-}" ]; then
+      printf 'one line of progress, then silence\n'
+      exec sleep 6317
+    fi
     if [ -n "${DOCKER_TEST_FAKE_BUILD_FIFO:-}" ]; then
       printf 'build-started\n' > "$DOCKER_TEST_FAKE_BUILD_FIFO"
     fi
@@ -211,6 +215,26 @@ if DOCKER_TEST_FAKE_FAIL_BUILD=1 \
 fi
 docker_test_materialize_image failed "$FAILED_IMAGE" -t "$FAILED_IMAGE" .
 [ "$(wc -l < "$STATE/builds")" -eq 5 ] || fail "failed leader did not release ownership for retry"
+
+STALLED_IMAGE="better-agent-backend-tests:deps-stalled"
+STALL_STDERR="$STATE/stall-stderr"
+STALL_START="$(date +%s)"
+if DOCKER_TEST_FAKE_STALL_BUILD=1 BETTER_AGENT_DOCKER_BUILD_STALL_SECONDS=1 \
+  docker_test_materialize_image stalled "$STALLED_IMAGE" -t "$STALLED_IMAGE" . \
+  2> "$STALL_STDERR"; then
+  fail "stalled build was reported as success"
+fi
+STALL_ELAPSED=$(( $(date +%s) - STALL_START ))
+[ "$STALL_ELAPSED" -lt 30 ] || fail "stall watchdog did not bound a hung build (took ${STALL_ELAPSED}s)"
+[ "$(wc -l < "$STATE/builds")" -eq 7 ] || fail "stalled build was not retried exactly once"
+grep -q 'retrying (attempt 2/2)' "$STALL_STDERR" || fail "stall retry was not announced"
+grep -q 'build stalled twice' "$STALL_STDERR" || fail "double stall did not fail loudly"
+! pgrep -f 'sleep 6317' >/dev/null 2>&1 || fail "stall watchdog leaked a hung build process"
+
+docker_test_materialize_image healthy-after-stall \
+  "better-agent-backend-tests:deps-healthy-after-stall" \
+  -t "better-agent-backend-tests:deps-healthy-after-stall" .
+[ "$(wc -l < "$STATE/builds")" -eq 8 ] || fail "healthy build after stall did not run"
 
 docker_test_prepare_lock_root
 rm -f "$DOCKER_TEST_LEASE_DIR/$DOCKER_TEST_RUN_ID"
