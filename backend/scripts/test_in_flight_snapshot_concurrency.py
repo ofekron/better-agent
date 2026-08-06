@@ -66,7 +66,7 @@ def _mk_in_flight_msg() -> tuple[str, str, TurnManager, dict]:
     return sid, root_id, tm, msg
 
 
-def test_concurrent_snapshot_does_not_crash() -> bool:
+def test_concurrent_snapshot_does_not_crash() -> None:
     """Mutator thread toggles keys on the msg's nested dict while holding
     the per-root lock (mirroring apply_event under session_manager.batch);
     the main thread deepcopies the in-flight msg via the public reader.
@@ -109,21 +109,24 @@ def test_concurrent_snapshot_does_not_crash() -> bool:
     if t.is_alive():
         errors.append(TimeoutError("mutator thread did not join"))
 
-    if errors:
-        for e in errors:
-            print(f"      {FAIL} {type(e).__name__}: {e}")
-        return False
+    # history-drop / RuntimeError-under-concurrency: the pre-fix reader
+    # copied the in-flight msg without the per-root lock and raised
+    # 'dictionary keys changed during iteration'. Every concurrency
+    # failure (reader RuntimeError, snapshot-None, mutator-join-timeout)
+    # lands here as a real assertion, not a swallowed bool.
+    assert not errors, (
+        "snapshot reader raised under concurrent mutation: "
+        + "; ".join(f"{type(e).__name__}: {e}" for e in errors)
+    )
 
     # Sanity: the snapshot is an independent deep copy — mutating it must
-    # not touch the live msg.
+    # not touch the live msg. A shallow copy would leak the mutation back
+    # into the live in-flight dict that apply_event mutates.
     snap = tm.get_in_flight_assistant_msg(sid)
     snap["scratch"]["LEAKED"] = True
-    if "LEAKED" in msg["scratch"]:
-        print(f"      {FAIL} snapshot is not a deep copy (mutation leaked)")
-        return False
+    assert "LEAKED" not in msg["scratch"], "snapshot is not a deep copy (mutation leaked)"
 
     print(f"      {PASS} {iterations} concurrent snapshots, no RuntimeError")
-    return True
 
 
 # ─── runner ───────────────────────────────────────────────────────
@@ -135,10 +138,13 @@ def main() -> int:
     failed = 0
     for name, fn in tests:
         print(f"  • {name}")
-        ok = fn()
-        print(f"    {'OK' if ok else 'FAILED'}\n")
-        if not ok:
+        try:
+            fn()
+        except AssertionError as exc:
             failed += 1
+            print(f"    {FAIL} {name}: {exc}\n")
+            continue
+        print(f"    OK\n")
     if failed:
         print(f"{FAIL} {failed}/{len(tests)} failed")
         return 1
