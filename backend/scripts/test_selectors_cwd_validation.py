@@ -58,38 +58,36 @@ def _patch_cwd(session_id: str, cwd: str):
     )
 
 
-def test_missing_directory_rejected() -> tuple[bool, str]:
+def test_missing_directory_rejected() -> None:
     start = os.path.realpath(tempfile.mkdtemp(prefix="selectors-start-"))
     sid = _new_session(start)
     missing = os.path.join(start, "does-not-exist")
     res = _patch_cwd(sid, missing)
-    if res.status_code != 400:
-        return False, f"expected 400, got {res.status_code}: {res.text[:160]}"
+    assert res.status_code == 400, f"expected 400, got {res.status_code}: {res.text[:160]}"
     stored = session_manager.get(sid).get("cwd")
-    return stored == start, f"cwd must be untouched, got {stored!r}"
+    assert stored == start, f"cwd must be untouched, got {stored!r}"
 
 
-def test_file_path_rejected() -> tuple[bool, str]:
+def test_file_path_rejected() -> None:
     start = os.path.realpath(tempfile.mkdtemp(prefix="selectors-start-"))
     sid = _new_session(start)
     a_file = os.path.join(start, "a-file.txt")
     with open(a_file, "w") as fh:
         fh.write("x")
     res = _patch_cwd(sid, a_file)
-    return res.status_code == 400, f"expected 400 for a file, got {res.status_code}"
+    assert res.status_code == 400, f"expected 400 for a file, got {res.status_code}"
 
 
-def test_existing_directory_accepted_and_resolved() -> tuple[bool, str]:
+def test_existing_directory_accepted_and_resolved() -> None:
     start = os.path.realpath(tempfile.mkdtemp(prefix="selectors-start-"))
     target = os.path.realpath(tempfile.mkdtemp(prefix="selectors-target-"))
     sid = _new_session(start)
     # Unresolved form: the handler must store the resolved path.
     unresolved = os.path.join(target, ".", "")
     res = _patch_cwd(sid, unresolved)
-    if res.status_code != 200:
-        return False, f"expected 200, got {res.status_code}: {res.text[:160]}"
+    assert res.status_code == 200, f"expected 200, got {res.status_code}: {res.text[:160]}"
     stored = session_manager.get(sid).get("cwd")
-    return stored == target, f"expected {target!r}, got {stored!r}"
+    assert stored == target, f"expected {target!r}, got {stored!r}"
 
 
 TESTS = [
@@ -103,11 +101,12 @@ def main_() -> int:
     failures = 0
     for label, fn in TESTS:
         try:
-            ok, detail = fn()
+            fn()
         except Exception as exc:  # noqa: BLE001
-            ok, detail = False, f"raised {type(exc).__name__}: {exc}"
-        print(f"{PASS if ok else FAIL} {label}" + ("" if ok else f" — {detail}"))
-        failures += 0 if ok else 1
+            failures += 1
+            print(f"{FAIL} {label} — {type(exc).__name__}: {exc}")
+            continue
+        print(f"{PASS} {label}")
     return 1 if failures else 0
 
 
