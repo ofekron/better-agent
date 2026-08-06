@@ -6,6 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-extension-storage-")
 
@@ -62,6 +64,37 @@ def _seed_extension() -> dict:
     return record
 
 
+def _apply_test_facade() -> None:
+    """Install the in-memory extension record + test coordinator these tests rely on.
+
+    Under pytest this runs via the autouse fixture (which also restores originals);
+    under __main__ it runs once at the start of main_run().
+    """
+    record = _seed_extension()
+    orchestrator._default_coordinator = _Coordinator()  # type: ignore[attr-defined]
+    extension_store.get_extension = lambda extension_id: record if extension_id == EXT_ID else None  # type: ignore[method-assign]
+    extension_store.is_extension_active = lambda extension_id: extension_id == EXT_ID  # type: ignore[method-assign]
+    extension_store.has_permission = lambda extension_record, permission: permission == "storage"  # type: ignore[method-assign]
+
+
+@pytest.fixture(autouse=True)
+def _storage_test_facade():
+    saved = {
+        "get_extension": extension_store.get_extension,
+        "is_extension_active": extension_store.is_extension_active,
+        "has_permission": extension_store.has_permission,
+        "_default_coordinator": getattr(orchestrator, "_default_coordinator", None),
+    }
+    _apply_test_facade()
+    try:
+        yield
+    finally:
+        extension_store.get_extension = saved["get_extension"]  # type: ignore[method-assign]
+        extension_store.is_extension_active = saved["is_extension_active"]  # type: ignore[method-assign]
+        extension_store.has_permission = saved["has_permission"]  # type: ignore[method-assign]
+        orchestrator._default_coordinator = saved["_default_coordinator"]  # type: ignore[attr-defined]
+
+
 def _client() -> TestClient:
     app = FastAPI()
     app.include_router(extension_storage_api.router)
@@ -73,20 +106,20 @@ def _headers() -> dict[str, str]:
     return {"X-Internal-Token": INTERNAL_TOKEN}
 
 
-def test_put_get_round_trip() -> tuple[bool, str]:
+def test_put_get_round_trip() -> None:
     client = _client()
     res = client.post(
         "/api/internal/extension-storage/put",
         headers=_headers(),
         json={"key": "state/value.bin", "value_base64": "b2s="},
     )
-    if res.status_code != 200:
-        return False, f"put got {res.status_code}: {res.text[:120]}"
+    assert res.status_code == 200, f"put got {res.status_code}: {res.text[:120]}"
     res = client.post("/api/internal/extension-storage/get", headers=_headers(), json={"key": "state/value.bin"})
-    return res.status_code == 200 and res.json().get("value_base64") == "b2s=", f"get got {res.status_code}: {res.text[:120]}"
+    assert res.status_code == 200, f"get got {res.status_code}: {res.text[:120]}"
+    assert res.json().get("value_base64") == "b2s=", f"round-trip mismatch: {res.text[:120]}"
 
 
-def test_leaf_symlink_rejected() -> tuple[bool, str]:
+def test_leaf_symlink_rejected() -> None:
     root = ba_home() / "extensions" / "storage" / EXT_ID
     root.mkdir(parents=True, exist_ok=True)
     outside = Path(_TMP_HOME) / "outside.txt"
@@ -97,10 +130,11 @@ def test_leaf_symlink_rejected() -> tuple[bool, str]:
         headers=_headers(),
         json={"key": "leaf", "value_base64": "bm8="},
     )
-    return res.status_code == 400 and outside.read_text(encoding="utf-8") == "outside", f"got {res.status_code}: {res.text[:120]}"
+    assert res.status_code == 400, f"got {res.status_code}: {res.text[:120]}"
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
-def test_parent_symlink_rejected() -> tuple[bool, str]:
+def test_parent_symlink_rejected() -> None:
     root = ba_home() / "extensions" / "storage" / EXT_ID
     target = Path(_TMP_HOME) / "outside-dir"
     target.mkdir()
@@ -111,7 +145,8 @@ def test_parent_symlink_rejected() -> tuple[bool, str]:
         headers=_headers(),
         json={"key": "linked/value", "value_base64": "bm8="},
     )
-    return res.status_code == 400 and not (target / "value").exists(), f"got {res.status_code}: {res.text[:120]}"
+    assert res.status_code == 400, f"got {res.status_code}: {res.text[:120]}"
+    assert not (target / "value").exists()
 
 
 TESTS = [
@@ -122,20 +157,16 @@ TESTS = [
 
 
 def main_run() -> int:
-    record = _seed_extension()
-    orchestrator._default_coordinator = _Coordinator()  # type: ignore[attr-defined]
-    extension_store.get_extension = lambda extension_id: record if extension_id == EXT_ID else None  # type: ignore[method-assign]
-    extension_store.is_extension_active = lambda extension_id: extension_id == EXT_ID  # type: ignore[method-assign]
-    extension_store.has_permission = lambda extension_record, permission: permission == "storage"  # type: ignore[method-assign]
+    _apply_test_facade()
     failed = 0
     for name, fn in TESTS:
         try:
-            ok, detail = fn()
+            fn()
         except Exception as exc:  # noqa: BLE001
-            ok, detail = False, f"exception: {exc}"
-        print(f"  {PASS if ok else FAIL} {name}{'' if ok else ' - ' + detail}")
-        if not ok:
+            print(f"  {FAIL} {name} - exception: {exc}")
             failed += 1
+            continue
+        print(f"  {PASS} {name}")
     return 1 if failed else 0
 
 
