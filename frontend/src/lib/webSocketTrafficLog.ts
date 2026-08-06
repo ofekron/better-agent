@@ -61,6 +61,7 @@ export const KNOWN_WEB_SOCKET_EVENT_TYPES = new Set([
   "session_monitoring_changed", "session_unread_changed", "session_provenance_changed",
   "session_error_changed", "session_user_input_changed", "session_marker_changed",
   "node_state_changed", "node_registration_requested", "node_registration_resolved",
+  "node_provider_credentials_changed",
   "session_deleted", "diagnostic", "lifecycle_notice", "tool_result", "pr_link",
   "background_work_changed", "command_received",
   "queue_consumed", "todos_snapshot",
