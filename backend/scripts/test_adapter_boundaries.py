@@ -25,6 +25,11 @@ ADAPTERS_DIR = BACKEND_DIR / "adapters"
 SCRIPTS_DIR = BACKEND_DIR / "scripts"
 MAIN_PY = BACKEND_DIR / "main.py"
 ADAPTER_API_PY = BACKEND_DIR / "adapter_api.py"
+# The composition-side implementation of ChatCommandPort (see
+# backend/adapters/command_port.py's module docstring): it imports
+# backend.adapters.command_port to implement the Protocol, so it needs
+# the same permitted-importer exemption as main.py/adapter_api.py.
+SURFACE_COMMANDS_PY = BACKEND_DIR / "surface_commands.py"
 
 SURFACE_CONTRACT_PREFIX = "backend.surface_contract"
 ADAPTERS_PREFIX = "backend.adapters"
@@ -37,6 +42,7 @@ ADAPTERS_ALLOWLIST = (
     "backend.event_ingester",
     "backend.jsonl_tailer",
     "backend.paths",
+    "backend.scheme_migrations",
     "backend.i18n",
     "backend.user_msg_lifecycle",
 )
@@ -173,7 +179,7 @@ def _adapters_violations() -> list[str]:
 
 def _external_adapters_import_violations() -> list[str]:
     exempt = {SURFACE_CONTRACT_DIR, ADAPTERS_DIR}
-    exempt_files = {MAIN_PY, ADAPTER_API_PY}
+    exempt_files = {MAIN_PY, ADAPTER_API_PY, SURFACE_COMMANDS_PY}
     violations = []
     for path in _iter_py_files(BACKEND_DIR):
         if path in exempt_files:

@@ -107,6 +107,49 @@ def typed_prompt_node_id(uuid_value: str | None) -> str | None:
     return uuid_value if isinstance(uuid_value, str) and uuid_value else None
 
 
+_PROMPT_ORIGIN_VALUES = {o.value for o in PromptOrigin}
+_SEND_MODE_VALUES = {s.value for s in SendMode}
+
+
+def parse_prompt_origin(value: object) -> PromptOrigin:
+    return PromptOrigin(value) if value in _PROMPT_ORIGIN_VALUES else PromptOrigin.USER
+
+
+def parse_send_mode(value: object) -> SendMode:
+    return SendMode(value) if value in _SEND_MODE_VALUES else SendMode.QUEUE
+
+
+def enrich_typed_prompt_node(node: Node, *, row_data: dict, meta: dict | None) -> Node:
+    """Fold a joined `prompt_meta` fact (backend.turn_manager, ADR Phase C)
+    onto a TYPED_PROMPT node's origin/send_mode.
+
+    The CLI-authored row's OWN `data.origin`/`data.send_mode` (if a future
+    write path ever stamps them directly) always wins over the
+    backend-authored meta fact — meta only fills in fields the row itself
+    is silent on. Idempotent: re-applying to an already-enriched node is a
+    no-op (`origin`/`send_mode` already match, so the identity check below
+    skips the `replace`), so callers may re-run this on every observation
+    of the same row (seed + live upsert) without accumulating drift.
+    """
+    if node.kind != NodeKind.TYPED_PROMPT or not isinstance(node.payload, TypedPromptPayload):
+        return node
+    origin = (
+        parse_prompt_origin(row_data.get("origin"))
+        if row_data.get("origin") is not None
+        else parse_prompt_origin(meta.get("origin")) if meta and meta.get("origin") is not None
+        else node.payload.origin
+    )
+    send_mode = (
+        parse_send_mode(row_data.get("send_mode"))
+        if row_data.get("send_mode") is not None
+        else parse_send_mode(meta.get("send_mode")) if meta and meta.get("send_mode") is not None
+        else node.payload.send_mode
+    )
+    if origin == node.payload.origin and send_mode == node.payload.send_mode:
+        return node
+    return replace(node, payload=replace(node.payload, origin=origin, send_mode=send_mode))
+
+
 def _tool_node_id(tool_use_id: str) -> str:
     return f"tool:{tool_use_id}"
 
@@ -168,6 +211,11 @@ def normalize_journal_row(
     data = data if isinstance(data, dict) else {}
     node = partial(_node, row=row, surface_id=surface_id, turn_id=turn_id, cv=cv)
 
+    if row_type == "prompt_meta":
+        # Backend-authored provenance fact (turn_manager.py) joined onto
+        # the matching TYPED_PROMPT node by msg_id in chat_adapter.py —
+        # never a node of its own (chat-panel.md "Metadata events").
+        return []
     if row_type == "agent_message":
         return _handle_agent_message(row, data, node)
     if row_type in _WORKER_FACT_TYPES:
@@ -286,10 +334,8 @@ def _handle_user(row: dict, data: dict, node: partial) -> list[Node]:
         return nodes
 
     text = _content_to_text(content if content is not None else inner)
-    origin_str = data.get("origin")
-    origin = PromptOrigin(origin_str) if origin_str in {o.value for o in PromptOrigin} else PromptOrigin.USER
-    send_mode_str = data.get("send_mode")
-    send_mode = SendMode(send_mode_str) if send_mode_str in {s.value for s in SendMode} else SendMode.QUEUE
+    origin = parse_prompt_origin(data.get("origin"))
+    send_mode = parse_send_mode(data.get("send_mode"))
     attachments = tuple(
         Attachment(name=a.get("name", ""), media_type=a.get("media_type", ""), ref=a.get("ref", ""))
         for a in data.get("attachments", [])

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from backend.adapters.normalize import (
     derive_link,
+    enrich_typed_prompt_node,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
@@ -17,6 +18,7 @@ from backend.surface_contract.nodes import (
     NodeKind,
     PromptOrigin,
     ResultKind,
+    SendMode,
 )
 
 SURFACE = "surf-1"
@@ -321,6 +323,78 @@ def test_derive_link_extracts_sidechain_fields():
     assert link.parent_uuid == "root1"
     assert link.is_sidechain is True
     assert link.parent_tool_use_id == "t9"
+
+
+# ---------------------------------------------------------------------------
+# prompt_meta row handling + chat_adapter join enrichment (Phase C).
+# ---------------------------------------------------------------------------
+def test_prompt_meta_row_normalizes_to_no_nodes():
+    row = {
+        "type": "prompt_meta",
+        "seq": 1,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "msg_id": "assistant-1",
+        "data": {"msg_id": "user-1", "origin": "supervisor"},
+    }
+    assert normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN) == []
+
+
+def _typed_prompt_node(*, uuid="p1", origin=None, send_mode=None):
+    data = {"type": "user", "uuid": uuid, "message": {"content": "hi"}}
+    if origin is not None:
+        data["origin"] = origin
+    if send_mode is not None:
+        data["send_mode"] = send_mode
+    row = {"type": "agent_message", "seq": 1, "ts": "2026-01-01T00:00:00+00:00", "data": data}
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].kind == NodeKind.TYPED_PROMPT
+    return row, nodes[0]
+
+
+def test_enrich_typed_prompt_node_fills_origin_from_meta_when_row_silent():
+    row, node = _typed_prompt_node()
+    assert node.payload.origin == PromptOrigin.USER  # unenriched default
+
+    enriched = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"origin": "supervisor"},
+    )
+    assert enriched.payload.origin == PromptOrigin.SUPERVISOR
+    assert enriched.payload.send_mode == SendMode.QUEUE  # untouched: meta had no send_mode
+
+
+def test_enrich_typed_prompt_node_row_origin_wins_over_meta():
+    row, node = _typed_prompt_node(origin="ask")
+    assert node.payload.origin == PromptOrigin.ASK
+
+    enriched = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"origin": "supervisor"},
+    )
+    assert enriched.payload.origin == PromptOrigin.ASK  # row wins, meta ignored
+
+
+def test_enrich_typed_prompt_node_no_meta_is_noop():
+    row, node = _typed_prompt_node()
+    enriched = enrich_typed_prompt_node(node, row_data=row["data"], meta=None)
+    assert enriched is node  # identical origin/send_mode: no replace() churn
+
+
+def test_enrich_typed_prompt_node_is_idempotent():
+    row, node = _typed_prompt_node()
+    once = enrich_typed_prompt_node(node, row_data=row["data"], meta={"origin": "supervisor"})
+    twice = enrich_typed_prompt_node(once, row_data=row["data"], meta={"origin": "supervisor"})
+    assert once == twice
+    assert twice is once  # second call is a true no-op: values already match
+
+
+def test_enrich_typed_prompt_node_ignores_non_typed_prompt_nodes():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "x",
+        "data": {"type": "assistant", "uuid": "a1", "message": {"content": [{"type": "text", "text": "hi"}]}},
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].kind == NodeKind.ASSISTANT_TEXT
+    enriched = enrich_typed_prompt_node(nodes[0], row_data=row["data"], meta={"origin": "supervisor"})
+    assert enriched is nodes[0]
 
 
 if __name__ == "__main__":

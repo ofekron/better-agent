@@ -19,6 +19,7 @@ prompt-anchored).
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
@@ -27,6 +28,7 @@ from backend.adapters import derive as _derive
 from backend.adapters.normalize import (
     ParentLink,
     derive_link,
+    enrich_typed_prompt_node,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
@@ -59,7 +61,15 @@ from backend.surface_contract.identity import (
     SurfaceCursor,
     SurfaceId,
 )
-from backend.surface_contract.intents import ChatIntent, IntentRejected, TransportAck
+from backend.surface_contract.intents import (
+    ChatIntent,
+    DeleteQueued,
+    EditQueued,
+    IntentAccepted,
+    IntentRejected,
+    Stop,
+    TransportAck,
+)
 from backend.surface_contract.nodes import (
     ContentStatus,
     Node,
@@ -77,6 +87,30 @@ _RESULT_SUFFIX = ":result"
 def _row_seq(row: dict) -> int:
     seq = row.get("seq")
     return seq if isinstance(seq, int) else 0
+
+
+def _collect_prompt_meta(rows: list[dict]) -> dict[str, dict]:
+    """Scan a row batch for `prompt_meta` facts (turn_manager.py), keyed by
+    the row's OWN journal-ownership `msg_id` — the assistant/turn-owning
+    message id every render row of that turn shares (see
+    `TurnManager._publish_prompt_meta`), not the `user_msg["id"]` carried
+    inside the fact's `data` payload.
+
+    Root-wide, not per-turn-segment: `prompt_meta` is published at turn
+    DISPATCH, before the provider's own `type: "user"` echo row exists, so
+    it always lands earlier in `events.jsonl` than the TYPED_PROMPT row it
+    describes — `_segment_turns` would otherwise misfile it into the
+    PREVIOUS turn's segment. Scanning the full row list up front sidesteps
+    that entirely."""
+    meta: dict[str, dict] = {}
+    for row in rows:
+        if row.get("type") != "prompt_meta":
+            continue
+        msg_id = row.get("msg_id")
+        data = row.get("data")
+        if isinstance(msg_id, str) and msg_id and isinstance(data, dict):
+            meta[msg_id] = data
+    return meta
 
 
 class _SubscriptionImpl:
@@ -97,6 +131,7 @@ class _TurnView:
     runtime_change: Node | None
     live_nodes: tuple[Node, ...]  # paired + parent-resolved raw nodes for this turn
     index: dict[NodeId, Node]  # every node this turn owns, parent_id fully stamped
+    prompt_row: dict  # raw row that produced this turn's TYPED_PROMPT node (always segment rows[0])
 
 
 @dataclass
@@ -113,6 +148,14 @@ class _SurfaceState:
     # render_rev can be turned back into a replay baseline. Bounded so a
     # long-lived surface can't grow this unboundedly.
     render_seq_history: "OrderedDict[int, int]" = field(default_factory=OrderedDict)
+    # msg_id (assistant-owned, see `_collect_prompt_meta`) -> prompt_meta
+    # data. Accumulates monotonically (a msg_id's meta never changes once
+    # written), so live updates and full rescans can merge freely.
+    prompt_meta: dict[str, dict] = field(default_factory=dict)
+    # Raw row of the currently-live turn's TYPED_PROMPT-producing row, so a
+    # `prompt_meta` fact arriving AFTER that row (live path) can re-derive
+    # and re-broadcast the now-enriched node. None until the first prompt.
+    current_prompt_row: dict | None = None
 
 
 def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -137,11 +180,20 @@ def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     return segments
 
 
-def _normalize_rows(surface_id: str, turn_id: str, rows: list[dict]) -> list[Node]:
+def _normalize_rows(
+    surface_id: str, turn_id: str, rows: list[dict], prompt_meta: dict[str, dict] | None = None,
+) -> list[Node]:
     raw_nodes: list[Node] = []
     links: dict[NodeId, ParentLink] = {}
     for row in rows:
         produced = normalize_journal_row(row, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION)
+        if prompt_meta:
+            row_data = row.get("data")
+            row_data = row_data if isinstance(row_data, dict) else {}
+            meta = prompt_meta.get(row.get("msg_id")) if isinstance(row.get("msg_id"), str) else None
+            produced = [
+                enrich_typed_prompt_node(n, row_data=row_data, meta=meta) for n in produced
+            ]
         link = derive_link(row)
         for n in produced:
             links[n.node_id] = link
@@ -150,9 +202,11 @@ def _normalize_rows(surface_id: str, turn_id: str, rows: list[dict]) -> list[Nod
     return resolve_parents(raw_nodes, links)
 
 
-def _build_turn_view(surface_id: str, turn_id: str, rows: list[dict]) -> _TurnView:
+def _build_turn_view(
+    surface_id: str, turn_id: str, rows: list[dict], prompt_meta: dict[str, dict] | None = None,
+) -> _TurnView:
     boundary_seq = _row_seq(rows[0])
-    raw_nodes = _normalize_rows(surface_id, turn_id, rows)
+    raw_nodes = _normalize_rows(surface_id, turn_id, rows, prompt_meta)
 
     runtime_change = next((n for n in raw_nodes if n.kind in RUNTIME_CHANGED_KINDS), None)
     body_source = [n for n in raw_nodes if n.kind not in RUNTIME_CHANGED_KINDS]
@@ -187,6 +241,7 @@ def _build_turn_view(surface_id: str, turn_id: str, rows: list[dict]) -> _TurnVi
     return _TurnView(
         turn_id=turn_id, boundary_seq=boundary_seq, turn_node=turn_node, prompt=prompt,
         results=results, runtime_change=runtime_change, live_nodes=tuple(raw_nodes), index=index,
+        prompt_row=rows[0],
     )
 
 
@@ -373,11 +428,36 @@ class ChatSurfaceAdapter(ChatSurface):
     # ---- command plane -------------------------------------------------
 
     def submit(self, intent: ChatIntent) -> TransportAck:
-        return IntentRejected(
-            intent_id=intent.intent_id,
-            code="unsupported_contract_phase",
-            message="command plane not wired yet; the legacy WS path remains authoritative",
-        )
+        port = getattr(self, "_command_port", None)
+        if port is None:
+            return IntentRejected(
+                intent_id=intent.intent_id,
+                code="unsupported_contract_phase",
+                message="command plane not wired yet; the legacy WS path remains authoritative",
+            )
+        # Acks are accept/reject only (see surface_contract/intents.py's
+        # module docstring) — the real outcome surfaces later as a
+        # projection fact over the live plane, so a well-formed,
+        # currently-supported intent is admitted and its port coroutine
+        # scheduled WITHOUT this synchronous call waiting on it. `submit`
+        # itself stays sync (fixed by the `ChatSurface` ABC), so it never
+        # awaits — only intents this port has real support for get past
+        # this point; anything else is rejected synchronously, before any
+        # coroutine is scheduled.
+        if isinstance(intent, Stop):
+            coro = port.stop(intent.session_id)
+        elif isinstance(intent, EditQueued):
+            coro = port.edit_queued(intent.session_id, intent.node_id, intent.text)
+        elif isinstance(intent, DeleteQueued):
+            coro = port.delete_queued(intent.session_id, intent.node_id)
+        else:
+            return IntentRejected(
+                intent_id=intent.intent_id,
+                code="unsupported",
+                message=f"{type(intent).__name__} intents are not yet supported on this transport",
+            )
+        asyncio.get_running_loop().create_task(coro)
+        return IntentAccepted(intent_id=intent.intent_id)
 
     # ---- internals: surface state --------------------------------------
 
@@ -391,8 +471,13 @@ class ChatSurfaceAdapter(ChatSurface):
 
     def _all_turns(self, surface_id: SurfaceId) -> list[_TurnView]:
         rows = self._read_all_rows(surface_id)
+        prompt_meta = _collect_prompt_meta(rows)
+        if prompt_meta:
+            state = self._get_or_create(surface_id)
+            with state.lock:
+                state.prompt_meta.update(prompt_meta)
         return [
-            _build_turn_view(surface_id, turn_id, seg_rows)
+            _build_turn_view(surface_id, turn_id, seg_rows, prompt_meta)
             for turn_id, seg_rows in _segment_turns(rows)
         ]
 
@@ -446,6 +531,7 @@ class ChatSurfaceAdapter(ChatSurface):
             state.current_turn_id = turns[-1].turn_id if turns else None
             state.last_seq = seq
             state.pending_tool_uses = pending
+            state.current_prompt_row = turns[-1].prompt_row if turns else None
             # render_rev 0 (never bumped) is what open_session's snapshot
             # hands back — a cursor presenting it has already seen
             # everything through `seq`, not literally "seq 0".
@@ -466,19 +552,32 @@ class ChatSurfaceAdapter(ChatSurface):
 
         frames: list[Node] = []
         with state.lock:
+            state.prompt_meta.update(_collect_prompt_meta(rows))
             turn_id = state.current_turn_id
             max_seq = state.last_seq
             for row in rows:
                 max_seq = max(max_seq, _row_seq(row))
+                if row.get("type") == "prompt_meta":
+                    frames.extend(
+                        self._late_prompt_meta_frames(state, row, turn_id, surface_id)
+                    )
+                    continue
                 produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
                 prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
                 if prompt_node is not None:
                     turn_id = prompt_node.node_id
                     state.pending_tool_uses = {}
+                    state.current_prompt_row = row
                 if turn_id is None:
                     continue  # pre-anchor row (no prompt seen yet): dropped
+                row_data = row.get("data")
+                row_data = row_data if isinstance(row_data, dict) else {}
+                row_msg_id = row.get("msg_id")
+                meta = state.prompt_meta.get(row_msg_id) if isinstance(row_msg_id, str) else None
                 for n in produced:
                     n = replace(n, turn_id=turn_id)
+                    if n.kind == NodeKind.TYPED_PROMPT:
+                        n = enrich_typed_prompt_node(n, row_data=row_data, meta=meta)
                     frames.append(self._merge_live_node(state, n))
             state.current_turn_id = turn_id
             state.last_seq = max_seq
@@ -492,6 +591,40 @@ class ChatSurfaceAdapter(ChatSurface):
             state.projection.broadcast(
                 NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=n)
             )
+
+    def _late_prompt_meta_frames(
+        self, state: _SurfaceState, meta_row: dict, turn_id: str | None, surface_id: str,
+    ) -> list[Node]:
+        """A `prompt_meta` fact observed AFTER its TYPED_PROMPT row already
+        emitted a live NodeUpsert: re-derive that node from the tracked raw
+        row and re-broadcast it enriched.
+
+        Only fires while `state.current_prompt_row` still IS the row this
+        meta describes (same journal-ownership `msg_id`) — if the turn has
+        since moved on, the meta is a moot live-freshness concern; the
+        durable state is already correct for the next seed/replay via
+        `_all_turns`'s independent full-row rescan regardless of arrival
+        order."""
+        current = state.current_prompt_row
+        row_msg_id = meta_row.get("msg_id")
+        if (
+            current is None
+            or turn_id is None
+            or not isinstance(row_msg_id, str)
+            or current.get("msg_id") != row_msg_id
+        ):
+            return []
+        row_data = current.get("data")
+        row_data = row_data if isinstance(row_data, dict) else {}
+        meta = state.prompt_meta.get(row_msg_id)
+        produced = normalize_journal_row(
+            current, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+        )
+        return [
+            self._merge_live_node(state, enrich_typed_prompt_node(n, row_data=row_data, meta=meta))
+            for n in produced
+            if n.kind == NodeKind.TYPED_PROMPT
+        ]
 
     @staticmethod
     def _merge_live_node(state: _SurfaceState, n: Node) -> Node:
@@ -570,6 +703,7 @@ class ChatSurfaceAdapter(ChatSurface):
             implied_seq = state.render_seq_history.get(cursor.render_rev, 0)
             snapshot = state.projection.snapshot()
         all_rows = self._read_all_rows(cursor.surface_id)
+        prompt_meta = _collect_prompt_meta(all_rows)
         segments = _segment_turns(all_rows)
         touched = {
             turn_id for turn_id, seg_rows in segments
@@ -580,5 +714,5 @@ class ChatSurfaceAdapter(ChatSurface):
         for turn_id, seg_rows in segments:
             if turn_id not in touched:
                 continue
-            for n in _normalize_rows(cursor.surface_id, turn_id, seg_rows):
+            for n in _normalize_rows(cursor.surface_id, turn_id, seg_rows, prompt_meta):
                 emit(NodeUpsert(cv=CONTRACT_VERSION, surface_id=cursor.surface_id, snapshot=snapshot, node=n))

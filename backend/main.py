@@ -783,8 +783,10 @@ def _wire_surface_adapter() -> None:
 
     from backend.adapters import build_adapter
     import adapter_api
+    import surface_commands
 
-    surface_adapter = build_adapter()
+    command_port = surface_commands.build_chat_command_port(coordinator=coordinator)
+    surface_adapter = build_adapter(command_port=command_port)
     adapter_api.configure(surface_adapter)
     app.include_router(adapter_api.router)
 

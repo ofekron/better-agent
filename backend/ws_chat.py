@@ -63,10 +63,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 coordinator: Any = None
+# ChatCommandPort instance (backend/adapters/command_port.py), built by
+# backend/surface_commands.py — the SAME transport-neutral command logic
+# backend.adapters.chat_adapter.ChatSurfaceAdapter.submit() dispatches to
+# for the new Chat Surface Contract transport. Legacy WS handlers call it
+# directly (not through submit()) so they keep their exact legacy
+# reply-frame contract, which submit()'s accept/reject-only ack cannot
+# express. See surface_commands.py's module docstring for what moved.
+_command_port: Any = None
 
 
 def configure(*, coordinator: Any) -> None:
+    import surface_commands
+
     globals()["coordinator"] = coordinator
+    globals()["_command_port"] = surface_commands.build_chat_command_port(
+        coordinator=coordinator,
+    )
 
 
 async def _request_subscribed_session_recovery(app_session_id: str) -> None:
@@ -78,8 +91,19 @@ async def _handle_stop_message(
     app_session_id: str,
     send,
 ) -> bool:
-    cancelled = await active_coordinator.turn_manager.cancel_turn(app_session_id)
-    if not cancelled:
+    # Builds the port from the PASSED-IN coordinator rather than the
+    # module-level `_command_port` — this stays callable with an
+    # explicit coordinator and no prior `configure()` call (e.g.
+    # backend/scripts/test_turn_gating.py), and the port is stateless
+    # beyond that reference (see surface_commands.py's factory
+    # docstring), so building it fresh here is equivalent to reusing a
+    # cached instance.
+    import surface_commands
+
+    result = await surface_commands.build_chat_command_port(
+        coordinator=active_coordinator,
+    ).stop(app_session_id)
+    if not result.accepted:
         await send({
             "type": "error",
             "data": {"error": t("error.ws_no_active_turn_to_stop")},
@@ -1671,12 +1695,7 @@ async def websocket_chat(websocket: WebSocket):
                 app_session_id = msg.get("app_session_id")
                 if app_session_id:
                     queued_id = msg.get("queued_id")
-                    coordinator.cancel_queued(
-                        app_session_id,
-                        queued_id if isinstance(queued_id, str) else None,
-                    )
-                    await asyncio.to_thread(
-                        session_manager.remove_queued_prompt,
+                    await _command_port.delete_queued(
                         app_session_id,
                         queued_id if isinstance(queued_id, str) else None,
                     )
@@ -1690,14 +1709,9 @@ async def websocket_chat(websocket: WebSocket):
                     and isinstance(queued_id, str)
                     and isinstance(content, str)
                 ):
-                    await coordinator.update_queued(
+                    await _command_port.edit_queued(
                         app_session_id, queued_id, content,
                     )
-                    await asyncio.to_thread(
-                        session_manager.update_queued_prompt,
-                        app_session_id, queued_id, {"content": content},
-                    )
-                    coordinator.finish_queued_edit(app_session_id, queued_id)
 
             elif msg_type == "begin_queued_edit":
                 app_session_id = msg.get("app_session_id")

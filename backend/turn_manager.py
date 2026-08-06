@@ -396,6 +396,69 @@ class TurnManager:
                 app_session_id,
             )
 
+    # Verified `user_msg["source"]` -> contract `PromptOrigin` signals.
+    # `"supervisor"` is stamped by `_init_turn_messages` (orchestrator.py)
+    # whenever `run_turn` is called with `source="supervisor"` — the
+    # direct-to-supervisor dispatch branch in `Coordinator.handle_prompt`,
+    # always paired with `session_id_field="supervisor_agent_session_id"`.
+    # No other `user_msg["source"]` value is currently stamped by any
+    # verified call site, so every other value (including None) maps to
+    # the contract default "user" rather than a guessed origin.
+    _PROMPT_ORIGIN_SIGNALS: dict[str, str] = {"supervisor": "supervisor"}
+
+    async def _publish_prompt_meta(
+        self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
+    ) -> None:
+        """Backend-authored persisted journal fact carrying this prompt's
+        origin/send_mode, published alongside `lifecycle.turn_start`.
+
+        Kept as its OWN journal row (never mutating the CLI-authored user
+        row) so `backend.adapters.chat_adapter` can join it onto the
+        matching TYPED_PROMPT node without the provider's own
+        session-jsonl replay ever needing to reproduce it — see
+        `backend.adapters.normalize`'s `prompt_meta` row handling.
+
+        The row's OWNERSHIP `msg_id` (`EventJournalWriter`'s
+        `MetadataOwnership`, verified in `event_journal.py`) is stamped
+        `assistant_message_id`, not `user_msg["id"]`: every render event
+        of this turn — INCLUDING the provider's own echoed `type: "user"`
+        row that `normalize._handle_user` turns into the TYPED_PROMPT node
+        — is journaled with `message_id=assistant_msg.get("id")` (see
+        `_publish_provider_stream_event` above), so that's the id the
+        TYPED_PROMPT row's own `row["msg_id"]` will carry once ownership
+        resolves. Using `user_msg["id"]` here would leave this fact
+        permanently unjoinable. `user_msg["id"]` still travels inside the
+        payload `data` — it identifies WHICH prompt this describes,
+        distinct from the journal-ownership key used to find it.
+
+        `send_mode` is omitted: no send-mode context reaches `run_turn`
+        yet (tracked as follow-up work).
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        origin = self._PROMPT_ORIGIN_SIGNALS.get(user_msg.get("source"), "user")
+        try:
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await bus.publish(BusEvent(
+                type="prompt_meta",
+                root_id=root_id,
+                sid=app_session_id,
+                payload={"msg_id": prompt_msg_id, "origin": origin},
+                msg_id=assistant_message_id,
+                persist=True,
+            ))
+        except Exception:
+            logger.exception(
+                "prompt_meta bus publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
+            )
+
     async def _publish_terminal_lifecycle(
         self,
         kind: Literal["complete", "stopped"],
@@ -2295,6 +2358,11 @@ class TurnManager:
                 assistant_message_id=new_msg["id"],
                 manager_session_id=session.get(session_id_field),
                 prompt_uuid=self._resolve_prompt_uuid(user_msg),
+            )
+            await self._publish_prompt_meta(
+                app_session_id=app_session_id,
+                user_msg=user_msg,
+                assistant_message_id=new_msg["id"],
             )
             turn_lifecycle_started = True
 

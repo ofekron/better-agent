@@ -777,6 +777,45 @@ def resolve_claude_config_dir(cfg_dir: str) -> Path:
     return resolve_provider_config_dir(cfg_dir)
 
 
+def scheme_home(component: str, version: int) -> Path:
+    """Schema-versioned state directory for `component` at `version`.
+
+    Returns `<ba_home()>/scheme/<component>/v<version>/`, creating every
+    path segment under `ba_home()` as a private (owner-only) directory —
+    `ba_home()` only secures its own root, not descendants. Idempotent:
+    calling again for an already-created dir just re-verifies privacy.
+
+    `component` must be a bare token (no path separators, no `.`/`..`) so
+    a caller can never escape the `scheme/` root via traversal.
+
+    This is the on-disk root for `scheme_migrations.ensure()` — see
+    `backend/scheme_migrations.py` for the versioning/migration contract
+    built on top of this path.
+    """
+    if (
+        not component
+        or component in (".", "..")
+        or "/" in component
+        or "\\" in component
+    ):
+        raise ValueError(f"scheme_home: invalid component {component!r}")
+    if version < 1:
+        raise ValueError(f"scheme_home: version must be >= 1, got {version}")
+    root = ba_home()
+    target = root / "scheme" / component / f"v{version}"
+    current = root
+    for part in target.relative_to(root).parts:
+        current /= part
+        try:
+            current.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=False)
+        except FileExistsError:
+            require_private_directory(current)
+            continue
+        make_private_directory(current)
+        require_private_directory(current)
+    return target
+
+
 def claude_projects_root_for_session(node: dict) -> Path:
     """Resolve the claude projects directory for a session's provider.
 

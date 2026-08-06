@@ -14,6 +14,16 @@ Locks three owner-side facts the chat-surface adapter layer projects from:
 3. `backend.adapters.normalize.normalize_journal_row` maps a provider
    `result` row to a `NodeKind.RESULT` / `ResultKind.PROVIDER` node so
    `derive.resolve_result`'s provider branch activates.
+4. `turn_manager.TurnManager._publish_prompt_meta` publishes a persisted
+   `prompt_meta` bus fact (Phase C) whose journal-ownership `msg_id` is
+   the ASSISTANT/turn-owning message id (not `user_msg["id"]` — verified
+   in `event_journal.py`: every render row of a turn, including the
+   provider's echoed `type: "user"` row, is journaled with
+   `message_id=assistant_msg.get("id")`), with `origin` mapped from the
+   one verified `user_msg["source"]` signal ("supervisor"), defaulting to
+   "user" otherwise. `backend.adapters.chat_adapter.ChatSurfaceAdapter`
+   joins this fact onto the matching TYPED_PROMPT node by that same
+   `msg_id`, regardless of which row lands in `events.jsonl` first.
 
 Run:
     PYTHONPATH=. python3 -m pytest backend/scripts/test_owner_facts.py -q
@@ -51,8 +61,10 @@ from turn_manager import TurnManager  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.adapters.normalize import normalize_journal_row, typed_prompt_node_id  # noqa: E402
 from backend.event_bus import BusEvent as DottedBusEvent  # noqa: E402
+from backend.event_ingester import event_ingester as dotted_event_ingester  # noqa: E402
 from backend.surface_contract.frames import TurnLifecycle, TurnPhase  # noqa: E402
-from backend.surface_contract.nodes import NodeKind, ResultKind  # noqa: E402
+from backend.surface_contract.identity import Ok  # noqa: E402
+from backend.surface_contract.nodes import NodeKind, PromptOrigin, ResultKind  # noqa: E402
 
 
 class _StubCoordinator:
@@ -334,6 +346,163 @@ def test_result_row_normalizes_to_result_provider_node() -> None:
     assert nodes[0].kind == NodeKind.RESULT
     assert nodes[0].payload.result_kind == ResultKind.PROVIDER
     assert nodes[0].node_id == "result-uuid-1"
+
+
+# ---------------------------------------------------------------------------
+# Item 4 (Phase C): TurnManager._publish_prompt_meta dispatch-site emission.
+# ---------------------------------------------------------------------------
+def test_publish_prompt_meta_defaults_origin_to_user() -> None:
+    sid = f"sid-meta-user-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-user-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-1"},
+            assistant_message_id="asst-msg-1",
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.type == "prompt_meta"
+        assert ev.persist is True
+        # Journal-ownership msg_id is the ASSISTANT/turn-owning message id
+        # (verified in event_journal.py: every render row of a turn,
+        # including the provider's own echoed `type: "user"` row, is
+        # journaled with message_id=assistant_msg.get("id")) — NOT
+        # user_msg["id"], which travels inside the payload instead.
+        assert ev.msg_id == "asst-msg-1"
+        assert ev.payload == {"msg_id": "user-msg-1", "origin": "user"}
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_prompt_meta_maps_supervisor_source_to_supervisor_origin() -> None:
+    sid = f"sid-meta-supervisor-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-supervisor-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-2", "source": "supervisor"},
+            assistant_message_id="asst-msg-2",
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert len(events) == 1
+        assert events[0].payload == {"msg_id": "user-msg-2", "origin": "supervisor"}
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_prompt_meta_unverified_source_still_defaults_to_user() -> None:
+    """Only `source == "supervisor"` is a verified signal — every other
+    `user_msg["source"]` value (e.g. the scheduler's "schedule") maps to
+    the contract default "user" rather than a guessed origin."""
+    sid = f"sid-meta-schedule-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-schedule-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-3", "source": "schedule"},
+            assistant_message_id="asst-msg-3",
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert len(events) == 1
+        assert events[0].payload["origin"] == "user"
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_prompt_meta_noop_without_user_msg_id() -> None:
+    sid = f"sid-meta-noid-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-noid-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid, user_msg={}, assistant_message_id="asst-msg-4",
+        ))
+        assert not [e for e in captured if e.sid == sid]
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_prompt_meta_noop_without_assistant_message_id() -> None:
+    sid = f"sid-meta-noasst-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-noasst-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid, user_msg={"id": "user-msg-5"}, assistant_message_id="",
+        ))
+        assert not [e for e in captured if e.sid == sid]
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+# ---------------------------------------------------------------------------
+# Item 4 (Phase C): ChatSurfaceAdapter joins prompt_meta onto TYPED_PROMPT
+# by journal-ownership msg_id, order-independent.
+# ---------------------------------------------------------------------------
+def _ingest_user_row(root_id: str, text: str, *, msg_id: str) -> int:
+    return dotted_event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {"type": "user", "message": {"content": text}},
+        source="test", msg_id=msg_id,
+    )
+
+
+def _ingest_prompt_meta_row(root_id: str, *, msg_id: str, user_msg_id: str, origin: str) -> int:
+    return dotted_event_ingester.ingest(
+        root_id, root_id, "prompt_meta",
+        {"msg_id": user_msg_id, "origin": origin},
+        source="test", msg_id=msg_id,
+    )
+
+
+def test_chat_adapter_open_session_enriches_typed_prompt_when_meta_precedes_row() -> None:
+    root_id = f"root-meta-precedes-{uuid.uuid4().hex}"
+    asst_msg_id = "asst-precedes-1"
+    _ingest_prompt_meta_row(root_id, msg_id=asst_msg_id, user_msg_id="user-precedes-1", origin="supervisor")
+    _ingest_user_row(root_id, "hello", msg_id=asst_msg_id)
+
+    result = ChatSurfaceAdapter().open_session(root_id)
+    assert isinstance(result, Ok), result
+    turn = result.value.turns[0]
+    assert turn.prompt is not None
+    assert turn.prompt.payload.origin == PromptOrigin.SUPERVISOR
+
+
+def test_chat_adapter_open_session_enriches_typed_prompt_when_meta_follows_row() -> None:
+    root_id = f"root-meta-follows-{uuid.uuid4().hex}"
+    asst_msg_id = "asst-follows-1"
+    _ingest_user_row(root_id, "hello", msg_id=asst_msg_id)
+    _ingest_prompt_meta_row(root_id, msg_id=asst_msg_id, user_msg_id="user-follows-1", origin="supervisor")
+
+    result = ChatSurfaceAdapter().open_session(root_id)
+    assert isinstance(result, Ok), result
+    turn = result.value.turns[0]
+    assert turn.prompt is not None
+    assert turn.prompt.payload.origin == PromptOrigin.SUPERVISOR
+
+
+def test_chat_adapter_open_session_defaults_origin_without_matching_meta() -> None:
+    """A prompt_meta row for a DIFFERENT msg_id must never leak onto this
+    turn's prompt — origin stays the contract default."""
+    root_id = f"root-meta-mismatch-{uuid.uuid4().hex}"
+    _ingest_prompt_meta_row(root_id, msg_id="asst-other", user_msg_id="user-other", origin="supervisor")
+    _ingest_user_row(root_id, "hello", msg_id="asst-mismatch-1")
+
+    result = ChatSurfaceAdapter().open_session(root_id)
+    assert isinstance(result, Ok), result
+    turn = result.value.turns[0]
+    assert turn.prompt is not None
+    assert turn.prompt.payload.origin == PromptOrigin.USER
 
 
 if __name__ == "__main__":
