@@ -8,49 +8,21 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 import browser_trust
 import auth
-import config_store
-import extension_store
 import lag_watchdog
 import perf
 import recovery
-import session_search
-import user_prefs
-import virtual_session_prompt_handlers
-from capability_contexts import normalize_capability_contexts
-from env_compat import dual_env
-from file_attachment_prompt import MAX_FILE_SIZE_BYTES, validate_file_attachment
+from backend.surface_contract.intents import SendTarget, SendTargetKind
 from i18n import t
-from offline_actions_api import _start_prompt_handoff
-from orchestrator import build_semantic_alter_prompt
-from session_detail_api import (
-    _build_messages_replay_delta,
-    _fallback_ws_send_mode_after_failed_steer,
-    _floor_events_from_seq,
-    _node_offline_error,
-    _normalize_ws_send_mode_for_turn_state,
-    _parse_ws_disabled_builtin_extensions,
-    _parse_ws_disallowed_tools,
-    _rewind_latest_user_for_alter,
-)
-import session_readiness
+from session_detail_api import _build_messages_replay_delta, _floor_events_from_seq
 from session_manager import manager as session_manager
 from stores import pending_approvals
-from user_msg_lifecycle import (
-    emit_failed,
-    emit_queued,
-    emit_requested,
-    new_lifecycle_msg_id,
-    queued_payload,
-)
 from ws_serialization import (
     SerializedWebSocketFrame,
     dumps_ws_json,
@@ -520,10 +492,6 @@ class _WebSocketOutbox:
             )
 
 
-def _ws_queued_prompt_is_user_visible(kind: str) -> bool:
-    return kind != "send"
-
-
 async def _send_snapshot_refresh_roots(scope, refresh_id, send) -> bool:
     authority = await asyncio.to_thread(_snapshot_refresh_authority, scope)
     if authority is None:
@@ -920,745 +888,46 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             if msg_type == "send_message":
-                prompt = msg.get("prompt", "").strip()
-                images = msg.get("images") or []
-                files = msg.get("files") or []
-                async def _send_message_error(error: str) -> None:
-                    data = {
-                        "error": error,
-                        "app_session_id": msg.get("app_session_id"),
-                        "session_id": msg.get("app_session_id"),
-                        "client_id": msg.get("client_id"),
-                    }
-                    await ws_callback({"type": "error", "data": data})
-                if not prompt and not images and not files:
-                    await _send_message_error(t("error.ws_empty_prompt"))
-                    continue
+                # Thin transport shell: parse the frame, build neutral args,
+                # hand off to surface_commands' _ChatCommandPortImpl.send_prompt
+                # (ADR 0006 command plane). All validation, offline/suspension
+                # checks, orchestration-mode gate, Ask-singleton + virtual-session
+                # routing, client_id dedup, fork rearm, alter-mode, admission
+                # claim, steer/interrupt handling, durable admission, lifecycle
+                # emits, and ordered reply frames live there now — this handler
+                # only supplies the pieces genuinely bound to this WebSocket
+                # connection: `ws_callback` itself (forwarded for turn
+                # streaming and deferred async acks, not just reply framing),
+                # `_register` (per-connection subscriber bookkeeping), and a
+                # `notify` shim that reproduces the exact legacy frame shape.
+                async def _ws_notify(frame_type: str, data: dict) -> None:
+                    await ws_callback({"type": frame_type, "data": data})
 
-                # Validate file attachments — reject oversized or malformed entries.
-                _file_error = None
-                for index, f in enumerate(files):
-                    try:
-                        validate_file_attachment(
-                            f,
-                            index,
-                            max_size=MAX_FILE_SIZE_BYTES,
-                        )
-                    except ValueError as exc:
-                        _file_error = str(exc)
-                        break
-                if _file_error:
-                    await _send_message_error(_file_error)
-                    continue
-
-                model = msg.get("model")
-                cwd = msg.get("cwd", os.path.expanduser("~"))
-                app_session_id = msg.get("app_session_id")
-                orchestration_mode = msg.get("orchestration_mode")
-                send_mode = msg.get("send_mode") or await asyncio.to_thread(
-                    user_prefs.get_send_mode,
-                )
-                logger.info("Received message: prompt=%s, images=%d, files=%d, send_mode=%s", prompt[:50], len(images), len(files), send_mode)
-
-                if not app_session_id:
-                    await _send_message_error(t("error.ws_no_session_selected"))
-                    continue
-
-                _offline_session = await asyncio.to_thread(
-                    session_manager.get_lite,
-                    app_session_id,
-                )
-                _offline_err = await _node_offline_error(_offline_session)
-                if _offline_err:
-                    await _send_message_error(_offline_err)
-                    continue
-                _provider_id_for_send = (_offline_session or {}).get("provider_id")
-                if _provider_id_for_send and config_store.provider_suspended(_provider_id_for_send):
-                    await _send_message_error(t("error.provider_suspended", action="run turns"))
-                    continue
-                if _offline_session:
-                    model = _offline_session.get("model") or model
-                    cwd = _offline_session.get("cwd") or cwd
-                    orchestration_mode = (
-                        _offline_session.get("orchestration_mode")
-                        or orchestration_mode
-                    )
-                if orchestration_mode == "manager":
-                    orchestration_mode = "team"
-                if orchestration_mode == "team":
-                    team_not_ready = extension_store.runtime_not_ready_message(
-                        extension_store.extension_id_for_role('team-orchestration')
-                    )
-                    if team_not_ready is not None:
-                        await _send_message_error(team_not_ready)
-                        continue
-
-                # Ask-singleton entry point: when the user sends a prompt
-                # into the singleton session via WS, wrap the prompt with
-                # the per-call session index + JSON contract instructions
-                # so the LLM emits structured `{session_ids, reasoning}`
-                # the frontend AskPicker can render. v1 trade-off: the
-                # wrapped prompt persists as user_msg.content on the
-                # singleton (the Ask UI hides scrollback so this is not
-                # user-visible). Documented in session_search.py.
-                cli_prompt = msg.get("cli_prompt")
-                try:
-                    disallowed_tools = _parse_ws_disallowed_tools(msg.get("disallowed_tools"))
-                    disabled_builtin_extensions = _parse_ws_disabled_builtin_extensions(
-                        msg.get("disabled_builtin_extensions")
-                    )
-                except ValueError as e:
-                    await _send_message_error(str(e))
-                    continue
-                backend_url = msg.get("backend_url")
-                if backend_url is not None:
-                    if not isinstance(backend_url, str) or not (
-                        backend_url.startswith("http://127.0.0.1:")
-                        or backend_url.startswith("http://localhost:")
-                    ):
-                        await _send_message_error("backend_url must be a loopback HTTP URL")
-                        continue
-                    backend_url = backend_url.rstrip("/")
-                    os.environ.update(dual_env("BETTER_CLAUDE_BACKEND_URL", backend_url))
-                    await asyncio.to_thread(
-                        session_manager.set_backend_url,
-                        app_session_id,
-                        backend_url,
-                    )
-                # NOTE: the Ask session runs NO claude turn of its own. A
-                # prompt sent into it is an Ask search, orchestrated after
-                # `_register` below via `session_search.search()` (appends
-                # user+assistant turns, runs an ephemeral search worker,
-                # stamps the picker).
-                known_worker_registry_cwds = msg.get("known_worker_registry_cwds")
-                if known_worker_registry_cwds is not None:
-                    if not isinstance(known_worker_registry_cwds, dict):
-                        await _send_message_error("known_worker_registry_cwds must be an object")
-                        continue
-                    parsed_worker_registry_cwds: dict[str, str] = {}
-                    registry_error = None
-                    for key, value in known_worker_registry_cwds.items():
-                        if not isinstance(key, str) or not key:
-                            registry_error = "known_worker_registry_cwds keys must be non-empty strings"
-                            break
-                        if not isinstance(value, str) or not value.strip():
-                            registry_error = "known_worker_registry_cwds values must be non-empty strings"
-                            break
-                        expanded = Path(value).expanduser()
-                        if not expanded.is_absolute():
-                            registry_error = "known_worker_registry_cwds values must be absolute paths"
-                            break
-                        parsed_worker_registry_cwds[key] = str(expanded.resolve())
-                    if registry_error:
-                        await _send_message_error(registry_error)
-                        continue
-                    known_worker_registry_cwds = parsed_worker_registry_cwds or None
-                try:
-                    capability_contexts = normalize_capability_contexts(msg.get("capability_contexts"))
-                except ValueError as e:
-                    await _send_message_error(str(e))
-                    continue
-                harness_profile_id = str(msg.get("harness_profile_id") or "").strip()
-
-                # Register this WS so /api/internal/ask-fork can fan out worker events.
-                _register(app_session_id)
-
-                # Ask search: orchestrate entirely via session_search.search()
-                # (appends a user turn + an assistant turn with the picker on
-                # the stable Ask session, driven by an ephemeral search
-                # worker). No claude turn runs on the Ask session, so skip
-                # the normal submit/queue path — the broadcasts from search()
-                # drive the UI over this registered WS.
-                if app_session_id == session_search.ASK_SINGLETON_ID:
-                    not_ready_msg = extension_store.runtime_not_ready_message(
-                        extension_store.BUILTIN_ASK_EXTENSION_ID
-                    )
-                    if not_ready_msg is not None:
-                        await _send_message_error(not_ready_msg)
-                        continue
-                    ask_client_id = msg.get("client_id")
-                    already_done = await asyncio.to_thread(
-                        session_search.find_user_message_by_client_id,
-                        ask_client_id,
-                    )
-                    if already_done:
-                        await ws_callback({
-                            "type": "user_message_persisted",
-                            "data": {
-                                "session_id": app_session_id,
-                                "user_message": already_done,
-                            },
-                        })
-                        continue
-
-                    async def _ack_ask_user_message(user_message: dict) -> None:
-                        await ws_callback({
-                            "type": "user_message_persisted",
-                            "data": {
-                                "session_id": app_session_id,
-                                "user_message": user_message,
-                            },
-                        })
-
-                    asyncio.create_task(
-                        session_search.search(
-                            prompt,
-                            client_id=ask_client_id,
-                            lifecycle_msg_id=new_lifecycle_msg_id(),
-                            on_user_message=_ack_ask_user_message,
-                        )
-                    )
-                    continue
-                virtual_prompt_client_id = msg.get("client_id")
-                virtual_prompt_handled = await virtual_session_prompt_handlers.handle(
-                    app_session_id,
-                    prompt=prompt,
-                    cwd=cwd,
-                    client_id=(
-                        virtual_prompt_client_id
-                        if isinstance(virtual_prompt_client_id, str)
-                        else None
-                    ),
-                    lifecycle_msg_id=new_lifecycle_msg_id(),
-                    dispatch_ws=ws_callback,
-                )
-                if virtual_prompt_handled:
-                    continue
-
-                # Dedup: if client_id is present, check whether this prompt
-                # was already processed or is already queued.  Prevents
-                # duplicate turns when the frontend re-flushes its offline
-                # backlog after a WS reconnect or page reload.
-                _cid = msg.get("client_id")
-                if _cid:
-                    import session_queue_projection
-                    _sess = await asyncio.to_thread(
-                        session_queue_projection.get,
-                        app_session_id,
-                        storage_identity=(
-                            session_manager._root_repository.storage_identity()
-                        ),
-                    )
-                    if _sess:
-                        # Check if user message with this client_id exists.
-                        _already_done = None
-                        for _m in _sess.get("user_messages", []):
-                            if _m.get("client_id") == _cid:
-                                _already_done = _m
-                                break
-                        if _already_done:
-                            await ws_callback({
-                                "type": "user_message_persisted",
-                                "data": {
-                                    "session_id": app_session_id,
-                                    "user_message": _already_done,
-                                },
-                            })
-                            continue
-
-                        # Check if prompt with this client_id is already queued.
-                        _already_queued = None
-                        for _qp in _sess.get("queued_prompts", []):
-                            if _qp.get("client_id") == _cid:
-                                _already_queued = _qp
-                                break
-                        if _already_queued:
-                            _already_lifecycle_msg_id = _already_queued.get("lifecycle_msg_id")
-                            _already_kind = _already_queued.get("kind") or "queued_behind"
-                            if _already_lifecycle_msg_id:
-                                await ws_callback({
-                                    "type": "user_message_queued",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        **queued_payload(
-                                            lifecycle_msg_id=_already_lifecycle_msg_id,
-                                            content=_already_queued.get("content", ""),
-                                            kind=_already_kind,
-                                            queue_position=coordinator.get_queued_count(app_session_id),
-                                            client_id=_cid,
-                                            images_count=int(_already_queued.get("images_count") or 0),
-                                            orchestration_mode=_already_queued.get("orchestration_mode"),
-                                        ),
-                                    },
-                                })
-                            if _ws_queued_prompt_is_user_visible(_already_kind):
-                                await ws_callback({
-                                    "type": "prompt_queued",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        "queued_id": _already_queued.get("id"),
-                                        "prompt_preview": _already_queued.get("content", ""),
-                                        "send_mode": send_mode,
-                                        "queue_position": coordinator.get_queued_count(app_session_id),
-                                        "client_id": _cid,
-                                    },
-                                })
-                            continue
-
-                    _already_active = coordinator.active_prompt_for_client_id(
-                        app_session_id,
-                        _cid,
-                    )
-                    if _already_active:
-                        _already_lifecycle_msg_id = _already_active.get("lifecycle_msg_id")
-                        if _already_lifecycle_msg_id:
-                            await ws_callback({
-                                "type": "user_message_queued",
-                                "data": {
-                                    "app_session_id": app_session_id,
-                                    **queued_payload(
-                                        lifecycle_msg_id=_already_lifecycle_msg_id,
-                                        content=prompt,
-                                        kind="send",
-                                        queue_position=0,
-                                        client_id=_cid,
-                                        images_count=len(images),
-                                        orchestration_mode=orchestration_mode,
-                                    ),
-                                },
-                            })
-                        continue
-
-                # has_active_runs (not has_active_turn): also covers the
-                # dequeue→cancel_events gap and recovered live runs, so
-                # an interrupt can't silently degrade to a plain queue.
-                # A new prompt is the user retrying, so give a session
-                # whose provisioning failed another attempt rather than
-                # rejecting every prompt on it forever.
-                if session_readiness.fork_provisioning_failed(app_session_id):
-                    import file_editor
-                    await file_editor.rearm_fork_provisioning_if_failed(
-                        app_session_id
-                    )
-
-                is_queued = (
-                    coordinator.turn_manager.has_active_turn(app_session_id)
-                    or coordinator.turn_manager.has_active_runs(app_session_id)
-                    # A session still warming its provisioned base has no
-                    # active turn or run, but its prompt WILL wait at the
-                    # dispatch gate. Reporting it as queued up-front is
-                    # what stops the UI rendering it as a sent message and
-                    # then moving it into the queue afterwards.
-                    or session_readiness.is_awaiting_fork_provisioning(
-                        app_session_id
-                    )
-                )
-
-                lifecycle_msg_id = new_lifecycle_msg_id()
-                alter_rewind_latest = False
-                if send_mode == "alter":
-                    _alter_session = await asyncio.to_thread(
-                        session_manager.get_lite,
-                        app_session_id,
-                    )
-                    queued_prompts = (_alter_session or {}).get("queued_prompts") or []
-                    latest_queued = queued_prompts[-1] if queued_prompts else None
-                    if latest_queued:
-                        lifecycle_msg_id = (
-                            latest_queued.get("lifecycle_msg_id")
-                            or lifecycle_msg_id
-                        )
-                        queued_id = await coordinator.update_latest_queued(
-                            app_session_id,
-                            prompt,
-                            cli_prompt,
-                            msg.get("client_id"),
-                            lifecycle_msg_id,
-                            capability_contexts,
-                        )
-                        if not queued_id:
-                            await _send_message_error(t("error.ws_no_queued_prompt"))
-                            continue
-                        await asyncio.to_thread(
-                            session_manager.update_queued_prompt,
-                            app_session_id,
-                            queued_id,
-                            {
-                                "content": prompt,
-                                "cli_prompt": cli_prompt,
-                                "client_id": msg.get("client_id"),
-                                "lifecycle_msg_id": lifecycle_msg_id,
-                                "capability_contexts": capability_contexts,
-                            },
-                        )
-                        await ws_callback({
-                            "type": "steer_prompt_persisted",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                "client_id": msg.get("client_id"),
-                                "lifecycle_msg_id": lifecycle_msg_id,
-                            },
-                        })
-                        continue
-
-                    if is_queued:
-                        alter_rewind_latest = True
-                        send_mode = "queue"
-                    else:
-                        try:
-                            rewind_data = await _rewind_latest_user_for_alter(app_session_id)
-                        except HTTPException as e:
-                            await _send_message_error(str(e.detail))
-                            continue
-                        model = rewind_data.get("retry_model") or model
-                        cwd = rewind_data.get("retry_cwd") or cwd
-                        orchestration_mode = (
-                            rewind_data.get("retry_orchestration_mode")
-                            or orchestration_mode
-                        )
-                        previous_prompt = rewind_data.get("semantic_alter_previous_prompt")
-                        if previous_prompt is not None:
-                            cli_prompt = build_semantic_alter_prompt(
-                                str(previous_prompt),
-                                cli_prompt or prompt,
-                            )
-                        send_mode = "queue"
-
-                send_mode = _normalize_ws_send_mode_for_turn_state(
-                    send_mode, is_queued,
-                )
-                if send_mode == "steer":
-                    # Steer injects into the live turn and never reaches the
-                    # claim below, so dedup it here: a concurrent same-client_id
-                    # steer (offline re-dispatch after a reconnect) must not be
-                    # injected twice. One-shot — release right after.
-                    _steer_cid = msg.get("client_id")
-                    _steer_item = str(uuid.uuid4())
-                    if _steer_cid and coordinator.try_claim_prompt_client_id(
-                        app_session_id, _steer_item, _steer_cid,
-                    ):
-                        continue
-                    try:
-                        _steered = await coordinator.steer_active_turn(
-                            app_session_id=app_session_id,
-                            prompt=cli_prompt or prompt,
-                            display_prompt=prompt,
-                            images=images if images else None,
-                            files=files if files else None,
-                            client_id=msg.get("client_id"),
-                            lifecycle_msg_id=lifecycle_msg_id,
-                        )
-                    finally:
-                        if _steer_cid:
-                            coordinator._forget_active_prompt_item(_steer_item)
-                    if _steered:
-                        continue
-                    root_id = (
-                        await asyncio.to_thread(
-                            session_manager._root_id_for,
-                            app_session_id,
-                        )
-                        or app_session_id
-                    )
-                    await coordinator.turn_manager.lifecycle.publish(
-                        "lifecycle.steer_fallback_queued",
-                        root_id=root_id,
-                        session_id=app_session_id,
-                        message_id=lifecycle_msg_id,
-                        payload={"reason": "steer_rejected"},
-                    )
-                    send_mode = _fallback_ws_send_mode_after_failed_steer(
-                        send_mode,
-                    )
-
-                if alter_rewind_latest:
-                    lifecycle_kind = "interrupt"
-                elif send_mode == "interrupt" and is_queued:
-                    lifecycle_kind = "interrupt"
-                elif is_queued:
-                    lifecycle_kind = "queued_behind"
-                else:
-                    lifecycle_kind = "send"
-                queue_position = coordinator.get_queued_count(app_session_id)
-                interrupts_msg_id = (
-                    coordinator.user_prompt_manager.get_in_flight_lifecycle_msg_id(app_session_id)
-                    if lifecycle_kind == "interrupt" else None
-                )
-                lifecycle_queued_payload = queued_payload(
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    content=prompt,
-                    kind=lifecycle_kind,
-                    queue_position=queue_position,
+                await _command_port.send_prompt(
+                    msg.get("app_session_id"),
+                    msg.get("prompt", "").strip(),
+                    (),
+                    msg.get("send_mode"),
+                    SendTarget(kind=SendTargetKind.CURRENT),
+                    msg.get("client_id") or "",
+                    notify=_ws_notify,
+                    ws_callback=ws_callback,
+                    register=_register,
+                    images=msg.get("images") or [],
+                    files=msg.get("files") or [],
+                    model=msg.get("model"),
+                    cwd=msg.get("cwd", os.path.expanduser("~")),
+                    orchestration_mode=msg.get("orchestration_mode"),
+                    cli_prompt=msg.get("cli_prompt"),
+                    raw_disallowed_tools=msg.get("disallowed_tools"),
+                    raw_disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
+                    backend_url=msg.get("backend_url"),
+                    raw_known_worker_registry_cwds=msg.get("known_worker_registry_cwds"),
+                    raw_capability_contexts=msg.get("capability_contexts"),
+                    harness_profile_id=str(msg.get("harness_profile_id") or "").strip(),
+                    orchestrator_send_target=msg.get("send_target"),
                     client_id=msg.get("client_id"),
-                    interrupts_msg_id=interrupts_msg_id,
-                    images_count=len(images),
-                    orchestration_mode=orchestration_mode,
                 )
-
-                item_id = str(uuid.uuid4())
-                # Atomic admission gate: claim the client_id BEFORE
-                # persisting/emitting anything. A concurrent same-client_id
-                # send (offline re-dispatch after a reconnect) that arrives
-                # while this turn is in flight would otherwise slip past the
-                # read-only dedup checks above and broadcast a phantom
-                # queued bubble before submit_prompt deduped it. Claiming
-                # here makes the dedup authoritative under concurrency.
-                _claim_cid = msg.get("client_id")
-                if _claim_cid:
-                    _dup_of = coordinator.try_claim_prompt_client_id(
-                        app_session_id, item_id, _claim_cid,
-                    )
-                    if _dup_of:
-                        _dup_lifecycle = (
-                            coordinator.user_prompt_manager
-                            .get_in_flight_lifecycle_msg_id(app_session_id)
-                        )
-                        if _dup_lifecycle:
-                            await ws_callback({
-                                "type": "user_message_queued",
-                                "data": {
-                                    "app_session_id": app_session_id,
-                                    **queued_payload(
-                                        lifecycle_msg_id=_dup_lifecycle,
-                                        content=prompt,
-                                        kind="send",
-                                        queue_position=0,
-                                        client_id=_claim_cid,
-                                        images_count=len(images),
-                                        orchestration_mode=orchestration_mode,
-                                    ),
-                                },
-                            })
-                        continue
-                await emit_requested(
-                    app_session_id=app_session_id,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    content=prompt,
-                    kind=lifecycle_kind,
-                    queue_position=queue_position,
-                    client_id=msg.get("client_id"),
-                    interrupts_msg_id=interrupts_msg_id,
-                    images_count=len(images),
-                    orchestration_mode=orchestration_mode,
-                )
-                # Sample the active provider after the acceptance fact so
-                # environment refresh cannot delay the running projection.
-                # This remains before durable admission and CLI spawn.
-                await asyncio.to_thread(config_store.apply_env_vars)
-                params = {
-                    "prompt": prompt,
-                    "app_session_id": app_session_id,
-                    "model": model,
-                    "cwd": cwd,
-                    "ws_callback": ws_callback,
-                    "images": images if images else None,
-                    "files": files if files else None,
-                    "orchestration_mode": orchestration_mode,
-                    "send_target": msg.get("send_target"),
-                    "client_id": msg.get("client_id"),
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "cli_prompt": cli_prompt,
-                    "disallowed_tools": disallowed_tools,
-                    "disabled_builtin_extensions": disabled_builtin_extensions,
-                    "known_worker_registry_cwds": known_worker_registry_cwds,
-                    "capability_contexts": capability_contexts,
-                    "harness_profile_id": harness_profile_id,
-                    "_queued_id": item_id,
-                    "_client_id_claimed": bool(_claim_cid),
-                }
-
-                # From the claim above until submit_prompt hands the claim's
-                # release to turn-end, any failure must release the claim —
-                # otherwise the offline backlog's same-client_id re-dispatch
-                # would be deduped and the prompt silently lost. Fail closed
-                # toward NOT losing user intent.
-                def _release_claim_on_failure() -> None:
-                    if _claim_cid:
-                        coordinator._forget_active_prompt_item(item_id)
-
-                if send_mode == "interrupt" and is_queued:
-                    params["_interrupt"] = True
-                    # Cancel the current turn so the processor picks this up sooner.
-                    # Pass the incoming lifecycle id so the displaced
-                    # turn's done event carries the cross-ref.
-                    try:
-                        await coordinator.turn_manager.cancel_turn(
-                            app_session_id,
-                            interrupted_by_msg_id=lifecycle_msg_id,
-                        )
-                    except Exception as exc:
-                        _release_claim_on_failure()
-                        await emit_failed(
-                            app_session_id=app_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            reason="interrupt_failed",
-                            error=str(exc),
-                        )
-                        raise
-                elif alter_rewind_latest:
-                    params["_alter_rewind_latest"] = True
-                    try:
-                        await coordinator.turn_manager.cancel_turn(
-                            app_session_id,
-                            interrupted_by_msg_id=lifecycle_msg_id,
-                        )
-                    except Exception as exc:
-                        _release_claim_on_failure()
-                        await emit_failed(
-                            app_session_id=app_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            reason="alter_interrupt_failed",
-                            error=str(exc),
-                        )
-                        raise
-
-                # Hand off to the coordinator-owned per-session
-                # processor. It survives this WebSocket's lifetime — a
-                # disconnect deregisters the ws_callback below but the
-                # processor keeps running and the detached runner keeps
-                # writing events into the persisted session JSON, so a
-                # reconnect+refetch shows the same content as live.
-                queued_prompt = {
-                    "id": item_id,
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "content": prompt,
-                    "kind": lifecycle_kind,
-                    "queue_position": queue_position,
-                    "images_count": len(images),
-                    "files_count": len(files),
-                    "images": images if images else None,
-                    "files": files if files else None,
-                    "orchestration_mode": orchestration_mode,
-                    "send_target": msg.get("send_target"),
-                    "cli_prompt": cli_prompt,
-                    "disallowed_tools": disallowed_tools,
-                    "disabled_builtin_extensions": disabled_builtin_extensions,
-                    "client_id": msg.get("client_id"),
-                    "alter_rewind_latest": alter_rewind_latest,
-                    "capability_contexts": capability_contexts,
-                    "harness_profile_id": harness_profile_id,
-                    "created_at": datetime.now().isoformat(),
-                }
-                try:
-                    admission = await _start_prompt_handoff(
-                        app_session_id,
-                        queued_prompt,
-                        params,
-                    )
-                except Exception as exc:
-                    _release_claim_on_failure()
-                    await emit_failed(
-                        app_session_id=app_session_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        reason="durable_admission_failed",
-                        error=str(exc),
-                    )
-                    raise
-                if not admission.get("session"):
-                    _release_claim_on_failure()
-                    await emit_failed(
-                        app_session_id=app_session_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        reason="session_not_found",
-                    )
-                    await _send_message_error(t("error.session_not_found_retry"))
-                    continue
-                existing_user_message = admission.get("existing_user_message")
-                if existing_user_message:
-                    _release_claim_on_failure()
-                    await emit_failed(
-                        app_session_id=app_session_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        reason="duplicate_user_message",
-                    )
-                    await ws_callback({
-                        "type": "user_message_persisted",
-                        "data": {
-                            "session_id": app_session_id,
-                            "user_message": existing_user_message,
-                        },
-                    })
-                    continue
-                existing_queued_prompt = admission.get("existing_queued_prompt")
-                if existing_queued_prompt:
-                    _release_claim_on_failure()
-                    await emit_failed(
-                        app_session_id=app_session_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        reason="duplicate_queued_prompt",
-                    )
-                    existing_lifecycle_msg_id = existing_queued_prompt.get("lifecycle_msg_id")
-                    existing_kind = existing_queued_prompt.get("kind") or "queued_behind"
-                    if existing_lifecycle_msg_id:
-                        await ws_callback({
-                            "type": "user_message_queued",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                **queued_payload(
-                                    lifecycle_msg_id=existing_lifecycle_msg_id,
-                                    content=existing_queued_prompt.get("content", ""),
-                                    kind=existing_kind,
-                                    queue_position=coordinator.get_queued_count(app_session_id),
-                                    client_id=msg.get("client_id"),
-                                    images_count=int(existing_queued_prompt.get("images_count") or 0),
-                                    orchestration_mode=existing_queued_prompt.get("orchestration_mode"),
-                                ),
-                            },
-                        })
-                    if _ws_queued_prompt_is_user_visible(existing_kind):
-                        await ws_callback({
-                            "type": "prompt_queued",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                "queued_id": existing_queued_prompt.get("id"),
-                                "prompt_preview": existing_queued_prompt.get("content", ""),
-                                "send_mode": send_mode,
-                                "queue_position": coordinator.get_queued_count(app_session_id),
-                                "client_id": msg.get("client_id"),
-                            },
-                        })
-                    continue
-                if not is_queued:
-                    try:
-                        await emit_queued(
-                            app_session_id=app_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            content=prompt,
-                            kind=lifecycle_kind,
-                            queue_position=queue_position,
-                            client_id=msg.get("client_id"),
-                            interrupts_msg_id=interrupts_msg_id,
-                            images_count=len(images),
-                            orchestration_mode=orchestration_mode,
-                        )
-                    except Exception:
-                        logger.exception("lifecycle: emit_queued failed")
-                await ws_callback({
-                    "type": "user_message_queued",
-                    "data": {
-                        "app_session_id": app_session_id,
-                        **lifecycle_queued_payload,
-                    },
-                })
-                if is_queued:
-                    try:
-                        await emit_queued(
-                            app_session_id=app_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            content=prompt,
-                            kind=lifecycle_kind,
-                            queue_position=queue_position,
-                            client_id=msg.get("client_id"),
-                            interrupts_msg_id=interrupts_msg_id,
-                            images_count=len(images),
-                            orchestration_mode=orchestration_mode,
-                        )
-                    except Exception:
-                        logger.exception("lifecycle: emit_queued failed")
-
-                # Notify the frontend about queue state
-                if is_queued:
-                    await ws_callback({
-                        "type": "prompt_queued",
-                        "data": {
-                            "app_session_id": app_session_id,
-                            "queued_id": item_id,
-                            "prompt_preview": prompt,
-                            "send_mode": send_mode,
-                            "queue_position": queue_position,
-                            "client_id": msg.get("client_id"),
-                        },
-                    })
 
             elif msg_type == "stop_message":
                 app_session_id = msg.get("app_session_id")
@@ -1674,7 +943,15 @@ async def websocket_chat(websocket: WebSocket):
                 if app_session_id:
                     action = msg.get("action")
                     if action not in ("interrupt", "steer"):
-                        await _send_message_error(t("error.ws_invalid_send_mode"))
+                        await ws_callback({
+                            "type": "error",
+                            "data": {
+                                "error": t("error.ws_invalid_send_mode"),
+                                "app_session_id": app_session_id,
+                                "session_id": app_session_id,
+                                "client_id": msg.get("client_id"),
+                            },
+                        })
                         continue
                     queued_ids_raw = msg.get("queued_ids")
                     queued_ids = (

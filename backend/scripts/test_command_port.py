@@ -44,10 +44,7 @@ from backend.surface_contract.intents import (  # noqa: E402
     EditQueued,
     IntentAccepted,
     IntentRejected,
-    SendMode,
-    SendPrompt,
-    SendTarget,
-    SendTargetKind,
+    Rewind,
     Stop,
 )
 
@@ -273,17 +270,15 @@ def test_submit_delete_queued_dispatches_to_port_and_accepts() -> None:
 
 
 def test_submit_unsupported_intent_kind_is_rejected_even_with_port_wired() -> None:
+    """Rewind is not yet migrated onto ChatSurfaceAdapter.submit()'s
+    isinstance dispatch (unlike Stop/EditQueued/DeleteQueued/SendPrompt —
+    see backend/scripts/test_send_prompt_port.py for SendPrompt's own
+    dispatch coverage)."""
     async def _run() -> None:
         port = _FakePort()
         adapter = ChatSurfaceAdapter()
         adapter._command_port = port
-        intent = SendPrompt(
-            **_make_intent_base("i-4", "sess-1"),
-            text="hi",
-            attachments=(),
-            send_mode=SendMode.QUEUE,
-            target=SendTarget(kind=SendTargetKind.CURRENT),
-        )
+        intent = Rewind(**_make_intent_base("i-4", "sess-1"), node_id="node-1")
         ack = adapter.submit(intent)
         assert isinstance(ack, IntentRejected)
         assert ack.intent_id == "i-4"

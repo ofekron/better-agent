@@ -67,6 +67,7 @@ from backend.surface_contract.intents import (
     EditQueued,
     IntentAccepted,
     IntentRejected,
+    SendPrompt,
     Stop,
     TransportAck,
 )
@@ -82,6 +83,15 @@ _COMPACT_TURN_WINDOW = 5
 _RENDER_HISTORY_CAP = 500
 _TOOL_PREFIX = "tool:"
 _RESULT_SUFFIX = ":result"
+
+
+async def _drop_frames(frame_type: str, payload: dict) -> None:
+    """`notify` for `ChatSurfaceAdapter.submit()`'s SendPrompt dispatch: v2
+    acks are projection-fact based (ADR 0006 §5) — the admission-time
+    reply frames the legacy WS transport would send here are intentionally
+    dropped. The real outcome surfaces later as a projection fact over the
+    live plane (`EVENT_JOURNAL_WRITTEN` / `lifecycle.*` bus facts), not as
+    a reply frame from this call."""
 
 
 def _row_seq(row: dict) -> int:
@@ -450,6 +460,30 @@ class ChatSurfaceAdapter(ChatSurface):
             coro = port.edit_queued(intent.session_id, intent.node_id, intent.text)
         elif isinstance(intent, DeleteQueued):
             coro = port.delete_queued(intent.session_id, intent.node_id)
+        elif isinstance(intent, SendPrompt):
+            # The only rejection determinable without an await: no text and
+            # no attachments can never be a valid prompt (mirrors the
+            # legacy WS handler's own first-line check). Every other
+            # outcome (session state, dedup, admission) needs I/O the port
+            # coroutine performs after this call returns, so those surface
+            # later as projection facts — not a synchronous IntentRejected
+            # — via `_drop_frames` below (v2 acks are projection-fact
+            # based; see this module's docstring and ADR 0006 §5).
+            if not intent.text.strip() and not intent.attachments:
+                return IntentRejected(
+                    intent_id=intent.intent_id,
+                    code="empty_prompt",
+                    message="text and attachments are both empty",
+                )
+            coro = port.send_prompt(
+                intent.session_id,
+                intent.text,
+                intent.attachments,
+                intent.send_mode,
+                intent.target,
+                intent.intent_id,
+                notify=_drop_frames,
+            )
         else:
             return IntentRejected(
                 intent_id=intent.intent_id,

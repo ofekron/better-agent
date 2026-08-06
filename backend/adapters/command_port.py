@@ -17,11 +17,25 @@ signature — no WS frame construction, no HTTP/WS-specific bookkeeping.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from backend.surface_contract.identity import ApprovalRef, NodeId, SessionId
 from backend.surface_contract.intents import SendTarget
 from backend.surface_contract.nodes import Attachment, SendMode
+
+# One reply-frame callback shape for every ChatCommandPort method that can
+# emit ordered transport frames during its own execution: `notify(frame_type,
+# payload)`. The legacy WS transport implements it as a thin wrapper around
+# its existing per-connection send helper (`ws_callback`); the v2 Chat
+# Surface Contract transport implements it as a no-op (acks are
+# projection-fact based — see backend/adapters/chat_adapter.py's
+# `ChatSurfaceAdapter.submit()`).
+NotifyFn = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+async def _default_notify(frame_type: str, payload: dict[str, Any]) -> None:
+    """Default `notify` for callers that never emit transport frames (e.g.
+    non-WS callers exercising the port directly in tests)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,13 +61,26 @@ class ChatCommandPort(Protocol):
 
     async def send_prompt(
         self,
-        session_id: SessionId,
+        session_id: SessionId | None,
         text: str,
         attachments: tuple[Attachment, ...],
         send_mode: SendMode,
         target: SendTarget,
         intent_id: str,
-    ) -> CommandResult: ...
+        *,
+        notify: NotifyFn = _default_notify,
+    ) -> CommandResult:
+        """`intent_id` doubles as the client-supplied dedup key (unified
+        with the legacy WS transport's `client_id`): the v2 contract always
+        supplies a real `IntentId`; the legacy transport passes `""` when
+        the browser omitted `client_id`, and `""` is treated as "no dedup
+        key" everywhere this port checks it — matching the legacy `if
+        client_id:` gate exactly. A concrete implementation may accept
+        additional legacy-transport-only keyword arguments beyond this
+        signature (see `backend/surface_commands.py`); they all have
+        defaults so a Protocol-typed caller (this port's only contractual
+        surface) never needs to supply them."""
+        ...
 
     async def stop(self, session_id: SessionId) -> CommandResult: ...
 
