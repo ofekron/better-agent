@@ -2703,9 +2703,18 @@ def _do_build_summary_index_unsafe() -> None:
     """
     global _summary_index_loaded, _summary_index_version
     global _summary_order_version, _summary_metadata_version
+    # Resolve the sessions directory BEFORE capturing the build epoch.
+    # _ensure_dir() -> _sessions_dir() fires _reset_home_scoped_caches()
+    # (bumping _summary_index_reset_epoch) whenever _SESSIONS_DIR resolves
+    # to a new/stale path. Capturing the epoch first made the build
+    # self-invalidate at every publish-point guard, leaving the index
+    # unloaded and empty (#372). Capturing after resolution lets that
+    # legitimate reset settle, so the epoch guard still protects against a
+    # genuine concurrent reset from another thread without bailing on the
+    # build's own directory resolution.
+    _ensure_dir()
     with _summary_index_lock:
         build_epoch = _summary_index_reset_epoch
-    _ensure_dir()
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
     seen_cursor_ids: set[str] = set()
