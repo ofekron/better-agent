@@ -5,7 +5,7 @@ import shutil
 import sys
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-virtual-sessions-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-virtual-sessions-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -19,50 +19,70 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_generated_ids_are_namespaced() -> bool:
+def _wipe() -> None:
+    """Reset virtual_session_store to a clean slate for the next test.
+
+    virtual_session_store keeps module-global read caches (_cache_data and a
+    1s-TTL _summary_cache) that are only invalidated by its own _save. Tests
+    that hand-write virtual_sessions.json to simulate legacy/malformed on-disk
+    state bypass _save, so the caches must be cleared or later reads return
+    stale data. Each test wipes the file and the caches so functions are
+    independent and read on-disk truth.
+    """
+    virtual_session_store._cache_data = None
+    virtual_session_store._cache_signature = None
+    virtual_session_store._summary_cache = None
+    virtual_session_store._summary_cache_signature = None
+    virtual_session_store._summary_cache_fresh_until = 0.0
+    try:
+        virtual_session_store._path().unlink()
+    except FileNotFoundError:
+        pass
+
+
+def test_generated_ids_are_namespaced() -> None:
+    _wipe()
     session = virtual_session_store.upsert("ofek-dev.test", {"name": "Virtual"})
-    expected_prefix = "virtual:ofek-dev.test:"
-    if not session["id"].startswith(expected_prefix):
-        print(f"  generated id missing namespace: {session['id']}")
-        return False
-    return virtual_session_store.get(session["id"]) is not None
+    assert session["id"].startswith("virtual:ofek-dev.test:")
+    assert virtual_session_store.get(session["id"]) is not None
 
 
-def test_rejects_real_session_id_shadow() -> bool:
+def test_rejects_real_session_id_shadow() -> None:
+    _wipe()
     real = session_store.create_session(
         name="real",
         model="claude-sonnet-4-6",
         cwd="/tmp/project",
         orchestration_mode="native",
-        provider_id="claude",
     )
     try:
         virtual_session_store.upsert("ofek-dev.test", {"id": real["id"], "name": "shadow"})
     except ValueError as exc:
-        return "extension namespace" in str(exc) or "collides" in str(exc)
-    print("  virtual upsert accepted a real session id")
-    return False
+        assert "extension namespace" in str(exc) or "collides" in str(exc)
+    else:
+        raise AssertionError("virtual upsert accepted a real session id")
 
 
-def test_rejects_other_extension_namespace() -> bool:
+def test_rejects_other_extension_namespace() -> None:
+    _wipe()
     try:
         virtual_session_store.upsert(
             "ofek-dev.test",
             {"id": "virtual:ofek-dev.other:abc", "name": "wrong owner"},
         )
     except ValueError as exc:
-        return "extension namespace" in str(exc)
-    print("  virtual upsert accepted another extension namespace")
-    return False
+        assert "extension namespace" in str(exc)
+    else:
+        raise AssertionError("virtual upsert accepted another extension namespace")
 
 
-def test_legacy_bad_ids_do_not_shadow_reads() -> bool:
+def test_legacy_bad_ids_do_not_shadow_reads() -> None:
+    _wipe()
     real = session_store.create_session(
         name="real 2",
         model="claude-sonnet-4-6",
         cwd="/tmp/project",
         orchestration_mode="native",
-        provider_id="claude",
     )
     path = virtual_session_store._path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,33 +94,20 @@ def test_legacy_bad_ids_do_not_shadow_reads() -> bool:
         ),
         encoding="utf-8",
     )
-    if virtual_session_store.get(real["id"]) is not None:
-        print("  legacy invalid virtual id shadowed a real session")
-        return False
-    return virtual_session_store.list_all() == []
+    assert virtual_session_store.get(real["id"]) is None
+    assert virtual_session_store.list_all() == []
 
 
-def test_malformed_virtual_prefix_is_rejected() -> bool:
+def test_malformed_virtual_prefix_is_rejected() -> None:
+    _wipe()
     path = virtual_session_store._path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '{"version":1,"sessions":{"virtual:test":{"id":"virtual:test","name":"bad"}}}',
         encoding="utf-8",
     )
-    if virtual_session_store.get("virtual:test") is not None:
-        print("  malformed virtual id was readable")
-        return False
-    return virtual_session_store.list_all() == []
-
-
-def run_test(name: str, fn) -> bool:
-    try:
-        ok = fn()
-    except Exception as exc:
-        print(f"{FAIL} {name}: {exc}")
-        return False
-    print(f"{PASS if ok else FAIL} {name}")
-    return ok
+    assert virtual_session_store.get("virtual:test") is None
+    assert virtual_session_store.list_all() == []
 
 
 def main() -> int:
@@ -111,11 +118,20 @@ def main() -> int:
         ("legacy bad ids do not shadow reads", test_legacy_bad_ids_do_not_shadow_reads),
         ("malformed virtual prefix is rejected", test_malformed_virtual_prefix_is_rejected),
     ]
-    try:
-        return 0 if all(run_test(name, fn) for name, fn in tests) else 1
-    finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    failures = 0
+    for name, fn in tests:
+        try:
+            fn()
+        except Exception as exc:
+            print(f"{FAIL} {name}: {exc}")
+            failures += 1
+            continue
+        print(f"{PASS} {name}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
