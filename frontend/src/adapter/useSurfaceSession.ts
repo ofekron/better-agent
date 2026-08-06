@@ -131,19 +131,20 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
       for (const run of envelope.runs) runsById.set(run.run_ref, run);
       instructionWidgetNode = envelope.instruction_widget ?? null;
 
+      const renderRev = identity.render_rev;
+      const bodies = await Promise.all(
+        envelope.turns.map((turn, i): Promise<NodeWire[]> => {
+          const isLastTurn = i === envelope.turns.length - 1;
+          if (isLastTurn) return Promise.resolve(envelope.live_turn_nodes);
+          if (turn.manifest.renderable_child_count > 0) {
+            return client.fetchTurnBody(sid, turn.turn.node_id, renderRev);
+          }
+          return Promise.resolve([]);
+        }),
+      );
+      if (cancelled) return;
       for (let i = 0; i < envelope.turns.length; i++) {
-        const turn = envelope.turns[i];
-        const isLastTurn = i === envelope.turns.length - 1;
-        let body: NodeWire[];
-        if (isLastTurn) {
-          body = envelope.live_turn_nodes;
-        } else if (turn.manifest.renderable_child_count > 0) {
-          body = await client.fetchTurnBody(sid, turn.turn.node_id, identity.render_rev);
-        } else {
-          body = [];
-        }
-        if (cancelled) return;
-        turnsById.set(turn.turn.turn_id, { turn, body });
+        turnsById.set(envelope.turns[i].turn.turn_id, { turn: envelope.turns[i], body: bodies[i] });
       }
 
       pushSnapshot();

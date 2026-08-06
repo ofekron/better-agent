@@ -187,6 +187,8 @@ class WorkerInteractionPayload:
 @dataclass(frozen=True, slots=True)
 class ResultPayload:
     result_kind: ResultKind
+    text: str | None = None
+    is_error: bool = False
 
 
 class CompactionOrigin(StrEnum):

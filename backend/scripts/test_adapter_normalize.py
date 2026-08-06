@@ -292,6 +292,26 @@ def test_result_row_maps_to_result_provider_node():
     assert nodes[0].node_id == "r1"
     assert nodes[0].status is None
     assert nodes[0].payload.result_kind == ResultKind.PROVIDER
+    assert nodes[0].payload.text == "done"
+    assert nodes[0].payload.is_error is False
+
+
+def test_result_row_carries_is_error_true():
+    row = {
+        "type": "agent_message",
+        "seq": 5,
+        "ts": "2026-01-01T00:00:04+00:00",
+        "data": {
+            "type": "result",
+            "uuid": "r2",
+            "subtype": "error",
+            "is_error": True,
+            "result": "boom",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.text == "boom"
+    assert nodes[0].payload.is_error is True
 
 
 def test_result_row_without_uuid_falls_back_to_seq_id():
@@ -304,6 +324,8 @@ def test_result_row_without_uuid_falls_back_to_seq_id():
     nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
     assert nodes[0].kind == NodeKind.RESULT
     assert nodes[0].node_id == "seq:4:result"
+    assert nodes[0].payload.text is None
+    assert nodes[0].payload.is_error is False
 
 
 def test_typed_prompt_node_id_identity_and_none():

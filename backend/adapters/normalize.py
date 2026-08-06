@@ -302,9 +302,14 @@ def _handle_result(row: dict, data: dict, node: partial) -> Node:
     `derive.resolve_result`'s provider branch (`_is_marked_final`) activates
     instead of falling back to the trailing-assistant-text heuristic."""
     uuid = _uuid_of(row) or _fallback_id(row, "result")
+    result_text = data.get("result")
     return node(
         node_id=uuid, kind=NodeKind.RESULT, status=None,
-        payload=ResultPayload(result_kind=ResultKind.PROVIDER),
+        payload=ResultPayload(
+            result_kind=ResultKind.PROVIDER,
+            text=result_text if isinstance(result_text, str) else None,
+            is_error=bool(data.get("is_error")),
+        ),
     )
 
 

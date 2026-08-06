@@ -181,6 +181,8 @@ export interface WorkerInteractionPayloadWire {
 
 export interface ResultPayloadWire {
   result_kind: ResultKindWire;
+  text: string | null;
+  is_error: boolean;
 }
 
 export interface CompactionPayloadWire {

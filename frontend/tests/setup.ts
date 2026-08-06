@@ -50,6 +50,11 @@ await i18n
 
 beforeEach(() => {
   installMemoryStorage();
+  // Chat Surface Contract v2 (frontend/src/adapter/flag.ts) defaults ON.
+  // The existing suite is written against the legacy render path, so pin
+  // the kill-switch here globally; a v2-specific suite (e.g. flag.test.ts)
+  // clears/overrides it in its own beforeEach to exercise the true default.
+  localStorage.setItem("ba.surface_v2", "0");
   // Route state leaks across tests otherwise: a prior test's /s/<id> URL
   // makes App's route-sync effect fetch/select that session in the next
   // test's fresh mock backend.

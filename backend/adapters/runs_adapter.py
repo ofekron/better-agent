@@ -63,15 +63,29 @@ def _provider_id(record: RunRecord) -> str:
     return (session.provider_id or "") if session is not None and session.provider_id else ""
 
 
+def _runner(provider_id: str) -> str:
+    # gap: RunRecord carries no runner of its own, and a provider can have
+    # more than one runtime profile — best available signal is the first
+    # runtime profile configured for the run's provider (list order); a
+    # provider with several runners stamps every one of its runs with the
+    # same first-found runner.
+    if not provider_id:
+        return ""
+    return next(
+        (p.runner for p in store_access.list_runtime_profiles() if p.provider_id == provider_id),
+        "",
+    )
+
+
 def _map_summary(record: RunRecord) -> RunSummary:
+    provider_id = _provider_id(record)
     return RunSummary(
         run_id=record.run_id,
         session_id=record.session_id,
         # gap: no turn_id source on RunRecord.
         turn_id=None,
-        provider_id=_provider_id(record),
-        # gap: no runner source on RunRecord or joinable via the session.
-        runner="",
+        provider_id=provider_id,
+        runner=_runner(provider_id),
         phase=_phase(record),
         started_at=record.started_at,
         # gap: no heartbeat source — `stalled` is never computed here,
@@ -140,11 +154,11 @@ class RunsSurfaceAdapter(RunsSurface):
         session_id = event.sid
         if not session_id:
             return
-        records = [r for r in store_access.list_run_records() if r.session_id == session_id]
-        if not records:
+        # gap: no direct run<->turn index — store_access.get_latest_run_record
+        # is a best-effort linkage picking the most recently started run for
+        # this session.
+        record = store_access.get_latest_run_record(session_id)
+        if record is None:
             return
-        # gap: no direct run<->turn index — best-effort linkage picks the
-        # most recently started run for this session.
-        record = max(records, key=lambda r: r.started_at)
         cv = self._projection.bump_render()
         self._projection.broadcast(RunSummaryUpsert(cv=cv, summary=_map_summary(record)))

@@ -20,8 +20,17 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 
+# Only needed by test_event_ingester_bare_and_dotted_are_the_same_singleton
+# below, which does a real (function-local) backend import — every other
+# check in this file stays stdlib-only and never touches sys.path.
+for _p in (str(BACKEND_DIR), str(REPO_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+del _p
+
 SURFACE_CONTRACT_DIR = BACKEND_DIR / "surface_contract"
 ADAPTERS_DIR = BACKEND_DIR / "adapters"
+DESKTOP_DIR = REPO_ROOT / "desktop"
 SCRIPTS_DIR = BACKEND_DIR / "scripts"
 MAIN_PY = BACKEND_DIR / "main.py"
 ADAPTER_API_PY = BACKEND_DIR / "adapter_api.py"
@@ -49,18 +58,28 @@ ADAPTERS_ALLOWLIST = (
 )
 
 # backend/adapters/__init__.py is the ONE sanctioned canonicalization site
-# (see its module docstring): it bare-imports the infra modules above so it
-# can alias them onto their "backend.*" sys.modules keys before any other
-# backend/adapters/*.py file's own dotted import runs. A per-file extension
-# of the general adapters allowlist, granting exactly the bare (undotted)
-# names of the infra this package canonicalizes — derived from
-# ADAPTERS_ALLOWLIST itself so the two lists can never drift apart.
+# (see its module docstring): it bare-imports these infra modules so it can
+# alias them onto their "backend.*" sys.modules keys before any other
+# backend/adapters/*.py file's own dotted import runs — and, per its
+# docstring, also before ANY dotted `backend.<name>` import anywhere else in
+# the repo (see CANONICAL_ALIAS_TABLE / test_outward_dotted_imports_have_
+# alias_coverage below). This is ground truth, not derived from
+# ADAPTERS_ALLOWLIST: `event_ingester` is canonicalized here for external
+# dotted importers (backend/scripts/test_chat_adapter.py,
+# test_owner_facts.py) even though no backend/adapters/*.py file imports it
+# itself, so it can't be a live entry in that internal-use allowlist.
 ADAPTERS_INIT_PY = ADAPTERS_DIR / "__init__.py"
-ADAPTERS_INIT_BARE_ALLOWLIST = tuple(
-    prefix.rsplit(".", 1)[-1]
-    for prefix in ADAPTERS_ALLOWLIST
-    if prefix not in (SURFACE_CONTRACT_PREFIX, ADAPTERS_PREFIX)
+ADAPTERS_INIT_CANONICALIZED = (
+    "event_bus",
+    "event_ingester",
+    "event_journal",
+    "paths",
+    "scheme_migrations",
 )
+# Per-file extension of the general adapters allowlist, granting exactly
+# the bare (undotted) names backend/adapters/__init__.py canonicalizes —
+# it's the one file permitted to bare-import them.
+ADAPTERS_INIT_BARE_ALLOWLIST = ADAPTERS_INIT_CANONICALIZED
 
 # backend/adapters/store_access.py is the ONE place adapters may reach
 # persistent stores (see its module docstring) — a per-file extension of
@@ -72,12 +91,35 @@ STORE_ACCESS_ALLOWLIST = (
     "backend.config_store",
     "backend.project_store",
     "backend.runs_dir",
+    "backend.worker_store",
 )
 
 # The two files permitted to mutate sys.modules directly (the
 # canonicalization sites above) — every other backend/adapters/*.py file
 # must not (see test_no_adapter_mutates_sys_modules_outside_sanctioned_site).
 _SANCTIONED_SYS_MODULES_MUTATORS = frozenset({STORE_ACCESS_PY, ADAPTERS_INIT_PY})
+
+# Every bare module name a dotted `backend.<name>` import anywhere in the
+# repo can safely reach a single shared instance for: either
+# backend/adapters/__init__.py canonicalizes it eagerly (above), or
+# store_access.py's `_resolve` canonicalizes it lazily on first use.
+CANONICAL_ALIAS_TABLE = frozenset(ADAPTERS_INIT_CANONICALIZED) | {
+    prefix.rsplit(".", 1)[-1] for prefix in STORE_ACCESS_ALLOWLIST
+}
+
+# Modules verified to hold no module-level mutable singleton (only pure
+# functions / constants operating on caller-supplied state) — a dotted
+# `backend.<name>` import of one of these reaching a second, un-aliased
+# copy of the module object is harmless, since there is no shared state for
+# the two copies to disagree about. Exempted from
+# test_outward_dotted_imports_have_alias_coverage on that basis alone; a
+# module added here must be re-verified against the same criterion.
+STATELESS_DOTTED_IMPORT_ALLOWLIST = frozenset({
+    "dependency_plan",
+    "restart_request",
+    "dependency_environment",
+    "portable_lock",
+})
 
 _STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 _SKIP_DIR_NAMES = {"__pycache__", "node_modules"}
@@ -342,6 +384,46 @@ def _sys_modules_mutation_violations() -> list[str]:
     return violations
 
 
+# ---- outward alias-coverage sweep: an orphaned dotted `backend.<name>`
+# import ANYWHERE in the repo (not just backend/adapters/*.py) silently
+# mints a second, disconnected singleton the first time it runs unless
+# something aliases it — exactly how a second EventIngester formed when
+# `event_ingester` was dropped from the canonicalization list while
+# backend/scripts/test_chat_adapter.py and test_owner_facts.py kept
+# dotted-importing it.
+
+def _outward_alias_coverage_violations() -> list[str]:
+    covered = CANONICAL_ALIAS_TABLE | STATELESS_DOTTED_IMPORT_ALLOWLIST
+    violations = []
+    for root in (BACKEND_DIR, DESKTOP_DIR):
+        if not root.is_dir():
+            continue
+        for path in _iter_py_files(root):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            package = _package_for(path)
+            rel = path.relative_to(REPO_ROOT)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                    continue
+                for candidate in _import_candidates(node, package):
+                    if not candidate or not candidate.startswith("backend."):
+                        continue
+                    if _matches(candidate, SURFACE_CONTRACT_PREFIX) or _matches(candidate, ADAPTERS_PREFIX):
+                        continue
+                    name = candidate[len("backend."):].split(".", 1)[0]
+                    if name in covered:
+                        continue
+                    violations.append(
+                        f"{rel}:{node.lineno}: dotted import {candidate!r} reaches "
+                        f"backend.{name}, which has no alias coverage — add "
+                        f"{name!r} to backend/adapters/__init__.py's "
+                        f"canonicalization list (if it holds module-level mutable "
+                        f"state) or to STATELESS_DOTTED_IMPORT_ALLOWLIST (if it "
+                        f"doesn't)",
+                    )
+    return violations
+
+
 def _external_adapters_import_violations() -> list[str]:
     exempt = {SURFACE_CONTRACT_DIR, ADAPTERS_DIR}
     exempt_files = {MAIN_PY, ADAPTER_API_PY, SURFACE_COMMANDS_PY}
@@ -402,6 +484,28 @@ def test_no_adapter_mutates_sys_modules_outside_sanctioned_site() -> None:
     assert not violations, "unsanctioned sys.modules mutation in backend/adapters:\n" + "\n".join(violations)
 
 
+def test_outward_dotted_imports_have_alias_coverage() -> None:
+    violations = _outward_alias_coverage_violations()
+    assert not violations, "orphaned dotted backend.* import(s) with no alias coverage:\n" + "\n".join(violations)
+
+
+def test_event_ingester_bare_and_dotted_are_the_same_singleton() -> None:
+    """Runtime companion to test_outward_dotted_imports_have_alias_coverage:
+    proves backend/adapters/__init__.py's canonicalization actually unifies
+    bare `event_ingester` and dotted `backend.event_ingester` at runtime —
+    the same invariant backend/scripts/test_adapter_api.py's
+    `test_aliasing_unifies_bare_and_dotted_event_bus` proves for the bus.
+    Kept here instead of there because this file has no fastapi dependency
+    to skip on; imports are local to this function so every other test in
+    this module keeps collecting/running without any backend import at
+    all."""
+    import event_ingester
+    import backend.adapters  # noqa: F401  (triggers canonicalization)
+    import backend.event_ingester as dotted_event_ingester
+
+    assert dotted_event_ingester.event_ingester is event_ingester.event_ingester
+
+
 if __name__ == "__main__":
     all_violations = (
         _surface_contract_violations()
@@ -411,6 +515,7 @@ if __name__ == "__main__":
         + _dynamic_import_evasion_violations()
         + _store_access_dynamic_target_violations()
         + _sys_modules_mutation_violations()
+        + _outward_alias_coverage_violations()
     )
     if all_violations:
         print("\n".join(all_violations))

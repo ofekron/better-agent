@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from backend.adapters.store_access import ProviderRecord, store_access
 from backend.surface_contract.descriptors import (
+    AuthFlow,
     Capabilities,
     CatalogModel,
     ConfigState,
@@ -53,11 +54,50 @@ def _capabilities(record: ProviderRecord) -> Capabilities:
     )
 
 
+# config_store.provider_credential_status's exhaustive return set
+# (backend/credential_session_client.py's `CredentialStatus` Literal) is
+# {"available", "missing", "blocked", "unknown"} — only the two with an
+# unambiguous ConfigState analog are mapped; "available" needs no
+# refinement (ACTIVE already), and "unknown" (status not yet probed) isn't
+# confidently either credential_required or credential_failed, so it's
+# left at ACTIVE too rather than guessed. RETRYING has no source anywhere
+# in this read layer: `retry_provider_credential` is an intent-triggered
+# action, not a persisted status this facade can observe — stays
+# unreachable.
+_CREDENTIAL_STATUS_TO_CONFIG_STATE = {
+    "missing": ConfigState.CREDENTIAL_REQUIRED,
+    "blocked": ConfigState.CREDENTIAL_FAILED,
+}
+
+
 def _config_state(record: ProviderRecord) -> ConfigState:
-    # gap: only `suspended` reaches store_access — no credential-status
-    # signal, so CREDENTIAL_REQUIRED / CREDENTIAL_FAILED / RETRYING are
-    # unreachable states here.
-    return ConfigState.SUSPENDED if record.suspended else ConfigState.ACTIVE
+    if record.suspended:
+        return ConfigState.SUSPENDED
+    # provider_credential_status only means anything for api_key providers
+    # (config_store itself only probes it in that case — see
+    # config_store._provider_ui_state); subscription providers have no
+    # credential-broker status to read.
+    if record.mode == "api_key":
+        status = store_access.get_provider_credential_status(record.id)
+        refined = _CREDENTIAL_STATUS_TO_CONFIG_STATE.get(status)
+        if refined is not None:
+            return refined
+    return ConfigState.ACTIVE
+
+
+# config_store's provider `mode` field ("subscription" | "api_key" — see
+# frontend/src/types.ts ProviderMode) is the only auth-mode signal
+# store_access can reach; NONE has no store source distinguishing it from
+# "not yet configured", so it's never emitted here.
+_MODE_TO_AUTH_FLOW = {
+    "subscription": AuthFlow.OAUTH_SUBSCRIPTION,
+    "api_key": AuthFlow.API_KEY,
+}
+
+
+def _auth_flows(record: ProviderRecord) -> tuple[AuthFlow, ...]:
+    flow = _MODE_TO_AUTH_FLOW.get(record.mode)
+    return (flow,) if flow is not None else ()
 
 
 def _map_descriptor(record: ProviderRecord) -> ProviderDescriptor:
@@ -68,9 +108,7 @@ def _map_descriptor(record: ProviderRecord) -> ProviderDescriptor:
             icon_id=record.kind,
             config_copy_key=f"provider.config_copy.{record.kind}",
         ),
-        # gap: ProviderRecord carries no auth-mode/credential-kind field
-        # to derive flows from — emit none rather than guess by `kind`.
-        auth_flows=(),
+        auth_flows=_auth_flows(record),
         capabilities=_capabilities(record),
         # gap: no orchestration-mode / send-mode source in store_access.
         orchestration_modes=(),

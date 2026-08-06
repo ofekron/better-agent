@@ -1974,14 +1974,31 @@ export function useSession(authStatus?: string) {
       // that were added by WS events (user_message_persisted, etc.)
       // during the fetch — the REST response was generated before those
       // messages existed, so carryDrafts alone would lose them.
+      //
+      // Surface v2 kill-the-flash: when the flag is ON for this session,
+      // this REST fetch still fires (forks/draft/wsTargetSessionId/seq
+      // cursors below all depend on it — the legacy `/ws/chat` plane for
+      // non-content events stays untouched per useSurfaceSession.ts), but
+      // its `messages` are never applied into state for this session id.
+      // useSurfaceSession's onSnapshot (replaceMessages) exclusively owns
+      // that node's messages once its own hydration resolves — applying
+      // the legacy REST messages here first would cause exactly the
+      // legacy-then-v2 flash this is meant to avoid.
+      const stripSurfaceOwnedMessages = (t: Session): Session =>
+        readSurfaceV2Flag()
+          ? updateNodeById(t, id, (node) =>
+              !node.messages || node.messages.length === 0 ? node : { ...node, messages: [] }
+            )
+          : t;
       setCurrentSession((prev) => {
         if (!prev || prev.id !== treeWithOpenedAt.id) {
-          return treeWithOpenedAt;
+          return stripSurfaceOwnedMessages(treeWithOpenedAt);
         }
         const carried = carryDrafts(prev, treeWithOpenedAt);
-        return reconcilingCachedTree
+        const reconciled = reconcilingCachedTree
           ? carried
           : preservePostRequestMessages(carried, prev, messageBaseline);
+        return stripSurfaceOwnedMessages(reconciled);
       });
       // Seed the seq cursor for the root AND every embedded fork —
       // each pane's WS subscribe sends its own since_seq.
@@ -3130,13 +3147,14 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  // ---- Chat Surface Contract v2 thin client (OFF by default) --------
+  // ---- Chat Surface Contract v2 thin client (ON by default) ----------
   //
-  // Behind `ba.surface_v2` (frontend/src/adapter/flag.ts). OFF: the block
-  // below is inert (surfaceSessionId is always null, useSurfaceSession is
-  // a no-op, and the two gated wrappers just delegate straight through —
-  // byte-identical behavior to calling applyMessagesReplay/applyLiveEvent
-  // directly). ON: the currently-open session's CHAT content plane
+  // Behind `ba.surface_v2` (frontend/src/adapter/flag.ts) — an explicit
+  // opt-out kill-switch, not an opt-in. OFF: the block below is inert
+  // (surfaceSessionId is always null, useSurfaceSession is a no-op, and
+  // the two gated wrappers just delegate straight through — byte-identical
+  // behavior to calling applyMessagesReplay/applyLiveEvent directly).
+  // ON: the currently-open session's CHAT content plane
   // (hydration + live) is owned by useSurfaceSession instead of the
   // legacy messages_replay/agent_message WS ingestion; every other event
   // type (run_state, worker_*, session_metadata_updated, ...) and all

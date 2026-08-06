@@ -1564,6 +1564,30 @@ export class MockBackend {
     if (method === "POST" && /^\/api\/sessions\/[^/]+\/project-suggestion$/.test(path))
       return { suggestion: this.state.projectSuggestion };
 
+    // Chat Surface Contract v2 (backend/adapter_api.py). The flag in
+    // frontend/src/adapter/flag.ts defaults ON, so any suite that selects
+    // a session — even one only exercising the legacy render path — can
+    // trigger useSurfaceSession's hydrate() fetch. Minimal always-empty
+    // "ok" envelope: no turns/runs, so mapTurnToMessages never runs and
+    // this route never needs to mirror `this.state.sessions` content.
+    // Suites that actually test v2 behavior (see useSurfaceSession.test.ts)
+    // supply their own richer fetch mock instead of this harness.
+    const surfaceSnapshotMatch = path.match(/^\/api\/v2\/surface\/sessions\/([^/]+)\/snapshot$/);
+    if (surfaceSnapshotMatch && method === "GET") {
+      const sessionId = decodeURIComponent(surfaceSnapshotMatch[1]);
+      return {
+        kind: "ok",
+        session_id: sessionId,
+        surface_id: sessionId,
+        instruction_widget: null,
+        turns: [],
+        live_turn_nodes: [],
+        runs: [],
+        older_cursor: null,
+        snapshot_identity: { incarnation: "mock", render_rev: 0, hist_rev: 0 },
+      };
+    }
+
     throw new Error(`MockBackend: unhandled ${method} ${path}`);
   }
 }

@@ -52,7 +52,16 @@ _CAPABILITY_PREFIX = "supports_"
 # (bare names, not the dotted "backend.<name>" form that list uses) — fail
 # closed at runtime even if the boundary test never ran, matching this
 # project's "no fallback on ambiguity" rule.
-_ALLOWED_STORE_NAMES = frozenset({"session_store", "config_store", "project_store", "runs_dir"})
+_ALLOWED_STORE_NAMES = frozenset(
+    {"session_store", "config_store", "project_store", "runs_dir", "worker_store"}
+)
+
+# worker_store is the one sanctioned store that isn't a top-level backend/*.py
+# module — it lives under the `stores` subpackage (backend/stores/worker_store.py)
+# — so its bare literal name ("worker_store", matching every other entry's
+# convention and STORE_ACCESS_ALLOWLIST's rsplit-derived short name) needs an
+# explicit import-path override rather than importing itself literally.
+_STORE_IMPORT_PATHS = {"worker_store": "stores.worker_store"}
 
 
 def _resolve(name: str):
@@ -65,7 +74,8 @@ def _resolve(name: str):
     mod = sys.modules.get(dotted)
     if mod is not None:
         return mod
-    mod = sys.modules.get(name) or importlib.import_module(name)
+    import_path = _STORE_IMPORT_PATHS.get(name, name)
+    mod = sys.modules.get(import_path) or importlib.import_module(import_path)
     sys.modules[dotted] = mod
     return mod
 
@@ -81,6 +91,10 @@ class SessionRecord:
     updated_at: str
     provider_id: str | None
     kind: str
+    runtime_profile_id: str | None
+    model: str | None
+    reasoning_effort: str | None
+    orchestration_mode: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +115,7 @@ class ProviderRecord:
     models: tuple[str, ...]
     capabilities: dict[str, bool]
     suspended: bool
+    mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +140,21 @@ class RunRecord:
     started_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerRecord:
+    agent_session_id: str
+    name: str | None
+    role_key: str | None
+    cwd: str
+    orchestration_mode: str
+    node_id: str
+    created_at: str
+    last_active: str
+    delegation_count: int
+    token_usage: dict
+    tags: tuple[str, ...]
+
+
 def _session_record(raw: dict) -> SessionRecord:
     return SessionRecord(
         id=str(raw.get("id", "")),
@@ -136,6 +166,14 @@ def _session_record(raw: dict) -> SessionRecord:
         updated_at=str(raw.get("updated_at", "")),
         provider_id=raw.get("provider_id"),
         kind=str(raw.get("kind", "user")),
+        # `runtime_profile_id` is absent from session_store's list-summary
+        # shape (only the single-session get_session() read carries it) —
+        # honestly None rather than guessed when the caller only has the
+        # summary form.
+        runtime_profile_id=raw.get("runtime_profile_id"),
+        model=str(raw.get("model") or "") or None,
+        reasoning_effort=str(raw.get("reasoning_effort") or "") or None,
+        orchestration_mode=str(raw.get("orchestration_mode") or "") or None,
     )
 
 
@@ -162,6 +200,7 @@ def _provider_record(raw: dict) -> ProviderRecord:
         models=tuple(raw.get("custom_models") or ()),
         capabilities=capabilities,
         suspended=bool(raw.get("suspended", False)),
+        mode=str(raw.get("mode", "subscription")),
     )
 
 
@@ -199,6 +238,22 @@ def _run_record(session_id: str, run_dir) -> RunRecord:
     )
 
 
+def _worker_record(raw: dict) -> WorkerRecord:
+    return WorkerRecord(
+        agent_session_id=str(raw.get("agent_session_id", "")),
+        name=raw.get("name"),
+        role_key=raw.get("role_key"),
+        cwd=str(raw.get("cwd", "")),
+        orchestration_mode=str(raw.get("orchestration_mode", "")),
+        node_id=str(raw.get("node_id") or "primary"),
+        created_at=str(raw.get("created_at", "")),
+        last_active=str(raw.get("last_active", "")),
+        delegation_count=int(raw.get("delegation_count", 0) or 0),
+        token_usage=dict(raw.get("token_usage") or {}),
+        tags=tuple(raw.get("tags") or ()),
+    )
+
+
 class StoreAccess:
     """Narrow, typed, read-only methods the surface adapters need. No store
     internals (dicts, module objects, mutation methods) leak out."""
@@ -231,9 +286,29 @@ class StoreAccess:
             _run_record(session_id, run_dir) for session_id, run_dir in by_session.items()
         )
 
+    def get_latest_run_record(self, session_id: str) -> RunRecord | None:
+        """Most-recently-started run for `session_id`, or None. The shared
+        best-effort run<->session linkage heuristic (no direct run<->turn
+        index exists) — used by both RunsSurfaceAdapter's lifecycle-fact
+        handler and ChatSurfaceAdapter's worker-sidecar success/error
+        lookup, so the heuristic has exactly one owner."""
+        records = [r for r in self.list_run_records() if r.session_id == session_id]
+        if not records:
+            return None
+        return max(records, key=lambda r: r.started_at)
+
     def list_projects(self) -> tuple[ProjectRecord, ...]:
         project_store = _resolve("project_store")
         return tuple(_project_record(p) for p in project_store.list_projects())
+
+    def get_provider_credential_status(self, provider_id: str) -> str:
+        config_store = _resolve("config_store")
+        return config_store.provider_credential_status(provider_id)
+
+    def get_worker_record(self, agent_session_id: str) -> WorkerRecord | None:
+        worker_store = _resolve("worker_store")
+        raw = worker_store.get_worker("", agent_session_id)
+        return _worker_record(raw) if raw is not None else None
 
 
 store_access = StoreAccess()

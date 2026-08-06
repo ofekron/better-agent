@@ -774,6 +774,15 @@ def _wire_surface_adapter() -> None:
 
 _wire_surface_adapter()
 
+# Phase G: proxy-fed model-traffic thread facts (parallel, flag-gated path
+# — see backend/traffic_facts_api.py's module docstring). Mounted only
+# when BA_SURFACE_TRAFFIC_SOURCE is on, so with it off the route doesn't
+# exist at all, same shape as the node_link conditional mount below.
+import traffic_facts_api
+
+if traffic_facts_api.feature_enabled():
+    app.include_router(traffic_facts_api.router)
+
 # Working-mode owners subscribe to `session.parent_deleted` and route by
 # `working_mode`; cascade-delete only publishes the fact.
 import working_mode as _working_mode_mod

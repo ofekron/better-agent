@@ -443,18 +443,39 @@ describe("mapTurnToAssistantMessage / mapTurnToMessages", () => {
   });
 
   it("finalizes (isStreaming false, completed_at set) once a RESULT node is present", () => {
-    const resultNode = node({ node_id: "res1", kind: "result", payload: { result_kind: "provider" }, ts: 999 });
+    const resultNode = node({ node_id: "res1", kind: "result", payload: { result_kind: "provider", text: null, is_error: false }, ts: 999 });
     const msg = mapTurnToAssistantMessage(turn({ results: [resultNode] }), []);
     expect(msg.isStreaming).toBe(false);
     expect(msg.completed_at).toBeDefined();
   });
 
-  it("prefers the result's associated assistant_text over body text when both exist", () => {
-    const resultNode = node({ node_id: "res1", kind: "result", payload: { result_kind: "provider" } });
+  it("prefers the result's associated assistant_text over body text when the result node itself carries no text", () => {
+    const resultNode = node({ node_id: "res1", kind: "result", payload: { result_kind: "provider", text: null, is_error: false } });
     const resultText = node({ node_id: "res1-text", kind: "assistant_text", payload: { text: "final answer" } });
     const body = [node({ node_id: "b1", kind: "assistant_text", payload: { text: "draft" } })];
     const msg = mapTurnToAssistantMessage(turn({ results: [resultNode, resultText] }), body);
     expect(msg.content).toBe("final answer");
+  });
+
+  it("prefers the provider result node's own payload text over both its associated assistant_text and body text (golden: explanations + provider result row)", () => {
+    const explanationBody = [
+      node({ node_id: "b1", kind: "assistant_text", ts: 1, payload: { text: "working on it" } }),
+      node({ node_id: "t1", kind: "tool_interaction", ts: 2, payload: { tool_name: "Bash", args: {}, result: { output: "ok" }, approval_ref: null, ui_kind: null, derived_view: null } }),
+      node({ node_id: "b2", kind: "assistant_text", ts: 3, payload: { text: "here is a draft" } }),
+    ];
+    const resultNode = node({
+      node_id: "res1", kind: "result", ts: 999,
+      payload: { result_kind: "provider", text: "the definitive final answer", is_error: false },
+    });
+    const staleAssociatedText = node({
+      node_id: "res1-text", kind: "assistant_text", ts: 998,
+      payload: { text: "an associated-but-superseded text" },
+    });
+    const msg = mapTurnToAssistantMessage(
+      turn({ results: [resultNode, staleAssociatedText] }),
+      explanationBody,
+    );
+    expect(msg.content).toBe("the definitive final answer");
   });
 
   it("stamps error/errorText from a failure body node", () => {

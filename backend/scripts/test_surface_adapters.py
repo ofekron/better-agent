@@ -47,10 +47,11 @@ from backend.adapters import build_adapter  # noqa: E402
 from backend.adapters.provider_adapter import ProviderConfigSurfaceAdapter  # noqa: E402
 from backend.adapters.runs_adapter import RunsSurfaceAdapter  # noqa: E402
 from backend.adapters.session_adapter import SessionSurfaceAdapter  # noqa: E402
+from backend.adapters.store_access import store_access  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.surface_contract.adapter import BetterAgentAdapter  # noqa: E402
 from backend.surface_contract.chat_surface import ChatSurface  # noqa: E402
-from backend.surface_contract.descriptors import ConfigState  # noqa: E402
+from backend.surface_contract.descriptors import AuthFlow, ConfigState  # noqa: E402
 from backend.surface_contract.identity import Ok, Rebuilding  # noqa: E402
 from backend.surface_contract.provider_config_surface import ProviderConfigSurface  # noqa: E402
 from backend.surface_contract.runs_surface import RunPhase, RunsSurface  # noqa: E402
@@ -80,7 +81,10 @@ def _publish_session_fire(sid: str) -> None:
 
 def test_list_sessions_maps_seeded_session() -> None:
     cwd = tempfile.mkdtemp(prefix="ba-surface-session-cwd-")
-    session = session_store.create_session(name=f"surface session {uuid.uuid4().hex}", model="m", cwd=cwd)
+    session = session_store.create_session(
+        name=f"surface session {uuid.uuid4().hex}", model="test-model", cwd=cwd,
+        reasoning_effort="high", orchestration_mode="native",
+    )
 
     adapter = SessionSurfaceAdapter()
     result = adapter.list_sessions(None, None)
@@ -89,10 +93,127 @@ def test_list_sessions_maps_seeded_session() -> None:
     assert match is not None
     assert match.title == session["name"]
     assert match.selectors.cwd == cwd
+    assert match.selectors.model == "test-model"
+    assert match.selectors.reasoning_effort == "high"
+    assert match.selectors.orchestration_mode == "native"
     assert match.archived is False
-    # gap: no running/failed/queued signal on SessionRecord — always IDLE.
+    # No session.fire.*/session.status_projected fact has been observed for
+    # this sid yet — conservatively IDLE, per _derive_rollup's default.
     assert match.state == SessionRollupState.IDLE
     assert match.attention_markers == ()
+
+
+def test_live_refresh_selectors_include_runtime_profile_id() -> None:
+    # `runtime_profile_id` is absent from session_store's list-summary shape
+    # (session_store.py's `_build_summary_for_root`) — only the single-
+    # session get_session() read carries it. `_refresh` (the live-fact
+    # path) uses that single-record read, so it's the one path that can
+    # surface it; list_sessions() (the list-summary path) cannot.
+    provider = config_store.add_provider({
+        "name": f"Selector Provider {uuid.uuid4().hex}", "kind": "claude", "mode": "subscription",
+    })
+    profile = config_store.add_runtime_profile({
+        "provider_id": provider["id"], "runner": "better_agent_runner",
+    })
+    cwd = tempfile.mkdtemp(prefix="ba-surface-session-cwd-")
+    session = session_store.create_session(
+        name=f"profile session {uuid.uuid4().hex}", cwd=cwd, runtime_profile_id=profile["id"],
+    )
+    sid = session["id"]
+
+    adapter = SessionSurfaceAdapter()
+    adapter.bind()
+    received: list = []
+    sub = adapter.subscribe(received.append)
+    try:
+        _publish_session_fire(sid)
+        upserts = [
+            f for f in received if isinstance(f, SessionSummaryUpsert) and f.summary.session_id == sid
+        ]
+        assert upserts, received
+        assert upserts[0].summary.selectors.runtime_profile_id == profile["id"]
+    finally:
+        sub.close()
+
+
+def test_session_fire_running_and_error_changed_update_rollup() -> None:
+    cwd = tempfile.mkdtemp(prefix="ba-surface-session-cwd-")
+    session = session_store.create_session(name=f"fire rollup {uuid.uuid4().hex}", model="m", cwd=cwd)
+    sid = session["id"]
+
+    adapter = SessionSurfaceAdapter()
+    adapter.bind()
+
+    asyncio.run(bus.publish(BusEvent(
+        type="session.fire.running_changed", root_id=sid, sid=sid,
+        payload={"kind": "running_changed", "value": True}, persist=False,
+    )))
+    result = adapter.list_sessions(None, None)
+    assert isinstance(result, Ok), result
+    match = next(s for s in result.value.sessions if s.session_id == sid)
+    assert match.state == SessionRollupState.RUNNING
+
+    # errored takes priority over running, mirroring session_status.key_for.
+    asyncio.run(bus.publish(BusEvent(
+        type="session.fire.error_changed", root_id=sid, sid=sid,
+        payload={"kind": "error_changed", "has_error": True, "error": "boom"}, persist=False,
+    )))
+    result2 = adapter.list_sessions(None, None)
+    match2 = next(s for s in result2.value.sessions if s.session_id == sid)
+    assert match2.state == SessionRollupState.FAILED
+
+
+def test_session_status_projected_maps_waiting_for_user() -> None:
+    cwd = tempfile.mkdtemp(prefix="ba-surface-session-cwd-")
+    session = session_store.create_session(name=f"status rollup {uuid.uuid4().hex}", model="m", cwd=cwd)
+    sid = session["id"]
+
+    adapter = SessionSurfaceAdapter()
+    adapter.bind()
+
+    asyncio.run(bus.publish(BusEvent(
+        type="session.status_projected", root_id=sid, sid=sid,
+        payload={
+            "session_id": sid, "running": False, "unread": False,
+            "waiting_for_user": True, "errored": False,
+            "status_key": "needs_decision", "status_rank": 5,
+        },
+        persist=False,
+    )))
+    result = adapter.list_sessions(None, None)
+    assert isinstance(result, Ok), result
+    match = next(s for s in result.value.sessions if s.session_id == sid)
+    assert match.state == SessionRollupState.AWAITING_APPROVAL
+
+
+def test_session_deleted_fact_evicts_rollup_cache() -> None:
+    cwd = tempfile.mkdtemp(prefix="ba-surface-session-cwd-")
+    session = session_store.create_session(name=f"delete rollup {uuid.uuid4().hex}", model="m", cwd=cwd)
+    sid = session["id"]
+
+    adapter = SessionSurfaceAdapter()
+    adapter.bind()
+
+    asyncio.run(bus.publish(BusEvent(
+        type="session.fire.running_changed", root_id=sid, sid=sid,
+        payload={"kind": "running_changed", "value": True}, persist=False,
+    )))
+    running_result = adapter.list_sessions(None, None)
+    running_match = next(s for s in running_result.value.sessions if s.session_id == sid)
+    assert running_match.state == SessionRollupState.RUNNING
+
+    # gap: SessionFrame has no deletion/tombstone variant (would need a new
+    # frame type in backend/surface_contract/session_surface.py, not
+    # editable here) — no live frame tells a subscriber the session is
+    # gone; only the adapter's own rollup/summary cache is evicted, visible
+    # here as the rollup resetting to IDLE on the next read.
+    asyncio.run(bus.publish(BusEvent(
+        type="session.fire.deleted", root_id=sid, sid=sid,
+        payload={"kind": "deleted", "deleted_sids": [sid]}, persist=False,
+    )))
+    after_result = adapter.list_sessions(None, None)
+    after_match = next(s for s in after_result.value.sessions if s.session_id == sid)
+    assert after_match.state == SessionRollupState.IDLE
 
 
 def test_list_sessions_query_filters_by_title() -> None:
@@ -177,8 +298,8 @@ def test_provider_descriptor_mapping() -> None:
     assert match.display.icon_id == "claude"
     assert match.display.config_copy_key == "provider.config_copy.claude"
     assert match.config_state == ConfigState.ACTIVE
-    # gap: no auth-flow signal reaches store_access.
-    assert match.auth_flows == ()
+    # config_store's `mode` field (subscription|api_key) maps to auth_flows.
+    assert match.auth_flows == (AuthFlow.OAUTH_SUBSCRIPTION,)
     assert isinstance(match.capabilities.usage_reporting, bool)
     assert isinstance(match.capabilities.startup_monitoring, bool)
 
@@ -196,6 +317,20 @@ def test_provider_suspended_maps_to_suspended_config_state() -> None:
     adapter = ProviderConfigSurfaceAdapter()
     match = next(d for d in adapter.list_providers() if d.provider_id == provider["id"])
     assert match.config_state == ConfigState.SUSPENDED
+
+
+def test_provider_api_key_mode_maps_auth_flow_and_credential_status() -> None:
+    provider = config_store.add_provider({
+        "name": f"API Key Provider {uuid.uuid4().hex}", "kind": "claude", "mode": "api_key",
+    })
+
+    adapter = ProviderConfigSurfaceAdapter()
+    match = next(d for d in adapter.list_providers() if d.provider_id == provider["id"])
+    assert match.auth_flows == (AuthFlow.API_KEY,)
+    # No desktop credential-session connection exists in this test process
+    # (see test_store_access.py's equivalent test) — the credential broker
+    # status is deterministically "blocked", which maps to CREDENTIAL_FAILED.
+    assert match.config_state == ConfigState.CREDENTIAL_FAILED
 
 
 def test_runtime_profiles_maps_seeded_profile() -> None:
@@ -262,10 +397,40 @@ def test_list_runs_phase_mapping_completed_failed_running() -> None:
     assert by_id[completed_run].phase == RunPhase.COMPLETED
     assert by_id[failed_run].phase == RunPhase.FAILED
     assert by_id[running_run].phase == RunPhase.RUNNING
-    # gap: no turn_id / runner / heartbeat source anywhere in store_access.
+    # gap: no turn_id / heartbeat source anywhere in store_access.
     assert by_id[completed_run].turn_id is None
+    # runner is joined via the run's session -> provider -> runtime profile
+    # (see test_list_runs_runner_joined_via_session_provider below); no
+    # session is seeded for this run's app_session_id, so the join bottoms
+    # out at "" here rather than guessed.
     assert by_id[completed_run].runner == ""
     assert by_id[completed_run].last_heartbeat_at is None
+
+
+def test_list_runs_runner_joined_via_session_provider() -> None:
+    provider = config_store.add_provider({
+        "name": f"Runner Provider {uuid.uuid4().hex}", "kind": "claude", "mode": "subscription",
+    })
+    # add_provider seeds its own default runtime profile — the join takes
+    # whichever runtime profile store_access surfaces first for this
+    # provider (documented, ambiguous-if->1 gap), so the oracle is read the
+    # SAME way rather than assuming a specific runner string.
+    expected_runner = next(
+        p.runner for p in store_access.list_runtime_profiles() if p.provider_id == provider["id"]
+    )
+    cwd = tempfile.mkdtemp(prefix="ba-surface-runs-cwd-")
+    session = session_store.create_session(
+        name=f"runner join session {uuid.uuid4().hex}", cwd=cwd, provider_id=provider["id"],
+    )
+    run_id = _seed_run(session["id"], success=True)
+
+    adapter = RunsSurfaceAdapter()
+    result = adapter.list_runs(session["id"], None)
+    assert isinstance(result, Ok), result
+    match = next(r for r in result.value if r.run_id == run_id)
+    assert match.provider_id == provider["id"]
+    assert match.runner == expected_runner
+    assert expected_runner
 
 
 def test_list_runs_filters_by_session_id() -> None:
@@ -342,16 +507,22 @@ def test_build_adapter_returns_typed_composition() -> None:
 
 _TESTS = [
     test_list_sessions_maps_seeded_session,
+    test_live_refresh_selectors_include_runtime_profile_id,
+    test_session_fire_running_and_error_changed_update_rollup,
+    test_session_status_projected_maps_waiting_for_user,
+    test_session_deleted_fact_evicts_rollup_cache,
     test_list_sessions_query_filters_by_title,
     test_projects_maps_seeded_project_with_gap_defaults,
     test_rearranger_state_is_rebuilding,
     test_session_fire_fact_triggers_change_only_upsert,
     test_provider_descriptor_mapping,
     test_provider_suspended_maps_to_suspended_config_state,
+    test_provider_api_key_mode_maps_auth_flow_and_credential_status,
     test_runtime_profiles_maps_seeded_profile,
     test_installable_catalog_is_empty,
     test_provider_submit_rejects_all_intents,
     test_list_runs_phase_mapping_completed_failed_running,
+    test_list_runs_runner_joined_via_session_provider,
     test_list_runs_filters_by_session_id,
     test_run_detail_maps_entries_and_missing_is_rebuilding,
     test_usage_analytics_is_rebuilding,

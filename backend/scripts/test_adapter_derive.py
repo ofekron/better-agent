@@ -86,6 +86,25 @@ def test_resolve_result_provider_marked_final():
     assert [n.node_id for n in result] == ["txt1", "res1"]
 
 
+def test_resolve_result_provider_marked_final_with_no_associated_text():
+    # No ASSISTANT_TEXT node parented to the result marker — the provider
+    # branch must still return the result node itself (whose payload now
+    # carries the answer text), not fall through to the trailing-text or
+    # last-item heuristics.
+    marked = Node(
+        cv=1, node_id="res1", parent_id=None, turn_id=TURN, surface_id=SURFACE,
+        kind=NodeKind.RESULT, ts=5.0, seq=5, status=ContentStatus.COMPLETE,
+        payload=ResultPayload(result_kind=ResultKind.PROVIDER, text="final answer", is_error=False),
+    )
+    unrelated_text = _text("txt0", 1.0, 1, "unrelated preamble")
+    items = [unrelated_text, marked]
+
+    result, consumed = resolve_result(items)
+    assert [n.node_id for n in result] == ["res1"]
+    assert [n.node_id for n in consumed] == ["res1"]
+    assert result[0].payload.text == "final answer"
+
+
 def test_derive_body_partitions_at_assistant_text_boundaries():
     items = [
         _text("txt1", 1.0, 1, "first explanation"),

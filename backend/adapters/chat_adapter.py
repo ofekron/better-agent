@@ -1,9 +1,12 @@
 """Concrete ChatSurface implementation (ADR 0006).
 
 Reads exclusively through `event_journal_reader.read_events` (the journal
-is the only persistent source), normalizes/derives via
-`backend.adapters.{normalize,derive}`, and pushes live deltas from
-`event_journal.written` / `lifecycle.turn_*` bus facts. See
+is the only persistent source) for the content plane, normalizes/derives
+via `backend.adapters.{normalize,derive}`, and pushes live deltas from
+`event_journal.written` / `lifecycle.turn_*` bus facts. `fetch_sidecar`
+is the one exception: it reads through
+`backend.adapters.store_access.store_access` (worker + run records), the
+same façade the other adapters use. See
 `backend/scripts/test_adapter_boundaries.py` for the enforced import
 boundary this file must satisfy.
 
@@ -35,6 +38,7 @@ from backend.adapters.normalize import (
     typed_prompt_node_id,
 )
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection
+from backend.adapters.store_access import WorkerRecord, store_access
 from backend.event_bus import BusEvent
 from backend.event_journal import EVENT_JOURNAL_WRITTEN, event_journal_reader
 from backend.surface_contract.chat_surface import (
@@ -274,6 +278,49 @@ def _path_to(index: dict[NodeId, Node], node_id: NodeId) -> tuple[NodeId, ...]:
     return tuple(reversed(path))
 
 
+_WORKER_SIDECAR_PANEL_KIND = "worker_panel"
+
+
+def _worker_sidecar_status(success: bool | None) -> str:
+    if success is True:
+        return "complete"
+    if success is False:
+        return "failed"
+    return "running"
+
+
+def _map_worker_sidecar(ref: SidecarRef, worker: WorkerRecord) -> Sidecar:
+    # The worker's own Better Agent session runs its own provider
+    # execution(s) under `worker.agent_session_id` — store_access's shared
+    # run<->session linkage heuristic (see get_latest_run_record) is a
+    # real, non-invented source for success/error, unlike
+    # instructions_preview below.
+    run = store_access.get_latest_run_record(worker.agent_session_id)
+    success = run.success if run is not None else None
+    error = run.error if run is not None else None
+    return Sidecar(
+        sidecar_ref=ref,
+        panel_kind=_WORKER_SIDECAR_PANEL_KIND,
+        status=_worker_sidecar_status(success),
+        payload={
+            "worker_session_id": worker.agent_session_id,
+            "orchestration_mode": worker.orchestration_mode,
+            "cwd": worker.cwd,
+            "node_id": worker.node_id,
+            "delegation_count": worker.delegation_count,
+            "last_active": worker.last_active,
+            "token_usage": worker.token_usage,
+            "success": success,
+            "error": error,
+            # gap: instructions_preview has no store source of its own —
+            # it's only ever carried inline in the WORKER_INTERACTION
+            # fact's own payload (backend/adapters/normalize.py), which the
+            # frontend already reads directly off the chat node without a
+            # sidecar fetch.
+        },
+    )
+
+
 def _searchable_text(node: Node) -> str | None:
     payload = node.payload
     if payload is None:
@@ -396,9 +443,19 @@ class ChatSurfaceAdapter(ChatSurface):
     def fetch_sidecar(
         self, session_id: SessionId, sidecar_ref: SidecarRef
     ) -> ProjectionResult[Sidecar]:
-        # No sidecar source is reachable within the adapter import boundary
-        # yet (no sidecar-content store/reader is on the allowlist).
-        return Rebuilding(retry_after_ms=None)
+        # gap: nothing in backend/adapters/normalize.py (not in this
+        # worktree's editable set) stamps Node.sidecar_ref for
+        # WORKER_INTERACTION nodes yet, so no producer exists for the ref
+        # this consumes — `sidecar_ref` is treated as the worker's Better
+        # Agent session id (agent_session_id / WorkerPanel.worker_session_id
+        # in frontend/src/types.ts), the only identifier
+        # backend/stores/worker_store.py indexes workers by. No other
+        # sidecar kind (panel_kind) has a store source reachable here.
+        worker = store_access.get_worker_record(sidecar_ref)
+        if worker is None:
+            return Rebuilding(retry_after_ms=None)
+        state = self._get_or_create(session_id)
+        return Ok(_map_worker_sidecar(sidecar_ref, worker), state.projection.snapshot())
 
     # ---- live plane --------------------------------------------------
 

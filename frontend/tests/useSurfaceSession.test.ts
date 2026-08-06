@@ -19,7 +19,7 @@ function promptNode(turnId: string, text: string, ts: number): NodeWire {
 function resultNode(turnId: string, ts: number): NodeWire {
   return {
     cv: 1, node_id: `${turnId}:result`, parent_id: null, turn_id: turnId, surface_id: SESSION,
-    kind: "result", ts, seq: 1, status: null, payload: { result_kind: "provider" },
+    kind: "result", ts, seq: 1, status: null, payload: { result_kind: "provider", text: null, is_error: false },
     run_ref: null, sidecar_ref: null, target_ref: null, child_manifest: null,
   };
 }

@@ -94,7 +94,17 @@ class RearrangerChanged:
     intent_id: IntentId | None = None
 
 
-SessionFrame = SessionSummaryUpsert | SessionTreeChanged | ProjectUpsert | RearrangerChanged
+# Tombstone: a deleted session must be announced, never silently dropped
+# from a live subscriber's cache.
+@dataclass(frozen=True, slots=True)
+class SessionRemoved:
+    cv: int
+    session_id: SessionId
+
+
+SessionFrame = (
+    SessionSummaryUpsert | SessionTreeChanged | ProjectUpsert | RearrangerChanged | SessionRemoved
+)
 
 
 class SessionSurface(ABC):

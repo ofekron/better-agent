@@ -486,6 +486,9 @@ function statusToStreaming(status: ContentStatusWire | null): boolean {
 }
 
 function resultText(results: NodeWire[]): string {
+  const marker = results.find((n) => n.kind === "result");
+  const markerText = marker ? (marker.payload as ResultPayloadWire).text : null;
+  if (markerText) return markerText;
   return results
     .filter((n) => n.kind === "assistant_text")
     .map((n) => (n.payload as AssistantTextPayloadWire).text)

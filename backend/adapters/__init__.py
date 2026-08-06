@@ -21,6 +21,18 @@ alongside store_access.py's `_resolve` (a narrower, store-specific version
 of the same problem — see that module's docstring for why it stays
 separate and dynamic instead of joining this list).
 
+`event_ingester` is canonicalized here even though no backend/adapters/*.py
+file itself imports it dotted — the coverage this list provides isn't
+limited to this package's own internal imports. backend/scripts/
+test_chat_adapter.py and test_owner_facts.py dotted-import
+`backend.event_ingester` directly to prove a real single-writer invariant
+(the ingester and the ChatSurfaceAdapter they exercise must observe the
+same in-process EventIngester), and that only holds if this canonicalizes
+it too — see backend/scripts/test_adapter_boundaries.py's
+`test_outward_dotted_imports_have_alias_coverage`, which fails on any
+future dotted `backend.<stateful module>` import anywhere in the repo that
+this list (or store_access.py's dynamic set) doesn't cover.
+
 Self-canonicalizing on purpose: Python guarantees a package's __init__.py
 runs before any of its submodules, and runs at most once per process — so
 this fires no matter which permitted importer (backend/main.py,
@@ -36,18 +48,20 @@ singletons. Moving it here removes that import-order hazard entirely.
 import sys as _sys
 
 import event_bus as _event_bus
+import event_ingester as _event_ingester
 import event_journal as _event_journal
 import paths as _paths
 import scheme_migrations as _scheme_migrations
 
 for _bare_name, _module in (
     ("event_bus", _event_bus),
+    ("event_ingester", _event_ingester),
     ("event_journal", _event_journal),
     ("paths", _paths),
     ("scheme_migrations", _scheme_migrations),
 ):
     _sys.modules[f"backend.{_bare_name}"] = _module
-del _bare_name, _module, _sys, _event_bus, _event_journal, _paths, _scheme_migrations
+del _bare_name, _module, _sys, _event_bus, _event_ingester, _event_journal, _paths, _scheme_migrations
 
 from backend.adapters.chat_adapter import ChatSurfaceAdapter
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection

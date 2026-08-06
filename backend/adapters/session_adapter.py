@@ -3,10 +3,14 @@
 Reads exclusively through `backend.adapters.store_access.store_access`;
 live deltas come from the `session.fire.*` owner-side fact
 (`session_manager._fire`, additive alongside its `session.<kind>`
-WS-broadcaster event — see session_manager.py's `_fire` docstring) and
-`lifecycle.turn_*`. Both handlers just re-pull the affected session
-record and re-map it — see `_refresh` — so a lifecycle tick that doesn't
-change the record's fields (the common case) never re-broadcasts.
+WS-broadcaster event — see session_manager.py's `_fire` docstring),
+`session.status_projected` (backend/session_status_projection.py:107-144,
+the richer per-sid running/waiting_for_user/errored projection), and
+`lifecycle.turn_*`. The fact/lifecycle handlers re-pull the affected
+session record and re-map it — see `_refresh` — so a tick that doesn't
+change the record's fields (the common case) never re-broadcasts. Rollup
+state (`SessionSummary.state`) is instead tracked in a separate per-sid
+`_RollupFlags` cache fed by the two fact sources — see `_derive_rollup`.
 
 Every field this adapter cannot honestly derive from
 `backend.adapters.store_access.StoreAccess`'s current surface is called
@@ -17,12 +21,14 @@ out inline as a `# gap:` comment rather than guessed at (CLAUDE.md:
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from backend.adapters.projection import BusBoundProjection
 from backend.adapters.store_access import SessionRecord, store_access
 from backend.event_bus import BusEvent
 from backend.surface_contract.identity import (
+    CONTRACT_VERSION,
     Emit,
     Ok,
     PageCursor,
@@ -37,6 +43,7 @@ from backend.surface_contract.intents import IntentRejected, SessionIntent, Tran
 from backend.surface_contract.session_surface import (
     Project,
     SessionPage,
+    SessionRemoved,
     SessionRollupState,
     SessionSummary,
     SessionSurface,
@@ -67,7 +74,36 @@ def _parse_epoch(value: str) -> float | None:
         return None
 
 
-def _map_summary(record: SessionRecord) -> SessionSummary:
+@dataclass(frozen=True, slots=True)
+class _RollupFlags:
+    """Per-sid live-signal cache, fed incrementally by `session.fire.*`
+    (running_changed/error_changed) and fully by `session.status_projected`
+    (backend/session_status_projection.py:107-144). Never persisted —
+    rebuilt purely from bus facts observed since this adapter started, so
+    a sid this process hasn't heard about yet is simply absent."""
+
+    running: bool = False
+    waiting_for_user: bool = False
+    errored: bool = False
+
+
+def _derive_rollup(flags: "_RollupFlags | None") -> SessionRollupState:
+    # QUEUED / RECONNECTING / DETACHED have no source anywhere reachable
+    # from session.fire.*/session.status_projected — conservatively IDLE
+    # when nothing else is known, same priority order as
+    # session_status.key_for (error > needs_decision > running > idle).
+    if flags is None:
+        return SessionRollupState.IDLE
+    if flags.errored:
+        return SessionRollupState.FAILED
+    if flags.waiting_for_user:
+        return SessionRollupState.AWAITING_APPROVAL
+    if flags.running:
+        return SessionRollupState.RUNNING
+    return SessionRollupState.IDLE
+
+
+def _map_summary(record: SessionRecord, state: SessionRollupState) -> SessionSummary:
     return SessionSummary(
         session_id=record.id,
         title=record.title,
@@ -75,16 +111,13 @@ def _map_summary(record: SessionRecord) -> SessionSummary:
         project_ref=None,
         selectors=SessionSelectors(
             provider_id=record.provider_id,
-            # gap: SessionRecord carries none of these selector fields.
-            runtime_profile_id=None,
-            model=None,
-            reasoning_effort=None,
-            orchestration_mode=None,
+            runtime_profile_id=record.runtime_profile_id,
+            model=record.model,
+            reasoning_effort=record.reasoning_effort,
+            orchestration_mode=record.orchestration_mode,
             cwd=record.cwd,
         ),
-        # gap: SessionRecord carries no running/failed/queued signal —
-        # conservatively always IDLE rather than inventing one.
-        state=SessionRollupState.IDLE,
+        state=state,
         # gap: no attention-marker source on SessionRecord.
         attention_markers=(),
         opened_at=_parse_epoch(record.opened_at),
@@ -93,13 +126,13 @@ def _map_summary(record: SessionRecord) -> SessionSummary:
     )
 
 
-def _map_tree_node(record: SessionRecord) -> SessionTreeNode:
+def _map_tree_node(record: SessionRecord, state: SessionRollupState) -> SessionTreeNode:
     return SessionTreeNode(
         surface_id=record.id,
         parent_surface_id=None,
         kind="root",
         title=record.title,
-        state=SessionRollupState.IDLE,
+        state=state,
     )
 
 
@@ -108,6 +141,7 @@ class SessionSurfaceAdapter(SessionSurface):
         self._projection = BusBoundProjection()
         self._cache_lock = threading.Lock()
         self._last_summary: dict[SessionId, SessionSummary] = {}
+        self._rollup_by_sid: dict[SessionId, _RollupFlags] = {}
 
     def bind(self) -> None:
         """Idempotent: `BusBoundProjection.bind` unsubscribes-then-
@@ -115,9 +149,32 @@ class SessionSurfaceAdapter(SessionSurface):
         self._projection.bind(
             [
                 ("session.fire.*", self._on_session_fire),
+                ("session.status_projected", self._on_status_projected),
                 ("lifecycle.turn_*", self._on_lifecycle),
             ]
         )
+
+    # ---- internals: rollup cache ----------------------------------------
+
+    def _rollup_for(self, session_id: SessionId) -> SessionRollupState:
+        with self._cache_lock:
+            return _derive_rollup(self._rollup_by_sid.get(session_id))
+
+    def _update_flags(self, session_id: SessionId, **changes: bool) -> None:
+        with self._cache_lock:
+            current = self._rollup_by_sid.get(session_id, _RollupFlags())
+            self._rollup_by_sid[session_id] = replace(current, **changes)
+
+    def _evict(self, session_id: SessionId) -> None:
+        with self._cache_lock:
+            known = session_id in self._last_summary or session_id in self._rollup_by_sid
+            self._last_summary.pop(session_id, None)
+            self._rollup_by_sid.pop(session_id, None)
+        if known:
+            self._projection.bump_render()
+            self._projection.broadcast(
+                SessionRemoved(cv=CONTRACT_VERSION, session_id=session_id)
+            )
 
     # ---- read plane ------------------------------------------------
 
@@ -147,7 +204,7 @@ class SessionSurfaceAdapter(SessionSurface):
             next_cursor = PageCursor(
                 surface_id=_LIST_SURFACE_ID, snapshot=snapshot, token=str(offset + _PAGE_SIZE),
             )
-        summaries = tuple(_map_summary(r) for r in page)
+        summaries = tuple(_map_summary(r, self._rollup_for(r.id)) for r in page)
         return Ok(SessionPage(sessions=summaries, next_cursor=next_cursor), snapshot)
 
     def session_tree(
@@ -159,7 +216,7 @@ class SessionSurfaceAdapter(SessionSurface):
             return Rebuilding(retry_after_ms=None)
         # gap: no fork/parent-child source in store_access — always a
         # single root node, forks never surface here.
-        return Ok((_map_tree_node(record),), snapshot)
+        return Ok((_map_tree_node(record, self._rollup_for(session_id)),), snapshot)
 
     def projects(self) -> ProjectionResult[tuple[Project, ...]]:
         snapshot = self._projection.snapshot()
@@ -196,7 +253,44 @@ class SessionSurfaceAdapter(SessionSurface):
     # ---- internals: live fact handlers ----------------------------------
 
     async def _on_session_fire(self, event: BusEvent) -> None:
+        kind = event.payload.get("kind")
+        if kind == "deleted":
+            # gap: SessionFrame has no deletion/tombstone variant (would
+            # need a new frame type added to
+            # backend/surface_contract/session_surface.py, which is not in
+            # this worktree's editable set — a live subscriber only learns
+            # a deleted session is gone the next time it re-lists). The
+            # cache-eviction side is real: `deleted_sids` carries the whole
+            # removed subtree (session_manager.py's delete()), not just
+            # `event.sid`, so every one of them is evicted here.
+            deleted_sids = event.payload.get("deleted_sids") or [event.sid]
+            for sid in deleted_sids:
+                if isinstance(sid, str) and sid:
+                    self._evict(sid)
+            return
+        if kind == "running_changed":
+            self._update_flags(event.sid, running=bool(event.payload.get("value")))
+        elif kind == "error_changed":
+            self._update_flags(event.sid, errored=bool(event.payload.get("has_error")))
         await self._refresh(event.sid)
+
+    async def _on_status_projected(self, event: BusEvent) -> None:
+        payload = event.payload
+        session_id = payload.get("session_id") or event.sid
+        if not session_id:
+            return
+        if payload.get("deleted"):
+            # Same tombstone limitation as `_on_session_fire`'s "deleted"
+            # branch above — cache eviction only, no frame.
+            self._evict(session_id)
+            return
+        self._update_flags(
+            session_id,
+            running=bool(payload.get("running")),
+            waiting_for_user=bool(payload.get("waiting_for_user")),
+            errored=bool(payload.get("errored")),
+        )
+        await self._refresh(session_id)
 
     async def _on_lifecycle(self, event: BusEvent) -> None:
         await self._refresh(event.sid)
@@ -206,13 +300,13 @@ class SessionSurfaceAdapter(SessionSurface):
             return
         record = store_access.get_session_record(session_id)
         if record is None:
-            # gap: SessionFrame has no deletion/tombstone variant — a
-            # deleted session silently drops out of the cache with no
-            # frame broadcast to tell a live subscriber it is gone.
-            with self._cache_lock:
-                self._last_summary.pop(session_id, None)
+            # Defensive backstop only — real deletions are evicted
+            # explicitly above (`_on_session_fire`'s "deleted" branch and
+            # `_on_status_projected`'s `deleted` flag); this covers a
+            # record vanishing without either fact reaching this adapter.
+            self._evict(session_id)
             return
-        summary = _map_summary(record)
+        summary = _map_summary(record, self._rollup_for(session_id))
         with self._cache_lock:
             if self._last_summary.get(session_id) == summary:
                 return

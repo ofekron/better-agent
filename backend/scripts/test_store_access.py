@@ -19,6 +19,7 @@ Run:
 from __future__ import annotations
 
 import atexit
+import os
 import shutil
 import sys
 import tempfile
@@ -41,6 +42,7 @@ import config_store  # noqa: E402  (bare — store_access._resolve aliases onto 
 import project_store  # noqa: E402
 import runs_dir  # noqa: E402
 import session_store  # noqa: E402
+from stores import worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
 
 from backend.adapters.store_access import StoreAccess, store_access  # noqa: E402
 
@@ -50,7 +52,10 @@ _PUBLIC_METHODS = {
     "list_provider_records",
     "list_runtime_profiles",
     "list_run_records",
+    "get_latest_run_record",
     "list_projects",
+    "get_provider_credential_status",
+    "get_worker_record",
 }
 
 
@@ -132,6 +137,59 @@ def test_list_projects_reflects_seeded_project() -> None:
     assert match.node_id == "primary"
 
 
+def test_get_latest_run_record_picks_most_recent() -> None:
+    root = runs_dir.runs_root()
+    app_session_id = f"app-{uuid.uuid4().hex}"
+    older = f"run-{uuid.uuid4().hex}"
+    newer = f"run-{uuid.uuid4().hex}"
+    for run_id in (older, newer):
+        run_dir = root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        runs_dir.atomic_write_json(run_dir / "state.json", {
+            "session_id": f"prov-{run_id}",
+            "jsonl_path": str(run_dir / "stream.jsonl"),
+            "app_session_id": app_session_id,
+        })
+    # `started_at` is the run dir's mtime — stamp it explicitly so ordering
+    # doesn't depend on same-second filesystem resolution.
+    os.utime(root / older, (1000.0, 1000.0))
+    os.utime(root / newer, (2000.0, 2000.0))
+
+    match = store_access.get_latest_run_record(app_session_id)
+    assert match is not None
+    assert match.run_id == newer
+
+    assert store_access.get_latest_run_record(f"missing-{uuid.uuid4().hex}") is None
+
+
+def test_get_provider_credential_status_reflects_api_key_provider() -> None:
+    provider = config_store.add_provider({
+        "name": f"Credential Provider {uuid.uuid4().hex}", "kind": "claude", "mode": "api_key",
+    })
+    # No desktop credential-session connection exists in this test process
+    # (backend.credential_session_client._CONNECTION is only set from the
+    # BETTER_AGENT_CREDENTIAL_SESSION_FD env var) — `available()` is
+    # deterministically False, so the status is deterministically "blocked".
+    status = store_access.get_provider_credential_status(provider["id"])
+    assert status == "blocked"
+
+
+def test_get_worker_record_reflects_seeded_worker() -> None:
+    cwd = tempfile.mkdtemp(prefix="ba-store-access-worker-cwd-")
+    agent_session_id = f"worker-{uuid.uuid4().hex}"
+    worker_store.upsert_worker(cwd, agent_session_id, "native", None, name="my worker")
+
+    record = store_access.get_worker_record(agent_session_id)
+    assert record is not None
+    assert record.agent_session_id == agent_session_id
+    assert record.name == "my worker"
+    assert record.cwd == cwd
+    assert record.orchestration_mode == "native"
+    assert record.token_usage == {}
+
+    assert store_access.get_worker_record(f"missing-{uuid.uuid4().hex}") is None
+
+
 def test_resolve_aliases_bare_modules_onto_backend_namespace() -> None:
     """Every store_access method must resolve to the SAME bare-imported
     module object this test already seeded through, not a second copy
@@ -142,10 +200,12 @@ def test_resolve_aliases_bare_modules_onto_backend_namespace() -> None:
     store_access.list_runtime_profiles()
     store_access.list_run_records()
     store_access.list_projects()
+    store_access.get_worker_record(f"missing-{uuid.uuid4().hex}")
     assert sys.modules["backend.session_store"] is session_store
     assert sys.modules["backend.config_store"] is config_store
     assert sys.modules["backend.project_store"] is project_store
     assert sys.modules["backend.runs_dir"] is runs_dir
+    assert sys.modules["backend.worker_store"] is worker_store
 
 
 def test_store_access_exposes_only_read_methods() -> None:
@@ -161,6 +221,9 @@ _TESTS = [
     test_get_session_record_single_lookup,
     test_list_provider_records_and_runtime_profiles_from_one_provider,
     test_list_run_records_from_seeded_run_dir,
+    test_get_latest_run_record_picks_most_recent,
+    test_get_provider_credential_status_reflects_api_key_provider,
+    test_get_worker_record_reflects_seeded_worker,
     test_list_projects_reflects_seeded_project,
     test_resolve_aliases_bare_modules_onto_backend_namespace,
     test_store_access_exposes_only_read_methods,
