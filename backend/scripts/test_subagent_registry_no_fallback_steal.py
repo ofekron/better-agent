@@ -62,7 +62,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 # ─── unit tests ───────────────────────────────────────────────────
 
 
-def test_no_exact_match_returns_none_not_type_fallback() -> bool:
+def test_no_exact_match_returns_none_not_type_fallback() -> None:
     """Registry with two same-type pending entries; claim with a
     description that matches NEITHER must return None — the removed
     fallback would have popped the first one and returned its id."""
@@ -70,44 +70,31 @@ def test_no_exact_match_returns_none_not_type_fallback() -> bool:
     reg.register("tid-A", "general-purpose", "Round 1")
     reg.register("tid-B", "general-purpose", "Round 2")
     got = reg.claim("general-purpose", "Round 99")
-    if got is not None:
-        print(f"  claim with unmatched description returned {got!r}; expected None")
-        return False
+    assert got is None, f"claim with unmatched description returned {got!r}; expected None"
     # Both entries must remain pending (None ≠ pop).
-    if len(reg._pending) != 2:
-        print(f"  pending size changed: expected 2, got {len(reg._pending)}")
-        return False
-    return True
+    assert len(reg._pending) == 2, f"pending size changed: expected 2, got {len(reg._pending)}"
 
 
-def test_exact_match_after_unmatched_attempt() -> bool:
+def test_exact_match_after_unmatched_attempt() -> None:
     """After an unmatched claim returns None, an exact-match claim
     later in the iteration MUST still succeed — the fallback removal
     can't break the happy path."""
     reg = _SubagentRegistry()
     reg.register("tid-A", "general-purpose", "Round 1")
     reg.register("tid-B", "general-purpose", "Round 2")
-    if reg.claim("general-purpose", "Round 99") is not None:
-        return False
-    if reg.claim("general-purpose", "Round 1") != "tid-A":
-        return False
-    if reg.claim("general-purpose", "Round 2") != "tid-B":
-        return False
-    if reg._pending:
-        return False
-    return True
+    assert reg.claim("general-purpose", "Round 99") is None
+    assert reg.claim("general-purpose", "Round 1") == "tid-A"
+    assert reg.claim("general-purpose", "Round 2") == "tid-B"
+    assert not reg._pending
 
 
-def test_subagent_type_mismatch_returns_none() -> bool:
+def test_subagent_type_mismatch_returns_none() -> None:
     """A subagent_type that doesn't appear in pending entries — even
     with exact description match on another type — returns None."""
     reg = _SubagentRegistry()
     reg.register("tid-A", "general-purpose", "Find files")
     got = reg.claim("relevant-context-search", "Find files")
-    if got is not None:
-        print(f"  cross-type match returned {got!r}; expected None")
-        return False
-    return True
+    assert got is None, f"cross-type match returned {got!r}; expected None"
 
 
 # ─── integration: _replay_subagents over a sidecar dir with one
@@ -165,7 +152,7 @@ def _write_subagent_sidecar(
     (sub_dir / f"agent-{agent_id}.jsonl").write_text("\n".join(lines) + "\n")
 
 
-def test_replay_subagents_skips_unmatched_meta_no_mis_claim() -> bool:
+def test_replay_subagents_skips_unmatched_meta_no_mis_claim() -> None:
     """End-to-end: sidecar dir with an EXTRA meta whose description
     isn't in the parent slice's registry. Verify (a) the extra meta
     is SKIPPED (no events from it appear in the replay output),
@@ -218,21 +205,16 @@ def test_replay_subagents_skips_unmatched_meta_no_mis_claim() -> bool:
         # Assert (a): aaa's events do NOT appear. Their uuids start "sub-aaa-".
         aaa_uuids = {e["data"].get("uuid") for e in out
                      if e["data"].get("uuid", "").startswith("sub-aaa-")}
-        if aaa_uuids:
-            print(f"  extra meta 'aaa' was replayed (should have been skipped): {aaa_uuids}")
-            return False
+        assert not aaa_uuids, f"extra meta 'aaa' was replayed (should have been skipped): {aaa_uuids}"
 
         # Assert (b): bbb's events DO appear with parent_tool_use_id=tid-B.
         bbb_events = [e for e in out
                       if e["data"].get("uuid", "").startswith("sub-bbb-")]
-        if len(bbb_events) != 3:
-            print(f"  matching meta 'bbb' replay: expected 3 events, got {len(bbb_events)}")
-            return False
+        assert len(bbb_events) == 3, f"matching meta 'bbb' replay: expected 3 events, got {len(bbb_events)}"
         for e in bbb_events:
-            if e["data"].get("parent_tool_use_id") != "tid-B":
-                print(f"  bbb event mis-attributed: parent_tool_use_id="
-                      f"{e['data'].get('parent_tool_use_id')!r}, expected 'tid-B'")
-                return False
+            assert e["data"].get("parent_tool_use_id") == "tid-B", (
+                f"bbb event mis-attributed: parent_tool_use_id="
+                f"{e['data'].get('parent_tool_use_id')!r}, expected 'tid-B'")
 
         # Assert (c): no event carries an unrelated parent_tool_use_id —
         # specifically, no aaa-shaped event was tagged with tid-B
@@ -240,38 +222,23 @@ def test_replay_subagents_skips_unmatched_meta_no_mis_claim() -> bool:
         wrong_attribution = [e for e in out
                              if e["data"].get("uuid", "").startswith("sub-aaa-")
                              and e["data"].get("parent_tool_use_id") == "tid-B"]
-        if wrong_attribution:
-            print(f"  pre-fix mis-claim detected: {len(wrong_attribution)} aaa events stole tid-B")
-            return False
+        assert not wrong_attribution, f"pre-fix mis-claim detected: {len(wrong_attribution)} aaa events stole tid-B"
 
         # Assert (d): the unmatched meta (aaa) surfaced as exactly ONE
         # subagent_unmatched signal with correct fields and line_count.
-        if len(unmatched) != 1:
-            print(f"  expected 1 unmatched signal, got {len(unmatched)}: {unmatched}")
-            return False
+        assert len(unmatched) == 1, f"expected 1 unmatched signal, got {len(unmatched)}: {unmatched}"
         sig = unmatched[0]
-        if sig.get("type") != "subagent_unmatched":
-            print(f"  unmatched signal type wrong: {sig.get('type')!r}")
-            return False
+        assert sig.get("type") == "subagent_unmatched", f"unmatched signal type wrong: {sig.get('type')!r}"
         sd = sig.get("data") or {}
-        if sd.get("agent_id") != "aaa":
-            print(f"  unmatched agent_id wrong: {sd.get('agent_id')!r}")
-            return False
-        if sd.get("description") != "UNMATCHED-extra":
-            print(f"  unmatched description wrong: {sd.get('description')!r}")
-            return False
-        if sd.get("line_count") != 2:
-            print(f"  unmatched line_count wrong: expected 2, got {sd.get('line_count')!r}")
-            return False
-        if not str(sd.get("uuid", "")).startswith("unmatched-"):
-            print(f"  unmatched uuid not synthetic: {sd.get('uuid')!r}")
-            return False
-        return True
+        assert sd.get("agent_id") == "aaa", f"unmatched agent_id wrong: {sd.get('agent_id')!r}"
+        assert sd.get("description") == "UNMATCHED-extra", f"unmatched description wrong: {sd.get('description')!r}"
+        assert sd.get("line_count") == 2, f"unmatched line_count wrong: expected 2, got {sd.get('line_count')!r}"
+        assert str(sd.get("uuid", "")).startswith("unmatched-"), f"unmatched uuid not synthetic: {sd.get('uuid')!r}"
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
-def test_unmatched_signal_uuid_is_deterministic() -> bool:
+def test_unmatched_signal_uuid_is_deterministic() -> None:
     """The synthetic uuid on a subagent_unmatched signal must be stable
     across runs (hash of agent_id + description) so `event_ingester`'s
     uid:sha256(data) dedup collapses the row across repeated recovery
@@ -299,15 +266,12 @@ def test_unmatched_signal_uuid_is_deterministic() -> bool:
         s2 = _run()
         u1 = (s1.get("data") or {}).get("uuid")
         u2 = (s2.get("data") or {}).get("uuid")
-        if not u1 or u1 != u2:
-            print(f"  uuid not deterministic: {u1!r} vs {u2!r}")
-            return False
-        return True
+        assert u1 and u1 == u2, f"uuid not deterministic: {u1!r} vs {u2!r}"
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
-def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
+def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> None:
     """End-to-end: `_replay_and_apply` over a run_dir whose sidecar dir
     has an unmatched meta must write exactly ONE `subagent_unmatched`
     row to events.jsonl with `msg_id=None` (orphan path via
@@ -364,20 +328,15 @@ def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
         event_journal_writer.barrier_sync(root_id)
 
         n, msg_ids = _count_orphan_rows()
-        if n != 1:
-            print(f"  expected 1 subagent_unmatched row, got {n}")
-            return False
-        if msg_ids != {None}:
-            print(f"  orphan row must have msg_id=None, got msg_ids={msg_ids}")
-            return False
+        assert n == 1, f"expected 1 subagent_unmatched row, got {n}"
+        assert msg_ids == {None}, f"orphan row must have msg_id=None, got msg_ids={msg_ids}"
 
         # The orphan event must NOT be on the assistant msg's render tree.
         after = session_manager.get(app_sid)
         a = next(m for m in after["messages"] if m["id"] == asst_id)
-        for ev in (a.get("events") or []):
-            if (ev.get("data") or {}).get("type") == "subagent_unmatched":
-                print("  subagent_unmatched leaked onto msg.events")
-                return False
+        leaked = [ev for ev in (a.get("events") or [])
+                  if (ev.get("data") or {}).get("type") == "subagent_unmatched"]
+        assert not leaked, "subagent_unmatched leaked onto msg.events"
 
         # Idempotent: re-run yields no new row (deterministic uuid dedup).
         with session_manager.batch(app_sid, bump_updated_at=False):
@@ -387,10 +346,7 @@ def test_replay_and_apply_emits_orphan_row_with_null_msg_id() -> bool:
             )
         event_journal_writer.barrier_sync(root_id)
         n2, _ = _count_orphan_rows()
-        if n2 != 1:
-            print(f"  re-run not idempotent: expected 1 orphan row, got {n2}")
-            return False
-        return True
+        assert n2 == 1, f"re-run not idempotent: expected 1 orphan row, got {n2}"
     finally:
         event_ingester.close_all()
         shutil.rmtree(sandbox, ignore_errors=True)
@@ -417,15 +373,19 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                fn()
+            except AssertionError as e:
+                failed += 1
+                print(f"{FAIL}  {name}")
+                print(f"  assert: {e}")
+                continue
             except Exception as e:
-                ok = False
+                failed += 1
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
-                failed += 1
+                print(f"{FAIL}  {name}  (exception: {e})")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
