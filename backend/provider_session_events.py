@@ -626,16 +626,33 @@ class SessionEventsProvider(Provider):
                 )
 
             if not live_orphan and not has_complete_json:
-                # Dead orphan — synthesize complete.json so future scans
-                # skip and the replay path is unambiguous.
+                # Dead orphan — materialize complete.json so future scans
+                # skip and the replay path is unambiguous. Prefer the
+                # BA-owned runner's `terminal.json` checkpoint when present:
+                # it is the authoritative success/failure record written
+                # (atomically, just before complete.json) by
+                # runner_better_agent, so a crash in the tiny window between
+                # the two writes is restored from the checkpoint instead of
+                # being reported as a synthetic "runner died" failure.
+                terminal_path = child / "terminal.json"
+                source: Optional[dict] = None
+                if terminal_path.exists():
+                    try:
+                        source = json.loads(terminal_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        logger.exception(
+                            "failed to read terminal.json for %s; synthesizing error",
+                            child.name,
+                        )
+                payload = source if source is not None else {
+                    "success": False,
+                    "session_id": bs.get("session_id") or rs_disk.get("session_id"),
+                    "error": "runner died before completion (recovered at startup)",
+                    "token_usage": None,
+                    "finished_at": datetime.now().isoformat(),
+                }
                 try:
-                    complete_path.write_text(json.dumps({
-                        "success": False,
-                        "session_id": bs.get("session_id") or rs_disk.get("session_id"),
-                        "error": "runner died before completion (recovered at startup)",
-                        "token_usage": None,
-                        "finished_at": datetime.now().isoformat(),
-                    }, indent=2), encoding="utf-8")
+                    complete_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                     has_complete_json = True
                 except Exception:
                     logger.exception(

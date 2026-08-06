@@ -18,7 +18,7 @@ from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 
 
-def test_terminal_checkpoint_restores_success_complete() -> bool:
+def test_terminal_checkpoint_restores_success_complete() -> None:
     provider = OpenAIProvider({
         "id": "openai-test",
         "kind": "openai",
@@ -52,18 +52,25 @@ def test_terminal_checkpoint_restores_success_complete() -> bool:
     }), encoding="utf-8")
 
     recovered = provider.recover_in_flight(run_id_filter={run_id})
-    if len(recovered) != 1:
-        print(f"  expected one descriptor, got {recovered!r}")
-        return False
+    assert len(recovered) == 1, f"expected one descriptor, got {recovered!r}"
     complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
-    return complete == terminal and recovered[0].get("has_complete_json") is True
+    assert complete == terminal, f"complete.json {complete!r} != terminal {terminal!r}"
+    assert recovered[0].get("has_complete_json") is True
 
 
 def run() -> int:
     try:
-        ok = test_terminal_checkpoint_restores_success_complete()
-        print(("PASS" if ok else "FAIL") + " terminal checkpoint restores success complete")
-        return 0 if ok else 1
+        test_terminal_checkpoint_restores_success_complete()
+        print("PASS terminal checkpoint restores success complete")
+        return 0
+    except AssertionError as exc:
+        print(f"FAIL terminal checkpoint restores success complete: {exc}")
+        return 1
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("FAIL terminal checkpoint restores success complete (unexpected error)")
+        return 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
