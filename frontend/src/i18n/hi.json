@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "कम दिखाएं",
   "backgroundWork.offline": "ऑफ़लाइन",
   "backgroundWork.providerInstall": "{{provider}} इंस्टॉल हो रहा है",
-  "backgroundWork.credentialSync": "{{provider}} क्रेडेंशियल {{node}} में सिंक हो रहे हैं"
+  "backgroundWork.credentialSync": "{{provider}} क्रेडेंशियल {{node}} में सिंक हो रहे हैं",
+  "backgroundWork.hide": "पृष्ठभूमि कार्य छिपाएं",
+  "backgroundWork.show": "पृष्ठभूमि कार्य दिखाएं",
+  "backgroundWork.chipActive": "{{count}} चल रहे",
+  "backgroundWork.chipFailed": "{{count}} विफल"
 }

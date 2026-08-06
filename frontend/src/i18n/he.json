@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "הצג פחות",
   "backgroundWork.offline": "לא מקוון",
   "backgroundWork.providerInstall": "מתקין {{provider}}",
-  "backgroundWork.credentialSync": "מסנכרן אישורי {{provider}} אל {{node}}"
+  "backgroundWork.credentialSync": "מסנכרן אישורי {{provider}} אל {{node}}",
+  "backgroundWork.hide": "הסתר עבודת רקע",
+  "backgroundWork.show": "הצג עבודת רקע",
+  "backgroundWork.chipActive": "{{count}} פעילות",
+  "backgroundWork.chipFailed": "{{count}} נכשלו"
 }

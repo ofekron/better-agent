@@ -1523,5 +1523,9 @@
   "backgroundWork.showLess": "Показать меньше",
   "backgroundWork.offline": "Не в сети",
   "backgroundWork.providerInstall": "Установка {{provider}}",
-  "backgroundWork.credentialSync": "Синхронизация учётных данных {{provider}} с {{node}}"
+  "backgroundWork.credentialSync": "Синхронизация учётных данных {{provider}} с {{node}}",
+  "backgroundWork.hide": "Скрыть фоновые задачи",
+  "backgroundWork.show": "Показать фоновые задачи",
+  "backgroundWork.chipActive": "{{count}} выполняется",
+  "backgroundWork.chipFailed": "{{count}} с ошибкой"
 }

@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "Weniger anzeigen",
   "backgroundWork.offline": "Offline",
   "backgroundWork.providerInstall": "{{provider}} wird installiert",
-  "backgroundWork.credentialSync": "{{provider}}-Anmeldedaten werden mit {{node}} synchronisiert"
+  "backgroundWork.credentialSync": "{{provider}}-Anmeldedaten werden mit {{node}} synchronisiert",
+  "backgroundWork.hide": "Hintergrundarbeit ausblenden",
+  "backgroundWork.show": "Hintergrundarbeit anzeigen",
+  "backgroundWork.chipActive": "{{count}} laufend",
+  "backgroundWork.chipFailed": "{{count}} fehlgeschlagen"
 }

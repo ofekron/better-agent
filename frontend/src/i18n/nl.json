@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "Toon minder",
   "backgroundWork.offline": "Offline",
   "backgroundWork.providerInstall": "{{provider}} installeren",
-  "backgroundWork.credentialSync": "{{provider}}-inloggegevens synchroniseren met {{node}}"
+  "backgroundWork.credentialSync": "{{provider}}-inloggegevens synchroniseren met {{node}}",
+  "backgroundWork.hide": "Achtergrondtaken verbergen",
+  "backgroundWork.show": "Achtergrondtaken tonen",
+  "backgroundWork.chipActive": "{{count}} actief",
+  "backgroundWork.chipFailed": "{{count}} mislukt"
 }

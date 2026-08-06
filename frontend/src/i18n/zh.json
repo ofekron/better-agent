@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "收起",
   "backgroundWork.offline": "离线",
   "backgroundWork.providerInstall": "正在安装 {{provider}}",
-  "backgroundWork.credentialSync": "正在将 {{provider}} 凭据同步到 {{node}}"
+  "backgroundWork.credentialSync": "正在将 {{provider}} 凭据同步到 {{node}}",
+  "backgroundWork.hide": "隐藏后台任务",
+  "backgroundWork.show": "显示后台任务",
+  "backgroundWork.chipActive": "{{count}} 个进行中",
+  "backgroundWork.chipFailed": "{{count}} 个失败"
 }

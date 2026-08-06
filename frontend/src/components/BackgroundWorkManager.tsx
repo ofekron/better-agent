@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import { useBackgroundWork } from "../hooks/useBackgroundWork";
+import { useBackgroundWork, useBackgroundWorkVisible } from "../hooks/useBackgroundWork";
 import { BackgroundWorkItemCard } from "./BackgroundWorkItemCard";
 
 /** The one place background work is shown.
@@ -21,6 +21,7 @@ const COLLAPSE_THRESHOLD = 3;
 export function BackgroundWorkManager() {
   const { t } = useTranslation();
   const { items, live, dismiss } = useBackgroundWork();
+  const [panelVisible, setPanelVisible] = useBackgroundWorkVisible();
   const [expanded, setExpanded] = useState(false);
 
   if (items.length === 0) return null;
@@ -30,6 +31,27 @@ export function BackgroundWorkManager() {
   const activeCount = items.filter(
     (item) => item.status === "running" || item.status === "pending",
   ).length;
+  const failedCount = items.filter((item) => item.status === "failed").length;
+
+  // Hidden collapses the panel to a chip rather than removing it. Work that
+  // outlives its control has to stay reachable until it finishes or fails, so
+  // the chip carries the counts and restores the panel on click. With nothing
+  // in flight the chip renders nothing, which is the quiet the user asked for.
+  if (!panelVisible) {
+    return (
+      <button
+        className="background-work-chip"
+        onClick={() => setPanelVisible(true)}
+        aria-label={t("backgroundWork.show")}
+        title={t("backgroundWork.show")}
+      >
+        <span className={`background-work-chip-dot${activeCount > 0 ? " is-active" : ""}`} aria-hidden />
+        {failedCount > 0
+          ? t("backgroundWork.chipFailed", { count: failedCount })
+          : t("backgroundWork.chipActive", { count: activeCount || items.length })}
+      </button>
+    );
+  }
 
   return (
     <aside
@@ -49,6 +71,14 @@ export function BackgroundWorkManager() {
             {t("backgroundWork.offline")}
           </span>
         ) : null}
+        <button
+          className="background-work-hide"
+          onClick={() => setPanelVisible(false)}
+          aria-label={t("backgroundWork.hide")}
+          title={t("backgroundWork.hide")}
+        >
+          —
+        </button>
       </div>
 
       <ul className="background-work-list">

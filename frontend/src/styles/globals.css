@@ -17908,6 +17908,9 @@ html[dir="rtl"] .user-request-toast::before {
     inset-inline-end: 12px;
     width: min(380px, calc(100vw - 24px));
   }
+  .background-work-chip {
+    inset-inline-end: 12px;
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -23949,6 +23952,65 @@ button.progress-inflight {
   gap: 8px;
 }
 
+.background-work-hide {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: calc(14px * var(--app-font-scale));
+  line-height: 1;
+  padding: 0 2px;
+  margin-inline-start: auto;
+  opacity: 0.65;
+  transition: opacity 160ms ease;
+}
+
+.background-work-hide:hover { opacity: 1; }
+
+/* Collapsed form. Hiding must not make in-flight work unreachable, so the
+   chip keeps the counts and restores the panel. */
+.background-work-chip {
+  position: fixed;
+  inset-inline-end: 24px;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  z-index: 95;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  font-size: calc(10.5px * var(--app-font-scale));
+  animation: background-work-chip-in 180ms ease-out;
+}
+
+@keyframes background-work-chip-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.background-work-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  opacity: 0.45;
+}
+
+.background-work-chip-dot.is-active {
+  background: var(--accent);
+  opacity: 1;
+  animation: background-work-chip-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes background-work-chip-pulse {
+  50% { opacity: 0.35; }
+}
+
 .background-work-title {
   font-size: calc(11.5px * var(--app-font-scale));
   font-weight: 600;
@@ -24094,7 +24156,9 @@ button.progress-inflight {
 
 @media (prefers-reduced-motion: reduce) {
   .background-work-row-running .background-work-row-icon,
-  .background-work-progress-indeterminate .background-work-progress-fill {
+  .background-work-progress-indeterminate .background-work-progress-fill,
+  .background-work-chip-dot.is-active,
+  .background-work-chip {
     animation: none;
   }
   .background-work-progress-fill { transition: none; }

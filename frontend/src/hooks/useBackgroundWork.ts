@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "../api";
 import { eventBus, type BusEventMap } from "src/lib/eventBus";
+import { queueWrite } from "../utils/writeBacklog";
 import type { BackgroundWorkItem, BackgroundWorkSnapshot } from "../types";
 
 /** Projection of the backend's background work registry.
@@ -146,4 +147,55 @@ export function useBackgroundWork(): BackgroundWorkState {
     (a, b) => Date.parse(a.started_at) - Date.parse(b.started_at),
   );
   return { items: ordered, live, dismiss };
+}
+
+/** Whether the manager renders expanded or collapsed to its chip.
+ *
+ * Backend-owned (`user_prefs.background_work_visible`) rather than
+ * localStorage, because it is an acknowledged preference that must converge
+ * across tabs and devices — the same home `sessions_tabs_visible` uses. The
+ * local write is the narrow optimistic ack-bridge: applied immediately, fanned
+ * out to same-tab listeners, then queued durably so it survives being offline.
+ */
+export function useBackgroundWorkVisible(): [boolean, (visible: boolean) => void] {
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API}/api/user-prefs`)
+      .then((r) => r.json())
+      .then((data: { background_work_visible?: unknown }) => {
+        if (cancelled) return;
+        if (typeof data?.background_work_visible === "boolean") {
+          setVisible(data.background_work_visible);
+        }
+      })
+      .catch(() => {
+        // Backend not reachable yet. The default (visible) is the safe side:
+        // never hide work because a preference fetch failed.
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    function onPrefs(detail: BusEventMap["user_prefs_changed"]) {
+      const next = (detail as { background_work_visible?: unknown })
+        ?.background_work_visible;
+      if (typeof next === "boolean") setVisible(next);
+    }
+    return eventBus.subscribe("user_prefs_changed", onPrefs);
+  }, []);
+
+  const update = useCallback((next: boolean) => {
+    setVisible(next);
+    eventBus.publish("user_prefs_changed", { background_work_visible: next });
+    queueWrite({
+      method: "PATCH",
+      url: "/api/user-prefs",
+      body: { background_work_visible: next },
+      key: "user_prefs:background_work_visible",
+    });
+  }, []);
+
+  return [visible, update];
 }

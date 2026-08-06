@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "عرض أقل",
   "backgroundWork.offline": "غير متصل",
   "backgroundWork.providerInstall": "جارٍ تثبيت {{provider}}",
-  "backgroundWork.credentialSync": "جارٍ مزامنة بيانات اعتماد {{provider}} مع {{node}}"
+  "backgroundWork.credentialSync": "جارٍ مزامنة بيانات اعتماد {{provider}} مع {{node}}",
+  "backgroundWork.hide": "إخفاء مهام الخلفية",
+  "backgroundWork.show": "إظهار مهام الخلفية",
+  "backgroundWork.chipActive": "{{count}} قيد التنفيذ",
+  "backgroundWork.chipFailed": "{{count}} فشلت"
 }

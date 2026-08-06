@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "Afficher moins",
   "backgroundWork.offline": "Hors ligne",
   "backgroundWork.providerInstall": "Installation de {{provider}}",
-  "backgroundWork.credentialSync": "Synchronisation des identifiants {{provider}} vers {{node}}"
+  "backgroundWork.credentialSync": "Synchronisation des identifiants {{provider}} vers {{node}}",
+  "backgroundWork.hide": "Masquer les tâches en arrière-plan",
+  "backgroundWork.show": "Afficher les tâches en arrière-plan",
+  "backgroundWork.chipActive": "{{count}} en cours",
+  "backgroundWork.chipFailed": "{{count}} en échec"
 }

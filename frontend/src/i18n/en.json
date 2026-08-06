@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "Show less",
   "backgroundWork.offline": "Offline",
   "backgroundWork.providerInstall": "Installing {{provider}}",
-  "backgroundWork.credentialSync": "Syncing {{provider}} credentials to {{node}}"
+  "backgroundWork.credentialSync": "Syncing {{provider}} credentials to {{node}}",
+  "backgroundWork.hide": "Hide background work",
+  "backgroundWork.show": "Show background work",
+  "backgroundWork.chipActive": "{{count}} running",
+  "backgroundWork.chipFailed": "{{count}} failed"
 }

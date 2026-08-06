@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "折りたたむ",
   "backgroundWork.offline": "オフライン",
   "backgroundWork.providerInstall": "{{provider}} をインストール中",
-  "backgroundWork.credentialSync": "{{provider}} の認証情報を {{node}} に同期中"
+  "backgroundWork.credentialSync": "{{provider}} の認証情報を {{node}} に同期中",
+  "backgroundWork.hide": "バックグラウンド処理を隠す",
+  "backgroundWork.show": "バックグラウンド処理を表示",
+  "backgroundWork.chipActive": "{{count}} 件実行中",
+  "backgroundWork.chipFailed": "{{count}} 件失敗"
 }

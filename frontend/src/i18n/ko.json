@@ -1521,5 +1521,9 @@
   "backgroundWork.showLess": "간략히 보기",
   "backgroundWork.offline": "오프라인",
   "backgroundWork.providerInstall": "{{provider}} 설치 중",
-  "backgroundWork.credentialSync": "{{provider}} 자격 증명을 {{node}}(으)로 동기화 중"
+  "backgroundWork.credentialSync": "{{provider}} 자격 증명을 {{node}}(으)로 동기화 중",
+  "backgroundWork.hide": "백그라운드 작업 숨기기",
+  "backgroundWork.show": "백그라운드 작업 표시",
+  "backgroundWork.chipActive": "{{count}}개 실행 중",
+  "backgroundWork.chipFailed": "{{count}}개 실패"
 }
