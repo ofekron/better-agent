@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "已复制错误详情",
   "nodeCredentials.syncing": "正在将 {{provider}} 凭据同步到 {{node}}…",
   "nodeCredentials.failed": "无法将 {{provider}} 凭据同步到 {{node}}。",
-  "nodeCredentials.dismiss": "关闭 {{node}} 上 {{provider}} 凭据的同步状态"
+  "nodeCredentials.dismiss": "关闭 {{node}} 上 {{provider}} 凭据的同步状态",
+  "backgroundWork.title": "后台任务",
+  "backgroundWork.activeTitle": "后台任务（{{count}} 个进行中）",
+  "backgroundWork.fromExtension": "来自 {{extension}}",
+  "backgroundWork.inProgress": "进行中",
+  "backgroundWork.count": "{{total}} 中的 {{completed}} {{unit}}",
+  "backgroundWork.stateUnknown": "重启后状态未知",
+  "backgroundWork.disconnected": "已断开连接 — 最后已知状态",
+  "backgroundWork.dismiss": "关闭",
+  "backgroundWork.showAll": "显示另外 {{count}} 个",
+  "backgroundWork.showLess": "收起",
+  "backgroundWork.offline": "离线"
 }

@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "Error details copied",
   "nodeCredentials.syncing": "Syncing {{provider}} credentials to {{node}}…",
   "nodeCredentials.failed": "Couldn't sync {{provider}} credentials to {{node}}.",
-  "nodeCredentials.dismiss": "Dismiss credential sync status for {{provider}} on {{node}}"
+  "nodeCredentials.dismiss": "Dismiss credential sync status for {{provider}} on {{node}}",
+  "backgroundWork.title": "Background work",
+  "backgroundWork.activeTitle": "Background work ({{count}} running)",
+  "backgroundWork.fromExtension": "From {{extension}}",
+  "backgroundWork.inProgress": "In progress",
+  "backgroundWork.count": "{{completed}} of {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "State unknown since restart",
+  "backgroundWork.disconnected": "Disconnected — last known state",
+  "backgroundWork.dismiss": "Dismiss",
+  "backgroundWork.showAll": "Show {{count}} more",
+  "backgroundWork.showLess": "Show less",
+  "backgroundWork.offline": "Offline"
 }

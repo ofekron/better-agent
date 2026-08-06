@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "Détails de l’erreur copiés",
   "nodeCredentials.syncing": "Synchronisation des identifiants {{provider}} avec {{node}}…",
   "nodeCredentials.failed": "Impossible de synchroniser les identifiants {{provider}} avec {{node}}.",
-  "nodeCredentials.dismiss": "Masquer l’état de synchronisation des identifiants {{provider}} sur {{node}}"
+  "nodeCredentials.dismiss": "Masquer l’état de synchronisation des identifiants {{provider}} sur {{node}}",
+  "backgroundWork.title": "Tâches en arrière-plan",
+  "backgroundWork.activeTitle": "Tâches en arrière-plan ({{count}} en cours)",
+  "backgroundWork.fromExtension": "De {{extension}}",
+  "backgroundWork.inProgress": "En cours",
+  "backgroundWork.count": "{{completed}} sur {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "État inconnu depuis le redémarrage",
+  "backgroundWork.disconnected": "Déconnecté — dernier état connu",
+  "backgroundWork.dismiss": "Ignorer",
+  "backgroundWork.showAll": "Afficher {{count}} de plus",
+  "backgroundWork.showLess": "Afficher moins",
+  "backgroundWork.offline": "Hors ligne"
 }

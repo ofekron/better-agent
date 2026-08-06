@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "Fehlerdetails kopiert",
   "nodeCredentials.syncing": "Anmeldedaten für {{provider}} werden mit {{node}} synchronisiert…",
   "nodeCredentials.failed": "Anmeldedaten für {{provider}} konnten nicht mit {{node}} synchronisiert werden.",
-  "nodeCredentials.dismiss": "Status der Anmeldedatensynchronisierung für {{provider}} auf {{node}} ausblenden"
+  "nodeCredentials.dismiss": "Status der Anmeldedatensynchronisierung für {{provider}} auf {{node}} ausblenden",
+  "backgroundWork.title": "Hintergrundarbeit",
+  "backgroundWork.activeTitle": "Hintergrundarbeit ({{count}} laufend)",
+  "backgroundWork.fromExtension": "Von {{extension}}",
+  "backgroundWork.inProgress": "Läuft",
+  "backgroundWork.count": "{{completed}} von {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "Status seit Neustart unbekannt",
+  "backgroundWork.disconnected": "Getrennt — letzter bekannter Status",
+  "backgroundWork.dismiss": "Schließen",
+  "backgroundWork.showAll": "{{count}} weitere anzeigen",
+  "backgroundWork.showLess": "Weniger anzeigen",
+  "backgroundWork.offline": "Offline"
 }

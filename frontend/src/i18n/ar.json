@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "تم نسخ تفاصيل الخطأ",
   "nodeCredentials.syncing": "جارٍ مزامنة بيانات اعتماد {{provider}} مع {{node}}…",
   "nodeCredentials.failed": "تعذرت مزامنة بيانات اعتماد {{provider}} مع {{node}}.",
-  "nodeCredentials.dismiss": "إخفاء حالة مزامنة بيانات اعتماد {{provider}} على {{node}}"
+  "nodeCredentials.dismiss": "إخفاء حالة مزامنة بيانات اعتماد {{provider}} على {{node}}",
+  "backgroundWork.title": "مهام الخلفية",
+  "backgroundWork.activeTitle": "مهام الخلفية ({{count}} قيد التنفيذ)",
+  "backgroundWork.fromExtension": "من {{extension}}",
+  "backgroundWork.inProgress": "قيد التنفيذ",
+  "backgroundWork.count": "{{completed}} من {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "الحالة غير معروفة منذ إعادة التشغيل",
+  "backgroundWork.disconnected": "غير متصل — آخر حالة معروفة",
+  "backgroundWork.dismiss": "إغلاق",
+  "backgroundWork.showAll": "عرض {{count}} إضافية",
+  "backgroundWork.showLess": "عرض أقل",
+  "backgroundWork.offline": "غير متصل"
 }

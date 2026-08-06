@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "Dettagli errore copiati",
   "nodeCredentials.syncing": "Sincronizzazione delle credenziali {{provider}} con {{node}}…",
   "nodeCredentials.failed": "Impossibile sincronizzare le credenziali {{provider}} con {{node}}.",
-  "nodeCredentials.dismiss": "Ignora lo stato di sincronizzazione delle credenziali {{provider}} su {{node}}"
+  "nodeCredentials.dismiss": "Ignora lo stato di sincronizzazione delle credenziali {{provider}} su {{node}}",
+  "backgroundWork.title": "Lavoro in background",
+  "backgroundWork.activeTitle": "Lavoro in background ({{count}} in corso)",
+  "backgroundWork.fromExtension": "Da {{extension}}",
+  "backgroundWork.inProgress": "In corso",
+  "backgroundWork.count": "{{completed}} di {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "Stato sconosciuto dal riavvio",
+  "backgroundWork.disconnected": "Disconnesso — ultimo stato noto",
+  "backgroundWork.dismiss": "Ignora",
+  "backgroundWork.showAll": "Mostra altri {{count}}",
+  "backgroundWork.showLess": "Mostra meno",
+  "backgroundWork.offline": "Offline"
 }

@@ -47,6 +47,7 @@ import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { ModelCatalogActivity } from "./components/ModelCatalogActivity";
+import { BackgroundWorkManager } from "./components/BackgroundWorkManager";
 import { MarketplaceBridgeCenter } from "./components/MarketplaceBridgeCenter";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
 import { useAttentionSound } from "./utils/attentionSound";
@@ -6587,6 +6588,7 @@ function AppMain({
           </div>
         </div>
       )}
+      <BackgroundWorkManager />
       <StartupTasksBanner />
       <ModelCatalogActivity providers={providers} />
       <NodeProviderCredentialStatus machines={machines} />

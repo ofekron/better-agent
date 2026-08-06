@@ -1510,5 +1510,16 @@
   "errorCopy.copied": "Сведения об ошибке скопированы",
   "nodeCredentials.syncing": "Синхронизация учётных данных {{provider}} с {{node}}…",
   "nodeCredentials.failed": "Не удалось синхронизировать учётные данные {{provider}} с {{node}}.",
-  "nodeCredentials.dismiss": "Скрыть состояние синхронизации учётных данных {{provider}} на {{node}}"
+  "nodeCredentials.dismiss": "Скрыть состояние синхронизации учётных данных {{provider}} на {{node}}",
+  "backgroundWork.title": "Фоновые задачи",
+  "backgroundWork.activeTitle": "Фоновые задачи ({{count}} выполняется)",
+  "backgroundWork.fromExtension": "От {{extension}}",
+  "backgroundWork.inProgress": "Выполняется",
+  "backgroundWork.count": "{{completed}} из {{total}} {{unit}}",
+  "backgroundWork.stateUnknown": "Состояние неизвестно после перезапуска",
+  "backgroundWork.disconnected": "Нет связи — последнее известное состояние",
+  "backgroundWork.dismiss": "Закрыть",
+  "backgroundWork.showAll": "Показать ещё {{count}}",
+  "backgroundWork.showLess": "Показать меньше",
+  "backgroundWork.offline": "Не в сети"
 }

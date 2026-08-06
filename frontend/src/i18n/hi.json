@@ -1508,5 +1508,16 @@
   "errorCopy.copied": "त्रुटि विवरण कॉपी हो गया",
   "nodeCredentials.syncing": "{{provider}} क्रेडेंशियल {{node}} से सिंक किए जा रहे हैं…",
   "nodeCredentials.failed": "{{provider}} क्रेडेंशियल {{node}} से सिंक नहीं हो सके।",
-  "nodeCredentials.dismiss": "{{node}} पर {{provider}} क्रेडेंशियल सिंक स्थिति हटाएँ"
+  "nodeCredentials.dismiss": "{{node}} पर {{provider}} क्रेडेंशियल सिंक स्थिति हटाएँ",
+  "backgroundWork.title": "पृष्ठभूमि कार्य",
+  "backgroundWork.activeTitle": "पृष्ठभूमि कार्य ({{count}} चल रहे)",
+  "backgroundWork.fromExtension": "{{extension}} से",
+  "backgroundWork.inProgress": "चल रहा है",
+  "backgroundWork.count": "{{total}} में से {{completed}} {{unit}}",
+  "backgroundWork.stateUnknown": "पुनरारंभ के बाद स्थिति अज्ञात",
+  "backgroundWork.disconnected": "डिस्कनेक्ट — अंतिम ज्ञात स्थिति",
+  "backgroundWork.dismiss": "खारिज करें",
+  "backgroundWork.showAll": "{{count}} और दिखाएं",
+  "backgroundWork.showLess": "कम दिखाएं",
+  "backgroundWork.offline": "ऑफ़लाइन"
 }
