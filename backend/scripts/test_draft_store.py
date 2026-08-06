@@ -17,7 +17,12 @@ import sys
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc_test_ds_")
+# `isolate_installed` commits an active installation profile:
+# session_manager.create() funnels through
+# installation_profile.assert_orchestration_mode_allowed, which requires a
+# bootstrap-ready profile. A bare isolate() home leaves it unset and the
+# create() call raises IncompatibleOrchestrationMode.
+_test_home.isolate_installed("bc_test_ds_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from session_manager import manager as session_manager  # noqa: E402
