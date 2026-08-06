@@ -56,7 +56,7 @@ def _old_canonical(event_type: str, data: dict, cwd: str) -> dict:
     return canonical
 
 
-def test_canonical_equivalence_and_caller_isolation() -> bool:
+def test_canonical_equivalence_and_caller_isolation() -> None:
     data = _agent_message(f"Updated {_FILE_ABS} with the fix.", uid=str(uuid.uuid4()))
     original_text = data["message"]["content"][0]["text"]
     expected = _old_canonical("agent_message", data, _CWD)
@@ -65,22 +65,12 @@ def test_canonical_equivalence_and_caller_isolation() -> bool:
         "agent_message", data, _CWD, True,
     )
 
-    # Same logical result as the old full-deepcopy path, including the rewrite.
-    if got != expected:
-        print(f"{FAIL} canonical shape diverged from old deepcopy path")
-        return False
-    if "bcfile:" not in got["message"]["content"][0]["text"]:
-        print(f"{FAIL} file ref was not rewritten in canonical")
-        return False
-    # Caller's live data must be unmutated.
-    if data["message"]["content"][0]["text"] != original_text:
-        print(f"{FAIL} caller's data was mutated by _canonical_data_for_storage")
-        return False
-    print(f"{PASS} canonical equivalence + caller isolation")
-    return True
+    assert got == expected, "canonical shape diverged from old deepcopy path"
+    assert "bcfile:" in got["message"]["content"][0]["text"], "file ref was not rewritten in canonical"
+    assert data["message"]["content"][0]["text"] == original_text, "caller's data was mutated by _canonical_data_for_storage"
 
 
-def test_legacy_frame_isolation() -> bool:
+def test_legacy_frame_isolation() -> None:
     # Legacy/orchestrator frames: rewrite reassigns top-level text/output/
     # thought/error/content strings. The isolator's `dict(data)` shallow copy
     # must cover those, locking the lockstep contract for the legacy branch.
@@ -95,20 +85,12 @@ def test_legacy_frame_isolation() -> bool:
     got = event_ingester._canonical_data_for_storage(
         "legacy_output_frame", data, _CWD, True,
     )
-    if got != expected:
-        print(f"{FAIL} legacy frame canonical diverged")
-        return False
-    if "bcfile:" not in got["text"]:
-        print(f"{FAIL} legacy text not rewritten")
-        return False
-    if data != original:
-        print(f"{FAIL} legacy frame caller data mutated")
-        return False
-    print(f"{PASS} legacy frame isolation")
-    return True
+    assert got == expected, "legacy frame canonical diverged"
+    assert "bcfile:" in got["text"], "legacy text not rewritten"
+    assert data == original, "legacy frame caller data mutated"
 
 
-def test_manager_event_isolation() -> bool:
+def test_manager_event_isolation() -> None:
     inner = _agent_message(f"Edited {_FILE_ABS}.", uid=str(uuid.uuid4()))
     data = {"event": {"type": "agent_message", "data": inner}}
     original = copy.deepcopy(data)
@@ -117,28 +99,20 @@ def test_manager_event_isolation() -> bool:
     got = event_ingester._canonical_data_for_storage(
         "manager_event", data, _CWD, True,
     )
-    if got != expected:
-        print(f"{FAIL} manager_event canonical diverged")
-        return False
-    if data != original:
-        print(f"{FAIL} manager_event caller data mutated")
-        return False
-    print(f"{PASS} manager_event isolation")
-    return True
+    assert got == expected, "manager_event canonical diverged"
+    assert data == original, "manager_event caller data mutated"
 
 
-def test_dedup_hash_equivalence() -> bool:
+def test_dedup_hash_equivalence() -> None:
     data = _agent_message(f"Updated {_FILE_ABS}.", uid=str(uuid.uuid4()))
     old = _old_canonical("agent_message", data, _CWD)
     new = event_ingester._canonical_data_for_storage("agent_message", data, _CWD, True)
-    if event_ingester._dedup_data_for_hash(old) != event_ingester._dedup_data_for_hash(new):
-        print(f"{FAIL} dedup hash differs between old and new canonical path")
-        return False
-    print(f"{PASS} dedup hash equivalence")
-    return True
+    assert event_ingester._dedup_data_for_hash(old) == event_ingester._dedup_data_for_hash(new), (
+        "dedup hash differs between old and new canonical path"
+    )
 
 
-def test_canonical_perf_gate() -> bool:
+def test_canonical_perf_gate() -> None:
     # ~6 MB agent_message: a content block with a file ref plus a large meta
     # payload the old full deepcopy copied per-event. The narrow copy shares
     # meta by reference, so `_canonical_data_for_storage` is dominated by the
@@ -158,14 +132,10 @@ def test_canonical_perf_gate() -> bool:
     # blocked the asyncio ingest loop). 50 ms is a clear fail-before/pass-after
     # gate: an accidental reintroduction of a full payload copy regresses it
     # far past this bound.
-    if median >= 50.0:
-        print(f"{FAIL} _canonical_data_for_storage median {median:.1f}ms >= 50ms (timings={timings})")
-        return False
-    print(f"{PASS} _canonical_data_for_storage median {median:.2f}ms < 50ms (timings={[round(t, 2) for t in timings]})")
-    return True
+    assert median < 50.0, f"_canonical_data_for_storage median {median:.1f}ms >= 50ms (timings={timings})"
 
 
-def test_persisted_row_has_rewrite() -> bool:
+def test_persisted_row_has_rewrite() -> None:
     data = _agent_message(f"Updated {_FILE_ABS}.", uid=str(uuid.uuid4()))
     root_id = sid = str(uuid.uuid4())
     event_ingester.ingest(
@@ -178,11 +148,7 @@ def test_persisted_row_has_rewrite() -> bool:
     # captured `_TMP_HOME`. Assert on the actual write location.
     rows_path = paths.ba_home() / "sessions" / root_id / "events.jsonl"
     rows = [json.loads(ln) for ln in rows_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    if not rows or "bcfile:" not in json.dumps(rows[-1]):
-        print(f"{FAIL} persisted row missing rewritten file ref")
-        return False
-    print(f"{PASS} persisted row carries rewritten file ref")
-    return True
+    assert rows and "bcfile:" in json.dumps(rows[-1]), "persisted row missing rewritten file ref"
 
 
 def main() -> int:
@@ -196,8 +162,18 @@ def main() -> int:
     ]
     failed = 0
     for t in tests:
-        if not t():
+        try:
+            t()
+        except AssertionError as exc:
             failed += 1
+            print(f"{FAIL} {t.__name__}: {exc}")
+        except Exception:
+            import traceback
+            failed += 1
+            print(f"{FAIL} {t.__name__} unexpected:")
+            traceback.print_exc()
+        else:
+            print(f"{PASS} {t.__name__}")
     if failed:
         print(f"\n{FAIL} {failed}/{len(tests)} failed")
         return 1
