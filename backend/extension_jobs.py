@@ -755,3 +755,61 @@ def _sweep_disk(
                     path.unlink()
             except OSError:
                 continue
+
+
+# `operation_requests` persists its records inside this same store under its
+# own owner, and re-registers every non-terminal one at startup via
+# `recover()`. Those are genuinely running again, so seeding them as `unknown`
+# would contradict a live producer.
+_RECOVERED_OWNERS = frozenset({"operation-runtime"})
+
+
+def seed_background_work_after_recovery() -> int:
+    """Surface durable jobs that outlived a restart.
+
+    `get_or_resume` is pull-based, so a non-terminal record belonging to an
+    owner with no recovery path has no running task and no registry row until
+    its extension calls back in. The user would otherwise see nothing while
+    believing work is in flight.
+
+    Seeded as `unknown` rather than `running`, because nothing has claimed
+    these — reporting them as running would be the optimistic-success lie the
+    state rules forbid.
+    """
+    import background_work
+    from background_work import background_work_registry
+
+    root = bc_home() / "extension_jobs"
+    if not root.is_dir():
+        return 0
+    seeded = 0
+    for path in root.glob("*/*/*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") not in ("running", "cancel_requested"):
+            continue
+        job_id = str(record.get("job_id") or path.stem)
+        owner = str(record.get("owner") or path.parent.parent.name)
+        if owner in _RECOVERED_OWNERS:
+            continue
+        # A dismissal recorded on the owner's durable record outlives the
+        # disposable registry, so a dismissed row cannot resurrect here.
+        if record.get("background_work_dismissed"):
+            continue
+        operation = str(record.get("operation") or path.parent.name)
+        try:
+            background_work_registry.report(
+                owner_kind=background_work.OWNER_EXTENSION,
+                owner_id=owner,
+                local_id=f"job:{operation}:{job_id}",
+                label=operation,
+                status=background_work.STATUS_UNKNOWN,
+            )
+            seeded += 1
+        except background_work.BackgroundWorkRejected:
+            continue
+    return seeded

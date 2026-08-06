@@ -1319,6 +1319,43 @@ class Client:
             timeout=timeout,
         )
 
+    def background_work(
+        self,
+        label: str,
+        *,
+        total: int | None = None,
+        unit: str = "",
+        detail: str | None = None,
+        local_id: str | None = None,
+        session_id: str | None = None,
+        dismissible: bool = True,
+    ):
+        """Report long-running work into the user's background work stack.
+
+            with client.background_work("Indexing repo", total=120) as work:
+                work.progress(n)
+
+        Use as a context manager (sync or async): the item finishes as
+        succeeded on clean exit and failed with the exception message
+        otherwise, so it cannot be left spinning. Omit `total` when the work
+        has no countable end — the row is then explicitly indeterminate
+        rather than showing an invented percentage.
+
+        Requires the `background-work.*` capability grants in the manifest.
+        """
+        from better_agent_sdk.background_work import background_work as _start
+
+        return _start(
+            self,
+            label,
+            total=total,
+            unit=unit,
+            detail=detail,
+            local_id=local_id,
+            session_id=session_id,
+            dismissible=dismissible,
+        )
+
     # ── inter-extension calls ─────────────────────────────────────────
     def call_extension(
         self,

@@ -421,6 +421,16 @@ async def on_startup():
         import operation_requests
         _fire_and_forget(operation_requests.recover())
 
+        # Durable jobs whose owner has no recovery path are re-seeded as
+        # `unknown` so a restart cannot leave the user staring at an empty
+        # corner while work sits non-terminal on disk. Owners that
+        # `recover()` re-registers are excluded by the seeder itself.
+        async def _seed_background_work() -> None:
+            import extension_jobs
+            await asyncio.to_thread(extension_jobs.seed_background_work_after_recovery)
+
+        _fire_and_forget(_seed_background_work())
+
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.
     if provider_runtime_enabled:
