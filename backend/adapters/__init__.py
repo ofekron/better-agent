@@ -1,6 +1,53 @@
 """The only module implementing backend/surface_contract/ surfaces.
 See backend/scripts/test_adapter_boundaries.py for the enforced import
-boundary."""
+boundary.
+
+CANONICALIZATION: this backend imports its infra modules bare (`import
+event_bus`), while backend/adapters/* and backend/adapter_api.py import
+dotted (`backend.event_bus`) per the boundary that test file enforces.
+Left alone, that mismatch mints a second EventBus (etc.) singleton under
+the "backend.*" module keys the first time anything does `from backend
+import event_bus` — so e.g. ChatSurfaceAdapter.bind() would subscribe on
+a bus nothing else ever publishes to.
+
+Alias the bare-imported infra singletons this package's adapters actually
+use onto their "backend.*" sys.modules keys HERE, at package-import time,
+before any submodule below performs its own dotted `from backend.xxx
+import ...` — so every dotted import resolves to the SAME
+already-bare-imported instance instead of loading a fresh module. This is
+the ONE sanctioned sys.modules-mutation site for backend/adapters/* (see
+backend/scripts/test_adapter_boundaries.py's sys.modules-mutation check),
+alongside store_access.py's `_resolve` (a narrower, store-specific version
+of the same problem — see that module's docstring for why it stays
+separate and dynamic instead of joining this list).
+
+Self-canonicalizing on purpose: Python guarantees a package's __init__.py
+runs before any of its submodules, and runs at most once per process — so
+this fires no matter which permitted importer (backend/main.py,
+backend/adapter_api.py, backend/surface_commands.py, or a
+backend/scripts/test_*.py) imports backend.adapters first. Previously this
+lived inline in backend/main.py's `_wire_surface_adapter`, which only
+protected callers that ran AFTER that function — any earlier import of
+backend.adapters (e.g. a test importing it directly, as several
+backend/scripts/test_*.py already do) got unaliased, disconnected
+singletons. Moving it here removes that import-order hazard entirely.
+"""
+
+import sys as _sys
+
+import event_bus as _event_bus
+import event_journal as _event_journal
+import paths as _paths
+import scheme_migrations as _scheme_migrations
+
+for _bare_name, _module in (
+    ("event_bus", _event_bus),
+    ("event_journal", _event_journal),
+    ("paths", _paths),
+    ("scheme_migrations", _scheme_migrations),
+):
+    _sys.modules[f"backend.{_bare_name}"] = _module
+del _bare_name, _module, _sys, _event_bus, _event_journal, _paths, _scheme_migrations
 
 from backend.adapters.chat_adapter import ChatSurfaceAdapter
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection

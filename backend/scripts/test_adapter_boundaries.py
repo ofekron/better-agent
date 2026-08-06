@@ -34,17 +34,32 @@ SURFACE_COMMANDS_PY = BACKEND_DIR / "surface_commands.py"
 SURFACE_CONTRACT_PREFIX = "backend.surface_contract"
 ADAPTERS_PREFIX = "backend.adapters"
 
+# Only the infra actually imported by some backend/adapters/*.py file
+# belongs here — an allowlist entry nothing imports is a disguised future
+# hook, not a real boundary crossing, and silently rots (see
+# test_adapters_allowlist_has_no_dead_entries below, which fails the
+# instant an entry here isn't referenced by any adapters file).
 ADAPTERS_ALLOWLIST = (
     SURFACE_CONTRACT_PREFIX,
     ADAPTERS_PREFIX,
     "backend.event_bus",
     "backend.event_journal",
-    "backend.event_ingester",
-    "backend.jsonl_tailer",
     "backend.paths",
     "backend.scheme_migrations",
-    "backend.i18n",
-    "backend.user_msg_lifecycle",
+)
+
+# backend/adapters/__init__.py is the ONE sanctioned canonicalization site
+# (see its module docstring): it bare-imports the infra modules above so it
+# can alias them onto their "backend.*" sys.modules keys before any other
+# backend/adapters/*.py file's own dotted import runs. A per-file extension
+# of the general adapters allowlist, granting exactly the bare (undotted)
+# names of the infra this package canonicalizes — derived from
+# ADAPTERS_ALLOWLIST itself so the two lists can never drift apart.
+ADAPTERS_INIT_PY = ADAPTERS_DIR / "__init__.py"
+ADAPTERS_INIT_BARE_ALLOWLIST = tuple(
+    prefix.rsplit(".", 1)[-1]
+    for prefix in ADAPTERS_ALLOWLIST
+    if prefix not in (SURFACE_CONTRACT_PREFIX, ADAPTERS_PREFIX)
 )
 
 # backend/adapters/store_access.py is the ONE place adapters may reach
@@ -58,6 +73,11 @@ STORE_ACCESS_ALLOWLIST = (
     "backend.project_store",
     "backend.runs_dir",
 )
+
+# The two files permitted to mutate sys.modules directly (the
+# canonicalization sites above) — every other backend/adapters/*.py file
+# must not (see test_no_adapter_mutates_sys_modules_outside_sanctioned_site).
+_SANCTIONED_SYS_MODULES_MUTATORS = frozenset({STORE_ACCESS_PY, ADAPTERS_INIT_PY})
 
 _STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 _SKIP_DIR_NAMES = {"__pycache__", "node_modules"}
@@ -173,7 +193,152 @@ def _adapters_violations() -> list[str]:
         allowed = ADAPTERS_ALLOWLIST
         if path == STORE_ACCESS_PY:
             allowed = ADAPTERS_ALLOWLIST + STORE_ACCESS_ALLOWLIST
+        elif path == ADAPTERS_INIT_PY:
+            allowed = ADAPTERS_ALLOWLIST + ADAPTERS_INIT_BARE_ALLOWLIST
         violations += _collect_violations(path, allowed)
+    return violations
+
+
+def _adapters_allowlist_dead_entries() -> list[str]:
+    """Every ADAPTERS_ALLOWLIST entry must be reached by at least one real
+    (static) import somewhere under backend/adapters/ — an entry nothing
+    imports is a disguised future hook, not a live boundary crossing, and
+    silently drifts out of sync with what the code actually needs."""
+    reached: set[str] = set()
+    for path in _iter_py_files(ADAPTERS_DIR):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        package = _package_for(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            for candidate in _import_candidates(node, package):
+                for prefix in ADAPTERS_ALLOWLIST:
+                    if _matches(candidate, prefix):
+                        reached.add(prefix)
+    dead = [
+        prefix for prefix in ADAPTERS_ALLOWLIST
+        if prefix not in (SURFACE_CONTRACT_PREFIX, ADAPTERS_PREFIX) and prefix not in reached
+    ]
+    return [f"ADAPTERS_ALLOWLIST entry {prefix!r} is never imported by any backend/adapters/*.py file" for prefix in dead]
+
+
+# ---- dynamic-import evasion: importlib/__import__ close an AST-invisible
+# back door around every rule above unless explicitly policed. Only
+# store_access.py may use it (see its module docstring), and even there
+# only with a statically-verifiable string-literal target.
+
+def _is_importlib_import_module(func: ast.expr) -> bool:
+    return (
+        isinstance(func, ast.Attribute) and func.attr == "import_module"
+        and isinstance(func.value, ast.Name) and func.value.id == "importlib"
+    )
+
+
+def _is_dunder_import(func: ast.expr) -> bool:
+    return isinstance(func, ast.Name) and func.id == "__import__"
+
+
+def _collect_dynamic_import_evasion(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    rel = path.relative_to(REPO_ROOT)
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_importlib_import_module(node.func) or _is_dunder_import(node.func):
+            violations.append(
+                f"{rel}:{node.lineno}: dynamic import via "
+                f"{ast.unparse(node.func)}() is only permitted in "
+                f"{STORE_ACCESS_PY.relative_to(REPO_ROOT)}",
+            )
+    return violations
+
+
+def _dynamic_import_evasion_violations() -> list[str]:
+    violations = []
+    for path in _iter_py_files(ADAPTERS_DIR):
+        if path == STORE_ACCESS_PY:
+            continue
+        violations += _collect_dynamic_import_evasion(path)
+    return violations
+
+
+def _store_access_dynamic_target_violations() -> list[str]:
+    """store_access.py's `_resolve(name)` calls are the one sanctioned
+    dynamic-import site — but "dynamic" only refers to the import
+    *mechanism*; every call site passes a string literal, so the actual
+    *target* is fully static. Extract those literals via AST and check them
+    against STORE_ACCESS_ALLOWLIST exactly like a normal import would be
+    checked, closing the "AST checker can't see importlib" gap for this
+    exception. A non-literal argument (a computed name) is rejected
+    outright — allowing one would reopen the gap this check exists to
+    close."""
+    tree = ast.parse(STORE_ACCESS_PY.read_text(), filename=str(STORE_ACCESS_PY))
+    rel = STORE_ACCESS_PY.relative_to(REPO_ROOT)
+    allowed_names = {prefix.rsplit(".", 1)[-1] for prefix in STORE_ACCESS_ALLOWLIST}
+    violations = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_resolve"
+        ):
+            continue
+        arg = node.args[0] if node.args else None
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+            violations.append(
+                f"{rel}:{node.lineno}: _resolve() must be called with a string "
+                f"literal (found a computed/non-literal argument), so its "
+                f"target stays statically verifiable",
+            )
+            continue
+        if arg.value not in allowed_names:
+            violations.append(
+                f"{rel}:{node.lineno}: _resolve({arg.value!r}) is not in "
+                f"STORE_ACCESS_ALLOWLIST",
+            )
+    return violations
+
+
+# ---- sys.modules mutation: confine it to the two sanctioned
+# canonicalization sites (backend/adapters/__init__.py, store_access.py).
+
+def _is_sys_modules_expr(expr: ast.expr) -> bool:
+    return (
+        isinstance(expr, ast.Attribute) and expr.attr == "modules"
+        and isinstance(expr.value, ast.Name) and expr.value.id == "sys"
+    )
+
+
+def _collect_sys_modules_mutations(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    rel = path.relative_to(REPO_ROOT)
+    violations = []
+    for node in ast.walk(tree):
+        target = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        elif isinstance(node, ast.AugAssign):
+            target = node.target
+        if isinstance(target, ast.Subscript) and _is_sys_modules_expr(target.value):
+            violations.append(f"{rel}:{node.lineno}: direct sys.modules[...] assignment")
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("setdefault", "update", "pop", "popitem", "clear")
+            and _is_sys_modules_expr(node.func.value)
+        ):
+            violations.append(f"{rel}:{node.lineno}: sys.modules.{node.func.attr}(...) mutation")
+    return violations
+
+
+def _sys_modules_mutation_violations() -> list[str]:
+    violations = []
+    for path in _iter_py_files(ADAPTERS_DIR):
+        if path in _SANCTIONED_SYS_MODULES_MUTATORS:
+            continue
+        violations += _collect_sys_modules_mutations(path)
     return violations
 
 
@@ -217,11 +382,35 @@ def test_only_composition_root_imports_adapters() -> None:
     )
 
 
+def test_adapters_allowlist_has_no_dead_entries() -> None:
+    violations = _adapters_allowlist_dead_entries()
+    assert not violations, "ADAPTERS_ALLOWLIST has dead entries:\n" + "\n".join(violations)
+
+
+def test_no_dynamic_import_evasion_outside_store_access() -> None:
+    violations = _dynamic_import_evasion_violations()
+    assert not violations, "dynamic-import evasion of the adapters boundary:\n" + "\n".join(violations)
+
+
+def test_store_access_dynamic_targets_are_statically_verifiable() -> None:
+    violations = _store_access_dynamic_target_violations()
+    assert not violations, "store_access.py dynamic import target violations:\n" + "\n".join(violations)
+
+
+def test_no_adapter_mutates_sys_modules_outside_sanctioned_site() -> None:
+    violations = _sys_modules_mutation_violations()
+    assert not violations, "unsanctioned sys.modules mutation in backend/adapters:\n" + "\n".join(violations)
+
+
 if __name__ == "__main__":
     all_violations = (
         _surface_contract_violations()
         + _adapters_violations()
         + _external_adapters_import_violations()
+        + _adapters_allowlist_dead_entries()
+        + _dynamic_import_evasion_violations()
+        + _store_access_dynamic_target_violations()
+        + _sys_modules_mutation_violations()
     )
     if all_violations:
         print("\n".join(all_violations))

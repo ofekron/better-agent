@@ -740,17 +740,14 @@ def _wire_surface_adapter() -> None:
     """Compose the Chat Surface Contract adapter (ADR 0006) onto its
     versioned transport (backend/adapter_api.py).
 
-    CONSTRAINT: this backend imports its modules bare (`from event_bus
-    import bus`), while backend/adapters/* and backend/adapter_api.py
-    import dotted (`backend.event_bus`) per the boundary enforced by
-    backend/scripts/test_adapter_boundaries.py. Left alone, that mismatch
-    mints a second EventBus (etc.) singleton under the "backend.*" module
-    keys, so ChatSurfaceAdapter.bind() would subscribe on a bus nothing
-    ever publishes to. Alias the seven bare infra modules the adapter
-    boundary allows onto their "backend.*" sys.modules keys BEFORE the
-    first `backend.adapters`/`backend.surface_contract` import, so every
-    dotted import of them resolves to the SAME already-bare-imported
-    instance instead of loading a fresh module.
+    The bare<->dotted infra-singleton aliasing this used to perform inline
+    now lives in backend/adapters/__init__.py itself (see that module's
+    docstring): it is self-canonicalizing, firing for every importer of
+    backend.adapters rather than only callers that run after this
+    function — so it belongs to the package, not the composition root.
+    All that is left here is resolving the `backend` namespace package
+    (needed before the first `backend.*` import below can succeed at all)
+    and the actual composition-root wiring.
     """
     import importlib
     import sys
@@ -764,22 +761,6 @@ def _wire_surface_adapter() -> None:
             backend_pkg = types.ModuleType("backend")
             backend_pkg.__path__ = [str(Path(__file__).resolve().parent)]
             sys.modules["backend"] = backend_pkg
-
-    import event_bus as _event_bus
-    import event_journal as _event_journal
-    import event_ingester as _event_ingester
-    import jsonl_tailer as _jsonl_tailer
-    import paths as _paths
-    import i18n as _i18n
-    import user_msg_lifecycle as _user_msg_lifecycle
-
-    sys.modules["backend.event_bus"] = _event_bus
-    sys.modules["backend.event_journal"] = _event_journal
-    sys.modules["backend.event_ingester"] = _event_ingester
-    sys.modules["backend.jsonl_tailer"] = _jsonl_tailer
-    sys.modules["backend.paths"] = _paths
-    sys.modules["backend.i18n"] = _i18n
-    sys.modules["backend.user_msg_lifecycle"] = _user_msg_lifecycle
 
     from backend.adapters import build_adapter
     import adapter_api

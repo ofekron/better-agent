@@ -2,12 +2,13 @@
 """Unit coverage for backend/adapter_api.py (ADR 0006 §2/§4/§5 transport).
 
 Same isolation recipe as `backend/scripts/test_chat_adapter.py`
-(`paths.engage_test_home` before any backend import), plus the
-bare/dotted singleton aliasing `backend/main.py:_wire_surface_adapter`
-performs — replicated here (not by importing `main.py`, which pulls in
-the whole app's startup side effects) so this test exercises the exact
-same "backend.event_bus.bus IS event_bus.bus" invariant production
-wiring depends on.
+(`paths.engage_test_home` before any backend import). The bare/dotted
+singleton aliasing is `backend/adapters/__init__.py`'s own responsibility
+now (self-canonicalizing — see its module docstring), so this test doesn't
+replicate it: importing `backend.adapters.chat_adapter` below is enough to
+trigger it, and this file exercises the exact same "backend.event_bus.bus
+IS event_bus.bus" invariant production wiring depends on via the
+`test_aliasing_unifies_bare_and_dotted_event_bus` test below.
 
 Run:
     PYTHONPATH=. python3 -m pytest backend/scripts/test_adapter_api.py -q
@@ -41,24 +42,11 @@ _TEST_HOME = tempfile.mkdtemp(prefix="ba-adapter-api-test-")
 paths.engage_test_home(_TEST_HOME)
 atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
-# ---- replicate backend/main.py:_wire_surface_adapter's bare<->dotted alias
+# bare — used directly below (not for aliasing; backend/adapters/__init__.py
+# handles that on its own import, triggered by the `backend.adapters.*`
+# imports right below).
 import event_bus  # noqa: E402
-import event_journal  # noqa: E402
 import event_ingester as bare_event_ingester  # noqa: E402
-import jsonl_tailer  # noqa: E402
-import i18n  # noqa: E402
-import user_msg_lifecycle  # noqa: E402
-
-if "backend" not in sys.modules:
-    import backend  # noqa: E402  (namespace package via _REPO_ROOT on sys.path)
-
-sys.modules["backend.event_bus"] = event_bus
-sys.modules["backend.event_journal"] = event_journal
-sys.modules["backend.event_ingester"] = bare_event_ingester
-sys.modules["backend.jsonl_tailer"] = jsonl_tailer
-sys.modules["backend.paths"] = paths
-sys.modules["backend.i18n"] = i18n
-sys.modules["backend.user_msg_lifecycle"] = user_msg_lifecycle
 
 import auth  # noqa: E402
 import adapter_api  # noqa: E402
