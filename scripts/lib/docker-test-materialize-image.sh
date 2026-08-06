@@ -41,7 +41,7 @@ case "$BUILD_STALL_SECONDS" in
 esac
 
 buildx_build_watched() {
-  local fifo="$1" pid line status=0
+  local fifo="$1" pid line status=0 error_marker=""
   shift
   docker buildx build --builder "$BUILDER" --load --progress=plain \
     --label "${LABEL_PREFIX}.owner=true" \
@@ -54,6 +54,16 @@ buildx_build_watched() {
   while :; do
     if IFS= read -r -t "$BUILD_STALL_SECONDS" line <&3; then
       printf '%s\n' "$line"
+      # buildx's own top-level failure summary, printed exactly once right
+      # before the CLI exits nonzero. Remembered so it can be cross-checked
+      # against the process's actual exit status below: a cancelled/dropped
+      # `--load` export (daemon-side "Canceled"/"DeadlineExceeded", observed
+      # on this host's buildkit container during export) has been seen to
+      # leave the CLIENT reporting exit 0 despite printing this line, which
+      # would otherwise make a failed build look like a successful one.
+      case "$line" in
+        "ERROR: failed to build:"*) error_marker="$line" ;;
+      esac
       continue
     fi
     # read failed: timeout or EOF. bash 3.2 (stock macOS) returns 1 for BOTH,
@@ -68,11 +78,25 @@ buildx_build_watched() {
     pkill -P "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
+    if [ -n "$error_marker" ]; then
+      echo "docker-test-lifecycle: build already reported a failure before stalling — not retrying:" >&2
+      printf '%s\n' "$error_marker" >&2
+      return 1
+    fi
     return 76
   done
   exec 3<&-
   status=0
   wait "$pid" || status=$?
+  if [ "$status" -eq 0 ] && [ -n "$error_marker" ]; then
+    # The CLI claims success but its own output reported a build failure.
+    # Trust the tool's diagnostic text over its exit code: this is exactly
+    # the "red build masquerading as green" case a lying exit status would
+    # otherwise let through the `[ "$build_status" -eq 0 ]` check below.
+    echo "docker-test-lifecycle: buildx exited 0 but emitted a build failure line — treating as failed (exit-code/output desync, likely a cancelled --load export):" >&2
+    printf '%s\n' "$error_marker" >&2
+    status=1
+  fi
   return "$status"
 }
 

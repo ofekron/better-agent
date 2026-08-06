@@ -65,6 +65,23 @@ case "${1:-} ${2:-}" in
       IFS= read -r _ < "$DOCKER_TEST_FAKE_RELEASE_FIFO"
     fi
     [ -z "${DOCKER_TEST_FAKE_FAIL_BUILD:-}" ] || exit 17
+    if [ -n "${DOCKER_TEST_FAKE_ERROR_THEN_STALL_BUILD:-}" ]; then
+      # buildx printed its failure line, then the client wedges (observed
+      # during a cancelled --load export) instead of exiting promptly.
+      printf 'ERROR: failed to build: failed to solve: DeadlineExceeded: context deadline exceeded\n'
+      exec sleep 6317
+    fi
+    if [ -n "${DOCKER_TEST_FAKE_LIE_SUCCESS_BUILD:-}" ]; then
+      # Reproduces a real buildx/buildkit exit-code/output desync observed on
+      # this host: a cancelled `--load` export prints buildx's own top-level
+      # failure line but the CLIENT process still exits 0. The image tag
+      # STILL gets its config (and fingerprint label) committed despite the
+      # export being cancelled — the fingerprint-label check alone cannot
+      # tell this apart from a real success.
+      printf 'ERROR: failed to build: failed to solve: Canceled: context canceled\n'
+      printf '%s\n' "$fingerprint" > "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$tag")"
+      exit 0
+    fi
     printf '%s\n' "$fingerprint" > "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$tag")"
     ;;
   *) exit 0 ;;
@@ -235,6 +252,44 @@ docker_test_materialize_image healthy-after-stall \
   "better-agent-backend-tests:deps-healthy-after-stall" \
   -t "better-agent-backend-tests:deps-healthy-after-stall" .
 [ "$(wc -l < "$STATE/builds")" -eq 8 ] || fail "healthy build after stall did not run"
+
+# Regression: a real buildx/buildkit desync where a cancelled `--load`
+# export prints buildx's own "ERROR: failed to build:" summary but the
+# client process still exits 0, AND the image tag's config (fingerprint
+# label included) still gets committed despite the export being cancelled
+# (observed on this host: daemon-side "Canceled: context canceled" /
+# "DeadlineExceeded" during export; matching label alone cannot tell this
+# apart from a real success). Without cross-checking the build's own output
+# against its exit code, this made a failed build materialize as a reported
+# success with no test ever run.
+LYING_IMAGE="better-agent-backend-tests:deps-lying-success"
+LYING_STDERR="$STATE/lying-stderr"
+if DOCKER_TEST_FAKE_LIE_SUCCESS_BUILD=1 \
+  docker_test_materialize_image lying-success "$LYING_IMAGE" -t "$LYING_IMAGE" . \
+  2> "$LYING_STDERR"; then
+  fail "buildx exit-0/error-output desync was reported as a successful materialization"
+fi
+grep -q 'Canceled: context canceled' "$LYING_STDERR" || fail "build failure text was not surfaced on stderr"
+
+# Regression: buildx prints its failure line, then wedges instead of exiting
+# promptly (observed during a cancelled --load export). The watchdog must
+# not blindly retry a build it already knows failed, and must surface the
+# real reason instead of a generic "stalled twice" message.
+ERROR_STALL_IMAGE="better-agent-backend-tests:deps-error-then-stall"
+ERROR_STALL_STDERR="$STATE/error-then-stall-stderr"
+BUILDS_BEFORE_ERROR_STALL="$(wc -l < "$STATE/builds")"
+if DOCKER_TEST_FAKE_ERROR_THEN_STALL_BUILD=1 BETTER_AGENT_DOCKER_BUILD_STALL_SECONDS=1 \
+  docker_test_materialize_image error-then-stall "$ERROR_STALL_IMAGE" -t "$ERROR_STALL_IMAGE" . \
+  2> "$ERROR_STALL_STDERR"; then
+  fail "a build that reported failure before stalling was reported as success"
+fi
+grep -q 'DeadlineExceeded: context deadline exceeded' "$ERROR_STALL_STDERR" \
+  || fail "build failure text was not surfaced before the stall watchdog gave up"
+grep -q 'not retrying' "$ERROR_STALL_STDERR" \
+  || fail "a build that already reported failure was retried anyway"
+[ "$(wc -l < "$STATE/builds")" -eq "$((BUILDS_BEFORE_ERROR_STALL + 1))" ] \
+  || fail "a build that already reported failure should not be retried"
+! pgrep -f 'sleep 6317' >/dev/null 2>&1 || fail "error-then-stall watchdog leaked a hung build process"
 
 docker_test_prepare_lock_root
 rm -f "$DOCKER_TEST_LEASE_DIR/$DOCKER_TEST_RUN_ID"
