@@ -65,25 +65,23 @@ def _agent_message(uuid: str, text: str) -> dict:
     }
 
 
-def test_extract_and_strip() -> bool:
-    ok = True
+def test_extract_and_strip() -> None:
     ex = file_ref_resolver.extract_session_name
     st = file_ref_resolver.strip_session_name_tag
-    ok &= ex("a <SESSION_NAME>✏️ Fix auth</SESSION_NAME> b") == "✏️ Fix auth"
-    ok &= ex("no tag here") is None
-    ok &= ex("<SESSION_NAME>unterminated") is None
-    ok &= ex("<SESSION_NAME>  </SESSION_NAME>") is None
-    ok &= st("a <SESSION_NAME>✏️ Fix auth</SESSION_NAME>\nb") == "a b"
-    ok &= st("plain") == "plain"
+    assert ex("a <SESSION_NAME>✏️ Fix auth</SESSION_NAME> b") == "✏️ Fix auth"
+    assert ex("no tag here") is None
+    assert ex("<SESSION_NAME>unterminated") is None
+    assert ex("<SESSION_NAME>  </SESSION_NAME>") is None
+    assert st("a <SESSION_NAME>✏️ Fix auth</SESSION_NAME>\nb") == "a b"
+    assert st("plain") == "plain"
     # _apply_tag_rules strips it even with zero extension rules registered.
     file_ref_resolver.set_tag_rules([])
-    ok &= file_ref_resolver._apply_tag_rules(
+    assert file_ref_resolver._apply_tag_rules(
         "x <SESSION_NAME>n</SESSION_NAME> y"
     ) == "x  y"
-    return bool(ok)
 
 
-def test_apply_event_renames_without_allowed_flag() -> bool:
+def test_apply_event_renames_without_allowed_flag() -> None:
     sid, msg = _mk_session()
     strategy = get_strategy("native")
     ctx = ApplyEventCtx(root_id=sid, run_id="r1")
@@ -97,12 +95,8 @@ def test_apply_event_renames_without_allowed_flag() -> bool:
         fires_side_effects=True,
     )
     sess = session_manager.get_lite(sid) or {}
-    if sess.get("name") != "✏️ Rework parser":
-        print(f"  expected rename, got name={sess.get('name')!r}")
-        return False
-    if sess.get("agent_rename_allowed"):
-        print("  fixture invalid: agent_rename_allowed unexpectedly True")
-        return False
+    assert sess.get("name") == "✏️ Rework parser", f"expected rename, got name={sess.get('name')!r}"
+    assert not sess.get("agent_rename_allowed"), "fixture invalid: agent_rename_allowed unexpectedly True"
     # Change-gate: same tag again (new uuid) is a no-op.
     strategy.apply_event(
         app_session_id=sid,
@@ -114,10 +108,10 @@ def test_apply_event_renames_without_allowed_flag() -> bool:
         fires_side_effects=True,
     )
     sess = session_manager.get_lite(sid) or {}
-    return sess.get("name") == "✏️ Rework parser"
+    assert sess.get("name") == "✏️ Rework parser"
 
 
-def test_prepare_for_journal_renames_and_strips() -> bool:
+def test_prepare_for_journal_renames_and_strips() -> None:
     sid, _msg = _mk_session()
     strategy = get_strategy("native")
     etype, data = strategy.prepare_provider_event_for_journal(
@@ -125,32 +119,26 @@ def test_prepare_for_journal_renames_and_strips() -> bool:
         event=_agent_message("u3", "Plan:\n<SESSION_NAME>✏️ Split config</SESSION_NAME>\ndone"),
     )
     sess = session_manager.get_lite(sid) or {}
-    if sess.get("name") != "✏️ Split config":
-        print(f"  expected rename via prepare, got name={sess.get('name')!r}")
-        return False
+    assert sess.get("name") == "✏️ Split config", f"expected rename via prepare, got name={sess.get('name')!r}"
     text = data["message"]["content"][0]["text"]
-    if "<SESSION_NAME>" in text or "✏️ Split config" in text:
-        print(f"  tag not stripped from journal data: {text!r}")
-        return False
-    return etype == "agent_message"
+    assert "<SESSION_NAME>" not in text and "✏️ Split config" not in text, f"tag not stripped from journal data: {text!r}"
+    assert etype == "agent_message"
 
 
-def test_ai_title_still_gated() -> bool:
+def test_ai_title_still_gated() -> None:
     sid, _msg = _mk_session()
     strategy = get_strategy("native")
     strategy._apply_metadata_side_effects(
         app_session_id=sid, data={"type": "ai-title", "aiTitle": "auto name"},
     )
     sess = session_manager.get_lite(sid) or {}
-    if sess.get("name") == "auto name":
-        print("  ai-title renamed despite agent_rename_allowed=False")
-        return False
+    assert sess.get("name") != "auto name", "ai-title renamed despite agent_rename_allowed=False"
     session_manager.set_agent_rename_allowed(sid, True)
     strategy._apply_metadata_side_effects(
         app_session_id=sid, data={"type": "ai-title", "aiTitle": "auto name"},
     )
     sess = session_manager.get_lite(sid) or {}
-    return sess.get("name") == "auto name"
+    assert sess.get("name") == "auto name"
 
 
 def main() -> int:
@@ -163,14 +151,15 @@ def main() -> int:
     failures = 0
     for t in tests:
         try:
-            ok = t()
+            t()
         except Exception as exc:  # noqa: BLE001
             import traceback
             traceback.print_exc()
-            ok = False
             print(f"  raised: {exc}")
-        print(f"{PASS if ok else FAIL} {t.__name__}")
-        failures += 0 if ok else 1
+            print(f"{FAIL} {t.__name__}")
+            failures += 1
+        else:
+            print(f"{PASS} {t.__name__}")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 1 if failures else 0
 

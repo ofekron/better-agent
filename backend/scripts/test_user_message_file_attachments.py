@@ -20,7 +20,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_user_message_persists_file_metadata_without_data() -> bool:
+def test_user_message_persists_file_metadata_without_data() -> None:
     coordinator = Coordinator()
     session = session_manager.create(
         name="files",
@@ -46,19 +46,17 @@ def test_user_message_persists_file_metadata_without_data() -> bool:
     ))
     fresh = session_manager.get(sid)
     stored = fresh["messages"][0]
-    return (
-        msg["files"] == [{
-            "name": "notes.txt",
-            "media_type": "text/plain",
-            "size": 11,
-        }]
-        and stored["files"] == msg["files"]
-        and "data" not in stored["files"][0]
-        and stored["client_id"] == "pending-1"
-    )
+    assert msg["files"] == [{
+        "name": "notes.txt",
+        "media_type": "text/plain",
+        "size": 11,
+    }]
+    assert stored["files"] == msg["files"]
+    assert "data" not in stored["files"][0]
+    assert stored["client_id"] == "pending-1"
 
 
-def test_malformed_file_attachment_fails_closed() -> bool:
+def test_malformed_file_attachment_fails_closed() -> None:
     coordinator = Coordinator()
     session = session_manager.create(
         name="bad",
@@ -76,8 +74,8 @@ def test_malformed_file_attachment_fails_closed() -> bool:
             files=[{"name": "bad.txt", "media_type": "text/plain"}],
         ))
     except ValueError:
-        return True
-    return False
+        return
+    raise AssertionError("malformed file attachment should fail closed with ValueError")
 
 
 def main() -> int:
@@ -87,10 +85,13 @@ def main() -> int:
     ]
     failures = []
     for test in tests:
-        ok = test()
-        print(f"{PASS if ok else FAIL} {test.__name__}")
-        if not ok:
+        try:
+            test()
+        except Exception as exc:
             failures.append(test.__name__)
+            print(f"{FAIL} {test.__name__}: {exc}")
+        else:
+            print(f"{PASS} {test.__name__}")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
         print(f"{FAIL} failures: {', '.join(failures)}")

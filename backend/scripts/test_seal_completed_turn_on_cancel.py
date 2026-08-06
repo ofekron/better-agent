@@ -69,7 +69,7 @@ def _asst(sid: str, asst_id: str = "asst-1") -> dict:
     return next(m for m in sess.get("messages", []) if m.get("id") == asst_id)
 
 
-def test_success_sealed_on_cancel() -> bool:
+def test_success_sealed_on_cancel() -> None:
     sid, user_msg, asst = _seed()
     c = _StubCoordinator()
     c._finalize_turn_messages = _real_finalize
@@ -84,19 +84,12 @@ def test_success_sealed_on_cancel() -> bool:
         trace_id="tr-test",
     )
     sealed = _asst(sid)
-    if not sealed.get("completed_at"):
-        print(f"  success turn not sealed: {sealed!r}")
-        return False
-    if sealed.get("content") != "done":
-        print(f"  content not extracted from sdk_output: {sealed.get('content')!r}")
-        return False
-    if sealed.get("trace_id") != "tr-test":
-        print(f"  trace_id not stamped: {sealed.get('trace_id')!r}")
-        return False
-    return True
+    assert sealed.get("completed_at"), f"success turn not sealed: {sealed!r}"
+    assert sealed.get("content") == "done", f"content not extracted from sdk_output: {sealed.get('content')!r}"
+    assert sealed.get("trace_id") == "tr-test", f"trace_id not stamped: {sealed.get('trace_id')!r}"
 
 
-def test_no_seal_when_not_success() -> bool:
+def test_no_seal_when_not_success() -> None:
     sid, user_msg, asst = _seed()
     c = _StubCoordinator()
     calls: list[dict] = []
@@ -108,16 +101,11 @@ def test_no_seal_when_not_success() -> bool:
         assistant_msg=asst,
         primary_result={"success": False, "error": "boom"}, trace_id="tr",
     )
-    if calls:
-        print(f"  finalize should not run on failed result: {calls}")
-        return False
-    if _asst(sid).get("completed_at"):
-        print("  failed turn got completed_at")
-        return False
-    return True
+    assert not calls, f"finalize should not run on failed result: {calls}"
+    assert not _asst(sid).get("completed_at"), "failed turn got completed_at"
 
 
-def test_no_seal_when_already_terminal() -> bool:
+def test_no_seal_when_already_terminal() -> None:
     sid, user_msg, asst = _seed()
     c = _StubCoordinator()
     calls: list[dict] = []
@@ -132,13 +120,10 @@ def test_no_seal_when_already_terminal() -> bool:
         assistant_msg=already,
         primary_result={"success": True, "events": [], "sdk_output": "done"}, trace_id="tr",
     )
-    if calls:
-        print(f"  finalize should not re-run on already-terminal msg: {calls}")
-        return False
-    return True
+    assert not calls, f"finalize should not re-run on already-terminal msg: {calls}"
 
 
-def test_no_seal_when_assistant_msg_none() -> bool:
+def test_no_seal_when_assistant_msg_none() -> None:
     sid, user_msg, asst = _seed()
     c = _StubCoordinator()
     calls: list[dict] = []
@@ -150,10 +135,7 @@ def test_no_seal_when_assistant_msg_none() -> bool:
         assistant_msg=None,
         primary_result={"success": True, "events": []}, trace_id="tr",
     )
-    if calls:
-        print(f"  finalize should not run when assistant_msg is None: {calls}")
-        return False
-    return True
+    assert not calls, f"finalize should not run when assistant_msg is None: {calls}"
 
 
 def main() -> int:
@@ -167,10 +149,13 @@ def main() -> int:
     ]
     failures: list[str] = []
     for name, fn in cases:
-        ok = fn()
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
+        try:
+            fn()
+        except Exception as exc:
             failures.append(name)
+            print(f"{FAIL}  {name}: {exc}")
+        else:
+            print(f"{PASS}  {name}")
 
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:

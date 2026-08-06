@@ -34,9 +34,9 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _check(cond: bool, name: str, detail: str = "") -> bool:
-    print(f"{PASS if cond else FAIL} {name}{'' if cond else ' -- ' + detail}")
-    return cond
+def _check(cond: bool, name: str, detail: str = "") -> None:
+    assert cond, f"{name}{(' -- ' + detail) if detail else ''}"
+    print(f"{PASS} {name}")
 
 
 def _agent_event(idx: int) -> dict:
@@ -55,7 +55,7 @@ def _model_switch_event(uid: str = "model-switch-1") -> dict:
     }
 
 
-def test_build_stub_pins_beyond_tail() -> bool:
+def test_build_stub_pins_beyond_tail() -> None:
     """Pure-helper level: pinning keeps model_switched past the 25-tail."""
     events = [
         {"type": "model_switched", "data": _model_switch_event()}
@@ -65,14 +65,14 @@ def test_build_stub_pins_beyond_tail() -> bool:
     ]
     stub = render_stub.build_stub({"role": "assistant", "events": events})
     types = [e.get("type") for e in stub["last_events"]]
-    return _check(
+    _check(
         "model_switched" in types,
         "build_stub pins model_switched beyond tail",
         f"types={types[:3]}... len={len(types)}",
     )
 
 
-def test_build_stub_caps_pinned_growth() -> bool:
+def test_build_stub_caps_pinned_growth() -> None:
     """The pinned set is bounded: when many model_switched fall OUTSIDE the
     25-event tail, only the most recent _STUB_PINNED_CAP are kept."""
     n_switches = render_stub._STUB_PINNED_CAP + 5
@@ -88,7 +88,7 @@ def test_build_stub_caps_pinned_growth() -> bool:
     ]
     stub = render_stub.build_stub({"role": "assistant", "events": switches + agents})
     pinned = [e for e in stub["last_events"] if e.get("type") == "model_switched"]
-    return _check(
+    _check(
         len(pinned) == render_stub._STUB_PINNED_CAP,
         "build_stub caps pinned model_switched",
         f"pinned={len(pinned)} cap={render_stub._STUB_PINNED_CAP}",
@@ -109,7 +109,7 @@ def _ingest_long_turn(ingester: EventIngester, root_id: str, msg_id: str) -> Non
         )
 
 
-def test_summaries_path_pins_model_switched() -> bool:
+def test_summaries_path_pins_model_switched() -> None:
     """The REAL snapshot path: event_ingester.message_event_summaries must
     include model_switched in last_events for a long turn."""
     ingester = EventIngester()
@@ -118,17 +118,16 @@ def test_summaries_path_pins_model_switched() -> bool:
     _ingest_long_turn(ingester, root_id, msg_id)
     summaries = ingester.message_event_summaries(root_id, sid_filter=root_id)
     rec = summaries.get(msg_id)
-    if rec is None:
-        return _check(False, "summaries path pins model_switched", "msg missing from summaries")
+    assert rec is not None, "msg missing from summaries"
     types = [e.get("type") for e in rec.get("last_events", [])]
-    return _check(
+    _check(
         "model_switched" in types,
         "summaries path pins model_switched",
         f"types={types}",
     )
 
 
-def test_stale_sidecar_invalidated_by_version() -> bool:
+def test_stale_sidecar_invalidated_by_version() -> None:
     """F1 regression: a sidecar written before the pin (summary_version=6)
     must be REJECTED so a full rescan re-pins model_switched. Without the
     version bump, existing sessions keep a stale unpinned preview forever.
@@ -150,11 +149,9 @@ def test_stale_sidecar_invalidated_by_version() -> bool:
 
     # Sanity: the real sidecar loads and carries the pin.
     loaded = ingester._load_event_summaries_sidecar_locked(root_id, events_path, tail)
-    if loaded is None:
-        return _check(False, "stale sidecar invalidated by version", "real sidecar failed to load")
+    assert loaded is not None, "real sidecar failed to load"
     rec = loaded[0].get(msg_id, {})
-    if "model_switched" not in [e.get("type") for e in rec.get("last_events", [])]:
-        return _check(False, "stale sidecar invalidated by version", "real sidecar missing pin")
+    assert "model_switched" in [e.get("type") for e in rec.get("last_events", [])], "real sidecar missing pin"
 
     # Mutate ONLY the version -> the load must now be rejected.
     stale = dict(original)
@@ -177,21 +174,33 @@ def test_stale_sidecar_invalidated_by_version() -> bool:
     types2 = [e.get("type") for e in rec2.get("last_events", [])]
     rescan_pinned = "model_switched" in types2
 
-    return _check(
+    _check(
         rejected and rescan_pinned,
         f"stale sidecar (v6) rejected (gate={rejected}) and rescanned -> pinned ({rescan_pinned}); current v={_EVENT_SUMMARIES_VERSION}",
         f"types={types2}",
     )
 
 
+TESTS = [
+    test_build_stub_pins_beyond_tail,
+    test_build_stub_caps_pinned_growth,
+    test_summaries_path_pins_model_switched,
+    test_stale_sidecar_invalidated_by_version,
+]
+
+
 def main() -> int:
-    ok = True
-    ok &= test_build_stub_pins_beyond_tail()
-    ok &= test_build_stub_caps_pinned_growth()
-    ok &= test_summaries_path_pins_model_switched()
-    ok &= test_stale_sidecar_invalidated_by_version()
-    print(f"\n{'ALL PASS' if ok else 'FAILURES'}")
-    return 0 if ok else 1
+    failures = 0
+    for t in TESTS:
+        try:
+            t()
+        except Exception as exc:
+            print(f"{FAIL} {t.__name__}: {exc}")
+            failures += 1
+        else:
+            print(f"{PASS} {t.__name__}")
+    print(f"\n{'ALL PASS' if not failures else 'FAILURES'}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

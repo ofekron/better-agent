@@ -84,23 +84,18 @@ def _fresh_streaming_session() -> tuple[str, int]:
     return sid, render_head
 
 
-def test_projection_heads_diverge() -> bool:
+def test_projection_heads_diverge() -> None:
     sid, render_head = _fresh_streaming_session()
     raw = event_ingester.max_seq_by_sid(sid).get(sid, 0)
     render = event_ingester.render_seq_by_sid(sid).get(sid, 0)
-    if raw <= render:
-        print(f"  raw head ({raw}) should exceed render head ({render})")
-        return False
-    if render != render_head:
-        print(f"  render head {render} != expected {render_head}")
-        return False
-    if event_journal_reader.render_seq_by_context(sid).get(sid, 0) != render:
-        print("  reader render_seq_by_context disagrees with ingester")
-        return False
-    return True
+    assert raw > render, f"raw head ({raw}) should exceed render head ({render})"
+    assert render == render_head, f"render head {render} != expected {render_head}"
+    assert event_journal_reader.render_seq_by_context(sid).get(sid, 0) == render, (
+        "reader render_seq_by_context disagrees with ingester"
+    )
 
 
-def test_get_session_watermark_is_render_head() -> bool:
+def test_get_session_watermark_is_render_head() -> None:
     sid, render_head = _fresh_streaming_session()
     tree = asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
@@ -110,25 +105,17 @@ def test_get_session_watermark_is_render_head() -> bool:
         tree = json.loads(tree.body)
     wm = (tree.get("max_seq_by_sid") or {}).get(sid, 0)
     raw = event_ingester.max_seq_by_sid(sid).get(sid, 0)
-    if wm == raw:
-        print(f"  watermark stamped RAW head {raw} (the bug)")
-        return False
-    if wm != render_head:
-        print(f"  watermark {wm} != render head {render_head}")
-        return False
-    return True
+    assert wm != raw, f"watermark stamped RAW head {raw} (the bug)"
+    assert wm == render_head, f"watermark {wm} != render head {render_head}"
 
 
-def test_floor_events_from_seq_is_render_head() -> bool:
+def test_floor_events_from_seq_is_render_head() -> None:
     sid, render_head = _fresh_streaming_session()
     floor = session_detail_api._floor_events_from_seq(
         sid, 0, cursor_known=False,
     )
-    if floor != render_head:
-        raw = event_ingester.max_seq_by_sid(sid).get(sid, 0)
-        print(f"  floor {floor} != render head {render_head} (raw={raw})")
-        return False
-    return True
+    raw = event_ingester.max_seq_by_sid(sid).get(sid, 0)
+    assert floor == render_head, f"floor {floor} != render head {render_head} (raw={raw})"
 
 
 def main() -> int:
@@ -141,14 +128,14 @@ def main() -> int:
     try:
         for name, fn in tests:
             try:
-                ok = fn()
-            except Exception as e:
-                ok = False
+                fn()
+            except Exception:
                 import traceback
                 traceback.print_exc()
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"{FAIL}  {name}")
                 fails += 1
+            else:
+                print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()

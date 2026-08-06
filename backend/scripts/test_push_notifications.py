@@ -23,46 +23,38 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_register_unregister_round_trip() -> bool:
+def test_register_unregister_round_trip() -> None:
     record = device_token_store.register_token("dev-1", "tok-abc", "android", "sid-1")
-    if record["device_id"] != "dev-1" or record["platform"] != "android":
-        return False
-    if record["session_ids"] != ["sid-1"]:
-        return False
-    if record["notification_preferences"] != {
+    assert record["device_id"] == "dev-1"
+    assert record["platform"] == "android"
+    assert record["session_ids"] == ["sid-1"]
+    assert record["notification_preferences"] == {
         "pending_approvals": True,
         "pending_questions": True,
         "completed_turns": True,
-    }:
-        return False
+    }
 
     tokens = device_token_store.get_tokens_for_session("sid-1")
-    if len(tokens) != 1 or tokens[0]["token"] != "tok-abc":
-        return False
+    assert len(tokens) == 1
+    assert tokens[0]["token"] == "tok-abc"
 
     # Re-registering the same device for a second session accumulates interest.
     device_token_store.register_token("dev-1", "tok-abc", "android", "sid-2")
     tokens_sid2 = device_token_store.get_tokens_for_session("sid-2")
-    if len(tokens_sid2) != 1:
-        return False
+    assert len(tokens_sid2) == 1
 
     deleted = device_token_store.unregister_token("dev-1")
-    if not deleted:
-        return False
-    if device_token_store.get_tokens_for_session("sid-1"):
-        return False
-    if device_token_store.unregister_token("dev-1"):
-        return False
-    return True
+    assert deleted
+    assert not device_token_store.get_tokens_for_session("sid-1")
+    assert not device_token_store.unregister_token("dev-1")
 
 
-def test_preferences_are_durable_validated_and_filter_devices() -> bool:
+def test_preferences_are_durable_validated_and_filter_devices() -> None:
     initial = device_token_store.update_notification_preferences(
         "dev-prefs",
         {"completed_turns": False},
     )
-    if initial["completed_turns"]:
-        return False
+    assert not initial["completed_turns"]
     device_token_store.register_token(
         "dev-prefs",
         "tok-prefs",
@@ -70,24 +62,21 @@ def test_preferences_are_durable_validated_and_filter_devices() -> bool:
         "sid-prefs",
     )
     persisted = device_token_store.get_notification_preferences("dev-prefs")
-    if persisted["completed_turns"]:
-        return False
-    if device_token_store.get_tokens_for_session_category(
+    assert not persisted["completed_turns"]
+    assert not device_token_store.get_tokens_for_session_category(
         "sid-prefs",
         "completed_turns",
-    ):
-        return False
-    if len(device_token_store.get_tokens_for_session_category(
+    )
+    assert len(device_token_store.get_tokens_for_session_category(
         "sid-prefs",
         "pending_questions",
-    )) != 1:
-        return False
+    )) == 1
     try:
         device_token_store.update_notification_preferences(
             "dev-prefs",
             {"completed_turns": "yes"},
         )
-        return False
+        raise AssertionError("invalid preference value should raise NotificationPreferencesError")
     except device_token_store.NotificationPreferencesError:
         pass
     try:
@@ -95,18 +84,16 @@ def test_preferences_are_durable_validated_and_filter_devices() -> bool:
             "dev-prefs",
             {"unknown": True},
         )
-        return False
+        raise AssertionError("unknown preference key should raise NotificationPreferencesError")
     except device_token_store.NotificationPreferencesError:
         pass
     device_token_store.unregister_token("dev-prefs")
-    if device_token_store.get_notification_preferences(
+    assert not device_token_store.get_notification_preferences(
         "dev-prefs"
-    )["completed_turns"]:
-        return False
-    return True
+    )["completed_turns"]
 
 
-def test_token_re_registration_has_one_device_owner() -> bool:
+def test_token_re_registration_has_one_device_owner() -> None:
     device_token_store.register_token("dev-old", "tok-shared", "ios", "sid-shared")
     device_token_store.register_token(
         "dev-current",
@@ -115,26 +102,20 @@ def test_token_re_registration_has_one_device_owner() -> bool:
         "sid-shared",
     )
     devices = device_token_store.get_tokens_for_session("sid-shared")
-    if [device["device_id"] for device in devices] != ["dev-current"]:
-        return False
+    assert [device["device_id"] for device in devices] == ["dev-current"]
     device_token_store.unregister_token("dev-current")
-    return True
 
 
-def test_send_with_no_service_account_is_safe_noop() -> bool:
+def test_send_with_no_service_account_is_safe_noop() -> None:
     os.environ.pop("BETTER_AGENT_FCM_SERVICE_ACCOUNT", None)
     push_sender._INIT_ATTEMPTED = False
     push_sender._APP = None
     device_token_store.register_token("dev-2", "tok-xyz", "ios", "sid-noop")
-    try:
-        push_sender.send_pending_input_push("sid-noop", "approval", "req-1")
-    except Exception:
-        return False
+    push_sender.send_pending_input_push("sid-noop", "approval", "req-1")
     device_token_store.unregister_token("dev-2")
-    return True
 
 
-def test_new_pending_request_triggers_push_per_device() -> bool:
+def test_new_pending_request_triggers_push_per_device() -> None:
     calls: list[tuple[str, str, str]] = []
     original = push_sender.send_pending_input_push
 
@@ -148,10 +129,8 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
             questions=[{"id": "q1", "header": "H", "question": "Q", "options": []}],
             timeout_seconds=60,
         )
-        if len(calls) != 1:
-            return False
-        if calls[0] != ("sid-push", "input", req["request_id"]):
-            return False
+        assert len(calls) == 1
+        assert calls[0] == ("sid-push", "input", req["request_id"])
 
         # create_or_get_pending_request against an identical pending request
         # must NOT fire a second push (it's a dedup/update, not a new request).
@@ -160,10 +139,8 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
             questions=[{"id": "q1", "header": "H", "question": "Q", "options": []}],
             timeout_seconds=60,
         )
-        if created:
-            return False
-        if len(calls) != 1:
-            return False
+        assert not created
+        assert len(calls) == 1
 
         second, created2 = user_input_store.create_or_get_pending_request(
             app_session_id="sid-push",
@@ -172,18 +149,14 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
             questions=[],
             timeout_seconds=60,
         )
-        if not created2:
-            return False
-        if len(calls) != 2:
-            return False
-        if calls[1] != ("sid-push", "approval", second["request_id"]):
-            return False
-        return True
+        assert created2
+        assert len(calls) == 2
+        assert calls[1] == ("sid-push", "approval", second["request_id"])
     finally:
         push_sender.send_pending_input_push = original
 
 
-def test_successful_turn_emits_configurable_response_push() -> bool:
+def test_successful_turn_emits_configurable_response_push() -> None:
     import asyncio
     import threading
 
@@ -210,7 +183,7 @@ def test_successful_turn_emits_configurable_response_push() -> bool:
         lambda sid: "msg-latest" if sid == "sid-complete" else None
     )
     try:
-        async def exercise() -> bool:
+        async def exercise() -> None:
             publish_task = asyncio.create_task(bus.publish(BusEvent(
                 type="lifecycle.turn_complete",
                 root_id="sid-complete",
@@ -230,13 +203,11 @@ def test_successful_turn_emits_configurable_response_push() -> bool:
                 payload={"reason": "error"},
                 persist=False,
             ))
-            return (
-                started
-                and completed_before_delivery
-                and calls == [("sid-complete", "msg-latest")]
-            )
+            assert started, "push send did not start"
+            assert completed_before_delivery, "publish completed before delivery"
+            assert calls == [("sid-complete", "msg-latest")], f"unexpected calls: {calls}"
 
-        return asyncio.run(exercise())
+        asyncio.run(exercise())
     finally:
         release_send.set()
         bus.unsubscribe("push_notification_turn_complete")
@@ -258,10 +229,13 @@ def main() -> int:
     failures = 0
     try:
         for test in TESTS:
-            ok = test()
-            print(f"{PASS if ok else FAIL} {test.__name__}")
-            if not ok:
+            try:
+                test()
+            except Exception as exc:
                 failures += 1
+                print(f"{FAIL} {test.__name__}: {exc}")
+            else:
+                print(f"{PASS} {test.__name__}")
         return 1 if failures else 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
