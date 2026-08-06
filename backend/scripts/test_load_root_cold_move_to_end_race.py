@@ -23,6 +23,7 @@ import collections
 import os
 import shutil
 import sys
+import traceback
 
 import _test_home
 _BC_HOME = _test_home.isolate("bc-cold-race-test-")
@@ -60,7 +61,7 @@ def _reset() -> None:
     mgr._pin_predicate = lambda rid, sids: False
 
 
-def test_cold_load_survives_concurrent_eviction_at_move_to_end() -> bool:
+def test_cold_load_survives_concurrent_eviction_at_move_to_end() -> None:
     """Simulate a concurrent eviction during the cold-load fingerprint I/O
     window (the exact KeyError window). Without the guard this raises
     KeyError; with the guard it returns the freshly-loaded root."""
@@ -90,16 +91,12 @@ def test_cold_load_survives_concurrent_eviction_at_move_to_end() -> bool:
         session_store.get_root_tree = orig_get_root_tree
         session_store.session_file_fingerprint = orig_fingerprint
 
-    if root is not fake_root:
-        print("  cold-load did not return the loaded root (got %r)" % (root,))
-        return False
     # The next reader cold-loads a fresh copy; here the eviction won and the
     # entry need not be resident. The contract is solely: NO KeyError / 500.
-    print(PASS + " cold-load returns root despite concurrent eviction at move_to_end")
-    return True
+    assert root is fake_root, "cold-load did not return the loaded root (got %r)" % (root,)
 
 
-def test_warm_branch_guard_still_present() -> bool:
+def test_warm_branch_guard_still_present() -> None:
     """Sanity: the warm (cached) branch guard is intact too."""
     _reset()
     rid = "root-warm-race"
@@ -118,12 +115,14 @@ def test_warm_branch_guard_still_present() -> bool:
         # not reachable there, so emulate by deleting then calling directly.
         # Instead, directly assert the warm move_to_end no-op's on absent key.
         mgr._roots.pop(rid, None)
+        raised = False
         try:
             mgr._roots.move_to_end(rid)
-            print("  warm move_to_end did not raise on absent key (unexpected)")
-            return False
         except KeyError:
-            pass  # expected raw behavior; the GUARD in _load_root_impl handles it
+            raised = True
+        # Raw move_to_end on an absent key still raises; the GUARD in
+        # _load_root_impl handles it.
+        assert raised, "warm move_to_end did not raise on absent key (unexpected)"
     finally:
         mgr._cached_root_is_stale = orig_is_stale
         session_store.session_file_fingerprint = orig_fingerprint
@@ -146,23 +145,29 @@ def test_warm_branch_guard_still_present() -> bool:
     finally:
         mgr._cached_root_is_stale = orig_is_stale
         session_store.session_file_fingerprint = orig_fp2
-    if out is not fake_root:
-        print("  warm guarded path did not return held cached tree (got %r)" % (out,))
-        return False
-    print(PASS + " warm-branch guard survives concurrent eviction (returns cached tree)")
-    return True
+    assert out is fake_root, "warm guarded path did not return held cached tree (got %r)" % (out,)
 
 
 def main() -> int:
-    tests = [
-        test_cold_load_survives_concurrent_eviction_at_move_to_end,
-        test_warm_branch_guard_still_present,
-    ]
-    results = [t() for t in tests]
-    n = len(results)
-    ok = sum(1 for r in results if r)
-    print(f"\n{ok} of {n} test(s) passed")
-    return 0 if ok == n else 1
+    tests = (
+        ("cold-load returns root despite concurrent eviction at move_to_end",
+         test_cold_load_survives_concurrent_eviction_at_move_to_end),
+        ("warm-branch guard survives concurrent eviction (returns cached tree)",
+         test_warm_branch_guard_still_present),
+    )
+    failed = 0
+    for label, runner in tests:
+        try:
+            runner()
+            print(f"{PASS} {label}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL} {label}: {exc}")
+        except Exception:
+            failed += 1
+            traceback.print_exc()
+    print(f"\n{len(tests) - failed} of {len(tests)} test(s) passed")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

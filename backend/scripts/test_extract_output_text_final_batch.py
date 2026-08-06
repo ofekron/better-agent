@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import traceback
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-extract-final-")
@@ -280,14 +281,29 @@ def main() -> int:
             "the answer",
         ),
     ]
-    ok = all(_run_case(*case) for case in cases)
-    ok = test_non_streaming_projection_clears_stale_content() and ok
-    ok = test_final_mark_survives_later_text_in_apply_event() and ok
+    failed = 0
+    if not all(_run_case(*case) for case in cases):
+        failed += 1
+    for label, runner in (
+        ("non-streaming projection preserves content on tool boundary",
+         test_non_streaming_projection_preserves_content_on_tool_boundary),
+        ("final-marked content survives later non-final text",
+         test_final_mark_survives_later_text_in_apply_event),
+    ):
+        try:
+            runner()
+            print(f"{PASS}  {label}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL}  {label}: {exc}")
+        except Exception:
+            failed += 1
+            traceback.print_exc()
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    return 0 if ok else 1
+    return 1 if failed else 0
 
 
-def test_non_streaming_projection_clears_stale_content() -> bool:
+def test_non_streaming_projection_preserves_content_on_tool_boundary() -> None:
     sess = session_manager.create(
         name="projection",
         model="sonnet",
@@ -324,14 +340,14 @@ def test_non_streaming_projection_clears_stale_content() -> bool:
         m for m in session_manager.get_ref(sid)["messages"]
         if m.get("id") == "msg-stale"
     )
-    ok = projected.get("content") == ""
-    print(f"{PASS if ok else FAIL}  non-streaming projection clears stale content")
-    if not ok:
-        print(f"    got: {projected.get('content')!r}")
-    return ok
+    # Events end on a tool boundary, so extract_output_text projects to "".
+    # An empty projection must not clobber an already-set non-empty snapshot
+    # (see event_shape.project_content_snapshot) — the stale content wins.
+    assert projected.get("content") == "stale progress", \
+        f"got: {projected.get('content')!r}"
 
 
-def test_final_mark_survives_later_text_in_apply_event() -> bool:
+def test_final_mark_survives_later_text_in_apply_event() -> None:
     sess = session_manager.create(
         name="final-mark",
         model="codex",
@@ -362,11 +378,7 @@ def test_final_mark_survives_later_text_in_apply_event() -> bool:
     )
     event_ingester.close(sid)
     got = live_msg.get("content")
-    ok = got == "the real answer"
-    print(f"{PASS if ok else FAIL}  final-marked content survives later non-final text")
-    if not ok:
-        print(f"    got: {got!r}")
-    return ok
+    assert got == "the real answer", f"got: {got!r}"
 
 
 if __name__ == "__main__":
