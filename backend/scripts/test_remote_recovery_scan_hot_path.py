@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import traceback
 
 import _test_home
 
@@ -19,7 +20,7 @@ from ingestion_versions import write_marker  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 
 
-def test_pending_remote_scan_filters_on_disk_state() -> bool:
+def test_pending_remote_scan_filters_on_disk_state() -> None:
     root = runs_root()
     root.mkdir(parents=True, exist_ok=True)
     pending = root / "run-pending"
@@ -43,14 +44,28 @@ def test_pending_remote_scan_filters_on_disk_state() -> bool:
     )
 
     found = run_recovery._pending_remote_runs_for_node("node-a")
-    return [path.name for path, _ in found] == ["run-pending"]
+    names = [path.name for path, _ in found]
+    assert names == ["run-pending"], (
+        "pending remote scan must filter on disk state: only this-node, "
+        "unreconciled runs are recoverable. A reconciled run re-integrated "
+        "would corrupt session state; a foreign-node run would cross-"
+        f"contaminate nodes. got={names}"
+    )
 
 
 def run() -> int:
     try:
-        ok = test_pending_remote_scan_filters_on_disk_state()
-        print(("PASS" if ok else "FAIL") + " pending remote scan filters on disk state")
-        return 0 if ok else 1
+        try:
+            test_pending_remote_scan_filters_on_disk_state()
+        except AssertionError as exc:
+            print("FAIL pending remote scan filters on disk state")
+            print(exc)
+            return 1
+        except Exception:
+            traceback.print_exc()
+            return 1
+        print("PASS pending remote scan filters on disk state")
+        return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
