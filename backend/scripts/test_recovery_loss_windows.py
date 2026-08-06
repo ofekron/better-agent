@@ -160,7 +160,7 @@ def _events_jsonl_uuids(root_id: str) -> set[str]:
     }
 
 
-async def test_is_consistent_rejects_undrained_crash() -> bool:
+async def test_is_consistent_rejects_undrained_crash() -> None:
     """Crash between sid-stamping and tailer drain: the persisted
     session looks 'consistent' (sid stamped on session + msg, not
     streaming, no stopped_at) but processed_byte < jsonl size.
@@ -179,19 +179,14 @@ async def test_is_consistent_rejects_undrained_crash() -> bool:
 
     expected = {e["uuid"] for e in raw}
     got_msg = _msg_event_uuids(app_sid, asst_id)
-    if not expected <= got_msg:
-        print(f"  tail events missing from render tree: {expected - got_msg}")
-        return False
+    assert expected <= got_msg, f"tail events missing from render tree: {expected - got_msg}"
 
     event_journal_writer.barrier_sync(app_sid)
     got_jsonl = _events_jsonl_uuids(app_sid)
-    if not expected <= got_jsonl:
-        print(f"  tail events missing from events.jsonl: {expected - got_jsonl}")
-        return False
-    return True
+    assert expected <= got_jsonl, f"tail events missing from events.jsonl: {expected - got_jsonl}"
 
 
-async def test_replay_failure_blocks_marker() -> bool:
+async def test_replay_failure_blocks_marker() -> None:
     """Wholesale replay failure ⇒ reconciled.marker MUST NOT be
     written, and the next startup scan retries (and succeeds)."""
     app_sid, asst_id = _seed_session(streaming=True)
@@ -212,28 +207,21 @@ async def test_replay_failure_blocks_marker() -> bool:
         run_recovery._replay_and_apply = real_replay
 
     marker = _runs_root() / run_id / "reconciled.marker"
-    if marker.exists():
-        print("  marker written despite wholesale replay failure")
-        return False
+    assert not marker.exists(), "marker written despite wholesale replay failure"
 
     recovered = default_provider().recover_in_flight()
-    if run_id not in {d.get("run_id") for d in recovered}:
-        print("  failed run not rescanned on next startup")
-        return False
+    assert run_id in {d.get("run_id") for d in recovered}, (
+        "failed run not rescanned on next startup"
+    )
     await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
     expected = {e["uuid"] for e in raw}
     got_msg = _msg_event_uuids(app_sid, asst_id)
-    if not expected <= got_msg:
-        print(f"  retry pass did not ingest events: {expected - got_msg}")
-        return False
-    if not marker.exists():
-        print("  marker missing after successful retry pass")
-        return False
-    return True
+    assert expected <= got_msg, f"retry pass did not ingest events: {expected - got_msg}"
+    assert marker.exists(), "marker missing after successful retry pass"
 
 
-async def test_partial_replay_failure_blocks_marker() -> bool:
+async def test_partial_replay_failure_blocks_marker() -> None:
     """One event raising transiently mid-stream: the remaining events
     are still applied within the attempt (per-event isolation), but
     the marker MUST NOT be written — the next startup rescan retries
@@ -270,43 +258,34 @@ async def test_partial_replay_failure_blocks_marker() -> bool:
 
     survivors = {raw[0]["uuid"], raw[2]["uuid"]}
     got_msg = _msg_event_uuids(app_sid, asst_id)
-    if not survivors <= got_msg:
-        print(f"  failed event aborted remaining events: {survivors - got_msg}")
-        return False
+    assert survivors <= got_msg, f"failed event aborted remaining events: {survivors - got_msg}"
     marker = _runs_root() / run_id / "reconciled.marker"
-    if marker.exists():
-        print("  marker written despite a degraded (partial-failure) replay")
-        return False
+    assert not marker.exists(), "marker written despite a degraded (partial-failure) replay"
 
     # Next startup: transient fault gone — rescan retries and completes.
     recovered = default_provider().recover_in_flight()
-    if run_id not in {d.get("run_id") for d in recovered}:
-        print("  degraded run not rescanned on next startup")
-        return False
+    assert run_id in {d.get("run_id") for d in recovered}, (
+        "degraded run not rescanned on next startup"
+    )
     await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
     expected = {e["uuid"] for e in raw}
     got_msg = _msg_event_uuids(app_sid, asst_id)
-    if not expected <= got_msg:
-        print(f"  retry pass did not ingest all events: {expected - got_msg}")
-        return False
-    if not marker.exists():
-        print("  marker missing after successful retry pass")
-        return False
-    return True
+    assert expected <= got_msg, f"retry pass did not ingest all events: {expected - got_msg}"
+    assert marker.exists(), "marker missing after successful retry pass"
 
 
-async def test_unresolvable_root_blocks_marker() -> bool:
+async def test_unresolvable_root_blocks_marker() -> None:
     """`_barrier_journal` must raise (not silently return) when the
     root can't be resolved, and ANY barrier failure on the marker path
     must leave the run unmarked for retry."""
     # Direct: unresolvable root ⇒ raise, never silent success.
     try:
         run_recovery._barrier_journal(f"no-such-session-{uuid.uuid4()}")
-        print("  _barrier_journal returned despite unresolvable root")
-        return False
     except Exception:
         pass
+    else:
+        raise AssertionError("_barrier_journal returned despite unresolvable root")
 
     # End-to-end: barrier failure after a successful replay ⇒ no marker.
     app_sid, asst_id = _seed_session(streaming=True)
@@ -327,29 +306,22 @@ async def test_unresolvable_root_blocks_marker() -> bool:
         event_journal_writer.barrier_sync = real_barrier
 
     marker = _runs_root() / run_id / "reconciled.marker"
-    if marker.exists():
-        print("  marker written despite barrier failure")
-        return False
+    assert not marker.exists(), "marker written despite barrier failure"
 
     # Next startup: barrier healthy — rescan retries and completes.
     recovered = default_provider().recover_in_flight()
-    if run_id not in {d.get("run_id") for d in recovered}:
-        print("  barrier-failed run not rescanned on next startup")
-        return False
+    assert run_id in {d.get("run_id") for d in recovered}, (
+        "barrier-failed run not rescanned on next startup"
+    )
     await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
     expected = {e["uuid"] for e in raw}
     got_msg = _msg_event_uuids(app_sid, asst_id)
-    if not expected <= got_msg:
-        print(f"  retry pass did not ingest events: {expected - got_msg}")
-        return False
-    if not marker.exists():
-        print("  marker missing after successful retry pass")
-        return False
-    return True
+    assert expected <= got_msg, f"retry pass did not ingest events: {expected - got_msg}"
+    assert marker.exists(), "marker missing after successful retry pass"
 
 
-async def test_recovery_barrier_has_no_fixed_timeout() -> bool:
+async def test_recovery_barrier_has_no_fixed_timeout() -> None:
     """Recovery's marker gate must wait for the actual journal drain,
     not a generic bounded caller timeout. A large recovered stream can
     legitimately take longer than the interactive/default barrier."""
@@ -368,10 +340,9 @@ async def test_recovery_barrier_has_no_fixed_timeout() -> bool:
         run_recovery._barrier_journal(app_sid)
     finally:
         event_journal_writer.barrier_sync = real_barrier
-    return True
 
 
-async def test_marker_after_journal_drain() -> bool:
+async def test_marker_after_journal_drain() -> None:
     """When reconciled.marker exists, the replayed events MUST already
     be readable from events.jsonl — no fire-and-forget gap between the
     marker and the journal writes. Simulated by slowing the shard
@@ -394,19 +365,13 @@ async def test_marker_after_journal_drain() -> bool:
         await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
         marker = _runs_root() / run_id / "reconciled.marker"
-        if not marker.exists():
-            print("  marker never written for a successful replay")
-            return False
+        assert marker.exists(), "marker never written for a successful replay"
 
         expected = {e["uuid"] for e in raw}
         got_jsonl = _events_jsonl_uuids(app_sid)
-        if not expected <= got_jsonl:
-            print(
-                "  marker present but events not yet durable in "
-                f"events.jsonl: {expected - got_jsonl}"
-            )
-            return False
-        return True
+        assert expected <= got_jsonl, (
+            f"marker present but events not yet durable in events.jsonl: {expected - got_jsonl}"
+        )
     finally:
         event_journal_writer._append_event = real_append
         event_journal_writer.barrier_sync(app_sid)
@@ -433,15 +398,15 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = asyncio.run(fn())
+                asyncio.run(fn())
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
                 print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
                 failed += 1
+                print(f"{FAIL}  {name}")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

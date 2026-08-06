@@ -133,7 +133,7 @@ def _asst(app_sid: str, asst_id: str) -> dict:
     return next(m for m in sess["messages"] if m["id"] == asst_id)
 
 
-async def test_shutdown_killed_run_not_marked_stopped() -> bool:
+async def test_shutdown_killed_run_not_marked_stopped() -> None:
     """A recovered run with cancelled=True (hard-killed by backend
     shutdown) must NOT get stopped_at stamped. Pre-fix this stamped
     stopped_at at recovery wall-clock, misattributing a shutdown-killed
@@ -146,16 +146,13 @@ async def test_shutdown_killed_run_not_marked_stopped() -> bool:
     await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
     asst = _asst(app_sid, asst_id)
-    if asst.get("isStreaming") is True:
-        print("  streaming not pinned to False after recovery")
-        return False
-    if asst.get("stopped_at") not in (None, ""):
-        print(f"  cancelled run got a false stopped_at: {asst.get('stopped_at')!r}")
-        return False
-    return True
+    assert asst.get("isStreaming") is not True, "streaming not pinned to False after recovery"
+    assert asst.get("stopped_at") in (None, ""), (
+        f"cancelled run got a false stopped_at: {asst.get('stopped_at')!r}"
+    )
 
 
-async def test_real_user_stop_preserved_across_recovery() -> bool:
+async def test_real_user_stop_preserved_across_recovery() -> None:
     """A turn the user actually stopped already has stopped_at persisted
     by the live path (cancelled=False — soft stop). Recovery must PRESERVE
     it, not clear it. Pre-fix the else-branch of _apply_completion_state
@@ -170,13 +167,12 @@ async def test_real_user_stop_preserved_across_recovery() -> bool:
     await integrate_recovered_runs(coordinator=None, recovered=recovered)
 
     asst = _asst(app_sid, asst_id)
-    if asst.get("stopped_at") != "2026-06-20T10:00:00.000000":
-        print(f"  real user-stop stopped_at not preserved: {asst.get('stopped_at')!r}")
-        return False
-    return True
+    assert asst.get("stopped_at") == "2026-06-20T10:00:00.000000", (
+        f"real user-stop stopped_at not preserved: {asst.get('stopped_at')!r}"
+    )
 
 
-async def test_cancelled_live_pid_is_not_readmitted() -> bool:
+async def test_cancelled_live_pid_is_not_readmitted() -> None:
     app_sid, asst_id = _seed_streaming_assistant("native")
     run_id = _seed_run(
         app_sid,
@@ -192,9 +188,9 @@ async def test_cancelled_live_pid_is_not_readmitted() -> bool:
         for descriptor in bridge.recover_in_flight()
         if descriptor.get("run_id") == run_id
     ]
-    if len(recovered) != 1 or not recovered[0].get("alive"):
-        print(f"  live cancelled fixture was not recovered: {recovered!r}")
-        return False
+    assert len(recovered) == 1 and recovered[0].get("alive"), (
+        f"live cancelled fixture was not recovered: {recovered!r}"
+    )
 
     class _ProcessControl:
         @staticmethod
@@ -213,23 +209,18 @@ async def test_cancelled_live_pid_is_not_readmitted() -> bool:
     finally:
         run_recovery.process_control = original
 
-    if run_id in bridge._runs:
-        print("  cancelled process was attached to the provider")
-        return False
-    if _asst(app_sid, asst_id).get("isStreaming") is True:
-        print("  cancelled process left the assistant streaming")
-        return False
-    return True
+    assert run_id not in bridge._runs, "cancelled process was attached to the provider"
+    assert _asst(app_sid, asst_id).get("isStreaming") is not True, (
+        "cancelled process left the assistant streaming"
+    )
 
 
-async def test_cancelled_recovery_is_identity_safe() -> bool:
+async def test_cancelled_recovery_is_identity_safe() -> None:
     import run_recovery
     from process_identity import process_identity_to_dict
 
     identity = process_identity_to_dict(os.getpid())
-    if identity is None:
-        print("  could not capture test process identity")
-        return False
+    assert identity is not None, "could not capture test process identity"
     desc = {
         "pid": os.getpid(),
         "alive": True,
@@ -251,9 +242,7 @@ async def test_cancelled_recovery_is_identity_safe() -> bool:
     run_recovery.process_control = lambda: _ProcessControl()
     try:
         await run_recovery._contain_cancelled_recovered_runner(desc)
-        if not _ProcessControl.killed:
-            print("  verified cancelled runner was not contained")
-            return False
+        assert _ProcessControl.killed, "verified cancelled runner was not contained"
         _ProcessControl.killed = False
         try:
             await run_recovery._contain_cancelled_recovered_runner({
@@ -263,14 +252,12 @@ async def test_cancelled_recovery_is_identity_safe() -> bool:
         except RuntimeError:
             pass
         else:
-            print("  unverified cancelled runner did not fail closed")
-            return False
+            raise AssertionError("unverified cancelled runner did not fail closed")
     finally:
         run_recovery.process_control = original
-    return True
 
 
-async def test_recovered_success_gets_completed_at() -> bool:
+async def test_recovered_success_gets_completed_at() -> None:
     """A recovered successful run must be terminal even when events were
     already fully live-ingested before a backend restart. Without this, the
     assistant bubble can remain blank/non-terminal forever after recovery marks
@@ -290,19 +277,16 @@ async def test_recovered_success_gets_completed_at() -> bool:
 
     asst = _asst(app_sid, asst_id)
     completed_at = str(asst.get("completed_at") or "")
-    if not completed_at:
-        print(f"  recovered success missing completed_at: {asst!r}")
-        return False
-    if datetime.fromisoformat(completed_at).tzinfo is not None:
-        print(f"  recovered completed_at changed wire shape: {completed_at!r}")
-        return False
-    if asst.get("stopped_at"):
-        print(f"  recovered success got stopped_at: {asst.get('stopped_at')!r}")
-        return False
-    return True
+    assert completed_at, f"recovered success missing completed_at: {asst!r}"
+    assert datetime.fromisoformat(completed_at).tzinfo is None, (
+        f"recovered completed_at changed wire shape: {completed_at!r}"
+    )
+    assert not asst.get("stopped_at"), (
+        f"recovered success got stopped_at: {asst.get('stopped_at')!r}"
+    )
 
 
-async def test_recovered_failure_gets_assistant_error() -> bool:
+async def test_recovered_failure_gets_assistant_error() -> None:
     """A recovered failed run must be terminal on the assistant message,
     not only represented by the sidebar dot."""
     app_sid, asst_id = _seed_streaming_assistant("native")
@@ -319,13 +303,12 @@ async def test_recovered_failure_gets_assistant_error() -> bool:
     _apply_completion_state(app_sid, asst_id, run_id=run_id, cancelled=False)
 
     asst = _asst(app_sid, asst_id)
-    if not asst.get("error") or asst.get("errorText") != "HTTP 500: upstream":
-        print(f"  recovered failure missing assistant error: {asst!r}")
-        return False
-    if asst.get("completed_at"):
-        print(f"  recovered failure got completed_at: {asst.get('completed_at')!r}")
-        return False
-    return True
+    assert asst.get("error") and asst.get("errorText") == "HTTP 500: upstream", (
+        f"recovered failure missing assistant error: {asst!r}"
+    )
+    assert not asst.get("completed_at"), (
+        f"recovered failure got completed_at: {asst.get('completed_at')!r}"
+    )
 
 
 TESTS = [
@@ -349,15 +332,15 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = asyncio.run(fn()) if inspect.iscoroutinefunction(fn) else fn()
+                asyncio.run(fn()) if inspect.iscoroutinefunction(fn) else fn()
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
                 print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
                 failed += 1
+                print(f"{FAIL}  {name}")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

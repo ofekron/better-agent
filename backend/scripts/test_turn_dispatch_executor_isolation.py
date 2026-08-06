@@ -66,7 +66,6 @@ if _BACKEND not in sys.path:
 import turn_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 _PROBE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "turn_dispatch_test_probe", default="unset",
@@ -75,59 +74,57 @@ _PROBE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 # ─── A: behavior parity with asyncio.to_thread ─────────────────────
 
-async def test_a_behavior_parity() -> bool:
+async def test_a_behavior_parity() -> None:
     def _echo(x: int) -> int:
         return x * 2
 
     result = await turn_manager._to_turn_dispatch_thread(_echo, 21)
-    result_ok = result == 42
+    assert result == 42, f"return value wrong: {result}"
 
     def _boom() -> None:
         raise ValueError("dispatch-thread-boom")
 
-    raised = False
+    raised_exc: Exception | None = None
     try:
         await turn_manager._to_turn_dispatch_thread(_boom)
     except ValueError as exc:
-        raised = str(exc) == "dispatch-thread-boom"
+        raised_exc = exc
+    assert raised_exc is not None, "exception propagation wrong: did not raise ValueError"
+    assert str(raised_exc) == "dispatch-thread-boom", (
+        f"exception propagation wrong: {raised_exc}"
+    )
 
     token = _PROBE_VAR.set("caller-set-value")
     try:
         seen_in_thread = await turn_manager._to_turn_dispatch_thread(_PROBE_VAR.get)
     finally:
         _PROBE_VAR.reset(token)
-    context_ok = seen_in_thread == "caller-set-value"
-
-    ok = result_ok and raised and context_ok
-    print(
-        f"{PASS if ok else FAIL} A: return value {'ok' if result_ok else 'WRONG'}, "
-        f"exception propagation {'ok' if raised else 'WRONG'}, "
-        f"contextvar propagation {'ok' if context_ok else 'WRONG'}"
+    assert seen_in_thread == "caller-set-value", (
+        f"contextvar propagation wrong: {seen_in_thread}"
     )
-    return ok
+    print(f"{PASS} A: return value ok, exception propagation ok, contextvar propagation ok")
 
 
 # ─── B: dedicated pool is a distinct, named executor ───────────────
 
-def test_b_dedicated_executor_identity() -> bool:
+def test_b_dedicated_executor_identity() -> None:
     executor = turn_manager._TURN_DISPATCH_EXECUTOR
-    is_dedicated = executor is not None
-    prefix_ok = getattr(executor, "_thread_name_prefix", "") == "turn-dispatch"
-    sized_off_cpu = executor._max_workers == (os.cpu_count() or 4) * 4
-
-    ok = is_dedicated and prefix_ok and sized_off_cpu
-    print(
-        f"{PASS if ok else FAIL} B: dedicated executor "
-        f"(distinct={is_dedicated}, name_prefix_ok={prefix_ok}, "
-        f"sized_off_cpu_count={sized_off_cpu}, "
-        f"max_workers={executor._max_workers})"
+    assert executor is not None, "dedicated executor missing"
+    assert getattr(executor, "_thread_name_prefix", "") == "turn-dispatch", (
+        f"wrong thread name prefix: {getattr(executor, '_thread_name_prefix', '')!r}"
     )
-    return ok
+    assert executor._max_workers == (os.cpu_count() or 4) * 4, (
+        f"executor sized wrong: max_workers={executor._max_workers}"
+    )
+    print(
+        f"{PASS} B: dedicated executor (distinct=True, name_prefix_ok=True, "
+        f"sized_off_cpu_count=True, max_workers={executor._max_workers})"
+    )
 
 
 # ─── C: throughput isolated from default-pool saturation ──────────
 
-async def test_c_isolated_from_default_pool_saturation() -> bool:
+async def test_c_isolated_from_default_pool_saturation() -> None:
     default_pool_workers = min(32, (os.cpu_count() or 1) + 4)
     slow_seconds = 1.5
     started = [threading.Event() for _ in range(default_pool_workers)]
@@ -175,34 +172,31 @@ async def test_c_isolated_from_default_pool_saturation() -> bool:
     await control_task
     control_elapsed = time.monotonic() - control_start
 
-    results_ok = dispatch_results == [i * i for i in range(8)]
-    fast_ok = dispatch_elapsed < 0.5
-    control_ok = control_delayed and control_elapsed >= slow_seconds * 0.9
-
-    ok = results_ok and fast_ok and control_ok
+    assert dispatch_results == [i * i for i in range(8)], (
+        f"WRONG RESULTS: {dispatch_results}"
+    )
+    assert dispatch_elapsed < 0.5, f"dispatch took {dispatch_elapsed:.3f}s (want < 0.5s)"
+    assert control_delayed and control_elapsed >= slow_seconds * 0.9, (
+        f"control not delayed (delayed={control_delayed}, "
+        f"elapsed={control_elapsed:.3f}s, want >= {slow_seconds * 0.9:.2f}s)"
+    )
     print(
-        f"{PASS if ok else FAIL} C: {default_pool_workers} default-pool "
+        f"{PASS} C: {default_pool_workers} default-pool "
         f"threads saturated for {slow_seconds}s; dispatch calls "
-        f"({'correct results, ' if results_ok else 'WRONG RESULTS, '}"
-        f"{dispatch_elapsed:.3f}s) vs control asyncio.to_thread call "
+        f"(correct results, {dispatch_elapsed:.3f}s) vs control asyncio.to_thread call "
         f"({control_elapsed:.3f}s, delayed={control_delayed}) "
         f"(want dispatch < 0.5s, control >= {slow_seconds * 0.9:.2f}s)"
     )
-    return ok
 
 
 # ─── runner ─────────────────────────────────────────────────────────
 
 async def _run() -> int:
-    results = [
-        await test_a_behavior_parity(),
-        test_b_dedicated_executor_identity(),
-        await test_c_isolated_from_default_pool_saturation(),
-    ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{total} subtests passed")
-    return 0 if passed == total else 1
+    await test_a_behavior_parity()
+    test_b_dedicated_executor_identity()
+    await test_c_isolated_from_default_pool_saturation()
+    print("\n3/3 subtests passed")
+    return 0
 
 
 def main() -> int:
