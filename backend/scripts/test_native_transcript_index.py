@@ -204,7 +204,7 @@ def _write_current_codex(path: Path) -> None:
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
 
 
-def test_indexes_corpus_and_drops_tool_result() -> bool:
+def test_indexes_corpus_and_drops_tool_result() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude_rich(claude / encode_cwd("/proj") / "s1.jsonl")
@@ -235,10 +235,10 @@ def test_indexes_corpus_and_drops_tool_result() -> bool:
     )
     print(f"{OK if ok else FAIL} indexes lean elements, drops tool_result "
           f"(kinds={kinds}, refresh={r})")
-    return ok
+    assert ok
 
 
-def test_indexes_pi_sessions() -> bool:
+def test_indexes_pi_sessions() -> None:
     _setup_roots()
     pi = _SCRATCH / "pi-sessions"
     _write_pi_rich(pi / "--proj-pi--" / "2026-01-01T00-00-00-000Z_pi-session.jsonl")
@@ -256,10 +256,10 @@ def test_indexes_pi_sessions() -> bool:
         and not any("bulk" in x["text"] for x in rows)
     )
     print(f"{OK if ok else FAIL} indexes pi sessions leanly (kinds={kinds}, refresh={r})")
-    return ok
+    assert ok
 
 
-def test_old_schema_cache_rebuilds() -> bool:
+def test_old_schema_cache_rebuilds() -> None:
     _setup_roots()
     conn = idx._writer_connection()
     conn.execute("DROP TABLE native_element_fts")
@@ -312,10 +312,10 @@ def test_old_schema_cache_rebuilds() -> bool:
     print(f"{OK if ok else FAIL} old schema cache rebuilds "
           f"(columns={columns}, meta_columns={meta_columns}, "
           f"file_state_columns={file_state_columns}, stale_rows={stale_rows})")
-    return ok
+    assert ok
 
 
-def test_timestamp_utc_orders_offsets_chronologically() -> bool:
+def test_timestamp_utc_orders_offsets_chronologically() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude_events(claude / encode_cwd("/proj") / "time.jsonl", [
@@ -336,10 +336,10 @@ def test_timestamp_utc_orders_offsets_chronologically() -> bool:
         and "ts" not in idx._FTS_COLUMNS
     )
     print(f"{OK if ok else FAIL} ts_utc orders offset timestamps chronologically (rows={rows})")
-    return ok
+    assert ok
 
 
-def test_provider_roots_ignore_spoofed_home() -> bool:
+def test_provider_roots_ignore_spoofed_home() -> None:
     real_home = _SCRATCH / "real-native-home"
     fake_home = _SCRATCH / "fake-native-home"
     shutil.rmtree(real_home, ignore_errors=True)
@@ -392,10 +392,10 @@ def test_provider_roots_ignore_spoofed_home() -> bool:
             os.environ["PI_CODING_AGENT_DIR"] = old_pi_agent_dir
 
     print(f"{OK if ok else FAIL} provider roots ignore spoofed HOME")
-    return ok
+    assert ok
 
 
-def test_native_roots_dedupes_symlinked_real_path() -> bool:
+def test_native_roots_dedupes_symlinked_real_path() -> None:
     real_config = _SCRATCH / "real-zai"
     real_root = real_config / "projects"
     overlay_home = _SCRATCH / "codex-overlay-home"
@@ -412,10 +412,10 @@ def test_native_roots_dedupes_symlinked_real_path() -> bool:
     ])
     ok = roots == [(alias_root, "claude")]
     print(f"{OK if ok else FAIL} native roots dedupe symlinked real path (roots={roots})")
-    return ok
+    assert ok
 
 
-def test_old_codex_prompt_timestamp_indexes_from_raw_session() -> bool:
+def test_old_codex_prompt_timestamp_indexes_from_raw_session() -> None:
     _setup_roots()
     codex = _SCRATCH / "codex-sessions"
     transcript = codex / "2025" / "10" / "20" / "rollout-2025-10-20T10-05-35-old.jsonl"
@@ -445,10 +445,10 @@ def test_old_codex_prompt_timestamp_indexes_from_raw_session() -> bool:
         ]
     )
     print(f"{OK if ok else FAIL} old codex prompt timestamp indexes from raw session (rows={rows})")
-    return ok
+    assert ok
 
 
-def test_current_codex_full_transcript_indexes_from_raw_session() -> bool:
+def test_current_codex_full_transcript_indexes_from_raw_session() -> None:
     _setup_roots()
     codex = _SCRATCH / "codex-sessions"
     transcript = codex / "2026" / "07" / "10" / "rollout-current.jsonl"
@@ -475,10 +475,10 @@ def test_current_codex_full_transcript_indexes_from_raw_session() -> bool:
         and not idx.search_rows(["interagentmustnotindex"], limit=10)
     )
     print(f"{OK if ok else FAIL} current codex full transcript indexes (kinds={set(by_kind)})")
-    return ok
+    assert ok
 
 
-def test_match_paths_cwd_filter_and_cap() -> bool:
+def test_match_paths_cwd_filter_and_cap() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj-a") / "s1.jsonl", ["sharedneedle alpha"])
@@ -492,10 +492,10 @@ def test_match_paths_cwd_filter_and_cap() -> bool:
         and a_paths == {"s1"}  # cwd filter narrowed to /proj-a
     )
     print(f"{OK if ok else FAIL} match_paths cwd-filter + cap (all={len(all_hits)}, /proj-a={a_paths})")
-    return ok
+    assert ok
 
 
-def test_freshness_reindexes_changed_files() -> bool:
+def test_freshness_reindexes_changed_files() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     fpath = claude / encode_cwd("/proj") / "s1.jsonl"
@@ -512,10 +512,10 @@ def test_freshness_reindexes_changed_files() -> bool:
     ok = len(before) >= 1 and r["touched"] >= 1 and len(after) == 1
     print(f"{OK if ok else FAIL} freshness reindexes delta (touched={r['touched']}, "
           f"deltaneedle_rows={len(after)})")
-    return ok
+    assert ok
 
 
-def test_covered_refresh_does_not_full_walk() -> bool:
+def test_covered_refresh_does_not_full_walk() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     fpath = claude / encode_cwd("/proj") / "s1.jsonl"
@@ -537,10 +537,10 @@ def test_covered_refresh_does_not_full_walk() -> bool:
     ok = called["stat_walk"] == 0 and r["full"] == 0 and r["touched"] >= 1 and len(rows) == 1
     print(f"{OK if ok else FAIL} covered refresh avoids full walk "
           f"(stat_walk={called['stat_walk']}, refresh={r}, rows={len(rows)})")
-    return ok
+    assert ok
 
 
-def test_forced_full_reconcile_discovers_external_files() -> bool:
+def test_forced_full_reconcile_discovers_external_files() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["firstneedle here"])
@@ -553,10 +553,10 @@ def test_forced_full_reconcile_discovers_external_files() -> bool:
     ok = steady["full"] == 0 and len(before) == 0 and full["full"] == 1 and len(after) == 1
     print(f"{OK if ok else FAIL} forced full reconcile discovers external files "
           f"(steady={steady}, full={full}, before={len(before)}, after={len(after)})")
-    return ok
+    assert ok
 
 
-def test_restart_covered_worker_does_not_immediately_full_walk() -> bool:
+def test_restart_covered_worker_does_not_immediately_full_walk() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["restartneedle here"])
@@ -565,10 +565,10 @@ def test_restart_covered_worker_does_not_immediately_full_walk() -> bool:
     ok = idx.is_covered() and not idx._full_reconcile_due()
     print(f"{OK if ok else FAIL} covered restart reads full-reconcile timestamp "
           f"(last_full={idx._last_full_reconcile_at:.1f})")
-    return ok
+    assert ok
 
 
-def test_not_usable_until_covered() -> bool:
+def test_not_usable_until_covered() -> None:
     _setup_roots()
     cold = idx.quick_state()
     ok = not idx.is_usable() and not idx.is_covered() and cold == {
@@ -585,10 +585,10 @@ def test_not_usable_until_covered() -> bool:
     }
     print(f"{OK if ok else FAIL} quick_state/is_usable gated on covered "
           f"(cold={cold}, covered={covered})")
-    return ok
+    assert ok
 
 
-def test_incomplete_full_scan_state_overrides_stale_covered_bit() -> bool:
+def test_incomplete_full_scan_state_overrides_stale_covered_bit() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["stalecoveredneedle here"])
@@ -607,10 +607,10 @@ def test_incomplete_full_scan_state_overrides_stale_covered_bit() -> bool:
     ok = state == {"schema_ok": True, "covered": False, "usable": False} and not idx.is_covered()
     print(f"{OK if ok else FAIL} incomplete full scan state overrides stale covered bit "
           f"(state={state})")
-    return ok
+    assert ok
 
 
-def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
+def test_cold_full_build_commits_partial_progress_and_resumes() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -657,10 +657,10 @@ def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
     print(f"{OK if ok else FAIL} cold full build commits partial progress and resumes "
           f"(first={first}, first_files={first_files}, second={second}, "
           f"second_files={second_files}, third={third}, fourth={fourth}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_default_cold_build_batch_is_bounded() -> bool:
+def test_default_cold_build_batch_is_bounded() -> None:
     claude, codex = _setup_roots()
     original_path_stat = idx.Path.stat
     stat_calls = {"count": 0, "paths": set()}
@@ -727,10 +727,10 @@ def test_default_cold_build_batch_is_bounded() -> bool:
           f"(batch={idx._FULL_REFRESH_FILE_BATCH}, first={first}, "
           f"first_files={first_files}, second={second}, third={third}, fourth={fourth}, final={final_state}, "
           f"stat_calls_after_first={stat_calls_after_first}, queue_after_first={queue_after_first})")
-    return ok
+    assert ok
 
 
-def test_queue_empty_incomplete_full_scan_resumes() -> bool:
+def test_queue_empty_incomplete_full_scan_resumes() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -774,10 +774,10 @@ def test_queue_empty_incomplete_full_scan_resumes() -> bool:
     print(f"{OK if ok else FAIL} queue-empty incomplete full scan resumes "
           f"(first={first}, second={second}, third={third}, "
           f"queue_after_first={queue_after_first}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_partial_full_scan_defers_repeat_projection() -> bool:
+def test_partial_full_scan_defers_repeat_projection() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -815,10 +815,10 @@ def test_partial_full_scan_defers_repeat_projection() -> bool:
     )
     print(f"{OK if ok else FAIL} partial full scan defers repeat projection "
           f"(first={first}, rebuild_calls={calls['rebuild']}, status={status})")
-    return ok
+    assert ok
 
 
-def test_full_scan_completes_despite_live_touched_directory() -> bool:
+def test_full_scan_completes_despite_live_touched_directory() -> None:
     """Directory metadata changes must not reset name-cursor resume."""
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -861,10 +861,10 @@ def test_full_scan_completes_despite_live_touched_directory() -> bool:
     print(f"{OK if ok else FAIL} full scan completes despite live touched directory "
           f"(passes={len(results)}, last={results[-1]}, rows={len(rows)}, "
           f"final={final_state})")
-    return ok
+    assert ok
 
 
-def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
+def test_full_scan_indexes_file_inserted_before_resume_cursor() -> None:
     """Under the name-cursor resume contract, an entry inserted with a name that
     sorts at or before the current cursor is DEFERRED to the next fresh full
     sweep (cursor resets to "") rather than discovered mid-sweep. It must not be
@@ -923,10 +923,10 @@ def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
           f"(passes={len(results)}, deferred={len(deferred_rows)}, "
           f"fresh_passes={len(fresh)}, rows={len(rows)}, paths={sorted(paths)}, "
           f"final={final_state})")
-    return ok
+    assert ok
 
 
-def test_incremental_full_scan_preserves_sibling_directories() -> bool:
+def test_incremental_full_scan_preserves_sibling_directories() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -970,7 +970,7 @@ def test_incremental_full_scan_preserves_sibling_directories() -> bool:
     print(f"{OK if ok else FAIL} incremental full scan preserves sibling directories "
           f"(first={first}, second={second}, third={third}, "
           f"rows={len(rows)}, proj_b_rows={len(proj_b_rows)}, final={final_state})")
-    return ok
+    assert ok
 
 
 def _full_scan_stack() -> list[dict]:
@@ -982,7 +982,7 @@ def _full_scan_stack() -> list[dict]:
     return json.loads(row[0]).get("stack") or []
 
 
-def test_incremental_full_scan_keeps_one_parent_continuation() -> bool:
+def test_incremental_full_scan_keeps_one_parent_continuation() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1024,10 +1024,10 @@ def test_incremental_full_scan_keeps_one_parent_continuation() -> bool:
     print(f"{OK if ok else FAIL} incremental full scan keeps one parent continuation "
           f"(first={first}, parent_count={parent_count}, passes={len(results)}, "
           f"rows={len(rows)}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_corrupt_duplicate_full_scan_state_restarts() -> bool:
+def test_corrupt_duplicate_full_scan_state_restarts() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1077,10 +1077,10 @@ def test_corrupt_duplicate_full_scan_state_restarts() -> bool:
     print(f"{OK if ok else FAIL} corrupt duplicate full scan state restarts "
           f"(first={first}, duplicate_free={duplicate_free}, passes={len(results)}, "
           f"rows={len(rows)}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_full_scan_entry_budget_yields_without_candidates() -> bool:
+def test_full_scan_entry_budget_yields_without_candidates() -> None:
     """With a tiny entry budget, a directory full of ignored-suffix entries
     exhausts the budget before any candidate is found: the frame is saved with
     its name cursor, the discovery batch is empty, and per-pass examined work
@@ -1183,7 +1183,7 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
           f"remaining={remaining_after_first}, per_pass_seen={per_pass_seen}, "
           f"passes={len(results)}, rows={len(rows)}, inserted={len(inserted_after)}, "
           f"fresh_passes={len(fresh)}, final={final_state})")
-    return ok
+    assert ok
 
 
 def _install_order_scandir(sort_key, *, reverse=False):
@@ -1233,7 +1233,7 @@ def _seen_query_guarded_conn(inner):
     return GuardedConn(inner)
 
 
-def test_full_scan_deletion_scrambled_order_finds_surviving_needles() -> bool:
+def test_full_scan_deletion_scrambled_order_finds_surviving_needles() -> None:
     """Regression for the positional-offset resume bug (c4632ec6a). With scandir
     yielding a fixed non-sorted order, deleting a sibling that yields BEFORE
     later needles shifts their positional index; the positional offset then skips
@@ -1303,10 +1303,10 @@ def test_full_scan_deletion_scrambled_order_finds_surviving_needles() -> bool:
     print(f"{OK if ok else FAIL} full scan finds surviving needles after deletion in scrambled order "
           f"(passes={len(results)}, per_pass_seen={per_pass}, found={sorted(found)}, "
           f"expected={sorted(expected)}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_full_scan_scrambled_order_finds_insertion_after_cursor() -> bool:
+def test_full_scan_scrambled_order_finds_insertion_after_cursor() -> None:
     """An entry inserted with a name that sorts AFTER the current cursor must be
     discovered (never skipped) — that is the core correctness invariant of
     name-cursor resume. Run under a non-sorted scandir order to also prove
@@ -1357,10 +1357,10 @@ def test_full_scan_scrambled_order_finds_insertion_after_cursor() -> bool:
     )
     print(f"{OK if ok else FAIL} full scan finds insertion after cursor in scrambled order "
           f"(passes={len(results)}, found={sorted(found)}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_partial_resume_does_not_scan_entire_queue() -> bool:
+def test_partial_resume_does_not_scan_entire_queue() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1416,10 +1416,10 @@ def test_partial_resume_does_not_scan_entire_queue() -> bool:
     print(f"{OK if ok else FAIL} partial resume avoids full detailed queue scans "
           f"(first={first}, second={second}, third={third}, "
           f"full_queue_scans={guarded.full_queue_scans}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_full_scan_seen_queries_bounded_on_mutated_resume() -> bool:
+def test_full_scan_seen_queries_bounded_on_mutated_resume() -> None:
     """Regression: a directory mutated between passes must not re-query the
     SQLite seen-set for every already-seen entry each pass (O(N^2)). Each
     examined entry costs one budget unit, and the name cursor persists across
@@ -1500,10 +1500,10 @@ def test_full_scan_seen_queries_bounded_on_mutated_resume() -> bool:
           f"(budget={budget}, passes={len(results)}, "
           f"per_pass_seen={per_pass_seen_queries}, max_seen={max_seen}, "
           f"rows={len(rows)}, final={final_state})")
-    return ok
+    assert ok
 
 
-def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
+def test_partial_full_build_reconciles_deletes_before_final_covered() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1538,10 +1538,10 @@ def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     print(f"{OK if ok else FAIL} partial full build reconciles deletes before final covered "
           f"(results={results}, stale_rows={len(stale_rows)}, new_rows={len(new_rows)}, "
           f"final={final_state})")
-    return ok
+    assert ok
 
 
-def test_covered_partial_full_queue_resumes_by_default() -> bool:
+def test_covered_partial_full_queue_resumes_by_default() -> None:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
@@ -1582,10 +1582,10 @@ def test_covered_partial_full_queue_resumes_by_default() -> bool:
     print(f"{OK if ok else FAIL} covered partial full queue resumes by default "
           f"(first={first}, second={second}, third={third}, "
           f"queue_after_first={queue_after_first}, final_queue={final_queue})")
-    return ok
+    assert ok
 
 
-def test_refresh_persists_batch_and_file_timings() -> bool:
+def test_refresh_persists_batch_and_file_timings() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "timing-a.jsonl", ["timingneedle alpha"])
@@ -1622,10 +1622,10 @@ def test_refresh_persists_batch_and_file_timings() -> bool:
     )
     print(f"{OK if ok else FAIL} refresh persists batch/file timings "
           f"(result={result}, phases={sorted(phase_timings)}, files={len(file_timings)})")
-    return ok
+    assert ok
 
 
-def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
+def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     fpath = claude / encode_cwd("/proj") / "rowid-delete.jsonl"
@@ -1687,10 +1687,10 @@ def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
           f"(result={result}, path_deletes={guarded.fts_path_deletes}, "
           f"rowid_deletes={guarded.fts_rowid_deletes}, rows={len(rows)}, "
           f"mapped={mapped_rows}, meta={meta_rows})")
-    return ok
+    assert ok
 
 
-def test_metadata_projection_tracks_refresh_and_delete() -> bool:
+def test_metadata_projection_tracks_refresh_and_delete() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     first = claude / encode_cwd("/proj") / "meta-a.jsonl"
@@ -1724,10 +1724,10 @@ def test_metadata_projection_tracks_refresh_and_delete() -> bool:
     print(f"{OK if ok else FAIL} metadata projection tracks refresh and delete "
           f"(before={before}/{before_meta}, after={after}/{after_meta}, "
           f"deleted_meta={deleted_meta}, result={result})")
-    return ok
+    assert ok
 
 
-def test_full_walk_ignores_non_transcript_run_jsonl() -> bool:
+def test_full_walk_ignores_non_transcript_run_jsonl() -> None:
     claude, codex = _setup_roots()
     runs = _SCRATCH / "runs"
     shutil.rmtree(runs, ignore_errors=True)
@@ -1759,10 +1759,10 @@ def test_full_walk_ignores_non_transcript_run_jsonl() -> bool:
     )
     print(f"{OK if ok else FAIL} full walk ignores non-transcript run jsonl "
           f"(result={result}, ignored={len(ignored)}, found={len(found)}, indexed={len(indexed_paths)})")
-    return ok
+    assert ok
 
 
-def test_steady_refresh_purges_preexisting_non_transcript_run_jsonl() -> bool:
+def test_steady_refresh_purges_preexisting_non_transcript_run_jsonl() -> None:
     claude, codex = _setup_roots()
     runs = _SCRATCH / "runs"
     shutil.rmtree(runs, ignore_errors=True)
@@ -1805,10 +1805,10 @@ def test_steady_refresh_purges_preexisting_non_transcript_run_jsonl() -> bool:
     )
     print(f"{OK if ok else FAIL} steady refresh purges stale non-transcript run jsonl "
           f"(result={result}, before={len(before)}, after={len(after)}, indexed={len(indexed_paths)})")
-    return ok
+    assert ok
 
 
-def test_steady_refresh_is_bounded_over_indexed_paths() -> bool:
+def test_steady_refresh_is_bounded_over_indexed_paths() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     for i in range(5):
@@ -1857,10 +1857,10 @@ def test_steady_refresh_is_bounded_over_indexed_paths() -> bool:
     )
     print(f"{OK if ok else FAIL} steady refresh is bounded over indexed paths "
           f"(result={result}, scans={guarded.full_file_state_scans}, cursor={cursor})")
-    return ok
+    assert ok
 
 
-def test_refresh_stamps_freshness_after_index_work() -> bool:
+def test_refresh_stamps_freshness_after_index_work() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "fresh-after-work.jsonl", ["freshafterwork"])
@@ -1888,10 +1888,10 @@ def test_refresh_stamps_freshness_after_index_work() -> bool:
     ok = result["touched"] == 1 and last_walk_at == 1010.0
     print(f"{OK if ok else FAIL} refresh stamps freshness after index work "
           f"(result={result}, last_walk_at={last_walk_at})")
-    return ok
+    assert ok
 
 
-def test_broad_match_signals_fallback() -> bool:
+def test_broad_match_signals_fallback() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     enc = encode_cwd("/proj")
@@ -1902,10 +1902,10 @@ def test_broad_match_signals_fallback() -> bool:
     res = idx.match_paths(["commonneedle"], set())
     ok = res is None
     print(f"{OK if ok else FAIL} broad match (>cap) signals fallback (got None={res is None})")
-    return ok
+    assert ok
 
 
-def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
+def test_wait_fresh_serves_delta_instead_of_falling_back() -> None:
     """Once covered, a stale query REQUESTS a refresh and waits for the delta
     over indexed paths rather than dropping to rg. Simulates the worker with a
     one-shot thread that refreshes after the request."""
@@ -1939,10 +1939,10 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     ok = fresh and len(rows) >= 1
     print(f"{OK if ok else FAIL} wait_fresh serves delta instead of fallback "
           f"(fresh={fresh}, rows={len(rows)})")
-    return ok
+    assert ok
 
 
-def test_request_refresh_persists_cross_process_marker() -> bool:
+def test_request_refresh_persists_cross_process_marker() -> None:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["markerneedle here"])
@@ -1954,10 +1954,10 @@ def test_request_refresh_persists_cross_process_marker() -> bool:
     ok = requested_at > handled_at and idx._refresh_request_pending()
     print(f"{OK if ok else FAIL} request_refresh persists cross-process marker "
           f"(requested={requested_at}, handled={handled_at})")
-    return ok
+    assert ok
 
 
-def test_refresh_reports_locked_instead_of_colliding() -> bool:
+def test_refresh_reports_locked_instead_of_colliding() -> None:
     _setup_roots()
     lock_path = idx._writer_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1971,10 +1971,10 @@ def test_refresh_reports_locked_instead_of_colliding() -> bool:
         handle.close()
     ok = result == {"walked": 0, "touched": 0, "locked": 1}
     print(f"{OK if ok else FAIL} refresh reports locked instead of colliding (result={result})")
-    return ok
+    assert ok
 
 
-def test_ensure_started_spawns_external_worker_process() -> bool:
+def test_ensure_started_spawns_external_worker_process() -> None:
     _setup_roots()
     calls = []
 
@@ -2023,10 +2023,10 @@ def test_ensure_started_spawns_external_worker_process() -> bool:
     )
     print(f"{OK if ok else FAIL} ensure_started spawns external worker process "
           f"(calls={len(calls)}, worker_thread={idx._worker_thread})")
-    return ok
+    assert ok
 
 
-def test_shutdown_force_kills_unresponsive_worker_within_budget() -> bool:
+def test_shutdown_force_kills_unresponsive_worker_within_budget() -> None:
     _setup_roots()
     calls = []
 
@@ -2058,10 +2058,10 @@ def test_shutdown_force_kills_unresponsive_worker_within_budget() -> bool:
         ("wait", 2.0),
     ]
     print(f"{OK if ok else FAIL} shutdown force-kills unresponsive worker ({calls})")
-    return ok
+    assert ok
 
 
-def test_worker_short_throttles_partial_covered_refresh() -> bool:
+def test_worker_short_throttles_partial_covered_refresh() -> None:
     _setup_roots()
     calls = {"refresh": 0, "wait": [], "covered": 0}
 
@@ -2099,10 +2099,10 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
     }
     print(f"{OK if ok else FAIL} worker short-throttles partial covered refresh "
           f"(calls={calls})")
-    return ok
+    assert ok
 
 
-def test_worker_partial_build_obeys_background_duty_budget() -> bool:
+def test_worker_partial_build_obeys_background_duty_budget() -> None:
     _setup_roots()
     waits = []
     monotonic_values = iter((100.0, 110.0))
@@ -2139,7 +2139,7 @@ def test_worker_partial_build_obeys_background_duty_budget() -> bool:
     ok = waits == [expected]
     print(f"{OK if ok else FAIL} partial build obeys background duty budget "
           f"(waits={waits}, expected={expected})")
-    return ok
+    assert ok
 
 
 def _append_user(path: Path, uid: str, text: str) -> None:
@@ -2152,7 +2152,7 @@ def _append_user(path: Path, uid: str, text: str) -> None:
         }) + "\n")
 
 
-def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
+def test_append_refresh_is_proportional_and_preserves_rows() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/append") / "append.jsonl"
     _write_claude(path, [f"appendbase {index} " + "x" * 4096 for index in range(1000)])
@@ -2238,10 +2238,10 @@ def test_append_refresh_is_proportional_and_preserves_rows() -> bool:
         f"(new_rows={len(current_rowids - original_rowids)}, bytes_read={bytes_read}, "
         f"append_bytes={appended_bytes}, timing={timing})"
     )
-    return bool(ok)
+    assert ok
 
 
-def test_append_refresh_holds_partial_line_until_complete() -> bool:
+def test_append_refresh_holds_partial_line_until_complete() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/partial") / "partial.jsonl"
     _write_claude(path, ["partialbase"])
@@ -2267,10 +2267,10 @@ def test_append_refresh_holds_partial_line_until_complete() -> bool:
     ).fetchone()[0]
     ok = before == 0 and after == 1
     print(f"{OK if ok else FAIL} partial append waits for newline")
-    return ok
+    assert ok
 
 
-def test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate() -> bool:
+def test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/rewrite") / "rewrite.jsonl"
     _write_claude(path, ["early-old-" + "x" * 8192, "boundary-old"])
@@ -2297,10 +2297,10 @@ def test_append_refresh_rebuilds_after_prefix_rewrite_and_truncate() -> bool:
     }
     ok = rewrite_ok and truncated == {"replacementneedle"}
     print(f"{OK if ok else FAIL} prefix rewrite and truncate force rebuild")
-    return ok
+    assert ok
 
 
-def test_append_refresh_defers_unstable_generation() -> bool:
+def test_append_refresh_defers_unstable_generation() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/racing") / "racing.jsonl"
     _write_claude(path, ["stablebase"])
@@ -2340,10 +2340,10 @@ def test_append_refresh_defers_unstable_generation() -> bool:
         and after == {"stablebase", "racingone", "racingtwo"}
     )
     print(f"{OK if ok else FAIL} unstable source generation defers atomically")
-    return ok
+    assert ok
 
 
-def test_append_refresh_defers_same_stat_delta_rewrite() -> bool:
+def test_append_refresh_defers_same_stat_delta_rewrite() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/same-stat-racing") / "same-stat-racing.jsonl"
     _write_claude(path, ["stablebase"])
@@ -2385,10 +2385,10 @@ def test_append_refresh_defers_same_stat_delta_rewrite() -> bool:
         and after == {"stablebase", "version-two"}
     )
     print(f"{OK if ok else FAIL} same-stat delta rewrite defers atomically")
-    return ok
+    assert ok
 
 
-def test_append_refresh_recovers_after_transient_parse_failure() -> bool:
+def test_append_refresh_recovers_after_transient_parse_failure() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/retry") / "retry.jsonl"
     _write_claude(path, ["retrybase"])
@@ -2411,10 +2411,10 @@ def test_append_refresh_recovers_after_transient_parse_failure() -> bool:
     ).fetchone()[0]
     ok = first["touched"] == 0 and before == 0 and second["touched"] == 1 and after == 1
     print(f"{OK if ok else FAIL} transient tail parse failure retries safely")
-    return ok
+    assert ok
 
 
-def test_rebuild_defers_transient_parse_failure_without_erasing_rows() -> bool:
+def test_rebuild_defers_transient_parse_failure_without_erasing_rows() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/rebuild-retry") / "retry.jsonl"
     _write_claude(path, ["rebuildoldneedle"])
@@ -2446,10 +2446,10 @@ def test_rebuild_defers_transient_parse_failure_without_erasing_rows() -> bool:
         and after == {"rebuildnewneedle"}
     )
     print(f"{OK if ok else FAIL} transient rebuild parse preserves rows and retries")
-    return ok
+    assert ok
 
 
-def test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows() -> bool:
+def test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows() -> None:
     _setup_roots()
     root = _SCRATCH / "windsurf-retry"
     shutil.rmtree(root, ignore_errors=True)
@@ -2511,10 +2511,10 @@ def test_windsurf_rebuild_defers_transient_parse_failure_without_erasing_rows() 
         and after == {"windsurfnewneedle"}
     )
     print(f"{OK if ok else FAIL} windsurf rebuild parse preserves rows and retries")
-    return ok
+    assert ok
 
 
-def test_append_transaction_rolls_back_rows_and_cursor() -> bool:
+def test_append_transaction_rolls_back_rows_and_cursor() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/rollback") / "rollback.jsonl"
     _write_claude(path, ["rollbackbase"])
@@ -2552,10 +2552,10 @@ def test_append_transaction_rolls_back_rows_and_cursor() -> bool:
     ).fetchone()[0]
     ok = before == 0 and offset_after_failure == original_offset and after == 1
     print(f"{OK if ok else FAIL} append rows and cursor roll back atomically")
-    return ok
+    assert ok
 
 
-def test_append_cursor_survives_connection_restart() -> bool:
+def test_append_cursor_survives_connection_restart() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/restart-append") / "restart.jsonl"
     _write_claude(path, ["restartbase"])
@@ -2579,10 +2579,10 @@ def test_append_cursor_survives_connection_restart() -> bool:
         "restarttailneedle",
     ]
     print(f"{OK if ok else FAIL} persisted append cursor survives connection restart")
-    return ok
+    assert ok
 
 
-def test_append_repeat_projection_matches_full_rebuild() -> bool:
+def test_append_repeat_projection_matches_full_rebuild() -> None:
     claude, _ = _setup_roots()
     path = claude / encode_cwd("/repeat-parity") / "parity.jsonl"
     repeated = "repeat parity body " + "x" * 1200
@@ -2614,10 +2614,10 @@ def test_append_repeat_projection_matches_full_rebuild() -> bool:
     rebuilt = snapshot()
     ok = incremental == rebuilt
     print(f"{OK if ok else FAIL} append repeat projection equals full rebuild")
-    return ok
+    assert ok
 
 
-def test_incremental_parser_provider_parity() -> bool:
+def test_incremental_parser_provider_parity() -> None:
     root = _SCRATCH / "provider-parity"
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
@@ -2670,7 +2670,7 @@ def test_incremental_parser_provider_parity() -> bool:
         for name in records
     )
     print(f"{OK if ok else FAIL} incremental parser provider parity ({observed})")
-    return ok
+    assert ok
 
 
 def main_run() -> int:
@@ -2734,19 +2734,11 @@ def main_run() -> int:
         test_append_repeat_projection_matches_full_rebuild,
         test_incremental_parser_provider_parity,
     ]
-    results = []
     for fn in tests:
-        try:
-            results.append(fn())
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"{FAIL} {fn.__name__} raised: {e}")
-            results.append(False)
-    n_pass = sum(1 for r in results if r)
-    print(f"\n{n_pass}/{len(results)} native-transcript-index tests passed")
+        fn()
+    print(f"\n{len(tests)}/{len(tests)} native-transcript-index tests passed")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    return 0 if n_pass == len(results) else 1
+    return 0
 
 
 if __name__ == "__main__":
