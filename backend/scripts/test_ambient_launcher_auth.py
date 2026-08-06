@@ -120,63 +120,64 @@ def _item() -> dict:
     return record["manifest"]["entrypoints"]["mcp"][0]
 
 
-def test_launcher_auth_makes_a_backend_auth_server_ambient_eligible() -> bool:
+def test_launcher_auth_makes_a_backend_auth_server_ambient_eligible() -> None:
     _record(ambient_auth="launcher")
-    eligible = extension_store._native_harness_eligible(
-        extension_store.get_extension(EXT_ID), "mcp", SERVER_ID
-    )
-    granted = True
     try:
-        extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-    except extension_store.ExtensionError:
-        granted = False
-    ok = eligible and granted
-    print(f"{OK if ok else FAIL} ambient_auth='launcher' makes a backend-auth, user-facing "
-          f"server ambient-eligible and grantable (eligible={eligible}, granted={granted})")
-    _cleanup()
-    return ok
+        eligible = extension_store._native_harness_eligible(
+            extension_store.get_extension(EXT_ID), "mcp", SERVER_ID
+        )
+        granted = True
+        try:
+            extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+        except extension_store.ExtensionError:
+            granted = False
+        assert eligible, f"server should be ambient-eligible with ambient_auth='launcher' (eligible={eligible})"
+        assert granted, f"server should be grantable (granted={granted})"
+    finally:
+        _cleanup()
 
 
-def test_without_the_opt_in_the_ambient_gate_stays_closed() -> bool:
+def test_without_the_opt_in_the_ambient_gate_stays_closed() -> None:
     _record(ambient_auth="")
-    eligible = extension_store._native_harness_eligible(
-        extension_store.get_extension(EXT_ID), "mcp", SERVER_ID
-    )
-    rejected = False
     try:
-        extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-    except extension_store.ExtensionError:
-        rejected = True
-    ok = (not eligible) and rejected
-    print(f"{OK if ok else FAIL} without ambient_auth the ambient gate stays closed "
-          f"(eligible={eligible}, grant_rejected={rejected})")
-    _cleanup()
-    return ok
+        eligible = extension_store._native_harness_eligible(
+            extension_store.get_extension(EXT_ID), "mcp", SERVER_ID
+        )
+        rejected = False
+        try:
+            extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+        except extension_store.ExtensionError:
+            rejected = True
+        assert not eligible, f"ambient gate should stay closed without ambient_auth (eligible={eligible})"
+        assert rejected, f"grant should be rejected without ambient_auth (grant_rejected={rejected})"
+    finally:
+        _cleanup()
 
 
-def test_ambient_launch_resolves_and_mints_an_extension_scoped_token() -> bool:
+def test_ambient_launch_resolves_and_mints_an_extension_scoped_token() -> None:
     _record(ambient_auth="launcher")
     # Ambient exposure still requires an explicit user grant; eligibility only
     # makes the server grantable.
-    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-    record = extension_store.get_extension(EXT_ID)
-    item = _item()
-    available = extension_store._mcp_item_available_for_inputs(record, item, AMBIENT_INPUTS)
-    config = extension_store.resolve_native_mcp_server_config(
-        extension_id=EXT_ID, server_name=SERVER_ID, inputs=AMBIENT_INPUTS,
-    )
-    env = dict((config or {}).get("env") or {})
-    token = env.get("BETTER_CLAUDE_INTERNAL_TOKEN") or ""
-    import extension_token_registry
-    scoped = bool(token) and extension_token_registry.resolve(token) == EXT_ID
-    ok = available and bool(config) and scoped
-    print(f"{OK if ok else FAIL} ambient launch resolves and mints an extension-scoped token "
-          f"(available={available}, config={bool(config)}, extension_scoped={scoped})")
-    _cleanup()
-    return ok
+    try:
+        extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+        record = extension_store.get_extension(EXT_ID)
+        item = _item()
+        available = extension_store._mcp_item_available_for_inputs(record, item, AMBIENT_INPUTS)
+        assert available, "ambient launch should be available for an opted-in, granted server"
+        config = extension_store.resolve_native_mcp_server_config(
+            extension_id=EXT_ID, server_name=SERVER_ID, inputs=AMBIENT_INPUTS,
+        )
+        assert config, "ambient launch should resolve a native mcp config"
+        env = dict(config.get("env") or {})
+        token = env.get("BETTER_CLAUDE_INTERNAL_TOKEN") or ""
+        import extension_token_registry
+        assert token, "ambient launch should mint an extension-scoped token"
+        assert extension_token_registry.resolve(token) == EXT_ID, "minted token must scope to the extension"
+    finally:
+        _cleanup()
 
 
-def test_brokered_extension_still_mints_a_token_on_a_genuine_ambient_launch() -> bool:
+def test_brokered_extension_still_mints_a_token_on_a_genuine_ambient_launch() -> None:
     """A brokered extension_id (coordination, session-bridge, session-control,
     marketplace) normally authenticates in-session via the runtime broker, not
     a self-minted token -- but the runtime broker only exists inside a
@@ -189,63 +190,63 @@ def test_brokered_extension_still_mints_a_token_on_a_genuine_ambient_launch() ->
     "launcher"` opt-in silently resolved with no token at all -- it deleted
     the entrypoint's ambient path in production."""
     _record(ambient_auth="launcher")
-    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-    original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
-    extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
     try:
-        config = extension_store.resolve_native_mcp_server_config(
-            extension_id=EXT_ID, server_name=SERVER_ID, inputs=AMBIENT_INPUTS,
-        )
-        env = dict((config or {}).get("env") or {})
-        token = env.get("BETTER_CLAUDE_INTERNAL_TOKEN") or ""
-        import extension_token_registry
-        scoped = bool(token) and extension_token_registry.resolve(token) == EXT_ID
+        extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+        original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
+        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
+        try:
+            config = extension_store.resolve_native_mcp_server_config(
+                extension_id=EXT_ID, server_name=SERVER_ID, inputs=AMBIENT_INPUTS,
+            )
+            assert config, "ambient launch should resolve a config even for a brokered extension"
+            env = dict(config.get("env") or {})
+            token = env.get("BETTER_CLAUDE_INTERNAL_TOKEN") or ""
+            import extension_token_registry
+            assert token, "brokered extension must still self-mint on a genuine ambient launch"
+            assert extension_token_registry.resolve(token) == EXT_ID, "minted token must scope to the extension"
+        finally:
+            extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
     finally:
-        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
-    ok = bool(config) and scoped
-    print(f"{OK if ok else FAIL} a brokered extension_id still mints an extension-scoped token "
-          f"on a genuine ambient launch (config={bool(config)}, extension_scoped={scoped})")
-    _cleanup()
-    return ok
+        _cleanup()
 
 
-def test_brokered_extension_in_session_still_relies_on_the_broker() -> bool:
+def test_brokered_extension_in_session_still_relies_on_the_broker() -> None:
     """The fix must not widen self-minting into the normal in-session path for
     brokered extensions -- only the genuinely ambient (no app_session_id)
     launch gets the carve-out. A session-bound resolution for a brokered
     extension must still NOT self-mint."""
     _record(ambient_auth="launcher")
-    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-    original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
-    extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
-    session_inputs = {**AMBIENT_INPUTS, "app_session_id": "real-session-id", "user_facing": True}
     try:
-        config = extension_store.resolve_native_mcp_server_config(
-            extension_id=EXT_ID, server_name=SERVER_ID, inputs=session_inputs,
-        )
-        env = dict((config or {}).get("env") or {})
-        token_absent = "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
+        extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
+        original_brokered = extension_store._BROKERED_MCP_EXTENSION_IDS
+        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered | {EXT_ID}
+        session_inputs = {**AMBIENT_INPUTS, "app_session_id": "real-session-id", "user_facing": True}
+        try:
+            config = extension_store.resolve_native_mcp_server_config(
+                extension_id=EXT_ID, server_name=SERVER_ID, inputs=session_inputs,
+            )
+            assert config, "session-bound launch should resolve a config"
+            env = dict(config.get("env") or {})
+            assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in env, (
+                "brokered extension in-session must NOT self-mint; it relies on the runtime broker"
+            )
+        finally:
+            extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
     finally:
-        extension_store._BROKERED_MCP_EXTENSION_IDS = original_brokered
-    ok = bool(config) and token_absent
-    print(f"{OK if ok else FAIL} a brokered extension_id in a real session still relies on the "
-          f"broker, not a self-minted token (config={bool(config)}, token_absent={token_absent})")
-    _cleanup()
-    return ok
+        _cleanup()
 
 
-def test_without_the_opt_in_ambient_resolution_is_unavailable() -> bool:
+def test_without_the_opt_in_ambient_resolution_is_unavailable() -> None:
     _record(ambient_auth="")
-    record = extension_store.get_extension(EXT_ID)
-    available = extension_store._mcp_item_available_for_inputs(record, _item(), AMBIENT_INPUTS)
-    ok = not available
-    print(f"{OK if ok else FAIL} without ambient_auth an ambient launch is unavailable "
-          f"(available={available})")
-    _cleanup()
-    return ok
+    try:
+        record = extension_store.get_extension(EXT_ID)
+        available = extension_store._mcp_item_available_for_inputs(record, _item(), AMBIENT_INPUTS)
+        assert not available, f"ambient launch should be unavailable without ambient_auth (available={available})"
+    finally:
+        _cleanup()
 
 
-def test_shipped_coordination_manifest_declares_the_opt_in() -> bool:
+def test_shipped_coordination_manifest_declares_the_opt_in() -> None:
     manifest_path = Path(_BACKEND).parent / "extensions" / "coordination" / "better-agent-extension.json"
     manifest = extension_store.validate_manifest(
         json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -261,17 +262,33 @@ def test_shipped_coordination_manifest_declares_the_opt_in() -> bool:
     )
     declared = declarations.get((manifest["id"], server_id))
     grantable = declared is not None and "global" in declared.scopes
-    ok = opted_in and grantable
-    print(f"{OK if ok else FAIL} shipped coordination manifest is ambient-eligible AND grantable "
-          f"(opted_in={opted_in}, grantable={grantable})")
-    return ok
+    assert opted_in, "shipped coordination manifest must declare ambient_auth='launcher'"
+    assert grantable, "shipped coordination manifest must declare a grantable global native_mcp scope"
 
 
 if __name__ == "__main__":
-    results = [
-        fn()
+    tests = [
+        (name, fn)
         for name, fn in sorted(globals().items())
         if name.startswith("test_") and callable(fn)
     ]
-    print(f"\n{sum(1 for r in results if r)}/{len(results)} ambient launcher-auth tests passed")
-    raise SystemExit(0 if all(results) else 1)
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL}  {name}\n  {exc}")
+        except Exception:
+            failed += 1
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL}  {name}")
+        else:
+            print(f"{OK}  {name}")
+    print()
+    if failed:
+        print(f"{failed} of {len(tests)} ambient launcher-auth test(s) FAILED")
+    else:
+        print(f"all {len(tests)} ambient launcher-auth tests passed")
+    raise SystemExit(1 if failed else 0)
