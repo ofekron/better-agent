@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shutil
 import stat
 import sys
@@ -41,105 +40,105 @@ from runner_errors import (  # noqa: E402
 # ============================================================================
 # Classification table
 # ============================================================================
-def test_pi_auth_rule() -> bool:
+def test_pi_auth_rule() -> None:
     hit = classify("pi", "No API key found for provider anthropic")
     split = classify("pi", "Use /login first.\nSelect a provider to continue.")
-    return (
+    assert (
         hit is not None and hit.category == CATEGORY_AUTH
         and "/login" in hit.message
         and split is not None and split.category == CATEGORY_AUTH
     )
 
 
-def test_qwen_session_lost_rule() -> bool:
+def test_qwen_session_lost_rule() -> None:
     hit = classify(
         "qwen",
         "No saved session found with ID 123e4567-e89b-12d3-a456-426614174000. "
         "Run `qwen --resume` without an ID to choose from existing sessions.",
     )
-    return (
+    assert (
         hit is not None
         and hit.category == CATEGORY_SESSION_LOST
         and "session" in hit.message.lower()
     )
 
 
-def test_qwen_auth_rule() -> bool:
+def test_qwen_auth_rule() -> None:
     hit = classify("qwen", "Error: No auth type is selected.")
-    return hit is not None and hit.category == CATEGORY_AUTH and "OPENAI_API_KEY" in hit.message
+    assert hit is not None and hit.category == CATEGORY_AUTH and "OPENAI_API_KEY" in hit.message
 
 
-def test_cursor_auth_rule() -> bool:
+def test_cursor_auth_rule() -> None:
     hit = classify("cursor", "Error: Not authenticated. Run cursor-agent login")
-    return hit is not None and hit.category == CATEGORY_AUTH and "cursor-agent login" in hit.message
+    assert hit is not None and hit.category == CATEGORY_AUTH and "cursor-agent login" in hit.message
 
 
-def test_amp_rules() -> bool:
+def test_amp_rules() -> None:
     auth = classify("amp", "Error: API key is not configured. Run `amp login`.")
     quota = classify("amp", "402 Payment Required: insufficient credits for this request")
-    return (
+    assert (
         auth is not None and auth.category == CATEGORY_AUTH
         and quota is not None and quota.category == CATEGORY_QUOTA_RATE_LIMIT
     )
 
 
-def test_common_rules_apply_to_kimi_and_opencode() -> bool:
+def test_common_rules_apply_to_kimi_and_opencode() -> None:
     net = classify("kimi", "fetch failed: connect ECONNREFUSED 127.0.0.1:443")
     quota = classify("opencode", "Provider error: rate limit exceeded, retry later")
     auth = classify("opencode", "Error: invalid API key provided")
-    return (
+    assert (
         net is not None and net.category == CATEGORY_NETWORK
         and quota is not None and quota.category == CATEGORY_QUOTA_RATE_LIMIT
         and auth is not None and auth.category == CATEGORY_AUTH
     )
 
 
-def test_first_match_wins_provider_before_common() -> bool:
+def test_first_match_wins_provider_before_common() -> None:
     # Text matches both cursor's auth rule and the common network rule;
     # the provider-specific auth rule is ordered first.
     hit = classify("cursor", "authentication required\nsocket hang up")
-    return hit is not None and hit.category == CATEGORY_AUTH
+    assert hit is not None and hit.category == CATEGORY_AUTH
 
 
-def test_matched_line_and_message_fallback() -> bool:
+def test_matched_line_and_message_fallback() -> None:
     hit = classify("kimi", "some preamble\nHTTP 503 service unavailable\ntrailer")
-    return (
+    assert (
         hit is not None
         and hit.matched == "HTTP 503 service unavailable"
         and hit.message == hit.matched
     )
 
 
-def test_unknown_kind_fails_closed() -> bool:
+def test_unknown_kind_fails_closed() -> None:
     try:
         classify("nonexistent-kind", "boom")
     except ValueError:
-        return True
-    return False
+        return
+    raise AssertionError("expected ValueError for unknown provider kind")
 
 
-def test_no_match_and_empty_return_none() -> bool:
-    return classify("pi", "all fine here") is None and classify("pi", "", None) is None
+def test_no_match_and_empty_return_none() -> None:
+    assert classify("pi", "all fine here") is None and classify("pi", "", None) is None
 
 
 # ============================================================================
 # stderr extraction fallback
 # ============================================================================
-def test_extract_stderr_error_named_error_first() -> bool:
+def test_extract_stderr_error_named_error_first() -> None:
     text = "warning: something\nTypeError: cannot read x\n    at foo (bar.js:1)\ndone"
-    return extract_stderr_error(text) == "TypeError: cannot read x"
+    assert extract_stderr_error(text) == "TypeError: cannot read x"
 
 
-def test_extract_stderr_error_error_prefix_then_last_line() -> bool:
+def test_extract_stderr_error_error_prefix_then_last_line() -> None:
     prefixed = extract_stderr_error("noise\nerror: it broke\nmore noise")
     last = extract_stderr_error("first line\n    at frame (x.js:1)\nlast meaningful line\n}")
-    return prefixed == "error: it broke" and last == "last meaningful line"
+    assert prefixed == "error: it broke" and last == "last meaningful line"
 
 
-def test_stderr_error_prefers_classification() -> bool:
+def test_stderr_error_prefers_classification() -> None:
     friendly = stderr_error("pi", "No API key found for provider openai")
     raw = stderr_error("pi", "some unclassified failure line")
-    return (
+    assert (
         friendly is not None and "/login" in friendly
         and raw == "some unclassified failure line"
         and stderr_error("pi", "") is None
@@ -149,12 +148,12 @@ def test_stderr_error_prefers_classification() -> bool:
 # ============================================================================
 # Resume session-loss guard (pure function)
 # ============================================================================
-def test_resume_session_mismatch() -> bool:
+def test_resume_session_mismatch() -> None:
     hit = resume_session_mismatch("cursor", "chat-a", "chat-b")
     same = resume_session_mismatch("cursor", "chat-a", "chat-a")
     fresh = resume_session_mismatch("cursor", "", "chat-b")
     unobserved = resume_session_mismatch("cursor", "chat-a", None)
-    return (
+    assert (
         hit is not None
         and hit.category == CATEGORY_SESSION_LOST
         and "chat-a" in hit.message and "chat-b" in hit.message
@@ -165,7 +164,7 @@ def test_resume_session_mismatch() -> bool:
 # ============================================================================
 # Resume-mismatch guard wired into the runners (fake CLI stream fixtures)
 # ============================================================================
-def _make_fake_cli(bin_dir: Path, name: str, lines: list[str], *, then_sleep: bool = True) -> None:
+def _make_fake_cli(bin_dir: Path, name: str, lines: list[str], *, then_sleep: bool = True) -> Path:
     script = bin_dir / name
     body = ["#!/bin/sh", "cat > /dev/null 2>&1 || true"]
     for line in lines:
@@ -174,6 +173,7 @@ def _make_fake_cli(bin_dir: Path, name: str, lines: list[str], *, then_sleep: bo
         body.append("sleep 30")
     script.write_text("\n".join(body) + "\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
 
 
 def _run_with_fake_cli(
@@ -186,7 +186,10 @@ def _run_with_fake_cli(
 ) -> dict:
     """Run <runner_module>._run against a fake CLI that prints `lines`;
     returns the parsed complete.json. `then_sleep` keeps the fake CLI
-    alive after printing, proving the runner kills it on session loss."""
+    alive after printing, proving the runner kills it on session loss.
+
+    Runners resolve their CLI from inputs["_provider_executable"] (absolute
+    path), not PATH; qwen additionally requires a frozen inputs["_capability_plan"]."""
     import importlib
     runner = importlib.import_module(runner_module)
     work = Path(tempfile.mkdtemp(prefix="runner-errors-fixture-"))
@@ -194,15 +197,20 @@ def _run_with_fake_cli(
     bin_dir.mkdir(parents=True)
     run_dir = work / "run"
     run_dir.mkdir(parents=True)
-    _make_fake_cli(bin_dir, cli_name, lines, then_sleep=then_sleep)
-    inputs = {"cwd": str(work), "mode": "native", "app_session_id": "app-1", **inputs}
-    old_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+    shim = _make_fake_cli(bin_dir, cli_name, lines, then_sleep=then_sleep)
+    inputs = {
+        "cwd": str(work),
+        "mode": "native",
+        "app_session_id": "app-1",
+        "_provider_executable": str(shim),
+        **inputs,
+    }
+    if runner_module == "runner_qwen":
+        inputs.setdefault("_capability_plan", {"mcp_servers": []})
     try:
         asyncio.run(runner._run(run_dir, inputs))
         return json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
     finally:
-        os.environ["PATH"] = old_path
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -214,16 +222,16 @@ def _is_session_lost_failure(complete: dict, requested: str) -> bool:
     )
 
 
-def test_cursor_resume_mismatch_fails_run() -> bool:
+def test_cursor_resume_mismatch_fails_run() -> None:
     complete = _run_with_fake_cli(
         "runner_cursor", "cursor-agent",
         ['{"type":"system","subtype":"init","session_id":"other-chat","model":"m"}'],
         {"prompt": "hi", "session_id": "requested-chat"},
     )
-    return _is_session_lost_failure(complete, "requested-chat")
+    assert _is_session_lost_failure(complete, "requested-chat")
 
 
-def test_cursor_resume_same_sid_passes() -> bool:
+def test_cursor_resume_same_sid_passes() -> None:
     complete = _run_with_fake_cli(
         "runner_cursor", "cursor-agent",
         [
@@ -234,19 +242,19 @@ def test_cursor_resume_same_sid_passes() -> bool:
         {"prompt": "hi", "session_id": "requested-chat"},
         then_sleep=False,
     )
-    return complete.get("success") is True and complete.get("session_id") == "requested-chat"
+    assert complete.get("success") is True and complete.get("session_id") == "requested-chat"
 
 
-def test_opencode_resume_mismatch_fails_run() -> bool:
+def test_opencode_resume_mismatch_fails_run() -> None:
     complete = _run_with_fake_cli(
         "runner_opencode", "opencode",
         ['{"type":"text","sessionID":"other-session","part":{"id":"p1","text":"hi"}}'],
         {"prompt": "hi", "session_id": "requested-session"},
     )
-    return _is_session_lost_failure(complete, "requested-session")
+    assert _is_session_lost_failure(complete, "requested-session")
 
 
-def test_opencode_fork_new_sid_allowed() -> bool:
+def test_opencode_fork_new_sid_allowed() -> None:
     complete = _run_with_fake_cli(
         "runner_opencode", "opencode",
         [
@@ -256,28 +264,28 @@ def test_opencode_fork_new_sid_allowed() -> bool:
         then_sleep=False,
     )
     # Fork legitimately reports a new session id — no session_lost error.
-    return "session lost" not in str(complete.get("error") or "")
+    assert "session lost" not in str(complete.get("error") or "")
 
 
-def test_amp_resume_mismatch_fails_run() -> bool:
+def test_amp_resume_mismatch_fails_run() -> None:
     complete = _run_with_fake_cli(
         "runner_amp", "amp",
         ['{"type":"system","subtype":"init","session_id":"T-other","tools":[]}'],
         {"prompt": "hi", "session_id": "T-requested"},
     )
-    return _is_session_lost_failure(complete, "T-requested")
+    assert _is_session_lost_failure(complete, "T-requested")
 
 
-def test_qwen_resume_mismatch_fails_run() -> bool:
+def test_qwen_resume_mismatch_fails_run() -> None:
     complete = _run_with_fake_cli(
         "runner_qwen", "qwen",
         ['{"type":"system","subtype":"init","session_id":"other-sid","model":"m"}'],
         {"prompt": "hi", "session_id": "requested-sid"},
     )
-    return _is_session_lost_failure(complete, "requested-sid")
+    assert _is_session_lost_failure(complete, "requested-sid")
 
 
-def test_pi_resume_mismatch_fails_run() -> bool:
+def test_pi_resume_mismatch_fails_run() -> None:
     from runs_dir import runs_root
     import runner_pi
     sid = "requested-pi-sid"
@@ -289,7 +297,7 @@ def test_pi_resume_mismatch_fails_run() -> bool:
         ['{"type":"session","id":"other-pi-sid"}'],
         {"prompt": "hi", "session_id": sid},
     )
-    return _is_session_lost_failure(complete, sid)
+    assert _is_session_lost_failure(complete, sid)
 
 
 TESTS = [
@@ -322,14 +330,12 @@ def main() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                fn()
             except Exception as exc:  # noqa: BLE001
                 print(f"FAIL: {name} (exception: {type(exc).__name__}: {exc})")
                 failures.append(name)
                 continue
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
-                failures.append(name)
+            print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
