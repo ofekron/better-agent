@@ -21,11 +21,8 @@ import provider_claude  # noqa: E402
 from provider import RecoveredPopen  # noqa: E402
 from provider_claude import ClaudeProvider, RunState  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
-
-def test_attach_recovered_run_schedules_normal_bootstrap() -> bool:
+def test_attach_recovered_run_schedules_normal_bootstrap() -> None:
     provider = ClaudeProvider({"id": "claude-recover-test"})
     queue: asyncio.Queue = asyncio.Queue()
     scheduled: list[tuple[asyncio.AbstractEventLoop, object, str]] = []
@@ -59,16 +56,12 @@ def test_attach_recovered_run_schedules_normal_bootstrap() -> bool:
     finally:
         provider_claude.schedule_loop_task = original_schedule
 
-    if not attached:
-        print(f"{FAIL} attach_recovered_run returned False")
-        return False
+    assert attached, "attach_recovered_run returned False"
     rs = provider._runs.get("run-live-1234567890")
-    if not isinstance(rs, RunState):
-        print(f"{FAIL} recovered run was not registered as RunState: {rs!r}")
-        return False
-    if not isinstance(rs.popen, RecoveredPopen) or rs.popen.pid != 12345:
-        print(f"{FAIL} recovered popen not reconstructed correctly: {rs.popen!r}")
-        return False
+    assert isinstance(rs, RunState), f"recovered run was not registered as RunState: {rs!r}"
+    assert isinstance(rs.popen, RecoveredPopen) and rs.popen.pid == 12345, (
+        f"recovered popen not reconstructed correctly: {rs.popen!r}"
+    )
     expected = {
         "mode": "manager",
         "app_session_id": "app-session",
@@ -81,20 +74,16 @@ def test_attach_recovered_run_schedules_normal_bootstrap() -> bool:
         "turn_run_id": "turn-run",
     }
     for field, value in expected.items():
-        if getattr(rs, field) != value:
-            print(f"{FAIL} RunState.{field}={getattr(rs, field)!r}, expected {value!r}")
-            return False
-    if rs.queue is not queue:
-        print(f"{FAIL} RunState did not use recovery queue")
-        return False
-    if len(scheduled) != 1 or scheduled[0][2] != "claude-recover-bootstrap-run-live":
-        print(f"{FAIL} expected one scheduled bootstrap task, saw {scheduled!r}")
-        return False
-    print(f"{PASS} Claude recovered live run schedules normal bootstrap")
-    return True
+        assert getattr(rs, field) == value, (
+            f"RunState.{field}={getattr(rs, field)!r}, expected {value!r}"
+        )
+    assert rs.queue is queue, "RunState did not use recovery queue"
+    assert len(scheduled) == 1 and scheduled[0][2] == "claude-recover-bootstrap-run-live", (
+        f"expected one scheduled bootstrap task, saw {scheduled!r}"
+    )
 
 
-def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> bool:
+def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> None:
     provider = ClaudeProvider({"id": "claude-recover-test"})
     queue: asyncio.Queue = asyncio.Queue()
     original_schedule = provider_claude.schedule_loop_task
@@ -103,28 +92,23 @@ def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> bool:
         loop = asyncio.new_event_loop()
         try:
             desc = {"run_id": "run-dup", "pid": 12345, "app_session_id": "app"}
-            if not provider.attach_recovered_run(desc=desc, queue=queue, loop=loop):
-                print(f"{FAIL} initial attach unexpectedly failed")
-                return False
-            if provider.attach_recovered_run(desc=desc, queue=queue, loop=loop):
-                print(f"{FAIL} duplicate attach unexpectedly succeeded")
-                return False
-            if provider.attach_recovered_run(
+            assert provider.attach_recovered_run(desc=desc, queue=queue, loop=loop), (
+                "initial attach unexpectedly failed"
+            )
+            assert not provider.attach_recovered_run(desc=desc, queue=queue, loop=loop), (
+                "duplicate attach unexpectedly succeeded"
+            )
+            assert not provider.attach_recovered_run(
                 desc={"run_id": "run-bad", "pid": "not-an-int"},
                 queue=queue,
                 loop=loop,
-            ):
-                print(f"{FAIL} bad pid attach unexpectedly succeeded")
-                return False
+            ), "bad pid attach unexpectedly succeeded"
         finally:
             loop.close()
     finally:
         provider_claude.schedule_loop_task = original_schedule
-    print(f"{PASS} Claude recovered attach rejects duplicate/bad inputs")
-    return True
 
 
 if __name__ == "__main__":
-    ok = test_attach_recovered_run_schedules_normal_bootstrap()
-    ok = test_attach_recovered_run_rejects_duplicates_and_bad_pid() and ok
-    raise SystemExit(0 if ok else 1)
+    test_attach_recovered_run_schedules_normal_bootstrap()
+    test_attach_recovered_run_rejects_duplicates_and_bad_pid()
