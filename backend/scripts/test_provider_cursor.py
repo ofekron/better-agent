@@ -41,12 +41,12 @@ from capability_contexts import prompt_heading_for_source  # noqa: E402
 from provider_session_events import SessionEventsProvider  # noqa: E402
 
 
-def test_class_identity() -> bool:
+def test_class_identity() -> None:
     cls = provider_cursor.CursorProvider
-    return issubclass(cls, SessionEventsProvider) and cls.KIND == "cursor"
+    assert issubclass(cls, SessionEventsProvider) and cls.KIND == "cursor"
 
 
-def test_capability_matrix() -> bool:
+def test_capability_matrix() -> None:
     cls = provider_cursor.CursorProvider
     expected = {
         "supports_fork": False,
@@ -58,10 +58,10 @@ def test_capability_matrix() -> bool:
         "supports_reasoning_effort": False,
         "supports_headless_no_tools": False,
     }
-    return all(getattr(cls, k) is v for k, v in expected.items())
+    assert all(getattr(cls, k) is v for k, v in expected.items())
 
 
-def test_build_env_clears_claude_keeps_cursor_key() -> bool:
+def test_build_env_clears_claude_keeps_cursor_key() -> None:
     import os
     os.environ["CURSOR_API_KEY"] = "test-cursor-key"
     os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
@@ -74,18 +74,18 @@ def test_build_env_clears_claude_keeps_cursor_key() -> bool:
             "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
             "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
         ))
-        return cleared and env.get("CURSOR_API_KEY") == "test-cursor-key"
+        assert cleared and env.get("CURSOR_API_KEY") == "test-cursor-key"
     finally:
         os.environ.pop("CURSOR_API_KEY", None)
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
 
-def test_models_static_seed() -> bool:
+def test_models_static_seed() -> None:
     seed = provider_cursor.CURSOR_MODELS
-    return bool(seed) and "auto" in seed and "gpt-5" in seed and "sonnet-4" in seed
+    assert bool(seed) and "auto" in seed and "gpt-5" in seed and "sonnet-4" in seed
 
 
-def test_parses_models_output() -> bool:
+def test_parses_models_output() -> None:
     sample = (
         "\x1b[1mAvailable models:\x1b[0m\n"
         "  • auto\n"
@@ -95,25 +95,25 @@ def test_parses_models_output() -> bool:
         "\n"
         "Usage: pick one with --model\n"
     )
-    return provider_cursor.parse_cursor_models_output(sample) == [
+    assert provider_cursor.parse_cursor_models_output(sample) == [
         "auto", "composer-1", "gpt-5", "sonnet-4.5-thinking",
     ]
 
 
-def test_models_output_parse_fails_closed() -> bool:
+def test_models_output_parse_fails_closed() -> None:
     # Fewer than 2 parseable ids → treat as parse failure (keep prior cache).
-    return provider_cursor.parse_cursor_models_output("Error: not authenticated\n") == []
+    assert provider_cursor.parse_cursor_models_output("Error: not authenticated\n") == []
 
 
-def test_fetch_models_returns_list() -> bool:
+def test_fetch_models_returns_list() -> None:
     if not shutil.which("cursor-agent"):
-        return True
+        return  # cursor-agent not installed in this env — nothing to assert
     parsed = provider_cursor.fetch_cursor_models()
     # Auth-blocked CLIs return [] (fail closed); authenticated ones return ids.
-    return isinstance(parsed, list)
+    assert isinstance(parsed, list)
 
 
-def test_permission_argv_fail_closed() -> bool:
+def test_permission_argv_fail_closed() -> None:
     cases = [
         ({"mode": "force"}, ["-f"]),
         ({"mode": "default"}, []),
@@ -122,12 +122,12 @@ def test_permission_argv_fail_closed() -> bool:
         (None, []),
         ("force", []),                    # non-dict → closed
     ]
-    return all(runner_cursor.permission_argv(v) == out for v, out in cases)
+    assert all(runner_cursor.permission_argv(v) == out for v, out in cases)
 
 
-def test_resolve_permission_fail_closed() -> bool:
+def test_resolve_permission_fail_closed() -> None:
     import permission as perm
-    return (
+    assert (
         perm.resolve_permission("cursor", {"mode": "force"}, None) == {"mode": "force"}
         and perm.resolve_permission("cursor", {"mode": "default"}, None) == {"mode": "default"}
         # unknown value falls back to the axis default (full-bypass parity)
@@ -138,7 +138,7 @@ def test_resolve_permission_fail_closed() -> bool:
     )
 
 
-def test_build_argv_shape() -> bool:
+def test_build_argv_shape() -> None:
     argv = runner_cursor.build_argv(
         cursor_bin="/bin/cursor-agent",
         prompt="--resume sneaky prompt",
@@ -146,13 +146,11 @@ def test_build_argv_shape() -> bool:
         session_id="chat-123",
         permission={"mode": "force"},
     )
-    if argv[0] != "/bin/cursor-agent":
-        return False
+    assert argv[0] == "/bin/cursor-agent"
     for flag in ("--print", "--output-format", "stream-json", "--stream-partial-output", "-f"):
-        if flag not in argv:
-            return False
+        assert flag in argv, f"missing flag {flag}"
     sep = argv.index("--")
-    return (
+    assert (
         argv[argv.index("--model") + 1] == "gpt-5"
         and argv[argv.index("--resume") + 1] == "chat-123"
         # Prompt is the single positional after `--`: flag-shaped prompt text
@@ -162,12 +160,12 @@ def test_build_argv_shape() -> bool:
     )
 
 
-def test_build_argv_default_permission_has_no_force() -> bool:
+def test_build_argv_default_permission_has_no_force() -> None:
     argv = runner_cursor.build_argv(
         cursor_bin="cursor-agent", prompt="hi", model="", session_id="",
         permission={"mode": "default"},
     )
-    return "-f" not in argv and "--force" not in argv and "--model" not in argv and "--resume" not in argv
+    assert "-f" not in argv and "--force" not in argv and "--model" not in argv and "--resume" not in argv
 
 
 def _mk_normalizer() -> "runner_cursor.CursorStreamNormalizer":
@@ -180,22 +178,22 @@ def _mk_normalizer() -> "runner_cursor.CursorStreamNormalizer":
     return n
 
 
-def test_normalizer_init_captures_session_and_model() -> bool:
+def test_normalizer_init_captures_session_and_model() -> None:
     n = _mk_normalizer()
-    return n.session_id == "chat-1" and n.model == "gpt-5"
+    assert n.session_id == "chat-1" and n.model == "gpt-5"
 
 
-def test_normalizer_skips_user_echo() -> bool:
+def test_normalizer_skips_user_echo() -> None:
     n = _mk_normalizer()
     out = n.handle({
         "type": "user",
         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
         "session_id": "chat-1",
     })
-    return out == []
+    assert out == []
 
 
-def test_normalizer_accumulates_assistant_deltas() -> bool:
+def test_normalizer_accumulates_assistant_deltas() -> None:
     n = _mk_normalizer()
     a = n.handle({
         "type": "assistant",
@@ -207,10 +205,9 @@ def test_normalizer_accumulates_assistant_deltas() -> bool:
         "message": {"role": "assistant", "content": [{"type": "text", "text": "lo"}]},
         "session_id": "chat-1",
     })
-    if len(a) != 1 or len(b) != 1:
-        return False
+    assert len(a) == 1 and len(b) == 1
     ev_a, ev_b = a[0], b[0]
-    return (
+    assert (
         ev_a["type"] == "assistant"
         and ev_a["uuid"] == ev_b["uuid"]  # same segment → stable uuid
         and ev_a["message"]["content"][0]["text"] == "Hel"
@@ -220,12 +217,12 @@ def test_normalizer_accumulates_assistant_deltas() -> bool:
     )
 
 
-def test_normalizer_thinking_deltas() -> bool:
+def test_normalizer_thinking_deltas() -> None:
     n = _mk_normalizer()
     a = n.handle({"type": "thinking", "subtype": "delta", "text": "think", "session_id": "chat-1"})
     n.handle({"type": "thinking", "subtype": "completed", "session_id": "chat-1"})
     c = n.handle({"type": "thinking", "subtype": "delta", "text": "again", "session_id": "chat-1"})
-    return (
+    assert (
         len(a) == 1 and len(c) == 1
         and a[0]["message"]["content"][0] == {"type": "thinking", "thinking": "think"}
         and c[0]["message"]["content"][0]["thinking"] == "again"
@@ -233,7 +230,7 @@ def test_normalizer_thinking_deltas() -> bool:
     )
 
 
-def test_normalizer_tool_call_started_maps_shell() -> bool:
+def test_normalizer_tool_call_started_maps_shell() -> None:
     n = _mk_normalizer()
     out = n.handle({
         "type": "tool_call", "subtype": "started", "call_id": "call-1",
@@ -242,10 +239,9 @@ def test_normalizer_tool_call_started_maps_shell() -> bool:
         }}},
         "session_id": "chat-1",
     })
-    if len(out) != 1:
-        return False
+    assert len(out) == 1
     block = out[0]["message"]["content"][0]
-    return (
+    assert (
         out[0]["type"] == "assistant"
         and block["type"] == "tool_use"
         and block["id"] == "call-1"
@@ -254,9 +250,9 @@ def test_normalizer_tool_call_started_maps_shell() -> bool:
     )
 
 
-def test_normalizer_tool_call_completed_success_and_failure() -> bool:
+def test_normalizer_tool_call_completed_success_and_failure() -> None:
     n = _mk_normalizer()
-    ok = n.handle({
+    good = n.handle({
         "type": "tool_call", "subtype": "completed", "call_id": "call-1",
         "tool_call": {"shellToolCall": {
             "args": {"command": "ls"},
@@ -272,22 +268,21 @@ def test_normalizer_tool_call_completed_success_and_failure() -> bool:
         }},
         "session_id": "chat-1",
     })
-    if len(ok) != 1 or len(bad) != 1:
-        return False
-    ok_block = ok[0]["message"]["content"][0]
+    assert len(good) == 1 and len(bad) == 1
+    good_block = good[0]["message"]["content"][0]
     bad_block = bad[0]["message"]["content"][0]
-    return (
-        ok[0]["type"] == "user"
-        and ok_block["type"] == "tool_result"
-        and ok_block["tool_use_id"] == "call-1"
-        and ok_block["content"] == "file.py"
-        and ok_block["is_error"] is False
+    assert (
+        good[0]["type"] == "user"
+        and good_block["type"] == "tool_result"
+        and good_block["tool_use_id"] == "call-1"
+        and good_block["content"] == "file.py"
+        and good_block["is_error"] is False
         and bad_block["is_error"] is True
         and "exploded" in bad_block["content"]
     )
 
 
-def test_normalizer_tool_uuids_deterministic() -> bool:
+def test_normalizer_tool_uuids_deterministic() -> None:
     def run_once() -> tuple[str, str]:
         n = _mk_normalizer()
         started = n.handle({
@@ -302,43 +297,43 @@ def test_normalizer_tool_uuids_deterministic() -> bool:
         return started[0]["uuid"], completed[0]["uuid"]
 
     a, b = run_once(), run_once()
-    return a == b and a[0] != a[1]
+    assert a == b and a[0] != a[1]
 
 
-def test_normalizer_read_tool_input_mapping() -> bool:
+def test_normalizer_read_tool_input_mapping() -> None:
     n = _mk_normalizer()
     out = n.handle({
         "type": "tool_call", "subtype": "started", "call_id": "c",
         "tool_call": {"readToolCall": {"args": {"path": "/tmp/f.py"}}},
     })
     block = out[0]["message"]["content"][0]
-    return block["name"] == "Read" and block["input"] == {"file_path": "/tmp/f.py"}
+    assert block["name"] == "Read" and block["input"] == {"file_path": "/tmp/f.py"}
 
 
-def test_normalizer_result_bookkeeping() -> bool:
+def test_normalizer_result_bookkeeping() -> None:
     n = _mk_normalizer()
     out = n.handle({
         "type": "result", "subtype": "success", "is_error": False,
         "duration_ms": 1234, "result": "pong", "session_id": "chat-1",
     })
-    return (
+    assert (
         out == []
         and n.result_seen and n.success and not n.is_error
         and n.result_text == "pong" and n.duration_ms == 1234
     )
 
 
-def test_normalizer_result_error() -> bool:
+def test_normalizer_result_error() -> None:
     n = _mk_normalizer()
     n.handle({"type": "result", "subtype": "error", "is_error": True,
               "result": "boom", "session_id": "chat-1"})
-    return n.result_seen and not n.success and n.error == "boom"
+    assert n.result_seen and not n.success and n.error == "boom"
 
 
-def test_normalizer_unknown_event_surfaced() -> bool:
+def test_normalizer_unknown_event_surfaced() -> None:
     n = _mk_normalizer()
     out = n.handle({"type": "totally_new_thing", "payload": 1})
-    return (
+    assert (
         len(out) == 1
         and out[0]["type"] == "unknown_event"
         and out[0]["raw_type"] == "totally_new_thing"
@@ -346,14 +341,14 @@ def test_normalizer_unknown_event_surfaced() -> bool:
     )
 
 
-def test_auth_failure_detection() -> bool:
+def test_auth_failure_detection() -> None:
     import runner_errors
     hit = runner_errors.classify(
         "cursor",
         "",
         "Error: Authentication required. Please run 'cursor-agent login' first",
     )
-    return (
+    assert (
         hit is not None
         and hit.category == runner_errors.CATEGORY_AUTH
         and "cursor-agent login" in hit.message
@@ -361,7 +356,7 @@ def test_auth_failure_detection() -> bool:
     )
 
 
-def test_runner_fails_closed_on_empty_prompt() -> bool:
+def test_runner_fails_closed_on_empty_prompt() -> None:
     run_dir = Path(tempfile.mkdtemp(prefix="cursor-runner-test-"))
     try:
         rc = asyncio.run(runner_cursor._run(run_dir, {
@@ -370,16 +365,16 @@ def test_runner_fails_closed_on_empty_prompt() -> bool:
             "_provider_executable": sys.executable,
         }))
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
-        return rc == 1 and complete["success"] is False and "prompt" in complete["error"]
+        assert rc == 1 and complete["success"] is False and "prompt" in complete["error"]
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message() -> None:
     # The label contract lives in prompt_heading_for_source (capability_contexts).
     # Assert it there directly — prepend_capability_context is integrations-gated
     # and short-circuits in the isolated test home, so it cannot prove the label.
-    return (
+    assert (
         prompt_heading_for_source("mssg") == "Message"
         and prompt_heading_for_source("team_ask") == "Ask"
         and prompt_heading_for_source("user") == "Injected prompt (user)"
@@ -420,10 +415,13 @@ def main() -> int:
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError:
                 failures.append(name)
+                print(f"FAIL: {name}")
+            else:
+                print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
