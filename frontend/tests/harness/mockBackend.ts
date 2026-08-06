@@ -20,7 +20,7 @@ import { finalizeTerminalAssistant } from "../../src/hooks/useSession";
  *  Single source for the `/api/extensions/<id>/backend/...` proxy family:
  *  a known id re-dispatches onto the canonical /api/... handler below, so
  *  each endpoint keeps exactly one mock implementation. */
-export const TEST_BUILTIN_EXTENSION_IDS: Record<BuiltinExtensionKey, string> = {
+const TEST_BUILTIN_EXTENSION_IDS: Record<BuiltinExtensionKey, string> = {
   ask: "ofek-dev.ask",
   team: "ofek-dev.team-orchestration",
   supervisor: "ofek-dev.supervisor",
