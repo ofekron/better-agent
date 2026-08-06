@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "Schließen",
   "backgroundWork.showAll": "{{count}} weitere anzeigen",
   "backgroundWork.showLess": "Weniger anzeigen",
-  "backgroundWork.offline": "Offline"
+  "backgroundWork.offline": "Offline",
+  "backgroundWork.providerInstall": "{{provider}} wird installiert",
+  "backgroundWork.credentialSync": "{{provider}}-Anmeldedaten werden mit {{node}} synchronisiert"
 }

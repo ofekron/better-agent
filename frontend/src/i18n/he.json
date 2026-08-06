@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "סגור",
   "backgroundWork.showAll": "הצג {{count}} נוספים",
   "backgroundWork.showLess": "הצג פחות",
-  "backgroundWork.offline": "לא מקוון"
+  "backgroundWork.offline": "לא מקוון",
+  "backgroundWork.providerInstall": "מתקין {{provider}}",
+  "backgroundWork.credentialSync": "מסנכרן אישורי {{provider}} אל {{node}}"
 }

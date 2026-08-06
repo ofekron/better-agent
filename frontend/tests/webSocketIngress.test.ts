@@ -171,18 +171,29 @@ const BASE_CORE_PAYLOAD_CASES = [
     invalid: { provider_id: "" },
   },
   {
-    type: "startup_task_changed",
+    type: "background_work_changed",
     valid: {
-      task: {
-        id: "recover",
+      epoch: "epoch-1",
+      item: {
+        id: "core:startup:recover",
+        kind: "work",
+        owner_kind: "core",
+        owner_id: "startup",
         label: "startup_tasks.recover_in_flight",
-        state: "running",
+        status: "running",
+        seq: 1,
         started_at: "2026-08-04T10:00:00Z",
-        finished_at: null,
+        updated_at: "2026-08-04T10:00:00Z",
+        session_id: null,
+        detail: null,
+        phase: null,
         error: null,
+        finished_at: null,
+        progress: null,
+        actions: [],
       },
     },
-    invalid: { task: { id: "recover", state: "running" } },
+    invalid: { epoch: "epoch-1", item: { id: "core:startup:recover", status: "exploded" } },
   },
   {
     type: "extension_event",
@@ -620,8 +631,8 @@ describe("parseWireEvent", () => {
       data: { kind: "codex", phase: "started" },
     })).toMatchObject({ ok: true });
     expect(parseWireEvent({
-      type: "startup_task_changed",
-      data: { cleared: true },
+      type: "background_work_changed",
+      data: { epoch: "epoch-1", cleared: true },
     })).toMatchObject({ ok: true });
   });
 

@@ -64,7 +64,6 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "session_provenance_changed", "session_unread_changed",
         "session_marker_changed", "session_status_changed",
     ),
-    "startup_tasks": ("startup_task_changed",),
     "background_work": ("background_work_changed",),
     "switch_control": ("switch_control_state_changed",),
     "machine_nodes": (
@@ -73,6 +72,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     ),
     "credential_broker": ("credential_consent_changed",),
     "installation_profile": ("installation_capabilities_changed",),
+    "a2a": ("a2a_registry_changed",),
 }
 
 GLOBAL_EVENT_SPECS = {

@@ -17856,214 +17856,7 @@ html[dir="rtl"] .user-request-toast::before {
  * area; auto-clears `done` rows, running/failed rows can be dismissed.
  * Authoritative state in the backend's
  * `startup_task_registry`; live deltas via `startup_task_changed` WS.
- * ───────────────────────────────────────────────────────────────────── */
-.startup-tasks-banner {
-  position: fixed;
-  right: 24px;
-  bottom: calc(100px + env(safe-area-inset-bottom, 0px));
-  z-index: 90;
-  width: min(360px, calc(100vw - 48px));
-  max-height: min(42vh, 320px);
-  overflow: auto;
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: #1f262a;
-  border: 1px solid #2f4d5b;
-  color: #cce6f0;
-  font-size: calc(12px * var(--app-font-scale));
-}
-.startup-tasks-banner-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  opacity: 0.8;
-}
-.startup-tasks-banner-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.startup-tasks-banner-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  line-height: 1.4;
-}
-.startup-tasks-banner-row-failed {
-  color: #f4d4cd;
-}
-.startup-tasks-banner-spinner {
-  display: inline-block;
-  width: 14px;
-  text-align: center;
-}
-.startup-tasks-banner-row-running .startup-tasks-banner-spinner {
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-@keyframes startup-tasks-spin {
-  to { transform: rotate(360deg); }
-}
-.startup-tasks-banner-text { flex: 1; }
-.startup-tasks-banner-error { opacity: 0.85; }
-.startup-tasks-banner-close {
-  background: transparent;
-  border: none;
-  color: inherit;
-  font-size: calc(16px * var(--app-font-scale));
-  cursor: pointer;
-  padding: 0 4px;
-  opacity: 0.7;
-  line-height: 1;
-  flex-shrink: 0;
-}
-.startup-tasks-banner-close:hover { opacity: 1; }
-:dir(rtl) .startup-tasks-banner {
-  right: auto;
-  left: 24px;
-}
-
-.model-catalog-activity {
-  position: fixed;
-  inset-inline-end: 24px;
-  bottom: calc(156px + env(safe-area-inset-bottom, 0px));
-  z-index: 91;
-  width: min(360px, calc(100vw - 48px));
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
-  animation: model-catalog-activity-in 180ms ease-out;
-}
-.model-catalog-activity header,
-.model-catalog-activity li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.model-catalog-activity li {
-  align-items: flex-start;
-  animation: model-catalog-activity-in 180ms ease-out;
-}
-.model-catalog-activity li svg {
-  margin-top: 3px;
-  flex: none;
-}
-.model-catalog-activity-text {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-.model-catalog-activity-provider {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.model-catalog-activity-detail {
-  color: var(--text-secondary);
-  font-size: calc(12px * var(--app-font-scale));
-  overflow-wrap: anywhere;
-  transition: color 180ms ease-out;
-}
-.model-catalog-activity header {
-  justify-content: space-between;
-  font-weight: 600;
-}
-.model-catalog-activity header button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
-}
-.model-catalog-activity ul {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.model-catalog-activity-refreshing svg,
-.model-catalog-activity-pending svg {
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-.node-provider-credential-status {
-  position: fixed;
-  inset-inline-end: 24px;
-  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-  z-index: 92;
-  width: min(380px, calc(100vw - 48px));
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
-  animation: node-provider-credential-status-in 180ms ease-out;
-}
-body:has(.model-catalog-activity) .node-provider-credential-status {
-  bottom: calc(250px + env(safe-area-inset-bottom, 0px));
-}
-.node-provider-credential-status ul {
-  display: grid;
-  gap: 1px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.node-provider-credential-status li {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 9px;
-  min-height: 42px;
-  padding: 9px 11px;
-  font-size: calc(12px * var(--app-font-scale));
-}
-.node-provider-credential-status li + li {
-  border-top: 1px solid var(--border-color);
-}
-.node-provider-credential-status-indicator {
-  width: 10px;
-  height: 10px;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-.node-provider-credential-status-failed {
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
-}
-.node-provider-credential-status-failed .node-provider-credential-status-indicator {
-  border: 0;
-  border-radius: 50%;
-  background: var(--danger);
-  animation: none;
-}
-.node-provider-credential-status button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
-  line-height: 1;
-  opacity: 0.72;
-  transition: opacity 180ms ease;
-}
-.node-provider-credential-status button:hover {
-  opacity: 1;
-}
-@keyframes node-provider-credential-status-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.model-catalog-status {
+ * ───────────────────────────────────────────────────────────────────── *.model-catalog-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -18103,38 +17896,15 @@ body:has(.model-catalog-activity) .node-provider-credential-status {
   border-inline-start-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 9%, transparent);
 }
-@keyframes model-catalog-activity-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+
 @media (prefers-reduced-motion: reduce) {
-  .model-catalog-activity,
-  .node-provider-credential-status,
-  .node-provider-credential-status-indicator,
-  .node-provider-credential-status button,
-  .model-catalog-status,
-  .model-catalog-activity li,
-  .model-catalog-activity-detail,
-  .model-catalog-activity svg {
+  .model-catalog-status {
     animation: none;
     transition: none;
   }
 }
 @media (max-width: 640px) {
-  .startup-tasks-banner {
-    right: 12px;
-    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-    width: min(360px, calc(100vw - 24px));
-  }
-  :dir(rtl) .startup-tasks-banner {
-    right: auto;
-    left: 12px;
-  }
-  .model-catalog-activity {
-    inset-inline-end: 12px;
-    width: min(360px, calc(100vw - 24px));
-  }
-  .node-provider-credential-status {
+  .background-work-manager {
     inset-inline-end: 12px;
     width: min(380px, calc(100vw - 24px));
   }
@@ -24219,8 +23989,13 @@ button.progress-inflight {
   opacity: 0.8;
 }
 
+@keyframes background-work-spin {
+  to { transform: rotate(360deg); }
+}
+
 .background-work-row-running .background-work-row-icon {
-  animation: startup-tasks-spin 1.2s linear infinite;
+  display: inline-flex;
+  animation: background-work-spin 1.2s linear infinite;
 }
 
 .background-work-row-failed .background-work-row-icon { color: var(--danger); }

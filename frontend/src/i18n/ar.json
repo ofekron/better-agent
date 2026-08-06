@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "إغلاق",
   "backgroundWork.showAll": "عرض {{count}} إضافية",
   "backgroundWork.showLess": "عرض أقل",
-  "backgroundWork.offline": "غير متصل"
+  "backgroundWork.offline": "غير متصل",
+  "backgroundWork.providerInstall": "جارٍ تثبيت {{provider}}",
+  "backgroundWork.credentialSync": "جارٍ مزامنة بيانات اعتماد {{provider}} مع {{node}}"
 }

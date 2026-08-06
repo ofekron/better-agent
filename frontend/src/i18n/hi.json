@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "खारिज करें",
   "backgroundWork.showAll": "{{count}} और दिखाएं",
   "backgroundWork.showLess": "कम दिखाएं",
-  "backgroundWork.offline": "ऑफ़लाइन"
+  "backgroundWork.offline": "ऑफ़लाइन",
+  "backgroundWork.providerInstall": "{{provider}} इंस्टॉल हो रहा है",
+  "backgroundWork.credentialSync": "{{provider}} क्रेडेंशियल {{node}} में सिंक हो रहे हैं"
 }

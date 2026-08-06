@@ -789,10 +789,56 @@ if (
 
         node_store.add_listener(_on_node_state_changed)
 
+        def _project_node_credential_work(
+            node_id: str,
+            provider_credentials: list[dict],
+        ) -> None:
+            """Credential sync per (node, provider) is background work the
+            user should see wherever they are, so each non-synced pair gets a
+            row and clears itself once the backend reports it synced."""
+            import background_work
+            from background_work import background_work_registry
+
+            for entry in provider_credentials or []:
+                provider = str(entry.get("provider") or "")
+                if not provider:
+                    continue
+                local_id = f"credsync:{node_id}:{provider}"
+                item_id = f"{background_work.OWNER_CORE}:node_credentials:{local_id}"
+                status = entry.get("status")
+                if status == "synced":
+                    background_work_registry.finish(item_id)
+                    continue
+                if status == "failed":
+                    if background_work_registry.get(item_id) is None:
+                        background_work_registry.report(
+                            owner_kind=background_work.OWNER_CORE,
+                            owner_id="node_credentials",
+                            local_id=local_id,
+                            label=provider,
+                            title_key="backgroundWork.credentialSync",
+                            title_params={"provider": provider, "node": node_id},
+                        )
+                    background_work_registry.finish(
+                        item_id,
+                        status=background_work.STATUS_FAILED,
+                        error=str(entry.get("error") or "") or None,
+                    )
+                    continue
+                background_work_registry.report(
+                    owner_kind=background_work.OWNER_CORE,
+                    owner_id="node_credentials",
+                    local_id=local_id,
+                    label=provider,
+                    title_key="backgroundWork.credentialSync",
+                    title_params={"provider": provider, "node": node_id},
+                )
+
         async def _on_node_provider_credentials_changed(
             node_id: str,
             provider_credentials: list[dict],
         ) -> None:
+            _project_node_credential_work(node_id, provider_credentials)
             try:
                 await coordinator.broadcast_global(
                     "node_provider_credentials_changed",

@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "닫기",
   "backgroundWork.showAll": "{{count}}개 더 보기",
   "backgroundWork.showLess": "간략히 보기",
-  "backgroundWork.offline": "오프라인"
+  "backgroundWork.offline": "오프라인",
+  "backgroundWork.providerInstall": "{{provider}} 설치 중",
+  "backgroundWork.credentialSync": "{{provider}} 자격 증명을 {{node}}(으)로 동기화 중"
 }

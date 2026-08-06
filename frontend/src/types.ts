@@ -274,10 +274,6 @@ export type WSEventType =
   // future replay path) still type-checks and renders via PrLinkEvent.
   | "pr_link"
   // Backend startup task lifecycle delta (register/done/failed/reset).
-  // `useAppWebSocket` publishes it on the typed event bus that
-  // `StartupTasksBanner` subscribes to; the banner's authoritative
-  // snapshot comes from `GET /api/startup_tasks` on mount.
-  | "startup_task_changed"
   // Deltas from the backend's background work registry. The manager's
   // authoritative snapshot is `GET /api/background-work`; a delta whose
   // epoch differs from the snapshot's means the registry was rebuilt and
@@ -1476,6 +1472,25 @@ export interface DeletedProviderRef {
 
 /** Snapshot returned by GET /api/runtime-profiles; `runtime_profiles_changed`
  * WS frames carry the same shape (push side of the pull+push contract). */
+/** Redacted (secret-free) view of a registered outbound A2A remote
+ * agent — the only shape the backend ever sends the frontend. */
+export interface A2AAgent {
+  id: string;
+  name: string;
+  base_url: string;
+  auth_header_name: string;
+  has_auth_secret: boolean;
+  agent_card: Record<string, unknown>;
+  created_at: string;
+  last_probed_at: string | null;
+  last_probe_ok: boolean | null;
+  last_probe_error: string | null;
+}
+
+export interface A2AAgentsSnapshot {
+  agents: A2AAgent[];
+}
+
 export interface RuntimeProfilesSnapshot {
   runtime_profiles: RuntimeProfile[];
   default_runtime_profile_id: string | null;
@@ -1569,21 +1584,6 @@ export interface ProjectConfigFile {
   modified: string | null;
 }
 
-/** Backend startup task — long-running work (migrations, recovery)
- * moved off the FastAPI startup critical path. Authoritative state
- * lives in the backend's in-memory `startup_task_registry`; the
- * frontend reflects it via `GET /api/startup_tasks` on mount and live
- * `startup_task_changed` WS pings. Non-blocking banner; sessions whose
- * messages are still being recovered show a per-message `isRecovering`
- * pill independently. */
-export interface StartupTask {
-  id: string;
-  label: string;
-  state: "running" | "done" | "failed";
-  started_at: string;
-  finished_at: string | null;
-  error: string | null;
-}
 
 /** One row in the background work manager. Authoritative state lives in
  * the backend's in-memory `background_work_registry`; the frontend holds a

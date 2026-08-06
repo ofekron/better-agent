@@ -1521,5 +1521,7 @@
   "backgroundWork.dismiss": "Закрыть",
   "backgroundWork.showAll": "Показать ещё {{count}}",
   "backgroundWork.showLess": "Показать меньше",
-  "backgroundWork.offline": "Не в сети"
+  "backgroundWork.offline": "Не в сети",
+  "backgroundWork.providerInstall": "Установка {{provider}}",
+  "backgroundWork.credentialSync": "Синхронизация учётных данных {{provider}} с {{node}}"
 }

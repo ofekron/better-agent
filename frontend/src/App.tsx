@@ -25,7 +25,6 @@ import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { useLatestEventOfTypes } from "./hooks/useLatestEventOfTypes";
 import { Chat } from "./components/Chat";
 import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
-import { NodeProviderCredentialStatus } from "./components/NodeProviderCredentialStatus";
 import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthPrompt";
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
@@ -45,8 +44,6 @@ import { sessionHasForkSource } from "./utils/sessionFork";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
-import { StartupTasksBanner } from "./components/StartupTasksBanner";
-import { ModelCatalogActivity } from "./components/ModelCatalogActivity";
 import { BackgroundWorkManager } from "./components/BackgroundWorkManager";
 import { MarketplaceBridgeCenter } from "./components/MarketplaceBridgeCenter";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
@@ -6589,9 +6586,6 @@ function AppMain({
         </div>
       )}
       <BackgroundWorkManager />
-      <StartupTasksBanner />
-      <ModelCatalogActivity providers={providers} />
-      <NodeProviderCredentialStatus machines={machines} />
       {authStatus === "authed" ? <MarketplaceBridgeCenter /> : null}
       {authStatus === "authed" &&
         sessionDragOverlayModules.map((module) => (

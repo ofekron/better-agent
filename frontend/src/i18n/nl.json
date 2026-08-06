@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "Sluiten",
   "backgroundWork.showAll": "Toon {{count}} meer",
   "backgroundWork.showLess": "Toon minder",
-  "backgroundWork.offline": "Offline"
+  "backgroundWork.offline": "Offline",
+  "backgroundWork.providerInstall": "{{provider}} installeren",
+  "backgroundWork.credentialSync": "{{provider}}-inloggegevens synchroniseren met {{node}}"
 }

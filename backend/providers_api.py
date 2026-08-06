@@ -12,10 +12,12 @@ from typing import Any, Callable, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+import background_work
 import config_store
 import provider_auth
 import provider_setup
 import runtime_profile
+from background_work import background_work_registry
 from i18n import t
 from provider_validation import (
     is_loopback_request,
@@ -114,9 +116,53 @@ def _with_login_states(state: dict) -> dict:
 
 async def _broadcast_install(event_type: str, data: dict) -> None:
     """Fan-out for streaming provider-CLI installs. provider_setup calls
-    this per stdout/stderr line and on completion."""
+    this per stdout/stderr line and on completion.
+
+    The per-line events stay as they are — the Settings page renders the full
+    installer log from them. Alongside that, the run is projected into the
+    background work registry so an install started from Settings stays
+    visible after the user navigates away."""
     broadcast_global = _require_configured()
+    _project_install_work(event_type, data)
     await broadcast_global(event_type, data)
+
+
+def _project_install_work(event_type: str, data: dict) -> None:
+    kind = str(data.get("kind") or "")
+    if not kind:
+        return
+    local_id = f"install:{kind}"
+    if event_type == "provider_install_progress":
+        phase = data.get("phase")
+        text = data.get("text")
+        if phase == "started":
+            background_work_registry.report(
+                owner_kind=background_work.OWNER_CORE,
+                owner_id="provider_setup",
+                local_id=local_id,
+                label=kind,
+                title_key="backgroundWork.providerInstall",
+                title_params={"provider": kind},
+            )
+            return
+        # Installer output has no total to count against, so the row stays
+        # indeterminate and shows the latest line as its phase.
+        if text:
+            background_work_registry.update(
+                f"{background_work.OWNER_CORE}:provider_setup:{local_id}",
+                phase=str(text).strip(),
+            )
+        return
+    if event_type == "provider_install_finished":
+        failed = data.get("state") == "failed" or data.get("returncode") not in (0, None)
+        background_work_registry.finish(
+            f"{background_work.OWNER_CORE}:provider_setup:{local_id}",
+            status=(
+                background_work.STATUS_FAILED if failed
+                else background_work.STATUS_SUCCEEDED
+            ),
+            error=str(data.get("message") or "") or None if failed else None,
+        )
 
 
 async def broadcast_model_catalog_fact(fact) -> None:
@@ -183,16 +229,6 @@ async def _refresh_provider_models(record: dict) -> dict | None:
     import models as models_mod
 
     return await models_mod.refresh_one(str(record["id"]))
-
-
-@router.get("/api/startup_tasks")
-async def get_startup_tasks():
-    """Snapshot of in-flight + recent-history backend startup tasks.
-    Frontend banner reads this on mount for first paint, then
-    subscribes to `startup_task_changed` WS events for live deltas.
-    Authoritative state lives in `startup_task_registry` (in-memory)."""
-    from startup_tasks import startup_task_registry
-    return startup_task_registry.list()
 
 
 @router.get("/api/providers")

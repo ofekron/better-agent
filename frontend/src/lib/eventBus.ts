@@ -30,7 +30,6 @@ import type {
   Schedule,
   Session,
   SessionStatusKey,
-  StartupTask,
   BackgroundWorkItem,
   ToolApproval,
   UserInteractionRequest,
@@ -150,9 +149,6 @@ export interface BusEventMap {
     went_retired?: string[];
     truly_removed?: string[];
   };
-  startup_task_changed:
-    | { cleared: true }
-    | { task: StartupTask };
   background_work_changed:
     | { epoch: string; cleared: true }
     | { epoch: string; item: BackgroundWorkItem }

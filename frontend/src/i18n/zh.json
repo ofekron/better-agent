@@ -1519,5 +1519,7 @@
   "backgroundWork.dismiss": "关闭",
   "backgroundWork.showAll": "显示另外 {{count}} 个",
   "backgroundWork.showLess": "收起",
-  "backgroundWork.offline": "离线"
+  "backgroundWork.offline": "离线",
+  "backgroundWork.providerInstall": "正在安装 {{provider}}",
+  "backgroundWork.credentialSync": "正在将 {{provider}} 凭据同步到 {{node}}"
 }
