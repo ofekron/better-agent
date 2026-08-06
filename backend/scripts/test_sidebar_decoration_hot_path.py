@@ -16,7 +16,7 @@ import main  # noqa: E402
 import session_listing_api  # noqa: E402
 
 
-def test_sidebar_decoration_uses_summary_error_projection() -> bool:
+def test_sidebar_decoration_uses_summary_error_projection() -> None:
     original = main.session_manager.has_unseen_error
 
     def fail_load(_sid: str) -> bool:
@@ -31,9 +31,10 @@ def test_sidebar_decoration_uses_summary_error_projection() -> bool:
             "node_id": "primary",
             "unseen_error": "boom",
         }])
+        assert len(rows) == 1
+        assert rows[0].get("has_error") is True
     finally:
         main.session_manager.has_unseen_error = original
-    return len(rows) == 1 and rows[0].get("has_error") is True
 
 
 def run() -> int:
@@ -46,14 +47,15 @@ def run() -> int:
     failures: list[str] = []
     for name, fn in tests:
         try:
-            ok = fn()
-        except Exception as exc:
-            ok = False
+            fn()
+        except AssertionError as exc:
             print(f"FAIL {name}: {exc}")
-        else:
-            print(("PASS" if ok else "FAIL") + f" {name}")
-        if not ok:
             failures.append(name)
+        except Exception as exc:
+            print(f"FAIL {name}: {exc}")
+            failures.append(name)
+        else:
+            print(f"PASS {name}")
     if failures:
         print(f"FAILED: {failures}")
         return 1
