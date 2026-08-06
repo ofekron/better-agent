@@ -28,8 +28,6 @@ import sys
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-authme-")
-# Real auth path only — never the loopback test bypass.
-os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -55,31 +53,28 @@ def _fresh_client() -> TestClient:
     return TestClient(main.app, client=("127.0.0.1", 50000))
 
 
-def test_valid_bearer_authenticates() -> tuple[bool, str]:
+def test_valid_bearer_authenticates() -> None:
     """Case 1: a valid bearer token (no cookie) authenticates /me."""
     res = _fresh_client().get(
         "/api/auth/me", headers={"Authorization": f"Bearer {_TOKEN}"}
     )
-    if res.status_code != 200:
-        return False, f"expected 200, got {res.status_code}"
+    assert res.status_code == 200, f"expected 200, got {res.status_code}"
     body = res.json()
-    if body.get("username") != _USERNAME:
-        return False, f"expected username {_USERNAME!r}, got {body!r}"
-    return True, ""
+    assert body.get("username") == _USERNAME, f"expected username {_USERNAME!r}, got {body!r}"
 
 
-def test_no_credentials_rejected() -> tuple[bool, str]:
+def test_no_credentials_rejected() -> None:
     """Case 2: no cookie, no bearer -> 401."""
     res = _fresh_client().get("/api/auth/me")
-    return res.status_code == 401, f"expected 401, got {res.status_code}"
+    assert res.status_code == 401, f"expected 401, got {res.status_code}"
 
 
-def test_bogus_bearer_rejected() -> tuple[bool, str]:
+def test_bogus_bearer_rejected() -> None:
     """Case 3: a forged token -> 401 (signature must be verified)."""
     res = _fresh_client().get(
         "/api/auth/me", headers={"Authorization": "Bearer not.a.real.token"}
     )
-    return res.status_code == 401, f"expected 401, got {res.status_code}"
+    assert res.status_code == 401, f"expected 401, got {res.status_code}"
 
 
 TESTS = [
@@ -94,15 +89,14 @@ def main_run() -> int:
     failed = 0
     for name, fn in TESTS:
         try:
-            ok, detail = fn()
+            fn()
         except Exception as e:  # noqa: BLE001
-            ok, detail = False, f"exception: {e}"
             import traceback
             traceback.print_exc()
-        tag = PASS if ok else FAIL
-        print(f"  {tag} {name}{'' if ok else ' — ' + detail}")
-        if not ok:
+            print(f"  {FAIL} {name} — {e}")
             failed += 1
+            continue
+        print(f"  {PASS} {name}")
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
           else f"all {len(TESTS)} tests passed")
