@@ -121,73 +121,66 @@ def _write(d: Path, name: str, content: str = "hello world\n") -> Path:
     return p
 
 
-def test_persistent_marks_meta() -> bool:
+def test_persistent_marks_meta() -> None:
     """file_editor.start(persistent=True) stamps meta.persistent=True +
     file_paths."""
     d = _project("persistent_marks")
     fp = _write(d, "a.txt")
     result = file_editor.start(str(fp), cwd=str(d), persistent=True)
     sess = session_manager.get(result["session_id"])
-    if sess is None:
-        print("  session not found after start")
-        return False
-    if sess.get("working_mode") != "file_editing":
-        print(f"  expected working_mode='file_editing', got {sess.get('working_mode')!r}")
-        return False
+    assert sess is not None, "session not found after start"
+    assert sess.get("working_mode") == "file_editing", (
+        f"expected working_mode='file_editing', got {sess.get('working_mode')!r}"
+    )
     meta = sess.get("working_mode_meta") or {}
-    if meta.get("persistent") is not True:
-        print(f"  expected meta.persistent=True, got {meta.get('persistent')!r}")
-        return False
-    if meta.get("file_paths") != [str(fp.resolve())]:
-        print(f"  expected meta.file_paths=[{str(fp.resolve())!r}], got {meta.get('file_paths')!r}")
-        return False
-    if meta.get("project_cwd") != str(d.resolve()):
-        print(f"  expected meta.project_cwd={str(d.resolve())!r}, got {meta.get('project_cwd')!r}")
-        return False
-    return True
+    assert meta.get("persistent") is True, (
+        f"expected meta.persistent=True, got {meta.get('persistent')!r}"
+    )
+    assert meta.get("file_paths") == [str(fp.resolve())], (
+        f"expected meta.file_paths=[{str(fp.resolve())!r}], got {meta.get('file_paths')!r}"
+    )
+    assert meta.get("project_cwd") == str(d.resolve()), (
+        f"expected meta.project_cwd={str(d.resolve())!r}, got {meta.get('project_cwd')!r}"
+    )
 
 
-def test_temporal_marks_meta_without_persistent() -> bool:
+def test_temporal_marks_meta_without_persistent() -> None:
     """file_editor.start(persistent=False) leaves meta.persistent falsy."""
     d = _project("temporal_marks")
     fp = _write(d, "b.txt")
     result = file_editor.start(str(fp), cwd=str(d))
     sess = session_manager.get(result["session_id"])
-    if sess is None:
-        print("  session not found")
-        return False
+    assert sess is not None, "session not found"
     meta = sess.get("working_mode_meta") or {}
-    if meta.get("persistent"):
-        print(f"  expected meta.persistent falsy, got {meta.get('persistent')!r}")
-        return False
-    return True
+    assert not meta.get("persistent"), (
+        f"expected meta.persistent falsy, got {meta.get('persistent')!r}"
+    )
 
 
-def test_same_cwd_persistent_start_creates_fresh_session() -> bool:
+def test_same_cwd_persistent_start_creates_fresh_session() -> None:
     """Existing temporal session for a cwd + a later persistent=True
     start for the SAME cwd → distinct sessions; persistent is per-session."""
     d = _project("upgrade")
     fp = _write(d, "c.txt")
     r1 = file_editor.start(str(fp), cwd=str(d))
     r2 = file_editor.start(str(fp), cwd=str(d), persistent=True)
-    if r1["session_id"] == r2["session_id"]:
-        print("  expected a fresh session, not a cwd-keyed join")
-        return False
+    assert r1["session_id"] != r2["session_id"], (
+        "expected a fresh session, not a cwd-keyed join"
+    )
     meta1 = (session_manager.get(r1["session_id"]) or {}).get("working_mode_meta") or {}
     meta2 = (session_manager.get(r2["session_id"]) or {}).get("working_mode_meta") or {}
-    if meta1.get("persistent"):
-        print(f"  temporal session should remain temporal, got {meta1.get('persistent')!r}")
-        return False
-    if meta2.get("persistent") is not True:
-        print(f"  new persistent session missing flag, got {meta2.get('persistent')!r}")
-        return False
-    if meta1.get("base_session_id") != meta2.get("base_session_id"):
-        print("  same cwd/model/provider should reuse the warm base")
-        return False
-    return True
+    assert not meta1.get("persistent"), (
+        f"temporal session should remain temporal, got {meta1.get('persistent')!r}"
+    )
+    assert meta2.get("persistent") is True, (
+        f"new persistent session missing flag, got {meta2.get('persistent')!r}"
+    )
+    assert meta1.get("base_session_id") == meta2.get("base_session_id"), (
+        "same cwd/model/provider should reuse the warm base"
+    )
 
 
-def test_sidebar_visibility_persistent_vs_temporal() -> bool:
+def test_sidebar_visibility_persistent_vs_temporal() -> None:
     """should_hide_from_sidebar:
       - persistent file_editing → visible (False)
       - temporal file_editing → hidden (True)
@@ -218,13 +211,10 @@ def test_sidebar_visibility_persistent_vs_temporal() -> bool:
     ]
     for summary, want_hidden, label in cases:
         got = working_mode.should_hide_from_sidebar(summary)
-        if got != want_hidden:
-            print(f"  {label}: expected hidden={want_hidden}, got {got}")
-            return False
-    return True
+        assert got == want_hidden, f"{label}: expected hidden={want_hidden}, got {got}"
 
 
-def test_list_sessions_includes_persistent_but_excludes_temporal() -> bool:
+def test_list_sessions_includes_persistent_but_excludes_temporal() -> None:
     """End-to-end: GET /api/sessions equivalent via session_manager.list()
     + should_hide_from_sidebar (the pipeline main.py:get_sessions uses).
     Different cwds so the two flavors don't cross-join."""
@@ -240,16 +230,15 @@ def test_list_sessions_includes_persistent_but_excludes_temporal() -> bool:
         s["id"] for s in summaries
         if not working_mode.should_hide_from_sidebar(s)
     }
-    if r_p["session_id"] not in visible_ids:
-        print(f"  persistent session {r_p['session_id'][:8]} should be visible")
-        return False
-    if r_t["session_id"] in visible_ids:
-        print(f"  temporal session {r_t['session_id'][:8]} must be hidden")
-        return False
-    return True
+    assert r_p["session_id"] in visible_ids, (
+        f"persistent session {r_p['session_id'][:8]} should be visible"
+    )
+    assert r_t["session_id"] not in visible_ids, (
+        f"temporal session {r_t['session_id'][:8]} must be hidden"
+    )
 
 
-def test_list_sessions_summary_includes_working_mode_meta() -> bool:
+def test_list_sessions_summary_includes_working_mode_meta() -> None:
     """The sidebar summary must carry `working_mode_meta` so the frontend
     sidebar filter can read meta.persistent without a per-session detail
     fetch."""
@@ -262,27 +251,21 @@ def test_list_sessions_summary_includes_working_mode_meta() -> bool:
         if s.get("working_mode") == "file_editing"
         and (s.get("working_mode_meta") or {}).get("persistent")
     ]
-    if not pers:
-        print("  no persistent session found in sidebar summaries")
-        return False
+    assert pers, "no persistent session found in sidebar summaries"
     meta = pers[0].get("working_mode_meta")
-    if meta is None:
-        print("  summary missing working_mode_meta field")
-        return False
-    if not meta.get("file_paths"):
-        print("  summary's working_mode_meta missing file_paths")
-        return False
-    return True
+    assert meta is not None, "summary missing working_mode_meta field"
+    assert meta.get("file_paths"), "summary's working_mode_meta missing file_paths"
 
 
-def test_session_record_has_no_legacy_file_edit_path_field() -> bool:
+def test_session_record_has_no_legacy_file_edit_path_field() -> None:
     """The legacy `file_edit_path` field was deleted from the session
     schema. Newly created sessions must not carry it."""
-    sess = session_manager.create(name="legacy-check", model="x", cwd="/tmp")
-    if "file_edit_path" in sess:
-        print(f"  session record still carries legacy field: file_edit_path={sess.get('file_edit_path')!r}")
-        return False
-    return True
+    sess = session_manager.create(
+        name="legacy-check", model="x", cwd="/tmp", orchestration_mode="native",
+    )
+    assert "file_edit_path" not in sess, (
+        f"session record still carries legacy field: file_edit_path={sess.get('file_edit_path')!r}"
+    )
 
 
 TESTS = [
@@ -301,15 +284,15 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                fn()
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"  {e}")
                 failed += 1
+                print(f"{FAIL}  {name}")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
