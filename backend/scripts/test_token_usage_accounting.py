@@ -45,32 +45,32 @@ def _agent_event(message_id: str | None, usage: dict) -> dict:
     }
 
 
-def test_exact_duplicate_message_id_counts_once() -> bool:
+def test_exact_duplicate_message_id_counts_once():
     usage = _usage(10, 2, 3, 4)
     got = extract_token_usage([
         _agent_event("msg-a", usage),
         _agent_event("msg-a", usage),
     ])
-    return got == usage
+    assert got == usage
 
 
-def test_streaming_update_keeps_latest_snapshot() -> bool:
+def test_streaming_update_keeps_latest_snapshot():
     got = extract_token_usage([
         _agent_event("msg-a", _usage(10, 1, 3, 4)),
         _agent_event("msg-a", _usage(10, 5, 3, 4)),
     ])
-    return got == _usage(10, 5, 3, 4)
+    assert got == _usage(10, 5, 3, 4)
 
 
-def test_distinct_message_ids_sum() -> bool:
+def test_distinct_message_ids_sum():
     got = extract_token_usage([
         _agent_event("msg-a", _usage(10, 2, 3, 4)),
         _agent_event("msg-b", _usage(1, 20, 30, 40)),
     ])
-    return got == _usage(11, 22, 33, 44)
+    assert got == _usage(11, 22, 33, 44)
 
 
-def test_result_rollup_preferred_over_event_fallback() -> bool:
+def test_result_rollup_preferred_over_event_fallback():
     got = extract_provider_result_token_usage({
         "token_usage": _usage(7, 8, 9, 10),
         "events": [
@@ -78,28 +78,28 @@ def test_result_rollup_preferred_over_event_fallback() -> bool:
             _agent_event("msg-b", _usage(1, 20, 30, 40)),
         ],
     })
-    return got == _usage(7, 8, 9, 10)
+    assert got == _usage(7, 8, 9, 10)
 
 
-def test_missing_message_id_counts_each_snapshot_once() -> bool:
+def test_missing_message_id_counts_each_snapshot_once():
     got = extract_token_usage([
         _agent_event(None, _usage(1, 2, 3, 4)),
         _agent_event(None, _usage(10, 20, 30, 40)),
     ])
-    return got == _usage(11, 22, 33, 44)
+    assert got == _usage(11, 22, 33, 44)
 
 
-def test_runner_snapshot_helper_matches_trace_fallback_semantics() -> bool:
+def test_runner_snapshot_helper_matches_trace_fallback_semantics():
     snapshots = [
         ("msg-a", _usage(10, 1, 3, 4)),
         ("msg-a", _usage(10, 5, 3, 4)),
         ("msg-b", _usage(1, 20, 30, 40)),
     ]
     got = aggregate_claude_usage_snapshots(snapshots)
-    return got == _usage(11, 25, 33, 44)
+    assert got == _usage(11, 25, 33, 44)
 
 
-def test_runner_turn_helper_prefers_result_rollup() -> bool:
+def test_runner_turn_helper_prefers_result_rollup():
     got = aggregate_claude_turn_usage(
         [
             ("msg-a", _usage(10, 2, 3, 4)),
@@ -107,10 +107,10 @@ def test_runner_turn_helper_prefers_result_rollup() -> bool:
         ],
         _usage(7, 8, 9, 10),
     )
-    return got == _usage(7, 8, 9, 10)
+    assert got == _usage(7, 8, 9, 10)
 
 
-def test_runner_message_id_reads_sdk_assistant_message_id() -> bool:
+def test_runner_message_id_reads_sdk_assistant_message_id():
     first = AssistantMessage(
         content=[],
         model="test",
@@ -127,7 +127,7 @@ def test_runner_message_id_reads_sdk_assistant_message_id() -> bool:
         (_message_id(first), first.usage),
         (_message_id(updated), updated.usage),
     ])
-    return got == _usage(10, 5, 3, 4)
+    assert got == _usage(10, 5, 3, 4)
 
 
 TESTS = [
@@ -146,13 +146,17 @@ def main_run() -> int:
     ok = True
     for name, fn in TESTS:
         try:
-            passed = bool(fn())
-        except Exception as exc:
-            passed = False
-            print(f"{FAIL} {name}: {type(exc).__name__}: {exc}")
+            fn()
+        except AssertionError as exc:
+            print(f"{FAIL} {name}: {exc}")
+            ok = False
+        except Exception:
+            import traceback
+            print(f"{FAIL} {name}: unexpected")
+            traceback.print_exc()
+            ok = False
         else:
-            print(f"{PASS if passed else FAIL} {name}")
-        ok = ok and passed
+            print(f"{PASS} {name}")
     return 0 if ok else 1
 
 
