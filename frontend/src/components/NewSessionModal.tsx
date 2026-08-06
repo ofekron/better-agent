@@ -21,6 +21,7 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { usePersistedDraft, usePersistedJSONDraft } from "../hooks/usePersistedDraft";
 import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
+import { useViewport } from "../hooks/useViewport";
 import { navigateRoute } from "../hooks/useRoute";
 import { ConfirmModal } from "./ConfirmModal";
 import { ModelCatalogStatus } from "./ModelCatalogStatus";
@@ -744,6 +745,8 @@ export function NewSessionModal({
   const nodeIdTouchedRef = useRef(false);
   const { machines } = useMachines();
   const localNodeId = useLocalNodeId();
+  // On touch-class viewports the soft keyboard's Enter means newline.
+  const enterIsNewline = useViewport().mode !== "desktop";
   // Default-pick rule:
   //   0 machines (single-machine deploy, no topology) → silent "primary"
   //   1 machine                                       → auto-pick the one
@@ -1020,6 +1023,10 @@ export function NewSessionModal({
   };
 
   const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Desktop: Enter creates the session, Shift+Enter inserts a newline.
+    // Mobile/tablet: the soft keyboard's return key always inserts a newline;
+    // creation happens through the explicit create button.
+    if (enterIsNewline) return;
     if (event.key !== "Enter") return;
     if (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
