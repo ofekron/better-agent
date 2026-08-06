@@ -40,7 +40,7 @@ function isRuntimeProfile(value: unknown): value is ModelRuntimeCatalogProfile {
   );
 }
 
-export function parseModelCatalog(value: unknown): ModelCatalog {
+function parseModelCatalog(value: unknown): ModelCatalog {
   if (!value || typeof value !== "object") {
     throw new Error("invalid model catalog response");
   }

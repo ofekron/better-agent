@@ -4,12 +4,12 @@ import {
   type WSEventType,
 } from "../types";
 
-export type WireEventParseErrorCode =
+type WireEventParseErrorCode =
   | "invalid_envelope"
   | "untrusted_session"
   | "invalid_core_payload";
 
-export type WireEventParseResult =
+type WireEventParseResult =
   | { ok: true; event: WireEvent }
   | {
       ok: false;
