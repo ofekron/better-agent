@@ -202,7 +202,8 @@ def test_seen_journal_head_fast_clean_skips_cold_load() -> bool:
     print(f"{PASS if ok else FAIL} seen journal-head fast-clean "
           f"(cleaned={cleaned}, root_loaded={root_loaded}, "
           f"peek={peeked}, read_events={scanned})")
-    return ok
+    assert ok, (f"seen journal-head fast-clean failed: cleaned={cleaned}, "
+                f"root_loaded={root_loaded}, peek={peeked}, read_events={scanned}")
 
 
 def test_seen_fast_clean_rejects_later_render_before_non_render_tail() -> bool:
@@ -237,16 +238,23 @@ def test_seen_fast_clean_rejects_later_render_before_non_render_tail() -> bool:
     ok = cleaned is False
     print(f"{PASS if ok else FAIL} seen fast-clean rejects later render "
           f"(cleaned={cleaned})")
-    return ok
+    assert ok, f"seen fast-clean failed to reject later render: cleaned={cleaned}"
 
 
 def main() -> int:
-    results = [
-        test_cold_setup_blocking_path_scans(),
-        test_warm_unread_hydrates_and_fires(),
-        test_seen_journal_head_fast_clean_skips_cold_load(),
-        test_seen_fast_clean_rejects_later_render_before_non_render_tail(),
+    tests = [
+        test_cold_setup_blocking_path_scans,
+        test_warm_unread_hydrates_and_fires,
+        test_seen_journal_head_fast_clean_skips_cold_load,
+        test_seen_fast_clean_rejects_later_render_before_non_render_tail,
     ]
+    results = []
+    for fn in tests:
+        try:
+            ret = fn()
+            results.append(ret is not False)
+        except Exception:
+            results.append(False)
     passed = sum(1 for r in results if r)
     total = len(results)
     print(f"\n{passed}/{total} passed")

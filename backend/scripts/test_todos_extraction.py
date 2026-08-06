@@ -1419,29 +1419,20 @@ def test_codex_update_plan_convergence_live_equals_recovery() -> bool:
 
 # ─── TaskCreate / TaskUpdate tests ───────────────────────────────
 
-def test_task_create_adds_pending_item() -> bool:
+def test_task_create_adds_pending_item() -> None:
     """TaskCreate adds a new item with content=subject, status=pending."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
     _apply(strategy, sid, msg,
            _task_create("u1", "Fix login bug", activeForm="Fixing login"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item, got {len(got)}: {got}")
-        return False
-    if got[0]["content"] != "Fix login bug":
-        print(f"  wrong content: {got[0]['content']}")
-        return False
-    if got[0]["status"] != "pending":
-        print(f"  wrong status: {got[0]['status']}")
-        return False
-    if got[0]["activeForm"] != "Fixing login":
-        print(f"  wrong activeForm: {got[0]['activeForm']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item, got {len(got)}: {got}"
+    assert got[0]["content"] == "Fix login bug", f"wrong content: {got[0]['content']}"
+    assert got[0]["status"] == "pending", f"wrong status: {got[0]['status']}"
+    assert got[0]["activeForm"] == "Fixing login", f"wrong activeForm: {got[0]['activeForm']}"
 
 
-def test_task_create_multiple_accumulates() -> bool:
+def test_task_create_multiple_accumulates() -> None:
     """Multiple TaskCreate calls accumulate items."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1452,17 +1443,12 @@ def test_task_create_multiple_accumulates() -> bool:
     _apply(strategy, sid, msg,
            _task_create("u3", "Task C", tool_id="tc3"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 3:
-        print(f"  expected 3 items, got {len(got)}: {got}")
-        return False
+    assert len(got) == 3, f"expected 3 items, got {len(got)}: {got}"
     contents = [t["content"] for t in got]
-    if contents != ["Task A", "Task B", "Task C"]:
-        print(f"  wrong contents: {contents}")
-        return False
-    return True
+    assert contents == ["Task A", "Task B", "Task C"], f"wrong contents: {contents}"
 
 
-def test_task_create_dedup_on_replay() -> bool:
+def test_task_create_dedup_on_replay() -> None:
     """Replaying the same TaskCreate doesn't duplicate items."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1470,13 +1456,10 @@ def test_task_create_dedup_on_replay() -> bool:
     _apply(strategy, sid, msg, ev, source_is_provider_stream=True)
     _apply(strategy, sid, msg, ev, source_is_provider_stream=False)  # recovery replay
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item after replay, got {len(got)}: {got}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item after replay, got {len(got)}: {got}"
 
 
-def test_task_update_status_heuristic_pending_to_in_progress() -> bool:
+def test_task_update_status_heuristic_pending_to_in_progress() -> None:
     """TaskUpdate(status=in_progress) advances the first pending item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1488,13 +1471,10 @@ def test_task_update_status_heuristic_pending_to_in_progress() -> bool:
            _task_update("u3", "1", status="in_progress", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["in_progress", "pending"]:
-        print(f"  wrong statuses: {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending"], f"wrong statuses: {statuses}"
 
 
-def test_task_update_status_heuristic_to_completed() -> bool:
+def test_task_update_status_heuristic_to_completed() -> None:
     """TaskUpdate(status=completed) completes the first in_progress item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1505,16 +1485,11 @@ def test_task_update_status_heuristic_to_completed() -> bool:
     _apply(strategy, sid, msg,
            _task_update("u3", "1", status="completed", tool_id="tu2"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item, got {len(got)}: {got}")
-        return False
-    if got[0]["status"] != "completed":
-        print(f"  wrong status: {got[0]['status']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item, got {len(got)}: {got}"
+    assert got[0]["status"] == "completed", f"wrong status: {got[0]['status']}"
 
 
-def test_task_update_by_subject_match() -> bool:
+def test_task_update_by_subject_match() -> None:
     """TaskUpdate with subject matches by content."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1526,16 +1501,11 @@ def test_task_update_by_subject_match() -> bool:
            _task_update("u3", "2", status="in_progress",
                         subject="Fix tests", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if got[1]["status"] != "in_progress":
-        print(f"  second item not in_progress: {got}")
-        return False
-    if got[0]["status"] != "pending":
-        print(f"  first item not pending: {got}")
-        return False
-    return True
+    assert got[1]["status"] == "in_progress", f"second item not in_progress: {got}"
+    assert got[0]["status"] == "pending", f"first item not pending: {got}"
 
 
-def test_task_update_deleted_removes_item() -> bool:
+def test_task_update_deleted_removes_item() -> None:
     """TaskUpdate(status=deleted) with subject removes the matched item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1547,16 +1517,11 @@ def test_task_update_deleted_removes_item() -> bool:
            _task_update("u3", "2", status="deleted",
                         subject="Remove me", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item after delete, got {len(got)}: {got}")
-        return False
-    if got[0]["content"] != "Keep":
-        print(f"  wrong item remained: {got[0]['content']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item after delete, got {len(got)}: {got}"
+    assert got[0]["content"] == "Keep", f"wrong item remained: {got[0]['content']}"
 
 
-def test_task_create_and_todowrite_stored_separately() -> bool:
+def test_task_create_and_todowrite_stored_separately() -> None:
     """TaskCreate and TodoWrite store into separate fields."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1568,50 +1533,36 @@ def test_task_create_and_todowrite_stored_separately() -> bool:
            ], tool_id="tw1"), source_is_provider_stream=True)
     todos = session_manager.get(sid).get("current_todos") or []
     tasks = session_manager.get(sid).get("current_tasks") or []
-    if len(todos) != 1 or todos[0]["content"] != "From TodoWrite":
-        print(f"  wrong todos: {todos}")
-        return False
-    if len(tasks) != 1 or tasks[0]["content"] != "From TaskCreate":
-        print(f"  wrong tasks: {tasks}")
-        return False
-    return True
+    assert len(todos) == 1 and todos[0]["content"] == "From TodoWrite", f"wrong todos: {todos}"
+    assert len(tasks) == 1 and tasks[0]["content"] == "From TaskCreate", f"wrong tasks: {tasks}"
 
 
-def test_task_update_no_match_returns_none() -> bool:
+def test_task_update_no_match_returns_none() -> None:
     """TaskUpdate with no matching item returns None."""
     normalized = _task_update("u1", "nonexistent", status="completed", tool_id="tu1")
     result = extract_tasks_from_normalized(normalized, [])
-    if result is not None:
-        print(f"  expected None, got {result}")
-        return False
-    return True
+    assert result is None, f"expected None, got {result}"
 
 
-def test_task_create_purity() -> bool:
+def test_task_create_purity() -> None:
     """TaskCreate MUST NOT mutate `current`."""
     current = [{"content": "existing", "status": "pending", "activeForm": "e"}]
     snapshot = copy.deepcopy(current)
     ev = _task_create("u1", "New task", tool_id="tc1")
     extract_tasks_from_normalized(ev, current)
-    if current != snapshot:
-        print(f"  TaskCreate mutated current: {current} != {snapshot}")
-        return False
-    return True
+    assert current == snapshot, f"TaskCreate mutated current: {current} != {snapshot}"
 
 
-def test_task_update_purity() -> bool:
+def test_task_update_purity() -> None:
     """TaskUpdate MUST NOT mutate `current`."""
     current = [{"content": "existing", "status": "pending", "activeForm": "e"}]
     snapshot = copy.deepcopy(current)
     ev = _task_update("u1", "1", status="in_progress", tool_id="tu1")
     extract_tasks_from_normalized(ev, current)
-    if current != snapshot:
-        print(f"  TaskUpdate mutated current: {current} != {snapshot}")
-        return False
-    return True
+    assert current == snapshot, f"TaskUpdate mutated current: {current} != {snapshot}"
 
 
-def test_task_convergence_live_equals_recovery() -> bool:
+def test_task_convergence_live_equals_recovery() -> None:
     """Same TaskCreate+TaskUpdate sequence via live and recovery produces
     identical current_tasks."""
     seq = [
@@ -1634,13 +1585,10 @@ def test_task_convergence_live_equals_recovery() -> bool:
 
     live_result = run(True)
     recovery_result = run(False)
-    if live_result != recovery_result:
-        print(f"  divergence: source_is_provider_stream={live_result} recovery={recovery_result}")
-        return False
-    return True
+    assert live_result == recovery_result, f"divergence: source_is_provider_stream={live_result} recovery={recovery_result}"
 
 
-def test_fork_derives_tasks_from_copied_messages() -> bool:
+def test_fork_derives_tasks_from_copied_messages() -> None:
     """Fork re-derives current_tasks from TaskCreate events."""
     messages = [{
         "id": "m1", "role": "assistant", "seq": 0,
@@ -1651,43 +1599,29 @@ def test_fork_derives_tasks_from_copied_messages() -> bool:
         ],
     }]
     derived = derive_current_tasks(messages)
-    if len(derived) != 2:
-        print(f"  expected 2 items, got {len(derived)}: {derived}")
-        return False
+    assert len(derived) == 2, f"expected 2 items, got {len(derived)}: {derived}"
     statuses = [t["status"] for t in derived]
-    if statuses != ["in_progress", "pending"]:
-        print(f"  wrong statuses: {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending"], f"wrong statuses: {statuses}"
 
 
 # ── tool_result → taskId tracking tests ─────────────────────────
 
-def test_task_result_stamps_task_id() -> bool:
+def test_task_result_stamps_task_id() -> None:
     """A tool_result for TaskCreate extracts taskId and stamps it on
     the matching item."""
     normalized = _task_create("u1", "My task", tool_id="tc_abc")
     result = extract_tasks_from_normalized(normalized, [])
-    if result is None or len(result) != 1:
-        print(f"  TaskCreate failed: {result}")
-        return False
-    if result[0].get("tool_use_id") != "tc_abc":
-        print(f"  missing tool_use_id: {result[0]}")
-        return False
+    assert result is not None and len(result) == 1, f"TaskCreate failed: {result}"
+    assert result[0].get("tool_use_id") == "tc_abc", f"missing tool_use_id: {result[0]}"
 
     # Now feed the tool_result
     tr = _task_create_result("u2", "tc_abc", "42")
     updated = extract_tasks_from_normalized(tr, result)
-    if updated is None:
-        print("  tool_result returned None")
-        return False
-    if updated[0].get("task_id") != "42":
-        print(f"  task_id not stamped: {updated[0]}")
-        return False
-    return True
+    assert updated is not None, "tool_result returned None"
+    assert updated[0].get("task_id") == "42", f"task_id not stamped: {updated[0]}"
 
 
-def test_task_update_matches_by_task_id() -> bool:
+def test_task_update_matches_by_task_id() -> None:
     """After tool_result stamps task_id, TaskUpdate matches exactly."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1705,16 +1639,11 @@ def test_task_update_matches_by_task_id() -> bool:
     _apply(strategy, sid, msg,
            _task_update("u3", "2", status="in_progress", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if got[0]["status"] != "pending":
-        print(f"  Task A should be pending: {got}")
-        return False
-    if got[1]["status"] != "in_progress":
-        print(f"  Task B should be in_progress: {got}")
-        return False
-    return True
+    assert got[0]["status"] == "pending", f"Task A should be pending: {got}"
+    assert got[1]["status"] == "in_progress", f"Task B should be in_progress: {got}"
 
 
-def test_task_update_matches_out_of_order() -> bool:
+def test_task_update_matches_out_of_order() -> None:
     """TaskUpdate matches by taskId even when working out of order."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1738,13 +1667,10 @@ def test_task_update_matches_out_of_order() -> bool:
            _task_update("u5", "1", status="in_progress", tool_id="tu2"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["in_progress", "pending", "completed"]:
-        print(f"  wrong statuses (should be exact match): {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending", "completed"], f"wrong statuses (should be exact match): {statuses}"
 
 
-def test_task_result_ignores_already_stamped() -> bool:
+def test_task_result_ignores_already_stamped() -> None:
     """Re-playing a tool_result on an item that already has a task_id
     is a no-op (idempotent replay)."""
     normalized = _task_create("u1", "My task", tool_id="tc_abc")
@@ -1753,21 +1679,15 @@ def test_task_result_ignores_already_stamped() -> bool:
     updated = extract_tasks_from_normalized(tr, result)
     # Replay the same result
     updated2 = extract_tasks_from_normalized(tr, updated)
-    if updated2 is not None:
-        print(f"  replay should be no-op, got {updated2}")
-        return False
-    return True
+    assert updated2 is None, f"replay should be no-op, got {updated2}"
 
 
-def test_task_result_no_match_is_noop() -> bool:
+def test_task_result_no_match_is_noop() -> None:
     """A tool_result that doesn't match any pending item is a no-op."""
     current = [{"content": "existing", "status": "pending", "source_id": "tc:abc"}]
     tr = _task_create_result("u1", "nonexistent_id", "99")
     result = extract_tasks_from_normalized(tr, current)
-    if result is not None:
-        print(f"  expected None for non-matching result, got {result}")
-        return False
-    return True
+    assert result is None, f"expected None for non-matching result, got {result}"
 
 
 def test_disabled_todos_extension_blocks_session_mutation() -> bool:
@@ -2322,7 +2242,10 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                ret = fn()
+                # De-frauded tests assert and return None (pass); legacy
+                # fraud tests still return True/False. Treat None as pass.
+                ok = ret is not False
             except Exception as e:
                 ok = False
                 import traceback
