@@ -17,6 +17,8 @@ import { withTokenQuery } from "./bearerAuth";
 import { extId } from "./extensionIds";
 import { readNativeServerUrl } from "./nativeServerConfig";
 import type {
+  A2AAgent,
+  A2AAgentsSnapshot,
   RuntimeProfile,
   RuntimeProfilesSnapshot,
   Schedule,
@@ -133,6 +135,62 @@ export async function activateRuntimeProfile(
   const res = await fetch(
     `${API}/api/runtime-profiles/${encodeURIComponent(profileId)}/activate`,
     { method: "POST", credentials: "include" },
+  );
+  return _json(res);
+}
+
+// ---------------------------------------------------------------------------
+// A2A remote agents (pull side; push side is the `a2a_registry_changed`
+// WS frame carrying the same snapshot).
+
+export async function fetchA2AAgents(): Promise<A2AAgentsSnapshot> {
+  const res = await fetch(`${API}/api/a2a/agents`, { credentials: "include" });
+  return _json(res);
+}
+
+export async function createA2AAgent(body: {
+  name: string;
+  base_url: string;
+  auth_header_name?: string;
+  auth_secret?: string;
+}): Promise<A2AAgent> {
+  const res = await fetch(`${API}/api/a2a/agents`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return _json(res);
+}
+
+export async function deleteA2AAgent(agentId: string): Promise<void> {
+  const res = await fetch(
+    `${API}/api/a2a/agents/${encodeURIComponent(agentId)}`,
+    { method: "DELETE", credentials: "include" },
+  );
+  await _json(res);
+}
+
+export async function probeA2AAgent(agentId: string): Promise<A2AAgent> {
+  const res = await fetch(
+    `${API}/api/a2a/agents/${encodeURIComponent(agentId)}/probe`,
+    { method: "POST", credentials: "include" },
+  );
+  return _json(res);
+}
+
+export async function delegateToA2AAgent(
+  agentId: string,
+  body: { app_session_id: string; instructions: string },
+): Promise<{ delegation_id: string }> {
+  const res = await fetch(
+    `${API}/api/a2a/agents/${encodeURIComponent(agentId)}/delegate`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
   );
   return _json(res);
 }

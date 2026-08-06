@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Better Agent — canonical backend Python test-runner image.
 #
 # This is the ONLY sanctioned way to run backend/scripts pytest tests: it
@@ -67,9 +66,11 @@ COPY backend/requirements.txt backend/requirements-claude.txt backend/requiremen
 # BuildKit cache mount: persists pip's download/wheel cache across image
 # rebuilds (keyed by this layer, so it survives even when requirements*.txt
 # changes invalidate the layer itself) instead of --no-cache-dir discarding
-# it every time. Requires `# syntax=docker/dockerfile:1` above and BuildKit
-# enabled on the daemon (default; scripts/run-backend-tests.sh also sets
-# DOCKER_BUILDKIT=1 explicitly so this works even on older daemons).
+# it every time. Served by BuildKit's builtin dockerfile frontend — no
+# `# syntax=` remote-frontend pin, so builds never depend on a Docker Hub
+# fetch of docker/dockerfile (scripts/run-backend-tests.sh builds via the
+# buildx docker-container driver, whose bundled frontend supports cache
+# mounts natively; it also sets DOCKER_BUILDKIT=1 for older daemons).
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd backend \
  && pip install -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
