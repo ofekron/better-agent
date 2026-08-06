@@ -41,9 +41,9 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _check(cond: bool, name: str, detail: str = "") -> bool:
-    print(f"{PASS if cond else FAIL} {name}{'' if cond else ' -- ' + detail}")
-    return cond
+def _check(cond: bool, name: str, detail: str = "") -> None:
+    assert cond, f"{name} -- {detail}" if detail else name
+    print(f"{PASS} {name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +78,7 @@ class FakeFileEditor:
         # start() dispatch mode: "ok" returns start_result; "nf"/"ve" raise.
         self.start_mode: str = "ok"
 
-    def is_file_editor_session(self, session_id: str) -> bool:
+    def is_file_editor_session(self, session_id: str) -> None:
         return session_id in self.sessions
 
     async def start(self, file_path, **kw) -> dict:
@@ -111,7 +111,7 @@ class FakeFileEditor:
     def format_discussion_prompt(discussion, prompt):
         return f"[{discussion['id']}] {prompt}"
 
-    def cleanup(self, session_id) -> bool:
+    def cleanup(self, session_id) -> None:
         self.cleanup_called.append(session_id)
         return True
 
@@ -191,8 +191,7 @@ def _status(exc) -> int:
 # --------------------------------------------------------------------------- #
 # _coordinator() not configured -> 503
 # --------------------------------------------------------------------------- #
-def test_coordinator_not_configured_503() -> bool:
-    ok = True
+def test_coordinator_not_configured_503() -> None:
     saved = file_editor_api._coordinator_ref
     try:
         file_editor_api._coordinator_ref = None
@@ -201,17 +200,15 @@ def test_coordinator_not_configured_503() -> bool:
             file_editor_api._coordinator()
         except Exception as exc:  # HTTPException
             raised = _status(exc) == 503
-        ok = _check(raised, "_coordinator() unconfigured -> 503") and ok
+        _check(raised, "_coordinator() unconfigured -> 503")
     finally:
         file_editor_api._coordinator_ref = saved
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # start_file_editor
 # --------------------------------------------------------------------------- #
-def test_start_file_editor_branches() -> bool:
-    ok = True
+def test_start_file_editor_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -221,7 +218,7 @@ def test_start_file_editor_branches() -> bool:
             _run(start_file_editor({}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "missing file_path -> 400") and ok
+        _check(raised, "missing file_path -> 400")
 
         # start() raises FileNotFoundError -> 404.
         fe.start_mode = "nf"
@@ -230,7 +227,7 @@ def test_start_file_editor_branches() -> bool:
             _run(start_file_editor({"file_path": "/x", "cwd": "/repo"}))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "FileNotFoundError -> 404") and ok
+        _check(raised, "FileNotFoundError -> 404")
 
         # start() raises ValueError -> 400.
         fe.start_mode = "ve"
@@ -239,7 +236,7 @@ def test_start_file_editor_branches() -> bool:
             _run(start_file_editor({"file_path": "/x"}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "ValueError -> 400") and ok
+        _check(raised, "ValueError -> 400")
 
         # Success WITHOUT meta_prompt -> coordinator not called.
         fe.start_mode = "ok"
@@ -249,12 +246,12 @@ def test_start_file_editor_branches() -> bool:
             "meta_prompt": None,
         }
         out = _run(start_file_editor({"file_path": "/repo/a.py", "cwd": "/repo"}))
-        ok = _check(coord.prompts == [], "no meta_prompt -> coordinator skipped") and ok
-        ok = _check(out["resumed"] is False and out["session_id"] == "sess-ok",
-                    "success payload returned") and ok
+        _check(coord.prompts == [], "no meta_prompt -> coordinator skipped")
+        _check(out["resumed"] is False and out["session_id"] == "sess-ok",
+                    "success payload returned")
         # default model path exercised (body has no model) -> default-session-model used.
-        ok = _check(fe.start_calls[-1]["model"] == "default-model",
-                    "default model used when body omits model") and ok
+        _check(fe.start_calls[-1]["model"] == "default-model",
+                    "default model used when body omits model")
 
         # Success WITH meta_prompt -> coordinator.submit_prompt_async called once.
         fe.start_result = {
@@ -262,20 +259,18 @@ def test_start_file_editor_branches() -> bool:
             "resumed": True, "meta_prompt": "META",
         }
         out = _run(start_file_editor({"file_path": "/repo/a.py", "model": "explicit"}))
-        ok = _check(len(coord.prompts) == 1, "meta_prompt -> one coordinator submit") and ok
-        ok = _check(coord.prompts[0][1]["prompt"] == "META",
-                    "submitted prompt is the meta_prompt") and ok
-        ok = _check(out["resumed"] is True, "resumed flag surfaced") and ok
+        _check(len(coord.prompts) == 1, "meta_prompt -> one coordinator submit")
+        _check(coord.prompts[0][1]["prompt"] == "META",
+                    "submitted prompt is the meta_prompt")
+        _check(out["resumed"] is True, "resumed flag surfaced")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # add_file_editor_comment
 # --------------------------------------------------------------------------- #
-def test_add_file_editor_comment_branches() -> bool:
-    ok = True
+def test_add_file_editor_comment_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -285,7 +280,7 @@ def test_add_file_editor_comment_branches() -> bool:
             _run(add_file_editor_comment("nope", {}))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "comment on non-editor session -> 404") and ok
+        _check(raised, "comment on non-editor session -> 404")
 
         # Missing field (file_path) -> 400.
         raised = False
@@ -293,7 +288,7 @@ def test_add_file_editor_comment_branches() -> bool:
             _run(add_file_editor_comment("sess-ok", {"start_line": 1}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "missing field -> 400") and ok
+        _check(raised, "missing field -> 400")
 
         # Non-int line -> ValueError -> 400.
         raised = False
@@ -304,28 +299,26 @@ def test_add_file_editor_comment_branches() -> bool:
             }))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "non-int line -> 400") and ok
+        _check(raised, "non-int line -> 400")
 
         # Success -> coordinator receives the formatted comment.
         out = _run(add_file_editor_comment("sess-ok", {
             "file_path": "a.py", "start_line": 1, "end_line": 2,
             "start_col": 1, "end_col": 2, "comment": "fix this", "client_id": "c1",
         }))
-        ok = _check(out == {"submitted": True}, "success returns submitted=True") and ok
-        ok = _check(len(coord.prompts) == 1 and coord.prompts[0][1]["prompt"] == "FORMATTED",
-                    "formatted comment submitted to coordinator") and ok
-        ok = _check(coord.prompts[0][1]["client_id"] == "c1",
-                    "client_id forwarded") and ok
+        _check(out == {"submitted": True}, "success returns submitted=True")
+        _check(len(coord.prompts) == 1 and coord.prompts[0][1]["prompt"] == "FORMATTED",
+                    "formatted comment submitted to coordinator")
+        _check(coord.prompts[0][1]["client_id"] == "c1",
+                    "client_id forwarded")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # start_file_editor_discussion
 # --------------------------------------------------------------------------- #
-def test_start_file_editor_discussion_branches() -> bool:
-    ok = True
+def test_start_file_editor_discussion_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -335,7 +328,7 @@ def test_start_file_editor_discussion_branches() -> bool:
             _run(start_file_editor_discussion("nope", {"file_path": "a", "line": 1}))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "discussion on non-editor session -> 404") and ok
+        _check(raised, "discussion on non-editor session -> 404")
 
         # Bad input (non-int line -> TypeError) -> 400.
         raised = False
@@ -343,27 +336,25 @@ def test_start_file_editor_discussion_branches() -> bool:
             _run(start_file_editor_discussion("sess-ok", {"file_path": "a", "line": "x"}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "bad discussion input -> 400") and ok
+        _check(raised, "bad discussion input -> 400")
 
         # Success.
         out = _run(start_file_editor_discussion("sess-ok", {
             "file_path": " a.py ", "line": 5, "title": "T", "client_id": "c",
         }))
-        ok = _check(out["discussion"]["line"] == 5, "discussion returned") and ok
-        ok = _check(out["discussion"]["file_path"] == "a.py",
-                    "file_path stripped before forwarding") and ok
-        ok = _check(out["discussion"]["opened_by"] == "user",
-                    "user-opened discussion tagged opened_by=user") and ok
+        _check(out["discussion"]["line"] == 5, "discussion returned")
+        _check(out["discussion"]["file_path"] == "a.py",
+                    "file_path stripped before forwarding")
+        _check(out["discussion"]["opened_by"] == "user",
+                    "user-opened discussion tagged opened_by=user")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # internal_start_file_discussion (agent-opened, in-band errors)
 # --------------------------------------------------------------------------- #
-def test_internal_start_file_discussion_branches() -> bool:
-    ok = True
+def test_internal_start_file_discussion_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -374,35 +365,33 @@ def test_internal_start_file_discussion_branches() -> bool:
             _run(internal_start_file_discussion({"app_session_id": "sess-ok"}, "tok"))
         except Exception as exc:
             raised = _status(exc) == 403
-        ok = _check(raised, "invalid internal authority -> 403") and ok
+        _check(raised, "invalid internal authority -> 403")
         fakes["guards"].authority_is_valid = lambda: True
 
         # Not an editor session -> in-band {success: False} (no raise).
         out = _run(internal_start_file_discussion({"app_session_id": "nope"}, "tok"))
-        ok = _check(out.get("success") is False, "non-editor session -> in-band failure") and ok
+        _check(out.get("success") is False, "non-editor session -> in-band failure")
 
         # Bad input -> in-band {success: False, error}.
         out = _run(internal_start_file_discussion(
             {"app_session_id": "sess-ok", "line": "x"}, "tok"))
-        ok = _check(out.get("success") is False and "error" in out,
-                    "bad input -> in-band error payload") and ok
+        _check(out.get("success") is False and "error" in out,
+                    "bad input -> in-band error payload")
 
         # Success.
         out = _run(internal_start_file_discussion(
             {"app_session_id": "sess-ok", "file_path": "a", "line": 3, "title": "T"}, "tok"))
-        ok = _check(out.get("success") is True, "success -> in-band success") and ok
-        ok = _check(out["discussion"]["opened_by"] == "agent",
-                    "agent-opened discussion tagged opened_by=agent") and ok
+        _check(out.get("success") is True, "success -> in-band success")
+        _check(out["discussion"]["opened_by"] == "agent",
+                    "agent-opened discussion tagged opened_by=agent")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # patch_file_editor_discussion
 # --------------------------------------------------------------------------- #
-def test_patch_file_editor_discussion_branches() -> bool:
-    ok = True
+def test_patch_file_editor_discussion_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -412,7 +401,7 @@ def test_patch_file_editor_discussion_branches() -> bool:
             _run(patch_file_editor_discussion("nope", "d1", {"client_id": "c"}))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "patch on non-editor session -> 404") and ok
+        _check(raised, "patch on non-editor session -> 404")
 
         # ValueError -> 400.
         raised = False
@@ -420,21 +409,19 @@ def test_patch_file_editor_discussion_branches() -> bool:
             _run(patch_file_editor_discussion("sess-ok", "d1", {"force_error": True}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "patch ValueError -> 400") and ok
+        _check(raised, "patch ValueError -> 400")
 
         # Success.
         out = _run(patch_file_editor_discussion("sess-ok", "d1", {"client_id": "c"}))
-        ok = _check(out["discussion"]["patched"] is True, "patch success") and ok
+        _check(out["discussion"]["patched"] is True, "patch success")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # send_file_editor_discussion_message
 # --------------------------------------------------------------------------- #
-def test_send_file_editor_discussion_message_branches() -> bool:
-    ok = True
+def test_send_file_editor_discussion_message_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -444,7 +431,7 @@ def test_send_file_editor_discussion_message_branches() -> bool:
             _run(send_file_editor_discussion_message("nope", "d1", {"prompt": "hi"}))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "message on non-editor session -> 404") and ok
+        _check(raised, "message on non-editor session -> 404")
 
         # Empty prompt -> 400.
         raised = False
@@ -452,7 +439,7 @@ def test_send_file_editor_discussion_message_branches() -> bool:
             _run(send_file_editor_discussion_message("sess-ok", "d1", {"prompt": "  "}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "empty prompt -> 400") and ok
+        _check(raised, "empty prompt -> 400")
 
         # get_discussion ValueError -> 400.
         raised = False
@@ -460,28 +447,26 @@ def test_send_file_editor_discussion_message_branches() -> bool:
             _run(send_file_editor_discussion_message("sess-ok", "missing", {"prompt": "hi"}))
         except Exception as exc:
             raised = _status(exc) == 400
-        ok = _check(raised, "unknown discussion -> 400") and ok
+        _check(raised, "unknown discussion -> 400")
 
         # Success -> coordinator gets cli_prompt from format_discussion_prompt.
         out = _run(send_file_editor_discussion_message("sess-ok", "d1", {
             "prompt": "hello", "client_id": "c7"}))
-        ok = _check(out["submitted"] is True and out["client_id"] == "c7",
-                    "success returns submitted + client_id") and ok
-        ok = _check(len(coord.prompts) == 1, "one coordinator submit") and ok
-        ok = _check(coord.prompts[0][1]["cli_prompt"] == "[d1] hello",
-                    "cli_prompt built via format_discussion_prompt") and ok
-        ok = _check(coord.prompts[0][1]["file_discussion_id"] == "d1",
-                    "file_discussion_id stamped on payload") and ok
+        _check(out["submitted"] is True and out["client_id"] == "c7",
+                    "success returns submitted + client_id")
+        _check(len(coord.prompts) == 1, "one coordinator submit")
+        _check(coord.prompts[0][1]["cli_prompt"] == "[d1] hello",
+                    "cli_prompt built via format_discussion_prompt")
+        _check(coord.prompts[0][1]["file_discussion_id"] == "d1",
+                    "file_discussion_id stamped on payload")
     finally:
         _restore(saved)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # cleanup_file_editor
 # --------------------------------------------------------------------------- #
-def test_cleanup_file_editor_branches() -> bool:
-    ok = True
+def test_cleanup_file_editor_branches() -> None:
     coord, fe, fakes = _build_fakes()
     saved = _patch(fakes)
     try:
@@ -491,16 +476,15 @@ def test_cleanup_file_editor_branches() -> bool:
             _run(cleanup_file_editor("nope"))
         except Exception as exc:
             raised = _status(exc) == 404
-        ok = _check(raised, "cleanup on non-editor session -> 404") and ok
+        _check(raised, "cleanup on non-editor session -> 404")
 
         # Success -> cancel + cleanup + fanout, returns deleted.
         out = _run(cleanup_file_editor("sess-ok"))
-        ok = _check(out == {"deleted": True}, "cleanup returns deleted=True") and ok
-        ok = _check(coord.cancelled == ["sess-ok"], "coordinator.cancel_session called") and ok
-        ok = _check(fe.cleanup_called == ["sess-ok"], "file_editor.cleanup called") and ok
+        _check(out == {"deleted": True}, "cleanup returns deleted=True")
+        _check(coord.cancelled == ["sess-ok"], "coordinator.cancel_session called")
+        _check(fe.cleanup_called == ["sess-ok"], "file_editor.cleanup called")
     finally:
         _restore(saved)
-    return ok
 
 
 TESTS = [
@@ -516,17 +500,18 @@ TESTS = [
 
 
 def main() -> int:
-    results = []
+    failed = 0
     for test in TESTS:
         print(f"\n--- {test.__name__} ---")
         try:
-            results.append(test())
-        except Exception as exc:  # noqa: BLE001
-            print(f"{FAIL} {test.__name__} raised: {exc!r}")
-            results.append(False)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{len(results)} test groups passed")
-    return 0 if passed == len(results) else 1
+            test()
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL} {test.__name__}")
+            failed += 1
+    print(f"\n{len(TESTS) - failed}/{len(TESTS)} test groups passed")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

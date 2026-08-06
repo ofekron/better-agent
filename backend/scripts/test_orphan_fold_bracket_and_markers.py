@@ -34,6 +34,8 @@ import os
 import shutil
 import sys
 
+import pytest
+
 import _test_home
 
 _TMP_HOME = _test_home.isolate("bc-test-orphan-fold-")
@@ -65,6 +67,21 @@ def _register_marker_rule() -> None:
             "_extension_id": "test-orphan-fold",
         },
     ])
+
+
+@pytest.fixture(autouse=True)
+def _marker_rule_registered():
+    """Marker detection reads the global tag-rule registry, which `main()`
+    seeds via `_register_marker_rule()`. Under pytest `main()` never runs, so
+    register here (save/restore to avoid cross-module rule pollution)."""
+    saved_rules = file_ref_resolver._tag_rules
+    saved_re = file_ref_resolver._tag_scan_re
+    _register_marker_rule()
+    try:
+        yield
+    finally:
+        file_ref_resolver._tag_rules = saved_rules
+        file_ref_resolver._tag_scan_re = saved_re
 
 
 def _mk_session(msg_id: str, *, is_streaming: bool) -> str:
@@ -120,7 +137,7 @@ def _marker_color(sid: str) -> str:
     return markers.get("test-orphan-fold", {}).get("color", "")
 
 
-def test_marker_fires_on_immediately_folded_orphan() -> bool:
+def test_marker_fires_on_immediately_folded_orphan() -> None:
     """Orphan row for a sid whose latest assistant message is ALREADY
     finalized (the steady state for externally-driven sessions) folds
     immediately AND gets attention-marker detection — closing the gap
@@ -140,15 +157,15 @@ def test_marker_fires_on_immediately_folded_orphan() -> bool:
         (e.get("data") or {}).get("uuid") == "u1" for e in events
     )
     color = _marker_color(sid)
-    ok = landed and color == "#ff8c00"
+    assert landed, f"orphan row did not land on msg.events (color={color!r})"
+    assert color == "#ff8c00", f"marker did not fire (landed={landed}, color={color!r})"
     print(
-        f"  {PASS if ok else FAIL} immediately-folded orphan lands on "
+        f"  {PASS} immediately-folded orphan lands on "
         f"msg.events and fires marker (landed={landed}, color={color!r})",
     )
-    return ok
 
 
-def test_buffered_orphan_flushes_in_order_on_finalize() -> bool:
+def test_buffered_orphan_flushes_in_order_on_finalize() -> None:
     """Orphan rows arriving while the latest assistant message is still
     streaming must buffer (not apply) until finalization is observed on a
     later fold, then flush in seq order — push-driven, not polled."""
@@ -177,11 +194,15 @@ def test_buffered_orphan_flushes_in_order_on_finalize() -> bool:
         and [r.get("data", {}).get("uuid") for r in buffered] == ["o1", "o2"]
         and _marker_color(sid) == "#ff8c00"
     )
+    assert not_applied_yet, (
+        "orphan rows were not buffered (or folded too early) while streaming "
+        f"(buffered={len(buffered)}, applied_early={not not_applied_yet})"
+    )
     print(
-        f"  {PASS if not_applied_yet else FAIL} orphan rows buffered "
+        f"  {PASS} orphan rows buffered "
         f"(not yet folded into msg.events) while still streaming, "
         f"marker already fired at ingest time "
-        f"(buffered={len(buffered)}, applied_early={not not_applied_yet})",
+        f"(buffered={len(buffered)})",
     )
 
     # Finalize msg-2 (mirrors orchestrator's own turn_complete flip) then
@@ -220,25 +241,39 @@ def test_buffered_orphan_flushes_in_order_on_finalize() -> bool:
         and buffer_drained
         and _marker_color(sid) == "#ff8c00"
     )
+    assert flushed_ok, (
+        "buffered orphans did not flush in order on finalize "
+        f"(present={uuids_present}, buffered_order={uuids_in_order}, "
+        f"buffer_drained={buffer_drained}, color={_marker_color(sid)!r})"
+    )
     print(
-        f"  {PASS if flushed_ok else FAIL} buffered orphans flush in "
+        f"  {PASS} buffered orphans flush in "
         f"order on finalize, push-driven (present={uuids_present}, "
         f"buffered_order={uuids_in_order}, buffer_drained={buffer_drained}, "
         f"color={_marker_color(sid)!r})",
     )
-    return not_applied_yet and flushed_ok
 
 
 def main() -> int:
     try:
         _register_marker_rule()
-        results = [
-            test_marker_fires_on_immediately_folded_orphan(),
-            test_buffered_orphan_flushes_in_order_on_finalize(),
+        tests = [
+            test_marker_fires_on_immediately_folded_orphan,
+            test_buffered_orphan_flushes_in_order_on_finalize,
         ]
-        ok = all(results)
-        print(("\n" + PASS + " all passed") if ok else ("\n" + FAIL + " failed"))
-        return 0 if ok else 1
+        failed = 0
+        for t in tests:
+            try:
+                t()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                print(f"  {FAIL} {t.__name__}")
+                failed += 1
+                continue
+            print(f"  {PASS} {t.__name__}")
+        print("\n" + PASS + " all passed" if not failed else "\n" + FAIL + f" {failed} failed")
+        return 1 if failed else 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
