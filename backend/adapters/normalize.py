@@ -25,6 +25,9 @@ from backend.surface_contract.nodes import (
     ContentStatus,
     DiagnosticCode,
     DiagnosticPayload,
+    FailurePayload,
+    FailureResolution,
+    FailureSeverity,
     LifecycleNoticeKind,
     LifecycleNoticePayload,
     ModelChangePayload,
@@ -60,6 +63,60 @@ _DROPPED_ENVELOPE_TYPES = frozenset(
 _WORKER_FACT_TYPES = frozenset({"worker_start", "worker_event", "worker_complete"})
 _TODO_TOOL_NAMES = frozenset({"TodoWrite", "TaskCreate", "TaskUpdate"})
 _LIFECYCLE_KIND_VALUES = {k.value for k in LifecycleNoticeKind}
+_FAILURE_NODE_ID_PREFIX = "failure:"
+
+# `user_message_failed` `reason` -> (code, severity, retryable, resolution).
+# Single source of truth for this table — `backend.adapters.chat_adapter`
+# imports `failure_payload_for_reason` rather than keeping its own copy.
+# See backend/surface_commands.py:663/678/716 and backend/run_recovery.py
+# :1430/1841/3759 for the emit sites this mirrors. Reasons absent here
+# (including any future/unmapped one) fall through to `code=reason`
+# verbatim with contract defaults (severity=error, retryable=False,
+# resolution=none) — never invented text, never a raw-JSON dump.
+_FAILURE_REASON_MAP: dict[str, tuple[str, FailureSeverity, bool, FailureResolution]] = {
+    "orphaned_before_provider": (
+        "recovery_unknown", FailureSeverity.ERROR, True, FailureResolution.RETRY,
+    ),
+    "missing_bound_provider_run": (
+        "recovery_unknown", FailureSeverity.ERROR, True, FailureResolution.RETRY,
+    ),
+    "recovered_run_failed": (
+        "recovery_unknown", FailureSeverity.ERROR, True, FailureResolution.RETRY,
+    ),
+    "interrupt_failed": (
+        "admission_rejected", FailureSeverity.ERROR, False, FailureResolution.NONE,
+    ),
+    "alter_interrupt_failed": (
+        "admission_rejected", FailureSeverity.ERROR, False, FailureResolution.NONE,
+    ),
+    "durable_admission_failed": (
+        "admission_rejected", FailureSeverity.ERROR, False, FailureResolution.NONE,
+    ),
+}
+
+
+def failure_payload_for_reason(reason: str, error: str | None) -> FailurePayload:
+    """`user_message_failed`'s `reason` (+ optional `error` text) -> the
+    taxonomized FailurePayload. Shared by the live bus-handler
+    (`chat_adapter._on_user_message_failed`) and the journaled-row branch
+    below (`_handle_user_message_failed`) so both paths — live-instant and
+    reload-reconstructed — classify the SAME fact identically."""
+    mapped = _FAILURE_REASON_MAP.get(reason)
+    code, severity, retryable, resolution = (
+        mapped if mapped is not None
+        else (reason, FailureSeverity.ERROR, False, FailureResolution.NONE)
+    )
+    text = error if isinstance(error, str) and error else f"user message failed: {reason}"
+    return FailurePayload(
+        code=code, text=text, severity=severity, retryable=retryable, resolution=resolution,
+    )
+
+
+def user_message_failed_node_id(lifecycle_msg_id: str) -> NodeId:
+    """Deterministic FAILURE node id for a `user_message_failed` fact —
+    stable across the live broadcast and any later replay/reconstruction
+    of the same `lifecycle_msg_id`."""
+    return f"{_FAILURE_NODE_ID_PREFIX}{lifecycle_msg_id}"
 
 
 def _parse_ts(row: dict) -> float:
@@ -218,6 +275,8 @@ def normalize_journal_row(
         return []
     if row_type == "agent_message":
         return _handle_agent_message(row, data, node)
+    if row_type == "user_message_failed":
+        return _handle_user_message_failed(row, data, node)
     if row_type in _WORKER_FACT_TYPES:
         uuid = _uuid_of(row) or _fallback_id(row, row_type)
         return [
@@ -232,6 +291,36 @@ def normalize_journal_row(
         node(
             node_id=uuid, kind=NodeKind.UNKNOWN, status=ContentStatus.COMPLETE,
             payload=UnknownPayload(label=f"row.{row_type or '(none)'}", payload=row),
+        )
+    ]
+
+
+def _handle_user_message_failed(row: dict, data: dict, node: partial) -> list[Node]:
+    """Journaled `user_message_failed` BusEvent row (`backend/user_msg_
+    lifecycle.py` `emit_failed`; persisted generically by the wildcard
+    `event_bus_subscribers._persist_to_event_journal` subscriber — see
+    `backend/event_ingester.py`'s `_emit` for the on-disk row shape this
+    reads: `{"type": "user_message_failed", "data": {lifecycle_msg_id,
+    reason, error}, "msg_id": lifecycle_msg_id, ...}`).
+
+    Reload/replay counterpart to `chat_adapter.ChatSurfaceAdapter.
+    _on_user_message_failed`'s live broadcast — both call
+    `failure_payload_for_reason` and `user_message_failed_node_id`, so the
+    SAME fact always produces the SAME node_id/payload whichever path
+    observes it first."""
+    lifecycle_msg_id = data.get("lifecycle_msg_id")
+    if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+        lifecycle_msg_id = row.get("msg_id")
+    if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+        return []
+    reason = data.get("reason")
+    reason = reason if isinstance(reason, str) and reason else "unknown"
+    error = data.get("error")
+    payload = failure_payload_for_reason(reason, error if isinstance(error, str) else None)
+    return [
+        node(
+            node_id=user_message_failed_node_id(lifecycle_msg_id), kind=NodeKind.FAILURE,
+            status=None, payload=payload,
         )
     ]
 

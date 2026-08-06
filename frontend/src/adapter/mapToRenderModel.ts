@@ -30,9 +30,15 @@
 //                          ModelSwitchedEvent (no legacy equivalent to
 //                          reuse otherwise).
 //   diagnostic           -> WSEvent{type:"diagnostic", ...}
-//   failure              -> WSEvent{type:"diagnostic", data:{kind:"failure",...}}
-//                          (chosen per spec: "failure -> diagnostic-style
-//                          events"); ALSO patches ChatMessage.error/errorText
+//   failure              -> WSEvent{type:"failure", data:{code, text,
+//                          severity, retryable, resolution, raw}} — a
+//                          first-class event (MessageBubble.FailureChip),
+//                          not folded into the generic diagnostic chip.
+//                          code="provider_error" ALSO patches
+//                          ChatMessage.error/errorText (legacy top-of-
+//                          bubble error banner, kept as-is); every other
+//                          code renders ONLY via the FailureChip so the
+//                          same failure never double-renders.
 //   lifecycle_notice     -> WSEvent{type:"lifecycle_notice", ...} (exact
 //                          legacy shape — flattenClaudeMessages already
 //                          special-cases this mtype identically)
@@ -282,7 +288,10 @@ export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()):
     }
     case "lifecycle_notice": {
       const p = node.payload as LifecycleNoticePayloadWire;
-      return [{ type: "lifecycle_notice", data: { ...base, kind: p.kind, ...(p.data ?? {}) } }];
+      // `kind` (the discriminant LifecycleNotice.tsx dispatches on) is
+      // spread LAST so a `p.data` field of the same name can never shadow
+      // it — a nested-data collision would silently misroute rendering.
+      return [{ type: "lifecycle_notice", data: { ...base, ...(p.data ?? {}), kind: p.kind } }];
     }
     case "compaction": {
       const p = node.payload as CompactionPayloadWire;
@@ -296,7 +305,18 @@ export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()):
     case "failure": {
       const p = node.payload as FailurePayloadWire;
       return [
-        { type: "diagnostic", data: { ...base, kind: "failure", code: p.code, text: p.text, raw: p.data } },
+        {
+          type: "failure",
+          data: {
+            ...base,
+            code: p.code,
+            text: p.text,
+            severity: p.severity,
+            retryable: p.retryable,
+            resolution: p.resolution,
+            raw: p.data,
+          },
+        },
       ];
     }
     case "diagnostic": {
@@ -559,8 +579,14 @@ export function mapTurnToAssistantMessage(
   if (turn.turn.status === "stopped") msg.stopped_at = tsToIso(turn.turn.ts);
   if (failed && failureNode) {
     const p = failureNode.payload as FailurePayloadWire;
-    msg.error = true;
-    msg.errorText = p.text;
+    // Only `provider_error` keeps patching the legacy top-of-bubble
+    // error banner (msg.error/errorText) — every other code renders
+    // exclusively via the FailureChip event (mapNodeToEvents above) so
+    // the same failure never shows twice.
+    if (p.code === "provider_error") {
+      msg.error = true;
+      msg.errorText = p.text;
+    }
   }
   const continuation = ordered.find((n) => n.kind === "continuation_session");
   if (continuation) {

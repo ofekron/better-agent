@@ -165,12 +165,74 @@ describe("mapNodeToEvents", () => {
     ]);
   });
 
-  it("maps failure to a diagnostic-style event", () => {
-    const n = node({ node_id: "f1", kind: "failure", payload: { code: "timeout", text: "boom", data: null } });
+  it("lifecycle_notice: top-level kind always wins over a colliding key inside payload.data", () => {
+    // Regression: `kind` used to be spread BEFORE `...p.data`, so a data
+    // dict that happened to carry its own "kind" key would silently
+    // shadow the discriminant LifecycleNotice.tsx dispatches on.
+    const n = node({
+      node_id: "ln2", kind: "lifecycle_notice",
+      payload: { kind: "detached", data: { kind: "should_not_win", extra: 1 } },
+    });
     expect(mapNodeToEvents(n)).toEqual([
-      { type: "diagnostic", data: { node_id: "f1", kind: "failure", code: "timeout", text: "boom", raw: null } },
+      { type: "lifecycle_notice", data: { node_id: "ln2", kind: "detached", extra: 1 } },
     ]);
   });
+
+  it.each([
+    ["retrying", { retry_at: "2026-01-01T00:00:00Z" }],
+    ["detached", {}],
+    ["recovering", {}],
+    ["auto_retried", { retry_kind: "rate_limit", count: 2 }],
+    ["rate_limited", { text: "Rate limit exceeded" }],
+  ] as const)("lifecycle_notice: dispatches kind=%s through unchanged", (kind, data) => {
+    const n = node({ node_id: "ln3", kind: "lifecycle_notice", payload: { kind, data } });
+    expect(mapNodeToEvents(n)).toEqual([
+      { type: "lifecycle_notice", data: { node_id: "ln3", kind, ...data } },
+    ]);
+  });
+
+  it("maps failure to a first-class failure event (not diagnostic)", () => {
+    const n = node({
+      node_id: "f1", kind: "failure",
+      payload: {
+        code: "recovery_unknown", text: "boom", data: null,
+        severity: "error", retryable: true, resolution: "retry",
+      },
+    });
+    expect(mapNodeToEvents(n)).toEqual([
+      {
+        type: "failure",
+        data: {
+          node_id: "f1", code: "recovery_unknown", text: "boom",
+          severity: "error", retryable: true, resolution: "retry", raw: null,
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    ["recovery_unknown", "error", true, "retry"],
+    ["admission_rejected", "error", false, "none"],
+    ["provider_credential", "error", false, "fix_credential"],
+    ["some_future_unmapped_code", "warning", false, "none"],
+  ] as const)(
+    "maps failure code=%s through verbatim with its severity/retryable/resolution",
+    (code, severity, retryable, resolution) => {
+      const n = node({
+        node_id: "f2", kind: "failure",
+        payload: { code, text: `text for ${code}`, data: { provider_id: "claude" }, severity, retryable, resolution },
+      });
+      expect(mapNodeToEvents(n)).toEqual([
+        {
+          type: "failure",
+          data: {
+            node_id: "f2", code, text: `text for ${code}`,
+            severity, retryable, resolution, raw: { provider_id: "claude" },
+          },
+        },
+      ]);
+    },
+  );
 
   it("maps fact(pr_link) to a dedicated pr_link event", () => {
     const n = node({ node_id: "pr1", kind: "fact", payload: { kind: "pr_link", data: { number: 42, repo: "x/y" } } });
@@ -478,11 +540,28 @@ describe("mapTurnToAssistantMessage / mapTurnToMessages", () => {
     expect(msg.content).toBe("the definitive final answer");
   });
 
-  it("stamps error/errorText from a failure body node", () => {
-    const body = [node({ node_id: "fail1", kind: "failure", payload: { code: "provider_error", text: "upstream 500", data: null } })];
+  it("stamps error/errorText from a code=provider_error failure body node", () => {
+    const body = [node({
+      node_id: "fail1", kind: "failure",
+      payload: { code: "provider_error", text: "upstream 500", data: null, severity: "error", retryable: false, resolution: "none" },
+    })];
     const msg = mapTurnToAssistantMessage(turn(), body);
     expect(msg.error).toBe(true);
     expect(msg.errorText).toBe("upstream 500");
+  });
+
+  it("does NOT stamp error/errorText for a non-provider_error failure code (renders via FailureChip only)", () => {
+    const body = [node({
+      node_id: "fail2", kind: "failure",
+      payload: { code: "recovery_unknown", text: "orphaned run", data: null, severity: "error", retryable: true, resolution: "retry" },
+    })];
+    const msg = mapTurnToAssistantMessage(turn(), body);
+    expect(msg.error).toBeUndefined();
+    expect(msg.errorText).toBeUndefined();
+    expect(msg.events).toContainEqual({
+      type: "failure",
+      data: { node_id: "fail2", code: "recovery_unknown", text: "orphaned run", severity: "error", retryable: true, resolution: "retry", raw: null },
+    });
   });
 
   it("stamps continuation_active from a continuation_session body node", () => {

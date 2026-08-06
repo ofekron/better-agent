@@ -8,13 +8,17 @@ from __future__ import annotations
 from backend.adapters.normalize import (
     derive_link,
     enrich_typed_prompt_node,
+    failure_payload_for_reason,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
     typed_prompt_node_id,
+    user_message_failed_node_id,
 )
 from backend.surface_contract.nodes import (
     ContentStatus,
+    FailureResolution,
+    FailureSeverity,
     NodeKind,
     PromptOrigin,
     ResultKind,
@@ -198,6 +202,82 @@ def test_worker_facts_map_to_worker_interaction():
         assert nodes[0].kind == NodeKind.WORKER_INTERACTION
         assert nodes[0].payload.fact_kind == fact_kind
         assert nodes[0].payload.fact == {"worker_id": "w1"}
+
+
+def _user_message_failed_row(*, lifecycle_msg_id="lc-1", reason="orphaned_before_provider", error="boom", seq=5, msg_id=None):
+    # Exact on-disk shape the wildcard `event_bus_subscribers.
+    # _persist_to_event_journal` subscriber produces for a
+    # `user_message_failed` BusEvent, per `event_ingester.py`'s `_emit`
+    # entry construction (`{"seq","ts","sid","type","data","source",
+    # +"msg_id" when set}`) — traced via
+    # `_persist_to_event_journal` -> `EventJournalWriter._event_from_bus`
+    # -> `_append_metadata_event` -> `event_ingester.ingest`.
+    row = {
+        "type": "user_message_failed",
+        "seq": seq,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "sid": SURFACE,
+        "data": {"lifecycle_msg_id": lifecycle_msg_id, "reason": reason, "error": error},
+        "source": "event_bus",
+    }
+    if msg_id is not None:
+        row["msg_id"] = msg_id
+    return row
+
+
+def test_user_message_failed_row_maps_to_failure_node_with_reason_mapping():
+    row = _user_message_failed_row(lifecycle_msg_id="lc-1", reason="orphaned_before_provider", error="boom")
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    n = nodes[0]
+    assert n.kind == NodeKind.FAILURE
+    assert n.node_id == "failure:lc-1"
+    assert n.turn_id == TURN
+    assert n.surface_id == SURFACE
+    assert n.payload.code == "recovery_unknown"
+    assert n.payload.severity == FailureSeverity.ERROR
+    assert n.payload.retryable is True
+    assert n.payload.resolution == FailureResolution.RETRY
+    assert n.payload.text == "boom"
+
+
+def test_user_message_failed_row_unknown_reason_falls_back_verbatim():
+    row = _user_message_failed_row(lifecycle_msg_id="lc-2", reason="some_new_reason", error=None)
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    n = nodes[0]
+    assert n.payload.code == "some_new_reason"
+    assert n.payload.severity == FailureSeverity.ERROR
+    assert n.payload.retryable is False
+    assert n.payload.resolution == FailureResolution.NONE
+    assert n.payload.text == "user message failed: some_new_reason"
+
+
+def test_user_message_failed_row_falls_back_to_row_msg_id_when_data_lacks_it():
+    row = _user_message_failed_row(seq=6, msg_id="lc-from-row")
+    del row["data"]["lifecycle_msg_id"]
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].node_id == "failure:lc-from-row"
+
+
+def test_user_message_failed_row_with_no_lifecycle_msg_id_anywhere_produces_no_node():
+    row = _user_message_failed_row(seq=7)
+    del row["data"]["lifecycle_msg_id"]
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes == []
+
+
+def test_failure_payload_for_reason_matches_admission_rejected_table():
+    for reason in ("interrupt_failed", "alter_interrupt_failed", "durable_admission_failed"):
+        payload = failure_payload_for_reason(reason, None)
+        assert payload.code == "admission_rejected", reason
+        assert payload.severity == FailureSeverity.ERROR, reason
+        assert payload.retryable is False, reason
+        assert payload.resolution == FailureResolution.NONE, reason
+
+
+def test_user_message_failed_node_id_is_deterministic():
+    assert user_message_failed_node_id("abc") == "failure:abc"
+    assert user_message_failed_node_id("abc") == user_message_failed_node_id("abc")
 
 
 def test_compaction_lifecycle_notice():

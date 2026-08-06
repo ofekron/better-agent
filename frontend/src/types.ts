@@ -264,6 +264,10 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // Chat Surface Contract v2 FAILURE node (mapToRenderModel.ts) — a
+  // taxonomized failure (code/severity/retryable/resolution), rendered
+  // as MessageBubble.FailureChip.
+  | "failure"
   // Frontend-flattened provider tool result. Matched results are paired
   // with their tool card; orphaned results render as standalone output.
   | "tool_result"

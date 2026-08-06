@@ -114,6 +114,13 @@ export type LifecycleNoticeKindWire =
   | "recovering"
   | "auto_retried"
   | "rate_limited";
+export type FailureSeverityWire = "info" | "warning" | "error";
+export type FailureResolutionWire =
+  | "none"
+  | "retry"
+  | "fix_credential"
+  | "choose_fallback"
+  | "open_settings";
 
 export interface AttachmentWire {
   name: string;
@@ -201,6 +208,9 @@ export interface FailurePayloadWire {
   code: string;
   text: string;
   data: Record<string, unknown> | null;
+  severity: FailureSeverityWire;
+  retryable: boolean;
+  resolution: FailureResolutionWire;
 }
 
 export interface DiagnosticPayloadWire {

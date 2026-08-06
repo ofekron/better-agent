@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 
@@ -32,10 +33,12 @@ from backend.adapters.normalize import (
     ParentLink,
     derive_link,
     enrich_typed_prompt_node,
+    failure_payload_for_reason,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
     typed_prompt_node_id,
+    user_message_failed_node_id,
 )
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection
 from backend.adapters.store_access import WorkerRecord, store_access
@@ -87,6 +90,17 @@ _COMPACT_TURN_WINDOW = 5
 _RENDER_HISTORY_CAP = 500
 _TOOL_PREFIX = "tool:"
 _RESULT_SUFFIX = ":result"
+
+
+def _turn_node_id(turn_id: str) -> NodeId:
+    """The TURN node's own node_id for a given raw turn_id — MUST mirror
+    `backend.adapters.derive.derive_turn`'s `f"turn:{turn_id}"` literal
+    (not importable from here: derive.py computes it inline, not behind a
+    helper). Node.turn_id itself always stays the raw, unprefixed id
+    (matching every producer in this file/normalize.py); only a Node's
+    `parent_id`, when attaching directly to the turn (results,
+    runtime_change, failure), uses this prefixed form."""
+    return f"turn:{turn_id}"
 
 
 async def _drop_frames(frame_type: str, payload: dict) -> None:
@@ -223,7 +237,18 @@ def _build_turn_view(
     raw_nodes = _normalize_rows(surface_id, turn_id, rows, prompt_meta)
 
     runtime_change = next((n for n in raw_nodes if n.kind in RUNTIME_CHANGED_KINDS), None)
-    body_source = [n for n in raw_nodes if n.kind not in RUNTIME_CHANGED_KINDS]
+    # FAILURE nodes attach directly to the turn (never Explanation-
+    # wrapped) — excluded from `derive_turn`'s body pipeline the same way
+    # runtime_change is, so replay/reload reconstructs the exact Node
+    # `_on_user_message_failed`'s live broadcast and `_on_event_written`'s
+    # journal-catch-up already produce (both set parent_id=_turn_node_id
+    # (turn_id) directly; `derive_body` would otherwise wrap this in a synthetic
+    # Explanation like any other body item).
+    failure_nodes = [n for n in raw_nodes if n.kind == NodeKind.FAILURE]
+    body_source = [
+        n for n in raw_nodes
+        if n.kind not in RUNTIME_CHANGED_KINDS and n.kind != NodeKind.FAILURE
+    ]
 
     derived = _derive.derive_turn(turn_id, body_source, surface_id=surface_id, cv=CONTRACT_VERSION)
     turn_node = replace(derived["turn"], parent_id=surface_id)
@@ -239,6 +264,9 @@ def _build_turn_view(
     if runtime_change is not None:
         runtime_change = replace(runtime_change, parent_id=turn_node.node_id)
         index[runtime_change.node_id] = runtime_change
+    for fn in failure_nodes:
+        fn = replace(fn, parent_id=turn_node.node_id)
+        index[fn.node_id] = fn
 
     derived_body = derived["body"]
     for item in derived_body.items:
@@ -362,6 +390,7 @@ class ChatSurfaceAdapter(ChatSurface):
                 ("lifecycle.turn_start", self._on_lifecycle),
                 ("lifecycle.turn_complete", self._on_lifecycle),
                 ("lifecycle.turn_stopped", self._on_lifecycle),
+                ("user_message_failed", self._on_user_message_failed),
             ]
         )
 
@@ -669,6 +698,13 @@ class ChatSurfaceAdapter(ChatSurface):
                     n = replace(n, turn_id=turn_id)
                     if n.kind == NodeKind.TYPED_PROMPT:
                         n = enrich_typed_prompt_node(n, row_data=row_data, meta=meta)
+                    elif n.kind == NodeKind.FAILURE:
+                        # Attach directly to the turn (never Explanation-
+                        # wrapped) — matches `_on_user_message_failed`'s
+                        # live broadcast AND `_build_turn_view`'s replay
+                        # attachment below, so this row's node_id resolves
+                        # to the identical Node wherever it's observed.
+                        n = replace(n, parent_id=_turn_node_id(turn_id))
                     frames.append(self._merge_live_node(state, n))
             state.current_turn_id = turn_id
             state.last_seq = max_seq
@@ -787,6 +823,71 @@ class ChatSurfaceAdapter(ChatSurface):
                 cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot,
                 turn_id=turn_id, phase=phase, reason=reason,
             )
+        )
+
+    async def _on_user_message_failed(self, event: BusEvent) -> None:
+        """`user_message_failed` (backend/user_msg_lifecycle.py `emit_failed`,
+        payload `{lifecycle_msg_id, reason, error}`) -> an immediate live
+        FAILURE NodeUpsert on the affected turn, ahead of the journal
+        write's own round trip.
+
+        `user_message_failed` IS itself persisted to events.jsonl
+        (BusEvent.persist defaults True; see backend/event_bus.py's
+        docstring and the wildcard `_persist_to_event_journal` subscriber
+        in backend/event_bus_subscribers.py) and `normalize.py` now has a
+        matching row branch (`_handle_user_message_failed`), so the SAME
+        node also arrives moments later via `_on_event_written`'s normal
+        journal-catch-up path (harmless — NodeUpsert is keyed by node_id,
+        so it's an idempotent re-broadcast of identical content) and gets
+        reconstructed identically on any later reload/replay. This
+        handler exists purely to not make the live UI wait for that round
+        trip. `failure_payload_for_reason`/`user_message_failed_node_id`
+        (backend/adapters/normalize.py) are the single source of truth
+        for the reason mapping and node identity — never duplicated here.
+        """
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        lifecycle_msg_id = payload.get("lifecycle_msg_id") or event.msg_id
+        if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
+            return
+        reason = payload.get("reason")
+        reason = reason if isinstance(reason, str) and reason else "unknown"
+        error = payload.get("error")
+        failure_payload = failure_payload_for_reason(
+            reason, error if isinstance(error, str) else None,
+        )
+
+        surface_id = event.root_id
+        state = self._ensure_seeded(surface_id)
+        with state.lock:
+            turn_id = state.current_turn_id
+            if turn_id is None:
+                # No turn has ever been observed on this surface yet (the
+                # very first prompt failed before durable admission) — no
+                # TURN node exists to attach to, and Node.turn_id is
+                # required, so there is structurally nowhere to hang this
+                # node without inventing turn machinery. Documented gap,
+                # not silently invented. `_on_event_written`'s later
+                # journal-catch-up pass has the exact same limitation for
+                # the exact same reason (see its FAILURE handling below).
+                return
+            node = Node(
+                cv=CONTRACT_VERSION,
+                node_id=user_message_failed_node_id(lifecycle_msg_id),
+                parent_id=_turn_node_id(turn_id),
+                turn_id=turn_id,
+                surface_id=surface_id,
+                kind=NodeKind.FAILURE,
+                ts=time.time(),
+                seq=state.last_seq,
+                status=None,
+                payload=failure_payload,
+            )
+            render_rev = state.projection.bump_render()
+            state.render_seq_history[render_rev] = state.last_seq
+            snapshot = state.projection.snapshot()
+
+        state.projection.broadcast(
+            NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=node)
         )
 
     def _replay(self, state: _SurfaceState, cursor: SurfaceCursor, emit: Emit) -> None:

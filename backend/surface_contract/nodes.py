@@ -211,11 +211,28 @@ class ContinuationSessionPayload:
     summary: str | None = None
 
 
+class FailureSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class FailureResolution(StrEnum):
+    NONE = "none"
+    RETRY = "retry"
+    FIX_CREDENTIAL = "fix_credential"
+    CHOOSE_FALLBACK = "choose_fallback"
+    OPEN_SETTINGS = "open_settings"
+
+
 @dataclass(frozen=True, slots=True)
 class FailurePayload:
     code: str
     text: str
     data: dict[str, object] | None = None
+    severity: FailureSeverity = FailureSeverity.ERROR
+    retryable: bool = False
+    resolution: FailureResolution = FailureResolution.NONE
 
 
 @dataclass(frozen=True, slots=True)

@@ -47,7 +47,11 @@ from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
 from backend.surface_contract.frames import NodeUpsert, ResyncRequired  # noqa: E402
 from backend.surface_contract.identity import Focus, Ok, Rebuilding, StaleCursor, SurfaceCursor  # noqa: E402
 from backend.surface_contract.intents import SendPrompt, SendMode, SendTarget, SendTargetKind  # noqa: E402
-from backend.surface_contract.nodes import NodeKind  # noqa: E402
+from backend.surface_contract.nodes import (  # noqa: E402
+    FailureResolution,
+    FailureSeverity,
+    NodeKind,
+)
 
 
 def _ingest_prompt(root_id: str, text: str) -> int:
@@ -242,6 +246,205 @@ def test_children_stale_cursor_on_render_rev_mismatch() -> None:
     assert ok.value[0].kind == NodeKind.TURN
 
 
+def _publish_user_message_failed(root_id: str, lifecycle_msg_id: str, reason: str, error: str | None = None) -> None:
+    asyncio.run(
+        bus.publish(
+            BusEvent(
+                type="user_message_failed",
+                root_id=root_id,
+                sid=root_id,
+                msg_id=lifecycle_msg_id,
+                payload={"lifecycle_msg_id": lifecycle_msg_id, "reason": reason, "error": error},
+            )
+        )
+    )
+
+
+def test_user_message_failed_recovery_reason_maps_to_retryable_failure_node() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        lifecycle_msg_id = str(uuid.uuid4())
+        _publish_user_message_failed(root_id, lifecycle_msg_id, "orphaned_before_provider", error="boom")
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert) and f.node.kind == NodeKind.FAILURE]
+        assert upserts, received
+        node = upserts[-1].node
+        assert node.node_id == f"failure:{lifecycle_msg_id}"
+        assert node.turn_id  # attached to the seeded turn (best-effort attribution)
+        assert node.payload.code == "recovery_unknown"
+        assert node.payload.severity == FailureSeverity.ERROR
+        assert node.payload.retryable is True
+        assert node.payload.resolution == FailureResolution.RETRY
+        assert node.payload.text == "boom"
+    finally:
+        sub.close()
+
+
+def test_user_message_failed_admission_reason_maps_to_non_retryable_failure_node() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        for reason in ("interrupt_failed", "alter_interrupt_failed", "durable_admission_failed"):
+            lifecycle_msg_id = str(uuid.uuid4())
+            _publish_user_message_failed(root_id, lifecycle_msg_id, reason)
+            upserts = [
+                f for f in received
+                if isinstance(f, NodeUpsert) and f.node.kind == NodeKind.FAILURE
+                and f.node.node_id == f"failure:{lifecycle_msg_id}"
+            ]
+            assert upserts, (reason, received)
+            payload = upserts[-1].node.payload
+            assert payload.code == "admission_rejected", reason
+            assert payload.retryable is False, reason
+            assert payload.resolution == FailureResolution.NONE, reason
+    finally:
+        sub.close()
+
+
+def test_user_message_failed_unknown_reason_falls_back_to_verbatim_code_and_defaults() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        lifecycle_msg_id = str(uuid.uuid4())
+        _publish_user_message_failed(root_id, lifecycle_msg_id, "aborted_before_send")
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert) and f.node.kind == NodeKind.FAILURE]
+        assert upserts, received
+        payload = upserts[-1].node.payload
+        assert payload.code == "aborted_before_send"
+        assert payload.severity == FailureSeverity.ERROR
+        assert payload.retryable is False
+        assert payload.resolution == FailureResolution.NONE
+    finally:
+        sub.close()
+
+
+def test_user_message_failed_node_id_is_deterministic_across_replays() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        lifecycle_msg_id = str(uuid.uuid4())
+        _publish_user_message_failed(root_id, lifecycle_msg_id, "recovered_run_failed")
+        _publish_user_message_failed(root_id, lifecycle_msg_id, "recovered_run_failed")
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert) and f.node.kind == NodeKind.FAILURE]
+        assert len(upserts) == 2, received
+        assert upserts[0].node.node_id == upserts[1].node.node_id == f"failure:{lifecycle_msg_id}"
+    finally:
+        sub.close()
+
+
+def test_user_message_failed_with_no_turn_yet_does_not_crash_or_emit() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"  # never ingested — no TURN exists
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+
+    received: list[object] = []
+    # subscribe_control mirrors subscribe's registration without requiring
+    # an open_session/turn to exist first.
+    lifecycle_msg_id = str(uuid.uuid4())
+    _publish_user_message_failed(root_id, lifecycle_msg_id, "durable_admission_failed")
+    # No crash is the primary assertion; nothing to unsubscribe since this
+    # surface was never subscribed to.
+    assert received == []
+
+
+def test_live_handler_node_equals_reload_reconstructed_node_for_same_fact() -> None:
+    """Closes the live-only gap: the node `_on_user_message_failed`
+    broadcasts instantly must be the SAME node a cold reload (open_session
+    -> children(), with NO live handler involved) reconstructs from the
+    journaled row via `normalize.py`'s `user_message_failed` branch."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    # 1) Live path.
+    live_adapter = ChatSurfaceAdapter()
+    live_adapter.bind()
+    opened = live_adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = live_adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    lifecycle_msg_id = str(uuid.uuid4())
+    try:
+        _publish_user_message_failed(root_id, lifecycle_msg_id, "orphaned_before_provider", error="boom")
+        live_upserts = [f for f in received if isinstance(f, NodeUpsert) and f.node.kind == NodeKind.FAILURE]
+        assert live_upserts, received
+        live_node = live_upserts[-1].node
+    finally:
+        sub.close()
+
+    # 2) Reload path: journal the SAME fact for real, via the exact
+    # function the wildcard `_persist_to_event_journal` subscriber funnels
+    # every persisted BusEvent into (`event_ingester.ingest` —
+    # `EventJournalWriter._append_metadata_event` calls this directly),
+    # then read it back through a FRESH adapter that never saw the live
+    # broadcast — only normalize.py's row branch reconstructs it.
+    event_ingester.ingest(
+        root_id, root_id, "user_message_failed",
+        {"lifecycle_msg_id": lifecycle_msg_id, "reason": "orphaned_before_provider", "error": "boom"},
+        source="test", msg_id=lifecycle_msg_id,
+    )
+    reload_adapter = ChatSurfaceAdapter()
+    reloaded = reload_adapter.open_session(root_id)
+    assert isinstance(reloaded, Ok)
+    turn_id = reloaded.value.turns[0].turn.node_id
+    kids = reload_adapter.children(root_id, turn_id, at_render_rev=reloaded.snapshot.render_rev)
+    assert isinstance(kids, Ok)
+    reload_node = next((n for n in kids.value if n.node_id == live_node.node_id), None)
+    assert reload_node is not None, kids.value
+
+    assert reload_node.node_id == live_node.node_id
+    assert reload_node.kind == live_node.kind == NodeKind.FAILURE
+    assert reload_node.turn_id == live_node.turn_id
+    assert reload_node.surface_id == live_node.surface_id
+    assert reload_node.parent_id == live_node.parent_id
+    assert reload_node.payload == live_node.payload
+
+
 def test_search_finds_substring_case_insensitive() -> None:
     root_id = f"root-{uuid.uuid4().hex}"
     _ingest_prompt(root_id, "find the needle please")
@@ -262,6 +465,12 @@ _TESTS = [
     test_fetch_sidecar_maps_worker_record,
     test_fetch_sidecar_worker_status_reflects_latest_run_outcome,
     test_children_stale_cursor_on_render_rev_mismatch,
+    test_user_message_failed_recovery_reason_maps_to_retryable_failure_node,
+    test_user_message_failed_admission_reason_maps_to_non_retryable_failure_node,
+    test_user_message_failed_unknown_reason_falls_back_to_verbatim_code_and_defaults,
+    test_user_message_failed_node_id_is_deterministic_across_replays,
+    test_user_message_failed_with_no_turn_yet_does_not_crash_or_emit,
+    test_live_handler_node_equals_reload_reconstructed_node_for_same_fact,
     test_search_finds_substring_case_insensitive,
 ]
 

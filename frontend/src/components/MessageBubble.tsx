@@ -340,6 +340,70 @@ function DetachedPill() {
   );
 }
 
+/** Shown while the backend is replaying/rebuilding state for a message
+ * (long replay or recovery). Shared by the message-level `isRecovering`
+ * flag and the `lifecycle_notice(kind="recovering")` dispatch so both
+ * paths render identically. */
+function RecoveringPill() {
+  return (
+    <div
+      className="recovering-pill"
+      data-testid="message-recovering-pill"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="recovering-spinner" aria-hidden="true" />
+      <span>Updating state…</span>
+    </div>
+  );
+}
+
+/** Shown once a turn recovers after backend automatic retry attempts.
+ * Shared by the message-level `auto_retry` field and the
+ * `lifecycle_notice(kind="auto_retried")` dispatch. */
+function AutoRetryPill({ kind, count }: { kind?: string; count: number }) {
+  return (
+    <div className="auto-retry-pill" data-testid="message-auto-retry-pill" role="status">
+      <span aria-hidden="true">↻</span>
+      <span>
+        {kind === "rate_limit"
+          ? "Auto-retried after rate limit"
+          : kind === "transient"
+            ? "Auto-retried after a transient error"
+            : "Auto-retried"}
+        {count > 1 ? ` ×${count}` : ""} — recovered
+      </span>
+    </div>
+  );
+}
+
+/** The status-warning box chrome shown while a turn is retrying (most
+ * commonly after a rate limit). `actions` (retry-on-another-provider
+ * controls) is only available where the caller has the assistant
+ * message + callbacks in scope; the `lifecycle_notice(kind="rate_limited")`
+ * dispatch renders the same chrome without it — no callback plumbing
+ * reaches that render path (see MessageBubble.LifecycleNotice). */
+function RateLimitBox({
+  label,
+  errorText,
+  actions,
+}: {
+  label: string;
+  errorText?: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className="message-status status-warning" data-testid="message-retry-warning">
+      <div className="error-block-header">
+        <span className="status-dot" />
+        <span className="error-block-label">{label}</span>
+        <span className="status-error-text">{errorText ?? "Rate limit exceeded"}</span>
+        {actions}
+      </div>
+    </div>
+  );
+}
+
 /** Inline banner shown while the backend starts a fresh subprocess for a
  * context-window continuation. Displays once and disappears when the
  * new subprocess begins producing output. */
@@ -1202,6 +1266,8 @@ export function renderSingleEvent(
       return <ModelFallbackEvent key={idx} data={event.data ?? {}} />;
     case "lifecycle_notice":
       return <LifecycleNotice key={idx} data={event.data ?? {}} />;
+    case "failure":
+      return <FailureChip key={idx} data={event.data ?? {}} />;
     case "pr_link":
       return (
         <PrLinkEvent
@@ -1465,7 +1531,30 @@ export function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
   );
 }
 
+/** Dispatches a `lifecycle_notice` node by its `LifecycleNoticeKind` to the
+ * SAME purpose-built pill the message-level equivalent field renders
+ * (RetryingPill/DetachedPill/RecoveringPill/AutoRetryPill/RateLimitBox) —
+ * never the generic italic line — for the five taxonomy kinds. Any other
+ * `kind` (a future/unrecognized producer) falls through to the italic-line
+ * + optional replacement-history fallback, unchanged. */
 export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
+  const kind = typeof data.kind === "string" ? data.kind : "";
+  if (kind === "retrying") {
+    const retryAt = typeof data.retry_at === "string" ? data.retry_at : null;
+    return retryAt ? <RetryingPill retryAt={retryAt} /> : null;
+  }
+  if (kind === "detached") return <DetachedPill />;
+  if (kind === "recovering") return <RecoveringPill />;
+  if (kind === "auto_retried") {
+    const retryKind = typeof data.retry_kind === "string" ? data.retry_kind : undefined;
+    const count = typeof data.count === "number" ? data.count : 1;
+    return <AutoRetryPill kind={retryKind} count={count} />;
+  }
+  if (kind === "rate_limited") {
+    const text = typeof data.text === "string" ? data.text : undefined;
+    return <RateLimitBox label="Retrying" errorText={text} />;
+  }
+
   const message = String(data.message ?? "");
   if (!message) return null;
   const replacementHistory = Array.isArray(data.replacement_history)
@@ -1497,6 +1586,87 @@ export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
           <pre className="tool-result-pre">{replacementText}</pre>
         </CollapsibleOutput>
       ) : null}
+    </div>
+  );
+}
+
+const FAILURE_SEVERITY_STYLE: Record<string, { color: string; background: string }> = {
+  info: { color: "var(--text-muted)", background: "rgba(139,148,158,0.16)" },
+  warning: { color: "var(--warning, #d29922)", background: "rgba(210,153,34,0.16)" },
+  error: { color: "var(--danger, #f85149)", background: "rgba(248,81,73,0.16)" },
+};
+
+/** Generic renderer for a `failure` node (FailurePayloadWire, taxonomy
+ * see backend/surface_contract/nodes.py FailureSeverity/FailureResolution).
+ * Dispatches by `resolution` to an existing purpose-built component where
+ * one applies; otherwise a severity-colored chip with text + a retryable
+ * indicator. Never dumps `data`/`raw` as JSON — unknown codes fall
+ * through to the same chip with a generic label. */
+export function FailureChip({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const code = typeof data.code === "string" && data.code ? data.code : "unknown";
+  const text = typeof data.text === "string" ? data.text : "";
+  const severity = typeof data.severity === "string" ? data.severity : "error";
+  const retryable = data.retryable === true;
+  const resolution = typeof data.resolution === "string" ? data.resolution : "none";
+  const raw = (data.raw && typeof data.raw === "object" ? data.raw : {}) as Record<string, unknown>;
+  const label = t("message.failureChip", { code, defaultValue: text || code });
+
+  if (resolution === "fix_credential") {
+    const providerId = typeof raw.provider_id === "string" ? raw.provider_id : undefined;
+    if (providerId) {
+      return (
+        <CredentialErrorFix
+          meta={{
+            kind: "provider_credential",
+            provider_id: providerId,
+            credential_status: typeof raw.credential_status === "string" ? raw.credential_status : undefined,
+          }}
+        />
+      );
+    }
+  }
+  if (resolution === "choose_fallback") {
+    // Actions (retry-on-another-provider buttons) need message-level
+    // callbacks not available at this render depth (see RateLimitBox's
+    // own docstring) — rendered without them where data alone suffices
+    // for the box + label.
+    return <RateLimitBox label={label} errorText={text} />;
+  }
+
+  const palette = FAILURE_SEVERITY_STYLE[severity] ?? FAILURE_SEVERITY_STYLE.error;
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.85,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flexWrap: "wrap",
+      }}
+    >
+      <span
+        style={{
+          padding: "1px 7px",
+          borderRadius: 999,
+          fontSize: "0.9em",
+          fontWeight: 600,
+          background: palette.background,
+          color: palette.color,
+        }}
+      >
+        {t(`message.failureSeverity_${severity}`, { defaultValue: severity })}
+      </span>
+      <span>{label}</span>
+      {retryable && (
+        <span style={{ opacity: 0.7 }}>{t("message.failureRetryable", { defaultValue: "Retryable" })}</span>
+      )}
     </div>
   );
 }
@@ -2823,39 +2993,36 @@ const AssistantMessage = memo(function AssistantMessage({
           </>
         )}
         {message.error && message.retrying_until && (
-          <div className="message-status status-warning" data-testid="message-retry-warning">
-            <div className="error-block-header">
-              <span className="status-dot" />
-              <span className="error-block-label">Retrying</span>
-              <span className="status-error-text">
-                {message.errorText
-                  ? message.errorText.split("\n", 1)[0]
-                  : "Rate limit exceeded"}
-              </span>
-              {onContinueRateLimitOnAnotherProvider && (
-                <button
-                  className="status-retry-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onContinueRateLimitOnAnotherProvider();
-                  }}
-                >
-                  {rateLimitFallbackLabel ?? t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
-                </button>
-              )}
-              {onChooseAnotherProviderForRateLimit && (
-                <button
-                  className="status-retry-btn status-retry-btn--secondary"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onChooseAnotherProviderForRateLimit(message);
-                  }}
-                >
-                  {t("rateLimit.chooseProviderModel", "Choose provider & model…")}
-                </button>
-              )}
-            </div>
-          </div>
+          <RateLimitBox
+            label="Retrying"
+            errorText={message.errorText ? message.errorText.split("\n", 1)[0] : undefined}
+            actions={
+              <>
+                {onContinueRateLimitOnAnotherProvider && (
+                  <button
+                    className="status-retry-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onContinueRateLimitOnAnotherProvider();
+                    }}
+                  >
+                    {rateLimitFallbackLabel ?? t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
+                  </button>
+                )}
+                {onChooseAnotherProviderForRateLimit && (
+                  <button
+                    className="status-retry-btn status-retry-btn--secondary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onChooseAnotherProviderForRateLimit(message);
+                    }}
+                  >
+                    {t("rateLimit.chooseProviderModel", "Choose provider & model…")}
+                  </button>
+                )}
+              </>
+            }
+          />
         )}
         {message.stopped_at && (
           <StoppedIndicator
@@ -2866,15 +3033,7 @@ const AssistantMessage = memo(function AssistantMessage({
         )}
         {message.isDetached && <DetachedPill />}
         {message.isRecovering && !runs.some((run) => run.startup_phase === "stalled") && (
-          <div
-            className="recovering-pill"
-            data-testid="message-recovering-pill"
-            role="status"
-            aria-live="polite"
-          >
-            <span className="recovering-spinner" aria-hidden="true" />
-            <span>Updating state…</span>
-          </div>
+          <RecoveringPill />
         )}
         {message.retrying_until && (
           <RetryingPill retryAt={message.retrying_until} />
@@ -2883,24 +3042,7 @@ const AssistantMessage = memo(function AssistantMessage({
           <ContinuationPill chainDepth={message.continuation_active} />
         )}
         {message.auto_retry && message.auto_retry.count > 0 && (
-          <div
-            className="auto-retry-pill"
-            data-testid="message-auto-retry-pill"
-            role="status"
-          >
-            <span aria-hidden="true">↻</span>
-            <span>
-              {message.auto_retry.kind === "rate_limit"
-                ? "Auto-retried after rate limit"
-                : message.auto_retry.kind === "transient"
-                  ? "Auto-retried after a transient error"
-                  : "Auto-retried"}
-              {message.auto_retry.count > 1
-                ? ` ×${message.auto_retry.count}`
-                : ""}{" "}
-              — recovered
-            </span>
-          </div>
+          <AutoRetryPill kind={message.auto_retry.kind} count={message.auto_retry.count} />
         )}
         <AssistantRunMeta
           message={message}
