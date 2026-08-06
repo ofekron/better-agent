@@ -38,6 +38,9 @@ installation_profile.integrations_enabled = lambda: True  # type: ignore[assignm
 
 _EXT_ID = "test.app-settings"
 
+PASS = "\x1b[32mPASS\x1b[0m"
+FAIL = "\x1b[31mFAIL\x1b[0m"
+
 
 def _manifest(**overrides):
     manifest = {
@@ -92,43 +95,32 @@ def _rejects(raw, needle: str) -> bool:
     return False
 
 
-def test_manifest_validation() -> bool:
+def test_manifest_validation() -> None:
     validated = extension_store.validate_manifest(_manifest())
     settings = {item["key"]: item for item in validated["entrypoints"]["settings"]}
-    if settings["play_sound"].get("section") != "notifications":
-        print("  section not preserved on the setting")
-        return False
-    if "section" in settings["api_base"]:
-        print("  unbound setting must not gain a section")
-        return False
-    if validated["entrypoints"]["settings_sections"][0]["label"] != "Notifications":
-        print("  section label not preserved")
-        return False
+    assert settings["play_sound"].get("section") == "notifications", "section not preserved on the setting"
+    assert "section" not in settings["api_base"], "unbound setting must not gain a section"
+    assert validated["entrypoints"]["settings_sections"][0]["label"] == "Notifications", "section label not preserved"
 
     undeclared = _manifest()
     undeclared["entrypoints"]["settings"][0]["section"] = "nope"
-    if not _rejects(undeclared, "settings_sections"):
-        return False
+    assert _rejects(undeclared, "settings_sections")
 
     secret = _manifest()
     secret["entrypoints"]["settings"][0] = {
         "key": "token", "label": "Token", "type": "secret", "section": "notifications",
     }
-    if not _rejects(secret, "cannot declare a section"):
-        return False
+    assert _rejects(secret, "cannot declare a section")
 
     unknown_gate = _manifest()
     unknown_gate["entrypoints"]["applied_config"]["tag_rules"][0]["marker"]["sound_setting"] = "missing"
-    if not _rejects(unknown_gate, "sound_setting"):
-        return False
+    assert _rejects(unknown_gate, "sound_setting")
 
     non_boolean_gate = _manifest()
     non_boolean_gate["entrypoints"]["applied_config"]["tag_rules"][0]["marker"]["sound_setting"] = "api_base"
-    if not _rejects(non_boolean_gate, "sound_setting"):
-        return False
+    assert _rejects(non_boolean_gate, "sound_setting")
 
     print("  manifest validation ok")
-    return True
 
 
 def _install() -> None:
@@ -152,52 +144,41 @@ def _install() -> None:
     extension_store.set_enabled(_EXT_ID, True)
 
 
-def test_projection_and_scope() -> bool:
+def test_projection_and_scope() -> None:
     _install()
 
     sections = extension_app_settings.sections()
     section = next((s for s in sections if s["id"] == "notifications"), None)
-    if section is None:
-        print(f"  notifications section missing from projection: {sections}")
-        return False
+    assert section is not None, f"notifications section missing from projection: {sections}"
     keys = [item["key"] for item in section["items"]]
-    if keys != ["play_sound"]:
-        print(f"  only section-bound settings belong in the app section: {keys}")
-        return False
+    assert keys == ["play_sound"], f"only section-bound settings belong in the app section: {keys}"
     item = section["items"][0]
-    if item["value"] is not True or item["extension_id"] != _EXT_ID:
-        print(f"  projected item carries the wrong value/owner: {item}")
-        return False
+    assert item["value"] is True and item["extension_id"] == _EXT_ID, (
+        f"projected item carries the wrong value/owner: {item}"
+    )
 
     overlay_keys = [
         entry["name"] for entry in harness_fields._settings_group(_EXT_ID)["items"]
     ]
-    if overlay_keys != ["api_base"]:
-        print(f"  app-section settings must not be profile overlays: {overlay_keys}")
-        return False
+    assert overlay_keys == ["api_base"], (
+        f"app-section settings must not be profile overlays: {overlay_keys}"
+    )
 
     path = ["extension_instances", _EXT_ID, harness_fields.GROUP_SETTINGS, "play_sound"]
-    if harness_fields.scope_for(path) != harness_fields.SCOPE_GLOBAL:
-        print("  app-section setting must be global scope")
-        return False
+    assert harness_fields.scope_for(path) == harness_fields.SCOPE_GLOBAL, "app-section setting must be global scope"
     path = ["extension_instances", _EXT_ID, harness_fields.GROUP_SETTINGS, "api_base"]
-    if harness_fields.scope_for(path) != harness_fields.SCOPE_PROFILE:
-        print("  plain setting must stay profile scope")
-        return False
+    assert harness_fields.scope_for(path) == harness_fields.SCOPE_PROFILE, "plain setting must stay profile scope"
 
     extension_store.set_extension_setting(_EXT_ID, "play_sound", False)
     refreshed = next(
         s for s in extension_app_settings.sections() if s["id"] == "notifications"
     )
-    if refreshed["items"][0]["value"] is not False:
-        print("  written value did not reach the projection")
-        return False
+    assert refreshed["items"][0]["value"] is False, "written value did not reach the projection"
 
     print("  projection + scope ok")
-    return True
 
 
-def test_sdk_builders_match_core() -> bool:
+def test_sdk_builders_match_core() -> None:
     from better_agent_sdk import Setting, SettingsSection
 
     section = SettingsSection(id="notifications", label="Notifications")
@@ -210,25 +191,34 @@ def test_sdk_builders_match_core() -> bool:
     raw["entrypoints"]["settings"] = [setting.to_dict()]
     raw["entrypoints"]["applied_config"]["tag_rules"][0]["marker"]["sound_setting"] = "play_sound"
     validated = extension_store.validate_manifest(raw)
-    if validated["entrypoints"]["settings"][0].get("section") != "notifications":
-        print("  SDK-built setting did not survive core validation")
-        return False
+    assert validated["entrypoints"]["settings"][0].get("section") == "notifications", (
+        "SDK-built setting did not survive core validation"
+    )
     print("  SDK builders ok")
-    return True
 
 
 def main() -> int:
+    tests = [
+        ("manifest validation", test_manifest_validation),
+        ("projection and scope", test_projection_and_scope),
+        ("sdk builders match core", test_sdk_builders_match_core),
+    ]
+    failed = 0
     try:
-        results = [
-            test_manifest_validation(),
-            test_projection_and_scope(),
-            test_sdk_builders_match_core(),
-        ]
-        if not all(results):
-            print("FAIL test_extension_app_settings")
-            return 1
-        print("PASS test_extension_app_settings")
-        return 0
+        for label, runner in tests:
+            try:
+                runner()
+            except AssertionError as exc:
+                failed += 1
+                print(f"{FAIL} {label}: {exc}")
+            except Exception:
+                failed += 1
+                import traceback
+                traceback.print_exc()
+            else:
+                print(f"{PASS} {label}")
+        print(f"{len(tests) - failed}/{len(tests)} subtests passed")
+        return 1 if failed else 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
