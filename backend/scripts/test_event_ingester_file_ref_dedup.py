@@ -82,11 +82,10 @@ def test_single_ingest_dedupes_file_ref_only_rewrite() -> bool:
     finally:
         _restore_ref_ctx(original)
     rows = _rows(root_id)
-    ok = first == 1 and second == -1 and len(rows) == 1
-    if not ok:
-        print(f"  first={first} second={second} rows={len(rows)}")
+    assert first == 1, f"first ingest must append, got {first}"
+    assert second == -1, f"file-ref-only rewrite must dedup to -1, got {second}"
+    assert len(rows) == 1, f"deduped ingest must leave 1 row, got {len(rows)}"
     event_ingester.close(root_id)
-    return ok
 
 
 def test_batch_ingest_dedupes_file_ref_only_rewrite() -> bool:
@@ -115,11 +114,10 @@ def test_batch_ingest_dedupes_file_ref_only_rewrite() -> bool:
     finally:
         _restore_ref_ctx(original)
     rows = _rows(root_id)
-    ok = first == [1] and second == [-1] and len(rows) == 1
-    if not ok:
-        print(f"  first={first} second={second} rows={len(rows)}")
+    assert first == [1], f"batch first ingest must append, got {first}"
+    assert second == [-1], f"batch file-ref-only rewrite must dedup to -1, got {second}"
+    assert len(rows) == 1, f"deduped batch ingest must leave 1 row, got {len(rows)}"
     event_ingester.close(root_id)
-    return ok
 
 
 def test_same_uuid_real_content_mutation_still_appends() -> bool:
@@ -137,11 +135,10 @@ def test_same_uuid_real_content_mutation_still_appends() -> bool:
         source="test", msg_id=msg_id, cwd_override=str(repo),
     )
     rows = _rows(root_id)
-    ok = first == 1 and second == 2 and len(rows) == 2
-    if not ok:
-        print(f"  first={first} second={second} rows={len(rows)}")
+    assert first == 1, f"first ingest must append, got {first}"
+    assert second == 2, f"real content mutation must append a new row, got {second}"
+    assert len(rows) == 2, f"mutated same-uuid ingest must leave 2 rows, got {len(rows)}"
     event_ingester.close(root_id)
-    return ok
 
 
 TESTS = [
@@ -156,13 +153,12 @@ def main() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as exc:
-                ok = False
-                print(f"  exception: {exc}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                fn()
+            except Exception as exc:  # noqa: BLE001
+                print(f"{FAIL}  {name} — {exc}")
                 failed += 1
+                continue
+            print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         event_ingester.close_all()
