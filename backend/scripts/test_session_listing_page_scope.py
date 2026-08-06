@@ -133,30 +133,34 @@ def _seed_more_than_one_page() -> str:
     return "below-the-page"
 
 
-def test_no_params_request_is_capped_at_one_page(client: TestClient) -> bool:
+def test_no_params_request_is_capped_at_one_page() -> None:
     """The registry bootstrap fetches `/api/sessions` with no params."""
     _seed_more_than_one_page()
+    client = TestClient(main.app, client=("127.0.0.1", 50000))
 
     response = client.get("/api/sessions", headers=HEADERS)
-    if response.status_code != 200:
-        print(f"{FAIL} /api/sessions status {response.status_code}")
-        return False
+    assert response.status_code == 200, f"/api/sessions status {response.status_code}"
     body = response.json()
     rows = body.get("sessions", [])
-    ok = (
-        len(rows) == DEFAULT_PAGE_LIMIT
-        and body.get("total") == DEFAULT_PAGE_LIMIT + 1
+    assert len(rows) == DEFAULT_PAGE_LIMIT, (
+        f"/api/sessions with no params returned {len(rows)} rows; "
+        f"a no-param bootstrap request must be capped at one page of "
+        f"{DEFAULT_PAGE_LIMIT}, not the whole corpus"
+    )
+    assert body.get("total") == DEFAULT_PAGE_LIMIT + 1, (
+        f"/api/sessions total {body.get('total')}; expected "
+        f"{DEFAULT_PAGE_LIMIT + 1} (the page plus the below-page straggler)"
     )
     print(
-        f"{PASS if ok else FAIL} /api/sessions with no params returns one page "
+        f"{PASS} /api/sessions with no params returns one page "
         f"({len(rows)} of {body.get('total')}), not the whole corpus"
     )
-    return ok
 
 
-def test_session_below_the_page_is_absent_but_alive(client: TestClient) -> bool:
+def test_session_below_the_page_is_absent_but_alive() -> None:
     """Absence from the page is NOT evidence the session is gone."""
     straggler = _seed_more_than_one_page()
+    client = TestClient(main.app, client=("127.0.0.1", 50000))
 
     default_page = client.get("/api/sessions", headers=HEADERS)
     deep_page = client.get(
@@ -164,51 +168,60 @@ def test_session_below_the_page_is_absent_but_alive(client: TestClient) -> bool:
         headers=HEADERS,
     )
     detail = client.get(f"/api/sessions/{straggler}", headers=HEADERS)
-    if default_page.status_code != 200 or deep_page.status_code != 200:
-        print(f"{FAIL} listing status {default_page.status_code}/{deep_page.status_code}")
-        return False
+    assert default_page.status_code == 200 and deep_page.status_code == 200, (
+        f"listing status {default_page.status_code}/{deep_page.status_code}"
+    )
 
     on_default = {row["id"] for row in default_page.json().get("sessions", [])}
     on_deep = {row["id"] for row in deep_page.json().get("sessions", [])}
-    ok = (
-        straggler not in on_default
-        and straggler in on_deep
-        and detail.status_code == 200
+    assert straggler not in on_default, (
+        f"{straggler} ranked below the first page must be absent from the "
+        f"default page; evicting it from a page is a snapshot bug"
+    )
+    assert straggler in on_deep, (
+        f"{straggler} must appear on the deep page "
+        f"(offset={DEFAULT_PAGE_LIMIT}); absence from one page is not death"
+    )
+    assert detail.status_code == 200, (
+        f"detail fetch for {straggler} returned {detail.status_code}; "
+        f"a session below the page must still be live and fetchable"
     )
     print(
-        f"{PASS if ok else FAIL} a session below the first page is absent from the "
+        f"{PASS} a session below the first page is absent from the "
         f"default page while still live and fetchable"
     )
-    return ok
 
 
-def test_archived_session_is_absent_from_every_default_page(client: TestClient) -> bool:
+def test_archived_session_is_absent_from_every_default_page() -> None:
     """Archived sessions are filtered out regardless of offset."""
     _reset_home()
     _write(_record("plain", "2026-07-02T00:00:00+00:00"))
     _write(_record("archived-one", "2026-07-01T00:00:00+00:00", archived=True))
+    client = TestClient(main.app, client=("127.0.0.1", 50000))
 
     response = client.get("/api/sessions?offset=0&limit=200", headers=HEADERS)
-    if response.status_code != 200:
-        print(f"{FAIL} /api/sessions status {response.status_code}")
-        return False
+    assert response.status_code == 200, f"/api/sessions status {response.status_code}"
     ids = {row["id"] for row in response.json().get("sessions", [])}
-    ok = "plain" in ids and "archived-one" not in ids
+    assert "plain" in ids, f"non-archived 'plain' session missing from listing; got {ids}"
+    assert "archived-one" not in ids, (
+        f"an archived session must never appear on a default listing page at "
+        f"any offset; got {ids}"
+    )
     print(
-        f"{PASS if ok else FAIL} an archived session never appears on a default "
+        f"{PASS} an archived session never appears on a default "
         f"listing page, at any offset"
     )
-    return ok
 
 
 def main_run() -> int:
-    client = TestClient(main.app, client=("127.0.0.1", 50000))
     try:
-        ok = True
-        ok = test_no_params_request_is_capped_at_one_page(client) and ok
-        ok = test_session_below_the_page_is_absent_but_alive(client) and ok
-        ok = test_archived_session_is_absent_from_every_default_page(client) and ok
-        return 0 if ok else 1
+        test_no_params_request_is_capped_at_one_page()
+        test_session_below_the_page_is_absent_but_alive()
+        test_archived_session_is_absent_from_every_default_page()
+        return 0
+    except AssertionError as exc:
+        print(f"{FAIL} {exc}")
+        return 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
