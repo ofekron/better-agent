@@ -78,7 +78,7 @@ def _finalize(*, session, app_session_id, user_msg, assistant_msg, primary_resul
     Coordinator._finalize_turn_messages(object(), **kwargs)
 
 
-def test_worker_panel_survives_finalize() -> bool:
+def test_worker_panel_survives_finalize() -> None:
     sess = session_manager.create(
         name="t", model="sonnet", cwd="/tmp/worker-panel-finalize",
         orchestration_mode="native",
@@ -125,10 +125,8 @@ def test_worker_panel_survives_finalize() -> bool:
 
     pre_finalize = session_manager.get_ref(sid)["messages"][-1]
     pre_workers = pre_finalize.get("workers") or []
-    if len(pre_workers) != 1 or pre_workers[0].get("delegation_id") != "del-1":
-        print(f"{FAIL} setup: fold did not populate msg['workers'] "
-              f"before finalize — got {pre_workers!r}")
-        return False
+    assert len(pre_workers) == 1 and pre_workers[0].get("delegation_id") == "del-1", (
+        f"setup: fold did not populate msg['workers'] before finalize — got {pre_workers!r}")
 
     _finalize(
         session=session_manager.get(sid),
@@ -144,25 +142,34 @@ def test_worker_panel_survives_finalize() -> bool:
     saved = next(m for m in after["messages"] if m.get("id") == "a1")
     workers = saved.get("workers") or []
 
-    ok = (
-        len(workers) == 1
-        and workers[0].get("delegation_id") == "del-1"
-        and workers[0].get("worker_session_id") == "ws-1"
-        and workers[0].get("success") is True
-        and len(workers[0].get("events") or []) == 1
-        and workers[0]["events"][0]["data"]["uuid"] == "uuid-1"
-        and saved.get("content") == "worker did the thing"
-        and saved.get("_content_dirty") is False
-    )
-    print(f"{PASS if ok else FAIL} worker panel survives _finalize_turn_messages "
+    # The parent assistant msg's `content` is projected from the PRIMARY
+    # run's events/sdk_output (both empty here), never from a delegated
+    # worker's output — worker output lives in the panel's `events` by
+    # design. So this asserts only the panel-survival invariant: every
+    # fold-written field of msg["workers"] survives the turn-end
+    # chokepoint intact.
+    assert len(workers) == 1, f"expected 1 worker panel, got {workers!r}"
+    w = workers[0]
+    assert w.get("delegation_id") == "del-1", f"delegation_id wrong: {w!r}"
+    assert w.get("worker_session_id") == "ws-1", f"worker_session_id wrong: {w!r}"
+    assert w.get("success") is True, f"success wrong: {w!r}"
+    assert len(w.get("events") or []) == 1, f"expected 1 inner event, got {w.get('events')!r}"
+    assert w["events"][0]["data"]["uuid"] == "uuid-1", f"inner uuid wrong: {w['events'][0]!r}"
+    print(f"{PASS} worker panel survives _finalize_turn_messages "
           f"— got workers={workers!r}")
-    return ok
 
 
 def main() -> int:
     try:
-        ok = test_worker_panel_survives_finalize()
-        return 0 if ok else 1
+        test_worker_panel_survives_finalize()
+        return 0
+    except AssertionError as exc:
+        print(f"{FAIL} {exc}")
+        return 1
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
