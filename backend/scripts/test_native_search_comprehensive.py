@@ -288,15 +288,15 @@ def _reset_index() -> None:
 # native_session_miner — parsers + extractors
 # ===========================================================================
 
-def test_claude_parse_user_prompt() -> bool:
+def test_claude_parse_user_prompt() -> None:
     visit = _candidate_from_prompts("s1", "/p", [("hello world", "2024-01-01")]).parse()
     msgs = visit.messages
     ok = len(msgs) == 1 and msgs[0]["role"] == "user" and msgs[0]["content"] == "hello world"
     print(f"{OK if ok else FAIL} claude parse keeps user prompt (got {msgs})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_tool_result_user_turn() -> bool:
+def test_claude_parse_drops_tool_result_user_turn() -> None:
     """A user turn whose only content is a tool_result is NOT a typed prompt."""
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_tool_use("Bash", {"command": "ls"})]),
@@ -305,10 +305,10 @@ def test_claude_parse_drops_tool_result_user_turn() -> bool:
     visit = _candidate("s1", "/p", t).parse()
     ok = visit.messages == []
     print(f"{OK if ok else FAIL} claude parse drops tool-result-only user turn (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_sidechain() -> bool:
+def test_claude_parse_drops_sidechain() -> None:
     t = _write_claude_raw([
         {"type": "user", "uuid": "s1", "isSidechain": True,
          "message": {"role": "user", "content": "sidechain noise"}},
@@ -318,10 +318,10 @@ def test_claude_parse_drops_sidechain() -> bool:
     texts = [m["content"] for m in visit.messages]
     ok = texts == ["real prompt"]
     print(f"{OK if ok else FAIL} claude parse drops sidechain (got {texts})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_meta() -> bool:
+def test_claude_parse_drops_meta() -> None:
     t = _write_claude_raw([
         {"type": "user", "uuid": "m1", "isMeta": True,
          "message": {"role": "user", "content": "meta noise"}},
@@ -331,10 +331,10 @@ def test_claude_parse_drops_meta() -> bool:
     texts = [m["content"] for m in visit.messages]
     ok = texts == ["real prompt"]
     print(f"{OK if ok else FAIL} claude parse drops meta lines (got {texts})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_command_tags() -> bool:
+def test_claude_parse_drops_command_tags() -> None:
     t = _write_claude_raw([
         _claude_user("<command-name>/help</command-name>", "u1"),
         _claude_user("<local-command-stdout>output</local-command-stdout>", "u2"),
@@ -345,28 +345,28 @@ def test_claude_parse_drops_command_tags() -> bool:
     texts = [m["content"] for m in visit.messages]
     ok = texts == ["real prompt"]
     print(f"{OK if ok else FAIL} claude parse drops CLI command tags (got {texts})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_caveat() -> bool:
+def test_claude_parse_drops_caveat() -> None:
     t = _write_claude_raw([_claude_user("Caveat: some warning", "u1")])
     visit = _candidate("s1", "/p", t).parse()
     ok = visit.messages == []
     print(f"{OK if ok else FAIL} claude parse drops 'Caveat:' line (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_assistant_text() -> bool:
+def test_claude_parse_assistant_text() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_text_block("sure thing")]),
     ])
     visit = _candidate("s1", "/p", t).parse()
     ok = len(visit.messages) == 1 and visit.messages[0]["content"] == "sure thing"
     print(f"{OK if ok else FAIL} claude parse keeps assistant text (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_keeps_assistant_with_edit_tool_only() -> bool:
+def test_claude_parse_keeps_assistant_with_edit_tool_only() -> None:
     """An assistant turn with no text but an Edit tool_use is still kept."""
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_tool_use("Edit", {"file": "a.py"})]),
@@ -374,20 +374,20 @@ def test_claude_parse_keeps_assistant_with_edit_tool_only() -> bool:
     visit = _candidate("s1", "/p", t).parse()
     ok = len(visit.messages) == 1
     print(f"{OK if ok else FAIL} claude parse keeps edit-only assistant turn (got {len(visit.messages)})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_drops_assistant_no_text_no_edit() -> bool:
+def test_claude_parse_drops_assistant_no_text_no_edit() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_tool_use("Read", {"file": "a.py"})]),
     ])
     visit = _candidate("s1", "/p", t).parse()
     ok = visit.messages == []
     print(f"{OK if ok else FAIL} claude parse drops no-text no-edit assistant (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_malformed_json_line_skipped() -> bool:
+def test_claude_parse_malformed_json_line_skipped() -> None:
     path = _SCRATCH / f"bad_{_next_seq()}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -399,26 +399,26 @@ def test_claude_parse_malformed_json_line_skipped() -> bool:
     texts = [m["content"] for m in visit.messages]
     ok = texts == ["good prompt"]
     print(f"{OK if ok else FAIL} claude parse skips malformed json line (got {texts})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_empty_file() -> bool:
+def test_claude_parse_empty_file() -> None:
     path = _SCRATCH / f"empty_{_next_seq()}.jsonl"
     path.write_text("", encoding="utf-8")
     visit = _candidate("s1", "/p", path).parse()
     ok = visit.messages == [] and visit.events_by_msg_id == {}
     print(f"{OK if ok else FAIL} claude parse empty file -> empty (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_missing_file_returns_none() -> bool:
+def test_claude_parse_missing_file_returns_none() -> None:
     visit = _candidate("s1", "/p", _SCRATCH / "does_not_exist.jsonl").parse()
     ok = visit is None
     print(f"{OK if ok else FAIL} claude parse missing file -> None (got {visit})")
-    return ok
+    assert ok
 
 
-def test_claude_parse_user_text_in_list_blocks() -> bool:
+def test_claude_parse_user_text_in_list_blocks() -> None:
     """A user turn whose content is a list of text blocks (no tool_result) is a prompt."""
     t = _write_claude_raw([
         {"type": "user", "uuid": "u1", "timestamp": "2024-01-01",
@@ -428,10 +428,10 @@ def test_claude_parse_user_text_in_list_blocks() -> bool:
     visit = _candidate("s1", "/p", t).parse()
     ok = len(visit.messages) == 1 and visit.messages[0]["content"] == "multi\nblock"
     print(f"{OK if ok else FAIL} claude parse joins user list text blocks (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_claude_events_by_msg_id_has_agent_message() -> bool:
+def test_claude_events_by_msg_id_has_agent_message() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_text_block("hi")], uid="a1"),
     ])
@@ -439,12 +439,12 @@ def test_claude_events_by_msg_id_has_agent_message() -> bool:
     ev = visit.events_by_msg_id.get("a1")
     ok = ev and ev[0]["type"] == "agent_message"
     print(f"{OK if ok else FAIL} claude parse emits agent_message event (got {ev})")
-    return ok
+    assert ok
 
 
 # ─── codex parser ──────────────────────────────────────────────────────────
 
-def test_codex_parse_user_message() -> bool:
+def test_codex_parse_user_message() -> None:
     t = _write_codex([
         {"type": "session_meta", "timestamp": "t0",
          "payload": {"id": "z", "cwd": "/zapp", "source": "cli"}},
@@ -456,10 +456,10 @@ def test_codex_parse_user_message() -> bool:
     msgs = visit.messages
     ok = len(msgs) == 1 and msgs[0]["content"] == "codex prompt"
     print(f"{OK if ok else FAIL} codex parse keeps user message (got {msgs})")
-    return ok
+    assert ok
 
 
-def test_codex_parse_drops_environment_context() -> bool:
+def test_codex_parse_drops_environment_context() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "user", "id": "u1",
@@ -473,10 +473,10 @@ def test_codex_parse_drops_environment_context() -> bool:
     texts = [m["content"] for m in visit.messages]
     ok = texts == ["real codex prompt"]
     print(f"{OK if ok else FAIL} codex parse drops environment_context (got {texts})")
-    return ok
+    assert ok
 
 
-def test_codex_parse_drops_user_instructions() -> bool:
+def test_codex_parse_drops_user_instructions() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "user", "id": "u1",
@@ -486,10 +486,10 @@ def test_codex_parse_drops_user_instructions() -> bool:
     visit = _candidate("s1", "/p", t, fmt="codex").parse()
     ok = visit.messages == []
     print(f"{OK if ok else FAIL} codex parse drops user_instructions (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_codex_parse_drops_assistant_in_parse() -> bool:
+def test_codex_parse_drops_assistant_in_parse() -> None:
     """_codex_messages only collects user prompts (parse path); assistant is ignored."""
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
@@ -502,10 +502,10 @@ def test_codex_parse_drops_assistant_in_parse() -> bool:
     visit = _candidate("s1", "/p", t, fmt="codex").parse()
     ok = len(visit.messages) == 1 and visit.messages[0]["content"] == "prompt"
     print(f"{OK if ok else FAIL} codex parse (msgs) only keeps user (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_codex_parse_string_content() -> bool:
+def test_codex_parse_string_content() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "user", "id": "u1", "content": "string prompt"}},
@@ -513,26 +513,26 @@ def test_codex_parse_string_content() -> bool:
     visit = _candidate("s1", "/p", t, fmt="codex").parse()
     ok = len(visit.messages) == 1 and visit.messages[0]["content"] == "string prompt"
     print(f"{OK if ok else FAIL} codex parse accepts string content (got {visit.messages})")
-    return ok
+    assert ok
 
 
-def test_codex_first_cwd_extracts() -> bool:
+def test_codex_first_cwd_extracts() -> None:
     t = _SCRATCH / f"cwd_{_next_seq()}.jsonl"
     _w(t, [{"type": "session_meta", "payload": {"cwd": "/my/cwd"}}])
     ok = _codex_first_cwd(t) == "/my/cwd"
     print(f"{OK if ok else FAIL} codex_first_cwd extracts cwd (got {_codex_first_cwd(t)})")
-    return ok
+    assert ok
 
 
-def test_codex_first_cwd_missing() -> bool:
+def test_codex_first_cwd_missing() -> None:
     t = _SCRATCH / f"cwd_{_next_seq()}.jsonl"
     _w(t, [{"type": "something_else", "payload": {}}])
     ok = _codex_first_cwd(t) == ""
     print(f"{OK if ok else FAIL} codex_first_cwd missing -> empty (got {_codex_first_cwd(t)!r})")
-    return ok
+    assert ok
 
 
-def test_codex_first_cwd_invalid_json() -> bool:
+def test_codex_first_cwd_invalid_json() -> None:
     """A codex file whose first line is not valid JSON yields "" (the _missing
     sibling covers a valid line without cwd; this covers the JSON-decode path)."""
     t = _SCRATCH / f"cwd_{_next_seq()}.jsonl"
@@ -540,60 +540,60 @@ def test_codex_first_cwd_invalid_json() -> bool:
     t.write_text("{not valid json\n", encoding="utf-8")
     ok = _codex_first_cwd(t) == ""
     print(f"{OK if ok else FAIL} codex_first_cwd invalid-json -> empty (got {_codex_first_cwd(t)!r})")
-    return ok
+    assert ok
 
 
 # ─── claude element extractor ──────────────────────────────────────────────
 
-def test_claude_elements_user_prompt() -> bool:
+def test_claude_elements_user_prompt() -> None:
     t = _write_claude_raw([_claude_user("hello prompt", "u1")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "user_prompt" and els[0].text == "hello prompt"
     print(f"{OK if ok else FAIL} claude_elements user_prompt (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_command_tag() -> bool:
+def test_claude_elements_command_tag() -> None:
     t = _write_claude_raw([_claude_user("<command-name>/run</command-name>", "u1")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "command"
     print(f"{OK if ok else FAIL} claude_elements command tag -> command kind (got {[e.kind for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_bash_input_tag() -> bool:
+def test_claude_elements_bash_input_tag() -> None:
     t = _write_claude_raw([_claude_user("<bash-input>ls -la</bash-input>", "u1")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "command"
     print(f"{OK if ok else FAIL} claude_elements bash-input -> command kind (got {[e.kind for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_system_reminder_is_meta() -> bool:
+def test_claude_elements_system_reminder_is_meta() -> None:
     t = _write_claude_raw([_claude_user("<system-reminder>careful</system-reminder>", "u1")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "meta"
     print(f"{OK if ok else FAIL} claude_elements system-reminder -> meta (got {[e.kind for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_assistant_text() -> bool:
+def test_claude_elements_assistant_text() -> None:
     t = _write_claude_raw([_claude_assistant_blocks([_claude_text_block("reply text")])])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "assistant_text"
     print(f"{OK if ok else FAIL} claude_elements assistant_text (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_reasoning() -> bool:
+def test_claude_elements_reasoning() -> None:
     t = _write_claude_raw([_claude_assistant_blocks([_claude_thinking_block("let me think")])])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "reasoning" and els[0].text == "let me think"
     print(f"{OK if ok else FAIL} claude_elements reasoning (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_tool_call() -> bool:
+def test_claude_elements_tool_call() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([_claude_tool_use("Bash", {"command": "make"}, "t1")], uid="a1"),
     ])
@@ -601,18 +601,18 @@ def test_claude_elements_tool_call() -> bool:
     ok = (len(els) == 1 and els[0].kind == "tool_call" and els[0].tool_name == "Bash"
           and "make" in els[0].text)
     print(f"{OK if ok else FAIL} claude_elements tool_call (got {[(e.kind,e.tool_name,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_tool_result() -> bool:
+def test_claude_elements_tool_result() -> None:
     t = _write_claude_raw([_claude_tool_result("t1", "output here")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "tool_result" and els[0].text == "output here"
     print(f"{OK if ok else FAIL} claude_elements tool_result (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_drops_sidechain_and_meta() -> bool:
+def test_claude_elements_drops_sidechain_and_meta() -> None:
     t = _write_claude_raw([
         {"type": "user", "uuid": "s1", "isSidechain": True,
          "message": {"role": "user", "content": "sidechain"}},
@@ -623,29 +623,29 @@ def test_claude_elements_drops_sidechain_and_meta() -> bool:
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].text == "real"
     print(f"{OK if ok else FAIL} claude_elements drops sidechain+meta (got {[e.text for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_user_string_content() -> bool:
+def test_claude_elements_user_string_content() -> None:
     t = _write_claude_raw([_claude_user("string body", "u1")])
     els = _claude_elements(t)
     ok = len(els) == 1 and els[0].kind == "user_prompt"
     print(f"{OK if ok else FAIL} claude_elements string user content (got {[e.kind for e in els]})")
-    return ok
+    assert ok
 
 
-def test_claude_elements_malformed_line_skipped() -> bool:
+def test_claude_elements_malformed_line_skipped() -> None:
     path = _SCRATCH / f"elbad_{_next_seq()}.jsonl"
     path.write_text("{bad json\n" + json.dumps(_claude_user("good", "u1")) + "\n", encoding="utf-8")
     els = _claude_elements(path)
     ok = len(els) == 1 and els[0].text == "good"
     print(f"{OK if ok else FAIL} claude_elements skips malformed line (got {[e.text for e in els]})")
-    return ok
+    assert ok
 
 
 # ─── codex element extractor ───────────────────────────────────────────────
 
-def test_codex_elements_user_prompt() -> bool:
+def test_codex_elements_user_prompt() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "user", "id": "u1",
@@ -654,10 +654,10 @@ def test_codex_elements_user_prompt() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "user_prompt" and els[0].text == "codex prompt"
     print(f"{OK if ok else FAIL} codex_elements user_prompt (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_environment_context_is_meta() -> bool:
+def test_codex_elements_environment_context_is_meta() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "user", "id": "u1",
@@ -667,10 +667,10 @@ def test_codex_elements_environment_context_is_meta() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "meta"
     print(f"{OK if ok else FAIL} codex_elements env-context -> meta (got {[e.kind for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_assistant_text() -> bool:
+def test_codex_elements_assistant_text() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "message", "role": "assistant", "id": "a1",
@@ -679,10 +679,10 @@ def test_codex_elements_assistant_text() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "assistant_text"
     print(f"{OK if ok else FAIL} codex_elements assistant_text (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_reasoning() -> bool:
+def test_codex_elements_reasoning() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "agent_reasoning", "id": "r1",
@@ -691,10 +691,10 @@ def test_codex_elements_reasoning() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "reasoning"
     print(f"{OK if ok else FAIL} codex_elements reasoning (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_event_msg_reasoning() -> bool:
+def test_codex_elements_event_msg_reasoning() -> None:
     t = _write_codex([
         {"type": "event_msg", "timestamp": "t1",
          "payload": {"type": "agent_reasoning", "text": "thinking"}},
@@ -702,10 +702,10 @@ def test_codex_elements_event_msg_reasoning() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "reasoning" and els[0].text == "thinking"
     print(f"{OK if ok else FAIL} codex_elements event_msg reasoning (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_function_call() -> bool:
+def test_codex_elements_function_call() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "function_call", "id": "f1", "name": "shell",
@@ -714,10 +714,10 @@ def test_codex_elements_function_call() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "tool_call" and els[0].tool_name == "shell"
     print(f"{OK if ok else FAIL} codex_elements function_call (got {[(e.kind,e.tool_name) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_custom_tool_call() -> bool:
+def test_codex_elements_custom_tool_call() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "custom_tool_call", "id": "c1", "name": "edit",
@@ -726,10 +726,10 @@ def test_codex_elements_custom_tool_call() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "tool_call" and els[0].tool_name == "edit"
     print(f"{OK if ok else FAIL} codex_elements custom_tool_call (got {[(e.kind,e.tool_name) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_function_call_output() -> bool:
+def test_codex_elements_function_call_output() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "function_call_output", "id": "o1",
@@ -738,10 +738,10 @@ def test_codex_elements_function_call_output() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].kind == "tool_result" and els[0].text == "result text"
     print(f"{OK if ok else FAIL} codex_elements function_call_output unwrapped (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
-def test_codex_elements_function_call_output_raw_string() -> bool:
+def test_codex_elements_function_call_output_raw_string() -> None:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
          "payload": {"type": "function_call_output", "id": "o1", "output": "raw string"}},
@@ -749,45 +749,45 @@ def test_codex_elements_function_call_output_raw_string() -> bool:
     els = _codex_elements(t)
     ok = len(els) == 1 and els[0].text == "raw string"
     print(f"{OK if ok else FAIL} codex_elements raw string output (got {[(e.kind,e.text) for e in els]})")
-    return ok
+    assert ok
 
 
 # ─── cwd token decode ──────────────────────────────────────────────────────
 
-def test_decode_cwd_token_basic() -> bool:
+def test_decode_cwd_token_basic() -> None:
     ok = _decode_cwd_token("-Users-ofek-proj") == "/Users/ofek/proj"
     print(f"{OK if ok else FAIL} decode_cwd_token basic (got {_decode_cwd_token('-Users-ofek-proj')!r})")
-    return ok
+    assert ok
 
 
-def test_decode_cwd_token_empty() -> bool:
+def test_decode_cwd_token_empty() -> None:
     ok = _decode_cwd_token("") == ""
     print(f"{OK if ok else FAIL} decode_cwd_token empty -> empty")
-    return ok
+    assert ok
 
 
-def test_decode_cwd_token_all_dashes() -> bool:
+def test_decode_cwd_token_all_dashes() -> None:
     ok = _decode_cwd_token("---") == ""
     print(f"{OK if ok else FAIL} decode_cwd_token all dashes -> empty (got {_decode_cwd_token('---')!r})")
-    return ok
+    assert ok
 
 
-def test_decode_cwd_token_leading_dashes() -> bool:
+def test_decode_cwd_token_leading_dashes() -> None:
     ok = _decode_cwd_token("--Users-test") == "/Users/test"
     print(f"{OK if ok else FAIL} decode_cwd_token strips leading dashes (got {_decode_cwd_token('--Users-test')!r})")
-    return ok
+    assert ok
 
 
-def test_encode_cwd_underscore_becomes_dash() -> bool:
+def test_encode_cwd_underscore_becomes_dash() -> None:
     """encode_cwd maps _ -> -, so underscore paths share a token with dash paths."""
     enc_u = encode_cwd("/foo_bar")
     enc_d = encode_cwd("/foo-bar")
     ok = enc_u == enc_d and "_" not in enc_u
     print(f"{OK if ok else FAIL} encode_cwd underscore->dash (u={enc_u!r}, d={enc_d!r})")
-    return ok
+    assert ok
 
 
-def test_decode_cwd_token_dash_ambiguous_documented() -> bool:
+def test_decode_cwd_token_dash_ambiguous_documented() -> None:
     """_decode_cwd_token is intentionally lossy: every '-' becomes '/', so a
     cwd containing a dash cannot be round-tripped (encode_cwd maps both '-' and
     '_' to '-'). This is the documented ambiguity — callers needing an exact
@@ -801,39 +801,39 @@ def test_decode_cwd_token_dash_ambiguous_documented() -> bool:
     ok = ok and _decode_cwd_token(enc2) == "/proj/x"
     print(f"{OK if ok else FAIL} decode_cwd_token dash-ambiguity documented "
           f"(plain={dec!r}, dashed={_decode_cwd_token(enc2)!r})")
-    return ok
+    assert ok
 
 
 # ─── parse_elements dispatch ───────────────────────────────────────────────
 
-def test_parse_elements_dispatch_claude() -> bool:
+def test_parse_elements_dispatch_claude() -> None:
     t = _write_claude_raw([_claude_user("p", "u1")])
     els = _candidate("s1", "/p", t, fmt="claude").parse_elements()
     ok = len(els) == 1 and els[0].kind == "user_prompt"
     print(f"{OK if ok else FAIL} parse_elements claude dispatch (got {len(els)})")
-    return ok
+    assert ok
 
 
-def test_parse_elements_dispatch_codex() -> bool:
+def test_parse_elements_dispatch_codex() -> None:
     t = _write_codex([{"type": "response_item", "timestamp": "t1",
                        "payload": {"type": "message", "role": "user", "id": "u1",
                                    "content": [{"type": "input_text", "text": "p"}]}}])
     els = _candidate("s1", "/p", t, fmt="codex").parse_elements()
     ok = len(els) == 1 and els[0].kind == "user_prompt"
     print(f"{OK if ok else FAIL} parse_elements codex dispatch (got {len(els)})")
-    return ok
+    assert ok
 
 
-def test_parse_elements_missing_file_returns_empty() -> bool:
+def test_parse_elements_missing_file_returns_empty() -> None:
     els = _candidate("s1", "/p", _SCRATCH / "nope.jsonl", fmt="claude").parse_elements()
     ok = els == []
     print(f"{OK if ok else FAIL} parse_elements missing file -> [] (got {els})")
-    return ok
+    assert ok
 
 
 # ─── discovery ─────────────────────────────────────────────────────────────
 
-def test_iter_all_claude_only() -> bool:
+def test_iter_all_claude_only() -> None:
     projects = _SCRATCH / "it-claude"
     cwd = "/proj/alpha"
     sd = projects / encode_cwd(cwd)
@@ -846,10 +846,10 @@ def test_iter_all_claude_only() -> bool:
         _restore_native_roots(orig)
     ok = len(cands) == 1 and cands[0].sid == "sid1" and cands[0].format == "claude"
     print(f"{OK if ok else FAIL} iter_all finds claude transcript (got {[(c.sid,c.format) for c in cands]})")
-    return ok
+    assert ok
 
 
-def test_iter_all_codex_rollout() -> bool:
+def test_iter_all_codex_rollout() -> None:
     codex = _SCRATCH / "it-codex"
     codex.mkdir(parents=True, exist_ok=True)
     _w(codex / "rollout-x.jsonl", [
@@ -864,10 +864,10 @@ def test_iter_all_codex_rollout() -> bool:
         _restore_native_roots(orig)
     ok = len(cands) == 1 and cands[0].format == "codex" and cands[0].cwd == "/zapp"
     print(f"{OK if ok else FAIL} iter_all finds codex rollout (got {[(c.format,c.cwd) for c in cands]})")
-    return ok
+    assert ok
 
 
-def test_iter_all_runs_dir() -> bool:
+def test_iter_all_runs_dir() -> None:
     runs = _SCRATCH / "it-runs"
     run_dir = runs / "run-1"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -881,10 +881,10 @@ def test_iter_all_runs_dir() -> bool:
     ok = (len(cands) == 1 and cands[0].format == "claude"
           and cands[0].sid == "app-sid-1")
     print(f"{OK if ok else FAIL} iter_all finds run-dir transcript (got {[(c.format,c.sid) for c in cands]})")
-    return ok
+    assert ok
 
 
-def test_iter_all_runs_dir_requires_state_json() -> bool:
+def test_iter_all_runs_dir_requires_state_json() -> None:
     """Run-dir discovery globs ``*/state.json``; a run dir without state.json
     is NOT discovered (the run-dir index is keyed off state.json's
     app_session_id). This is the documented contract — verify it holds so a
@@ -900,48 +900,48 @@ def test_iter_all_runs_dir_requires_state_json() -> bool:
         _restore_native_roots(orig)
     ok = cands == []
     print(f"{OK if ok else FAIL} iter_all run dir requires state.json (got {len(cands)})")
-    return ok
+    assert ok
 
 
 # ===========================================================================
 # native_session_prompt_search — tokens, categorizer, search
 # ===========================================================================
 
-def test_query_tokens_lowercases_and_filters() -> bool:
+def test_query_tokens_lowercases_and_filters() -> None:
     toks = _query_tokens("Fix THE Bug in 3D")
     # "the" is a stopword, single chars dropped (min len 2), 3D -> 3d
     ok = toks == ["fix", "bug", "3d"]
     print(f"{OK if ok else FAIL} query_tokens lowercase+filter (got {toks})")
-    return ok
+    assert ok
 
 
-def test_query_tokens_drops_single_chars() -> bool:
+def test_query_tokens_drops_single_chars() -> None:
     ok = _query_tokens("a I x ok") == ["ok"]
     print(f"{OK if ok else FAIL} query_tokens drops <2 char tokens (got {_query_tokens('a I x ok')})")
-    return ok
+    assert ok
 
 
-def test_query_tokens_drops_all_stopwords() -> bool:
+def test_query_tokens_drops_all_stopwords() -> None:
     ok = _query_tokens("the is in to of") == []
     print(f"{OK if ok else FAIL} query_tokens drops stopwords-only (got {_query_tokens('the is in to of')})")
-    return ok
+    assert ok
 
 
-def test_query_tokens_alphanumeric_only() -> bool:
+def test_query_tokens_alphanumeric_only() -> None:
     ok = _query_tokens("foo.bar_baz!qux") == ["foo", "bar", "baz", "qux"]
     print(f"{OK if ok else FAIL} query_tokens splits on non-alnum (got {_query_tokens('foo.bar_baz!qux')})")
-    return ok
+    assert ok
 
 
-def test_token_patterns_whole_word() -> bool:
+def test_token_patterns_whole_word() -> None:
     pats = _token_patterns(["in"])
     # "in" matches the word "in" but not inside "building"
     ok = bool(pats[0].search("the in thing")) and not bool(pats[0].search("building guise"))
     print(f"{OK if ok else FAIL} token_patterns whole-word (got {ok})")
-    return ok
+    assert ok
 
 
-def test_search_empty_query_returns_empty() -> bool:
+def test_search_empty_query_returns_empty() -> None:
     _patch_candidates([_candidate_from_prompts("s1", "/p", [("hello", "2024-01-01")])])
     try:
         out = nsp.search_native_session_prompts(query="")
@@ -949,10 +949,10 @@ def test_search_empty_query_returns_empty() -> bool:
         _reset_candidates()
     ok = out == []
     print(f"{OK if ok else FAIL} empty query -> empty (got {out})")
-    return ok
+    assert ok
 
 
-def test_search_stopword_only_returns_empty() -> bool:
+def test_search_stopword_only_returns_empty() -> None:
     _patch_candidates([_candidate_from_prompts("s1", "/p", [("the plan is in the doc", "2024-01-01")])])
     try:
         out = nsp.search_native_session_prompts(query="in the")
@@ -960,10 +960,10 @@ def test_search_stopword_only_returns_empty() -> bool:
         _reset_candidates()
     ok = out == []
     print(f"{OK if ok else FAIL} stopword-only query -> empty (got {out})")
-    return ok
+    assert ok
 
 
-def test_search_whole_word_not_substring() -> bool:
+def test_search_whole_word_not_substring() -> None:
     _patch_candidates([
         _candidate_from_prompts("s1", "/p", [("fix the ui layout", "2024-01-01")]),
         _candidate_from_prompts("s2", "/p", [("rebuilding guise now", "2024-01-02")]),
@@ -975,10 +975,10 @@ def test_search_whole_word_not_substring() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"fix the ui layout"}
     print(f"{OK if ok else FAIL} search whole-word not substring (got {texts})")
-    return ok
+    assert ok
 
 
-def test_search_ranking_higher_overlap_wins() -> bool:
+def test_search_ranking_higher_overlap_wins() -> None:
     _patch_candidates([
         _candidate_from_prompts("s1", "/p", [("offline sync mode broke", "2024-01-01")]),
         _candidate_from_prompts("s2", "/p", [("offline notes only", "2024-01-02")]),
@@ -989,10 +989,10 @@ def test_search_ranking_higher_overlap_wins() -> bool:
         _reset_candidates()
     ok = len(out) == 1 and out[0]["text"] == "offline sync mode broke"
     print(f"{OK if ok else FAIL} ranking higher overlap (got {[r['text'] for r in out]})")
-    return ok
+    assert ok
 
 
-def test_search_cwd_filter_restricts() -> bool:
+def test_search_cwd_filter_restricts() -> None:
     _patch_candidates([
         _candidate_from_prompts("s1", "/a", [("offline here", "2024-01-01")]),
         _candidate_from_prompts("s2", "/b", [("offline there", "2024-01-02")]),
@@ -1004,10 +1004,10 @@ def test_search_cwd_filter_restricts() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"offline here"}
     print(f"{OK if ok else FAIL} cwd filter restricts (got {texts})")
-    return ok
+    assert ok
 
 
-def test_search_cwd_filter_encoded_match() -> bool:
+def test_search_cwd_filter_encoded_match() -> None:
     """cwd filter matches via encode_cwd too (underscore/dash equivalence)."""
     _patch_candidates([
         _candidate_from_prompts("s1", "/foo_bar", [("needle x", "2024-01-01")]),
@@ -1020,10 +1020,10 @@ def test_search_cwd_filter_encoded_match() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"needle x"}
     print(f"{OK if ok else FAIL} cwd filter encode_cwd equivalence (got {texts})")
-    return ok
+    assert ok
 
 
-def test_search_is_noise_drops() -> bool:
+def test_search_is_noise_drops() -> None:
     _patch_candidates([
         _candidate_from_prompts("s1", "/p", [
             ("NOISE preamble offline", "2024-01-01"),
@@ -1037,10 +1037,10 @@ def test_search_is_noise_drops() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"real offline req"}
     print(f"{OK if ok else FAIL} is_noise drops preamble (got {texts})")
-    return ok
+    assert ok
 
 
-def test_search_dedup_identical_text() -> bool:
+def test_search_dedup_identical_text() -> None:
     _patch_candidates([
         _candidate_from_prompts("s1", "/p", [("offline sync survive", "2024-01-01")]),
         _candidate_from_prompts("s2", "/p", [("offline sync survive", "2024-01-02")]),
@@ -1051,10 +1051,10 @@ def test_search_dedup_identical_text() -> bool:
         _reset_candidates()
     ok = len(out) == 1
     print(f"{OK if ok else FAIL} dedup identical text (got {len(out)})")
-    return ok
+    assert ok
 
 
-def test_search_oldest_first_presentation() -> bool:
+def test_search_oldest_first_presentation() -> None:
     """After ranking selects, presentation is oldest-first (ts ascending)."""
     _patch_candidates([
         _candidate_from_prompts("s1", "/p", [("offline late", "2024-03-01")]),
@@ -1068,10 +1068,10 @@ def test_search_oldest_first_presentation() -> bool:
     order = [r["text"] for r in out]
     ok = order == ["offline early", "offline mid", "offline late"]
     print(f"{OK if ok else FAIL} oldest-first presentation (got {order})")
-    return ok
+    assert ok
 
 
-def test_search_empty_ts_sorts_last_deterministically() -> bool:
+def test_search_empty_ts_sorts_last_deterministically() -> None:
     _patch_candidates([
         _candidate_from_prompts("sB", "/p", [("offline beta", "")]),
         _candidate_from_prompts("sA", "/p", [("offline alpha", "")]),
@@ -1084,10 +1084,10 @@ def test_search_empty_ts_sorts_last_deterministically() -> bool:
     order = [r["text"] for r in out]
     ok = order == ["offline alpha", "offline beta", "offline gamma"]
     print(f"{OK if ok else FAIL} empty-ts deterministic order (got {order})")
-    return ok
+    assert ok
 
 
-def test_search_record_kind_and_source_prompts() -> bool:
+def test_search_record_kind_and_source_prompts() -> None:
     _patch_candidates([_candidate_from_prompts("s1", "/p", [("offline here", "2024-01-01")])])
     try:
         out = nsp.search_native_session_prompts(query="offline")
@@ -1097,10 +1097,10 @@ def test_search_record_kind_and_source_prompts() -> bool:
           and out[0]["source"] == "native_session_fallback"
           and out[0]["category"] == ElementCategory.PROMPT)
     print(f"{OK if ok else FAIL} prompts record labels (got {out[0] if out else None})")
-    return ok
+    assert ok
 
 
-def test_search_transcripts_includes_reply() -> bool:
+def test_search_transcripts_includes_reply() -> None:
     """search_native_session_transcripts covers prompt + reply categories."""
     t = _write_claude_raw([
         _claude_user("offline question", "u1"),
@@ -1114,10 +1114,10 @@ def test_search_transcripts_includes_reply() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"offline question", "offline answer"}
     print(f"{OK if ok else FAIL} transcripts includes reply (got {texts})")
-    return ok
+    assert ok
 
 
-def test_search_transcripts_excludes_tool_call() -> bool:
+def test_search_transcripts_excludes_tool_call() -> None:
     """The transcripts facade is prompt+reply only; a tool_call must NOT appear."""
     t = _write_claude_raw([
         _claude_assistant_blocks([
@@ -1133,10 +1133,10 @@ def test_search_transcripts_excludes_tool_call() -> bool:
     cats = {r["category"] for r in out}
     ok = cats == {ElementCategory.REPLY}
     print(f"{OK if ok else FAIL} transcripts excludes tool_call (got {cats})")
-    return ok
+    assert ok
 
 
-def test_generalized_search_returns_categories_and_tools() -> bool:
+def test_generalized_search_returns_categories_and_tools() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([
             _claude_text_block("running zulifrangible build"),
@@ -1153,10 +1153,10 @@ def test_generalized_search_returns_categories_and_tools() -> bool:
     tools = {r.get("tool_name") for r in out}
     ok = cats == {ElementCategory.REPLY, ElementCategory.SHELL, ElementCategory.TOOL_OUTPUT}
     print(f"{OK if ok else FAIL} generalized search categories+tools (cats={cats}, tools={tools})")
-    return ok
+    assert ok
 
 
-def test_generalized_search_category_filter_shell() -> bool:
+def test_generalized_search_category_filter_shell() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([
             _claude_text_block("zulifrangible note"),
@@ -1171,10 +1171,10 @@ def test_generalized_search_category_filter_shell() -> bool:
     cats = {r["category"] for r in out}
     ok = cats == {ElementCategory.SHELL} and len(out) == 1
     print(f"{OK if ok else FAIL} category filter shell (got {cats}, len={len(out)})")
-    return ok
+    assert ok
 
 
-def test_generalized_search_kind_filter_tool_call() -> bool:
+def test_generalized_search_kind_filter_tool_call() -> None:
     t = _write_claude_raw([
         _claude_assistant_blocks([
             _claude_text_block("zulifrangible text"),
@@ -1189,159 +1189,144 @@ def test_generalized_search_kind_filter_tool_call() -> bool:
     eks = {r["element_kind"] for r in out}
     ok = eks == {"tool_call"} and len(out) == 1
     print(f"{OK if ok else FAIL} kind filter tool_call (got {eks}, len={len(out)})")
-    return ok
+    assert ok
 
 
 # ─── Categorizer: every tool class ─────────────────────────────────────────
 
-def test_cat_prompt() -> bool:
+def test_cat_prompt() -> None:
     ok = Categorizer().categorize(NativeElement("user_prompt", "user", "x")) == ElementCategory.PROMPT
     print(f"{OK if ok else FAIL} categorize prompt")
-    return ok
+    assert ok
 
 
-def test_cat_reply() -> bool:
+def test_cat_reply() -> None:
     ok = Categorizer().categorize(NativeElement("assistant_text", "assistant", "x")) == ElementCategory.REPLY
     print(f"{OK if ok else FAIL} categorize reply")
-    return ok
+    assert ok
 
 
-def test_cat_reasoning() -> bool:
+def test_cat_reasoning() -> None:
     ok = Categorizer().categorize(NativeElement("reasoning", "assistant", "x")) == ElementCategory.REASONING
     print(f"{OK if ok else FAIL} categorize reasoning")
-    return ok
+    assert ok
 
 
-def test_cat_command() -> bool:
+def test_cat_command() -> None:
     ok = Categorizer().categorize(NativeElement("command", "user", "/x")) == ElementCategory.COMMAND
     print(f"{OK if ok else FAIL} categorize command")
-    return ok
+    assert ok
 
 
-def test_cat_meta() -> bool:
+def test_cat_meta() -> None:
     ok = Categorizer().categorize(NativeElement("meta", "user", "x")) == ElementCategory.META
     print(f"{OK if ok else FAIL} categorize meta")
-    return ok
+    assert ok
 
 
-def test_cat_edit_tool() -> bool:
+def test_cat_edit_tool() -> None:
     for name in ("Edit", "MultiEdit", "Write", "write_file", "apply_patch", "str_replace_editor"):
         got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", name))
-        if got != ElementCategory.FILE_EDIT:
-            print(f"{FAIL} categorize edit tool {name} -> {got}")
-            return False
+        assert got == ElementCategory.FILE_EDIT, f"{FAIL} categorize edit tool {name} -> {got}"
     print(f"{OK} categorize edit tools -> file_edit")
-    return True
 
 
-def test_cat_shell_tool() -> bool:
+def test_cat_shell_tool() -> None:
     for name in ("Bash", "shell", "exec_command", "terminal"):
         got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", name))
-        if got != ElementCategory.SHELL:
-            print(f"{FAIL} categorize shell tool {name} -> {got}")
-            return False
+        assert got == ElementCategory.SHELL, f"{FAIL} categorize shell tool {name} -> {got}"
     print(f"{OK} categorize shell tools -> shell")
-    return True
 
 
-def test_cat_read_tool() -> bool:
+def test_cat_read_tool() -> None:
     for name in ("Read", "read_file", "view"):
         got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", name))
-        if got != ElementCategory.FILE_READ:
-            print(f"{FAIL} categorize read tool {name} -> {got}")
-            return False
+        assert got == ElementCategory.FILE_READ, f"{FAIL} categorize read tool {name} -> {got}"
     print(f"{OK} categorize read tools -> file_read")
-    return True
 
 
-def test_cat_search_tool() -> bool:
+def test_cat_search_tool() -> None:
     for name in ("Grep", "Glob", "WebSearch", "search_files", "webfetch"):
         got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", name))
-        if got != ElementCategory.SEARCH:
-            print(f"{FAIL} categorize search tool {name} -> {got}")
-            return False
+        assert got == ElementCategory.SEARCH, f"{FAIL} categorize search tool {name} -> {got}"
     print(f"{OK} categorize search tools -> search")
-    return True
 
 
-def test_cat_subagent_tool() -> bool:
+def test_cat_subagent_tool() -> None:
     for name in ("Task", "Agent", "spawn_agent", "delegate_task"):
         got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", name))
-        if got != ElementCategory.SUBAGENT:
-            print(f"{FAIL} categorize subagent tool {name} -> {got}")
-            return False
+        assert got == ElementCategory.SUBAGENT, f"{FAIL} categorize subagent tool {name} -> {got}"
     print(f"{OK} categorize subagent tools -> subagent")
-    return True
 
 
-def test_cat_unknown_tool_other() -> bool:
+def test_cat_unknown_tool_other() -> None:
     got = Categorizer().categorize(NativeElement("tool_call", "assistant", "x", "MysteryTool"))
     ok = got == ElementCategory.OTHER
     print(f"{OK if ok else FAIL} categorize unknown tool -> other (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_tool_name_case_insensitive() -> bool:
+def test_cat_tool_name_case_insensitive() -> None:
     ok = (Categorizer().categorize(NativeElement("tool_call", "a", "x", "BASH"))
           == Categorizer().categorize(NativeElement("tool_call", "a", "x", "bash"))
           == ElementCategory.SHELL)
     print(f"{OK if ok else FAIL} categorize case-insensitive")
-    return ok
+    assert ok
 
 
-def test_cat_tool_name_slash_normalized() -> bool:
+def test_cat_tool_name_slash_normalized() -> None:
     """str_replace_editor-style names with / are normalized to _."""
     got = Categorizer().categorize(NativeElement("tool_call", "a", "x", "str/replace/editor"))
     # After normalization 'str/replace/editor' -> 'str_replace_editor' which IS an edit tool
     ok = got == ElementCategory.FILE_EDIT
     print(f"{OK if ok else FAIL} categorize slash-normalized (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_tool_result_ok() -> bool:
+def test_cat_tool_result_ok() -> None:
     ok = Categorizer().categorize(NativeElement("tool_result", "user", "all good")) == ElementCategory.TOOL_OUTPUT
     print(f"{OK if ok else FAIL} categorize tool_result -> tool_output")
-    return ok
+    assert ok
 
 
-def test_cat_tool_result_error_traceback() -> bool:
+def test_cat_tool_result_error_traceback() -> None:
     got = Categorizer().categorize(NativeElement("tool_result", "user", "Traceback (most recent call last)"))
     ok = got == ElementCategory.ERROR
     print(f"{OK if ok else FAIL} categorize tool_result traceback -> error (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_tool_result_error_failed() -> bool:
+def test_cat_tool_result_error_failed() -> None:
     got = Categorizer().categorize(NativeElement("tool_result", "user", "command failed to run"))
     ok = got == ElementCategory.ERROR
     print(f"{OK if ok else FAIL} categorize tool_result 'failed' -> error (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_tool_result_error_command_not_found() -> bool:
+def test_cat_tool_result_error_command_not_found() -> None:
     got = Categorizer().categorize(NativeElement("tool_result", "user", "foo: command not found"))
     ok = got == ElementCategory.ERROR
     print(f"{OK if ok else FAIL} categorize 'command not found' -> error (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_unknown_kind_other() -> bool:
+def test_cat_unknown_kind_other() -> None:
     got = Categorizer().categorize(NativeElement("weird_kind", "x", "y"))
     ok = got == ElementCategory.OTHER
     print(f"{OK if ok else FAIL} categorize unknown kind -> other (got {got})")
-    return ok
+    assert ok
 
 
-def test_cat_empty_tool_name_other() -> bool:
+def test_cat_empty_tool_name_other() -> None:
     got = Categorizer().categorize(NativeElement("tool_call", "a", "x", ""))
     ok = got == ElementCategory.OTHER
     print(f"{OK if ok else FAIL} categorize empty tool_name -> other (got {got})")
-    return ok
+    assert ok
 
 
 # ─── rg filter + native roots ──────────────────────────────────────────────
 
-def test_rg_filter_none_when_no_roots() -> bool:
+def test_rg_filter_none_when_no_roots() -> None:
     _reset_candidates()
     orig = _isolate_native_roots(claude=[], codex=_SCRATCH / "no-codex",
                                  runs=_SCRATCH / "no-runs")
@@ -1351,10 +1336,10 @@ def test_rg_filter_none_when_no_roots() -> bool:
         _restore_native_roots(orig)
     ok = res is None
     print(f"{OK if ok else FAIL} rg_filter None when no roots (got {res})")
-    return ok
+    assert ok
 
 
-def test_rg_filter_none_for_empty_tokens() -> bool:
+def test_rg_filter_none_for_empty_tokens() -> None:
     _reset_candidates()
     orig = _isolate_native_roots(claude=[_SCRATCH / "some"])
     try:
@@ -1363,14 +1348,14 @@ def test_rg_filter_none_for_empty_tokens() -> bool:
         _restore_native_roots(orig)
     ok = res is None
     print(f"{OK if ok else FAIL} rg_filter None for empty tokens (got {res})")
-    return ok
+    assert ok
 
 
-def test_rg_filter_finds_needle_files() -> bool:
+def test_rg_filter_finds_needle_files() -> None:
     _reset_candidates()
     if not shutil.which("rg"):
         print(f"{OK} rg-filter-finds skipped (rg not installed)")
-        return True
+        return
     projects = _SCRATCH / "rgf-projects"
     sd = projects / encode_cwd("/rgf")
     sd.mkdir(parents=True, exist_ok=True)
@@ -1385,28 +1370,28 @@ def test_rg_filter_finds_needle_files() -> bool:
     sids = {Path(p).stem for p, _ in (hits or [])}
     ok = sids == {"hit"}
     print(f"{OK if ok else FAIL} rg_filter finds needle files (got {sids})")
-    return ok
+    assert ok
 
 
-def test_classify_root_claude() -> bool:
+def test_classify_root_claude() -> None:
     roots = [(_SCRATCH / "claude", "claude")]
     ok = nsp._classify_root(_SCRATCH / "claude" / "x" / "y.jsonl", roots) == "claude"
     print(f"{OK if ok else FAIL} classify_root claude")
-    return ok
+    assert ok
 
 
-def test_classify_root_unknown_defaults_claude() -> bool:
+def test_classify_root_unknown_defaults_claude() -> None:
     roots = [(_SCRATCH / "other", "codex")]
     ok = nsp._classify_root(_SCRATCH / "unrelated" / "y.jsonl", roots) == "claude"
     print(f"{OK if ok else FAIL} classify_root unknown -> claude default")
-    return ok
+    assert ok
 
 
 # ===========================================================================
 # native_transcript_index
 # ============================================================================
 
-def test_malformed_worker_roots_rejected() -> bool:
+def test_malformed_worker_roots_rejected() -> None:
     """Worker root config must fail closed on every malformed/escaped shape.
     Table-driven: each row must raise ValueError. ``_configure_worker_roots``
     is the exact gate the detached worker runs at startup, so this also covers
@@ -1445,10 +1430,10 @@ def test_malformed_worker_roots_rejected() -> bool:
     ok = not failures
     print(f"{OK if ok else FAIL} malformed worker roots rejected "
           f"(failed-closed on all={ok}; leaked={failures})")
-    return ok
+    assert ok
 
 
-def test_idx_refresh_marks_covered_and_usable() -> bool:
+def test_idx_refresh_marks_covered_and_usable() -> None:
     token = _idx_setup_roots()
     try:
         ok_pre = not idx.is_covered() and not idx.is_usable()
@@ -1458,10 +1443,10 @@ def test_idx_refresh_marks_covered_and_usable() -> bool:
         _restore_idx_roots(token)
     ok = ok_pre and ok_post
     print(f"{OK if ok else FAIL} refresh marks covered+usable (pre={ok_pre}, post={ok_post})")
-    return ok
+    assert ok
 
 
-def test_idx_indexes_user_prompt() -> bool:
+def test_idx_indexes_user_prompt() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1472,10 +1457,10 @@ def test_idx_indexes_user_prompt() -> bool:
         _restore_idx_roots(token)
     ok = len(rows) == 1 and "needleword alpha" in rows[0]["text"]
     print(f"{OK if ok else FAIL} idx indexes user_prompt (got {len(rows)})")
-    return ok
+    assert ok
 
 
-def test_idx_drops_tool_result_lean() -> bool:
+def test_idx_drops_tool_result_lean() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1494,10 +1479,10 @@ def test_idx_drops_tool_result_lean() -> bool:
     ok = (kinds == {"assistant_text", "tool_call"}
           and not any("bulk dump output" in r["text"] for r in rows))
     print(f"{OK if ok else FAIL} idx lean drops tool_result (kinds={kinds})")
-    return ok
+    assert ok
 
 
-def test_idx_freshness_reindexes_changed_file() -> bool:
+def test_idx_freshness_reindexes_changed_file() -> None:
     """Equal-length content rewrite (same byte count, different needle) so
     freshness differs on MTIME alone, not size. Waits for real mtime granularity
     and asserts touched == 1 exactly (not >= 1)."""
@@ -1529,10 +1514,10 @@ def test_idx_freshness_reindexes_changed_file() -> bool:
           and old_after == [])
     print(f"{OK if ok else FAIL} idx freshness reindexes (touched={r['touched']}, "
           f"after={len(after)}, old_gone={old_after == []})")
-    return ok
+    assert ok
 
 
-def test_idx_tombstones_deleted_file() -> bool:
+def test_idx_tombstones_deleted_file() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1547,10 +1532,10 @@ def test_idx_tombstones_deleted_file() -> bool:
         _restore_idx_roots(token)
     ok = after == [] and r["touched"] >= 1
     print(f"{OK if ok else FAIL} idx tombstones deleted file (after={len(after)})")
-    return ok
+    assert ok
 
 
-def test_idx_match_paths_returns_pairs() -> bool:
+def test_idx_match_paths_returns_pairs() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1563,10 +1548,10 @@ def test_idx_match_paths_returns_pairs() -> bool:
     sids = {Path(p).stem for p, _ in hits}
     ok = sids == {"s1", "s2"}
     print(f"{OK if ok else FAIL} match_paths returns pairs (got {sids})")
-    return ok
+    assert ok
 
 
-def test_idx_match_paths_cwd_filter() -> bool:
+def test_idx_match_paths_cwd_filter() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1579,10 +1564,10 @@ def test_idx_match_paths_cwd_filter() -> bool:
     sids = {Path(p).stem for p, _ in hits}
     ok = sids == {"s1"}
     print(f"{OK if ok else FAIL} match_paths cwd filter (got {sids})")
-    return ok
+    assert ok
 
 
-def test_idx_match_paths_broad_returns_none() -> bool:
+def test_idx_match_paths_broad_returns_none() -> None:
     """Too many distinct matched FILES (> _PATH_CAP) => None."""
     token = _idx_setup_roots()
     try:
@@ -1596,10 +1581,10 @@ def test_idx_match_paths_broad_returns_none() -> bool:
         _restore_idx_roots(token)
     ok = res is None
     print(f"{OK if ok else FAIL} match_paths broad (files>cap) -> None (got {res})")
-    return ok
+    assert ok
 
 
-def test_idx_match_paths_scan_limit_returns_none() -> bool:
+def test_idx_match_paths_scan_limit_returns_none() -> None:
     """When the FTS element-row scan hits _MATCHED_SCAN_LIMIT, the result is
     truncated and the deduped path list may be silently incomplete => None so
     the caller falls back to rg. Build > _MATCHED_SCAN_LIMIT matching element
@@ -1629,10 +1614,10 @@ def test_idx_match_paths_scan_limit_returns_none() -> bool:
         _restore_idx_roots(token)
     ok = res is None
     print(f"{OK if ok else FAIL} match_paths scan-limit -> None (got {res})")
-    return ok
+    assert ok
 
 
-def test_idx_not_usable_when_empty_tokens() -> bool:
+def test_idx_not_usable_when_empty_tokens() -> None:
     token = _idx_setup_roots()
     try:
         idx.refresh_once()
@@ -1642,10 +1627,10 @@ def test_idx_not_usable_when_empty_tokens() -> bool:
         _restore_idx_roots(token)
     ok = res is None
     print(f"{OK if ok else FAIL} match_paths empty tokens -> None (got {res})")
-    return ok
+    assert ok
 
 
-def test_idx_search_rows_empty_when_not_usable() -> bool:
+def test_idx_search_rows_empty_when_not_usable() -> None:
     token = _idx_setup_roots()
     try:
         # Not yet refreshed -> not usable
@@ -1654,10 +1639,10 @@ def test_idx_search_rows_empty_when_not_usable() -> bool:
         _restore_idx_roots(token)
     ok = rows == []
     print(f"{OK if ok else FAIL} search_rows empty when not usable (got {rows})")
-    return ok
+    assert ok
 
 
-def test_idx_search_rows_empty_tokens() -> bool:
+def test_idx_search_rows_empty_tokens() -> None:
     token = _idx_setup_roots()
     try:
         idx.refresh_once()
@@ -1666,10 +1651,10 @@ def test_idx_search_rows_empty_tokens() -> bool:
         _restore_idx_roots(token)
     ok = rows == []
     print(f"{OK if ok else FAIL} search_rows empty tokens -> [] (got {rows})")
-    return ok
+    assert ok
 
 
-def test_idx_wait_fresh_serves_delta() -> bool:
+def test_idx_wait_fresh_serves_delta() -> None:
     """Drive the REAL worker (ensure_started + request_refresh) and assert a file
     changed after the last refresh becomes searchable once steady refresh fires."""
     token = _idx_setup_roots()
@@ -1698,10 +1683,10 @@ def test_idx_wait_fresh_serves_delta() -> bool:
         _restore_idx_roots(token)
     ok = fresh and len(rows) >= 1
     print(f"{OK if ok else FAIL} wait_fresh serves delta (fresh={fresh}, rows={len(rows)})")
-    return ok
+    assert ok
 
 
-def test_idx_wait_fresh_timeout_returns_false() -> bool:
+def test_idx_wait_fresh_timeout_returns_false() -> None:
     """wait_fresh with a tiny timeout and no refresh happening returns False."""
     token = _idx_setup_roots()
     try:
@@ -1715,10 +1700,10 @@ def test_idx_wait_fresh_timeout_returns_false() -> bool:
         _restore_idx_roots(token)
     ok = fresh is False
     print(f"{OK if ok else FAIL} wait_fresh timeout -> False (got {fresh})")
-    return ok
+    assert ok
 
 
-def test_idx_request_refresh_sets_flag() -> bool:
+def test_idx_request_refresh_sets_flag() -> None:
     token = _idx_setup_roots()
     try:
         idx.request_refresh()
@@ -1727,10 +1712,10 @@ def test_idx_request_refresh_sets_flag() -> bool:
         _restore_idx_roots(token)
     ok = flag
     print(f"{OK if ok else FAIL} request_refresh sets flag (got {flag})")
-    return ok
+    assert ok
 
 
-def test_idx_schema_version_correct() -> bool:
+def test_idx_schema_version_correct() -> None:
     """After a clean refresh schema_ok() is True; corrupting the schema_version
     row makes it False."""
     token = _idx_setup_roots()
@@ -1751,20 +1736,20 @@ def test_idx_schema_version_correct() -> bool:
     ok = ok_clean and ok_corrupt
     print(f"{OK if ok else FAIL} schema_ok correct+corrupt "
           f"(clean={ok_clean}, corrupt={ok_corrupt})")
-    return ok
+    assert ok
 
 
-def test_idx_schema_not_ok_before_build() -> bool:
+def test_idx_schema_not_ok_before_build() -> None:
     token = _idx_setup_roots()
     try:
         ok = not idx.schema_ok()
     finally:
         _restore_idx_roots(token)
     print(f"{OK if ok else FAIL} schema not ok before build (got {not ok})")
-    return ok
+    assert ok
 
 
-def test_idx_preserves_long_text() -> bool:
+def test_idx_preserves_long_text() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1777,10 +1762,10 @@ def test_idx_preserves_long_text() -> bool:
     ok = len(rows) == 1 and rows[0]["text"] == long_text
     print(f"{OK if ok else FAIL} long indexed text preserved "
           f"(len={len(rows[0]['text']) if rows else 0})")
-    return ok
+    assert ok
 
 
-def test_idx_preserves_long_text_tail() -> bool:
+def test_idx_preserves_long_text_tail() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1793,10 +1778,10 @@ def test_idx_preserves_long_text_tail() -> bool:
     ok = len(rows) == 1 and rows[0]["text"].endswith("tailneedle")
     print(f"{OK if ok else FAIL} long indexed text tail searchable "
           f"(len={len(rows[0]['text']) if rows else 0})")
-    return ok
+    assert ok
 
 
-def test_idx_exact_hash_collapse_metadata() -> bool:
+def test_idx_exact_hash_collapse_metadata() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1823,10 +1808,10 @@ def test_idx_exact_hash_collapse_metadata() -> bool:
     )
     print(f"{OK if ok else FAIL} exact text hash collapse metadata "
           f"(rows={len(rows)}, hashes={len(hashes)}, grouped={grouped.get('rows')})")
-    return ok
+    assert ok
 
 
-def test_idx_prefix_hash_collapse_metadata() -> bool:
+def test_idx_prefix_hash_collapse_metadata() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1855,10 +1840,10 @@ def test_idx_prefix_hash_collapse_metadata() -> bool:
     print(f"{OK if ok else FAIL} prefix hash collapse metadata "
           f"(rows={len(rows)}, prefix_hashes={len(prefix_hashes)}, "
           f"norm_hashes={len(norm_hashes)}, grouped={grouped.get('rows')})")
-    return ok
+    assert ok
 
 
-def test_idx_repeat_projection_exact_and_prefix() -> bool:
+def test_idx_repeat_projection_exact_and_prefix() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1902,18 +1887,18 @@ def test_idx_repeat_projection_exact_and_prefix() -> bool:
     print(f"{OK if ok else FAIL} repeat projection exact+prefix "
           f"(exact={exact_count}, prefix={prefix_count}, best={best_count}, "
           f"stale={stale_count})")
-    return ok
+    assert ok
 
 
-def test_idx_raw_index_checked_returns_tuple_at_whitespace_boundary() -> bool:
+def test_idx_raw_index_checked_returns_tuple_at_whitespace_boundary() -> None:
     result = idx._raw_index_after_normalized_prefix_checked("ab cd", 3)
     ok = result == (3, True)
     print(f"{OK if ok else FAIL} raw index checked tuple at whitespace boundary "
           f"(result={result})")
-    return ok
+    assert ok
 
 
-def test_idx_repeat_projection_rebuild_avoids_fts_text_reads() -> bool:
+def test_idx_repeat_projection_rebuild_avoids_fts_text_reads() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -1953,10 +1938,10 @@ def test_idx_repeat_projection_rebuild_avoids_fts_text_reads() -> bool:
     ok = prefix_count >= 1 and best_count >= 502 and not fts_text_reads
     print(f"{OK if ok else FAIL} repeat projection rebuild avoids FTS text reads "
           f"(prefix={prefix_count}, best={best_count}, fts_reads={len(fts_text_reads)})")
-    return ok
+    assert ok
 
 
-def test_idx_repeat_projection_incremental_dirty_buckets() -> bool:
+def test_idx_repeat_projection_incremental_dirty_buckets() -> None:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
@@ -2010,10 +1995,10 @@ def test_idx_repeat_projection_incremental_dirty_buckets() -> bool:
     print(f"{OK if ok else FAIL} repeat projection incremental dirty buckets "
           f"(initial={initial_best}, exact={exact_count}, prefix={prefix_count}, "
           f"best={best_count}, dirty={dirty_count}, status={status_value})")
-    return ok
+    assert ok
 
 
-def test_idx_indexed_kinds_set() -> bool:
+def test_idx_indexed_kinds_set() -> None:
     """Index a file with one element of EACH indexed kind + a tool_result, then
     assert search_rows returns the indexed kinds and NOT tool_result."""
     token = _idx_setup_roots()
@@ -2036,10 +2021,10 @@ def test_idx_indexed_kinds_set() -> bool:
     expected = {"user_prompt", "assistant_text", "reasoning", "tool_call"}
     ok = kinds == expected and "tool_result" not in kinds
     print(f"{OK if ok else FAIL} indexed kinds set real (kinds={kinds})")
-    return ok
+    assert ok
 
 
-def test_idx_no_candidates_empty_roots() -> bool:
+def test_idx_no_candidates_empty_roots() -> None:
     token = _idx_setup_roots()
     try:
         # _idx_setup_roots already points at temp dirs; refresh over empty set.
@@ -2049,14 +2034,14 @@ def test_idx_no_candidates_empty_roots() -> bool:
         _restore_idx_roots(token)
     ok = r["walked"] == 0 and covered
     print(f"{OK if ok else FAIL} empty roots refresh (walked={r['walked']})")
-    return ok
+    assert ok
 
 
 # ===========================================================================
 # cross-cutting / integration
 # ===========================================================================
 
-def test_integration_search_finds_via_filesystem_walk() -> bool:
+def test_integration_search_finds_via_filesystem_walk() -> None:
     """End-to-end: search finds a claude transcript via real Python discovery."""
     _reset_candidates()
     projects = _SCRATCH / "int-projects"
@@ -2076,10 +2061,10 @@ def test_integration_search_finds_via_filesystem_walk() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"zulifrangible integration test"}
     print(f"{OK if ok else FAIL} integration filesystem search (got {texts})")
-    return ok
+    assert ok
 
 
-def test_integration_search_finds_codex() -> bool:
+def test_integration_search_finds_codex() -> None:
     _reset_candidates()
     codex = _SCRATCH / "int-codex"
     codex.mkdir(parents=True, exist_ok=True)
@@ -2100,10 +2085,10 @@ def test_integration_search_finds_codex() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"zulifrangible codex e2e"}
     print(f"{OK if ok else FAIL} integration codex search (got {texts})")
-    return ok
+    assert ok
 
 
-def test_integration_index_fastpath_serves() -> bool:
+def test_integration_index_fastpath_serves() -> None:
     """Index built + fresh -> query served from FTS even with rg disabled.
     Both the miner roots (search discovery) and ``nsp._native_roots`` (the
     index stat-walk) must point at the SAME temp dir or the index walks a
@@ -2127,10 +2112,10 @@ def test_integration_index_fastpath_serves() -> bool:
     texts = {r["text"] for r in out}
     ok = "zulifrangible fastpath e2e" in texts
     print(f"{OK if ok else FAIL} integration index fastpath (got {texts})")
-    return ok
+    assert ok
 
 
-def test_integration_codex_env_context_dropped_in_search() -> bool:
+def test_integration_codex_env_context_dropped_in_search() -> None:
     _reset_candidates()
     codex = _SCRATCH / "env-codex"
     codex.mkdir(parents=True, exist_ok=True)
@@ -2153,10 +2138,10 @@ def test_integration_codex_env_context_dropped_in_search() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"zulifrangible real prompt"} and not any("environment_context" in t for t in texts)
     print(f"{OK if ok else FAIL} integration env-context dropped in search (got {texts})")
-    return ok
+    assert ok
 
 
-def test_integration_multi_format_dispatch() -> bool:
+def test_integration_multi_format_dispatch() -> None:
     """All three formats discovered and dispatched correctly in one search."""
     _reset_candidates()
     projects = _SCRATCH / "multi-claude"
@@ -2184,10 +2169,10 @@ def test_integration_multi_format_dispatch() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"multiformat needle claude", "multiformat needle codex"}
     print(f"{OK if ok else FAIL} integration multi-format dispatch (got {texts})")
-    return ok
+    assert ok
 
 
-def test_integration_max_matches_cap() -> bool:
+def test_integration_max_matches_cap() -> None:
     _reset_candidates()
     items = []
     for i in range(5):
@@ -2201,10 +2186,10 @@ def test_integration_max_matches_cap() -> bool:
         _restore_rg()
     ok = len(out) == 2
     print(f"{OK if ok else FAIL} integration max_matches cap (got {len(out)})")
-    return ok
+    assert ok
 
 
-def test_integration_unmatched_query_returns_empty() -> bool:
+def test_integration_unmatched_query_returns_empty() -> None:
     _reset_candidates()
     projects = _SCRATCH / "unmatched-projects"
     sd = projects / encode_cwd("/u")
@@ -2221,14 +2206,14 @@ def test_integration_unmatched_query_returns_empty() -> bool:
         _reset_index()
     ok = out == []
     print(f"{OK if ok else FAIL} integration unmatched query -> empty (got {out})")
-    return ok
+    assert ok
 
 
 # ===========================================================================
 # gap coverage — recall divergence, concurrency, error containment, encoding
 # ===========================================================================
 
-def test_gap_tool_result_recall_divergence() -> bool:
+def test_gap_tool_result_recall_divergence() -> None:
     """Documented design tradeoff: the lean index drops tool_result but the
     rg/python fallback indexes it → recall diverges. A needle appearing ONLY in
     a tool_result block is found by the fallback path but NOT the index fast
@@ -2267,10 +2252,10 @@ def test_gap_tool_result_recall_divergence() -> bool:
     ok = found_fallback and not found_index
     print(f"{OK if ok else FAIL} tool_result recall divergence "
           f"(fallback={found_fallback}, index={found_index})")
-    return ok
+    assert ok
 
 
-def test_gap_concurrent_reads_during_refresh() -> bool:
+def test_gap_concurrent_reads_during_refresh() -> None:
     """N reader threads call search_rows/match_paths in a loop while the main
     thread calls refresh_once repeatedly. WAL + readonly-vs-writer must keep
     this exception-free AND a reader must converge to newly-committed writes:
@@ -2320,10 +2305,10 @@ def test_gap_concurrent_reads_during_refresh() -> bool:
     ok = not errors and len(rows) >= 1 and saw_new.is_set()
     print(f"{OK if ok else FAIL} concurrent reads during refresh "
           f"(errors={len(errors)}, rows={len(rows)}, converged={saw_new.is_set()})")
-    return ok
+    assert ok
 
 
-def test_gap_match_elements_contains_non_oserror() -> bool:
+def test_gap_match_elements_contains_non_oserror() -> None:
     """A candidate whose parse_elements raises a non-OSError (e.g. RuntimeError)
     must NOT abort the whole search — _match_elements contains it and siblings
     still return."""
@@ -2342,10 +2327,10 @@ def test_gap_match_elements_contains_non_oserror() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"nonoserrorneedle good"}
     print(f"{OK if ok else FAIL} _match_elements contains non-OSError (got {texts})")
-    return ok
+    assert ok
 
 
-def test_gap_index_cwd_underscore_dash_match() -> bool:
+def test_gap_index_cwd_underscore_dash_match() -> None:
     """Index path: a file under cwd with an underscore (/proj_x) matches a query
     cwd using the dash form (/proj-x) via encode_cwd equivalence. Mirrors
     test_search_cwd_filter_encoded_match but for the index path."""
@@ -2363,16 +2348,16 @@ def test_gap_index_cwd_underscore_dash_match() -> bool:
     sids = {Path(p).stem for p, _ in hits}
     ok = sids == {"s1"}
     print(f"{OK if ok else FAIL} index cwd underscore/dash match (got {sids})")
-    return ok
+    assert ok
 
 
-def test_gap_rg_fallback_end_to_end() -> bool:
+def test_gap_rg_fallback_end_to_end() -> None:
     """rg ENABLED (real _rg_filter), index reset/not-covered: the query goes
     through rg → _candidate_from_match → cwd-filter and finds the needle. Tiny
     temp root, unique needle, keeps it fast."""
     if not shutil.which("rg"):
         print(f"{OK} rg-fallback-e2e skipped (rg not installed)")
-        return True
+        return
     _reset_candidates()
     _restore_rg()  # ensure rg is real, not disabled
     projects = _SCRATCH / "rgfb-projects"
@@ -2389,10 +2374,10 @@ def test_gap_rg_fallback_end_to_end() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"rgfbneedle unique token here"}
     print(f"{OK if ok else FAIL} rg fallback end-to-end (got {texts})")
-    return ok
+    assert ok
 
 
-def test_gap_wal_inode_staleness_after_reset() -> bool:
+def test_gap_wal_inode_staleness_after_reset() -> None:
     """Build index, read, reset_for_test, write DIFFERENT content, refresh again,
     assert a fresh read sees the NEW data (not stale). Exercises
     _close_readonly_connection on reset."""
@@ -2413,10 +2398,10 @@ def test_gap_wal_inode_staleness_after_reset() -> bool:
     texts = {r["text"] for r in rows}
     ok = texts == {"walneedle new content"}
     print(f"{OK if ok else FAIL} WAL/inode staleness after reset (got {texts})")
-    return ok
+    assert ok
 
 
-def test_gap_fts_injection_harmless() -> bool:
+def test_gap_fts_injection_harmless() -> None:
     """Belt-and-suspenders: a token that looks like an FTS operator or quote
     (\", OR, ';) is harmless — _query_tokens restricts to [a-z0-9]+ and tokens
     are quoted. Assert no exception and correct results."""
@@ -2441,7 +2426,7 @@ def test_gap_fts_injection_harmless() -> bool:
     texts = {r["text"] for r in out}
     ok = texts == {"injneedle normal text"} and out_empty == []
     print(f"{OK if ok else FAIL} FTS injection harmless (got {texts})")
-    return ok
+    assert ok
 
 
 # ===========================================================================
@@ -2608,19 +2593,10 @@ def main_run() -> int:
         test_gap_fts_injection_harmless,
     ]
     try:
-        results = []
         for fn in tests:
-            try:
-                results.append(fn())
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"{FAIL} {fn.__name__} raised: {e}")
-                results.append(False)
-        n_pass = sum(1 for r in results if r)
-        n_total = len(results)
-        print(f"\n{n_pass}/{n_total} native-search-comprehensive tests passed")
-        return 0 if n_pass == n_total else 1
+            fn()
+        print(f"\n{len(tests)}/{len(tests)} native-search-comprehensive tests passed")
+        return 0
     finally:
         idx.shutdown()
         _TEST_HOME.release()
