@@ -75,7 +75,7 @@ def _build_heavy(n: int) -> tuple[str, dict]:
     return sid, msg
 
 
-def _run() -> bool:
+def _run_checks() -> None:
     results: list[tuple[str, bool, str]] = []
 
     N = 2000
@@ -143,10 +143,10 @@ def _run() -> bool:
         tag = PASS if ok else FAIL
         print(f"  {tag} {name}{'' if ok else ' — ' + msg}")
     print(f"\n{passed}/{len(results)} checks passed")
-    return passed == len(results)
+    assert passed == len(results), f"{len(results) - passed} check(s) failed (see above)"
 
 
-def test_cold_get_lite_skips_event_hydration() -> bool:
+def test_cold_get_lite_skips_event_hydration() -> None:
     sid, _msg = _build_heavy(3)
     session_manager.flush_pending_persists()
     session_manager._roots.pop(sid, None)
@@ -164,20 +164,39 @@ def test_cold_get_lite_skips_event_hydration() -> bool:
         lite = session_manager.get_lite(sid)
     finally:
         session_manager._hydrate_cached_root_events = original
-    ok = lite is not None and calls == []
-    print(
-        f"  {PASS if ok else FAIL} cold get_lite skips event hydration"
-        f"{'' if ok else f' - hydrate calls={calls}'}"
-    )
-    return ok
+    assert lite is not None
+    assert calls == [], f"cold get_lite hydrated events: hydrate calls={calls}"
 
 
 def main() -> int:
+    checks = [
+        ("get_lite skips events + matches metadata + cache + perf + uid_idx",
+         _run_checks),
+        ("cold get_lite skips event hydration",
+         test_cold_get_lite_skips_event_hydration),
+    ]
+    failed = False
+    passed = 0
     try:
-        ok = _run() and test_cold_get_lite_skips_event_hydration()
-        return 0 if ok else 1
+        for label, runner in checks:
+            try:
+                runner()
+            except AssertionError as exc:
+                failed = True
+                print(f"{FAIL} {label}: {exc}")
+                continue
+            except Exception:
+                failed = True
+                import traceback
+                traceback.print_exc()
+                print(f"{FAIL} {label} (error)")
+                continue
+            passed += 1
+            print(f"{PASS} {label}")
+        print(f"{passed}/{len(checks)} subtests passed")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ PASS = "\033[32mPASS\033[0m"
 FAIL = "\033[31mFAIL\033[0m"
 
 
-def test_raw_file_info_accepts_images() -> bool:
+def test_raw_file_info_accepts_images() -> None:
     img = Path(_TMP_HOME) / "sample.png"
     img.write_bytes(
         b"\x89PNG\r\n\x1a\n"
@@ -29,11 +29,9 @@ def test_raw_file_info_accepts_images() -> bool:
         b"\x00\x00\x00\x00IEND\xaeB`\x82"
     )
     info = get_raw_file_info(str(img))
-    return (
-        info["path"] == str(img.resolve())
-        and info["mime_type"] == "image/png"
-        and info["size"] == img.stat().st_size
-    )
+    assert info["path"] == str(img.resolve())
+    assert info["mime_type"] == "image/png"
+    assert info["size"] == img.stat().st_size
 
 
 TESTS = [
@@ -42,17 +40,25 @@ TESTS = [
 
 
 def main_run() -> int:
-    failed = 0
+    failed = False
+    passed = 0
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as exc:
-                ok = False
-                print(f"  exception: {exc}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
-                failed += 1
+                fn()
+            except AssertionError as exc:
+                failed = True
+                print(f"{FAIL}  {name}: {exc}")
+                continue
+            except Exception:
+                failed = True
+                import traceback
+                traceback.print_exc()
+                print(f"{FAIL}  {name} (error)")
+                continue
+            passed += 1
+            print(f"{PASS}  {name}")
+        print(f"{passed}/{len(TESTS)} subtests passed")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 1 if failed else 0
