@@ -62,9 +62,11 @@ def _add_tag(client: TestClient, sid: str, tag_id: str, text: str, comment: str)
     assert r.status_code == 200, f"add_tag failed: {r.status_code} {r.text}"
 
 
-def test_typed_writes_on_different_fields_do_not_clobber(client: TestClient) -> bool:
+def test_typed_writes_on_different_fields_do_not_clobber() -> None:
     """Concurrent: REST DELETE /tags vs orchestrator-style writes
     (typed method on a different field). The DELETE must survive."""
+    client = TestClient(main.app)
+    authenticate_client(client)
     sid = _new_session()
     _add_tag(client, sid, "tag-A", "ephemeral", "yes")
     _add_tag(client, sid, "tag-B", "Replace the chat input area?", "yes")
@@ -101,26 +103,23 @@ def test_typed_writes_on_different_fields_do_not_clobber(client: TestClient) -> 
     t1.join(); t2.join()
 
     final = session_manager.get(sid)
-    if final is None:
-        print("  session vanished")
-        return False
-    if final.get("inline_tags") != []:
-        print(f"  expected inline_tags=[], got {final.get('inline_tags')!r}")
-        return False
+    assert final is not None, "session vanished"
+    assert final.get("inline_tags") == [], (
+        f"expected inline_tags=[], got {final.get('inline_tags')!r}"
+    )
     # And every event the orchestrator wrote should be present too.
     asst_after = next(
         (m for m in final["messages"] if m["id"] == asst["id"]), None,
     )
     events = (asst_after or {}).get("events") or []
-    if len(events) != 50:
-        print(f"  expected 50 events preserved, got {len(events)}")
-        return False
-    return True
+    assert len(events) == 50, f"expected 50 events preserved, got {len(events)}"
 
 
-def test_concurrent_draft_patches_and_typed_writes(client: TestClient) -> bool:
+def test_concurrent_draft_patches_and_typed_writes() -> None:
     """draft_input is its own field; concurrent typed writes on other
     fields must not overwrite the latest draft."""
+    client = TestClient(main.app)
+    authenticate_client(client)
     sid = _new_session()
     asst = session_manager.append_assistant_msg(sid, {
         "id": "asst-2",
@@ -157,24 +156,18 @@ def test_concurrent_draft_patches_and_typed_writes(client: TestClient) -> bool:
     t1.join(); t2.join()
 
     final = session_manager.get(sid)
-    if final.get("draft_input") != "text-50":
-        print(
-            "  expected draft_input='text-50' (last accepted seq), "
-            f"got {final.get('draft_input')!r}"
-        )
-        return False
-    if final.get("draft_input_seq") != 50:
-        print(
-            f"  expected draft_input_seq=50, got {final.get('draft_input_seq')!r}"
-        )
-        return False
+    assert final.get("draft_input") == "text-50", (
+        "expected draft_input='text-50' (last accepted seq), "
+        f"got {final.get('draft_input')!r}"
+    )
+    assert final.get("draft_input_seq") == 50, (
+        f"expected draft_input_seq=50, got {final.get('draft_input_seq')!r}"
+    )
     asst_after = next(
         (m for m in final["messages"] if m["id"] == asst["id"]), None,
     )
-    if len((asst_after or {}).get("manager", {}).get("events") or []) != 50:
-        print(f"  manager events lost — got {len((asst_after or {}).get('manager', {}).get('events') or [])}")
-        return False
-    return True
+    events = (asst_after or {}).get("events") or []
+    assert len(events) == 50, f"expected 50 events preserved, got {len(events)}"
 
 
 TESTS = [
@@ -190,21 +183,22 @@ TESTS = [
 
 
 def main_run() -> int:
-    client = TestClient(main.app)
-    authenticate_client(client)
     failed = 0
     try:
         for name, fn in TESTS:
             try:
-                ok = fn(client)
+                fn()
+            except AssertionError as e:
+                print(f"{FAIL}  {name}")
+                print(f"  {e}")
+                failed += 1
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"{FAIL}  {name} (exception: {e})")
                 failed += 1
+            else:
+                print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
