@@ -37,6 +37,13 @@ docker() {
         orphan) printf '%s\n' 'host-a|999999|dead-start' ;;
         live) printf '%s\n' "host-a|$$|$DOCKER_TEST_OWNER_START" ;;
         foreign) printf '%s\n' 'host-b|999999|dead-start' ;;
+        buildx_buildkit_*)
+          if [ -n "${DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK:-}" ]; then
+            printf '%s \n' legacy-net
+          else
+            printf '%s \n' "$DOCKER_TEST_REGISTRY_NETWORK"
+          fi
+          ;;
       esac
       ;;
     "image inspect") printf '%s\n' old ;;
@@ -47,6 +54,12 @@ docker() {
       [ "${4:-}" = "ancestor=kept" ] && printf '%s\n' using-kept
       ;;
     "buildx inspect") return 0 ;;
+    "volume inspect")
+      [ "${DOCKER_TEST_FAKE_VOLUME_MISSING:-}" != "1" ]
+      ;;
+    "run --rm")
+      printf '%s\t/data\n' "${DOCKER_TEST_FAKE_VOLUME_BYTES:-0}"
+      ;;
   esac
 }
 
@@ -95,6 +108,46 @@ docker_test_prune_build_cache_unlocked
 assert_logged "buildx prune --builder better-agent-tests --force --max-used-space 10GB"
 assert_not_logged "volume"
 assert_not_logged "system prune"
+
+[ "$(docker_test_size_to_bytes 10GB)" -eq 10737418240 ] || fail "size_to_bytes: 10GB parsed incorrectly"
+[ "$(docker_test_size_to_bytes 512MB)" -eq 536870912 ] || fail "size_to_bytes: 512MB parsed incorrectly"
+[ "$(docker_test_size_to_bytes 100)" -eq 100 ] || fail "size_to_bytes: bare byte count parsed incorrectly"
+
+# Registry storage is a disposable cache: below the cap it is left alone;
+# once it exceeds the cap, container+volume are deleted so the next
+# materialize recreates them fresh (no in-place GC).
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_BYTES=$((5 * 1024 * 1024 * 1024))
+docker_test_ensure_registry_within_cap
+assert_not_logged "rm -f $DOCKER_TEST_REGISTRY"
+assert_not_logged "volume rm"
+
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_BYTES=$((20 * 1024 * 1024 * 1024))
+docker_test_ensure_registry_within_cap
+assert_logged "rm -f $DOCKER_TEST_REGISTRY"
+assert_logged "volume rm $DOCKER_TEST_REGISTRY_VOLUME"
+unset DOCKER_TEST_FAKE_VOLUME_BYTES
+
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_MISSING=1
+docker_test_registry_volume_bytes_result="$(docker_test_registry_volume_bytes)"
+[ "$docker_test_registry_volume_bytes_result" -eq 0 ] || fail "missing registry volume did not report 0 bytes"
+unset DOCKER_TEST_FAKE_VOLUME_MISSING
+
+# Builder network attachment is migrated only when missing, under the
+# builder lock, so concurrent sessions never see a half-configured builder.
+: > "$LOG"
+docker_test_ensure_builder_on_network
+assert_not_logged "buildx rm"
+assert_not_logged "buildx create --name"
+
+: > "$LOG"
+DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK=1
+docker_test_ensure_builder_on_network
+assert_logged "buildx rm better-agent-tests"
+assert_logged "buildx create --name better-agent-tests --driver docker-container --driver-opt network=$DOCKER_TEST_REGISTRY_NETWORK"
+unset DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK
 
 : > "$LOG"
 docker_test_run --rm example -k smoke
