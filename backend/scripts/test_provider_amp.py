@@ -62,12 +62,13 @@ _REAL_RESULT_ERROR = {
 }
 
 
-def test_class_identity() -> bool:
+def test_class_identity():
     cls = provider_amp.AmpProvider
-    return issubclass(cls, SessionEventsProvider) and cls.KIND == "amp"
+    assert issubclass(cls, SessionEventsProvider)
+    assert cls.KIND == "amp"
 
 
-def test_capability_matrix() -> bool:
+def test_capability_matrix():
     cls = provider_amp.AmpProvider
     expected = {
         "supports_fork": True,
@@ -78,10 +79,11 @@ def test_capability_matrix() -> bool:
         "supports_native_subagents": False,
         "supports_reasoning_effort": False,
     }
-    return all(getattr(cls, k) is v for k, v in expected.items())
+    for key, value in expected.items():
+        assert getattr(cls, key) is value
 
 
-def test_build_env_clears_claude_and_routes_credentials() -> bool:
+def test_build_env_clears_claude_and_routes_credentials():
     inst = provider_amp.AmpProvider({
         "id": "a1", "kind": "amp", "mode": "api_key",
         "api_key": "test-amp-key", "base_url": "https://amp.example.com",
@@ -89,36 +91,32 @@ def test_build_env_clears_claude_and_routes_credentials() -> bool:
         "_credential_status": "available",
     })
     env = inst.build_env()
-    cleared = not any(k in env for k in (
+    for foreign in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
-    ))
-    return (
-        cleared
-        and env.get("AMP_API_KEY") == "test-amp-key"
-        and env.get("AMP_URL") == "https://amp.example.com"
-    )
+    ):
+        assert foreign not in env
+    assert env.get("AMP_API_KEY") == "test-amp-key"
+    assert env.get("AMP_URL") == "https://amp.example.com"
 
 
-def test_build_env_subscription_no_injection() -> bool:
+def test_build_env_subscription_no_injection():
     inst = provider_amp.AmpProvider({"id": "a2", "kind": "amp", "mode": "subscription"})
     env = inst.build_env()
     inherited = __import__("os").environ.get("AMP_API_KEY")
     # Without a record api_key the env only carries whatever the process
     # inherited — the provider must not invent a key.
-    return env.get("AMP_API_KEY") == inherited
+    assert env.get("AMP_API_KEY") == inherited
 
 
-def test_models_static_catalog() -> bool:
+def test_models_static_catalog():
     models = provider_amp.AMP_MODELS
-    return (
-        models[0] == "auto"
-        and set(models) == {"auto", "smart", "rush", "free", "sonnet"}
-        and provider_amp.fetch_amp_models() == models
-    )
+    assert models[0] == "auto"
+    assert set(models) == {"auto", "smart", "rush", "free", "sonnet"}
+    assert provider_amp.fetch_amp_models() == models
 
 
-def test_model_argv_mapping() -> bool:
+def test_model_argv_mapping():
     cases = {
         "": [],
         "auto": [],
@@ -128,26 +126,25 @@ def test_model_argv_mapping() -> bool:
         "sonnet": ["--use-sonnet"],
     }
     for selector, expected in cases.items():
-        if runner_amp.model_argv(selector) != expected:
-            return False
+        assert runner_amp.model_argv(selector) == expected
+    # Unknown selectors must fail closed.
     try:
         runner_amp.model_argv("gpt-5")
     except ValueError:
-        return True
-    return False
+        pass
+    else:
+        raise AssertionError("model_argv should reject unknown selectors")
 
 
-def test_permission_argv_fail_closed() -> bool:
-    return (
-        runner_amp.permission_argv({}) == []
-        and runner_amp.permission_argv(None) == []
-        and runner_amp.permission_argv({"mode": "default"}) == []
-        and runner_amp.permission_argv({"mode": "dangerously-allow-all"}) == ["--dangerously-allow-all"]
-        and runner_amp.permission_argv({"mode": "bypassPermissions"}) == ["--dangerously-allow-all"]
-    )
+def test_permission_argv_fail_closed():
+    assert runner_amp.permission_argv({}) == []
+    assert runner_amp.permission_argv(None) == []
+    assert runner_amp.permission_argv({"mode": "default"}) == []
+    assert runner_amp.permission_argv({"mode": "dangerously-allow-all"}) == ["--dangerously-allow-all"]
+    assert runner_amp.permission_argv({"mode": "bypassPermissions"}) == ["--dangerously-allow-all"]
 
 
-def test_build_argv_fresh_and_resume() -> bool:
+def test_build_argv_fresh_and_resume():
     fresh = runner_amp.build_amp_argv(
         "/bin/amp", resume_thread_id=None, model="smart",
         permission={"mode": "dangerously-allow-all"},
@@ -155,18 +152,14 @@ def test_build_argv_fresh_and_resume() -> bool:
     resume = runner_amp.build_amp_argv(
         "/bin/amp", resume_thread_id=_REAL_SID, model="", permission={},
     )
-    return (
-        fresh == ["/bin/amp", "-m", "smart", "--dangerously-allow-all", "-x", "--stream-json"]
-        and resume == ["/bin/amp", "threads", "continue", _REAL_SID, "-x", "--stream-json"]
-    )
+    assert fresh == ["/bin/amp", "-m", "smart", "--dangerously-allow-all", "-x", "--stream-json"]
+    assert resume == ["/bin/amp", "threads", "continue", _REAL_SID, "-x", "--stream-json"]
 
 
-def test_parse_fork_thread_id() -> bool:
+def test_parse_fork_thread_id():
     text = f"Created new thread {_REAL_SID} (forked)\n"
-    return (
-        runner_amp.parse_fork_thread_id(text) == _REAL_SID
-        and runner_amp.parse_fork_thread_id("no id here") is None
-    )
+    assert runner_amp.parse_fork_thread_id(text) == _REAL_SID
+    assert runner_amp.parse_fork_thread_id("no id here") is None
 
 
 def _normalize(event, index=0, sid=_REAL_SID):
@@ -175,15 +168,13 @@ def _normalize(event, index=0, sid=_REAL_SID):
     )
 
 
-def test_normalizer_skips_bookkeeping_and_prompt_echo() -> bool:
-    return (
-        _normalize(_REAL_INIT) is None
-        and _normalize(_REAL_RESULT_ERROR) is None
-        and _normalize(_REAL_USER_ECHO) is None
-    )
+def test_normalizer_skips_bookkeeping_and_prompt_echo():
+    assert _normalize(_REAL_INIT) is None
+    assert _normalize(_REAL_RESULT_ERROR) is None
+    assert _normalize(_REAL_USER_ECHO) is None
 
 
-def test_normalizer_assistant_text_and_tool_use() -> bool:
+def test_normalizer_assistant_text_and_tool_use():
     text_event = {
         "type": "assistant",
         "message": {
@@ -203,22 +194,20 @@ def test_normalizer_assistant_text_and_tool_use() -> bool:
     }
     out_text = _normalize(text_event, index=0)
     out_tool = _normalize(tool_event, index=1)
-    if out_text is None or out_tool is None:
-        return False
-    return (
-        out_text["type"] == "assistant"
-        and out_text["parentUuid"] == _REAL_SID
-        and out_text["message"]["content"][0]["text"] == "OK"
-        # Missing model falls back to the run selector, never a blank.
-        and out_text["message"]["model"] == "auto"
-        # Provider-reported model passes through untouched.
-        and out_tool["message"]["model"] == "claude-opus-4.5"
-        and out_tool["message"]["content"][0]["type"] == "tool_use"
-        and out_tool["message"]["content"][0]["id"] == "tu_1"
-    )
+    assert out_text is not None
+    assert out_tool is not None
+    assert out_text["type"] == "assistant"
+    assert out_text["parentUuid"] == _REAL_SID
+    assert out_text["message"]["content"][0]["text"] == "OK"
+    # Missing model falls back to the run selector, never a blank.
+    assert out_text["message"]["model"] == "auto"
+    # Provider-reported model passes through untouched.
+    assert out_tool["message"]["model"] == "claude-opus-4.5"
+    assert out_tool["message"]["content"][0]["type"] == "tool_use"
+    assert out_tool["message"]["content"][0]["id"] == "tu_1"
 
 
-def test_normalizer_user_tool_result_emitted() -> bool:
+def test_normalizer_user_tool_result_emitted():
     event = {
         "type": "user",
         "message": {
@@ -229,25 +218,21 @@ def test_normalizer_user_tool_result_emitted() -> bool:
         "session_id": _REAL_SID, "parent_tool_use_id": None,
     }
     out = _normalize(event, index=2)
-    return (
-        out is not None
-        and out["type"] == "user"
-        and out["message"]["content"][0]["type"] == "tool_result"
-        and out["message"]["content"][0]["tool_use_id"] == "tu_1"
-    )
+    assert out is not None
+    assert out["type"] == "user"
+    assert out["message"]["content"][0]["type"] == "tool_result"
+    assert out["message"]["content"][0]["tool_use_id"] == "tu_1"
 
 
-def test_normalizer_unknown_type_surfaces_diagnostic() -> bool:
+def test_normalizer_unknown_type_surfaces_diagnostic():
     out = _normalize({"type": "mystery_event", "payload": 1}, index=3)
-    return (
-        out is not None
-        and out["type"] == "unknown_event"
-        and out["raw_type"] == "mystery_event"
-        and out["raw"] == {"type": "mystery_event", "payload": 1}
-    )
+    assert out is not None
+    assert out["type"] == "unknown_event"
+    assert out["raw_type"] == "mystery_event"
+    assert out["raw"] == {"type": "mystery_event", "payload": 1}
 
 
-def test_uuid_deterministic_per_thread_ordinal() -> bool:
+def test_uuid_deterministic_per_thread_ordinal():
     event = {
         "type": "assistant",
         "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}]},
@@ -256,35 +241,33 @@ def test_uuid_deterministic_per_thread_ordinal() -> bool:
     b = _normalize(event, index=5)
     c = _normalize(event, index=6)
     d = _normalize(event, index=5, sid="T-other")
-    return (
-        a["uuid"] == b["uuid"]
-        and a["uuid"] != c["uuid"]
-        and a["uuid"] != d["uuid"]
-    )
+    assert a["uuid"] == b["uuid"]
+    assert a["uuid"] != c["uuid"]
+    assert a["uuid"] != d["uuid"]
 
 
-def test_result_error_extraction() -> bool:
+def test_result_error_extraction():
     ok = runner_amp.result_error({"type": "result", "subtype": "success",
                                   "is_error": False, "result": "OK"})
     err = runner_amp.result_error(_REAL_RESULT_ERROR)
-    return ok is None and err is not None and err.startswith("402")
+    assert ok is None
+    assert err is not None
+    assert err.startswith("402")
 
 
-def test_result_token_usage() -> bool:
+def test_result_token_usage():
     usage = runner_amp.result_token_usage({
         "type": "result", "subtype": "success", "is_error": False,
         "usage": {"input_tokens": 10, "output_tokens": 2},
         "total_cost_usd": 0.01, "duration_ms": 854,
     })
     empty = runner_amp.result_token_usage({"type": "result", "subtype": "success"})
-    return (
-        usage == {"input_tokens": 10, "output_tokens": 2,
-                  "total_cost_usd": 0.01, "duration_ms": 854}
-        and empty is None
-    )
+    assert usage == {"input_tokens": 10, "output_tokens": 2,
+                     "total_cost_usd": 0.01, "duration_ms": 854}
+    assert empty is None
 
 
-def test_auth_failure_detection() -> bool:
+def test_auth_failure_detection():
     import runner_errors
     hit = runner_errors.classify(
         "amp",
@@ -292,21 +275,17 @@ def test_auth_failure_detection() -> bool:
         "Error: API key is not configured. Run `amp login` or set AMP_API_KEY.",
     )
     miss = runner_errors.classify("amp", "all good", "")
-    return (
-        hit is not None
-        and hit.category == runner_errors.CATEGORY_AUTH
-        and "amp login" in hit.message
-        and miss is None
-    )
+    assert hit is not None
+    assert hit.category == runner_errors.CATEGORY_AUTH
+    assert "amp login" in hit.message
+    assert miss is None
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message():
     from capability_contexts import prompt_heading_for_source
 
-    return (
-        prompt_heading_for_source("mssg") == "Message"
-        and prompt_heading_for_source("team_ask") == "Ask"
-    )
+    assert prompt_heading_for_source("mssg") == "Message"
+    assert prompt_heading_for_source("team_ask") == "Ask"
 
 
 TESTS = [
@@ -331,21 +310,28 @@ TESTS = [
 ]
 
 
-def main() -> int:
+def main():
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError:
                 failures.append(name)
+                print(f"FAIL: {name}")
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                failures.append(name)
+                print(f"FAIL: {name} (unexpected exception)")
+            else:
+                print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
         print("Failures:", ", ".join(failures))
-        return 1
-    return 0
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
