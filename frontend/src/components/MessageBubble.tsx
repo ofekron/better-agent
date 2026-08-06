@@ -42,6 +42,8 @@ import { providerDisplayName } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
 import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
+import { isActionableUserInteractionEvent } from "../adapter/mapToRenderModel";
+import type { UserInteractionPayloadWire } from "../adapter/wire";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -965,11 +967,15 @@ export function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) 
   const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
   const runner = typeof data.runner === "string" ? data.runner : "";
   const previousRunner = typeof data.previous_runner === "string" ? data.previous_runner : "";
+  const harnessProfileId = typeof data.harness_profile_id === "string" ? data.harness_profile_id : "";
+  const previousHarnessProfileId =
+    typeof data.previous_harness_profile_id === "string" ? data.previous_harness_profile_id : "";
   const changed = Array.isArray(data.changed) ? data.changed : [];
   const hasModelChange = changed.includes("model") || changed.includes("provider_id");
   const hasReasoningChange = changed.includes("reasoning_effort");
   const hasRunnerChange = changed.includes("runner");
-  if (!model && !providerId && !reasoningEffort && !runner) return null;
+  const hasHarnessChange = changed.includes("harness_profile");
+  if (!model && !providerId && !reasoningEffort && !runner && !harnessProfileId) return null;
   const fromProvider = providerDisplayName(
     { name: previousProviderName, nickname: previousProviderNick },
     (previousProviderKind ? t(runtimeKindLabelKey(previousProviderKind), { defaultValue: previousProviderKind }) : "")
@@ -989,13 +995,21 @@ export function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) 
   const reasoning = previousReasoningEffort && reasoningEffort
     ? `${previousReasoningEffort} to ${reasoningEffort}`
     : reasoningEffort;
-  const label = hasRunnerChange
+  const label = hasHarnessChange
+    ? t("message.harnessChanged")
+    : hasRunnerChange
     ? t("message.runtimeChanged")
     : hasModelChange || !hasReasoningChange ? t("message.modelSwitched") : t("message.reasoningChanged");
   return (
     <div className="event-model-switched">
       <span>{label}</span>
-      {hasModelChange || !hasReasoningChange ? (
+      {hasHarnessChange ? (
+        <span>
+          {previousHarnessProfileId && harnessProfileId
+            ? `${previousHarnessProfileId} to ${harnessProfileId}`
+            : harnessProfileId}
+        </span>
+      ) : hasModelChange || !hasReasoningChange ? (
         <span>{from && to ? `${from} to ${to}` : to}</span>
       ) : (
         <span>{reasoning}</span>
@@ -1214,14 +1228,24 @@ export function renderSingleEvent(
           {linkifyFilePaths(event.data.error as string, onFileClick)}
         </div>
       );
-    case "diagnostic":
-      return (
-        <DiagnosticEvent
-          key={idx}
-          kind={(event.data?.kind as string) || "unknown"}
-          raw={event.data?.raw}
-        />
-      );
+    case "diagnostic": {
+      const kind = (event.data?.kind as string) || "unknown";
+      if (kind === "compaction") {
+        return <CompactionEvent key={idx} data={event.data ?? {}} />;
+      }
+      if (kind === "user_interaction") {
+        // A pending, corresponding-kind node already renders as an
+        // actionable card elsewhere (Chat.tsx's visiblePendingUserInputs
+        // merge, via mapUserInteractionEventToRequest) — suppress the
+        // inline duplicate here (see isActionableUserInteractionEvent).
+        if (isActionableUserInteractionEvent(event)) return null;
+        return <UserInteractionNotice key={idx} data={event.data ?? {}} />;
+      }
+      if (kind.startsWith("fact.")) {
+        return <FactChipEvent key={idx} factKind={kind.slice("fact.".length)} data={event.data?.raw} />;
+      }
+      return <DiagnosticEvent key={idx} kind={kind} raw={event.data?.raw} />;
+    }
     default:
       // Unknown top-level event type — render rather than silently
       // drop so future provider events (stream-json types, claude
@@ -1300,6 +1324,101 @@ export function PrLinkEvent({
         <span className="event-pr-link-repo">{prRepository}</span>
       )}
     </a>
+  );
+}
+
+/** `compaction` node's dedicated boundary notice — reuses `.event-session`
+ * (the same subtle inline-boundary style LifecycleNotice/PrLinkEvent's
+ * neighbors use) instead of the generic "unknown event" DiagnosticEvent
+ * fallback, with an origin-aware, translated label. */
+export function CompactionEvent({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const origin = typeof data.origin === "string" ? data.origin : "";
+  const summary = typeof data.summary === "string" ? data.summary : "";
+  const originLabel = origin ? t(`message.compactionOrigin_${origin}`, { defaultValue: origin }) : "";
+  return (
+    <div className="event-session">
+      <strong>{t("message.compactionNotice")}</strong>
+      {originLabel ? <span> · {originLabel}</span> : null}
+      {summary ? <div style={{ marginTop: 2, opacity: 0.85 }}>{summary}</div> : null}
+    </div>
+  );
+}
+
+/** Generic `fact.<kind>` chip (every FactPayload kind other than
+ * `pr_link`, which has its own PrLinkEvent) — a compact label+payload
+ * pill instead of the collapsible raw-JSON DiagnosticEvent fallback. */
+export function FactChipEvent({ factKind, data }: { factKind: string; data: unknown }) {
+  const { t } = useTranslation();
+  const entries =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? Object.entries(data as Record<string, unknown>)
+      : [];
+  const payload = entries
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(", ");
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.7,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+      }}
+    >
+      <span>{t("message.factChip", { kind: factKind })}</span>
+      {payload ? <span style={{ marginInlineStart: 6, opacity: 0.85 }}>{payload}</span> : null}
+    </div>
+  );
+}
+
+/** Fallback for a `user_interaction` node with no corresponding legacy
+ * card (unrecognized kind), or one kept for history (resolved/
+ * cancelled) — same diagnostic-box visual language as DiagnosticEvent,
+ * with a translated kind label and a pending/resolved/cancelled state
+ * chip instead of a raw-JSON dump. */
+export function UserInteractionNotice({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const raw = data.raw as UserInteractionPayloadWire | undefined;
+  const kind = raw?.kind || "unknown";
+  const state = raw?.state || "pending";
+  const stateColor =
+    state === "pending" ? "var(--warning, #d29922)" : state === "resolved" ? "var(--success, #3fb950)" : "var(--text-muted)";
+  const stateBackground =
+    state === "pending" ? "rgba(210,153,34,0.16)" : state === "resolved" ? "rgba(63,185,80,0.16)" : "rgba(139,148,158,0.16)";
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.7,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flexWrap: "wrap",
+      }}
+    >
+      <span>{t("message.userInteraction", { kind })}</span>
+      <span
+        style={{
+          padding: "1px 7px",
+          borderRadius: 999,
+          fontSize: "0.9em",
+          fontWeight: 600,
+          background: stateBackground,
+          color: stateColor,
+        }}
+      >
+        {t(`message.userInteractionState_${state}`, { defaultValue: state })}
+      </span>
+    </div>
   );
 }
 

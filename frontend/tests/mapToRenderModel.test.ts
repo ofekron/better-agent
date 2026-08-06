@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   applyNodeStatusToNode,
   applyTextDeltaToNode,
+  isActionableUserInteractionEvent,
+  mapInstructionWidgetToMessage,
   mapNodeToEvents,
   mapPromptToUserMessage,
   mapTurnToAssistantMessage,
   mapTurnToMessages,
+  mapUserInteractionEventToRequest,
   reduceWorkerInteractions,
   surfaceAssistantMessageId,
+  surfaceInstructionWidgetMessageId,
   surfaceUserMessageId,
   turnPhaseToMessagePatch,
   upsertEventByNodeId,
@@ -97,12 +101,58 @@ describe("mapNodeToEvents", () => {
     ]);
   });
 
-  it("drops a user-sourced model_change (documented gap: no legacy inline rendering)", () => {
+  it("maps a user-sourced model_change onto the legacy model_switched boundary event", () => {
     const n = node({
       node_id: "mc2", kind: "model_change",
+      payload: { from_run_ref: "sonnet-4", to_run_ref: "haiku-4", source: "user" },
+    });
+    expect(mapNodeToEvents(n)).toEqual([
+      {
+        type: "model_switched",
+        data: {
+          node_id: "mc2",
+          model: "haiku-4",
+          previous_model: "sonnet-4",
+          provider_id: "",
+          reasoning_effort: "",
+          runner: "",
+          changed: ["model"],
+        },
+      },
+    ]);
+  });
+
+  it("fills provider_id/reasoning_effort/runner for a user-sourced model_change from the node's own run", () => {
+    const run: RunWire = {
+      run_ref: "run-1", provider_id: "claude", account_name: null,
+      model: "haiku-4", reasoning_effort: "high", runner: "native",
+    };
+    const n = node({
+      node_id: "mc3", kind: "model_change", run_ref: "run-1",
       payload: { from_run_ref: null, to_run_ref: "haiku-4", source: "user" },
     });
-    expect(mapNodeToEvents(n)).toEqual([]);
+    const events = mapNodeToEvents(n, new Map([["run-1", run]]));
+    expect(events[0].data).toMatchObject({
+      provider_id: "claude", reasoning_effort: "high", runner: "native",
+    });
+  });
+
+  it("maps harness_change onto the same model_switched boundary event, flagged via `changed`", () => {
+    const n = node({
+      node_id: "hc1", kind: "harness_change",
+      payload: { from_harness_profile_id: "old-profile", to_harness_profile_id: "new-profile" },
+    });
+    expect(mapNodeToEvents(n)).toEqual([
+      {
+        type: "model_switched",
+        data: {
+          node_id: "hc1",
+          changed: ["harness_profile"],
+          harness_profile_id: "new-profile",
+          previous_harness_profile_id: "old-profile",
+        },
+      },
+    ]);
   });
 
   it("maps lifecycle_notice to the exact legacy shape (kind + spread data)", () => {
@@ -145,11 +195,133 @@ describe("mapNodeToEvents", () => {
 
   it.each([
     "turn", "explanation", "result", "typed_prompt", "worker_interaction",
-    "continuation_session", "instruction_widget", "harness_change",
+    "continuation_session", "instruction_widget",
     "worker_turn", "native_subagent_turn", "sub_session_turn", "session_turn",
   ] as const)("produces no direct WSEvent for structural/gap kind %s", (kind) => {
     const n = node({ node_id: "x", kind, payload: null });
     expect(mapNodeToEvents(n)).toEqual([]);
+  });
+
+  it("maps user_interaction to a diagnostic event carrying kind/state, unconditionally", () => {
+    const n = node({
+      node_id: "ui1", kind: "user_interaction",
+      payload: { kind: "approval", request: { prompt: "ok?" }, state: "pending", response: null },
+    });
+    expect(mapNodeToEvents(n)).toEqual([
+      {
+        type: "diagnostic",
+        data: {
+          node_id: "ui1", kind: "user_interaction",
+          raw: { kind: "approval", request: { prompt: "ok?" }, state: "pending", response: null },
+        },
+      },
+    ]);
+  });
+});
+
+describe("isActionableUserInteractionEvent / mapUserInteractionEventToRequest", () => {
+  function diagnosticEvent(payload: {
+    kind: string;
+    request: Record<string, unknown>;
+    state: "pending" | "resolved" | "cancelled";
+  }): WSEvent {
+    return {
+      type: "diagnostic",
+      data: { node_id: "ui-node", kind: "user_interaction", raw: payload },
+    };
+  }
+
+  it("is actionable for a pending approval-kind node, and maps to a UserApprovalRequest", () => {
+    const e = diagnosticEvent({
+      kind: "approval",
+      request: { request_id: "r1", app_session_id: "s1", created_at: 100, prompt: "Proceed?" },
+      state: "pending",
+    });
+    expect(isActionableUserInteractionEvent(e)).toBe(true);
+    expect(mapUserInteractionEventToRequest(e)).toEqual({
+      request_id: "r1", app_session_id: "s1", status: "pending", created_at: 100,
+      kind: "approval", prompt: "Proceed?",
+    });
+  });
+
+  it("is actionable for a pending memory-kind node, and maps to a MemoryProposalRequest", () => {
+    const proposal = { action: "add", name: "n", description: "d", type: "user", content: "c", scope_type: "global", scope_path: "" };
+    const e = diagnosticEvent({
+      kind: "memory",
+      request: { request_id: "r2", app_session_id: "s1", created_at: 200, memory_proposal: proposal },
+      state: "pending",
+    });
+    expect(isActionableUserInteractionEvent(e)).toBe(true);
+    expect(mapUserInteractionEventToRequest(e)).toEqual({
+      request_id: "r2", app_session_id: "s1", status: "pending", created_at: 200,
+      kind: "memory", memory_proposal: proposal,
+    });
+  });
+
+  it("is actionable for a pending input-kind node, and maps to a UserInputRequest", () => {
+    const questions = [{ id: "q1", header: "H", question: "Q?", options: [] }];
+    const e = diagnosticEvent({
+      kind: "input",
+      request: { request_id: "r3", app_session_id: "s1", created_at: 300, questions },
+      state: "pending",
+    });
+    expect(isActionableUserInteractionEvent(e)).toBe(true);
+    expect(mapUserInteractionEventToRequest(e)).toEqual({
+      request_id: "r3", app_session_id: "s1", status: "pending", created_at: 300,
+      kind: "input", questions,
+    });
+  });
+
+  it("is not actionable once resolved, even for a corresponding kind", () => {
+    const e = diagnosticEvent({
+      kind: "approval",
+      request: { request_id: "r4", app_session_id: "s1", created_at: 400, prompt: "Proceed?" },
+      state: "resolved",
+    });
+    expect(isActionableUserInteractionEvent(e)).toBe(false);
+    expect(mapUserInteractionEventToRequest(e)).toBeNull();
+  });
+
+  it("is not actionable for a kind with no corresponding legacy component", () => {
+    const e = diagnosticEvent({
+      kind: "credential_consent",
+      request: { request_id: "r5", app_session_id: "s1", created_at: 500 },
+      state: "pending",
+    });
+    expect(isActionableUserInteractionEvent(e)).toBe(false);
+    expect(mapUserInteractionEventToRequest(e)).toBeNull();
+  });
+
+  it("falls back to node_id / empty app_session_id when the request bag omits them", () => {
+    const e = diagnosticEvent({ kind: "approval", request: { prompt: "Proceed?" }, state: "pending" });
+    expect(mapUserInteractionEventToRequest(e)).toMatchObject({
+      request_id: "ui-node", app_session_id: "", status: "pending",
+    });
+  });
+
+  it("returns false/null for a non-diagnostic or non-user_interaction event", () => {
+    const output: WSEvent = { type: "output", data: { node_id: "x", output: "hi" } };
+    expect(isActionableUserInteractionEvent(output)).toBe(false);
+    expect(mapUserInteractionEventToRequest(output)).toBeNull();
+  });
+});
+
+describe("instruction_widget mapping", () => {
+  it("maps to a synthetic operator ChatMessage with the fixed sentinel id", () => {
+    const n = node({
+      node_id: "iw1", kind: "instruction_widget", ts: 42,
+      payload: { text: "Read this before you start.", action: null },
+    });
+    const msg = mapInstructionWidgetToMessage(n);
+    expect(msg.id).toBe(surfaceInstructionWidgetMessageId());
+    expect(msg.role).toBe("operator");
+    expect(msg.content).toBe("Read this before you start.");
+    expect(msg.isStreaming).toBe(false);
+  });
+
+  it("surfaceInstructionWidgetMessageId is a stable, session-scoped (non-per-turn) constant", () => {
+    expect(surfaceInstructionWidgetMessageId()).toBe(surfaceInstructionWidgetMessageId());
+    expect(surfaceInstructionWidgetMessageId()).not.toContain(TURN);
   });
 });
 
@@ -303,6 +475,23 @@ describe("mapTurnToAssistantMessage / mapTurnToMessages", () => {
     const body = [node({ node_id: "b1", kind: "assistant_text", run_ref: "run-1", payload: { text: "hi" } })];
     const msg = mapTurnToAssistantMessage(turn(), body, new Map([["run-1", run]]));
     expect(msg.run_meta).toEqual({ provider_id: "claude", model: "sonnet-4-6", reasoning_effort: "high", runner: "native" });
+  });
+
+  it("maps turn.runtime_change (e.g. harness_change) into the assistant message's events", () => {
+    const runtimeChange = node({
+      node_id: "hc1", kind: "harness_change",
+      payload: { from_harness_profile_id: null, to_harness_profile_id: "prof-2" },
+    });
+    const msg = mapTurnToAssistantMessage(turn({ runtime_change: runtimeChange }), []);
+    expect(msg.events).toEqual([
+      {
+        type: "model_switched",
+        data: {
+          node_id: "hc1", changed: ["harness_profile"],
+          harness_profile_id: "prof-2", previous_harness_profile_id: "",
+        },
+      },
+    ]);
   });
 
   it("mapTurnToMessages returns [user, assistant] with deterministic ids", () => {

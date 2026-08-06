@@ -13,10 +13,22 @@
 //                          shape, produced here directly instead of at
 //                          render time)
 //   model_change(source=provider) -> WSEvent{type:"model_fallback", ...}
-//   model_change(source=user)   -> GAP: no legacy inline rendering of a
-//                          user-initiated model switch (selector-only
-//                          concern); dropped (mapNodeToEvent -> null)
-//   harness_change       -> GAP: no legacy equivalent; dropped
+//   model_change(source=user)   -> WSEvent{type:"model_switched", ...},
+//                          reusing the legacy turn-boundary model-switch
+//                          banner (MessageBubble ModelSwitchedEvent /
+//                          ModelSwitchBoundaryEvents). ModelChangePayload
+//                          only carries display model-name strings (see
+//                          wire.ts), so only `model`/`previous_model` are
+//                          populated from the wire itself; provider_id/
+//                          runner/reasoning_effort are best-effort filled
+//                          from the node's own run (node.run_ref ->
+//                          runsById) when present, empty otherwise.
+//   harness_change       -> WSEvent{type:"model_switched", data:{changed:
+//                          ["harness_profile"], ...}} — the SAME boundary
+//                          rendering path as model_change(user), with a
+//                          dedicated harness-change label/branch inside
+//                          ModelSwitchedEvent (no legacy equivalent to
+//                          reuse otherwise).
 //   diagnostic           -> WSEvent{type:"diagnostic", ...}
 //   failure              -> WSEvent{type:"diagnostic", data:{kind:"failure",...}}
 //                          (chosen per spec: "failure -> diagnostic-style
@@ -29,11 +41,22 @@
 //   fact(kind="pr_link")  -> WSEvent{type:"pr_link", ...}
 //   fact(other kinds)     -> WSEvent{type:"diagnostic", data:{kind:"fact.<kind>",...}}
 //                          (no generic legacy "fact chip" renderer yet)
-//   user_interaction      -> GAP: legacy renders pending approvals via
-//                          separate PendingApproval/ToolApproval/
-//                          UserInputRequest state, never inline in
-//                          message.events; diagnostic fallback only for
-//                          visibility, not full interactivity
+//   user_interaction      -> WSEvent{type:"diagnostic", data:{kind:
+//                          "user_interaction", raw:node.payload}} always
+//                          (unchanged mapping). Render-layer split (see
+//                          isActionableUserInteractionEvent /
+//                          mapUserInteractionEventToRequest below): a
+//                          pending node whose `kind` corresponds to an
+//                          existing legacy request shape (input/approval/
+//                          memory) is surfaced by Chat.tsx as the SAME
+//                          UserInputCard/UserApprovalCard/
+//                          MemoryProposalCard used for legacy pending
+//                          requests (resolution still POSTs through those
+//                          components' own legacy endpoints — no new
+//                          interaction flow); everything else (unknown
+//                          kind, or resolved/cancelled state) renders the
+//                          inline diagnostic fallback with a pending/
+//                          resolved state chip.
 //   unknown               -> WSEvent{type:"diagnostic", data:{kind:"unknown.<label>",...}}
 //                          (the existing unknown-event rendering path)
 //   worker_interaction     -> folded into ChatMessage.workers (WorkerPanel[])
@@ -47,10 +70,14 @@
 //                          returns Rebuilding for unconditionally (not
 //                          implemented yet). Left unmapped here rather
 //                          than faked.
-//   instruction_widget    -> GAP: session-level, not per-turn; no
-//                          ChatMessage equivalent exists (legacy has no
-//                          "instruction banner" message type). Handled
-//                          by the caller only for completeness (ignored).
+//   instruction_widget    -> session-level (one per snapshot, not
+//                          per-turn) -> a synthetic ChatMessage with a
+//                          fixed id (surfaceInstructionWidgetMessageId)
+//                          outside the turn_id namespace, prepended by
+//                          useSurfaceSession.ts ahead of every turn
+//                          message. Chat.tsx recognizes the fixed id,
+//                          excludes it from turn-pairing (it is never a
+//                          Turn), and renders it as a standalone banner.
 //   turn / explanation / result -> structural; never produce a WSEvent
 //                          directly. `turn` seeds the assistant
 //                          ChatMessage's timestamp/status; `result`
@@ -64,9 +91,15 @@
 
 import type {
   ChatMessage,
+  MemoryProposal,
+  MemoryProposalRequest,
   MessageFile,
   MessageImage,
   ProviderRunner,
+  UserApprovalRequest,
+  UserInputQuestion,
+  UserInputRequest,
+  UserInteractionRequest,
   WorkerPanel,
   WSEvent,
 } from "../types";
@@ -79,6 +112,8 @@ import type {
   DiagnosticPayloadWire,
   FactPayloadWire,
   FailurePayloadWire,
+  HarnessChangePayloadWire,
+  InstructionWidgetPayloadWire,
   LifecycleNoticePayloadWire,
   ModelChangePayloadWire,
   NodeWire,
@@ -90,6 +125,7 @@ import type {
   TurnLifecycleFrame,
   TypedPromptPayloadWire,
   UnknownPayloadWire,
+  UserInteractionPayloadWire,
   WorkerInteractionPayloadWire,
 } from "./wire";
 
@@ -110,6 +146,13 @@ export function surfaceUserMessageId(turnId: string): string {
 
 export function surfaceAssistantMessageId(turnId: string): string {
   return `surface:${turnId}:assistant`;
+}
+
+/** Fixed, session-scoped (not per-turn) id for the instruction_widget
+ * banner message — a singleton outside the turn_id namespace, so the
+ * caller can recognize and exclude it from turn-pairing by id alone. */
+export function surfaceInstructionWidgetMessageId(): string {
+  return "surface:instruction_widget";
 }
 
 function tsToIso(ts: number): string {
@@ -153,8 +196,12 @@ function toolResultOutput(result: ToolInteractionPayloadWire["result"]): string 
  * produce exactly one; `tool_interaction` with a resolved result produces
  * two (tool_call + tool_result, mirroring how the legacy render pipeline
  * flattens a single provider tool_use+tool_result pair today). Returns
- * `[]` for structural/unmapped kinds (see the module-level gap list). */
-export function mapNodeToEvents(node: NodeWire): WSEvent[] {
+ * `[]` for structural/unmapped kinds (see the module-level gap list).
+ * `runsById` is used only by `model_change(source=user)` to best-effort
+ * fill provider/runner/reasoning_effort for the node's own run — optional
+ * and defaulted so every other call site (and existing tests) is
+ * unaffected. */
+export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()): WSEvent[] {
   const base = { node_id: node.node_id };
   switch (node.kind) {
     case "assistant_text": {
@@ -193,11 +240,43 @@ export function mapNodeToEvents(node: NodeWire): WSEvent[] {
     }
     case "model_change": {
       const p = node.payload as ModelChangePayloadWire;
-      if (p.source !== "provider") return [];
+      if (p.source === "provider") {
+        return [
+          {
+            type: "model_fallback",
+            data: { ...base, from_model: p.from_run_ref ?? "", to_model: p.to_run_ref },
+          },
+        ];
+      }
+      // source === "user": onto the legacy turn-boundary model-switch
+      // banner. See the module docstring for the data-fidelity caveat.
+      const run = node.run_ref ? runsById.get(node.run_ref) : undefined;
       return [
         {
-          type: "model_fallback",
-          data: { ...base, from_model: p.from_run_ref ?? "", to_model: p.to_run_ref },
+          type: "model_switched",
+          data: {
+            ...base,
+            model: p.to_run_ref,
+            previous_model: p.from_run_ref ?? "",
+            provider_id: run?.provider_id ?? "",
+            reasoning_effort: run?.reasoning_effort ?? "",
+            runner: run?.runner ?? "",
+            changed: ["model"],
+          },
+        },
+      ];
+    }
+    case "harness_change": {
+      const p = node.payload as HarnessChangePayloadWire;
+      return [
+        {
+          type: "model_switched",
+          data: {
+            ...base,
+            changed: ["harness_profile"],
+            harness_profile_id: p.to_harness_profile_id,
+            previous_harness_profile_id: p.from_harness_profile_id ?? "",
+          },
         },
       ];
     }
@@ -238,9 +317,9 @@ export function mapNodeToEvents(node: NodeWire): WSEvent[] {
       const p = node.payload as UnknownPayloadWire;
       return [{ type: "diagnostic", data: { ...base, kind: `unknown.${p.label}`, raw: p.payload } }];
     }
-    // Structural / handled-elsewhere kinds, plus the two documented GAPs
-    // (user-sourced model/harness change, and the sidecar-dependent
-    // SubAgentTurn family) — see the module docstring: no direct WSEvent.
+    // Structural / handled-elsewhere kinds, plus the one remaining
+    // documented GAP (the sidecar-dependent SubAgentTurn family) — see
+    // the module docstring: no direct WSEvent.
     case "turn":
     case "explanation":
     case "result":
@@ -248,7 +327,6 @@ export function mapNodeToEvents(node: NodeWire): WSEvent[] {
     case "worker_interaction":
     case "continuation_session":
     case "instruction_widget":
-    case "harness_change":
     case "worker_turn":
     case "native_subagent_turn":
     case "sub_session_turn":
@@ -284,6 +362,25 @@ export function mapPromptToUserMessage(prompt: NodeWire): ChatMessage {
     isStreaming: false,
     images: images.length > 0 ? images : undefined,
     files: files.length > 0 ? files : undefined,
+  };
+}
+
+// ---- instruction_widget -> synthetic banner ChatMessage ----------------
+
+/** Maps the snapshot-level instruction_widget node to a synthetic
+ * ChatMessage carrying only its display text — never a Turn (see
+ * surfaceInstructionWidgetMessageId). `action` (an opaque command payload)
+ * is intentionally not rendered here: no legacy interaction flow exists
+ * for it yet, and inventing one is out of scope for this mapping. */
+export function mapInstructionWidgetToMessage(node: NodeWire): ChatMessage {
+  const p = node.payload as InstructionWidgetPayloadWire;
+  return {
+    id: surfaceInstructionWidgetMessageId(),
+    role: "operator",
+    content: p.text,
+    events: [],
+    timestamp: tsToIso(node.ts),
+    isStreaming: false,
   };
 }
 
@@ -429,9 +526,9 @@ export function mapTurnToAssistantMessage(
   runsById: RunsById = new Map(),
 ): ChatMessage {
   const ordered = sortNodes(bodyNodes);
-  const events = ordered.flatMap(mapNodeToEvents);
+  const events = ordered.flatMap((n) => mapNodeToEvents(n, runsById));
   const workers = reduceWorkerInteractions(ordered);
-  const runtimeChangeEvents = turn.runtime_change ? mapNodeToEvents(turn.runtime_change) : [];
+  const runtimeChangeEvents = turn.runtime_change ? mapNodeToEvents(turn.runtime_change, runsById) : [];
   const allEvents = [...runtimeChangeEvents, ...events];
 
   const bodyText = ordered
@@ -531,4 +628,86 @@ export function turnPhaseToMessagePatch(
     };
   }
   return patch;
+}
+
+// ---- user_interaction -> existing legacy interactive components --------
+//
+// A pending user_interaction node whose `kind` corresponds to an existing
+// legacy request shape is surfaced by Chat.tsx as an actionable card
+// (UserInputCard / UserApprovalCard / MemoryProposalCard) merged into the
+// same list that already renders legacy pending requests — resolution
+// still travels those components' own legacy REST endpoints, no new
+// interaction flow. Everything else (unresolved-shape kind, or a
+// resolved/cancelled node kept for history) stays the inline diagnostic
+// fallback (mapNodeToEvents' unconditional "user_interaction" mapping),
+// rendered with a state chip by MessageBubble's diagnostic dispatch.
+//
+// NodeWire's user_interaction payload has no producer in the backend yet
+// (no construction site under backend/adapters/{normalize,derive}.py at
+// the time of this mapping — grep-confirmed), so the `kind` string
+// vocabulary below (input/approval/memory) is inferred from the existing
+// frontend UserInteractionRequest union it is meant to reuse, not
+// verified against real wire data. See the Phase E report for this gap.
+
+const CORRESPONDING_USER_INTERACTION_KINDS = new Set(["input", "approval", "memory"]);
+
+function isCorrespondingUserInteractionKind(kind: unknown): kind is "input" | "approval" | "memory" {
+  return typeof kind === "string" && CORRESPONDING_USER_INTERACTION_KINDS.has(kind);
+}
+
+/** True when a `user_interaction` diagnostic event (as produced by
+ * mapNodeToEvents) should render as an actionable legacy card instead of
+ * the inline diagnostic fallback. */
+export function isActionableUserInteractionEvent(event: WSEvent): boolean {
+  if (event.type !== "diagnostic") return false;
+  const data = event.data as { kind?: unknown; raw?: unknown } | undefined;
+  if (data?.kind !== "user_interaction") return false;
+  const raw = data.raw as UserInteractionPayloadWire | undefined;
+  return !!raw && raw.state === "pending" && isCorrespondingUserInteractionKind(raw.kind);
+}
+
+/** Maps an actionable user_interaction diagnostic event (see
+ * isActionableUserInteractionEvent — call that first) to the exact
+ * legacy request shape its card component expects. `request` is assumed
+ * to already carry the corresponding legacy request's fields (request_id,
+ * app_session_id, created_at, plus the kind-specific fields) since it is
+ * meant to reuse those shapes; `app_session_id` is left empty (rather
+ * than guessed) when absent — the caller decides how to treat that
+ * (Chat.tsx trusts the current session, since every node in `messages`
+ * is already scoped to one session's subscription). Returns `null` for a
+ * non-actionable or unrecognized-kind event. */
+export function mapUserInteractionEventToRequest(
+  event: WSEvent,
+): UserInteractionRequest | null {
+  if (!isActionableUserInteractionEvent(event)) return null;
+  const data = event.data as { node_id?: unknown; raw?: unknown };
+  const raw = data.raw as UserInteractionPayloadWire;
+  const request = raw.request;
+  const request_id =
+    typeof request.request_id === "string" ? request.request_id : String(data.node_id ?? "");
+  const app_session_id = typeof request.app_session_id === "string" ? request.app_session_id : "";
+  const created_at = typeof request.created_at === "number" ? request.created_at : 0;
+  const shared = { request_id, app_session_id, status: "pending" as const, created_at };
+  switch (raw.kind) {
+    case "approval":
+      return {
+        ...shared,
+        kind: "approval",
+        prompt: typeof request.prompt === "string" ? request.prompt : "",
+      } satisfies UserApprovalRequest;
+    case "memory":
+      return {
+        ...shared,
+        kind: "memory",
+        memory_proposal: request.memory_proposal as MemoryProposal,
+      } satisfies MemoryProposalRequest;
+    case "input":
+      return {
+        ...shared,
+        kind: "input",
+        questions: Array.isArray(request.questions) ? (request.questions as UserInputQuestion[]) : [],
+      } satisfies UserInputRequest;
+    default:
+      return null;
+  }
 }

@@ -21,6 +21,7 @@ import { SurfaceClient, type SurfaceSocket } from "./client";
 import {
   applyNodeStatusToNode,
   applyTextDeltaToNode,
+  mapInstructionWidgetToMessage,
   mapPromptToUserMessage,
   mapTurnToAssistantMessage,
   mapTurnToMessages,
@@ -85,6 +86,8 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
     let identity: SnapshotIdentity | null = null;
     const turnsById = new Map<string, TurnState>();
     const runsById = new Map<string, RunWire>();
+    // Session-level (not per-turn) — see mapInstructionWidgetToMessage.
+    let instructionWidgetNode: NodeWire | null = null;
 
     function currentCursor() {
       if (!identity) return null;
@@ -95,7 +98,10 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
       if (cancelled) return;
       const ordered = [...turnsById.values()].sort((a, b) => byTsSeq(a.turn.turn, b.turn.turn));
       const messages = ordered.flatMap((t) => mapTurnToMessages(t.turn, t.body, runsById));
-      optionsRef.current.onSnapshot(sid, messages);
+      const withBanner = instructionWidgetNode
+        ? [mapInstructionWidgetToMessage(instructionWidgetNode), ...messages]
+        : messages;
+      optionsRef.current.onSnapshot(sid, withBanner);
     }
 
     function pushUpsert(turnId: string): void {
@@ -123,6 +129,7 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
       turnsById.clear();
       runsById.clear();
       for (const run of envelope.runs) runsById.set(run.run_ref, run);
+      instructionWidgetNode = envelope.instruction_widget ?? null;
 
       for (let i = 0; i < envelope.turns.length; i++) {
         const turn = envelope.turns[i];
@@ -160,6 +167,11 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
             const cursor = currentCursor();
             if (socket && cursor) socket.trackCursor([cursor]);
             const node = frame.node;
+            if (node.kind === "instruction_widget") {
+              instructionWidgetNode = node;
+              optionsRef.current.onUpsertMessage(sid, mapInstructionWidgetToMessage(node));
+              return;
+            }
             const existing = turnsById.get(node.turn_id);
             if (!existing) {
               if (node.kind !== "typed_prompt") return; // no anchoring turn yet
