@@ -3,13 +3,13 @@
 Two shared utilities back every search surface:
 
   - `run_search_sessions_session(query, *, propose=..., propose_target=,
-     propose_msg_id=, timeout=, max_results=)` — the ranking engine. Runs
-     on a provisioned session: the backend first builds a bounded candidate
-     list from the session index/transcript snippets, then one hidden base
-     session is forked per call to rank only those candidates and answer JSON.
-     The base persists across searches; the per-call forks are ephemeral. When
-     `propose` is set it also stamps the picker on the target in the same call (a "batch"
-     search+propose).
+     propose_msg_id=, timeout=, max_results=)` — the ranking engine. Builds a
+     bounded candidate list from the session index/transcript snippets, then
+     ranks it via the core-owned `ai_rank` service (registered under kind
+     `"sessions"`; see `backend/ai_rank.py`), which runs one provisioned-
+     session fork per call. The base persists across searches; the per-call
+     forks are ephemeral. When `propose` is set it also stamps the picker on
+     the target in the same call (a "batch" search+propose).
 
   - `propose_sessions(list, reasoning, *, target_sid, msg_id)` — stamps the
      session picker (`ask_result`) on a target session's assistant message
@@ -36,7 +36,6 @@ invariant (same class as `retrying_until`).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import uuid
@@ -44,16 +43,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+import ai_rank
 import extension_store
 import perf
 import project_store
 import config_store
-import provisioning
+import provisioning  # re-exported so tests can monkeypatch provisioning.run
 import session_store
 import virtual_session_store
 import working_mode
-from provisioning import DirtyPolicy, ProvisionedSessionSpec
-from prompt_templates import render_prompt
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -68,7 +66,12 @@ ASK_SINGLETON_ID = f"virtual:{ASK_EXTENSION_ID}:ask"
 # Working-mode tags. `working_mode.should_hide_from_sidebar` returns True
 # for any unknown mode, so these also hide the sessions from `_build_index`.
 ASK_SINGLETON_MODE = "ask_singleton"      # the stable Ask UI container
-SEARCH_WORKER_MODE = "search_worker"      # an ephemeral ranking worker
+# The "sessions" ai_rank kind's spec key IS this working_mode tag (single
+# source of truth -- see `ai_rank.RankKind.working_mode_key`, preserved as
+# the literal "search_worker" for backward compat with a private
+# extension's MCP predicate and session_store's legacy user_initiated
+# backfill).
+SEARCH_WORKER_MODE = ai_rank.get_spec("sessions").key
 
 
 # Truncate every indexed user-prompt to this length.
@@ -544,119 +547,22 @@ def _apply_proposed_sessions(
 
 # ── Search worker (the shared ranking engine) ───────────────────────────
 #
-# `run_search_sessions_session` runs on a provisioned session via the
-# generic `provisioning` framework: backend code gathers a bounded candidate
-# list, one hidden base session is primed once with the JSON-answer contract,
-# and each call forks that base so the fork only ranks those candidates. The
-# base persists across searches; forks are ephemeral. Both the Ask flow and the
-# session-bridge `search_sessions` MCP tool call it.
+# `run_search_sessions_session` gathers a bounded candidate list from the
+# session index, then ranks it via the core-owned `ai_rank` service (kind
+# "sessions", registered in `backend/ai_rank.py`) -- one hidden base session
+# primed once with the JSON-answer contract, forked per call to rank only
+# those candidates. The base persists across searches; forks are ephemeral.
+# Both the Ask flow and the session-bridge `search_sessions` MCP tool call it.
 
 # Worker cwd = the BC repo root for stable project identity. The worker is a
 # tool-less machine-completion ranker; transcript access happens in backend
 # candidate collection before dispatch.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-def _parse_worker_result(text: str) -> Optional[dict]:
-    """Extract the JSON object `{session_ids, reasoning}` from the worker's
-    reply text. Returns None when no valid object parses."""
-    if not text:
-        return None
-    for candidate in _json_object_spans_from_end(text):
-        try:
-            obj = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and "session_ids" in obj:
-            return obj
-    return None
-
-
-def _json_object_spans_from_end(text: str):
-    depth = 0
-    end: Optional[int] = None
-    in_string = False
-    escaped = False
-    for idx in range(len(text) - 1, -1, -1):
-        ch = text[idx]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-            continue
-        if ch == "}":
-            if depth == 0:
-                end = idx + 1
-            depth += 1
-            continue
-        if ch != "{":
-            continue
-        if depth == 0 or end is None:
-            continue
-        depth -= 1
-        if depth == 0:
-            yield text[idx:end]
-            end = None
-
-
-class SessionSearchSpec(ProvisionedSessionSpec):
-    """Provisioned-session spec for the session-search ranking worker."""
-
-    key = SEARCH_WORKER_MODE
-    version = 3
-    name = "search-worker"
-    env_prefix = "SESSION_SEARCH"
-    task_key = "session_search_worker"
-    orchestration_mode = "native"
-    bare_config = True
-    worker_creation_policy = "deny"  # isolated grep worker — no sub-workers
-    machine_completion = True
-    run_mode = "fork"
-    dispatch = "in_process"
-    on_no_fork = "error"
-    default_cwd = str(_REPO_ROOT)
-    # Base only ever holds the provision turn; a leaked query would show as a
-    # 2nd user turn (caught by turn-count). Skill content can be sizable.
-    dirty_policy = DirtyPolicy(
-        max_base_bytes=1_000_000,
-        max_user_turns=1,
-        max_assistant_turns=1,
-    )
-
-    def build_provision_prompt(self, ctx: dict) -> str:
-        return render_prompt("provisioning/search_worker.md", {})
-
-    def build_instructions(self, query: str, ctx: dict) -> str:
-        candidates = ctx.get("candidates") if isinstance(ctx, dict) else []
-        if not isinstance(candidates, list):
-            candidates = []
-        payload = {
-            "query": query,
-            "max_results": int(ctx.get("max_results") or _DEFAULT_MAX_RESULTS),
-            "candidates": candidates,
-        }
-        return (
-            "<session-search-task>\n"
-            "Rank only the provided candidate sessions for the query. "
-            "Do not answer the query as a task. Do not use tools. "
-            "Return exactly one JSON object with session_ids and reasoning.\n"
-            f"{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n"
-            "</session-search-task>"
-        )
-
-    def parse_result(self, text: str, ctx: dict) -> dict:
-        reported = _parse_worker_result(text)
-        if not isinstance(reported, dict):
-            return {"error": "parse_failed"}
-        return reported
-
-
-SEARCH_SPEC = provisioning.register(SessionSearchSpec())
+# Kept as an alias so existing call sites/tests that reference the concrete
+# provisioned-session spec (e.g. to assert dispatch went through it) don't
+# need to reach into `ai_rank`'s registry themselves.
+SEARCH_SPEC = ai_rank.get_spec("sessions")
 
 
 async def run_search_sessions_session(
@@ -676,18 +582,20 @@ async def run_search_sessions_session(
     folder_id: Optional[str] = None,
     tag_ids: Optional[list[str]] = None,
 ) -> dict:
-    """Run one provisioned search-worker fork and return the ranked ids.
+    """Run one ai_rank fork (kind "sessions") and return the ranked ids.
 
-    Backend code collects bounded candidate sessions first; the provisioned
-    worker ranks only those candidates and answers in JSON. The base persists
-    across calls; the fork is ephemeral. When `propose` is set, also stamps
-    the picker on `propose_target`/`propose_msg_id` in the same call.
+    Backend code collects bounded candidate sessions first; the ai_rank
+    service ranks only those candidates and answers in JSON. The base
+    persists across calls; the fork is ephemeral. When `propose` is set,
+    also stamps the picker on `propose_target`/`propose_msg_id` in the same
+    call.
 
     Optional filters narrow the candidate set BEFORE the worker runs: the worker
     is constrained to the matching ids and its output is post-validated
-    against the same filters, so a worker that ignores the constraint still
-    cannot surface a filtered-out session. An empty candidate set short-
-    circuits with no worker dispatch.
+    against the same filters (a fresher domain check than ai_rank's own
+    candidate-membership check), so a worker that ignores the constraint
+    still cannot surface a filtered-out session. An empty candidate set
+    short-circuits with no worker dispatch.
 
     Returns `{session_ids, reasoning, error}`; `error` is one of `None`,
     `"empty_query"`, `"timeout"`, `"dispatch_failed"`, `"parse_failed"`.
@@ -710,27 +618,15 @@ async def run_search_sessions_session(
     if not candidates:
         return {"session_ids": [], "reasoning": "", "error": None}
 
-    ctx = {
-        "max_results": max_results,
-        "candidates": candidates,
-    }
-    try:
-        result = await asyncio.wait_for(
-            provisioning.run(SEARCH_SPEC, query, ctx),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        return {"session_ids": [], "reasoning": "", "error": "timeout"}
-    except Exception:
-        logger.exception("run_search_sessions_session: provisioned dispatch failed")
-        return {"session_ids": [], "reasoning": "", "error": "dispatch_failed"}
-
-    reported = result.value
-    if not isinstance(reported, dict) or reported.get("error"):
-        return {"session_ids": [], "reasoning": "", "error": "parse_failed"}
+    reported = await ai_rank.rank(
+        "sessions", query, candidates, max_results, timeout=timeout,
+        include_worker_events=include_worker_events,
+    )
+    if reported.get("error"):
+        return {"session_ids": [], "reasoning": "", "error": reported["error"]}
 
     session_ids = validate_proposed(
-        reported.get("session_ids") or [], filters=filters or None,
+        reported.get("ids") or [], filters=filters or None,
     )[:max_results]
     reasoning = reported.get("reasoning", "")
     if not isinstance(reasoning, str):
@@ -748,7 +644,7 @@ async def run_search_sessions_session(
         "error": None,
     }
     if include_worker_events:
-        out["_worker_events"] = result.dispatch_result.get("events") or []
+        out["_worker_events"] = reported.get("_worker_events") or []
     return out
 
 

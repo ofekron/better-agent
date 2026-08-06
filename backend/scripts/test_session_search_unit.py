@@ -307,8 +307,8 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     async def _fake_run(spec, query, ctx=None, *, model=None):
         calls.append((spec, query, ctx))
         return ProvisionedResult(
-            text='{"session_ids": ["auth-local", "ghost"], "reasoning": "r"}',
-            value={"session_ids": ["auth-local", "ghost"], "reasoning": "worker reasoning"},
+            text='{"ids": ["auth-local", "ghost"], "reasoning": "r"}',
+            value={"ids": ["auth-local", "ghost"], "reasoning": "worker reasoning"},
             config=None,
             base_session_id="base",
             caller_session_id="caller",
@@ -369,7 +369,7 @@ def test_search_worker_instructions_wrap_bounded_candidates() -> bool:
     if instructions == "fix auth latency":
         print(f"{FAIL} instructions: raw query leaked as full prompt")
         return False
-    if "<session-search-task>" not in instructions or "</session-search-task>" not in instructions:
+    if "<ai-rank-task" not in instructions or "</ai-rank-task>" not in instructions:
         print(f"{FAIL} instructions: missing task wrapper {instructions!r}")
         return False
     if '"max_results":3' not in instructions or '"id":"s1"' not in instructions:
@@ -512,13 +512,17 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
 
 
 def test_worker_parser_uses_last_valid_json_object() -> bool:
+    # The trailing-JSON parse now lives solely in `ai_rank` (single source of
+    # truth for every ai_rank kind, not just sessions).
+    import ai_rank
+
     text = (
         "I considered this malformed note first: {not json}\n"
         "{\"ignored\": true}\n"
-        "{\"session_ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
+        "{\"ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
     )
-    parsed = session_search._parse_worker_result(text)
-    if parsed != {"session_ids": ["live-1"], "reasoning": "matched {brace}"}:
+    parsed = ai_rank._parse_worker_result(text)
+    if parsed != {"ids": ["live-1"], "reasoning": "matched {brace}"}:
         print(f"{FAIL} parser last valid object: got {parsed!r}")
         return False
     print(f"{PASS} parser accepts final valid JSON object after brace noise")
@@ -821,7 +825,7 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
         # Worker (mis)behaves: returns a filtered-out id alongside a match.
         return type("_R", (), {
             "value": {
-                "session_ids": ["other-1", "match-1"],
+                "ids": ["other-1", "match-1"],
                 "reasoning": "r",
             },
         })()
@@ -904,7 +908,7 @@ def test_run_search_sessions_scope_filters_candidates_and_postvalidates() -> boo
         captured["ctx"] = ctx or {}
         return type("_R", (), {
             "value": {
-                "session_ids": ["wrong-cwd", "wrong-tag", "scoped-1"],
+                "ids": ["wrong-cwd", "wrong-tag", "scoped-1"],
                 "reasoning": "r",
             },
             "dispatch_result": {},

@@ -1035,6 +1035,53 @@ async def internal_provisioned_session(
     }
 
 
+@router.post("/api/internal/ai-rank")
+async def internal_ai_rank(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Extension-facing primitive (Better Agent SDK): rank a bounded
+    candidate list for one manifest-declared `permissions.ai_rank_kinds`
+    kind via the core-owned `ai_rank` service. Deliberately narrower than
+    `/api/internal/provisioned-sessions`: no prompt/spec fields -- the
+    kind's registered `RankSpec` supplies the one shared ranking prompt."""
+    if not internal_guards.authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    extension_id = internal_guards.internal_authority_extension_id() or ""
+    record = extension_store.get_extension(extension_id) if extension_id else None
+    if (
+        record is None
+        or not extension_store.is_extension_active(extension_id)
+        or not extension_store.has_permission(record, "spawn_runs")
+    ):
+        raise HTTPException(status_code=403, detail="extension lacks spawn_runs permission")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    kind = body.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise HTTPException(status_code=400, detail="kind must be a non-empty string")
+    kind = kind.strip()
+    declared_kinds = extension_store.extension_ai_rank_kinds(record)
+    task_key = declared_kinds.get(kind)
+    if task_key is None:
+        raise HTTPException(status_code=403, detail=f"extension does not declare ai_rank kind: {kind}")
+    query = body.get("query", "")
+    if query is None:
+        query = ""
+    if not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="query must be a string")
+    max_results = body.get("max_results", 20)
+
+    import ai_rank
+
+    try:
+        ai_rank.register_kind(ai_rank.RankKind(kind=kind, task_key=task_key))
+        result = await ai_rank.rank(kind, query, body.get("candidates"), max_results)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
 @router.post("/api/internal/extension-settings")
 async def internal_extension_settings(
     body: dict,

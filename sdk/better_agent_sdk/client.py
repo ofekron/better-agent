@@ -406,6 +406,35 @@ class Client:
             timeout=timeout,
         )
 
+    def ai_rank(
+        self,
+        kind: str,
+        query: str,
+        candidates: list[dict[str, Any]],
+        max_results: int,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Rank a bounded candidate list via core's generic ai_rank service.
+
+        `kind` must be declared by this extension's manifest under
+        `permissions.ai_rank_kinds` (`{kind: task_key}`); core rejects an
+        undeclared kind with HTTP 403. Returns
+        `{ids, reasoning, error, error_detail?}` -- `error` is one of
+        `None`, `"empty_query"`, `"timeout"`, `"dispatch_failed"`,
+        `"parse_failed"`. Requires `spawn_runs`.
+        """
+        return self._post(
+            "/api/internal/ai-rank",
+            {
+                "kind": kind,
+                "query": query,
+                "candidates": candidates,
+                "max_results": max_results,
+            },
+            timeout=timeout if timeout is not None else _LONG_TIMEOUT,
+        )
+
     # ── extension settings ────────────────────────────────────────────
     def get_settings(self) -> dict[str, Any]:
         """Read this extension's own declared settings (manifest
