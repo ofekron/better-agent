@@ -95,7 +95,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(json.dumps(r) + "\n")
 
 
-def test_dirty_reason() -> bool:
+def test_dirty_reason() -> None:
     policy = DirtyPolicy(
         max_base_bytes=1000,
         max_user_turns=1,
@@ -105,17 +105,13 @@ def test_dirty_reason() -> bool:
     cwd = "/tmp/proj"
 
     # No agent_sid yet → clean (not provisioned).
-    if dirty_reason({}, policy, cwd):
-        print(f"{FAIL} dirty: no agent_sid should be clean")
-        return False
+    assert not dirty_reason({}, policy, cwd), "dirty: no agent_sid should be clean"
 
-    if "no provider session id" not in dirty_reason(
+    assert "no provider session id" in dirty_reason(
         {"messages": [{"role": "user", "content": "stuck prep"}]},
         policy,
         cwd,
-    ):
-        print(f"{FAIL} dirty: failed initialization not detected")
-        return False
+    ), "dirty: failed initialization not detected"
 
     # compute_jsonl_path globs real disk; monkeypatch it to map our fake
     # agent_sids to temp jsonl files we control.
@@ -140,15 +136,11 @@ def test_dirty_reason() -> bool:
             {"type": "user", "message": {"content": "ready prompt"}},
             {"type": "assistant", "message": {"content": "ready"}},
         ])
-        if dirty_reason({"agent_session_id": clean}, policy, cwd):
-            print(f"{FAIL} dirty: clean base flagged dirty")
-            return False
+        assert not dirty_reason({"agent_session_id": clean}, policy, cwd), "dirty: clean base flagged dirty"
 
         # Dirty: too big.
         big = _seed("big-sid", [{"type": "user", "message": {"content": "x" * 2000}}])
-        if not dirty_reason({"agent_session_id": big}, policy, cwd):
-            print(f"{FAIL} dirty: oversized base not flagged")
-            return False
+        assert dirty_reason({"agent_session_id": big}, policy, cwd), "dirty: oversized base not flagged"
 
         # Dirty: a second user turn (a query leaked into the base).
         two = _seed("two-sid", [
@@ -156,36 +148,29 @@ def test_dirty_reason() -> bool:
             {"type": "assistant", "message": {"content": "ready"}},
             {"type": "user", "message": {"content": "second turn leaked"}},
         ])
-        if not dirty_reason({"agent_session_id": two}, policy, cwd):
-            print(f"{FAIL} dirty: 2 user-turn base not flagged")
-            return False
+        assert dirty_reason({"agent_session_id": two}, policy, cwd), "dirty: 2 user-turn base not flagged"
 
         # Dirty: leak marker in a user turn.
         leak = _seed("leak-sid", [
             {"type": "user", "message": {"content": "LEAKED_QUERY_MARKER stuff"}},
         ])
-        if not dirty_reason({"agent_session_id": leak}, policy, cwd):
-            print(f"{FAIL} dirty: leak marker not flagged")
-            return False
+        assert dirty_reason({"agent_session_id": leak}, policy, cwd), "dirty: leak marker not flagged"
 
         # Dirty: API-error assistant turn.
         err = _seed("err-sid", [
             {"type": "user", "message": {"content": "provision"}},
             {"type": "assistant", "message": {"content": "x"}, "isApiErrorMessage": True},
         ])
-        if not dirty_reason({"agent_session_id": err}, policy, cwd):
-            print(f"{FAIL} dirty: api-error turn not flagged")
-            return False
+        assert dirty_reason({"agent_session_id": err}, policy, cwd), "dirty: api-error turn not flagged"
     finally:
         jh.compute_jsonl_path = original  # type: ignore[assignment]
 
     print(f"{PASS} dirty_reason: clean / failed-init / size / turn-count / leak / api-error")
-    return True
 
 
 # ── expired_reason (lifetime recycling) ───────────────────────────────
 
-def test_expired_reason() -> bool:
+def test_expired_reason() -> None:
     class _Fresh(ProvisionedSessionSpec):
         lifetime_seconds = 60.0
 
@@ -196,33 +181,24 @@ def test_expired_reason() -> bool:
     now = time.time()
 
     # No lifetime configured ⇒ never expired.
-    if expired_reason({"working_mode_meta": {"provisioned_at": 0}}, _NoLifetime()):
-        print(f"{FAIL} expired: no-lifetime spec flagged expired")
-        return False
+    assert not expired_reason({"working_mode_meta": {"provisioned_at": 0}}, _NoLifetime()), "expired: no-lifetime spec flagged expired"
 
     # Fresh stamp ⇒ not expired.
-    if expired_reason({"working_mode_meta": {"provisioned_at": now}}, fresh):
-        print(f"{FAIL} expired: fresh base flagged expired")
-        return False
+    assert not expired_reason({"working_mode_meta": {"provisioned_at": now}}, fresh), "expired: fresh base flagged expired"
 
     # Old stamp ⇒ expired.
     old = {"working_mode_meta": {"provisioned_at": now - 120.0}}
-    if not expired_reason(old, fresh):
-        print(f"{FAIL} expired: aged base not flagged")
-        return False
+    assert expired_reason(old, fresh), "expired: aged base not flagged"
 
     # Missing stamp (predates lifetime tracking) ⇒ expired so it gets re-stamped.
-    if not expired_reason({"working_mode_meta": {}}, fresh):
-        print(f"{FAIL} expired: unstamped base not flagged")
-        return False
+    assert expired_reason({"working_mode_meta": {}}, fresh), "expired: unstamped base not flagged"
 
     print(f"{PASS} expired_reason: fresh / aged / unstamped / no-lifetime")
-    return True
 
 
 # ── spec + registry ───────────────────────────────────────────────────
 
-def test_spec_and_registry() -> bool:
+def test_spec_and_registry() -> None:
     class _S(ProvisionedSessionSpec):
         key = "unit_test_spec"
         version = 7
@@ -236,27 +212,18 @@ def test_spec_and_registry() -> bool:
             return "prep"
 
     s = register(_S())
-    if s.machine_completion is not False or s.bare_config is not False:
-        print(f"{FAIL} spec: subclass override ignored")
-        return False
-    if provisioning.get("unit_test_spec") is not s:
-        print(f"{FAIL} registry: get did not return registered instance")
-        return False
+    assert s.machine_completion is False and s.bare_config is False, "spec: subclass override ignored"
+    assert provisioning.get("unit_test_spec") is s, "registry: get did not return registered instance"
     # Defaults from the base class survive.
-    if _S().run_mode != "fork" or _S().dispatch != "http" or _S().ephemeral_forks is not True:
-        print(f"{FAIL} spec: base defaults wrong")
-        return False
+    assert _S().run_mode == "fork" and _S().dispatch == "http" and _S().ephemeral_forks is True, "spec: base defaults wrong"
     # build_instructions default = just the query.
-    if _S().build_instructions("hello", {}) != "hello":
-        print(f"{FAIL} spec: default build_instructions not identity")
-        return False
+    assert _S().build_instructions("hello", {}) == "hello", "spec: default build_instructions not identity"
     print(f"{PASS} ProvisionedSessionSpec overrides + registry")
-    return True
 
 
 # ── resolve_config ────────────────────────────────────────────────────
 
-def test_resolve_config_overlay() -> bool:
+def test_resolve_config_overlay() -> None:
     class _S(ProvisionedSessionSpec):
         key = "cfg_test_spec"
         env_prefix = "CFG_TEST"
@@ -272,18 +239,13 @@ def test_resolve_config_overlay() -> bool:
     finally:
         del os.environ["CFG_TEST_MODEL"]
         del os.environ["CFG_TEST_DISPATCH"]
-    if cfg.model != "overridden-model" or cfg.dispatch != "http":
-        print(f"{FAIL} resolve_config: env overlay not applied (model={cfg.model}, dispatch={cfg.dispatch})")
-        return False
+    assert cfg.model == "overridden-model" and cfg.dispatch == "http", f"resolve_config: env overlay not applied (model={cfg.model}, dispatch={cfg.dispatch})"
 
     # Invalid choice raises.
     os.environ["CFG_TEST_DISPATCH"] = "bogus"
     try:
-        resolve_config(_S())
-        print(f"{FAIL} resolve_config: bogus dispatch did not raise")
-        return False
-    except RuntimeError:
-        pass
+        with pytest.raises(RuntimeError):
+            resolve_config(_S())
     finally:
         del os.environ["CFG_TEST_DISPATCH"]
 
@@ -291,17 +253,12 @@ def test_resolve_config_overlay() -> bool:
         key = "cfg_test_spec2"
         env_prefix = "CFG_TEST2"
         task_key = ""  # no app-settings resolution
-    try:
+    with pytest.raises(RuntimeError):
         resolve_config(_S2())
-        print(f"{FAIL} resolve_config: missing model did not raise")
-        return False
-    except RuntimeError:
-        pass
     print(f"{PASS} resolve_config: env overlay + choice validation + missing model rejection")
-    return True
 
 
-def test_resolve_config_uses_runtime_profile_authority_and_typed_errors() -> bool:
+def test_resolve_config_uses_runtime_profile_authority_and_typed_errors() -> None:
     import config_store
 
     class _S(ProvisionedSessionSpec):
@@ -354,7 +311,6 @@ def test_resolve_config_uses_runtime_profile_authority_and_typed_errors() -> boo
         config_store.resolve_internal_llm = original_resolve_task
         config_store.resolve_provider_ref = original_resolve_provider
     print(f"{PASS} resolve_config: runtime-profile authority + typed failures")
-    return True
 
 
 def test_custom_config_rejects_unsupported_fork_provider() -> None:
@@ -395,7 +351,7 @@ def test_custom_config_rejects_unsupported_fork_provider() -> None:
     assert fork_unsupported.value.code == "fork_unsupported"
 
 
-def test_fork_capability_checks_never_resolve_credentials() -> bool:
+def test_fork_capability_checks_never_resolve_credentials() -> None:
     import config_store
     import provider
 
@@ -422,12 +378,11 @@ def test_fork_capability_checks_never_resolve_credentials() -> bool:
         config_store.resolve_provider_ref = original_resolve
         config_store.list_providers = original_list
         provider.get_provider = original_get_provider
-    ok = values == (True, True, False, False, True)
-    print(f"{PASS if ok else FAIL} provisioning fork checks avoid credential reads")
-    return ok
+    assert values == (True, True, False, False, True), "provisioning fork checks avoid credential reads"
+    print(f"{PASS} provisioning fork checks avoid credential reads")
 
 
-def test_resolve_config_uses_current_disk_token() -> bool:
+def test_resolve_config_uses_current_disk_token() -> None:
     class _S(ProvisionedSessionSpec):
         key = "cfg_token_spec"
         env_prefix = "CFG_TOKEN"
@@ -451,23 +406,17 @@ def test_resolve_config_uses_current_disk_token() -> bool:
         os.environ["CFG_TOKEN_PROVIDER_ID"] = "provider"
         os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
         cfg = resolve_config(_S())
-        if cfg.internal_token != disk_token:
-            print(f"{FAIL} resolve_config token: disk token did not beat stale env")
-            return False
+        assert cfg.internal_token == disk_token, "resolve_config token: disk token did not beat stale env"
 
         explicit_token = "x" * 32
         os.environ["CFG_TOKEN_INTERNAL_TOKEN"] = explicit_token
         cfg = resolve_config(_S())
-        if cfg.internal_token != explicit_token:
-            print(f"{FAIL} resolve_config token: explicit spec token did not win")
-            return False
+        assert cfg.internal_token == explicit_token, "resolve_config token: explicit spec token did not win"
 
         token_path.unlink()
         os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
         cfg = resolve_config(_S())
-        if cfg.internal_token != "a" * 32:
-            print(f"{FAIL} resolve_config token: env fallback did not survive missing disk")
-            return False
+        assert cfg.internal_token == "a" * 32, "resolve_config token: env fallback did not survive missing disk"
     finally:
         for key, value in original_env.items():
             if value is None:
@@ -476,10 +425,9 @@ def test_resolve_config_uses_current_disk_token() -> bool:
                 os.environ[key] = value
         token_path.unlink(missing_ok=True)
     print(f"{PASS} resolve_config token: explicit > disk > env")
-    return True
 
 
-def test_dispatch_sends_resolved_disk_token() -> bool:
+def test_dispatch_sends_resolved_disk_token() -> None:
     class _S(ProvisionedSessionSpec):
         key = "cfg_dispatch_token_spec"
         env_prefix = "CFG_DISPATCH_TOKEN"
@@ -526,18 +474,15 @@ def test_dispatch_sends_resolved_disk_token() -> bool:
             else:
                 os.environ[key] = value
         token_path.unlink(missing_ok=True)
-    ok = captured == [disk_token]
-    print(f"{PASS if ok else FAIL} dispatch uses resolved disk token (captured={captured!r})")
-    return ok
+    assert captured == [disk_token], f"dispatch uses resolved disk token (captured={captured!r})"
+    print(f"{PASS} dispatch uses resolved disk token (captured={captured!r})")
 
 
 # ── extract_fork_text ─────────────────────────────────────────────────
 
-def test_extract_fork_text() -> bool:
+def test_extract_fork_text() -> None:
     # sdk_output short-circuits.
-    if extract_fork_text({"sdk_output": "  hello  "}) != "hello":
-        print(f"{FAIL} extract: sdk_output path")
-        return False
+    assert extract_fork_text({"sdk_output": "  hello  "}) == "hello", "extract: sdk_output path"
 
     # jsonl byte window: write two assistant rows, sample the second.
     tmp = Path(os.environ["BETTER_CLAUDE_HOME"]) / "fork.jsonl"
@@ -551,14 +496,11 @@ def test_extract_fork_text() -> bool:
         "new_byte_offset": start + 1,
         "total_bytes_now": len((row1 + row2).encode("utf-8")),
     })
-    if text != "second":
-        print(f"{FAIL} extract: jsonl byte window got {text!r}")
-        return False
+    assert text == "second", f"extract: jsonl byte window got {text!r}"
     print(f"{PASS} extract_fork_text: sdk_output + jsonl byte window")
-    return True
 
 
-def test_run_serializes_lifecycle_creation() -> bool:
+def test_run_serializes_lifecycle_creation() -> None:
     class _S(ProvisionedSessionSpec):
         key = "lifecycle_lock_test"
         env_prefix = "LIFECYCLE_LOCK_TEST"
@@ -632,17 +574,12 @@ def test_run_serializes_lifecycle_creation() -> bool:
         prov_manager.dispatch = original_dispatch
         prov_manager._ensure_ready_base_locked = original_ready_base
 
-    if errors:
-        print(f"{FAIL} lifecycle lock: concurrent run failed with {errors[0]}")
-        return False
-    if max_active != 1:
-        print(f"{FAIL} lifecycle lock: ensure_session ran concurrently (max_active={max_active})")
-        return False
+    assert not errors, f"lifecycle lock: concurrent run failed with {errors[0]}"
+    assert max_active == 1, f"lifecycle lock: ensure_session ran concurrently (max_active={max_active})"
     print(f"{PASS} lifecycle lock: base/caller creation serialized")
-    return True
 
 
-def test_run_lifecycle_runs_off_event_loop() -> bool:
+def test_run_lifecycle_runs_off_event_loop() -> None:
     class _S(ProvisionedSessionSpec):
         key = "lifecycle_off_loop_test"
         env_prefix = "LIFECYCLE_OFF_LOOP_TEST"
@@ -704,26 +641,15 @@ def test_run_lifecycle_runs_off_event_loop() -> bool:
         prov_manager.dispatch = original_dispatch
         prov_manager._ensure_ready_base_locked = original_ready_base
 
-    if result.base_session_id != "base" or result.caller_session_id != "caller":
-        print(f"{FAIL} lifecycle off-loop: wrong lifecycle ids")
-        return False
-    if len(lifecycle_threads) != 2 or not dispatch_thread:
-        print(f"{FAIL} lifecycle off-loop: missing lifecycle/dispatch calls")
-        return False
-    if any(tid == dispatch_thread[0] for _name, tid in lifecycle_threads):
-        print(f"{FAIL} lifecycle off-loop: lifecycle ran on event-loop thread")
-        return False
-    if lifecycle_threads[0][0] != "base" or lifecycle_threads[1][0] != "caller":
-        print(f"{FAIL} lifecycle off-loop: wrong call order {lifecycle_threads}")
-        return False
-    if lifecycle_threads[0][1] != lifecycle_threads[1][1]:
-        print(f"{FAIL} lifecycle off-loop: base/caller split across worker threads")
-        return False
+    assert result.base_session_id == "base" and result.caller_session_id == "caller", "lifecycle off-loop: wrong lifecycle ids"
+    assert len(lifecycle_threads) == 2 and dispatch_thread, "lifecycle off-loop: missing lifecycle/dispatch calls"
+    assert not any(tid == dispatch_thread[0] for _name, tid in lifecycle_threads), "lifecycle off-loop: lifecycle ran on event-loop thread"
+    assert lifecycle_threads[0][0] == "base" and lifecycle_threads[1][0] == "caller", f"lifecycle off-loop: wrong call order {lifecycle_threads}"
+    assert lifecycle_threads[0][1] == lifecycle_threads[1][1], "lifecycle off-loop: base/caller split across worker threads"
     print(f"{PASS} lifecycle off-loop: base/caller creation runs off event loop")
-    return True
 
 
-def test_lifecycle_lock_timeout_surfaces() -> bool:
+def test_lifecycle_lock_timeout_surfaces() -> None:
     class _S(ProvisionedSessionSpec):
         key = "lifecycle_timeout_test"
         env_prefix = "LIFECYCLE_TIMEOUT_TEST"
@@ -757,25 +683,17 @@ def test_lifecycle_lock_timeout_surfaces() -> bool:
     lock.acquire()
     try:
         started = time.monotonic()
-        try:
+        with pytest.raises(TimeoutError) as excinfo:
             prov_manager.run_sync(spec, "", {})
-        except TimeoutError as exc:
-            elapsed = time.monotonic() - started
-            if "lifecycle lock timed out" not in str(exc):
-                print(f"{FAIL} lifecycle timeout: wrong error {exc}")
-                return False
-            if elapsed > 1.0:
-                print(f"{FAIL} lifecycle timeout: took too long ({elapsed:.3f}s)")
-                return False
-            print(f"{PASS} lifecycle lock timeout surfaces")
-            return True
-        print(f"{FAIL} lifecycle timeout: run_sync did not raise")
-        return False
+        elapsed = time.monotonic() - started
+        assert "lifecycle lock timed out" in str(excinfo.value), f"lifecycle timeout: wrong error {excinfo.value}"
+        assert elapsed <= 1.0, f"lifecycle timeout: took too long ({elapsed:.3f}s)"
+        print(f"{PASS} lifecycle lock timeout surfaces")
     finally:
         lock.release()
 
 
-def test_ensure_warm_base_initializes_once() -> bool:
+def test_ensure_warm_base_initializes_once() -> None:
     class _S(ProvisionedSessionSpec):
         key = "warm_base_test"
         env_prefix = "WARM_BASE_TEST"
@@ -862,15 +780,9 @@ def test_ensure_warm_base_initializes_once() -> bool:
         else:
             sys.modules.pop("main", None)
 
-    if first != "base" or second != "base":
-        print(f"{FAIL} warm_base: wrong base ids {first!r}/{second!r}")
-        return False
-    if calls != 1:
-        print(f"{FAIL} warm_base: expected one init call, got {calls}")
-        return False
-    if sessions["base"].get("agent_session_id") != "agent-sid":
-        print(f"{FAIL} warm_base: sid not persisted")
-        return False
+    assert first == "base" and second == "base", f"warm_base: wrong base ids {first!r}/{second!r}"
+    assert calls == 1, f"warm_base: expected one init call, got {calls}"
+    assert sessions["base"].get("agent_session_id") == "agent-sid", "warm_base: sid not persisted"
     expected = [
         "lifecycle_lock_waiting",
         "lifecycle_lock_acquired",
@@ -886,14 +798,11 @@ def test_ensure_warm_base_initializes_once() -> bool:
         "base_session_resolved",
         "base_session_ready",
     ]
-    if milestones != expected:
-        print(f"{FAIL} warm_base milestones: {milestones!r}")
-        return False
+    assert milestones == expected, f"warm_base milestones: {milestones!r}"
     print(f"{PASS} ensure_warm_base initializes only unwarmed bases")
-    return True
 
 
-def test_run_sync_times_out_stuck_dispatch() -> bool:
+def test_run_sync_times_out_stuck_dispatch() -> None:
     class _S(ProvisionedSessionSpec):
         key = "dispatch_timeout_test"
         env_prefix = "DISPATCH_TIMEOUT_TEST"
@@ -939,20 +848,12 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.dispatch = stuck_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         started = time.monotonic()
-        try:
+        with pytest.raises(TimeoutError) as excinfo:
             prov_manager.run_sync(_S(), "", {})
-        except TimeoutError as exc:
-            elapsed = time.monotonic() - started
-            if "provisioned run timed out" not in str(exc):
-                print(f"{FAIL} dispatch timeout: wrong error {exc}")
-                return False
-            if elapsed > 1.0:
-                print(f"{FAIL} dispatch timeout: took too long ({elapsed:.3f}s)")
-                return False
-            print(f"{PASS} dispatch timeout surfaces")
-            return True
-        print(f"{FAIL} dispatch timeout: run_sync did not raise")
-        return False
+        elapsed = time.monotonic() - started
+        assert "provisioned run timed out" in str(excinfo.value), f"dispatch timeout: wrong error {excinfo.value}"
+        assert elapsed <= 1.0, f"dispatch timeout: took too long ({elapsed:.3f}s)"
+        print(f"{PASS} dispatch timeout surfaces")
     finally:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
@@ -985,21 +886,16 @@ def _budget_spec(provision_timeout: float, dispatch_timeout: float | None, retry
     return spec
 
 
-def test_sync_timeout_composes_lifecycle_and_dispatch_budgets() -> bool:
+def test_sync_timeout_composes_lifecycle_and_dispatch_budgets() -> None:
     total = prov_manager._sync_timeout_seconds(_budget_spec(55.0, 45.0))
-    if total != 100.5:
-        print(f"{FAIL} budget composition: expected 100.5, got {total}")
-        return False
+    assert total == 100.5, f"budget composition: expected 100.5, got {total}"
     default_total = prov_manager._sync_timeout_seconds(_budget_spec(10.0, None, retry_attempts=2))
     # lifecycle 10 + dispatch 10×2 + backoff 2.0 + 0.5
-    if default_total != 32.5:
-        print(f"{FAIL} budget composition default: expected 32.5, got {default_total}")
-        return False
+    assert default_total == 32.5, f"budget composition default: expected 32.5, got {default_total}"
     print(f"{PASS} run_sync budget composes lifecycle + dispatch phases")
-    return True
 
 
-def test_dispatch_uses_dispatch_timeout_per_attempt() -> bool:
+def test_dispatch_uses_dispatch_timeout_per_attempt() -> None:
     import provisioning.dispatch as prov_dispatch
 
     spec = _budget_spec(55.0, 7.0)
@@ -1027,14 +923,11 @@ def test_dispatch_uses_dispatch_timeout_per_attempt() -> bool:
         ))
     finally:
         prov_dispatch._post_ask_fork = original
-    if seen != [(7.0, "explicit-delegation")]:
-        print(f"{FAIL} dispatch timeout/id kwargs: got {seen}")
-        return False
+    assert seen == [(7.0, "explicit-delegation")], f"dispatch timeout/id kwargs: got {seen}"
     print(f"{PASS} dispatch attempts use dispatch_timeout, not provision_timeout")
-    return True
 
 
-def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
+def test_in_process_dispatch_uses_explicit_delegation_id() -> None:
     import provisioning.dispatch as prov_dispatch
 
     spec = _budget_spec(55.0, 7.0)
@@ -1068,14 +961,11 @@ def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
             sys.modules["main"] = original_main
         else:
             sys.modules.pop("main", None)
-    if captured.get("client_delegation_id") != "explicit-in-process":
-        print(f"{FAIL} in-process dispatch id: {captured!r}")
-        return False
+    assert captured.get("client_delegation_id") == "explicit-in-process", f"in-process dispatch id: {captured!r}"
     print(f"{PASS} in-process dispatch uses explicit delegation id")
-    return True
 
 
-def test_run_honors_client_delegation_id_from_ctx() -> bool:
+def test_run_honors_client_delegation_id_from_ctx() -> None:
     spec = _budget_spec(55.0, 7.0)
     captured = {}
     original_ensure_session = prov_manager.ensure_session
@@ -1105,11 +995,8 @@ def test_run_honors_client_delegation_id_from_ctx() -> bool:
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
         prov_manager._ensure_ready_base_locked = original_ready_base
-    if captured.get("client_delegation_id") != "job-owned-id":
-        print(f"{FAIL} run client_delegation_id from ctx: {captured!r}")
-        return False
+    assert captured.get("client_delegation_id") == "job-owned-id", f"run client_delegation_id from ctx: {captured!r}"
     print(f"{PASS} run honors client_delegation_id from ctx")
-    return True
 
 
 def test_run_emits_provider_neutral_milestones() -> None:
@@ -1396,7 +1283,7 @@ def test_http_dispatch_projects_delegation_status_to_milestones() -> None:
     assert "milestone-http-dispatch" not in delegation_status_store._LISTENERS
 
 
-def test_run_logs_phase_timings_for_debug_requests() -> bool:
+def test_run_logs_phase_timings_for_debug_requests() -> None:
     spec = _budget_spec(55.0, 7.0)
     original_ensure_session = prov_manager.ensure_session
     original_ensure_caller = prov_manager.ensure_caller
@@ -1440,9 +1327,7 @@ def test_run_logs_phase_timings_for_debug_requests() -> bool:
         prov_manager.logger.info = original_info
 
     timing_rows = [args for message, args in captured if message.startswith("provisioned_run_timing")]
-    if not timing_rows:
-        print(f"{FAIL} phase timings: no provisioned_run_timing log")
-        return False
+    assert timing_rows, "phase timings: no provisioned_run_timing log"
     timing_text = str(timing_rows[-1][-1])
     expected = (
         "resolve_config_ms=",
@@ -1457,14 +1342,11 @@ def test_run_logs_phase_timings_for_debug_requests() -> bool:
         "dispatch_runner_enqueue_to_terminal_event_ms=",
         "total_ms=",
     )
-    if not all(part in timing_text for part in expected):
-        print(f"{FAIL} phase timings: missing fields in {timing_text!r}")
-        return False
+    assert all(part in timing_text for part in expected), f"phase timings: missing fields in {timing_text!r}"
     print(f"{PASS} run logs phase timings for debug requests")
-    return True
 
 
-def test_delegation_tool_activity_detector_reads_canonical_message_content() -> bool:
+def test_delegation_tool_activity_detector_reads_canonical_message_content() -> None:
     from orchs.manager._delegation import _delegation_event_is_tool_activity
 
     event = {
@@ -1479,14 +1361,11 @@ def test_delegation_tool_activity_detector_reads_canonical_message_content() -> 
             },
         },
     }
-    if not _delegation_event_is_tool_activity(event):
-        print(f"{FAIL} delegation timing: canonical tool_use block not detected")
-        return False
+    assert _delegation_event_is_tool_activity(event), "delegation timing: canonical tool_use block not detected"
     print(f"{PASS} delegation timing detects canonical tool activity")
-    return True
 
 
-def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
+def test_run_sync_survives_lifecycle_plus_full_dispatch() -> None:
     """Lifecycle and dispatch each within their own budget, but their SUM
     above the old provision_timeout+0.5 total — must succeed post-fix."""
     spec = _budget_spec(1.0, 1.0)
@@ -1509,22 +1388,16 @@ def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
         prov_manager.dispatch = slow_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         result = prov_manager.run_sync(spec, "", {})
-    except TimeoutError as exc:
-        print(f"{FAIL} phase budgets: run_sync raised {exc}")
-        return False
     finally:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
         prov_manager._ensure_ready_base_locked = original_ready_base
-    if result.text != "late-but-legal":
-        print(f"{FAIL} phase budgets: wrong result {result.text!r}")
-        return False
+    assert result.text == "late-but-legal", f"phase budgets: wrong result {result.text!r}"
     print(f"{PASS} run_sync tolerates lifecycle + dispatch each using their own budget")
-    return True
 
 
-def test_lifecycle_lock_budget_stays_on_provision_timeout() -> bool:
+def test_lifecycle_lock_budget_stays_on_provision_timeout() -> None:
     spec = _budget_spec(0.1, 30.0)
     cfg = ProvisionedConfig(
         cwd="/repo-lock", model="model", provider_id="provider", reasoning_effort="",
@@ -1537,46 +1410,33 @@ def test_lifecycle_lock_budget_stays_on_provision_timeout() -> bool:
     lock.acquire()
     started = time.monotonic()
     try:
-        with prov_manager._acquired_lifecycle_lock(spec, cfg):
-            print(f"{FAIL} lifecycle lock: acquired while held")
-            return False
-    except TimeoutError:
+        with pytest.raises(TimeoutError):
+            with prov_manager._acquired_lifecycle_lock(spec, cfg):
+                pass
         elapsed = time.monotonic() - started
-        if elapsed > 5.0:
-            print(f"{FAIL} lifecycle lock: waited {elapsed:.1f}s — used dispatch_timeout?")
-            return False
+        assert elapsed <= 5.0, f"lifecycle lock: waited {elapsed:.1f}s — used dispatch_timeout?"
     finally:
         lock.release()
     print(f"{PASS} lifecycle lock budget stays on provision_timeout")
-    return True
 
 
-def test_startup_wires_requirements_processor_prewarm() -> bool:
+def test_startup_wires_requirements_processor_prewarm() -> None:
     import requirement_prewarm
 
     main_src = (Path(_BACKEND) / "app_lifecycle.py").read_text(encoding="utf-8")
-    if "requirements-processor-prewarm" not in main_src:
-        print(f"{FAIL} startup wiring: prewarm task not created in main.py")
-        return False
-    if "run_requirements_prewarm" not in main_src:
-        print(f"{FAIL} startup wiring: run_requirements_prewarm not called from main.py")
-        return False
+    assert "requirements-processor-prewarm" in main_src, "startup wiring: prewarm task not created in main.py"
+    assert "run_requirements_prewarm" in main_src, "startup wiring: run_requirements_prewarm not called from main.py"
     orchestrator_src = main_src[main_src.index("async def _on_startup_bg_orchestrator"):]
     reconcile_index = orchestrator_src.index("list_extensions_with_reconciliation")
     tags_index = orchestrator_src.index("bind_requirement_tags_loop(loop)")
     prewarm_index = orchestrator_src.index('"requirements_processor_prewarm"')
-    if not reconcile_index < tags_index < prewarm_index:
-        print(f"{FAIL} startup wiring: requirements consumers race extension reconciliation")
-        return False
+    assert reconcile_index < tags_index < prewarm_index, "startup wiring: requirements consumers race extension reconciliation"
     prewarm_src = Path(requirement_prewarm.__file__).read_text(encoding="utf-8")
-    if "ensure_warm_base" not in prewarm_src:
-        print(f"{FAIL} prewarm: does not warm the provisioned processor base")
-        return False
+    assert "ensure_warm_base" in prewarm_src, "prewarm: does not warm the provisioned processor base"
     print(f"{PASS} startup wires requirements processor base prewarm")
-    return True
 
 
-def test_working_mode_lookup_uses_explicit_entity_scopes() -> bool:
+def test_working_mode_lookup_uses_explicit_entity_scopes() -> None:
     class _FakeSessionManager:
         def __init__(self) -> None:
             self.root_calls = 0
@@ -1672,41 +1532,30 @@ def test_working_mode_lookup_uses_explicit_entity_scopes() -> bool:
     finally:
         working_mode.session_manager = original
 
-    if not root or root.get("id") != "root-target":
-        print(f"{FAIL} working-mode lookup: did not return root target")
-        return False
-    if not fork or fork.get("id") != "fork-target":
-        print(f"{FAIL} working-mode lookup: did not return fork target")
-        return False
-    if not any_entity or any_entity.get("id") != "any-target":
-        print(f"{FAIL} working-mode lookup: did not return any-entity target")
-        return False
-    if (
+    assert root and root.get("id") == "root-target", "working-mode lookup: did not return root target"
+    assert fork and fork.get("id") == "fork-target", "working-mode lookup: did not return fork target"
+    assert any_entity and any_entity.get("id") == "any-target", "working-mode lookup: did not return any-entity target"
+    assert (
         fake.root_calls,
         fake.full_root_calls,
         fake.get_calls,
         fake.fork_calls,
         fake.any_calls,
-    ) != (1, 0, ["root-stale", "root-target"], 1, 1):
-        print(
-            f"{FAIL} working-mode lookup: calls "
-            f"{(fake.root_calls, fake.full_root_calls, fake.get_calls, fake.fork_calls, fake.any_calls)!r}"
-        )
-        return False
+    ) == (1, 0, ["root-stale", "root-target"], 1, 1), (
+        f"working-mode lookup: calls "
+        f"{(fake.root_calls, fake.full_root_calls, fake.get_calls, fake.fork_calls, fake.any_calls)!r}"
+    )
     print(f"{PASS} working-mode lookup uses explicit entity scopes")
-    return True
 
 
-def test_working_mode_index_stays_compact_across_restart_update_and_delete() -> bool:
+def test_working_mode_index_stays_compact_across_restart_update_and_delete() -> None:
     sessions_dir = session_store._sessions_dir()
     sessions_dir.mkdir(parents=True, exist_ok=True)
     sid = "working-index-test"
     root_path = sessions_dir / f"{sid}.json"
     summary_path = sessions_dir / f"{sid}.summary.json"
     index_path = sessions_dir / ".working-session-index.json"
-    if not session_store._is_sidecar_json(index_path.name):
-        print(f"{FAIL} working-mode index: cache is visible as a session root")
-        return False
+    assert session_store._is_sidecar_json(index_path.name), "working-mode index: cache is visible as a session root"
     root_path.write_text(json.dumps({
         "id": sid,
         "working_mode": "target_mode",
@@ -1760,19 +1609,14 @@ def test_working_mode_index_stays_compact_across_restart_update_and_delete() -> 
         summary_path.unlink(missing_ok=True)
         index_path.unlink(missing_ok=True)
         session_store._reset_home_scoped_caches()
-    if [entry.get("id") for entry in cold] != [sid]:
-        print(f"{FAIL} working-mode index: cold sidecar projection missing")
-        return False
-    if (
-        [entry.get("id") for entry in restarted] != [sid]
-        or [entry.get("id") for entry in updated] != [sid]
-        or stale
-        or deleted
-    ):
-        print(f"{FAIL} working-mode index: update/delete projection drifted")
-        return False
+    assert [entry.get("id") for entry in cold] == [sid], "working-mode index: cold sidecar projection missing"
+    assert (
+        [entry.get("id") for entry in restarted] == [sid]
+        and [entry.get("id") for entry in updated] == [sid]
+        and not stale
+        and not deleted
+    ), "working-mode index: update/delete projection drifted"
     print(f"{PASS} working-mode index avoids full-tree hydration")
-    return True
 
 
 # ── entry point ───────────────────────────────────────────────────────
