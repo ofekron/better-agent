@@ -50,12 +50,13 @@ from provider_session_events import SessionEventsProvider  # noqa: E402
 SID = "11111111-2222-3333-4444-555555555555"
 
 
-def test_class_contract() -> bool:
+def test_class_contract() -> None:
     cls = provider_kimi.KimiProvider
-    return issubclass(cls, SessionEventsProvider) and cls.KIND == "kimi"
+    assert issubclass(cls, SessionEventsProvider)
+    assert cls.KIND == "kimi"
 
 
-def test_capability_matrix() -> bool:
+def test_capability_matrix() -> None:
     cls = provider_kimi.KimiProvider
     expected = {
         "supports_fork": False,
@@ -66,31 +67,30 @@ def test_capability_matrix() -> bool:
         "supports_native_subagents": False,
         "supports_reasoning_effort": False,
     }
-    return all(getattr(cls, k) is v for k, v in expected.items())
+    assert {k: getattr(cls, k) for k in expected} == expected
 
 
-def test_build_env_clears_anthropic() -> bool:
+def test_build_env_clears_anthropic() -> None:
     os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-should-be-cleared")
     try:
         inst = provider_kimi.KimiProvider({"id": "k1", "kind": "kimi", "mode": "api_key"})
         env = inst.build_env()
-        return not any(k in env for k in (
+        for leaked in (
             "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
             "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
-        ))
+        ):
+            assert leaked not in env
     finally:
         if os.environ.get("ANTHROPIC_API_KEY") == "test-key-should-be-cleared":
             del os.environ["ANTHROPIC_API_KEY"]
 
 
-def test_models_static_seed() -> bool:
-    return (
-        "kimi-code/kimi-for-coding" in provider_kimi.KIMI_MODELS
-        and any(m.startswith("kimi-k2") for m in provider_kimi.KIMI_MODELS)
-    )
+def test_models_static_seed() -> None:
+    assert "kimi-code/kimi-for-coding" in provider_kimi.KIMI_MODELS
+    assert any(m.startswith("kimi-k2") for m in provider_kimi.KIMI_MODELS)
 
 
-def test_fetch_kimi_models_parses_config() -> bool:
+def test_fetch_kimi_models_parses_config() -> None:
     with tempfile.TemporaryDirectory() as td:
         cfg = Path(td) / "config.toml"
         cfg.write_text(
@@ -104,10 +104,10 @@ def test_fetch_kimi_models_parses_config() -> bool:
             encoding="utf-8",
         )
         parsed = provider_kimi.fetch_kimi_models(cfg)
-    return parsed == ["kimi-k2-thinking", "kimi-code/kimi-for-coding"]
+    assert parsed == ["kimi-k2-thinking", "kimi-code/kimi-for-coding"]
 
 
-def test_fetch_kimi_models_fails_closed() -> bool:
+def test_fetch_kimi_models_fails_closed() -> None:
     with tempfile.TemporaryDirectory() as td:
         missing = provider_kimi.fetch_kimi_models(Path(td) / "nope.toml")
         bad = Path(td) / "bad.toml"
@@ -116,46 +116,44 @@ def test_fetch_kimi_models_fails_closed() -> bool:
         empty = Path(td) / "empty.toml"
         empty.write_text('default_model = ""\n', encoding="utf-8")
         no_models = provider_kimi.fetch_kimi_models(empty)
-    return missing == [] and malformed == [] and no_models == []
+    assert missing == []
+    assert malformed == []
+    assert no_models == []
 
 
-def test_argv_never_carries_prompt() -> bool:
+def test_argv_never_carries_prompt() -> None:
     argv = runner_kimi.build_kimi_argv(
         "/usr/bin/kimi", model="kimi-k2-thinking", session_id=SID, cwd="/tmp/proj",
     )
-    return (
-        "--print" in argv
-        and argv[argv.index("--output-format") + 1] == "stream-json"
-        and argv[argv.index("--session") + 1] == SID
-        and argv[argv.index("--work-dir") + 1] == "/tmp/proj"
-        and argv[argv.index("--model") + 1] == "kimi-k2-thinking"
-        and not any("prompt" in a.lower() or "--command" in a for a in argv)
-    )
+    assert "--print" in argv
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert argv[argv.index("--session") + 1] == SID
+    assert argv[argv.index("--work-dir") + 1] == "/tmp/proj"
+    assert argv[argv.index("--model") + 1] == "kimi-k2-thinking"
+    assert not any("prompt" in a.lower() or "--command" in a for a in argv)
 
 
-def test_argv_omits_model_when_unset() -> bool:
+def test_argv_omits_model_when_unset() -> None:
     argv = runner_kimi.build_kimi_argv("/usr/bin/kimi", model="", session_id=SID, cwd="/tmp")
-    return "--model" not in argv
+    assert "--model" not in argv
 
 
-def test_normalizes_assistant_string_content() -> bool:
+def test_normalizes_assistant_string_content() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "assistant", "content": "hello"},
         session_id=SID, parent_uuid=SID, model="kimi-k2-thinking", event_key="0",
     )
-    if len(out) != 1 or out[0]["type"] != "agent_message":
-        return False
+    assert len(out) == 1
+    assert out[0]["type"] == "agent_message"
     data = out[0]["data"]
     block = data["message"]["content"][0]
-    return (
-        data["type"] == "assistant"
-        and data["parentUuid"] == SID
-        and data["message"]["model"] == "kimi-k2-thinking"
-        and block == {"type": "text", "text": "hello"}
-    )
+    assert data["type"] == "assistant"
+    assert data["parentUuid"] == SID
+    assert data["message"]["model"] == "kimi-k2-thinking"
+    assert block == {"type": "text", "text": "hello"}
 
 
-def test_normalizes_think_and_text_parts() -> bool:
+def test_normalizes_think_and_text_parts() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "assistant", "content": [
             {"type": "think", "think": "hmm"},
@@ -163,16 +161,15 @@ def test_normalizes_think_and_text_parts() -> bool:
         ]},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="1",
     )
-    if len(out) != 1:
-        return False
+    assert len(out) == 1
     content = out[0]["data"]["message"]["content"]
-    return content == [
+    assert content == [
         {"type": "thinking", "thinking": "hmm"},
         {"type": "text", "text": "answer"},
     ]
 
 
-def test_normalizes_tool_calls() -> bool:
+def test_normalizes_tool_calls() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "assistant", "content": [], "tool_calls": [
             {"type": "function", "id": "call_1",
@@ -182,18 +179,15 @@ def test_normalizes_tool_calls() -> bool:
         ]},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="2",
     )
-    if len(out) != 1:
-        return False
+    assert len(out) == 1
     blocks = out[0]["data"]["message"]["content"]
-    return (
-        blocks[0] == {"type": "tool_use", "id": "call_1", "name": "Bash",
-                      "input": {"command": "ls"}}
-        and blocks[1] == {"type": "tool_use", "id": "call_2", "name": "Read",
-                          "input": {"file_path": "/tmp/a.py"}}
-    )
+    assert blocks[0] == {"type": "tool_use", "id": "call_1", "name": "Bash",
+                         "input": {"command": "ls"}}
+    assert blocks[1] == {"type": "tool_use", "id": "call_2", "name": "Read",
+                         "input": {"file_path": "/tmp/a.py"}}
 
 
-def test_tool_call_bad_arguments_wrapped() -> bool:
+def test_tool_call_bad_arguments_wrapped() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "assistant", "content": [], "tool_calls": [
             {"type": "function", "id": "c",
@@ -201,38 +195,35 @@ def test_tool_call_bad_arguments_wrapped() -> bool:
         ]},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="3",
     )
-    return out[0]["data"]["message"]["content"][0]["input"] == {"input": "not json {"}
+    assert out[0]["data"]["message"]["content"][0]["input"] == {"input": "not json {"}
 
 
-def test_normalizes_tool_result() -> bool:
+def test_normalizes_tool_result() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "tool", "content": "file.py", "tool_call_id": "call_1"},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="4",
     )
-    if len(out) != 1:
-        return False
+    assert len(out) == 1
     data = out[0]["data"]
     block = data["message"]["content"][0]
-    return (
-        data["type"] == "user"
-        and block["type"] == "tool_result"
-        and block["tool_use_id"] == "call_1"
-        and block["content"] == "file.py"
-        and block["is_error"] is False
-    )
+    assert data["type"] == "user"
+    assert block["type"] == "tool_result"
+    assert block["tool_use_id"] == "call_1"
+    assert block["content"] == "file.py"
+    assert block["is_error"] is False
 
 
-def test_tool_result_error_detection() -> bool:
+def test_tool_result_error_detection() -> None:
     out = runner_kimi.normalize_kimi_message(
         {"role": "tool",
          "content": [{"type": "text", "text": "<system>ERROR: boom</system>"}],
          "tool_call_id": "call_1"},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="5",
     )
-    return out[0]["data"]["message"]["content"][0]["is_error"] is True
+    assert out[0]["data"]["message"]["content"][0]["is_error"] is True
 
 
-def test_uuid_is_deterministic() -> bool:
+def test_uuid_is_deterministic() -> None:
     kwargs = dict(session_id=SID, parent_uuid=SID, model="kimi", event_key="7")
     a = runner_kimi.normalize_kimi_message({"role": "assistant", "content": "x"}, **kwargs)
     b = runner_kimi.normalize_kimi_message({"role": "assistant", "content": "x"}, **kwargs)
@@ -240,30 +231,24 @@ def test_uuid_is_deterministic() -> bool:
         {"role": "assistant", "content": "x"},
         session_id=SID, parent_uuid=SID, model="kimi", event_key="8",
     )
-    return (
-        a[0]["data"]["uuid"] == b[0]["data"]["uuid"]
-        and a[0]["data"]["uuid"] != c[0]["data"]["uuid"]
-    )
+    assert a[0]["data"]["uuid"] == b[0]["data"]["uuid"]
+    assert a[0]["data"]["uuid"] != c[0]["data"]["uuid"]
 
 
-def test_skips_user_and_system_roles() -> bool:
+def test_skips_user_and_system_roles() -> None:
     for role in ("user", "system"):
         out = runner_kimi.normalize_kimi_message(
             {"role": role, "content": "echo"},
             session_id=SID, parent_uuid=SID, model="kimi", event_key="9",
         )
-        if out != []:
-            return False
-    return True
+        assert out == []
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message() -> None:
     from capability_contexts import prompt_heading_for_source
 
-    return (
-        prompt_heading_for_source("mssg") == "Message"
-        and prompt_heading_for_source("team_ask") == "Ask"
-    )
+    assert prompt_heading_for_source("mssg") == "Message"
+    assert prompt_heading_for_source("team_ask") == "Ask"
 
 
 def _write_fake_kimi(bin_dir: Path, script_body: str) -> None:
@@ -291,7 +276,7 @@ def _run_runner_with_fake_kimi(script_body: str, inputs: dict) -> tuple[int, Pat
     return rc, run_dir
 
 
-def test_runner_end_to_end_success() -> bool:
+def test_runner_end_to_end_success() -> None:
     with tempfile.TemporaryDirectory() as cwd:
         script = (
             "cat > /dev/null\n"
@@ -326,24 +311,20 @@ def test_runner_end_to_end_success() -> bool:
         shutil.rmtree(run_dir.parent, ignore_errors=True)
 
     sid = state.get("session_id") or ""
-    try:
-        uuid_mod.UUID(sid)
-    except ValueError:
-        return False
-    if rc != 0 or complete["success"] is not True or complete["session_id"] != sid:
-        return False
-    if len(events) != 3 or any(e["type"] != "agent_message" for e in events):
-        return False
+    uuid_mod.UUID(sid)
+    assert rc == 0
+    assert complete["success"] is True
+    assert complete["session_id"] == sid
+    assert len(events) == 3
+    assert all(e["type"] == "agent_message" for e in events)
     kinds = [e["data"]["message"]["content"][0]["type"] for e in events]
     # parentUuid threads: second event's parent is the first event's uuid.
-    return (
-        kinds == ["text", "tool_result", "text"]
-        and events[1]["data"]["parentUuid"] == events[0]["data"]["uuid"]
-        and events[0]["data"]["parentUuid"] == sid
-    )
+    assert kinds == ["text", "tool_result", "text"]
+    assert events[1]["data"]["parentUuid"] == events[0]["data"]["uuid"]
+    assert events[0]["data"]["parentUuid"] == sid
 
 
-def test_runner_resume_reuses_session_id() -> bool:
+def test_runner_resume_reuses_session_id() -> None:
     with tempfile.TemporaryDirectory() as cwd:
         script = (
             "cat > /dev/null\n"
@@ -357,10 +338,12 @@ def test_runner_resume_reuses_session_id() -> bool:
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
         shutil.rmtree(run_dir.parent, ignore_errors=True)
-    return rc == 0 and state["session_id"] == SID and complete["session_id"] == SID
+    assert rc == 0
+    assert state["session_id"] == SID
+    assert complete["session_id"] == SID
 
 
-def test_runner_failure_captures_plain_text_error() -> bool:
+def test_runner_failure_captures_plain_text_error() -> None:
     with tempfile.TemporaryDirectory() as cwd:
         script = (
             "cat > /dev/null\n"
@@ -377,16 +360,14 @@ def test_runner_failure_captures_plain_text_error() -> bool:
             if line.strip()
         ]
         shutil.rmtree(run_dir.parent, ignore_errors=True)
-    return (
-        rc == 1
-        and complete["success"] is False
-        and "402" in (complete["error"] or "")
-        and events
-        and events[-1]["data"].get("isApiErrorMessage") is True
-    )
+    assert rc == 1
+    assert complete["success"] is False
+    assert "402" in (complete["error"] or "")
+    assert events
+    assert events[-1]["data"].get("isApiErrorMessage") is True
 
 
-def test_runner_ghost_completion_fails() -> bool:
+def test_runner_ghost_completion_fails() -> None:
     with tempfile.TemporaryDirectory() as cwd:
         script = "cat > /dev/null\nexit 0\n"
         rc, run_dir = _run_runner_with_fake_kimi(
@@ -394,7 +375,9 @@ def test_runner_ghost_completion_fails() -> bool:
         )
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
         shutil.rmtree(run_dir.parent, ignore_errors=True)
-    return rc == 1 and complete["success"] is False and bool(complete["error"])
+    assert rc == 1
+    assert complete["success"] is False
+    assert complete["error"]
 
 
 TESTS = [
@@ -426,10 +409,13 @@ def main() -> int:
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError as exc:
+                print(f"FAIL: {name} ({exc})")
                 failures.append(name)
+                continue
+            print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
