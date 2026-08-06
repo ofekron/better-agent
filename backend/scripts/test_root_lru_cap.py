@@ -10,7 +10,8 @@ Locks the contract of the new eviction:
   • fail-closed when the pin predicate is unbound;
   • a busy per-root lock is skipped (treated as in-use);
   • eviction tears down the root's in-memory footprint but KEEPS the
-    per-root lock (reload identity).
+    per-root lock (reload identity), and notifies the draft store via
+    `note_root_dropped`.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_root_lru_cap.py
@@ -43,18 +44,41 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 mgr = smmod.manager
 
 
+class _FakeDraftStore:
+    """Stand-in DraftStore: records per-root teardown, reports clean.
+
+    Draft state lives in draft_store now (not on the manager); eviction
+    notifies it via `note_root_dropped(rid)`. This spy locks that hook.
+    """
+
+    def __init__(self) -> None:
+        self.dropped: list[str] = []
+
+    def note_root_dropped(self, rid: str) -> None:
+        self.dropped.append(rid)
+
+    def is_dirty(self, rid: str) -> bool:
+        return False
+
+
 def _fake_root(rid: str) -> dict:
     return {"id": rid, "forks": []}
 
 
 def _reset(pin_predicate=None) -> None:
+    # Prime the home identity so _ensure_home_current (reached from
+    # _lock_for_root during _enforce_root_cap) is a no-op. Without this the
+    # first enforce sees a None/stale _home_sessions_dir, treats it as a home
+    # switch, and _clear_home_scoped_state() wipes _roots mid-test.
+    mgr._home_sessions_dir = mgr._root_repository.storage_identity()
+    # Drop any instance-level method overrides a prior test installed
+    # (e.g. _draft_store_or_none spy) so each test starts from the real methods.
+    mgr.__dict__.pop("_draft_store_or_none", None)
     mgr._roots = collections.OrderedDict()
     mgr._event_hydrated_roots = set()
     mgr._node_root_id = {}
     mgr._root_locks = {}
     mgr._batches = {}
-    mgr._draft_dirty = set()
-    mgr._draft_gen = {}
     mgr._last_broadcast_running = {}
     mgr._unread_counts = {}
     mgr._unread_hydrated = set()
@@ -73,100 +97,72 @@ def _fill(n: int) -> list:
     return rids
 
 
-def test_cap_evicts_oldest_unpinned() -> bool:
+def test_cap_evicts_oldest_unpinned() -> None:
     _reset(pin_predicate=lambda rid, sids: False)
     cap = mgr._roots_max
     rids = _fill(cap + 5)
     mgr._enforce_root_cap(keep_rid="__none__")
-    if len(mgr._roots) != cap:
-        print(f"  expected {cap} after enforce, got {len(mgr._roots)}")
-        return False
+    assert len(mgr._roots) == cap, f"expected {cap} after enforce, got {len(mgr._roots)}"
     evicted, kept = rids[:5], rids[5:]
-    if any(r in mgr._roots for r in evicted):
-        print("  the 5 oldest were not the ones evicted")
-        return False
-    if not all(r in mgr._roots for r in kept):
-        print("  a newer root was wrongly evicted")
-        return False
-    if any(r in mgr._node_root_id for r in evicted):
-        print("  _node_root_id not cleared for evicted roots")
-        return False
-    return True
+    assert not any(r in mgr._roots for r in evicted), "the 5 oldest were not the ones evicted"
+    assert all(r in mgr._roots for r in kept), "a newer root was wrongly evicted"
+    assert not any(r in mgr._node_root_id for r in evicted), "_node_root_id not cleared for evicted roots"
 
 
-def test_lru_recency_protects_accessed_root() -> bool:
+def test_lru_recency_protects_accessed_root() -> None:
     _reset(pin_predicate=lambda rid, sids: False)
     cap = mgr._roots_max
     rids = _fill(cap + 1)
     oldest = rids[0]
     mgr._roots.move_to_end(oldest)   # simulate an access → most-recent
     mgr._enforce_root_cap(keep_rid="__none__")
-    if oldest not in mgr._roots:
-        print("  recently-accessed root was wrongly evicted")
-        return False
-    if rids[1] in mgr._roots:
-        print("  expected the new-oldest root to be evicted")
-        return False
-    return True
+    assert oldest in mgr._roots, "recently-accessed root was wrongly evicted"
+    assert rids[1] not in mgr._roots, "expected the new-oldest root to be evicted"
 
 
-def test_pinned_never_evicted() -> bool:
+def test_pinned_never_evicted() -> None:
     cap = mgr._roots_max
     pinned = {f"root-{i:03d}" for i in range(5)}   # the 5 oldest
     _reset(pin_predicate=lambda rid, sids: rid in pinned)
     _fill(cap + 5)
     mgr._enforce_root_cap(keep_rid="__none__")
-    if not all(r in mgr._roots for r in pinned):
-        print("  a pinned root was evicted")
-        return False
-    if len(mgr._roots) != cap:
-        print(f"  expected {cap} resident, got {len(mgr._roots)}")
-        return False
-    if any(f"root-{i:03d}" in mgr._roots for i in range(5, 10)):
-        print("  expected the oldest UNPINNED roots to be evicted")
-        return False
-    return True
+    assert all(r in mgr._roots for r in pinned), "a pinned root was evicted"
+    assert len(mgr._roots) == cap, f"expected {cap} resident, got {len(mgr._roots)}"
+    assert not any(f"root-{i:03d}" in mgr._roots for i in range(5, 10)), (
+        "expected the oldest UNPINNED roots to be evicted"
+    )
 
 
-def test_all_pinned_cap_is_soft() -> bool:
+def test_all_pinned_cap_is_soft() -> None:
     cap = mgr._roots_max
     _reset(pin_predicate=lambda rid, sids: True)
     _fill(cap + 5)
     mgr._enforce_root_cap(keep_rid="__none__")
-    if len(mgr._roots) != cap + 5:
-        print(f"  pinned roots were evicted (got {len(mgr._roots)})")
-        return False
-    return True
+    assert len(mgr._roots) == cap + 5, f"pinned roots were evicted (got {len(mgr._roots)})"
 
 
-def test_local_pin_signal_blocks_eviction() -> bool:
+def test_local_pin_signal_blocks_eviction() -> None:
     cap = mgr._roots_max
     _reset(pin_predicate=lambda rid, sids: False)
     rids = _fill(cap + 1)
     oldest = rids[0]
     mgr._batches[oldest] = {"bump_updated_at": False}   # active batch = pin
     mgr._enforce_root_cap(keep_rid="__none__")
-    if oldest not in mgr._roots:
-        print("  root with an active batch was evicted")
-        return False
-    if rids[1] in mgr._roots:
-        print("  expected next-oldest to be evicted instead")
-        return False
-    return True
+    assert oldest in mgr._roots, "root with an active batch was evicted"
+    assert rids[1] not in mgr._roots, "expected next-oldest to be evicted instead"
 
 
-def test_fail_closed_when_predicate_unbound() -> bool:
+def test_fail_closed_when_predicate_unbound() -> None:
     cap = mgr._roots_max
     _reset(pin_predicate=None)
     _fill(cap + 5)
     mgr._enforce_root_cap(keep_rid="__none__")
-    if len(mgr._roots) != cap + 5:
-        print(f"  fail-closed violated: evicted with no predicate ({len(mgr._roots)})")
-        return False
-    return True
+    assert len(mgr._roots) == cap + 5, (
+        f"fail-closed violated: evicted with no predicate ({len(mgr._roots)})"
+    )
 
 
-def test_busy_lock_skipped() -> bool:
+def test_busy_lock_skipped() -> None:
     cap = mgr._roots_max
     _reset(pin_predicate=lambda rid, sids: False)
     rids = _fill(cap + 1)
@@ -183,24 +179,17 @@ def test_busy_lock_skipped() -> bool:
 
     t = threading.Thread(target=_holder, daemon=True)
     t.start()
-    if not acquired.wait(5):
-        print("  holder thread never acquired the lock")
-        return False
+    assert acquired.wait(5), "holder thread never acquired the lock"
     try:
         mgr._enforce_root_cap(keep_rid="__none__")
     finally:
         release.set()
         t.join(5)
-    if oldest not in mgr._roots:
-        print("  busy-locked root was evicted (should be skipped)")
-        return False
-    if rids[1] in mgr._roots:
-        print("  expected next-oldest evicted instead of the busy one")
-        return False
-    return True
+    assert oldest in mgr._roots, "busy-locked root was evicted (should be skipped)"
+    assert rids[1] not in mgr._roots, "expected next-oldest evicted instead of the busy one"
 
 
-def test_eviction_clears_state_but_keeps_lock() -> bool:
+def test_eviction_clears_state_but_keeps_lock() -> None:
     _reset(pin_predicate=lambda rid, sids: False)
     cap = mgr._roots_max
     rids = _fill(cap + 1)
@@ -210,32 +199,30 @@ def test_eviction_clears_state_but_keeps_lock() -> bool:
     mgr._unread_counts[victim] = 3
     mgr._unread_hydrated.add(victim)
     mgr._last_broadcast_running[victim] = True
-    mgr._draft_gen[victim] = 1   # NOT a pin signal (unlike _draft_dirty)
+    fake_ds = _FakeDraftStore()
+    mgr._draft_store_or_none = lambda: fake_ds   # spy on the draft teardown hook
     _ = mgr._lock_for_root(victim)
     mgr._enforce_root_cap(keep_rid="__none__")
-    if victim in mgr._roots:
-        print("  victim not evicted")
-        return False
+    assert victim not in mgr._roots, "victim not evicted"
     cleared = {
         "_event_hydrated_roots": mgr._event_hydrated_roots,
         "_since_cache": mgr._since_cache,
         "_unread_counts": mgr._unread_counts,
         "_unread_hydrated": mgr._unread_hydrated,
         "_last_broadcast_running": mgr._last_broadcast_running,
-        "_draft_gen": mgr._draft_gen,
         "_node_root_id": mgr._node_root_id,
     }
     for name, container in cleared.items():
-        if victim in container:
-            print(f"  {name} not cleared for evicted victim")
-            return False
-    if victim not in mgr._root_locks:
-        print("  _root_locks wrongly dropped on eviction (breaks reload identity)")
-        return False
-    return True
+        assert victim not in container, f"{name} not cleared for evicted victim"
+    assert victim in fake_ds.dropped, (
+        "draft_store.note_root_dropped NOT called for evicted victim"
+    )
+    assert victim in mgr._root_locks, (
+        "_root_locks wrongly dropped on eviction (breaks reload identity)"
+    )
 
 
-def test_eviction_closes_event_ingester() -> bool:
+def test_eviction_closes_event_ingester() -> None:
     from event_ingester import event_ingester as ei
     _reset(pin_predicate=lambda rid, sids: False)
     rids = _fill(mgr._roots_max + 1)
@@ -249,13 +236,10 @@ def test_eviction_closes_event_ingester() -> bool:
             del ei.close
         except AttributeError:
             pass
-    if victim in mgr._roots:
-        print("  victim not evicted")
-        return False
-    if victim not in closed:
-        print(f"  event_ingester.close NOT called for evicted root (closed={closed})")
-        return False
-    return True
+    assert victim not in mgr._roots, "victim not evicted"
+    assert victim in closed, (
+        f"event_ingester.close NOT called for evicted root (closed={closed})"
+    )
 
 
 TESTS = [
@@ -280,15 +264,14 @@ def main_run() -> int:
     failed = 0
     for name, fn in TESTS:
         try:
-            ok = fn()
-        except Exception as e:
-            ok = False
+            fn()
+        except Exception:
             import traceback
             traceback.print_exc()
-            print(f"  exception: {e}")
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
+            print(f"{FAIL}  {name}")
             failed += 1
+            continue
+        print(f"{PASS}  {name}")
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
           else f"all {len(TESTS)} tests passed")
