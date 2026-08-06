@@ -79,7 +79,7 @@ async def _measure(coro_factory) -> tuple[int, float]:
     return ticks, time.perf_counter() - start
 
 
-async def test_fire_due_off_loop() -> bool:
+async def test_fire_due_off_loop() -> None:
     sched = Scheduler(coordinator=None)
     orig = schedule_store.due
     schedule_store.due = _slow_due  # type: ignore[assignment]
@@ -93,10 +93,11 @@ async def test_fire_due_off_loop() -> bool:
     ok = ticks >= 8
     print(f"{PASS if ok else FAIL} fire_due due() runs off-loop "
           f"(ticks={ticks} elapsed={elapsed*1000:.0f}ms)")
-    return ok
+    assert ok, (f"fire_due due() did not run off-loop: ticks={ticks} "
+                f"(want >=8) elapsed={elapsed*1000:.0f}ms")
 
 
-async def test_fire_task_triggers_off_loop() -> bool:
+async def test_fire_task_triggers_off_loop() -> None:
     sched = Scheduler(coordinator=None)
     orig = task_trigger_store.due
     task_trigger_store.due = _slow_due  # type: ignore[assignment]
@@ -107,10 +108,11 @@ async def test_fire_task_triggers_off_loop() -> bool:
     ok = ticks >= 8
     print(f"{PASS if ok else FAIL} fire_task_triggers due() runs off-loop "
           f"(ticks={ticks} elapsed={elapsed*1000:.0f}ms)")
-    return ok
+    assert ok, (f"fire_task_triggers due() did not run off-loop: ticks={ticks} "
+                f"(want >=8) elapsed={elapsed*1000:.0f}ms")
 
 
-async def test_receipt_snapshot_off_loop() -> bool:
+async def test_receipt_snapshot_off_loop() -> None:
     sched = Scheduler(coordinator=None)
     rec = {"id": "receipt", "task_id": "task", "kind": "turn_end_once"}
     original_due = task_trigger_store.due
@@ -133,19 +135,29 @@ async def test_receipt_snapshot_off_loop() -> bool:
     ok = ticks >= 8
     print(f"{PASS if ok else FAIL} receipt/task snapshot runs off-loop "
           f"(ticks={ticks} elapsed={elapsed*1000:.0f}ms)")
-    return ok
+    assert ok, (f"receipt/task snapshot did not run off-loop: ticks={ticks} "
+                f"(want >=8) elapsed={elapsed*1000:.0f}ms")
 
 
 async def _run() -> int:
-    results = [
-        await test_fire_due_off_loop(),
-        await test_fire_task_triggers_off_loop(),
-        await test_receipt_snapshot_off_loop(),
+    runners = [
+        ("fire_due off-loop", test_fire_due_off_loop),
+        ("fire_task_triggers off-loop", test_fire_task_triggers_off_loop),
+        ("receipt snapshot off-loop", test_receipt_snapshot_off_loop),
     ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{total} subtests passed")
-    return 0 if passed == total else 1
+    failed = 0
+    for label, runner in runners:
+        try:
+            await runner()
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL} {label}: {exc}")
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            failed += 1
+    print(f"\n{len(runners) - failed}/{len(runners)} subtests passed")
+    return 1 if failed else 0
 
 
 def main() -> int:
