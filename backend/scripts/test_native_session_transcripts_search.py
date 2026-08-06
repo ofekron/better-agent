@@ -86,7 +86,7 @@ def _reset_candidates() -> None:
     nsp._matched_candidates = _ORIG_MATCHED
 
 
-def test_term_only_in_assistant_reply() -> bool:
+def test_term_only_in_assistant_reply() -> None:
     # "hydration" appears only in the assistant reply, never in a user prompt.
     _patch_candidates([
         _candidate("s1", "/proj", [
@@ -100,16 +100,15 @@ def test_term_only_in_assistant_reply() -> bool:
     finally:
         _reset_candidates()
     t_texts = {r["text"] for r in transcripts}
-    ok = (
+    assert (
         t_texts == {"The blank panel is a hydration mismatch on mount"}
         and prompts == []
-    )
-    print(f"{OK if ok else FAIL} assistant-only term: transcript finds it, prompts do not "
+    ), f"transcript={t_texts}, prompts={prompts}"
+    print(f"{OK} assistant-only term: transcript finds it, prompts do not "
           f"(transcript={t_texts}, prompts={prompts})")
-    return ok
 
 
-def test_term_in_user_prompt_found_by_both() -> bool:
+def test_term_in_user_prompt_found_by_both() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [
             ("user", "the offline backlog keeps dropping actions", "2024-01-02T00:00:00"),
@@ -122,16 +121,15 @@ def test_term_in_user_prompt_found_by_both() -> bool:
     finally:
         _reset_candidates()
     want = "the offline backlog keeps dropping actions"
-    ok = (
+    assert (
         want in {r["text"] for r in transcripts}
         and {r["text"] for r in prompts} == {want}
-    )
-    print(f"{OK if ok else FAIL} user-prompt term found by both scopes "
+    ), f"transcript_has={want in {r['text'] for r in transcripts}}, prompts={[r['text'] for r in prompts]}"
+    print(f"{OK} user-prompt term found by both scopes "
           f"(transcript_has={want in {r['text'] for r in transcripts}}, prompts={[r['text'] for r in prompts]})")
-    return ok
 
 
-def test_match_records_carry_role() -> bool:
+def test_match_records_carry_role() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [
             ("user", "deploy the caching layer", "2024-01-03T00:00:00"),
@@ -144,12 +142,12 @@ def test_match_records_carry_role() -> bool:
         _reset_candidates()
     by_role = {r.get("role") for r in out}
     kinds = {r.get("kind") for r in out}
-    ok = by_role == {"user", "assistant"} and kinds == {"native_session_transcript"}
-    print(f"{OK if ok else FAIL} records carry role + transcript kind (roles={by_role}, kinds={kinds})")
-    return ok
+    assert by_role == {"user", "assistant"} and kinds == {"native_session_transcript"}, (
+        f"roles={by_role}, kinds={kinds}")
+    print(f"{OK} records carry role + transcript kind (roles={by_role}, kinds={kinds})")
 
 
-def test_cwd_filter_still_applies() -> bool:
+def test_cwd_filter_still_applies() -> None:
     _patch_candidates([
         _candidate("s1", "/proj-a", [("assistant", "widget rendered", "2024-01-04T00:00:00")]),
         _candidate("s2", "/proj-b", [("assistant", "widget crashed", "2024-01-04T00:00:01")]),
@@ -159,9 +157,8 @@ def test_cwd_filter_still_applies() -> bool:
     finally:
         _reset_candidates()
     texts = {r["text"] for r in out}
-    ok = texts == {"widget rendered"}
-    print(f"{OK if ok else FAIL} cwd filter restricts transcript search (got {texts})")
-    return ok
+    assert texts == {"widget rendered"}, f"got {texts}"
+    print(f"{OK} cwd filter restricts transcript search (got {texts})")
 
 
 def main_run() -> int:
@@ -171,20 +168,21 @@ def main_run() -> int:
         test_match_records_carry_role,
         test_cwd_filter_still_applies,
     ]
-    results = []
+    failed = 0
     for fn in tests:
         try:
-            results.append(fn())
+            fn()
         except Exception as e:
             import traceback
             traceback.print_exc()
             print(f"{FAIL} {fn.__name__} raised: {e}")
-            results.append(False)
-    n_pass = sum(1 for r in results if r)
-    n_total = len(results)
+            failed += 1
+            continue
+    n_pass = len(tests) - failed
+    n_total = len(tests)
     print(f"\n{n_pass}/{n_total} native-transcript-search tests passed")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    return 0 if n_pass == n_total else 1
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

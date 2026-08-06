@@ -205,7 +205,7 @@ def _events_jsonl_uuid_bearing_set(root_id: str) -> set[str]:
 # ─── tests ────────────────────────────────────────────────────────
 
 
-def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bool:
+def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> None:
     """Apply the first ceil(N * cut_ratio) enriched events live, then
     seed an orphan run_dir against the FULL fixture and call
     `_replay_and_apply`. Asserts:
@@ -262,27 +262,22 @@ def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bo
     baseline = _baseline_fingerprint(fixture_name)
 
     # Sanity: partial state was strictly smaller than baseline.
-    if not (partial_render["events_count"] < baseline["render"]["events_count"]):
-        print(f"  partial render count ({partial_render['events_count']}) was "
-              f"not less than baseline ({baseline['render']['events_count']}) — "
-              f"cut_ratio too high?")
-        return False
-    if not (partial_jsonl_rows < baseline["jsonl"]["events_jsonl_count"]):
-        print(f"  partial jsonl rows ({partial_jsonl_rows}) was not less than "
-              f"baseline ({baseline['jsonl']['events_jsonl_count']})")
-        return False
+    assert partial_render["events_count"] < baseline["render"]["events_count"], (
+        f"partial render count ({partial_render['events_count']}) was "
+        f"not less than baseline ({baseline['render']['events_count']}) — "
+        f"cut_ratio too high?")
+    assert partial_jsonl_rows < baseline["jsonl"]["events_jsonl_count"], (
+        f"partial jsonl rows ({partial_jsonl_rows}) was not less than "
+        f"baseline ({baseline['jsonl']['events_jsonl_count']})")
 
     # Final render must match baseline byte-for-byte on the locked fields.
-    if final_render["events_count"] != baseline["render"]["events_count"]:
-        print(f"  events_count mismatch: expected {baseline['render']['events_count']}, "
-              f"got {final_render['events_count']}")
-        return False
-    if final_render["events_uuid_list_sha256"] != baseline["render"]["events_uuid_list_sha256"]:
-        print(f"  events_uuid_list_sha256 mismatch (recovery dropped or reordered events)")
-        return False
-    if final_render["content_sha256"] != baseline["render"]["content_sha256"]:
-        print(f"  content_sha256 mismatch")
-        return False
+    assert final_render["events_count"] == baseline["render"]["events_count"], (
+        f"events_count mismatch: expected {baseline['render']['events_count']}, "
+        f"got {final_render['events_count']}")
+    assert final_render["events_uuid_list_sha256"] == baseline["render"]["events_uuid_list_sha256"], (
+        "events_uuid_list_sha256 mismatch (recovery dropped or reordered events)")
+    assert final_render["content_sha256"] == baseline["render"]["content_sha256"], (
+        "content_sha256 mismatch")
 
     # events.jsonl: the uuid-bearing rows must be FULLY present after
     # recovery (no data loss on the rows that matter for re-render).
@@ -302,10 +297,9 @@ def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bo
             enriched_uuids.add(u)
     actual_uuids = _events_jsonl_uuid_bearing_set(root)
     missing = enriched_uuids - actual_uuids
-    if missing:
-        print(f"  events.jsonl missing {len(missing)} uuid-bearing rows after recovery")
-        print(f"    sample: {sorted(missing)[:3]}")
-        return False
+    assert not missing, (
+        f"events.jsonl missing {len(missing)} uuid-bearing rows after recovery; "
+        f"sample: {sorted(missing)[:3]}")
     # Final row count cap: baseline + cut + slack. The duplicate
     # rows come from `event_ingester` writing every uuid-less event
     # twice (once in phase A, once during phase B replay) — the dedup
@@ -315,26 +309,24 @@ def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bo
     # uuid-less). A real dedup-gate regression would push rows to
     # `baseline + N`, which exceeds this cap.
     cap = baseline["jsonl"]["events_jsonl_count"] + cut + 5
-    if final_jsonl_rows > cap:
-        print(f"  events.jsonl rows ballooned: {final_jsonl_rows} > "
-              f"baseline({baseline['jsonl']['events_jsonl_count']}) + cut({cut}) + 5 "
-              f"= {cap} — uuid-keyed dedup gate has regressed")
-        return False
-    return True
+    assert final_jsonl_rows <= cap, (
+        f"events.jsonl rows ballooned: {final_jsonl_rows} > "
+        f"baseline({baseline['jsonl']['events_jsonl_count']}) + cut({cut}) + 5 "
+        f"= {cap} — uuid-keyed dedup gate has regressed")
 
 
-def test_partial_live_then_recovery_tool_use_fixture() -> bool:
-    return _partial_live_then_recovery("tool_use_bash_read.jsonl", cut_ratio=0.5)
+def test_partial_live_then_recovery_tool_use_fixture() -> None:
+    _partial_live_then_recovery("tool_use_bash_read.jsonl", cut_ratio=0.5)
 
 
-def test_partial_live_then_recovery_subagent_fixture() -> bool:
+def test_partial_live_then_recovery_subagent_fixture() -> None:
     """Same invariant on the subagent fixture — covers the case where
     the crash happens before subagent fan-out replay AND the subagent
     side-tailers' events overlap with recovery's `_replay_subagents`."""
-    return _partial_live_then_recovery("with_subagent.jsonl", cut_ratio=0.3)
+    _partial_live_then_recovery("with_subagent.jsonl", cut_ratio=0.3)
 
 
-def test_recovery_seek_skips_previous_turn_and_replays_subagents() -> bool:
+def test_recovery_seek_skips_previous_turn_and_replays_subagents() -> None:
     fixture = FIXTURES_DIR / "with_subagent.jsonl"
     run_id = str(_uuid.uuid4())
     run_dir = _runs_root() / run_id
@@ -367,19 +359,14 @@ def test_recovery_seek_skips_previous_turn_and_replays_subagents() -> bool:
         for ev in replayed
         if isinstance(ev.get("data"), dict)
     }
-    if "previous-turn-must-not-replay" in uuids:
-        print("  recovery replay scanned the previous turn prefix")
-        return False
-    if not uuids:
-        print("  recovery replay produced no current-turn events")
-        return False
-    if not any((ev.get("data") or {}).get("parent_tool_use_id") for ev in replayed):
-        print("  recovery replay did not include subagent fan-out events")
-        return False
-    return True
+    assert "previous-turn-must-not-replay" not in uuids, (
+        "recovery replay scanned the previous turn prefix")
+    assert uuids, "recovery replay produced no current-turn events"
+    assert any((ev.get("data") or {}).get("parent_tool_use_id") for ev in replayed), (
+        "recovery replay did not include subagent fan-out events")
 
 
-def test_recovery_seek_skips_file_edit_provision_ready_prefix() -> bool:
+def test_recovery_seek_skips_file_edit_provision_ready_prefix() -> None:
     run_id = str(_uuid.uuid4())
     run_dir = _runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -411,13 +398,10 @@ def test_recovery_seek_skips_file_edit_provision_ready_prefix() -> bool:
         for ev in replayed
         if isinstance(ev.get("data"), dict)
     }
-    if "file-edit-provision-ready" in uuids:
-        print("  provision ready prefix leaked into current file-edit turn")
-        return False
-    if "current-file-edit-reply" not in uuids:
-        print(f"  current reply missing after prefix seek: {uuids!r}")
-        return False
-    return True
+    assert "file-edit-provision-ready" not in uuids, (
+        "provision ready prefix leaked into current file-edit turn")
+    assert "current-file-edit-reply" in uuids, (
+        f"current reply missing after prefix seek: {uuids!r}")
 
 
 TESTS = [
@@ -437,15 +421,15 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                fn()
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
                 print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
                 failed += 1
+                print(f"{FAIL}  {name}")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         event_ingester.close_all()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
