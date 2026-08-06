@@ -101,7 +101,7 @@ def _subagent_message(agent_path: str, header: str, payload: str = "") -> dict:
     }
 
 
-def test_thread_settings_applied_is_filtered() -> bool:
+def test_thread_settings_applied_is_filtered() -> None:
     rows = _normalize({
         "type": "event_msg",
         "payload": {
@@ -113,13 +113,10 @@ def test_thread_settings_applied_is_filtered() -> bool:
             },
         },
     })
-    if rows:
-        print(f"  expected no render rows, got {rows!r}")
-        return False
-    return True
+    assert not rows, f"expected no render rows, got {rows!r}"
 
 
-def test_world_state_is_filtered() -> bool:
+def test_world_state_is_filtered() -> None:
     rows = _normalize({
         "type": "world_state",
         "payload": {
@@ -128,28 +125,20 @@ def test_world_state_is_filtered() -> bool:
             "state": {"agents_md": {"text": "rules"}},
         },
     })
-    if rows:
-        print(f"  expected no render rows, got {rows!r}")
-        return False
-    return True
+    assert not rows, f"expected no render rows, got {rows!r}"
 
 
-def test_unknown_native_event_still_renders_debug_card() -> bool:
+def test_unknown_native_event_still_renders_debug_card() -> None:
     rows = _normalize({
         "type": "event_msg",
         "payload": {"type": "new_visible_event", "value": 1},
     })
-    if len(rows) != 1:
-        print(f"  expected one debug render row, got {rows!r}")
-        return False
+    assert len(rows) == 1, f"expected one debug render row, got {rows!r}"
     text = _assistant_text(rows[0])
-    if "Codex native event_msg.new_visible_event" not in text:
-        print(f"  expected native debug text, got {text!r}")
-        return False
-    return True
+    assert "Codex native event_msg.new_visible_event" in text, f"expected native debug text, got {text!r}"
 
 
-def test_subagent_final_answer_is_tool_result() -> bool:
+def test_subagent_final_answer_is_tool_result() -> None:
     rows = _normalize_many([
         _spawn_agent_call("call_agent", "/root/trace_ui_mcp"),
         _spawn_agent_output("call_agent", "/root/trace_ui_mcp"),
@@ -165,16 +154,13 @@ def test_subagent_final_answer_is_tool_result() -> bool:
         if result.get("tool_use_id") == "call_agent"
         and "traced UI MCP" in str(result.get("content") or "")
     ]
-    if len(final_results) != 1:
-        print(f"  expected one Agent tool_result with final answer, got {rows!r}")
-        return False
-    if any(_assistant_text(row).startswith("Codex native ") for row in rows):
-        print(f"  expected no native debug card, got {rows!r}")
-        return False
-    return True
+    assert len(final_results) == 1, f"expected one Agent tool_result with final answer, got {rows!r}"
+    assert not any(_assistant_text(row).startswith("Codex native ") for row in rows), (
+        f"expected no native debug card, got {rows!r}"
+    )
 
 
-def test_final_answer_phase_is_stamped() -> bool:
+def test_final_answer_phase_is_stamped() -> None:
     rows = _normalize_many([
         {
             "type": "event_msg",
@@ -195,19 +181,16 @@ def test_final_answer_phase_is_stamped() -> bool:
     ])
     commentary = [r for r in rows if _assistant_text(r) == "just commentary"]
     final = [r for r in rows if _assistant_text(r) == "the final answer"]
-    if len(commentary) != 1 or commentary[0].get("final_answer"):
-        print(f"  commentary must not carry final mark, got {rows!r}")
-        return False
-    if len(final) != 1 or final[0].get("final_answer") is not True:
-        print(f"  final_answer phase must stamp the event, got {rows!r}")
-        return False
-    if final[0].get("final_answer_origin"):
-        print(f"  main-agent final must have no origin, got {final[0]!r}")
-        return False
-    return True
+    assert len(commentary) == 1 and not commentary[0].get("final_answer"), (
+        f"commentary must not carry final mark, got {rows!r}"
+    )
+    assert len(final) == 1 and final[0].get("final_answer") is True, (
+        f"final_answer phase must stamp the event, got {rows!r}"
+    )
+    assert not final[0].get("final_answer_origin"), f"main-agent final must have no origin, got {final[0]!r}"
 
 
-def test_response_item_final_echo_is_stamped_when_not_deduped() -> bool:
+def test_response_item_final_echo_is_stamped_when_not_deduped() -> None:
     rows = _normalize({
         "type": "response_item",
         "payload": {
@@ -217,13 +200,12 @@ def test_response_item_final_echo_is_stamped_when_not_deduped() -> bool:
             "content": [{"type": "output_text", "text": "finalized only"}],
         },
     })
-    if len(rows) != 1 or rows[0].get("final_answer") is not True:
-        print(f"  expected stamped finalized echo, got {rows!r}")
-        return False
-    return True
+    assert len(rows) == 1 and rows[0].get("final_answer") is True, (
+        f"expected stamped finalized echo, got {rows!r}"
+    )
 
 
-def test_unmapped_subagent_final_answer_is_stamped_with_origin() -> bool:
+def test_unmapped_subagent_final_answer_is_stamped_with_origin() -> None:
     rows = _normalize_many([
         _subagent_message(
             "/root/trace_ui_mcp",
@@ -232,16 +214,13 @@ def test_unmapped_subagent_final_answer_is_stamped_with_origin() -> bool:
         ),
     ])
     finals = [r for r in rows if r.get("final_answer") is True]
-    if len(finals) != 1:
-        print(f"  expected one stamped subagent final, got {rows!r}")
-        return False
-    if finals[0].get("final_answer_origin") != "/root/trace_ui_mcp":
-        print(f"  expected author origin, got {finals[0]!r}")
-        return False
-    return True
+    assert len(finals) == 1, f"expected one stamped subagent final, got {rows!r}"
+    assert finals[0].get("final_answer_origin") == "/root/trace_ui_mcp", (
+        f"expected author origin, got {finals[0]!r}"
+    )
 
 
-def test_subagent_encrypted_message_is_not_raw_rendered() -> bool:
+def test_subagent_encrypted_message_is_not_raw_rendered() -> None:
     rows = _normalize_many([
         _spawn_agent_call("call_agent", "/root/trace_ui_mcp"),
         _spawn_agent_output("call_agent", "/root/trace_ui_mcp"),
@@ -270,13 +249,12 @@ def test_subagent_encrypted_message_is_not_raw_rendered() -> bool:
         row for row in rows
         if _assistant_text(row).startswith("Codex native response_item.agent_message")
     ]
-    if native_cards:
-        print(f"  expected encrypted-only agent message to emit no native card, got {rows!r}")
-        return False
-    return True
+    assert not native_cards, (
+        f"expected encrypted-only agent message to emit no native card, got {rows!r}"
+    )
 
 
-def test_subagent_activity_is_lifecycle_notice() -> bool:
+def test_subagent_activity_is_lifecycle_notice() -> None:
     rows = _normalize({
         "type": "event_msg",
         "payload": {
@@ -287,20 +265,18 @@ def test_subagent_activity_is_lifecycle_notice() -> bool:
             "event_id": "call_agent",
         },
     })
-    if len(rows) != 1 or rows[0].get("type") != "lifecycle_notice":
-        print(f"  expected one lifecycle notice, got {rows!r}")
-        return False
-    data = rows[0].get("data") or {}
-    if data.get("kind") != "sub_agent_activity" or "trace_ui_mcp" not in data.get("message", ""):
-        print(f"  unexpected lifecycle data: {data!r}")
-        return False
-    return (
-        rows[0].get("codex_subagent_id") == "child-thread-id"
-        and rows[0].get("parent_tool_use_id") == "call_agent"
+    assert len(rows) == 1 and rows[0].get("type") == "lifecycle_notice", (
+        f"expected one lifecycle notice, got {rows!r}"
     )
+    data = rows[0].get("data") or {}
+    assert data.get("kind") == "sub_agent_activity" and "trace_ui_mcp" in data.get("message", ""), (
+        f"unexpected lifecycle data: {data!r}"
+    )
+    assert rows[0].get("codex_subagent_id") == "child-thread-id", f"unexpected codex_subagent_id: {rows[0]!r}"
+    assert rows[0].get("parent_tool_use_id") == "call_agent", f"unexpected parent_tool_use_id: {rows[0]!r}"
 
 
-def test_non_spawn_subagent_activity_cannot_create_source() -> bool:
+def test_non_spawn_subagent_activity_cannot_create_source() -> None:
     cases = [
         {
             "type": "event_msg",
@@ -336,38 +312,31 @@ def test_non_spawn_subagent_activity_cannot_create_source() -> bool:
     ]
     for case in cases:
         rows = _normalize(case)
-        if len(rows) != 1 or rows[0].get("codex_subagent_id"):
-            print(f"  unsafe subagent source from {case!r}: {rows!r}")
-            return False
-    return True
+        assert len(rows) == 1 and not rows[0].get("codex_subagent_id"), (
+            f"unsafe subagent source from {case!r}: {rows!r}"
+        )
 
 
-def test_empty_inter_agent_metadata_is_filtered() -> bool:
+def test_empty_inter_agent_metadata_is_filtered() -> None:
     rows = _normalize({
         "type": "inter_agent_communication_metadata",
         "payload": {"trigger_turn": False},
     })
-    if rows:
-        print(f"  expected empty metadata to be filtered, got {rows!r}")
-        return False
-    return True
+    assert not rows, f"expected empty metadata to be filtered, got {rows!r}"
 
 
-def test_rich_inter_agent_metadata_still_renders_debug_card() -> bool:
+def test_rich_inter_agent_metadata_still_renders_debug_card() -> None:
     rows = _normalize({
         "type": "inter_agent_communication_metadata",
         "payload": {"trigger_turn": False, "summary": "visible"},
     })
-    if len(rows) != 1:
-        print(f"  expected rich metadata fallback row, got {rows!r}")
-        return False
-    if "Codex native inter_agent_communication_metadata" not in _assistant_text(rows[0]):
-        print(f"  expected native debug text, got {rows!r}")
-        return False
-    return True
+    assert len(rows) == 1, f"expected rich metadata fallback row, got {rows!r}"
+    assert "Codex native inter_agent_communication_metadata" in _assistant_text(rows[0]), (
+        f"expected native debug text, got {rows!r}"
+    )
 
 
-def test_duplicate_subagent_path_does_not_cross_attach() -> bool:
+def test_duplicate_subagent_path_does_not_cross_attach() -> None:
     rows = _normalize_many([
         _spawn_agent_call("call_a", "/root/trace_ui_mcp"),
         _spawn_agent_output("call_a", "/root/trace_ui_mcp"),
@@ -379,13 +348,12 @@ def test_duplicate_subagent_path_does_not_cross_attach() -> bool:
         _tool_result(row) for row in rows
         if _tool_result(row).get("content") == "ambiguous"
     ]
-    if ambiguous_results:
-        print(f"  ambiguous final answer must not attach to either Agent call: {rows!r}")
-        return False
-    if not any("ambiguous" in _assistant_text(row) for row in rows):
-        print(f"  expected readable fallback text for ambiguous final answer, got {rows!r}")
-        return False
-    return True
+    assert not ambiguous_results, (
+        f"ambiguous final answer must not attach to either Agent call: {rows!r}"
+    )
+    assert any("ambiguous" in _assistant_text(row) for row in rows), (
+        f"expected readable fallback text for ambiguous final answer, got {rows!r}"
+    )
 
 
 TESTS = [
@@ -412,16 +380,16 @@ TESTS = [
 
 
 def main() -> int:
-    failed = False
+    failures = 0
     for name, fn in TESTS:
         try:
-            ok = fn()
-        except Exception as exc:
-            ok = False
-            print(f"  exception: {exc!r}")
-        print(f"{PASS if ok else FAIL} {name}")
-        failed = failed or not ok
-    return 1 if failed else 0
+            fn()
+        except AssertionError as exc:
+            failures += 1
+            print(f"{FAIL} {name}: {exc}")
+            continue
+        print(f"{PASS} {name}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
