@@ -35,7 +35,7 @@ class FakeRenderer(cli.Renderer):
         pass
 
 
-def test_drive_turn_passes_disallowed_tools() -> bool:
+def test_drive_turn_passes_disallowed_tools() -> None:
     backend = FakeBackend()
     session = {"id": "session-1"}
     result = asyncio.run(cli._drive_turn(
@@ -48,10 +48,11 @@ def test_drive_turn_passes_disallowed_tools() -> bool:
         mode="manager",
         disallowed_tools=["Bash"],
     ))
-    return result == "turn_complete" and backend.seen["disallowed_tools"] == ["Bash"]
+    assert result == "turn_complete"
+    assert backend.seen["disallowed_tools"] == ["Bash"]
 
 
-def test_drive_turn_passes_disabled_builtin_extensions() -> bool:
+def test_drive_turn_passes_disabled_builtin_extensions() -> None:
     backend = FakeBackend()
     session = {"id": "session-1"}
     result = asyncio.run(cli._drive_turn(
@@ -64,10 +65,8 @@ def test_drive_turn_passes_disabled_builtin_extensions() -> bool:
         mode="manager",
         disabled_builtin_extensions=["ofek.testape-internal"],
     ))
-    return (
-        result == "turn_complete"
-        and backend.seen["disabled_builtin_extensions"] == ["ofek.testape-internal"]
-    )
+    assert result == "turn_complete"
+    assert backend.seen["disabled_builtin_extensions"] == ["ofek.testape-internal"]
 
 
 def test_parse_repeated_disallowed_tool() -> bool:
@@ -83,7 +82,7 @@ def test_parse_repeated_disallowed_tool() -> bool:
             "Write",
         ]
         args = cli._parse_args()
-        return args.disallowed_tools == ["Bash", "Write"]
+        assert args.disallowed_tools == ["Bash", "Write"]
     finally:
         sys.argv = old_argv
 
@@ -101,7 +100,7 @@ def test_parse_repeated_disabled_builtin_extension() -> bool:
             "ofek-dev.canvas",
         ]
         args = cli._parse_args()
-        return args.disabled_builtin_extensions == [
+        assert args.disabled_builtin_extensions == [
             "ofek.testape-internal",
             "ofek-dev.canvas",
         ]
@@ -114,18 +113,19 @@ def test_parse_node_target() -> bool:
     try:
         sys.argv = ["cli.py", "--node", "lenovo", "--cwd", r"C:\Users\Lenovo\repo"]
         args = cli._parse_args()
-        return args.node_id == "lenovo" and args.cwd == r"C:\Users\Lenovo\repo"
+        assert args.node_id == "lenovo"
+        assert args.cwd == r"C:\Users\Lenovo\repo"
     finally:
         sys.argv = old_argv
 
 
-def test_tool_success_result_accepts_payload_without_success() -> bool:
+def test_tool_success_result_accepts_payload_without_success() -> None:
     result = runner._tool_success_result({
         "session_id": "worker-1",
         "final_message": "done",
         "turn_id": "turn-1",
     })
-    return result["is_error"] is False
+    assert result["is_error"] is False
 
 
 def main() -> int:
@@ -140,14 +140,16 @@ def main() -> int:
     failed = 0
     for name, fn in tests:
         try:
-            ok = fn()
-        except Exception as exc:
-            ok = False
-            print(f"{FAIL} {name}: {type(exc).__name__}: {exc}")
-        else:
-            print(f"{PASS if ok else FAIL} {name}")
-        if not ok:
+            fn()
+        except AssertionError as exc:
             failed += 1
+            print(f"{FAIL} {name}: {exc}")
+            continue
+        except Exception as exc:
+            failed += 1
+            print(f"{FAIL} {name}: {type(exc).__name__}: {exc}")
+            continue
+        print(f"{PASS} {name}")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 1 if failed else 0
 
