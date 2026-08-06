@@ -313,6 +313,7 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": [{"type": "agent_message", "data": {"text": "x"}}]},
+            timings_ms={},
         )
 
     original = session_search.provisioning.run
@@ -494,6 +495,7 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     original = session_search.provisioning.run
