@@ -64,8 +64,7 @@ def _payload(shape: str = "auth-a") -> dict:
     return json.loads(read.workers_response_bytes(CWD, shape))
 
 
-def test_concurrent_cold_singleflight_and_warm_latency() -> list[str]:
-    sids = _seed()
+def test_concurrent_cold_singleflight_and_warm_latency(sids: list[str]) -> None:
     original = read._build_workers_projection
     count_lock = threading.Lock()
     builds = 0
@@ -91,7 +90,6 @@ def test_concurrent_cold_singleflight_and_warm_latency() -> list[str]:
     assert len(set(payloads)) == 1 and payloads[0] == warm[0]
     assert len(json.loads(payloads[0])["workers"]) == 459
     assert warm_ms * 2 < cold_ms, (cold_ms, warm_ms)
-    return sids
 
 
 def test_each_dependency_invalidates(sids: list[str]) -> None:
@@ -232,14 +230,24 @@ def test_cache_cardinality_and_byte_bounds() -> None:
 
 
 def main() -> int:
-    sids = test_concurrent_cold_singleflight_and_warm_latency()
-    test_each_dependency_invalidates(sids)
-    test_mutation_during_build_never_publishes_stale(sids)
-    test_native_json_dependency_invalidates(sids)
-    test_delete_reorder_and_auth_isolation(sids)
-    test_cache_cardinality_and_byte_bounds()
-    print("PASS team orchestration workers cache")
-    return 0
+    sids = _seed()
+    checks = [
+        ("concurrent cold singleflight and warm latency", lambda: test_concurrent_cold_singleflight_and_warm_latency(sids)),
+        ("each dependency invalidates", lambda: test_each_dependency_invalidates(sids)),
+        ("mutation during build never publishes stale", lambda: test_mutation_during_build_never_publishes_stale(sids)),
+        ("native json dependency invalidates", lambda: test_native_json_dependency_invalidates(sids)),
+        ("delete reorder and auth isolation", lambda: test_delete_reorder_and_auth_isolation(sids)),
+        ("cache cardinality and byte bounds", test_cache_cardinality_and_byte_bounds),
+    ]
+    passed = 0
+    for label, check in checks:
+        try:
+            check()
+            passed += 1
+        except AssertionError as exc:
+            print(f"FAIL {label}: {exc}")
+    print(f"{passed}/{len(checks)} subtests passed")
+    return 0 if passed == len(checks) else 1
 
 
 if __name__ == "__main__":

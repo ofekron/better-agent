@@ -12,6 +12,8 @@ import re
 import shutil
 import sys
 
+import pytest
+
 import _test_home
 from _test_routes import walk_routes
 _TMP_HOME = _test_home.isolate("bc-test-route-registry-")
@@ -87,20 +89,22 @@ def _served_paths(app) -> set[tuple[str, str]]:
     return served
 
 
-def test_no_duplicate_route_registrations(app) -> bool:
+@pytest.fixture(scope="module")
+def app():
+    import main as main_module
+    return main_module.app
+
+
+def test_no_duplicate_route_registrations(app) -> None:
     seen: dict[tuple[str, str], int] = {}
     for path, methods in _app_routes(app):
         for method in methods:
             seen[(method, path)] = seen.get((method, path), 0) + 1
     dupes = sorted(k for k, count in seen.items() if count > 1)
-    if dupes:
-        print(f"{FAIL} duplicate route registrations (a move that left the original behind?): {dupes}")
-        return False
-    print(f"{PASS} no duplicate (method, path) registrations")
-    return True
+    assert not dupes, f"duplicate route registrations (a move that left the original behind?): {dupes}"
 
 
-def test_included_router_routes_are_reachable(app) -> bool:
+def test_included_router_routes_are_reachable(app) -> None:
     """Every route an extracted router declares must actually be served.
 
     Catches a router that was written but never included, and a router
@@ -114,14 +118,10 @@ def test_included_router_routes_are_reachable(app) -> bool:
             for method in (frozenset(getattr(route, "methods", None) or {"WEBSOCKET"}) - {"HEAD"}):
                 if (method, route.path) not in served:
                     missing.append(f"{module_name}: {method} {route.path}")
-    if missing:
-        print(f"{FAIL} router routes declared but not served: {missing}")
-        return False
-    print(f"{PASS} every extracted router's routes are served by the app")
-    return True
+    assert not missing, f"router routes declared but not served: {missing}"
 
 
-def test_extracted_domains_do_not_regrow_in_main() -> bool:
+def test_extracted_domains_do_not_regrow_in_main() -> None:
     """main.py must not re-declare a path a router already owns."""
     source = open(os.path.join(_BACKEND, "main.py"), encoding="utf-8").read()
     tree = ast.parse(source)
@@ -145,43 +145,41 @@ def test_extracted_domains_do_not_regrow_in_main() -> bool:
         for path in declared:
             if path.startswith(prefixes):
                 offenders.append(f"{path} belongs to {module_name}")
-    if offenders:
-        print(f"{FAIL} main.py re-declares extracted routes: {offenders}")
-        return False
-    print(f"{PASS} main.py declares no route owned by an extracted router")
-    return True
+    assert not offenders, f"main.py re-declares extracted routes: {offenders}"
 
 
-def test_route_paths_are_well_formed(app) -> bool:
+def test_route_paths_are_well_formed(app) -> None:
     bad = [
         path for path, _ in _app_routes(app)
         if path.startswith("/api") and re.search(r"//|\s", path)
     ]
-    if bad:
-        print(f"{FAIL} malformed route paths: {bad}")
-        return False
-    print(f"{PASS} route paths are well formed")
-    return True
+    assert not bad, f"malformed route paths: {bad}"
 
 
-def main() -> bool:
+def main() -> int:
     import main as main_module
 
     app = main_module.app
-    results = [
-        test_no_duplicate_route_registrations(app),
-        test_included_router_routes_are_reachable(app),
-        test_extracted_domains_do_not_regrow_in_main(),
-        test_route_paths_are_well_formed(app),
+    checks = [
+        ("no duplicate (method, path) registrations", lambda: test_no_duplicate_route_registrations(app)),
+        ("every extracted router's routes are served by the app", lambda: test_included_router_routes_are_reachable(app)),
+        ("main.py declares no route owned by an extracted router", test_extracted_domains_do_not_regrow_in_main),
+        ("route paths are well formed", lambda: test_route_paths_are_well_formed(app)),
     ]
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{len(results)} subtests passed")
-    return all(results)
+    passed = 0
+    for label, check in checks:
+        try:
+            check()
+            print(f"{PASS} {label}")
+            passed += 1
+        except AssertionError as exc:
+            print(f"{FAIL} {label}: {exc}")
+    print(f"\n{passed}/{len(checks)} subtests passed")
+    return 0 if passed == len(checks) else 1
 
 
 if __name__ == "__main__":
     try:
-        ok = main()
+        raise SystemExit(main())
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    raise SystemExit(0 if ok else 1)
