@@ -704,6 +704,7 @@ def _new_provider_record(kind: str) -> dict:
         raise ValueError(f"unsupported provider kind: {kind}")
     provider_id = str(uuid.uuid4())
     default_models = {"claude": "opus", "codex": "gpt-5.5"}
+    runner = _clean_runner(kind, "")
     return {
         **_new_provider_authority(),
         "id": provider_id,
@@ -715,8 +716,10 @@ def _new_provider_record(kind: str) -> dict:
         "config_dir": "",
         "custom_models": [],
         "default_model": default_models.get(kind, ""),
-        "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
-        "runner": _clean_runner(kind, ""),
+        "default_reasoning_effort": _clean_default_reasoning_effort(
+            _runtime_kind_for_config(kind, runner), DEFAULT_REASONING_EFFORT
+        ),
+        "runner": runner,
         "default_permission": default_permission_for_kind(kind),
         "suspended": False,
         "allowed_sinks": [],
