@@ -8,7 +8,7 @@ import base64
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-retry-preserves-history-")
+_TMP_HOME = _test_home.isolate_installed("bc-test-retry-preserves-history-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +44,7 @@ def _reset_home() -> None:
     session_manager._batches.clear()
 
 
-def test_retry_preserves_previous_turn() -> bool:
+def test_retry_preserves_previous_turn() -> None:
     _reset_home()
     root = session_manager.create(name="retry", cwd="/tmp")
     sid = root["id"]
@@ -104,33 +104,44 @@ def test_retry_preserves_previous_turn() -> bool:
     current = session_manager.get(sid) or {}
     messages = current.get("messages") or []
     queued = current.get("queued_prompts") or []
-    ok = (
-        body.get("ok") is True
-        and body.get("enqueued") is True
-        and len(queued) == 1  # prompt durably re-enqueued server-side
-        and queued[0].get("content") == user["content"]
-        and queued[0].get("images") == expected_images
-        and len(submitted) == 1
+    assert body.get("ok") is True and body.get("enqueued") is True, (
+        f"retry must report ok+enqueued; a fire-and-forget submit would lose the "
+        f"replayed prompt on restart: {body}"
+    )
+    assert [m.get("id") for m in messages] == ["u1", "a1"], (
+        f"retry must preserve the previous user+assistant turn, not drop history: "
+        f"{[m.get('id') for m in messages]}"
+    )
+    assert current.get("next_seq") == 2, (
+        f"sequence counter must stay consistent after retry: {current.get('next_seq')}"
+    )
+    assert len(queued) == 1 and queued[0].get("content") == user["content"], (
+        "prompt must be durably re-enqueued server-side (queued_prompts) so a "
+        f"pre-dispatch restart replays the original prompt: {queued}"
+    )
+    assert queued[0].get("images") == expected_images, (
+        "replayed queued prompt must carry the original images, not strip them: "
+        f"{queued[0].get('images')}"
+    )
+    assert (
+        len(submitted) == 1
         and submitted[0].get("prompt") == user["content"]
         and submitted[0].get("images") == expected_images
-        and [m.get("id") for m in messages] == ["u1", "a1"]
-        and current.get("next_seq") == 2
+    ), (
+        "retry must actually submit the prompt (with images) to the coordinator, "
+        f"not silently no-op: {submitted}"
     )
-    print(f"{PASS if ok else FAIL} retry preserves previous user+assistant turn")
-    if not ok:
-        print({
-            "body": body,
-            "messages": messages,
-            "next_seq": current.get("next_seq"),
-            "queued": queued,
-            "submitted": submitted,
-        })
-    return ok
+    print(f"{PASS} retry preserves previous user+assistant turn")
 
 
 def main_run() -> int:
     try:
-        return 0 if test_retry_preserves_previous_turn() else 1
+        try:
+            test_retry_preserves_previous_turn()
+        except AssertionError as exc:
+            print(f"{FAIL} {exc}")
+            return 1
+        return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
