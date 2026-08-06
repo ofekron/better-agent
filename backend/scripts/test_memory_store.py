@@ -22,7 +22,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_global_write_read_roundtrip() -> bool:
+def test_global_write_read_roundtrip() -> None:
     written = memory_store.write_memory(
         scope_type="global",
         scope_path="",
@@ -32,18 +32,15 @@ def test_global_write_read_roundtrip() -> bool:
         content="Body text.\n\nMore body text.",
     )
     read = memory_store.read_memory(scope_type="global", scope_path="", slug="shared-git-index-races")
-    ok = (
-        written is not None
-        and read is not None
-        and read["name"] == "shared-git-index-races"
-        and read["type"] == "feedback"
-        and "More body text." in read["content"]
-        and read["created_at"] and read["updated_at"]
-    )
-    return bool(ok)
+    assert written is not None, "write_memory returned None"
+    assert read is not None, "read_memory returned None"
+    assert read["name"] == "shared-git-index-races"
+    assert read["type"] == "feedback"
+    assert "More body text." in read["content"]
+    assert read["created_at"] and read["updated_at"], "timestamps missing"
 
 
-def test_index_rebuilds_on_write_and_delete() -> bool:
+def test_index_rebuilds_on_write_and_delete() -> None:
     memory_store.write_memory(
         scope_type="global",
         scope_path="",
@@ -54,14 +51,13 @@ def test_index_rebuilds_on_write_and_delete() -> bool:
     )
     index_path = memory_store.scope_dir("global", "") / "MEMORY.md"
     before = index_path.read_text(encoding="utf-8")
-    if "index-entry-one" not in before:
-        return False
+    assert "index-entry-one" in before, "index not updated on write"
     memory_store.delete_memory(scope_type="global", scope_path="", slug="index-entry-one")
     after = index_path.read_text(encoding="utf-8")
-    return "index-entry-one" not in after
+    assert "index-entry-one" not in after, "index not updated on delete"
 
 
-def test_project_scope_isolated_from_global() -> bool:
+def test_project_scope_isolated_from_global() -> None:
     project_path = "/tmp/bc-test-memory-project"
     memory_store.write_memory(
         scope_type="project",
@@ -73,13 +69,11 @@ def test_project_scope_isolated_from_global() -> bool:
     )
     global_list = memory_store.list_memories(scope_type="global", scope_path="")
     project_list = memory_store.list_memories(scope_type="project", scope_path=project_path)
-    return (
-        all(m["name"] != "project-only-fact" for m in global_list)
-        and any(m["name"] == "project-only-fact" for m in project_list)
-    )
+    assert all(m["name"] != "project-only-fact" for m in global_list), "project memory leaked into global"
+    assert any(m["name"] == "project-only-fact" for m in project_list), "project memory missing from project scope"
 
 
-def test_memories_for_cwd_merges_ancestors() -> bool:
+def test_memories_for_cwd_merges_ancestors() -> None:
     root = "/tmp/bc-test-memory-repo"
     sub = "/tmp/bc-test-memory-repo/pkg/sub"
     unrelated = "/tmp/bc-test-memory-other-repo"
@@ -97,46 +91,38 @@ def test_memories_for_cwd_merges_ancestors() -> bool:
     )
     merged = memory_store.memories_for_cwd(sub)
     names = {m["name"] for entries in merged.values() for m in entries}
-    return "root-fact" in names and "sub-fact" in names and "unrelated-fact" not in names
+    assert "root-fact" in names, "ancestor scope not merged"
+    assert "sub-fact" in names, "folder scope not merged"
+    assert "unrelated-fact" not in names, "unrelated scope leaked in"
 
 
-def test_rejects_invalid_slug() -> bool:
-    try:
+def test_rejects_invalid_slug() -> None:
+    with pytest.raises(memory_store.MemoryStoreError):
         memory_store.write_memory(
             scope_type="global", scope_path="", slug="Not Valid!",
             description="d", mem_type="user", content="c",
         )
-    except memory_store.MemoryStoreError:
-        return True
-    return False
 
 
-def test_rejects_newline_in_description() -> bool:
-    try:
+def test_rejects_newline_in_description() -> None:
+    with pytest.raises(memory_store.MemoryStoreError):
         memory_store.write_memory(
             scope_type="global", scope_path="", slug="frontmatter-injection",
             description="ok\n---\nHACKED: yes", mem_type="user", content="c",
         )
-    except memory_store.MemoryStoreError:
-        pass
-    else:
-        return False
     # Confirm nothing was written and the index wasn't touched.
-    return memory_store.read_memory(scope_type="global", scope_path="", slug="frontmatter-injection") is None
+    assert memory_store.read_memory(scope_type="global", scope_path="", slug="frontmatter-injection") is None, "rejected write still persisted"
 
 
-def test_rejects_newline_in_scope_path() -> bool:
-    try:
+def test_rejects_newline_in_scope_path() -> None:
+    with pytest.raises(memory_store.MemoryStoreError):
         memory_store.write_memory(
             scope_type="project", scope_path="/tmp/x\n---\nHACKED: yes", slug="frontmatter-injection-2",
             description="d", mem_type="user", content="c",
         )
-    except memory_store.MemoryStoreError:
-        return True
-    return False
 
 
-def test_edit_preserves_created_at() -> bool:
+def test_edit_preserves_created_at() -> None:
     first = memory_store.write_memory(
         scope_type="global", scope_path="", slug="edit-me",
         description="v1", mem_type="user", content="c1",
@@ -145,11 +131,9 @@ def test_edit_preserves_created_at() -> bool:
         scope_type="global", scope_path="", slug="edit-me",
         description="v2", mem_type="user", content="c2",
     )
-    return (
-        first["created_at"] == second["created_at"]
-        and second["description"] == "v2"
-        and second["content"].strip() == "c2"
-    )
+    assert first["created_at"] == second["created_at"], "created_at changed on edit"
+    assert second["description"] == "v2", "description not updated"
+    assert second["content"].strip() == "c2", "content not updated"
 
 
 TESTS = [
@@ -317,10 +301,18 @@ def main() -> int:
     failures = 0
     try:
         for label, fn in TESTS:
-            ok = fn()
-            print(f"{PASS if ok else FAIL} {label}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError as exc:
+                print(f"{FAIL} {label}: {exc}")
                 failures += 1
+            except Exception:
+                import traceback
+                print(f"{FAIL} {label} (unexpected)")
+                traceback.print_exc()
+                failures += 1
+            else:
+                print(f"{PASS} {label}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 1 if failures else 0
