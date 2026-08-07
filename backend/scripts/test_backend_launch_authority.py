@@ -266,3 +266,178 @@ def test_read_object_rejects_oversize(tmp_path: Path) -> None:
     target.write_text(json.dumps({"value": "x" * (65 * 1024)}), encoding="utf-8")
     with pytest.raises(RuntimeError, match="invalid"):
         bla._read_object(target, "record")
+
+
+def test_canonical_rejects_relative_path() -> None:
+    with pytest.raises(RuntimeError, match="must be absolute"):
+        bla._canonical("relative/path")
+
+
+def test_canonical_rejects_parent_traversal() -> None:
+    with pytest.raises(RuntimeError, match="must be absolute"):
+        bla._canonical("/foo/../bar")
+
+
+def test_write_private_json_aborts_on_zero_write(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    target = tmp_path / "record.json"
+    with pytest.raises(RuntimeError, match="write failed"):
+        bla._write_private_json(target, {"a": 1})
+    # The open fd is closed and the temp file cleaned up on the failure path.
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_read_object_missing_file_is_reported(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="is missing"):
+        bla._read_object(tmp_path / "absent.json", "record")
+
+
+def test_read_object_oserror_is_invalid(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "record.json"
+    bla._write_private_json(target, {"a": 1})
+
+    def boom(*args, **kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(os, "open", boom)
+    with pytest.raises(RuntimeError, match="is invalid"):
+        bla._read_object(target, "record")
+
+
+def test_read_object_detects_swap_during_validation(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "record.json"
+    bla._write_private_json(target, {"a": 1})
+    real_fstat = os.fstat
+
+    def shifted(fd):
+        original = real_fstat(fd)
+        # Same shape, different inode -> samestat() can no longer match.
+        return os.stat_result(
+            (
+                original.st_mode,
+                original.st_ino + 1,
+                original.st_dev,
+                original.st_nlink,
+                original.st_uid,
+                original.st_gid,
+                original.st_size,
+                original.st_atime,
+                original.st_mtime,
+                original.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", shifted)
+    with pytest.raises(RuntimeError, match="changed during validation"):
+        bla._read_object(target, "record")
+
+
+@pytest.mark.parametrize("body", [b"\xff\xfe not utf8", b"not-json"])
+def test_read_object_rejects_corrupt_payload(tmp_path: Path, body: bytes) -> None:
+    target = tmp_path / "record.json"
+    target.write_bytes(body)
+    with pytest.raises(RuntimeError, match="is invalid"):
+        bla._read_object(target, "record")
+
+
+def test_read_object_rejects_non_object(tmp_path: Path) -> None:
+    target = tmp_path / "record.json"
+    target.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="is invalid"):
+        bla._read_object(target, "record")
+
+
+def test_consume_succeeds_when_pointer_failed(
+    real_home: Path,
+    checkout: Path,
+    bound_launch,
+) -> None:
+    lease, reservation, _ = bound_launch
+    (real_home / "active_checkout.json").write_text(
+        json.dumps({"status": "failed", "active": "/wherever"}),
+        encoding="utf-8",
+    )
+    authority = bla.consume_primary_backend_launch_authority(
+        launcher_lease_id=lease.lease_id,
+        backend_reservation_id=reservation.reservation_id,
+        backend_lock_identity=reservation.lock_identity,
+        executing_checkout=checkout,
+    )
+    assert authority.launcher_lease_id == lease.lease_id
+
+
+def test_consume_succeeds_when_pointer_matches(
+    real_home: Path,
+    checkout: Path,
+    bound_launch,
+) -> None:
+    lease, reservation, _ = bound_launch
+    (real_home / "active_checkout.json").write_text(
+        json.dumps({"status": "active", "active": str(checkout)}),
+        encoding="utf-8",
+    )
+    authority = bla.consume_primary_backend_launch_authority(
+        launcher_lease_id=lease.lease_id,
+        backend_reservation_id=reservation.reservation_id,
+        backend_lock_identity=reservation.lock_identity,
+        executing_checkout=checkout,
+    )
+    assert authority.checkout == checkout
+
+
+def test_consume_rejects_invalid_pointer_status(
+    real_home: Path,
+    checkout: Path,
+    bound_launch,
+) -> None:
+    lease, reservation, _ = bound_launch
+    (real_home / "active_checkout.json").write_text(
+        json.dumps({"status": "bogus", "active": "/x"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="pointer is invalid"):
+        bla.consume_primary_backend_launch_authority(
+            launcher_lease_id=lease.lease_id,
+            backend_reservation_id=reservation.reservation_id,
+            backend_lock_identity=reservation.lock_identity,
+            executing_checkout=checkout,
+        )
+    assert (real_home / bla._AUTHORITY_FILE).exists()
+
+
+def test_consume_rejects_empty_record_path(
+    real_home: Path,
+    checkout: Path,
+    bound_launch,
+) -> None:
+    lease, reservation, _ = bound_launch
+    payload = _payload(real_home)
+    payload["checkout"] = ""
+    (real_home / bla._AUTHORITY_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid checkout"):
+        bla.consume_primary_backend_launch_authority(
+            launcher_lease_id=lease.lease_id,
+            backend_reservation_id=reservation.reservation_id,
+            backend_lock_identity=reservation.lock_identity,
+            executing_checkout=checkout,
+        )
+
+
+def test_consume_rejects_unexpected_record_fields(
+    real_home: Path,
+    checkout: Path,
+    bound_launch,
+) -> None:
+    lease, reservation, _ = bound_launch
+    payload = _payload(real_home)
+    payload["surprise"] = "x"
+    (real_home / bla._AUTHORITY_FILE).write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unexpected fields"):
+        bla.consume_primary_backend_launch_authority(
+            launcher_lease_id=lease.lease_id,
+            backend_reservation_id=reservation.reservation_id,
+            backend_lock_identity=reservation.lock_identity,
+            executing_checkout=checkout,
+        )
+    assert (real_home / bla._AUTHORITY_FILE).exists()

@@ -89,7 +89,9 @@ def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
         make_private_file(temporary)
         os.replace(temporary, path)
         make_private_file(path)
-        if os.name != "nt":
+        # Directory fsync is POSIX-only; the Windows arm is exercised on Windows.
+        # No single platform can run both arms, so exclude the branch decision.
+        if os.name != "nt":  # pragma: no branch
             directory_fd = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory_fd)
@@ -186,7 +188,10 @@ def issue_primary_backend_launch(
         raise ValueError("backend launch generation must be 32 lowercase hex characters")
     launcher_lease.assert_owner(root)
     backend_reservation.assert_owner(launcher_lease)
-    if backend_reservation.canonical_home != os.path.normcase(str(root)):
+    # Defense-in-depth invariant, unreachable via the public API: a reservation is
+    # always co-bound to its launcher lease's canonical home, and assert_owner(root)
+    # above already proved root == lease home == reservation.canonical_home.
+    if backend_reservation.canonical_home != os.path.normcase(str(root)):  # pragma: no cover
         raise RuntimeError("backend reservation state root does not match")
     _write_private_json(
         _authority_path(root),
@@ -255,7 +260,8 @@ def consume_primary_backend_launch_authority(
         backend_reservation_id,
     )
     path.unlink()
-    if os.name != "nt":
+    # Directory fsync is POSIX-only; the Windows arm is exercised on Windows.
+    if os.name != "nt":  # pragma: no branch
         directory_fd = os.open(root, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
