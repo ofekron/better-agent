@@ -17850,13 +17850,7 @@ html[dir="rtl"] .user-request-toast::before {
 }
 .extension-toast-close:hover { opacity: 1; }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Startup-tasks banner — non-blocking indicator for backend background
- * work (migrations, recovery, jsonl replay). Floats above the prompt
- * area; auto-clears `done` rows, running/failed rows can be dismissed.
- * Authoritative state in the backend's
- * `startup_task_registry`; live deltas via `startup_task_changed` WS.
- * ───────────────────────────────────────────────────────────────────── *.model-catalog-status {
+.model-catalog-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
