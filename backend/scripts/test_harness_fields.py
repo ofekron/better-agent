@@ -254,20 +254,31 @@ def test_descriptor_exposes_profile_meta_fields() -> None:
 
 
 def test_profile_meta_write_routes_to_set_profile_meta() -> None:
+    # The provider pin is a runtime-profile pin since harness_profile_store's
+    # v6 migration (`_migrate_5_to_6`): a bare `default_provider_id` maps to
+    # its provider's preferred live runtime profile, so the stored/writable
+    # field is `default_runtime_profile_id`, not `default_provider_id`.
     harness_profile_store.create_profile({"id": "meta.base.a", "name": "Meta Base A"})
     harness_profile_store.create_profile({"id": "meta.child.a", "name": "Meta Child A"})
+    codex_provider_id = next(
+        p["id"] for p in config_store.list_providers()["providers"] if p["kind"] == "codex"
+    )
+    codex_runtime_profile_id = config_store.provider_execution_defaults(codex_provider_id)["runtime_profile_id"]
     harness_field_writer.apply_field_writes(
         "meta.child.a",
         None,
         [
             {"path": [harness_fields.GROUP_PROFILE_META, "base_profile_id"], "value": "meta.base.a"},
-            {"path": [harness_fields.GROUP_PROFILE_META, "default_provider_id"], "value": "codex"},
+            {
+                "path": [harness_fields.GROUP_PROFILE_META, "default_runtime_profile_id"],
+                "value": codex_runtime_profile_id,
+            },
             {"path": [harness_fields.GROUP_PROFILE_META, "default_model"], "value": "gpt-5.5"},
         ],
     )
     stored = harness_profile_store.get_profile("meta.child.a")
     assert stored["base_profile_id"] == "meta.base.a"
-    assert stored["default_provider_id"] == "codex"
+    assert stored["default_runtime_profile_id"] == codex_runtime_profile_id
     assert stored["default_model"] == "gpt-5.5"
     # An empty value clears the pin back to unset.
     harness_field_writer.apply_field_writes(
@@ -311,9 +322,28 @@ def test_profile_meta_cycle_rejected_through_write_route() -> None:
         raise AssertionError("A->B->A cycle accepted through the /fields write route")
 
 
-def main() -> int:
+def setup_module(_module: object) -> None:
+    """Pytest's classic per-module setup hook — runs once before any
+    `test_*` function in this file. Without it, pytest collection (which
+    ignores this file's own `main()` orchestration below) never installs
+    the fixture extension, so every test that looks up FIXTURE_ID fails.
+
+    Runs BEFORE conftest.py's per-test autouse `_ensure_ba_home_dirs`
+    fixture ever fires for this module's first test (xunit-style module
+    hooks execute outside pytest's fixture graph, ahead of it) -- when this
+    file runs after another test file in the same pytest process, `ba_home()`
+    at this point is still whatever that PRIOR file's last test left active,
+    not this module's own isolated home. Re-engaging explicitly here (rather
+    than relying on the autouse fixture to have already switched it) makes
+    the fixture install land in the home this module's own tests actually
+    run against, regardless of run order."""
+    _test_home.engage(_TMP_HOME)
     _install_fixture_extension()
     assert extension_store.is_extension_runtime_ready(FIXTURE_ID)
+
+
+def main() -> int:
+    setup_module(None)
     test_descriptor_exposes_every_configurable_group()
     test_secret_setting_is_global_scope_and_never_exposes_a_value()
     test_reading_a_secret_typed_setting_does_not_raise()

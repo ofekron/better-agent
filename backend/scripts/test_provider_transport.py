@@ -4,17 +4,25 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import os
 import sys
-import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-TEST_HOME = tempfile.mkdtemp(prefix="better-agent-provider-transport-")
-os.environ["BETTER_AGENT_HOME"] = TEST_HOME
+import _test_home
+
+# `_test_home.isolate()` (not a raw `os.environ["BETTER_AGENT_HOME"] = ...`)
+# is required under pytest: conftest.py's autouse `_ensure_ba_home_dirs`
+# fixture re-engages the home before every test, and it only honors a
+# module's own home (vs. falling back to the shared session root) when the
+# module registered it via `isolate()`. A raw env-var assignment gets
+# silently clobbered back to the shared root on the very first test, so
+# `ba_home()` (used by `_managed_ca_path` to recognize this module's own
+# `stale.pem` fixture as "managed") never matches this module's own path.
+TEST_HOME = _test_home.isolate("better-agent-provider-transport-")
 
 import provider_transport
 import provider
@@ -340,6 +348,11 @@ def test_each_local_provider_executes_run_transport_finalizer():
             provider_class = provider._resolve_class(spec.kind)
             instance = object.__new__(provider_class)
             instance.id = f"test-{spec.kind}"
+            # `object.__new__` bypasses `Provider.__init__`, which normally
+            # sets this up (see provider.py) -- ClaudeProvider.build_env's
+            # runtime_record() reads it directly, not via getattr, so it
+            # must exist here the same way __init__ would have set it.
+            instance._execution_record = threading.local()
             instance._record = {
                 "id": instance.id,
                 "kind": spec.kind,

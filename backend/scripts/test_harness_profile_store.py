@@ -26,7 +26,7 @@ def test_create_profile_has_empty_overrides() -> None:
         "name": "Personal Harness",
         "description": "hand-tuned overrides",
     })
-    assert profile["schema_version"] == 5
+    assert profile["schema_version"] == harness_profile_store.SCHEMA_VERSION
     assert profile["overrides"] == {}
     assert profile["base_profile_id"] is None
     assert profile["default_model"] is None
@@ -206,13 +206,16 @@ def test_stale_revision_rejected() -> None:
 
 
 def test_set_profile_meta_roundtrip() -> None:
+    # The provider pin is a runtime-profile pin since the v6 migration
+    # (`_migrate_5_to_6`): the stored/writable field is
+    # `default_runtime_profile_id`, not `default_provider_id`.
     harness_profile_store.create_profile({"id": "meta.base", "name": "Meta Base"})
     child = harness_profile_store.create_profile({"id": "meta.child", "name": "Meta Child"})
     updated = harness_profile_store.set_profile_meta(
         "meta.child",
         {
             "base_profile_id": "meta.base",
-            "default_provider_id": "codex",
+            "default_runtime_profile_id": "codex-runtime-profile",
             "default_model": "gpt-5.5",
             "default_reasoning_effort": "high",
             "provisioning_prompt": "Prepare a strict reviewer workspace.",
@@ -220,7 +223,7 @@ def test_set_profile_meta_roundtrip() -> None:
         revision=child["revision"],
     )
     assert updated["base_profile_id"] == "meta.base"
-    assert updated["default_provider_id"] == "codex"
+    assert updated["default_runtime_profile_id"] == "codex-runtime-profile"
     assert updated["default_model"] == "gpt-5.5"
     assert updated["default_reasoning_effort"] == "high"
     assert updated["provisioning_prompt"] == "Prepare a strict reviewer workspace."
@@ -317,7 +320,7 @@ def test_extension_owned_profile_is_read_only() -> None:
         "secret_refs": {},
         "base_profile_id": None,
         "base_profile_revision": None,
-        "default_provider_id": None,
+        "default_runtime_profile_id": None,
         "default_model": None,
         "default_reasoning_effort": None,
         "created_at": "2026-01-01T00:00:00",

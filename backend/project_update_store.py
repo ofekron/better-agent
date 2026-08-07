@@ -12,13 +12,29 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from paths import ba_home
+from paths import ba_home, is_test_mode
 
 _lock = threading.Lock()
 _counts_loaded = False
 _unseen_counts: dict[str, int] = {}
 _total_unseen_count = 0
 _counts_version = 0
+
+
+def reset_for_test_home() -> None:
+    """Drop the cached unseen-counts projection so the next call reloads
+    from the current `ba_home()`. Without this, `_ensure_counts_locked`'s
+    `_counts_loaded` guard keeps serving the FIRST test home's counts
+    forever once any test in the process has warmed it, even after a later
+    test switches to a different isolated home."""
+    global _counts_loaded, _total_unseen_count, _counts_version
+    if not is_test_mode():
+        raise RuntimeError("project-update-store test-home reset requires test mode")
+    with _lock:
+        _counts_loaded = False
+        _unseen_counts.clear()
+        _total_unseen_count = 0
+        _counts_version = 0
 
 
 def _updates_dir() -> Path:

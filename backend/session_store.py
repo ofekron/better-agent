@@ -455,10 +455,24 @@ _working_session_index_loaded = False
 _summary_index_reset_epoch = 0
 _summary_index_version = 0
 _summary_order_version = 0
+# Reserved for a future distinction between "order changed" and "visibility
+# changed" (e.g. a session entering/leaving the default sidebar view without
+# changing its relative sort position among still-visible sessions). Today it
+# only advances alongside `_summary_order_version` on a full
+# `_reset_home_scoped_caches` reset; `sidebar_session_summary_page` returns
+# its current value as `vis_gen` purely for external staleness comparisons
+# (same pattern as `summary_index_version()`/`summary_order_version()`).
+_summary_visibility_version = 0
 _summary_metadata_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_id_cache: list[str] = []
 _summary_sorted_id_caches: dict[str, tuple[int, list[str]]] = {}
+# Cache for `sidebar_session_summary_page`'s folder-partitioned id ordering,
+# keyed by `(sort_by, folder_view)` -> `(order_version, visibility_version, ids)`.
+# Only the (cheap) partition-into-groups + slice step is cached here; the
+# (relatively) expensive per-`sort_by` full sort is already cached by
+# `ordered_session_summary_ids` via `_summary_sorted_id_caches`.
+_sidebar_page_projections: dict[tuple[str, bool], tuple[int, int, list[str]]] = {}
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -927,6 +941,7 @@ _OPENED_CACHE_MAX = 256
 def _reset_home_scoped_caches() -> None:
     global _index_loaded, _index_fingerprint, _dir_fingerprint_cache
     global _summary_index_loaded, _summary_index_version, _summary_order_version
+    global _summary_visibility_version
     global _summary_metadata_version, _summary_sorted_cache_version
     global _metadata_trigram_index_version, _summary_index_reset_epoch
     global _working_session_index_loaded
@@ -948,10 +963,12 @@ def _reset_home_scoped_caches() -> None:
         _summary_index_loaded = False
         _summary_index_version += 1
         _summary_order_version += 1
+        _summary_visibility_version += 1
         _summary_metadata_version += 1
         _summary_sorted_cache_version = -1
         _summary_sorted_id_cache.clear()
         _summary_sorted_id_caches.clear()
+        _sidebar_page_projections.clear()
         _summary_index_reset_epoch += 1
     with _working_session_index_lock:
         _working_session_index.clear()
@@ -1566,9 +1583,17 @@ def _summary_order_changed(before: Optional[dict], after: dict) -> bool:
     if before is None:
         return True
     sort_fields = ("updated_at", "last_user_prompt_at", "last_opened_at")
-    return bool(before.get("pinned", False)) != bool(after.get("pinned", False)) or any(
-        timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
-        for field in sort_fields
+    # `folder_id` is order-relevant: `sidebar_session_summary_page`'s
+    # folder_view grouping partitions by it (foldered sessions first), so a
+    # folder reassignment must invalidate `_sidebar_page_projections` the
+    # same way a timestamp/pin change invalidates `_summary_sorted_id_caches`.
+    return (
+        bool(before.get("pinned", False)) != bool(after.get("pinned", False))
+        or before.get("folder_id") != after.get("folder_id")
+        or any(
+            timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
+            for field in sort_fields
+        )
     )
 
 
@@ -6038,6 +6063,62 @@ def ordered_session_summary_ids(sort_by: str) -> list[str]:
             )
             _summary_sorted_id_caches[sort_by] = cached
         return list(cached[1])
+
+
+def sidebar_session_summary_page(
+    sort_by: str,
+    cursor: Optional[str],
+    offset: int,
+    limit: int,
+    *,
+    folder_view: bool,
+) -> tuple[list[dict], int, int, int]:
+    """Fast, order-preserving sidebar page — the folder_view-aware sibling of
+    `ordered_session_summary_ids`. Reuses that function's per-`sort_by`
+    sorted-id cache for the (relatively expensive) sort; when `folder_view`
+    is set, additionally partitions that order into foldered-sessions-first
+    then unfiled-sessions (each group keeping its relative sort order),
+    cached per `(sort_by, folder_view)` in `_sidebar_page_projections` and
+    invalidated the same way (`_summary_order_version`) since `folder_id` is
+    itself order-relevant (see `_summary_order_changed`).
+
+    `cursor` is reserved for future keyset pagination; only offset-based
+    paging is implemented today.
+
+    Returns `(page, total, order_gen, vis_gen)` — the generation numbers let
+    a caller detect whether the underlying data changed between two calls,
+    the same pattern as `summary_index_version()`/`summary_order_version()`.
+    """
+    if cursor is not None:
+        raise ValueError("sidebar_session_summary_page: cursor pagination is not implemented")
+    ordered_ids = ordered_session_summary_ids(sort_by)
+    with _summary_index_lock:
+        cache_key = (sort_by, folder_view)
+        cached = _sidebar_page_projections.get(cache_key)
+        if cached is not None and cached[0] == _summary_order_version:
+            grouped_ids = cached[2]
+        elif folder_view:
+            foldered: list[str] = []
+            unfiled: list[str] = []
+            for sid in ordered_ids:
+                summary = _summary_index.get(sid)
+                if summary is not None and summary.get("folder_id"):
+                    foldered.append(sid)
+                else:
+                    unfiled.append(sid)
+            grouped_ids = foldered + unfiled
+            _sidebar_page_projections[cache_key] = (
+                _summary_order_version, _summary_visibility_version, grouped_ids,
+            )
+        else:
+            grouped_ids = ordered_ids
+            _sidebar_page_projections[cache_key] = (
+                _summary_order_version, _summary_visibility_version, grouped_ids,
+            )
+        total = len(grouped_ids)
+        page_ids = grouped_ids[offset:offset + limit]
+        page = [_summary_index[sid] for sid in page_ids if sid in _summary_index]
+        return page, total, _summary_order_version, _summary_visibility_version
 
 
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:

@@ -307,9 +307,10 @@ def _local_session_page_for_sidebar_preserving_order(
     sources: set[str],
     content_scores: dict[str, int],
     status_gate: Callable[[dict], bool] | None = None,
+    folder_view: bool = False,
 ) -> tuple[list[dict], int]:
     import working_mode as _wm
-    if _can_page_default_local_visible_order(
+    no_other_filters = _can_page_default_local_visible_order(
         project_path=project_path,
         search=search,
         show_archived=show_archived,
@@ -322,7 +323,14 @@ def _local_session_page_for_sidebar_preserving_order(
         sources=sources,
         content_scores=content_scores,
         status_filter=status_gate is not None,
-    ):
+    )
+    if folder_view and no_other_filters:
+        with perf.timed("sessions.list.local.sidebar_summary_page"):
+            page, total, _order_gen, _vis_gen = session_store.sidebar_session_summary_page(
+                sort_by, None, offset, limit, folder_view=folder_view,
+            )
+        return page, total
+    if no_other_filters:
         with perf.timed("sessions.list.local.visible_order_page"):
             expected_summary_index_version = session_store.summary_index_version()
             expected_summary_order_version = session_store.summary_order_version()
@@ -1081,16 +1089,23 @@ def _can_preserve_summary_order(
     *,
     search_query: str,
     appended_virtual_sessions: bool,
-    folder_view: bool,
     sort_by: str,
     status_sort: bool,
-    status_filter: bool,
+    folder_view: bool = False,
+    status_filter: bool = False,
 ) -> bool:
+    # `folder_view` is accepted (not just ignored) for call-site compatibility
+    # -- it used to unconditionally disable this fast path (see
+    # test_folder_view_fast_path.py), forcing a fallback to a raw unsorted
+    # enumeration re-sorted with a DIFFERENT tie-break, which visibly
+    # reordered the sidebar even with zero foldered sessions. The order
+    # itself stays correct under folder_view via
+    # `session_store.sidebar_session_summary_page`'s folder-partitioning, so
+    # this gate no longer needs to exclude it.
     return (
         not status_filter
         and not search_query
         and not appended_virtual_sessions
-        and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
@@ -1099,15 +1114,16 @@ def _can_preserve_summary_order(
 def _can_page_local_summary_order(
     *,
     search_query: str,
-    folder_view: bool,
     sort_by: str,
     status_sort: bool,
-    status_filter: bool,
+    folder_view: bool = False,
+    status_filter: bool = False,
 ) -> bool:
+    # See `_can_preserve_summary_order` -- `folder_view` no longer excludes
+    # this fast path (accepted for call-site compatibility only).
     return (
         not status_filter
         and not search_query
-        and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
@@ -1120,7 +1136,6 @@ def _can_page_default_updated_at_with_virtual(
     show_archived: bool,
     file_edit_mode: bool | None,
     folder_ids: set[str],
-    folder_view: bool,
     tag_ids: set[str],
     provider_ids: set[str],
     model_ids: set[str],
@@ -1128,8 +1143,11 @@ def _can_page_default_updated_at_with_virtual(
     sources: set[str],
     sort_by: str,
     status_sort: bool,
-    status_filter: bool,
+    folder_view: bool = False,
+    status_filter: bool = False,
 ) -> bool:
+    # See `_can_preserve_summary_order` -- `folder_view` no longer excludes
+    # this fast path (accepted for call-site compatibility only).
     return (
         not status_filter
         and not search_query
@@ -1137,7 +1155,6 @@ def _can_page_default_updated_at_with_virtual(
         and not show_archived
         and file_edit_mode is None
         and not folder_ids
-        and not folder_view
         and not tag_ids
         and not provider_ids
         and not model_ids
@@ -1345,6 +1362,7 @@ def _build_local_sessions_page_for_list(
                 sources=sources,
                 content_scores=content_scores,
                 status_gate=status_gate,
+                folder_view=folder_view,
             )
         virtual_total = 0
         if may_include_virtual and sort_by == "last_user_prompt_at":
@@ -1434,6 +1452,7 @@ def _build_local_sessions_page_for_list(
                             sources=sources,
                             content_scores=content_scores,
                             status_gate=status_gate,
+                            folder_view=folder_view,
                         )
                     virtual_limit = max(offset + limit, 1)
                     cached_virtual = virtual_session_store.list_recent_cached(

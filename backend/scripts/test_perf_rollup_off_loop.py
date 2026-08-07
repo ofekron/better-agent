@@ -98,15 +98,24 @@ async def test_offloaded_flush_does_not_block_loop() -> None:
         perf.logger.removeHandler(handler)  # type: ignore[arg-type]
         perf.logger.setLevel(original_level)
 
-    ok = ticks >= 10
+    # The property under test is binary — did the loop keep making progress
+    # concurrently with the slow flush, or was it synchronously blocked for
+    # the whole hold? `test_direct_flush_blocks_loop_control` proves the
+    # regressed (blocking) case always yields exactly 0 ticks, so any
+    # non-zero count here already distinguishes "offloaded" from "blocking"
+    # with no straddling ambiguity. A fixed throughput floor (e.g. ">=10"
+    # ticks, assuming near-ideal 20ms-granularity scheduling) instead
+    # measures host CPU contention, not this code's behavior, and false-fails
+    # under a busy/CPU-capped CI runner even though the loop never blocked.
+    ok = ticks >= 1
     print(
         f"{PASS if ok else FAIL} perf.flush() via asyncio.to_thread: loop "
         f"ticks during a {SLOW_SECONDS}s slow-handler flush = {ticks} "
-        f"(want >=10, proves loop stayed responsive)"
+        f"(want >=1, proves loop stayed responsive)"
     )
     assert ok, (
-        f"loop froze: only {ticks} ticks during off-thread flush "
-        f"(want >=10)"
+        f"loop froze: {ticks} ticks during off-thread flush "
+        f"(want >=1 -- zero ticks means the loop was synchronously blocked)"
     )
 
 
