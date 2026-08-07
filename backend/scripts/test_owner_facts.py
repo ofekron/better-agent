@@ -24,6 +24,14 @@ Locks three owner-side facts the chat-surface adapter layer projects from:
    "user" otherwise. `backend.adapters.chat_adapter.ChatSurfaceAdapter`
    joins this fact onto the matching TYPED_PROMPT node by that same
    `msg_id`, regardless of which row lands in `events.jsonl` first.
+5. `turn_manager.TurnManager._publish_turn_error_meta` publishes a
+   persisted `turn_error_meta` bus fact from `run_turn`'s single
+   error-terminal chokepoint whenever a failed turn carries structured
+   `error_meta` (currently only `ProviderCredentialError`'s
+   `{kind, provider_id, credential_status}`) — same ownership/payload
+   msg_id split as `_publish_prompt_meta`, letting
+   `backend.adapters.normalize` map the row to a credential-specific
+   FAILURE node so surface v2's credential-failure chip survives reload.
 
 Run:
     PYTHONPATH=. python3 -m pytest backend/scripts/test_owner_facts.py -q
@@ -65,6 +73,12 @@ from backend.event_ingester import event_ingester as dotted_event_ingester  # no
 from backend.surface_contract.frames import TurnLifecycle, TurnPhase  # noqa: E402
 from backend.surface_contract.identity import Ok  # noqa: E402
 from backend.surface_contract.nodes import NodeKind, PromptOrigin, ResultKind  # noqa: E402
+
+# `provider` (bare import, matches `turn_manager.py`'s own top-level
+# `from provider import ...`) — used to drive the ProviderCredentialError
+# catch's `error_meta()`/`error_text` computation exactly as
+# `turn_manager.py`'s `run_turn` except-block does at its emit site.
+from provider import ProviderCredentialError  # noqa: E402
 
 
 class _StubCoordinator:
@@ -439,6 +453,100 @@ def test_publish_prompt_meta_noop_without_assistant_message_id() -> None:
         tm = TurnManager(_StubCoordinator())
         asyncio.run(tm._publish_prompt_meta(
             app_session_id=sid, user_msg={"id": "user-msg-5"}, assistant_message_id="",
+        ))
+        assert not [e for e in captured if e.sid == sid]
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+# ---------------------------------------------------------------------------
+# Item 5: TurnManager._publish_turn_error_meta — persisted fact carrying a
+# failed turn's structured error_meta (credential-failure chips under
+# surface v2).
+# ---------------------------------------------------------------------------
+def test_publish_turn_error_meta_credential_publishes_exact_payload():
+    """Drives `ProviderCredentialError.error_meta()`/`str(e)` the same way
+    `turn_manager.py`'s `run_turn` except-block computes `error_meta` /
+    `error_text` at its emit site, then asserts the published fact's exact
+    shape — including the ownership/payload msg_id split mirroring
+    `_publish_prompt_meta`."""
+    sid = f"sid-err-meta-cred-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-err-meta-cred-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("turn_error_meta", sub_name)
+    try:
+        err = ProviderCredentialError(
+            "credentials not authoritative",
+            provider_id="anthropic",
+            credential_status="missing",
+        )
+        error_meta = err.error_meta() if isinstance(err, ProviderCredentialError) else None
+        error_text = str(err) if error_meta else f"{type(err).__name__}: {err}"
+
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_turn_error_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-err-1"},
+            assistant_message_id="asst-err-1",
+            error_text=error_text,
+            error_meta=error_meta,
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.type == "turn_error_meta"
+        assert ev.persist is True
+        # Journal-ownership msg_id is the ASSISTANT/turn-owning message id
+        # (same convention as prompt_meta) — user_msg["id"] travels inside
+        # the payload instead.
+        assert ev.msg_id == "asst-err-1"
+        assert ev.payload == {
+            "msg_id": "user-msg-err-1",
+            "error_text": "credentials not authoritative",
+            "error_meta": {
+                "kind": "provider_credential",
+                "provider_id": "anthropic",
+                "credential_status": "missing",
+            },
+        }
+        # error_meta is a closed set — {kind, provider_id,
+        # credential_status} only, never anything secret-bearing.
+        assert set(ev.payload["error_meta"].keys()) == {
+            "kind", "provider_id", "credential_status",
+        }
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_turn_error_meta_noop_without_user_msg_id():
+    sid = f"sid-err-meta-noid-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-err-meta-noid-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("turn_error_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_turn_error_meta(
+            app_session_id=sid,
+            user_msg={},
+            assistant_message_id="asst-err-2",
+            error_text="boom",
+            error_meta={"kind": "provider_credential"},
+        ))
+        assert not [e for e in captured if e.sid == sid]
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_turn_error_meta_noop_without_assistant_message_id():
+    sid = f"sid-err-meta-noasst-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-err-meta-noasst-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("turn_error_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_turn_error_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-err-3"},
+            assistant_message_id="",
+            error_text="boom",
+            error_meta={"kind": "provider_credential"},
         ))
         assert not [e for e in captured if e.sid == sid]
     finally:

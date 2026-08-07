@@ -459,6 +459,57 @@ class TurnManager:
                 app_session_id, prompt_msg_id,
             )
 
+    async def _publish_turn_error_meta(
+        self,
+        *,
+        app_session_id: str,
+        user_msg: dict,
+        assistant_message_id: str,
+        error_text: str,
+        error_meta: dict,
+    ) -> None:
+        """Backend-authored persisted journal fact carrying a failed
+        turn's structured `error_meta` (e.g. `ProviderCredentialError`'s
+        `{kind, provider_id, credential_status}` — see `provider.py`'s
+        `error_meta()`; never secret-bearing), published from the single
+        `run_turn` error-terminal chokepoint so surface v2 can render a
+        credential-specific FAILURE node even after reload (the live-only
+        `error` WS frame this accompanies isn't journaled).
+
+        Same ownership convention as `_publish_prompt_meta`: the journal
+        row's OWNERSHIP `msg_id` is `assistant_message_id` (the
+        turn-owning id every render event of this turn is journaled
+        under), while `user_msg["id"]` travels inside the payload `data`
+        to identify WHICH prompt this failure describes.
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        try:
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await bus.publish(BusEvent(
+                type="turn_error_meta",
+                root_id=root_id,
+                sid=app_session_id,
+                payload={
+                    "msg_id": prompt_msg_id,
+                    "error_text": error_text,
+                    "error_meta": error_meta,
+                },
+                msg_id=assistant_message_id,
+                persist=True,
+            ))
+        except Exception:
+            logger.exception(
+                "turn_error_meta bus publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
+            )
+
     async def _publish_terminal_lifecycle(
         self,
         kind: Literal["complete", "stopped"],
@@ -2765,6 +2816,14 @@ class TurnManager:
                 )
             except Exception:
                 logger.exception("Failed to persist user message during error handling")
+            if error_meta is not None and assistant_msg_holder[0] is not None:
+                await self._publish_turn_error_meta(
+                    app_session_id=app_session_id,
+                    user_msg=user_msg,
+                    assistant_message_id=assistant_msg_holder[0]["id"],
+                    error_text=error_text,
+                    error_meta=error_meta,
+                )
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})

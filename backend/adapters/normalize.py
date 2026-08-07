@@ -119,6 +119,16 @@ def user_message_failed_node_id(lifecycle_msg_id: str) -> NodeId:
     return f"{_FAILURE_NODE_ID_PREFIX}{lifecycle_msg_id}"
 
 
+def turn_error_meta_node_id(assistant_msg_id: str) -> NodeId:
+    """Deterministic FAILURE node id for a `turn_error_meta` fact —
+    namespaced `err:` (distinct from `user_message_failed`'s bare
+    `failure:{lifecycle_msg_id}`) and keyed by the turn-owning assistant
+    message id (`backend.turn_manager._publish_turn_error_meta`'s journal
+    OWNERSHIP `msg_id`) so a retried prompt's second turn attempt gets its
+    own FAILURE node rather than colliding with the first."""
+    return f"{_FAILURE_NODE_ID_PREFIX}err:{assistant_msg_id}"
+
+
 def _parse_ts(row: dict) -> float:
     ts = row.get("ts")
     if isinstance(ts, (int, float)):
@@ -277,6 +287,8 @@ def normalize_journal_row(
         return _handle_agent_message(row, data, node)
     if row_type == "user_message_failed":
         return _handle_user_message_failed(row, data, node)
+    if row_type == "turn_error_meta":
+        return _handle_turn_error_meta(row, data, node)
     if row_type in _WORKER_FACT_TYPES:
         uuid = _uuid_of(row) or _fallback_id(row, row_type)
         return [
@@ -320,6 +332,67 @@ def _handle_user_message_failed(row: dict, data: dict, node: partial) -> list[No
     return [
         node(
             node_id=user_message_failed_node_id(lifecycle_msg_id), kind=NodeKind.FAILURE,
+            status=None, payload=payload,
+        )
+    ]
+
+
+def _handle_turn_error_meta(row: dict, data: dict, node: partial) -> list[Node]:
+    """Journaled `turn_error_meta` BusEvent row
+    (`backend.turn_manager._publish_turn_error_meta`, fired from
+    `run_turn`'s single error-terminal chokepoint whenever a failed turn
+    carries structured `error_meta` — currently only
+    `ProviderCredentialError`). Row shape: `{"type": "turn_error_meta",
+    "data": {msg_id, error_text, error_meta}, "msg_id":
+    assistant_message_id, ...}` — the top-level `row["msg_id"]` is the
+    JOURNAL OWNERSHIP key (turn-owning assistant message id); `data
+    ["msg_id"]` is the failed prompt's own id, carried for identification
+    only (not used for node identity here).
+
+    `error_meta.kind == "provider_credential"` maps to a credential-
+    specific FAILURE node (retryable, `FIX_CREDENTIAL` resolution,
+    structured `data={provider_id, credential_status}` — never anything
+    secret-bearing, matching `ProviderCredentialError.error_meta()`'s
+    closed field set). Any other kind falls back to the same
+    contract-default shape `failure_payload_for_reason` uses for an
+    unmapped reason (severity=error, retryable=False, resolution=none),
+    with `code=kind` — so a future/unknown kind still renders instead of
+    being dropped, just without a specific recovery action."""
+    assistant_msg_id = row.get("msg_id")
+    if not isinstance(assistant_msg_id, str) or not assistant_msg_id:
+        return []
+    error_meta = data.get("error_meta")
+    error_meta = error_meta if isinstance(error_meta, dict) else {}
+    error_text = data.get("error_text")
+    kind = error_meta.get("kind")
+    if kind == "provider_credential":
+        text = error_text if isinstance(error_text, str) and error_text else (
+            "provider credential error"
+        )
+        payload: FailurePayload = FailurePayload(
+            code="provider_credential",
+            text=text,
+            data={
+                "provider_id": error_meta.get("provider_id"),
+                "credential_status": error_meta.get("credential_status"),
+            },
+            severity=FailureSeverity.ERROR,
+            retryable=True,
+            resolution=FailureResolution.FIX_CREDENTIAL,
+        )
+    else:
+        code = kind if isinstance(kind, str) and kind else "unknown"
+        text = error_text if isinstance(error_text, str) and error_text else (
+            f"turn failed: {code}"
+        )
+        payload = FailurePayload(
+            code=code, text=text,
+            severity=FailureSeverity.ERROR, retryable=False,
+            resolution=FailureResolution.NONE,
+        )
+    return [
+        node(
+            node_id=turn_error_meta_node_id(assistant_msg_id), kind=NodeKind.FAILURE,
             status=None, payload=payload,
         )
     ]

@@ -69,7 +69,8 @@ def _unsubscribe(handler) -> None:
 # ---------------------------------------------------------------------------
 def test_textual_check_no_other_bus_publish_in_module() -> None:
     """Per-file bus.publish funnels after the UPM split:
-      turn_manager.py: 4 (start + user terminal + worker terminal + prompt_meta funnels)
+      turn_manager.py: 5 (start + user terminal + worker terminal +
+        prompt_meta + turn_error_meta funnels)
       user_prompt_manager.py: 1 (user lifecycle funnel)
     Each file's count locks down exactly-one-funnel-per-responsibility.
     """
@@ -81,9 +82,10 @@ def test_textual_check_no_other_bus_publish_in_module() -> None:
     assert "_publish_terminal_lifecycle" in tm_src
     # Count actual call sites (`bus.publish(`), not docstring mentions.
     n_tm = tm_src.count("bus.publish(")
-    assert n_tm == 4, (
-        f"expected exactly 4 `bus.publish` calls in turn_manager.py "
-        f"(lifecycle funnels + _publish_prompt_meta), got {n_tm} — "
+    assert n_tm == 5, (
+        f"expected exactly 5 `bus.publish` calls in turn_manager.py "
+        f"(lifecycle funnels + _publish_prompt_meta + "
+        f"_publish_turn_error_meta), got {n_tm} — "
         f"an unexpected emit site exists"
     )
     assert "_publish_prompt_meta" in tm_src

@@ -12,6 +12,7 @@ from backend.adapters.normalize import (
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
+    turn_error_meta_node_id,
     typed_prompt_node_id,
     user_message_failed_node_id,
 )
@@ -278,6 +279,101 @@ def test_failure_payload_for_reason_matches_admission_rejected_table():
 def test_user_message_failed_node_id_is_deterministic():
     assert user_message_failed_node_id("abc") == "failure:abc"
     assert user_message_failed_node_id("abc") == user_message_failed_node_id("abc")
+
+
+def _turn_error_meta_row(
+    *, assistant_msg_id="asst-1", user_msg_id="user-1",
+    error_text="cred missing", error_meta=None, seq=9,
+):
+    # Exact on-disk shape `turn_manager.py`'s `_publish_turn_error_meta`
+    # produces (same wildcard-journal-subscriber path traced for
+    # `_user_message_failed_row` above): `{"type": "turn_error_meta",
+    # "data": {msg_id, error_text, error_meta}, "msg_id":
+    # assistant_message_id, ...}` — `row["msg_id"]` is the JOURNAL
+    # OWNERSHIP key (turn-owning assistant message id), `data["msg_id"]`
+    # is the failed prompt's own id.
+    return {
+        "type": "turn_error_meta",
+        "seq": seq,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "sid": SURFACE,
+        "data": {
+            "msg_id": user_msg_id,
+            "error_text": error_text,
+            "error_meta": (
+                error_meta if error_meta is not None else {
+                    "kind": "provider_credential",
+                    "provider_id": "anthropic",
+                    "credential_status": "missing",
+                }
+            ),
+        },
+        "msg_id": assistant_msg_id,
+        "source": "event_bus",
+    }
+
+
+def test_turn_error_meta_row_provider_credential_maps_to_failure_node():
+    row = _turn_error_meta_row()
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    n = nodes[0]
+    assert n.kind == NodeKind.FAILURE
+    assert n.node_id == "failure:err:asst-1"
+    assert n.turn_id == TURN
+    assert n.surface_id == SURFACE
+    assert n.payload.code == "provider_credential"
+    assert n.payload.text == "cred missing"
+    assert n.payload.severity == FailureSeverity.ERROR
+    assert n.payload.retryable is True
+    assert n.payload.resolution == FailureResolution.FIX_CREDENTIAL
+    assert n.payload.data == {"provider_id": "anthropic", "credential_status": "missing"}
+
+
+def test_turn_error_meta_row_non_credential_kind_falls_back_to_defaults():
+    row = _turn_error_meta_row(error_meta={"kind": "some_other_kind"}, error_text="boom")
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    n = nodes[0]
+    assert n.payload.code == "some_other_kind"
+    assert n.payload.text == "boom"
+    assert n.payload.severity == FailureSeverity.ERROR
+    assert n.payload.retryable is False
+    assert n.payload.resolution == FailureResolution.NONE
+    assert n.payload.data is None
+
+
+def test_turn_error_meta_row_missing_kind_defaults_to_unknown():
+    row = _turn_error_meta_row(error_meta={}, error_text="boom")
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.code == "unknown"
+
+
+def test_turn_error_meta_row_without_row_msg_id_produces_no_node():
+    row = _turn_error_meta_row()
+    del row["msg_id"]
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes == []
+
+
+def test_turn_error_meta_node_id_is_deterministic():
+    assert turn_error_meta_node_id("asst-1") == "failure:err:asst-1"
+    assert turn_error_meta_node_id("asst-1") == turn_error_meta_node_id("asst-1")
+
+
+def test_turn_error_meta_provider_credential_data_is_closed_set_no_secrets():
+    """`error_meta` only ever carries `{kind, provider_id,
+    credential_status}` in production (`ProviderCredentialError.
+    error_meta()`), but the FAILURE node's `data` must stay a closed
+    set even if a future producer widens the dict — never pass through
+    an unexpected (potentially secret-bearing) key verbatim."""
+    row = _turn_error_meta_row(error_meta={
+        "kind": "provider_credential",
+        "provider_id": "anthropic",
+        "credential_status": "missing",
+        "api_key": "sk-should-never-appear",
+    })
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert set(nodes[0].payload.data.keys()) == {"provider_id", "credential_status"}
 
 
 def test_compaction_lifecycle_notice():
