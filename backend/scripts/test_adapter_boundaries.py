@@ -54,6 +54,7 @@ ADAPTERS_ALLOWLIST = (
     "backend.event_bus",
     "backend.event_journal",
     "backend.paths",
+    "backend.perf",
     "backend.scheme_migrations",
 )
 
@@ -74,6 +75,7 @@ ADAPTERS_INIT_CANONICALIZED = (
     "event_ingester",
     "event_journal",
     "paths",
+    "perf",
     "scheme_migrations",
 )
 # Per-file extension of the general adapters allowlist, granting exactly

@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import auth
 import browser_trust
 import file_delivery
+import perf
 from session_detail_api import resolve_session_image_path
 from backend.adapters.serialize import to_wire
 from backend.surface_contract.adapter import BetterAgentAdapter
@@ -462,8 +463,15 @@ async def ws_surface(websocket: WebSocket) -> None:
     feed_subscriptions: dict[str, object] = {}
 
     def emit(frame: object) -> None:
+        frame_type = _frame_type_name(frame)
         body = to_wire(frame)
-        body["type"] = _frame_type_name(frame)
+        body["type"] = frame_type
+        # Perf-instrumented (additive only): counts every frame this
+        # connection's live subscription hands off to the outbox, split by
+        # frame type — lets a live-content investigation confirm frames
+        # actually reached the WS transport layer (vs. never having been
+        # broadcast by the adapter in the first place).
+        perf.record_count(f"adapter_api.ws_surface.emit_handoff.{frame_type}")
         # `emit` may fire from a different thread than this connection's
         # event loop (chat_adapter's broadcast runs under the event-bus
         # dispatch context) — call_soon_threadsafe marshals the actual

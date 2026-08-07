@@ -64,6 +64,7 @@ import event_bus as _event_bus
 import event_ingester as _event_ingester
 import event_journal as _event_journal
 import paths as _paths
+import perf as _perf
 import scheme_migrations as _scheme_migrations
 
 _backend_pkg = _sys.modules["backend"]
@@ -72,11 +73,12 @@ for _bare_name, _module in (
     ("event_ingester", _event_ingester),
     ("event_journal", _event_journal),
     ("paths", _paths),
+    ("perf", _perf),
     ("scheme_migrations", _scheme_migrations),
 ):
     _sys.modules[f"backend.{_bare_name}"] = _module
     setattr(_backend_pkg, _bare_name, _module)
-del _bare_name, _module, _sys, _backend_pkg, _event_bus, _event_ingester, _event_journal, _paths, _scheme_migrations
+del _bare_name, _module, _sys, _backend_pkg, _event_bus, _event_ingester, _event_journal, _paths, _perf, _scheme_migrations
 
 from backend.adapters.chat_adapter import ChatSurfaceAdapter
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection

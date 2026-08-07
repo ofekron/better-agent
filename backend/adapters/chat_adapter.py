@@ -23,11 +23,13 @@ prompt-anchored).
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 
+from backend import perf
 from backend.adapters import derive as _derive
 from backend.adapters.normalize import (
     ParentLink,
@@ -35,6 +37,7 @@ from backend.adapters.normalize import (
     enrich_typed_prompt_node,
     failure_payload_for_reason,
     is_canonical_prompt_row,
+    is_dropped_control_row_type,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
@@ -93,6 +96,8 @@ from backend.surface_contract.nodes import (
     RUNTIME_CHANGED_KINDS,
     Sidecar,
 )
+
+logger = logging.getLogger(__name__)
 
 _COMPACT_TURN_WINDOW = 5
 _RENDER_HISTORY_CAP = 500
@@ -817,22 +822,34 @@ class ChatSurfaceAdapter(ChatSurface):
         yield (reschedules via call_soon; no wall-clock wait) — it lets
         every `_on_event_written` call already queued for THIS tick (e.g.
         several rapid feed_text_delta journal writes) land before the
-        flush reads, so one flush naturally coalesces all of them."""
+        flush reads, so one flush naturally coalesces all of them.
+
+        Perf-instrumented (additive only, no behavior change): every call
+        counts as one `entries` sample; a call that finds a flush already
+        scheduled and returns immediately counts as `skipped_already_
+        scheduled` — the two together answer "did a live write for this
+        surface ever reach the adapter at all" from the perf rollup alone,
+        without needing debug logs turned on."""
+        perf.record_count("chat_adapter.on_event_written.entries")
         surface_id = event.root_id
         state = self._ensure_seeded(surface_id)
         with state.lock:
             if state.flush_scheduled:
+                perf.record_count("chat_adapter.on_event_written.skipped_already_scheduled")
                 return
             state.flush_scheduled = True
+        perf.record_count("chat_adapter.on_event_written.scheduled")
         await asyncio.sleep(0)
         with state.lock:
             state.flush_scheduled = False
         await self._flush_event_written(surface_id, state)
 
     async def _flush_event_written(self, surface_id: SurfaceId, state: _SurfaceState) -> None:
+        perf.record_count("chat_adapter.flush.ran")
         with state.lock:
             after = state.last_seq
         rows, _total, _has_more = event_journal_reader.read_events(surface_id, after_seq=after, limit=1000)
+        perf.record_count("chat_adapter.flush.rows_flushed", len(rows))
         if not rows:
             return
 
@@ -843,6 +860,22 @@ class ChatSurfaceAdapter(ChatSurface):
         # block, or several coalesced _on_event_written ticks worth of
         # writes) net out to exactly one outbound frame per node_id.
         coalesced: dict[NodeId, Node] = {}
+        # Perf-instrumented (additive only): every reason a row's content
+        # never reaches `coalesced` as its OWN outbound frame is counted
+        # here — `turn_id_none`/`echo_dedup` are the two existing `continue`
+        # guards above; `control_row_excluded` is a recognized backend
+        # control/telemetry row type (`normalize.is_dropped_control_row_
+        # type`) that normalizes to zero nodes by design;
+        # `empty_after_normalize` is everything else that normalized to
+        # zero nodes (a genuine unexpected-drop signal); `coalesced_away`
+        # (below, once the full batch is known) is real content that DID
+        # normalize but was superseded by a later row for the same
+        # node_id within this same flush.
+        drop_counts: dict[str, int] = {
+            "turn_id_none": 0, "echo_dedup": 0,
+            "control_row_excluded": 0, "empty_after_normalize": 0,
+        }
+        node_touches = 0
         with state.lock:
             state.prompt_meta.update(_collect_prompt_meta(rows))
             turn_id = state.current_turn_id
@@ -851,6 +884,7 @@ class ChatSurfaceAdapter(ChatSurface):
                 max_seq = max(max_seq, _row_seq(row))
                 if row.get("type") == "prompt_meta":
                     for n in self._late_prompt_meta_frames(state, row, turn_id, surface_id):
+                        node_touches += 1
                         coalesced[n.node_id] = n
                     continue
                 produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
@@ -861,13 +895,21 @@ class ChatSurfaceAdapter(ChatSurface):
                     and is_canonical_prompt_row(state.current_prompt_row)
                     and not is_canonical_prompt_row(row)
                 ):
+                    drop_counts["echo_dedup"] += 1
                     continue  # echo of the currently-open canonical turn's own prompt
                 if prompt_node is not None:
                     turn_id = prompt_node.node_id
                     state.pending_tool_uses = {}
                     state.current_prompt_row = row
                 if turn_id is None:
+                    drop_counts["turn_id_none"] += 1
                     continue  # pre-anchor row (no prompt seen yet): dropped
+                if not produced:
+                    if is_dropped_control_row_type(row.get("type")):
+                        drop_counts["control_row_excluded"] += 1
+                    else:
+                        drop_counts["empty_after_normalize"] += 1
+                    continue
                 row_data = row.get("data")
                 row_data = row_data if isinstance(row_data, dict) else {}
                 row_msg_id = row.get("msg_id")
@@ -884,6 +926,7 @@ class ChatSurfaceAdapter(ChatSurface):
                         # to the identical Node wherever it's observed.
                         n = replace(n, parent_id=_turn_node_id(turn_id))
                     merged = self._merge_live_node(state, n)
+                    node_touches += 1
                     coalesced[merged.node_id] = merged
             state.current_turn_id = turn_id
             state.last_seq = max_seq
@@ -898,6 +941,30 @@ class ChatSurfaceAdapter(ChatSurface):
             # whole batch's growth, not one per row.
             outbound = [self._to_outbound(state, n) for n in coalesced.values()]
             snapshot = state.projection.snapshot()
+
+        # A node_id touched more than once in this batch nets out to one
+        # `coalesced` entry (latest-wins) — every touch beyond the first
+        # per node_id is real row content that never got its own outbound
+        # frame, folded into the node's final broadcast value instead.
+        drop_counts["coalesced_away"] = max(0, node_touches - len(coalesced))
+        frames_emitted = {"upsert": 0, "text_delta": 0}
+        for item in outbound:
+            frames_emitted["text_delta" if item[0] == "delta" else "upsert"] += 1
+        for reason, count in drop_counts.items():
+            if count:
+                perf.record_count(f"chat_adapter.flush.dropped.{reason}", count)
+        if frames_emitted["upsert"]:
+            perf.record_count("chat_adapter.flush.frames_emitted.upsert", frames_emitted["upsert"])
+        if frames_emitted["text_delta"]:
+            perf.record_count("chat_adapter.flush.frames_emitted.text_delta", frames_emitted["text_delta"])
+        logger.debug(
+            "chat_adapter.flush surface_id=%s rows=%d turn_id_none=%d echo_dedup=%d "
+            "control_row_excluded=%d empty_after_normalize=%d coalesced_away=%d "
+            "upserts=%d text_deltas=%d",
+            surface_id, len(rows), drop_counts["turn_id_none"], drop_counts["echo_dedup"],
+            drop_counts["control_row_excluded"], drop_counts["empty_after_normalize"],
+            drop_counts["coalesced_away"], frames_emitted["upsert"], frames_emitted["text_delta"],
+        )
 
         for item in outbound:
             if item[0] == "delta":

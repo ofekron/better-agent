@@ -114,6 +114,15 @@ _DROPPED_CONTROL_ROW_TYPES = frozenset({
     "event_ownership_resolved",
 })
 
+
+def is_dropped_control_row_type(row_type: object) -> bool:
+    """Public accessor onto `_DROPPED_CONTROL_ROW_TYPES` — lets a caller
+    (chat_adapter.py's drop-reason instrumentation) distinguish "a
+    recognized-and-excluded control row" from "normalize produced nothing
+    for an unexpected reason" without reaching into the private set."""
+    return row_type in _DROPPED_CONTROL_ROW_TYPES
+
+
 _WORKER_FACT_TYPES = frozenset({"worker_start", "worker_event", "worker_complete"})
 _TODO_TOOL_NAMES = frozenset({"TodoWrite", "TaskCreate", "TaskUpdate"})
 _LIFECYCLE_KIND_VALUES = {k.value for k in LifecycleNoticeKind}

@@ -38,6 +38,7 @@ _TEST_HOME = tempfile.mkdtemp(prefix="ba-chat-adapter-test-")
 paths.engage_test_home(_TEST_HOME)
 atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
+import perf  # noqa: E402  (bare — matches every other perf-instrumented backend module)
 import runs_dir  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
 from stores import worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
 
@@ -886,6 +887,97 @@ def test_open_session_perf_smoke_monster_sidechain_turn_bounded_response() -> No
     assert len(result.value.live_turn_nodes) < 10, len(result.value.live_turn_nodes)
 
 
+def test_flush_drop_reasons_recorded_for_known_cases() -> None:
+    """Perf-instrumentation regression (the 2026-08 live-content
+    investigation had zero observability distinguishing "a flush ran and
+    dropped everything" from "a flush never ran" — this locks each drop
+    bucket to its own known row shape so a future live rollup is
+    trustworthy).
+
+    - `turn_id_none`: a row lands before any prompt has ever opened a
+      turn on this surface.
+    - `echo_dedup`: a raw (non-canonical) provider-transcript echo of the
+      currently-open canonical turn's own prompt.
+    - `control_row_excluded`: a recognized backend control/telemetry row
+      type (`normalize._DROPPED_CONTROL_ROW_TYPES`).
+    - `empty_after_normalize`: a row that normalizes to zero nodes for a
+      reason OTHER than being a recognized control row (here: an
+      `agent_message` row whose inner `data.type` is `ai-title`, one of
+      `normalize._DROPPED_METADATA_TYPES`).
+
+    Also asserts the surrounding `ran`/`rows_flushed`/`frames_emitted`/
+    `on_event_written.entries` counters advance, so a rollup with only
+    zeros for ALL of these (not just the drop reasons) is distinguishable
+    from "everything got dropped for a known reason"."""
+    with perf._lock:
+        perf._counts.clear()
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+
+    # turn_id_none: no prompt has ever opened a turn on this fresh root.
+    # Seed the surface against the EMPTY journal first — `_ensure_seeded`
+    # cold-seeds `last_seq` to the journal's current tail, so an orphan
+    # row ingested before the first seed would be silently absorbed into
+    # that baseline (never reaching `_flush_event_written`'s row loop at
+    # all) instead of exercising the drop path this asserts on.
+    root_a = f"root-{uuid.uuid4().hex}"
+    adapter.open_session(root_a)
+    orphan_seq = _ingest_assistant_text(root_a, "orphaned before any prompt")
+    _publish_written(root_a, orphan_seq)
+
+    # echo_dedup + control_row_excluded + empty_after_normalize, all in
+    # the SAME later flush (read_events picks up everything durably
+    # written since the last flush regardless of how many bus facts fired
+    # in between — matching the real coalescing behavior under test).
+    # Same cold-seed-absorbs-the-first-row caveat as root_a: seed against
+    # the empty journal before the canonical prompt is durably written, so
+    # its own upsert (`frames_emitted.upsert`) is observable from a real
+    # flush instead of being folded into the seed baseline.
+    root_b = f"root-{uuid.uuid4().hex}"
+    adapter.open_session(root_b)
+    user_msg_id = str(uuid.uuid4())
+    canonical_seq = event_ingester.ingest(
+        root_b, root_b, "agent_message",
+        {
+            "type": "user", "uuid": user_msg_id,
+            "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            "origin": "user",
+        },
+        source="test", msg_id=f"asst-{uuid.uuid4().hex}",
+    )
+    _publish_written(root_b, canonical_seq)  # opens the turn
+
+    event_ingester.ingest(
+        root_b, root_b, "agent_message",
+        {"type": "user", "uuid": str(uuid.uuid4()), "message": {"role": "user", "content": "hello"}},
+        source="test",
+    )  # echo_dedup: raw transcript echo of the SAME open turn's prompt
+    event_ingester.ingest(
+        root_b, root_b, "run_state", {"phase": "queued"}, source="test",
+    )  # control_row_excluded: recognized control/telemetry row type
+    empty_seq = event_ingester.ingest(
+        root_b, root_b, "agent_message",
+        {"type": "ai-title", "aiTitle": "renamed"}, source="test",
+    )  # empty_after_normalize: normalizes to [] but isn't a control row
+    _publish_written(root_b, empty_seq)
+
+    with perf._lock:
+        counts = {k: dict(v) for k, v in perf._counts.items()}
+
+    def total(name: str) -> int:
+        return counts.get(name, {}).get("total", 0)
+
+    assert total("chat_adapter.flush.dropped.turn_id_none") >= 1, counts
+    assert total("chat_adapter.flush.dropped.echo_dedup") >= 1, counts
+    assert total("chat_adapter.flush.dropped.control_row_excluded") >= 1, counts
+    assert total("chat_adapter.flush.dropped.empty_after_normalize") >= 1, counts
+    assert total("chat_adapter.flush.ran") >= 2, counts
+    assert total("chat_adapter.flush.rows_flushed") >= 4, counts
+    assert total("chat_adapter.flush.frames_emitted.upsert") >= 1, counts
+    assert total("chat_adapter.on_event_written.entries") >= 2, counts
+
+
 _TESTS = [
     test_open_session_single_turn,
     test_subscribe_emits_node_upsert_with_bumped_render_rev,
@@ -913,6 +1005,7 @@ _TESTS = [
     test_live_path_only_expands_trailing_subagent_not_earlier_ones,
     test_open_session_perf_smoke_bounded_wall_time,
     test_open_session_perf_smoke_monster_sidechain_turn_bounded_response,
+    test_flush_drop_reasons_recorded_for_known_cases,
 ]
 
 
