@@ -1,0 +1,44 @@
+# Backend test suite sharded across the owner's self-hosted runners.
+#
+# Security posture (public repo + self-hosted runners):
+# - Triggers are push-to-dev and manual dispatch ONLY — never pull_request,
+#   so code from forks can never execute on these runners.
+# - Repo Actions policy additionally requires approval for all external
+#   contributors' workflow runs (fork-pr-contributor-approval).
+# - checkout uses persist-credentials: false; jobs need no repo secrets.
+name: backend-tests-selfhosted
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: backend-tests-selfhosted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-shard:
+    if: github.repository == 'ofekron/better-agent'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: [self-hosted, ba-tests]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run backend test shard ${{ matrix.shard }}/4
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Shard only pytest-collectible files (standalone runner scripts in
+          # backend/scripts/test_*.py have no `def test_` and are exercised by
+          # their own harnesses, not this workflow).
+          cd backend
+          shard_files=$(grep -l "def test_" scripts/test_*.py | sort | awk -v s="${{ matrix.shard }}" 'NR % 4 == s')
+          cd ..
+          echo "shard ${{ matrix.shard }}: $(echo "$shard_files" | wc -l | tr -d ' ') files"
+          ./scripts/run-backend-tests.sh -- $shard_files -q
