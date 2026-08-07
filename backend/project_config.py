@@ -41,8 +41,10 @@ def scan_project_configs(cwd: str) -> list[dict]:
         for skill_dir in sorted(skills_dir.iterdir()):
             if not skill_dir.is_dir():
                 continue
-            # Each skill dir has a .md file matching the dir name or "README.md"
-            skill_files = list(skill_dir.glob("*.md"))
+            # Each skill dir has a .md file matching the dir name or "README.md".
+            # Sort case-insensitively so a dir with several .md files (e.g.
+            # alpha.md + README.md) is listed deterministically, lowercase-first.
+            skill_files = sorted(skill_dir.glob("*.md"), key=lambda p: p.name.lower())
             if not skill_files:
                 # Dir exists but no .md — show the dir itself
                 entries.append(_file_entry(

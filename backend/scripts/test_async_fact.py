@@ -118,6 +118,84 @@ def test_set_from_a_thread_with_no_loop() -> None:
         _stop(loop, t)
 
 
+def test_wait_without_timeout_wakes_on_set() -> None:
+    fact = AsyncFact()
+    loop, t = _loop_in_thread()
+    try:
+        fut = asyncio.run_coroutine_threadsafe(fact.wait(), loop)  # no timeout
+        for _ in range(100):
+            if fact.waiter_count() == 1:
+                break
+            threading.Event().wait(0.01)
+        assert fact.waiter_count() == 1
+        fact.set()
+        assert fut.result(timeout=5) is True
+    finally:
+        _stop(loop, t)
+
+
+def test_set_from_same_loop_wakes_waiter_directly() -> None:
+    """set() issued from the waiter's own loop takes the same-loop wake path."""
+    fact = AsyncFact()
+
+    async def scenario():
+        wait_task = asyncio.create_task(fact.wait(timeout=5))
+        await asyncio.sleep(0)  # let the waiter register
+        assert fact.waiter_count() == 1
+        fact.set()  # running loop == waiter loop -> direct event.set()
+        assert await wait_task is True
+
+    asyncio.run(scenario())
+
+
+def test_wake_skips_a_closed_loop() -> None:
+    from async_fact import _wake
+
+    loop = asyncio.new_event_loop()
+    loop.close()
+    event = asyncio.Event()
+    _wake(loop, event)  # is_closed() True -> early return, no crash
+    assert not event.is_set()
+
+
+class _StoppedLoop:
+    """Not closed, but call_soon_threadsafe fails — loop died mid-wake."""
+
+    def is_closed(self):
+        return False
+
+    def call_soon_threadsafe(self, *args, **kwargs):
+        raise RuntimeError("no current event loop")
+
+
+def test_wake_swallows_stopped_loop_runtimeerror() -> None:
+    from async_fact import _wake
+
+    _wake(_StoppedLoop(), asyncio.Event())  # except RuntimeError -> debug log
+
+
+def test_wait_double_check_catches_set_during_locking() -> None:
+    """The second `if self._set` inside the lock catches a setter that ran
+    between the unlocked check (line 61) and acquiring the lock (line 66)."""
+    fact = AsyncFact()
+    real_lock = fact._lock
+
+    class _RaceLock:
+        def __enter__(self):
+            fact._set = True  # simulate the setter winning the race
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    fact._lock = _RaceLock()
+
+    async def scenario():
+        return await fact.wait(timeout=1)
+
+    assert asyncio.run(scenario()) is True
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

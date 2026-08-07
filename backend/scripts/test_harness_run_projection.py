@@ -12,6 +12,7 @@ if str(BACKEND) not in sys.path:
 import harness_run_projection
 import harness_profile_resolver
 import extension_store
+import installation_profile
 from capability_contexts import provider_capability_contexts
 
 
@@ -46,6 +47,17 @@ def test_empty_snapshot_is_noop() -> None:
 
 
 def test_active_snapshot_uses_renderable_context_shape() -> None:
+    # provider_capability_projection early-returns [] when integrations are
+    # gated off; enable them so the renderable-shape projection is exercised.
+    original = installation_profile.integrations_enabled
+    installation_profile.integrations_enabled = lambda: True
+    try:
+        _exercise_active_snapshot_shape()
+    finally:
+        installation_profile.integrations_enabled = original
+
+
+def _exercise_active_snapshot_shape() -> None:
     raw_context = {
         "source_id": "profile:test",
         "capability_id": "profile:test",
@@ -193,16 +205,59 @@ def test_setting_overlays_apply_without_secret_values() -> None:
     assert settings == {"mode": "profile", "token": ""}
 
 
+def test_launcher_projection_absent_when_snapshot_not_dict() -> None:
+    assert harness_run_projection.launcher_projection({}) == {}
+    assert harness_run_projection.launcher_projection(
+        {"resolved_harness_run_config": "nope"}
+    ) == {}
+
+
+def test_launcher_projection_deep_copies_dict_payload() -> None:
+    payload = {"extension_mcp_servers": {"personal.x": ["s"]}}
+    inputs = {"resolved_harness_run_config": {"profile_id": "p", "launcher_projection": payload}}
+    projection = harness_run_projection.launcher_projection(inputs)
+    assert projection == payload
+    projection["extension_mcp_servers"]["personal.x"].append("mut")
+    # Deep copy: mutating the projection must not touch the source snapshot.
+    assert payload["extension_mcp_servers"]["personal.x"] == ["s"]
+
+
+def test_launcher_projection_empty_when_payload_not_dict() -> None:
+    inputs = {"resolved_harness_run_config": {"profile_id": "p", "launcher_projection": []}}
+    assert harness_run_projection.launcher_projection(inputs) == {}
+
+
+def test_selected_mcp_servers_branches() -> None:
+    base = {"resolved_harness_run_config": {"profile_id": "p", "launcher_projection": {}}}
+    # no extension_mcp_servers dict -> empty
+    assert harness_run_projection.selected_mcp_servers(base, "personal.x") == set()
+    # extension entry missing/not a list -> empty
+    proj = {"extension_mcp_servers": {"personal.x": "nope"}}
+    assert harness_run_projection.selected_mcp_servers(
+        {"resolved_harness_run_config": {"launcher_projection": proj}}, "personal.x"
+    ) == set()
+    # list with blanks/whitespace is filtered and trimmed
+    proj = {"extension_mcp_servers": {"personal.x": [" a ", "", None, "b"]}}
+    assert harness_run_projection.selected_mcp_servers(
+        {"resolved_harness_run_config": {"launcher_projection": proj}}, "personal.x"
+    ) == {"a", "b"}
+
+
+def test_selected_extension_ids_branches() -> None:
+    # no projection -> empty
+    assert harness_run_projection.selected_extension_ids({}) == set()
+    # extension_revisions values filtered/trimmed
+    proj = {"extension_revisions": {" a ": 1, "": 2, "b": 3}}
+    assert harness_run_projection.selected_extension_ids(
+        {"resolved_harness_run_config": {"launcher_projection": proj}}
+    ) == {"a", "b"}
+
+
 def main() -> int:
-    for test in (
-        test_empty_snapshot_is_noop,
-        test_active_snapshot_uses_renderable_context_shape,
-        test_active_snapshot_merges_run_local_policy,
-        test_provider_bare_gate_reads_profile_snapshot,
-        test_selected_extension_skills_become_run_local_skills,
-        test_setting_overlays_apply_without_secret_values,
-    ):
-        test()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"ok {name}")
     print("PASS harness run projection")
     return 0
 
