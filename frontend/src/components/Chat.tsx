@@ -55,6 +55,8 @@ import {
 // otherwise, so every use below is inherently flag-scoped.
 const INSTRUCTION_WIDGET_MESSAGE_ID = surfaceInstructionWidgetMessageId();
 import { ForkSplitView } from "./ForkSplitView";
+import { readNativeSurfaceFlag } from "../surface/flag";
+import { ChatSurfaceView } from "../surface/ChatSurfaceView";
 import { SessionTabs } from "./SessionTabs";
 import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
@@ -1708,6 +1710,14 @@ export function Chat({
                 onDeleteFork={onDeleteFork}
                 onLoadOlderMessages={onLoadOlderMessages}
               />
+            ) : readNativeSurfaceFlag() && (focusedSessionId ?? tree?.id ?? session?.id) ? (
+              // Phase I stage 1: native Contract-Node rendering layer
+              // (ba.surface_native flag) — the single integration
+              // touchpoint into the chat content region. Everything else
+              // (composer, sidebar, approvals plane, fork split) is
+              // untouched; forks fall through to the legacy path above
+              // until ForkSplit gets its own native treatment.
+              <ChatSurfaceView sessionId={(focusedSessionId ?? tree?.id ?? session?.id) as string} />
             ) : (
               <LayoutGroup>
               {displayTurnGroups.map((g) => {
