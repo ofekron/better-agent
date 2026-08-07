@@ -180,9 +180,12 @@ class MarketplaceDeviceIdentity:
         for name, value in path_values.items():
             kind = _PATH_IDENTIFIER_KINDS.get(name)
             if kind is None:
+                # Defensive: every shipped signed-operation path parameter is
+                # registered above, so this fires only if the protocol artifact
+                # introduces an unregistered path parameter kind.
                 raise MarketplaceIdentityError(
                     "Marketplace signing path is unsupported"
-                )
+                )  # pragma: no cover
             path = path.replace(
                 f"{{{name}}}",
                 require_identifier(kind, value),
