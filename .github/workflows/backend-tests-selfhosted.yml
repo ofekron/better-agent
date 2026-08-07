@@ -34,6 +34,39 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Per-runner container resource caps (consumed by
+      # scripts/run-backend-tests.sh via docker_test_resource_cap_args in
+      # scripts/lib/docker-test-lifecycle.sh). Keyed off runner.arch, not
+      # runner.name, so this is independent of the shard matrix and doesn't
+      # need updating if a runner is renamed:
+      #   - arm64 == the owner's Mac. It's also their PRIMARY interactive
+      #     machine (8 cores; has hit load 30+ under concurrent CI+dev
+      #     work), so CI must never be able to starve foreground use. Cap
+      #     at half the box (4 CPUs / 6g) AND halve the cgroup CPU-share
+      #     weight (512 vs docker's default 1024): the weight only costs
+      #     the container CPU when something else is actually contending,
+      #     so an idle Mac still lets the container burst up to its 4-CPU
+      #     ceiling (fast), while a busy interactive session pushes the
+      #     container's share down (invisible).
+      #   - anything else == the Lenovo (WSL2 Ubuntu "TestApe", x64,
+      #     docker-ce inside WSL). It's a dedicated test box, not used
+      #     interactively, so there's no foreground work to protect —
+      #     just leave headroom so the WSL VM (8 cores / 7g total) never
+      #     OOMs the runner process itself: 6 CPUs / 5g, default CPU
+      #     share (no reason to deprioritize on a box nothing competes
+      #     with).
+      - name: Set per-runner backend test container caps
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.arch }}" = "ARM64" ]; then
+            echo "BETTER_AGENT_TEST_CPUS=4" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_CPU_SHARES=512" >> "$GITHUB_ENV"
+          else
+            echo "BETTER_AGENT_TEST_CPUS=6" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_MEMORY=5g" >> "$GITHUB_ENV"
+          fi
       - name: Run backend test shard ${{ matrix.shard }}/4
         shell: bash
         run: |
@@ -45,4 +78,20 @@ jobs:
           shard_files=$(grep -l "def test_" scripts/test_*.py | sort | awk -v s="${{ matrix.shard }}" 'NR % 4 == s')
           cd ..
           echo "shard ${{ matrix.shard }}: $(echo "$shard_files" | wc -l | tr -d ' ') files"
-          ./scripts/run-backend-tests.sh -- $shard_files -q
+          # --junitxml feeds phase-3 shard-rebalancing telemetry (per-test
+          # durations); the working-tree run path bind-mounts this checkout
+          # live at /repo, so the relative path lands directly under
+          # backend/ on the host once the container exits.
+          ./scripts/run-backend-tests.sh -- $shard_files -q "--junitxml=junit-shard-${{ matrix.shard }}.xml"
+      # Uploaded even on failure so a shard that fails partway still
+      # contributes the timings it did produce. Short retention: this is
+      # rebalancing input, not a durable record, and artifact storage is
+      # quota-limited.
+      - name: Upload JUnit timings (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-junit-shard-${{ matrix.shard }}
+          path: backend/junit-shard-${{ matrix.shard }}.xml
+          retention-days: 3
+          if-no-files-found: warn
