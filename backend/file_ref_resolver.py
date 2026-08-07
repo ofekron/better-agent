@@ -347,7 +347,10 @@ def rewrite_text(
             lines = m.group("lines")
             label_token = m.group(0)
         else:
-            return m.group(0)
+            # Unreachable: _FILE_RE is an alternation, so once
+            # existing_bt/existing are excluded exactly one of
+            # bpath/path matched. Defensive only.
+            return m.group(0)  # pragma: no cover
         if ext not in _EXT_ALLOWLIST:
             return m.group(0)
         if _is_absolute(path):
