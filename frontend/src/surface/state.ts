@@ -152,6 +152,15 @@ export class SurfaceStore {
    * callers (e.g. two components racing to expand the same node) share
    * one request instead of double-fetching. */
   private pendingFetches = new Map<NodeId, Promise<NodeWire[]>>();
+  /** turn_id -> the most recent `turn_lifecycle` frame seen for a turn
+   * this store hasn't birthed yet (e.g. delivered before that turn's
+   * first node_upsert, or tagged with a provisional turn_id the backend
+   * later supersedes without ever re-announcing it). Applied the moment
+   * that turn IS birthed instead of being dropped — see `birthTurn`. */
+  private pendingLifecycle = new Map<
+    TurnId,
+    { phase: TurnPhaseWire; reason: TerminalReasonWire | null; usage: UsageWire | null }
+  >();
 
   private readonly subscribers = new Set<() => void>();
   private cachedSnapshot: SurfaceStoreSnapshot | null = null;
@@ -328,6 +337,7 @@ export class SurfaceStore {
     this.runsById = new Map();
     this.childrenTables = new Map();
     this.nodeLocation = new Map();
+    this.pendingLifecycle = new Map();
     for (const run of envelope.runs) this.runsById.set(run.run_ref, run);
 
     for (const compact of envelope.turns) {
@@ -376,17 +386,60 @@ export class SurfaceStore {
   }
 
   private upsertIntoContainer(containerId: NodeId, node: NodeWire): void {
-    const table = this.childrenTables.get(containerId);
+    let table = this.childrenTables.get(containerId);
     if (!table) {
-      // Container not currently materialized (never extended, not on the
-      // eagerly-seeded live path) — nothing rendered depends on this
-      // node yet. Its container's own manifest upsert (handled generically
-      // below, same as any other node) keeps the ellipsis-exists decision
-      // correct for whenever it IS expanded.
-      return;
+      // Container not yet materialized — either never extended (a
+      // genuinely collapsed, historical subtree the user hasn't opened,
+      // which never receives live upserts in the first place since only
+      // the current live/trailing turn's own tree gets node_upserts), or
+      // a container born entirely from live frames after hydrate (a
+      // brand-new turn/explanation with no REST round trip to seed it —
+      // see `birthTurn`). Either way there is no pre-existing cached
+      // content this upsert could clobber, so create the table on demand
+      // instead of dropping the node (mirrors `setChildrenTable`'s own
+      // construction, just lazily one node at a time).
+      table = createTurnNodeTable();
+      this.childrenTables.set(containerId, table);
     }
+    // Deliberately no cross-table relocation when `containerId` differs
+    // from wherever this node_id last landed: a genuine structural
+    // re-bracket (hist_rev-driven) is already handled by the manifest-
+    // mismatch cache invalidation below (drop the WHOLE stale table, then
+    // re-fetch via REST) — the one place this codebase treats container
+    // membership as authoritative. Relocating individual nodes here on
+    // any `parent_id` change would additionally have to trust that the
+    // new `containerId` names a real, rendered container, which a raw
+    // node id the render tree doesn't recognize as a container kind is
+    // not — that would silently sink the node into a table nothing ever
+    // walks instead of just leaving a harmless stale duplicate behind.
     upsertTurnNode(table, node);
     this.nodeLocation.set(node.node_id, { table });
+  }
+
+  /** Creates a TurnEntry from the first live frame this store has ever
+   * seen for `node.turn_id` — a typed_prompt/turn-opening upsert births
+   * the turn in the common case, but ANY node kind may arrive first (a
+   * thinking/assistant_text delivered before its own typed_prompt is not
+   * dropped, it births a promptless entry that the later typed_prompt
+   * fills in). Applies any `turn_lifecycle` frame buffered for this
+   * turn_id while it didn't exist yet; otherwise defaults to "running" —
+   * a turn scaffolded from a LIVE frame (never present at hydrate) is, by
+   * construction, currently in flight, and chat-panel.md's `isLive(turn)`
+   * must not wait for an explicit lifecycle frame that the backend does
+   * not always (re-)send once a provisional turn_id is superseded by its
+   * final anchor. */
+  private birthTurn(node: NodeWire): TurnEntry {
+    const pending = this.pendingLifecycle.get(node.turn_id);
+    this.pendingLifecycle.delete(node.turn_id);
+    const entry: TurnEntry = {
+      ...this.newTurnEntry(scaffoldTurn(node), node.kind === "typed_prompt" ? node : null, [], null, null),
+      phase: pending?.phase ?? "running",
+      reason: pending?.reason ?? null,
+      usage: pending?.usage ?? null,
+    };
+    this.turnsById.set(node.turn_id, entry);
+    this.turnOrder = [...this.turnOrder, node.turn_id];
+    return entry;
   }
 
   private handleFrame(frame: ChatFrame): void {
@@ -404,17 +457,16 @@ export class SurfaceStore {
         }
 
         let entry = this.turnsById.get(node.turn_id);
-        if (!entry) {
-          if (node.kind !== "typed_prompt") return; // no anchoring turn yet
-          entry = this.newTurnEntry(scaffoldTurn(node), node, [], null, null);
-          this.turnsById.set(node.turn_id, entry);
-          this.turnOrder = [...this.turnOrder, node.turn_id];
-          this.notify();
-          return;
-        }
+        if (!entry) entry = this.birthTurn(node);
 
         if (node.kind === "typed_prompt") {
-          this.turnsById.set(node.turn_id, { ...entry, prompt: node });
+          // If this turn was born from a LATER node arriving first (the
+          // out-of-order case), entry.prompt is still null and the turn
+          // scaffold was derived from that later node's (ts, seq) — now
+          // that the real prompt has arrived, re-derive the scaffold from
+          // it so turn-level ordering reflects the turn's true start.
+          const turn = entry.prompt === null ? scaffoldTurn(node) : entry.turn;
+          this.turnsById.set(node.turn_id, { ...entry, turn, prompt: node });
           this.notify();
           return;
         }
@@ -443,10 +495,14 @@ export class SurfaceStore {
         // tool_interaction, steering_message, the SubAgentTurn family,
         // worker_interaction, compaction, continuation_session, failure,
         // diagnostic, user_interaction, lifecycle_notice, fact, unknown)
-        // is a direct child of SOME container by `parent_id` — the turn
-        // itself for a top-level BodyItem/Failure, an explanation for a
-        // partitioned member, a SubAgentTurn node for its own members.
-        if (node.parent_id) this.upsertIntoContainer(node.parent_id, node);
+        // is a direct child of SOME container — `parent_id` when set (an
+        // explanation for a partitioned member, a SubAgentTurn node for
+        // its own members), else the turn's own container id: the live
+        // wire sends `parent_id: null` for a node directly under the turn
+        // (mirrored by TurnView's `useChildren(store, entry.turn.node_id,
+        // ...)`, the same id REST-persisted top-level BodyItems carry as
+        // their non-null `parent_id`).
+        this.upsertIntoContainer(node.parent_id ?? entry.turn.node_id, node);
         // The node MAY itself be a container whose manifest changed (an
         // explanation/SubAgentTurn re-upserted with a fresh
         // child_manifest) — refresh its manifest-holding copy inside its
@@ -500,7 +556,20 @@ export class SurfaceStore {
       }
       case "turn_lifecycle": {
         const entry = this.turnsById.get(frame.turn_id);
-        if (!entry) return;
+        if (!entry) {
+          // Turn not born yet — arrived before its own opening node, or
+          // tagged with a turn_id no node will ever carry (a provisional
+          // anchor the backend later supersedes without re-announcing).
+          // Buffer instead of dropping so `birthTurn` can still pick this
+          // phase up if/when that turn_id IS born.
+          this.pendingLifecycle.set(frame.turn_id, {
+            phase: frame.phase,
+            reason: frame.reason,
+            usage: frame.usage ?? null,
+          });
+          this.identity = frame.snapshot;
+          return;
+        }
         this.turnsById.set(frame.turn_id, {
           ...entry,
           phase: frame.phase,

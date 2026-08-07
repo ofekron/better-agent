@@ -234,6 +234,11 @@ describe("ChatSurfaceView native rendering (component tier)", () => {
     socket.handlers.onFrame(ASSISTANT_TEXT_FRAME);
 
     const root = await screen.findByTestId("surface-chat-view");
-    await waitFor(() => expect(root.textContent).toContain("PONG"));
+    // Assert on the assistant node specifically — the prompt fixture also
+    // contains the literal "PONG", so a whole-view text match is vacuous.
+    await waitFor(() => {
+      const assistant = root.querySelector('[data-testid="surface-assistant-text"]');
+      expect(assistant?.textContent).toContain("PONG");
+    });
   });
 });
