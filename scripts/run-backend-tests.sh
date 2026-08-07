@@ -267,6 +267,10 @@ fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 TEST_STATUS=0
-docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${TIMEOUT_PYTEST_ARGS[@]}" "${PYTEST_ARGS[@]}" || TEST_STATUS=$?
+# ${arr[@]+"${arr[@]}"} guards against bash 3.2 (macOS), where reading an
+# empty array under `set -u` raises "unbound variable". TIMEOUT_PYTEST_ARGS is
+# empty without BETTER_AGENT_TEST_TIMEOUT and PYTEST_ARGS is empty on a bare
+# invocation, so both must be conditionally expanded.
+docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" ${TIMEOUT_PYTEST_ARGS[@]+"${TIMEOUT_PYTEST_ARGS[@]}"} ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"} || TEST_STATUS=$?
 docker_test_cleanup
 exit "$TEST_STATUS"
