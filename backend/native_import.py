@@ -973,6 +973,13 @@ def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:
     return f"{sess.provider_kind} session {sess.native_id[:8]}"
 
 
+# Provider kinds whose runner can resume a session created outside BA's
+# runs dir. codex is excluded because an external thread fails the resume
+# capability-contract check (runner_codex); pi because its resume lookup
+# only scans BA's own runs tree (runner_pi.find_session_file_for_sid).
+_RESUMABLE_KINDS = frozenset({"claude", "agy"})
+
+
 def import_session(sess: NativeSession, *, force: bool = False) -> str:
     """Ingest one native session as a new Better Agent session.
 
@@ -1021,6 +1028,22 @@ def _import_session_locked(sess: NativeSession) -> str:
         created_at=_native_created_iso(sess, turns),
     )
     root_id = created["id"]
+
+    # Continuation wiring: agent_session_id is the field turn dispatch
+    # resolves resume_sid from, so stamping the native sid here makes the
+    # next BA turn resume the provider-side conversation instead of
+    # starting fresh. Also marks the native session BA-managed, dropping
+    # it from future enumeration. Resume derives the transcript location
+    # from the session's cwd + provider config_dir, both stamped above.
+    if sess.native_id and sess.provider_kind in _RESUMABLE_KINDS:
+        session_manager.set_agent_sid(
+            root_id,
+            "native",
+            sess.native_id,
+            provider_id=sess.provider_id or None,
+            runner="native",
+            bump_updated_at=False,
+        )
 
     from orchs import get_strategy
     strategy = get_strategy("native")

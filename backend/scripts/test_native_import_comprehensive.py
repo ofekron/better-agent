@@ -43,6 +43,13 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
+from _projection_fold import start_projection_fold  # noqa: E402
+
+# Without this the ingest tests only pass when another test module (e.g.
+# test_native_import.py) happens to have registered the subscribers first
+# in the same process.
+start_projection_fold()
+
 import native_import  # noqa: E402
 logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)  # silence intentional error logs
 logging.getLogger("config_store").setLevel(logging.CRITICAL)  # silence provider-removal audit logs
@@ -877,6 +884,9 @@ def test_ingest_codex() -> None:
             asst_events = msgs[1]["events"]
             check(len(asst_events) == n_texts, f"codex n={n_texts} events {len(asst_events)} != {n_texts}")
             check(loaded["cwd"] == "/repo", "codex cwd recovered")
+            check(loaded.get("agent_session_id") is None,
+                  "codex import must not stamp a resume sid (external threads "
+                  "fail the resume capability-contract check)")
             # idempotent
             check(native_import.import_session(sess) == root_id, "codex idempotent")
 
@@ -971,6 +981,8 @@ def test_ingest_agy() -> None:
         check(msgs[0]["content"] == "What is in the hosts file please explain", "agy prompt text")
         # assistant carries tool_use + tool_result + text (≥3 events)
         check(len(msgs[1]["events"]) >= 3, f"agy assistant events {len(msgs[1]['events'])}")
+        check(loaded.get("agent_session_id") == "agy1",
+              "agy import stamps native sid for resume")
         check(native_import.import_session(sess) == root_id, "agy idempotent")
 
 
@@ -1066,6 +1078,9 @@ def test_ingest_pi() -> None:
               "pi prompts imported")
         check(len(asst_msgs) == 2 and all(len(m.get("events") or []) >= 2 for m in asst_msgs),
               "pi assistant events imported")
+        check(loaded.get("agent_session_id") is None,
+              "pi import must not stamp a resume sid (pi resume lookup only "
+              "scans BA's own runs tree)")
         check(native_import.import_session(sess) == root_id, "pi idempotent")
 
 

@@ -5173,9 +5173,10 @@ class SessionManager:
         # durable source of truth for agent_sid; this event is purely
         # a backend-internal "new sid exists" hook with no WS consumer.
         # Scheduled outside the per-root lock on the running loop;
-        # silently dropped when called from a sync-only context
-        # (which currently never happens for set_agent_sid in
-        # production paths — listed in `cluster_C_inventory`).
+        # silently dropped when called from a sync-only context. The
+        # only production sync-context caller is native_import's
+        # continuation stamp, where the drop is intentional: an
+        # imported session has no live run to tail.
         if sess is not None and agent_sid:
             root_id = self._root_id_for(sid)
             if root_id:
