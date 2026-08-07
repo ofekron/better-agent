@@ -27,3 +27,16 @@ def test_graceful_shutdown_timeout_rejects_invalid_values(
     )
     with pytest.raises(ValueError):
         graceful_shutdown_timeout_seconds()
+
+
+@pytest.mark.parametrize("value,expected", [("1", 1), ("30", 30), ("60", 60)])
+def test_graceful_shutdown_timeout_honors_valid_override(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: int,
+) -> None:
+    monkeypatch.setenv(
+        "BETTER_AGENT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS",
+        value,
+    )
+    assert graceful_shutdown_timeout_seconds() == expected

@@ -86,3 +86,20 @@ def test_supervised_restart_requests_are_coalesced(monkeypatch) -> None:
 
     assert asyncio.run(exercise()) == [True, True]
     assert len(restart_ids) == 1
+
+
+def test_request_restart_delegates_to_ops_api(monkeypatch) -> None:
+    """_request_restart imports and awaits ops_api.request_supervised_backend_restart,
+    returning its result. Existing tests patch recovery._request_restart itself, so the
+    delegation body (import + await + return) is otherwise uncovered."""
+
+    delegated: dict[str, bool] = {}
+
+    async def fake_request() -> bool:
+        delegated["called"] = True
+        return True
+
+    monkeypatch.setattr(ops_api, "request_supervised_backend_restart", fake_request)
+
+    assert asyncio.run(recovery._request_restart()) is True
+    assert delegated["called"]
