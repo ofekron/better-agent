@@ -1,6 +1,7 @@
-// `diagnostic`, `fact`, `unknown`, `user_interaction`, `worker_interaction`,
-// `instruction_widget` — the remaining leaf kinds, grouped here since each
-// is a thin dispatch onto an existing leaf chip.
+// `diagnostic`, `fact`, `unknown`, `worker_interaction`, `instruction_widget`
+// — the remaining thin-dispatch leaf kinds. `user_interaction` has its own
+// module (nodes/UserInteractionAction.tsx — a pending node renders a real
+// action form, not just a chip).
 
 import { useTranslation } from "react-i18next";
 import type {
@@ -9,10 +10,9 @@ import type {
   InstructionWidgetPayloadWire,
   NodeWire,
   UnknownPayloadWire,
-  UserInteractionPayloadWire,
   WorkerInteractionPayloadWire,
 } from "../../adapter/wire";
-import { DiagnosticBox, FactChip, UserInteractionChip } from "../leaf/Chips";
+import { DiagnosticBox, FactChip } from "../leaf/Chips";
 import { Markdown } from "../leaf/Markdown";
 
 export function DiagnosticView({ node }: { node: NodeWire }) {
@@ -38,12 +38,6 @@ export function UnknownView({ node }: { node: NodeWire }) {
   const payload = node.payload as UnknownPayloadWire | null;
   if (!payload) return null;
   return <DiagnosticBox kind={payload.label} raw={payload.payload} />;
-}
-
-export function UserInteractionView({ node }: { node: NodeWire }) {
-  const payload = node.payload as UserInteractionPayloadWire | null;
-  if (!payload) return null;
-  return <UserInteractionChip payload={payload} />;
 }
 
 /** `worker_interaction` — one worker lifecycle fact carried verbatim

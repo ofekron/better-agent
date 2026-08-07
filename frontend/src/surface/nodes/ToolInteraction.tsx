@@ -4,18 +4,22 @@
 // native-safe.
 //
 // `derived_view: "todo_snapshot"` (TodoWrite/TaskCreate/TaskUpdate calls,
-// per ADR 0006 §1) does not yet have a native-typed checklist renderer —
-// components/MessageBubble.tsx's TodosSnapshotEvent takes a `TodoItem[]`
-// parsed out of legacy WSEvent.data by the mapping layer; wiring the same
-// parse here is a stage-1 gap (falls through to the generic ToolCall args/
-// result view, which still shows the raw TodoWrite payload, just not the
-// checklist chrome).
+// per ADR 0006 §1): `deriveTodoSnapshotItems` (todoSnapshot.ts) parses
+// this ONE call's own `args` into the checklist shape
+// components/TodosPanel.tsx's `TodoItemRow` renders — reused verbatim
+// (already plain-props, no ChatMessage coupling), wrapped in the SAME
+// `.todos-snapshot` class components/MessageBubble.tsx's
+// `TodosSnapshotEvent` uses, for visual parity. Falls through to the
+// generic ToolCall args/result view when the parse can't produce any
+// items (unrecognized tool, or malformed args).
 
 import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import type { NodeWire, ToolInteractionPayloadWire } from "../../adapter/wire";
+import { deriveTodoSnapshotItems } from "./todoSnapshot";
 
 const ToolCall = lazy(() => import("../../components/ToolCall").then((m) => ({ default: m.ToolCall })));
+const TodoItemRow = lazy(() => import("../../components/TodosPanel").then((m) => ({ default: m.TodoItemRow })));
 
 export function ToolInteractionView({ node }: { node: NodeWire }) {
   const { t } = useTranslation();
@@ -27,6 +31,10 @@ export function ToolInteractionView({ node }: { node: NodeWire }) {
       : payload.result
         ? JSON.stringify(payload.result)
         : undefined;
+
+  const todoItems =
+    payload.derived_view === "todo_snapshot" ? deriveTodoSnapshotItems(payload.tool_name, payload.args) : null;
+
   return (
     <Suspense fallback={null}>
       <div data-testid="surface-tool-interaction" data-ui-kind={payload.ui_kind ?? undefined}>
@@ -35,7 +43,15 @@ export function ToolInteractionView({ node }: { node: NodeWire }) {
             {payload.ui_kind}
           </span>
         )}
-        <ToolCall tool={payload.tool_name} args={payload.args} result={resultText} />
+        {todoItems ? (
+          <div className="todos-snapshot" data-testid="surface-todo-snapshot">
+            {todoItems.map((item, i) => (
+              <TodoItemRow key={item.source_id ?? `${i}-${item.content}`} item={item} />
+            ))}
+          </div>
+        ) : (
+          <ToolCall tool={payload.tool_name} args={payload.args} result={resultText} />
+        )}
       </div>
     </Suspense>
   );

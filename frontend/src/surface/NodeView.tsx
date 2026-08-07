@@ -17,7 +17,8 @@ import { ResultView } from "./nodes/Result";
 import { CompactionView, ContinuationSessionView } from "./nodes/Continuation";
 import { FailureView } from "./nodes/Failure";
 import { LifecycleNoticeView } from "./nodes/LifecycleNotice";
-import { DiagnosticView, FactView, UnknownView, UserInteractionView, WorkerInteractionView } from "./nodes/Misc";
+import { DiagnosticView, FactView, UnknownView, WorkerInteractionView } from "./nodes/Misc";
+import { UserInteractionActionView } from "./nodes/UserInteractionAction";
 
 export interface NodeViewProps {
   node: NodeWire;
@@ -66,7 +67,7 @@ export function NodeView({ node, containerMode, store, runsById }: NodeViewProps
     case "diagnostic":
       return <DiagnosticView node={node} />;
     case "user_interaction":
-      return <UserInteractionView node={node} />;
+      return <UserInteractionActionView node={node} />;
     case "lifecycle_notice":
       return <LifecycleNoticeView node={node} />;
     case "fact":

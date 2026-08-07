@@ -103,11 +103,11 @@ export function FactChip({ payload }: { payload: FactPayloadWire }) {
   );
 }
 
-/** `user_interaction` node — state chip. Resolving the request (approval
- * buttons, credential consent form, memory-proposal editor) reuses
- * existing interactive components that take ChatMessage-shaped props;
- * that dispatch is not yet wired into the native layer (stage-1 gap,
- * see module report) — this always renders the read-only state view. */
+/** `user_interaction` node — read-only state chip, for a resolved/
+ * cancelled node or an unrecognized `kind`. A PENDING node whose `kind`
+ * is input/approval/memory instead renders the real action form — see
+ * nodes/UserInteractionAction.tsx, which is the only caller for that
+ * case; this chip is its fallback. */
 export function UserInteractionChip({ payload }: { payload: UserInteractionPayloadWire }) {
   const { t } = useTranslation();
   const { kind, state } = payload;

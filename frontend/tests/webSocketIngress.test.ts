@@ -7,6 +7,11 @@ import {
 
 const BASE_CORE_PAYLOAD_CASES = [
   {
+    type: "background_work_changed",
+    valid: { epoch: "epoch-1", cleared: true },
+    invalid: { cleared: true },
+  },
+  {
     type: "messages_replay",
     valid: { app_session_id: "session-a", messages: [] },
     invalid: { app_session_id: "session-a", messages: "not-an-array" },

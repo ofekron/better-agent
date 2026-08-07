@@ -5,19 +5,30 @@
 // subturns... therefore has multiple simultaneously expanded live
 // paths").
 //
-// Known gap (stage 1): the contract's real signal is each SubAgentTurn's
-// OWN `turn_lifecycle` frames scoped to ITS turn_id (ADR 0006 §4,
-// "SubAgentTurn-family turns get their own lifecycle frames scoped to
-// their turn_id") — for `worker_turn`/`sub_session_turn`/`session_turn`
-// that means subscribing to the TARGET session's lifecycle, which this
-// store does not do (out of frontend-only stage-1 scope; state.ts only
-// tracks phase for top-level turns of the OPENED session). For
-// `native_subagent_turn` (same-stream nesting, no separate session) this
-// heuristic is a real, non-fabricated signal: a still-live subtree has a
-// leaf whose `status` is non-terminal (queued/streaming) somewhere on its
-// trailing edge — this walks ONLY already-cached children (never
-// triggers a fetch, so it never expands a collapsed subtree just to
-// check liveness).
+// Confirmed backend gap (stage 2a investigation, not just "out of
+// frontend scope"): `worker_turn`/`sub_session_turn`/`session_turn` are
+// declared in the contract (backend/surface_contract/nodes.py's
+// `NodeKind`/`SUBAGENT_TURN_KINDS`) and dispatched here per ADR 0006 §1's
+// "one render contract, four sourcing modes" — but grep across
+// backend/adapters/{normalize,derive,chat_adapter}.py (the only three
+// modules that ever construct a Node) finds ZERO construction sites for
+// any of the three. They are never emitted today, so there is no
+// `turn_lifecycle` frame scoped to their turn_id (chat_adapter.py's
+// `_on_lifecycle` only tracks the OPENED session's own top-level turns —
+// no subscription to a worker/sub-session/cross-session target exists
+// either) AND no sidecar/status data to fall back to, because the
+// CONTAINER NODE ITSELF never arrives. This blocks the whole cross-
+// session subturn feature at the node-construction level, not just its
+// liveness signal — building a liveness mechanism on top of nodes that
+// don't exist would be fabrication, so none is added here; the safe
+// `false` default below is correct until the backend starts constructing
+// these nodes. `native_subagent_turn` (same-stream nesting, no separate
+// session — IS constructed today, by derive.py) is unaffected: its
+// heuristic below is a real, non-fabricated signal — a still-live
+// subtree has a leaf whose `status` is non-terminal (queued/streaming)
+// somewhere on its trailing edge — walking ONLY already-cached children
+// (never triggers a fetch, so it never expands a collapsed subtree just
+// to check liveness).
 
 import type { SurfaceStore } from "./state";
 import type { ContentStatusWire, NodeWire } from "../adapter/wire";

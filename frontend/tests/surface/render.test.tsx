@@ -40,7 +40,7 @@ class FakeSurfaceStore {
     return this.tables.get(nodeId) ?? [];
   }
 
-  subscribe(_cb: () => void): () => void {
+  subscribe(): () => void {
     return () => {};
   }
 }
@@ -93,6 +93,10 @@ describe("TurnView — collapsed/extended (chat-panel.md render/renderCollapsedT
     expect(screen.getByTestId("surface-result")).toBeTruthy();
   });
 
+  // Own timeout raised alongside the inner waitFor's: this is typically the
+  // FIRST test in the run to trigger AssistantTextView's dynamic import of
+  // components/MessageBubble.tsx (a large module), which can outrun
+  // vitest's default 5000ms per-test timeout on a cold transform cache.
   it("extends on click: fetches and renders the body via children(turn_id), boundary-inline with Result", async () => {
     const fake = new FakeSurfaceStore();
     const exp = explanationNode("t1", "exp1", "turn:t1", { renderable_child_count: 1, has_children: true });
@@ -105,9 +109,13 @@ describe("TurnView — collapsed/extended (chat-panel.md render/renderCollapsedT
     render(<TurnView entry={entry} store={asStore(fake)} runsById={NO_RUNS} />);
 
     await userEvent.click(screen.getByRole("button", { name: /expand hidden content/i }));
-    await waitFor(() => expect(screen.getByText("body text")).toBeTruthy());
+    // AssistantTextView lazy-loads components/MessageBubble.tsx's
+    // MessageBox (see nodes/ContentLeaves.tsx) — the first dynamic import
+    // of that (large) module in a test run can take longer than
+    // waitFor's default timeout.
+    await waitFor(() => expect(screen.getByText("body text")).toBeTruthy(), { timeout: 8000 });
     expect(screen.getByTestId("surface-result")).toBeTruthy();
-  });
+  }, 10000);
 });
 
 describe("Explanation collapse (chat-panel.md renderCollapsedExplanation: Text -> ... -> last item)", () => {
@@ -127,7 +135,10 @@ describe("Explanation collapse (chat-panel.md renderCollapsedExplanation: Text -
     await userEvent.click(screen.getByRole("button", { name: /expand hidden content/i }));
     await waitFor(() => expect(screen.getByTestId("surface-explanation")).toBeTruthy());
 
-    expect(screen.getByText("leading text")).toBeTruthy();
+    // AssistantTextView lazy-loads components/MessageBubble.tsx's
+    // MessageBox (see nodes/ContentLeaves.tsx) — wait for that dynamic
+    // import to resolve before asserting its content.
+    await waitFor(() => expect(screen.getByText("leading text")).toBeTruthy(), { timeout: 5000 });
     // Ellipsis hides count-1 = 2 of the 3 non-text items.
     expect(screen.getByText("• • • (2)")).toBeTruthy();
     // Only the LAST tool_interaction (LastTool) renders; the hidden two do not.
@@ -148,7 +159,7 @@ describe("Live turn (chat-panel.md renderLiveTurn — trailing-path forced expan
     const entry = entryWithBody({ renderable_child_count: 1, has_children: true }, { phase: "running" });
     render(<TurnView entry={entry} store={asStore(fake)} runsById={NO_RUNS} />);
 
-    await waitFor(() => expect(screen.getByText("streaming content")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("streaming content")).toBeTruthy(), { timeout: 5000 });
     expect(screen.queryByRole("button", { name: /expand hidden content/i })).toBeNull();
   });
 
@@ -165,7 +176,7 @@ describe("Live turn (chat-panel.md renderLiveTurn — trailing-path forced expan
     // Both siblings' trailing leaves are visible — sub1 is the non-trailing
     // sibling but liveness.ts detects its own live descendant; sub2 is the
     // list's trailing item and is unconditionally forced live.
-    await waitFor(() => expect(screen.getByText("worker one output")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("worker one output")).toBeTruthy(), { timeout: 5000 });
     expect(screen.getByText("worker two output")).toBeTruthy();
   });
 });

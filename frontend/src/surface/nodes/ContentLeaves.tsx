@@ -1,9 +1,27 @@
 // Plain-text/markdown leaf kinds: `assistant_text`, `thinking`,
-// `steering_message`. No collapse state of their own (render invariant:
-// "Prompt text, explanation text, and result content retain their
-// canonical renderer and have independent folding controls" — these ARE
-// that canonical renderer).
+// `steering_message`. No collapse state of their own beyond what their
+// reused legacy chrome already owns (render invariant: "Prompt text,
+// explanation text, and result content retain their canonical renderer
+// and have independent folding controls" — these ARE that canonical
+// renderer).
+//
+// `assistant_text` reuses components/MessageBubble.tsx's `MessageBox`
+// verbatim (already plain-props: text/defaultOpen/collapsible/onFileClick,
+// no ChatMessage coupling) instead of a bare markdown div, so native
+// assistant prose gets the SAME collapsible "💬 Message" box chrome
+// (`.message-box`/`.message-box-toggle`/`.message-box-body`) legacy's
+// `OutputEvent` renders it with — legacy's heavier `classifyOutput`
+// dispatch (session/error/success/json/tool-result heuristics) doesn't
+// apply here: the Contract-Node grammar already gives each of those
+// semantic kinds its OWN node kind (result/failure/diagnostic/
+// tool_interaction), so an `assistant_text` node is always genuine prose.
+//
+// `thinking` reuses components/ThinkingBlock.tsx verbatim (same
+// `.thinking-block`/`.thinking-indicator`/`.thinking-content` CSS legacy
+// uses) instead of the generic `.surface-collapsible` chrome, which has
+// different glyphs/styling with no dedicated "thinking" theming.
 
+import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantTextPayloadWire,
@@ -12,14 +30,18 @@ import type {
   ThinkingPayloadWire,
 } from "../../adapter/wire";
 import { Markdown } from "../leaf/Markdown";
-import { CollapsibleBlock } from "../leaf/Collapsible";
+
+const MessageBox = lazy(() => import("../../components/MessageBubble").then((m) => ({ default: m.MessageBox })));
+const ThinkingBlock = lazy(() => import("../../components/ThinkingBlock").then((m) => ({ default: m.ThinkingBlock })));
 
 export function AssistantTextView({ node }: { node: NodeWire }) {
   const payload = node.payload as AssistantTextPayloadWire | null;
   if (!payload || !payload.text) return null;
   return (
-    <div className="surface-assistant-text" data-testid="surface-assistant-text" data-status={node.status ?? undefined}>
-      <Markdown text={payload.text} />
+    <div data-testid="surface-assistant-text" data-status={node.status ?? undefined}>
+      <Suspense fallback={null}>
+        <MessageBox text={payload.text} />
+      </Suspense>
     </div>
   );
 }
@@ -32,9 +54,9 @@ export function ThinkingView({ node }: { node: NodeWire }) {
     return <div className="surface-thinking-redacted">{t("thinking.thinking")}</div>;
   }
   return (
-    <CollapsibleBlock header={<span>{t("thinking.thinking")}</span>} className="surface-thinking" testId="surface-thinking">
-      <Markdown text={payload.text} />
-    </CollapsibleBlock>
+    <Suspense fallback={null}>
+      <ThinkingBlock thought={payload.text} />
+    </Suspense>
   );
 }
 

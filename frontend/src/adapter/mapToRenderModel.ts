@@ -161,6 +161,7 @@ import type {
   UserInteractionPayloadWire,
   WorkerInteractionPayloadWire,
 } from "./wire";
+import { isRecognizedUserInteractionKind, parseUserInteractionActionFields } from "./userInteractionRequest";
 
 export type RunsById = ReadonlyMap<string, RunWire>;
 
@@ -805,17 +806,11 @@ export function turnPhaseToMessagePatch(
 // rendered with a state chip by MessageBubble's diagnostic dispatch.
 //
 // NodeWire's user_interaction payload has no producer in the backend yet
-// (no construction site under backend/adapters/{normalize,derive}.py at
-// the time of this mapping — grep-confirmed), so the `kind` string
+// (no construction site under backend/adapters/{normalize,derive}.py as of
+// Phase I stage 2a — grep-confirmed, still true) so the `kind` string
 // vocabulary below (input/approval/memory) is inferred from the existing
 // frontend UserInteractionRequest union it is meant to reuse, not
 // verified against real wire data. See the Phase E report for this gap.
-
-const CORRESPONDING_USER_INTERACTION_KINDS = new Set(["input", "approval", "memory"]);
-
-function isCorrespondingUserInteractionKind(kind: unknown): kind is "input" | "approval" | "memory" {
-  return typeof kind === "string" && CORRESPONDING_USER_INTERACTION_KINDS.has(kind);
-}
 
 /** True when a `user_interaction` diagnostic event (as produced by
  * mapNodeToEvents) should render as an actionable legacy card instead of
@@ -825,49 +820,52 @@ export function isActionableUserInteractionEvent(event: WSEvent): boolean {
   const data = event.data as { kind?: unknown; raw?: unknown } | undefined;
   if (data?.kind !== "user_interaction") return false;
   const raw = data.raw as UserInteractionPayloadWire | undefined;
-  return !!raw && raw.state === "pending" && isCorrespondingUserInteractionKind(raw.kind);
+  return !!raw && raw.state === "pending" && isRecognizedUserInteractionKind(raw.kind);
 }
 
 /** Maps an actionable user_interaction diagnostic event (see
  * isActionableUserInteractionEvent — call that first) to the exact
- * legacy request shape its card component expects. `request` is assumed
- * to already carry the corresponding legacy request's fields (request_id,
- * app_session_id, created_at, plus the kind-specific fields) since it is
- * meant to reuse those shapes; `app_session_id` is left empty (rather
- * than guessed) when absent — the caller decides how to treat that
- * (Chat.tsx trusts the current session, since every node in `messages`
- * is already scoped to one session's subscription). Returns `null` for a
- * non-actionable or unrecognized-kind event. */
+ * legacy request shape its card component expects. Field-reading itself
+ * (request_id/app_session_id/kind-specific fields out of the raw
+ * `request` bag) is the SAME `parseUserInteractionActionFields` the
+ * native surface/ path uses (see userInteractionRequest.ts) — this just
+ * wraps its plain-field result into the legacy request union, adding the
+ * legacy-only `status`/`created_at` bookkeeping fields the card
+ * components don't actually read but the union type still carries.
+ * `app_session_id` is left empty (rather than guessed) when absent — the
+ * caller decides how to treat that (Chat.tsx trusts the current session,
+ * since every node in `messages` is already scoped to one session's
+ * subscription). Returns `null` for a non-actionable or unrecognized-kind
+ * event. */
 export function mapUserInteractionEventToRequest(
   event: WSEvent,
 ): UserInteractionRequest | null {
   if (!isActionableUserInteractionEvent(event)) return null;
   const data = event.data as { node_id?: unknown; raw?: unknown };
   const raw = data.raw as UserInteractionPayloadWire;
-  const request = raw.request;
-  const request_id =
-    typeof request.request_id === "string" ? request.request_id : String(data.node_id ?? "");
-  const app_session_id = typeof request.app_session_id === "string" ? request.app_session_id : "";
-  const created_at = typeof request.created_at === "number" ? request.created_at : 0;
-  const shared = { request_id, app_session_id, status: "pending" as const, created_at };
-  switch (raw.kind) {
+  const fields = parseUserInteractionActionFields(raw.kind, raw.request, String(data.node_id ?? ""));
+  if (!fields) return null;
+  const created_at = typeof raw.request.created_at === "number" ? raw.request.created_at : 0;
+  const shared = {
+    request_id: fields.requestId,
+    app_session_id: fields.appSessionId,
+    status: "pending" as const,
+    created_at,
+  };
+  switch (fields.kind) {
     case "approval":
-      return {
-        ...shared,
-        kind: "approval",
-        prompt: typeof request.prompt === "string" ? request.prompt : "",
-      } satisfies UserApprovalRequest;
+      return { ...shared, kind: "approval", prompt: fields.prompt } satisfies UserApprovalRequest;
     case "memory":
       return {
         ...shared,
         kind: "memory",
-        memory_proposal: request.memory_proposal as MemoryProposal,
+        memory_proposal: fields.memoryProposal as MemoryProposal,
       } satisfies MemoryProposalRequest;
     case "input":
       return {
         ...shared,
         kind: "input",
-        questions: Array.isArray(request.questions) ? (request.questions as UserInputQuestion[]) : [],
+        questions: fields.questions as UserInputQuestion[],
       } satisfies UserInputRequest;
     default:
       return null;
