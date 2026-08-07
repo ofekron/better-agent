@@ -4,7 +4,6 @@ import { API } from "../api";
 
 export type InstallRun = BusEventMap["provider_install_finished"];
 export type InstallLine = InstallRun["lines"][number];
-export type InstallStream = InstallLine["s"];
 
 type RunsMap = Record<string, InstallRun>;
 
