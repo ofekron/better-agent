@@ -20,6 +20,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provider  # noqa: E402
+import reconciled_marker_index as rmi  # noqa: E402
 import runs_dir  # noqa: E402
 from ingestion_versions import (  # noqa: E402
     CLAUDE_INGESTION_VERSION,
@@ -313,6 +314,172 @@ def test_large_recovery_dispatch_repairs_index_without_quadratic_scan() -> None:
     print("PASS large recovery dispatch repairs index in bounded time")
 
 
+def _expect_value_error(action, *, message_contains: str | None = None) -> None:
+    try:
+        action()
+    except ValueError as exc:
+        if message_contains is not None:
+            assert message_contains in str(exc), str(exc)
+        return
+    raise AssertionError("expected ValueError was not raised")
+
+
+_VALID_ROW = {
+    "run_id": "run-ok",
+    "provider_kind": "claude",
+    "ingestion_version": 1,
+    "marker_size": 2,
+    "marker_mtime_ns": 3,
+    "marker_inode": 4,
+}
+
+
+def _fresh_index():
+    tmp = Path(tempfile.mkdtemp(prefix="bc-reconciled-unit-"))
+    return tmp, rmi.ReconciledMarkerIndex(tmp / "index.jsonl")
+
+
+def test_row_key_rejects_invalid_run_id_and_provider_kind() -> None:
+    # missing / wrong-typed / empty run_id -> "invalid ... run_id"
+    for bad in (None, 5, ""):
+        _expect_value_error(
+            lambda bad=bad: rmi.row_key(dict(_VALID_ROW, run_id=bad)),
+            message_contains="run_id",
+        )
+    # missing / wrong-typed / empty provider_kind -> "invalid ... provider_kind"
+    for bad in (None, 9, ""):
+        _expect_value_error(
+            lambda bad=bad: rmi.row_key(dict(_VALID_ROW, provider_kind=bad)),
+            message_contains="provider_kind",
+        )
+    # a fully valid row still passes through
+    assert rmi.row_key(dict(_VALID_ROW)) == ("run-ok", "claude", 1, 2, 3, 4)
+    print("PASS row_key rejects invalid run_id and provider_kind")
+
+
+def test_row_key_rejects_invalid_integer_fields() -> None:
+    # bool / string / float are not valid integer fields -> "invalid"
+    for bad in (True, "x", 1.5):
+        _expect_value_error(
+            lambda bad=bad: rmi.row_key(dict(_VALID_ROW, ingestion_version=bad)),
+            message_contains="ingestion_version",
+        )
+    # negative and beyond int64 max -> "out-of-range"
+    for bad in (-1, 2 ** 63):
+        _expect_value_error(
+            lambda bad=bad: rmi.row_key(dict(_VALID_ROW, ingestion_version=bad)),
+            message_contains="out-of-range",
+        )
+    # the range check applies to every integer field, not just the first
+    _expect_value_error(
+        lambda: rmi.row_key(dict(_VALID_ROW, marker_inode=-5)),
+        message_contains="out-of-range",
+    )
+    print("PASS row_key rejects invalid integer fields")
+
+
+def test_append_many_empty_is_a_noop() -> None:
+    tmp, idx = _fresh_index()
+    try:
+        assert idx.append_many([]) == 0
+        assert idx.load_latest() == {}
+        assert idx.load_keys() == set()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS append_many with no rows is a no-op")
+
+
+def test_consume_locked_skips_malformed_rows_but_keeps_valid_ones() -> None:
+    tmp, idx = _fresh_index()
+    try:
+        valid = json.dumps(_VALID_ROW)
+        # blank line, broken JSON, valid-but-non-dict JSON, dict missing run_id,
+        # and one good row.
+        idx.path.write_bytes(
+            b"\n{broken\n[1, 2]\n"
+            + b'{"provider_kind": "claude"}\n'
+            + valid.encode("utf-8") + b"\n",
+            # the trailing newline leaves an empty _partial
+        )
+        latest = idx.load_latest()
+        keys = idx.load_keys()
+        assert set(latest) == {"run-ok"}, latest
+        assert latest["run-ok"]["ingestion_version"] == 1
+        assert keys == {("run-ok", "claude", 1, 2, 3, 4)}, keys
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS consume_locked skips malformed rows but keeps valid ones")
+
+
+def test_must_rebuild_detects_inode_dev_shrink_and_same_size_change() -> None:
+    tmp, idx = _fresh_index()
+    try:
+        # first refresh records the baseline signature at offset 10
+        idx.path.write_bytes(b"x" * 10)
+        idx.load_latest()
+        assert idx._signature is not None
+
+        def must(sig):
+            return idx._must_rebuild(sig)
+
+        baseline = idx._signature
+        # dev/inode pair changed -> rebuild
+        assert must((baseline[0] + 1, baseline[1], 10, *baseline[3:])) is True
+        # size shrunk below the consumed offset -> rebuild
+        assert must((baseline[0], baseline[1], idx._offset - 1, *baseline[3:])) is True
+        # same size, same offset, but mtime/ctime changed -> rebuild
+        shifted = (*baseline[:4], baseline[4] + 1)
+        assert must((baseline[0], baseline[1], idx._offset, *shifted[3:])) is True
+        # identical signature at the same offset -> no rebuild
+        assert must(baseline) is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS _must_rebuild detects inode/dev/shrink/same-size change")
+
+
+def test_refresh_resets_state_when_index_read_fails() -> None:
+    tmp, idx = _fresh_index()
+    try:
+        idx.path.write_bytes(json.dumps(_VALID_ROW).encode("utf-8") + b"\n")
+        assert idx.load_latest() == {"run-ok": _VALID_ROW}
+
+        # a populated index whose read suddenly raises must reset to empty
+        original_open = Path.open
+
+        def failing_open(path, *args, **kwargs):
+            if path == idx.path:
+                raise OSError("read denied")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", failing_open):
+            assert idx.load_latest() == {}
+            assert idx.load_keys() == set()
+        # state was reset, so the next clean read rebuilds from scratch
+        assert idx.load_latest() == {"run-ok": _VALID_ROW}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS refresh resets state when index read fails")
+
+
+def test_append_raises_on_short_write() -> None:
+    tmp, idx = _fresh_index()
+    try:
+        # establish a valid baseline so the append reaches the write loop
+        idx.append(dict(_VALID_ROW))
+        with mock.patch.object(rmi.os, "write", return_value=0):
+            try:
+                idx.append(dict(_VALID_ROW, run_id="run-short"))
+            except OSError:
+                pass
+            else:
+                raise AssertionError("short write must raise OSError")
+        # the failed append must not have widened the index
+        assert set(idx.load_latest()) == {"run-ok"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS append raises on short write")
+
+
 def main() -> int:
     try:
         test_indexed_current_run_skips_marker_json_and_backend_state()
@@ -325,6 +492,13 @@ def main() -> int:
         test_backfill_propagates_scan_failure()
         test_write_marker_indexes_only_runs_root_reconciled_marker()
         test_large_recovery_dispatch_repairs_index_without_quadratic_scan()
+        test_row_key_rejects_invalid_run_id_and_provider_kind()
+        test_row_key_rejects_invalid_integer_fields()
+        test_append_many_empty_is_a_noop()
+        test_consume_locked_skips_malformed_rows_but_keeps_valid_ones()
+        test_must_rebuild_detects_inode_dev_shrink_and_same_size_change()
+        test_refresh_resets_state_when_index_read_fails()
+        test_append_raises_on_short_write()
         return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
