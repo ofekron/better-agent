@@ -21,11 +21,18 @@ import config_store  # noqa: E402
 
 
 def test_fresh_codex_default_uses_cli_visible_model():
+    # `default_model` lives on the provider's runtime profile since the v3
+    # schema migration moved runner/default_model/default_reasoning_effort
+    # off the provider record (config_store.py's `_migrate_schema_2_to_3`).
+    state = config_store._seed_default_state()
     codex_provider = next(
-        p for p in config_store._seed_default_state()["providers"]
-        if p["kind"] == "codex"
+        p for p in state["providers"] if p["kind"] == "codex"
     )
-    assert codex_provider["default_model"] == "gpt-5.5"
+    codex_profile = next(
+        rp for rp in state["runtime_profiles"]
+        if rp["provider_id"] == codex_provider["id"]
+    )
+    assert codex_profile["default_model"] == "gpt-5.5"
 
 
 def test_codex_catalog_ignores_legacy_schema2_cache_without_d3_projection():
