@@ -37,6 +37,13 @@ def test_isolated_subprocess_environment_reasserts_local_system_root():
     }
 
 
+def test_isolated_subprocess_environment_without_systemroot_drops_reassert():
+    # No systemroot-like key in the source -> the reassert block is skipped and
+    # only the host-filtered PATH survives (no SYSTEMROOT injected).
+    env = ee.isolated_subprocess_environment({"PATH": "/bin", "FOO": "bar"})
+    assert env == {"PATH": "/bin"}
+
+
 # --- happy paths -------------------------------------------------------------
 
 @pytest.mark.parametrize("value", [None, {}, {"MY_VAR": "value"}])
