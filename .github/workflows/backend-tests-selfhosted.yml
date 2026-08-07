@@ -13,9 +13,13 @@ on:
     branches: [dev]
   workflow_dispatch:
 
+# One run executes at a time; the pending slot always holds only the NEWEST
+# queued push (GitHub replaces a pending run in the same group). No
+# cancel-in-progress: dev receives frequent pushes and cancelling mid-run
+# meant full suites never finished.
 concurrency:
   group: backend-tests-selfhosted-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   backend-shard:
