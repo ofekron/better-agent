@@ -17,7 +17,6 @@ import {
   userInstructionsState,
 } from "../src/components/harness/resolve";
 import {
-  GROUP_DISABLED_BUILTIN_TOOLS,
   GROUP_SETTINGS,
   GROUP_USER_INSTRUCTIONS,
   SCOPE_GLOBAL,
