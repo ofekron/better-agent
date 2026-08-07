@@ -30,6 +30,16 @@ jobs:
         shard: [0, 1, 2, 3]
     runs-on: [self-hosted, ba-tests]
     timeout-minutes: 120
+    # Per-test timeout (scripts/run-backend-tests.sh forwards this to
+    # pytest-timeout as --timeout/--timeout-method=signal; see that script's
+    # header for the rationale). CI-only default — local dev runs stay
+    # timeout-free unless a caller sets BETTER_AGENT_TEST_TIMEOUT themselves.
+    # 120s bounds any single test well below the 120-minute job timeout, so a
+    # hang now fails one test with a thread-stack dump instead of silently
+    # consuming the whole job budget with no diagnostic (the failure mode
+    # that hid the 2026-08-07 shard-0 hang's stack trace and test name).
+    env:
+      BETTER_AGENT_TEST_TIMEOUT: "120"
     steps:
       - uses: actions/checkout@v4
         with:
