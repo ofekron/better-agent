@@ -202,10 +202,11 @@ _WINDSURF_NONCE_LEN = 12
 def _decode_cwd_token(token: str) -> str:
     """Best-effort reverse of :func:`paths.encode_cwd` for a projects dir name.
 
-    ``encode_cwd`` collapses ``/ \\ : _`` all to ``-``, so the reverse is
-    ambiguous for paths containing underscores — callers that need an exact
-    cwd match compare via ``encode_cwd`` rather than this string. Used only for
-    display and as a fallback cwd when no BA record enriches a transcript.
+    ``encode_cwd`` collapses every non-alphanumeric character (``/ \\ : _ .``,
+    spaces, ``~``, ...) to ``-``, so the reverse is ambiguous for paths
+    containing any of those — callers that need an exact cwd match compare
+    via ``encode_cwd`` rather than this string. Used only for display and as
+    a fallback cwd when no BA record enriches a transcript.
     """
     if not token:
         return ""
