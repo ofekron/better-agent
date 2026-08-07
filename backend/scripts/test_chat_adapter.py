@@ -43,6 +43,7 @@ import runs_dir  # noqa: E402  (bare — store_access._resolve aliases onto this
 from stores import worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
 
 import backend.adapters.chat_adapter as chat_adapter_mod  # noqa: E402
+import backend.adapters.chat_index as chat_index_mod  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
@@ -530,9 +531,13 @@ def test_open_session_normalizes_each_row_once() -> None:
 
 
 def test_older_only_builds_the_requested_page_not_every_turn() -> None:
-    """H5: `older()` builds a `_TurnView` for just the page it serves —
-    turns outside the requested page are segmented (cheap) but never
-    passed through `_build_turn_view` (derive_turn/derive_body)."""
+    """H5: `older()`'s FALLBACK pipeline (chat_index cold/stale) builds a
+    `_TurnView` for just the page it serves — turns outside the requested
+    page are segmented (cheap) but never passed through `_build_turn_view`
+    (derive_turn/derive_body). The layer-2 chat_index fast path (see
+    test_chat_index.py) does strictly better (zero `_build_turn_view`
+    calls once warm); `invalidate()` here forces the fallback path so
+    THIS test keeps measuring the bound it was written for."""
     root_id = f"root-{uuid.uuid4().hex}"
     # 7 turns total: open_session's compact window (5) covers the last 5,
     # leaving 2 older turns for a SINGLE older() page (window size 5 > 2).
@@ -544,6 +549,7 @@ def test_older_only_builds_the_requested_page_not_every_turn() -> None:
     opened = adapter.open_session(root_id)
     assert isinstance(opened, Ok)
     assert opened.value.older_cursor is not None
+    chat_index_mod.invalidate(root_id)  # open_session's backfill already warmed it — force the fallback path
 
     built_turn_ids: list[str] = []
     original = chat_adapter_mod._build_turn_view

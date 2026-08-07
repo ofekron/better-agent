@@ -30,6 +30,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 
 from backend import perf
+from backend.adapters import chat_index
 from backend.adapters import derive as _derive
 from backend.adapters.normalize import (
     ParentLink,
@@ -232,6 +233,11 @@ class _SurfaceState:
     # so those rows are recovered instead of staying forever behind
     # `last_seq`.
     pre_anchor_watermark: int | None = None
+    # The seq of `current_turn_id`'s own anchor (TYPED_PROMPT-producing)
+    # row — set alongside `current_prompt_row`. Lets chat_index folding
+    # (`_fold_turn_into_index`) bound its read to just one turn's rows
+    # (`_read_all_rows(after_seq=this-1)`) instead of the whole journal.
+    current_turn_boundary_seq: int | None = None
 
 
 _TurnSegment = tuple[str, list[dict], list[list[Node]]]
@@ -553,6 +559,9 @@ class ChatSurfaceAdapter(ChatSurface):
         # response never uses. Older turns are paged in on demand via
         # `older()`, which builds only the page it serves.
         state = self._get_or_create(session_id)
+        fast = self._open_session_fast(session_id)
+        if fast is not None:
+            return fast
         segments, prompt_meta = self._all_segments(session_id)
         window_segments = segments[-_COMPACT_TURN_WINDOW:]
         window = self._build_turns(session_id, window_segments, prompt_meta)
@@ -569,7 +578,111 @@ class ChatSurfaceAdapter(ChatSurface):
             runs=(), older_cursor=older_cursor,
         )
         self._ensure_seeded(session_id, window)
+        # Exclude the last window turn: it may still be the live trailing
+        # turn (not yet structurally final) — see `_backfill_index`'s
+        # docstring for why this never reintroduces O(journal) cost here.
+        self._backfill_index(session_id, window[:-1])
         return Ok(snapshot, state.projection.snapshot())
+
+    @staticmethod
+    def _compact_from_indexed(t: "chat_index.IndexedTurn") -> CompactTurn:
+        return CompactTurn(
+            turn=t.turn, prompt=t.prompt, results=t.results,
+            manifest=t.turn.child_manifest, runtime_change=t.runtime_change,
+        )
+
+    def _open_session_fast(
+        self, session_id: SessionId,
+    ) -> ProjectionResult[CompactSessionSnapshot] | None:
+        """O(window): the compact window's OLDER turns come straight from
+        chat_index (already-settled, immutable); only the still-open
+        trailing turn is computed directly, bounded to just its own rows
+        via `state.current_turn_boundary_seq`. Returns `None` — never a
+        wrong/partial answer — the instant any precondition doesn't hold,
+        so `open_session`'s existing full pipeline stays the correctness
+        backstop for every case this fast path doesn't cover.
+
+        Checks chat_index FIRST, before touching `_ensure_seeded`/the
+        journal at all: on a cold index (no settled turns for this
+        surface) there is nothing this fast path could ever accelerate,
+        so it must return `None` without normalizing a single row —
+        otherwise a cold-index session with exactly one (still-live) turn
+        would pay for a bounded-but-real normalize pass HERE and then pay
+        AGAIN for `open_session`'s fallback `_all_segments` full pass,
+        double-normalizing every row (the exact regression H5 removed).
+
+        Once `settled` is known non-cold, `_ensure_seeded` is called
+        (not just `state.seeded` checked): on a freshly-constructed
+        adapter (e.g. right after a process restart) nothing has seeded
+        `current_turn_id`/`current_turn_boundary_seq` yet, and `_ensure_
+        seeded`'s own seed read is now index-bounded (`_ensure_seeded_
+        turns_bounded`) rather than O(journal) — this is what makes the
+        fast path actually available on a cold PROCESS with a warm
+        on-disk index, not just within one already-seeded adapter
+        instance's lifetime."""
+        settled = chat_index.read_recent_settled_turns(session_id, _COMPACT_TURN_WINDOW - 1)
+        if settled is None:
+            return None
+        state = self._ensure_seeded(session_id)
+        with state.lock:
+            trailing_turn_id = state.current_turn_id
+            trailing_boundary_seq = state.current_turn_boundary_seq
+            prompt_meta = dict(state.prompt_meta)
+        if trailing_turn_id is None or trailing_boundary_seq is None:
+            return None
+        trailing_rows = self._read_all_rows(session_id, after_seq=trailing_boundary_seq - 1)
+        if not trailing_rows:
+            return None
+        trailing_segments = _segment_turns(trailing_rows)
+        if not trailing_segments or trailing_segments[-1][0] != trailing_turn_id:
+            return None  # a live-path race outran this read — fall back rather than risk a mismatch
+        trailing_view = _build_turn_view(session_id, *trailing_segments[-1], prompt_meta)
+        window = [self._compact_from_indexed(t) for t in settled] + [_to_compact(trailing_view)]
+        oldest_boundary = settled[0].boundary_seq if settled else trailing_view.boundary_seq
+        older_cursor = None
+        if chat_index.has_older_settled_turn(session_id, before_boundary_seq=oldest_boundary):
+            older_cursor = PageCursor(
+                surface_id=session_id, snapshot=state.projection.snapshot(), token=str(oldest_boundary),
+            )
+        snapshot = CompactSessionSnapshot(
+            session_id=session_id, surface_id=session_id, instruction_widget=None,
+            turns=tuple(window), live_turn_nodes=trailing_view.live_nodes,
+            runs=(), older_cursor=older_cursor,
+        )
+        perf.record_count("chat_adapter.open_session.index_fast_path")
+        return Ok(snapshot, state.projection.snapshot())
+
+    def _backfill_index(self, surface_id: SurfaceId, views: list["_TurnView"]) -> None:
+        """Persist already-built `_TurnView`s as settled turns — NEVER
+        builds anything itself (no `_build_turn_view` calls of its own):
+        callers pass views they needed to build for their own response
+        anyway (`open_session`'s window, `older`'s page), so warming the
+        index this way costs exactly zero extra `_build_turn_view` calls
+        beyond what the request already paid for. This is deliberately
+        NOT "backfill the whole journal on first cold call" — that would
+        reintroduce the exact O(journal) `_build_turn_view` cost H5
+        eliminated from a single open_session/older call. A long history
+        instead warms incrementally: one window/page at a time, exactly
+        as far as a caller has actually paged. Single-flight per surface
+        (`chat_index.try_begin_rebuild`) — a concurrent backfill already
+        in flight for the same surface is skipped, not duplicated."""
+        if not views:
+            return
+        if not chat_index.try_begin_rebuild(surface_id):
+            return
+        try:
+            for view in views:
+                try:
+                    chat_index.merge_settled_turn(
+                        surface_id, view.turn_node.node_id, view.boundary_seq, view.index,
+                        prompt=view.prompt, results=view.results, runtime_change=view.runtime_change,
+                    )
+                except Exception:
+                    logger.exception(
+                        "chat_index: backfill failed for turn_id=%s surface_id=%s", view.turn_id, surface_id,
+                    )
+        finally:
+            chat_index.end_rebuild(surface_id)
 
     def children(
         self, surface_id: SurfaceId, node_id: NodeId, at_render_rev: int
@@ -578,6 +691,16 @@ class ChatSurfaceAdapter(ChatSurface):
         current = state.projection.snapshot()
         if at_render_rev != current.render_rev:
             return StaleCursor()
+        # Fast path: `node_id` belongs to an already-SETTLED turn (see
+        # chat_index.py's module docstring) — its children are immutable,
+        # so an O(1)-indexed lookup is exact, not an approximation. `None`
+        # means `node_id` isn't known to the index at all (e.g. it's part
+        # of the still-open trailing turn, or the index hasn't settled
+        # this turn yet) — falls through to the existing full scan.
+        indexed = chat_index.read_children(surface_id, node_id)
+        if indexed is not None:
+            perf.record_count("chat_adapter.children.index_hit")
+            return Ok(indexed, current)
         combined: dict[NodeId, Node] = {}
         for t in self._all_turns(surface_id):
             combined.update(t.index)
@@ -595,6 +718,9 @@ class ChatSurfaceAdapter(ChatSurface):
             boundary = int(cursor.token)
         except ValueError:
             return StaleCursor()
+        fast = self._older_fast(cursor.surface_id, boundary, current)
+        if fast is not None:
+            return fast
         # Same "only build what's served" bound as open_session: only the
         # requested page's segments get a full _TurnView.
         segments, prompt_meta = self._all_segments(cursor.surface_id)
@@ -606,8 +732,40 @@ class ChatSurfaceAdapter(ChatSurface):
             next_cursor = PageCursor(
                 surface_id=cursor.surface_id, snapshot=current, token=str(page[0].boundary_seq),
             )
+        # Unlike open_session's window, EVERY turn `older()` builds is
+        # already strictly before the live compact window, so none of
+        # `page` can be the still-open trailing turn — safe to fold all
+        # of it.
+        self._backfill_index(cursor.surface_id, page)
         return Ok(
             OlderPage(turns=tuple(_to_compact(t) for t in page), runs=(), older_cursor=next_cursor),
+            current,
+        )
+
+    def _older_fast(
+        self, surface_id: SurfaceId, boundary: int, current: object,
+    ) -> ProjectionResult[OlderPage] | None:
+        """O(page): every turn `older()` ever pages through is by
+        definition already-settled (paging only walks BACKWARD from the
+        compact window), so a page fully covered by chat_index is always
+        exact. An empty index result is treated as "uncovered, fall back"
+        rather than "no more history" — conservative, since the index
+        alone can't distinguish a cold/partial index from genuine
+        end-of-history; the fallback pipeline always answers that
+        correctly, just without the speedup."""
+        page = chat_index.read_older_settled_turns(surface_id, before_boundary_seq=boundary, limit=_COMPACT_TURN_WINDOW)
+        if not page:
+            return None
+        next_cursor = None
+        if chat_index.has_older_settled_turn(surface_id, before_boundary_seq=page[0].boundary_seq):
+            next_cursor = PageCursor(
+                surface_id=surface_id, snapshot=current, token=str(page[0].boundary_seq),
+            )
+        perf.record_count("chat_adapter.older.index_fast_path")
+        return Ok(
+            OlderPage(
+                turns=tuple(self._compact_from_indexed(t) for t in page), runs=(), older_cursor=next_cursor,
+            ),
             current,
         )
 
@@ -824,10 +982,7 @@ class ChatSurfaceAdapter(ChatSurface):
             if state.seeded:
                 return state
         if turns is None:
-            # Only `turns[-1]` is ever read below — build a _TurnView for
-            # just the last segment rather than every turn in the journal.
-            segments, prompt_meta = self._all_segments(surface_id)
-            turns = self._build_turns(surface_id, segments[-1:], prompt_meta)
+            turns = self._ensure_seeded_turns_bounded(surface_id)
         seq = event_journal_reader.current_seq(surface_id) or 0
         pending: dict[str, Node] = {}
         if turns:
@@ -847,12 +1002,44 @@ class ChatSurfaceAdapter(ChatSurface):
             state.last_seq = seq
             state.pending_tool_uses = pending
             state.current_prompt_row = turns[-1].prompt_row if turns else None
+            state.current_turn_boundary_seq = turns[-1].boundary_seq if turns else None
             # render_rev 0 (never bumped) is what open_session's snapshot
             # hands back — a cursor presenting it has already seen
             # everything through `seq`, not literally "seq 0".
             state.render_seq_history.setdefault(0, seq)
             state.seeded = True
         return state
+
+    def _ensure_seeded_turns_bounded(self, surface_id: SurfaceId) -> list["_TurnView"]:
+        """Only `turns[-1]` is ever needed by `_ensure_seeded` — build a
+        `_TurnView` for just the last segment, bounded to a read of just
+        the rows AFTER the most recent SETTLED turn chat_index already
+        knows about (falling back to seq 0, i.e. the whole journal, when
+        chat_index has nothing yet — the same O(journal) cost `_ensure_
+        seeded` always paid before this index existed, never worse).
+
+        This is what makes the index's benefit survive a process restart:
+        without it, a freshly-constructed `ChatSurfaceAdapter` would need
+        one full O(journal) seed pass before `_open_session_fast`/etc.
+        could engage at all, even with a fully warm on-disk index."""
+        settled = chat_index.read_recent_settled_turns(surface_id, 1)
+        after_seq = (settled[-1].boundary_seq - 1) if settled else 0
+        rows = self._read_all_rows(surface_id, after_seq=after_seq)
+        if not rows:
+            return []
+        segments = _segment_turns(rows)
+        if not segments:
+            return []
+        turn_id, seg_rows, seg_produced = segments[-1]
+        # `_collect_prompt_meta` scans the WHOLE bounded read (not just
+        # this segment's own rows): a `prompt_meta` fact can land with a
+        # LOWER seq than the TYPED_PROMPT row it describes (published at
+        # dispatch, before the provider's own echo row — see
+        # `_collect_prompt_meta`'s own docstring), so it can fall inside
+        # the previous (settled) turn's row range, which `rows` already
+        # covers as a safety margin at no extra read cost.
+        prompt_meta = _collect_prompt_meta(rows)
+        return [_build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta)]
 
     # ---- internals: live fact handlers ----------------------------------
 
@@ -921,6 +1108,15 @@ class ChatSurfaceAdapter(ChatSurface):
             "control_row_excluded": 0, "empty_after_normalize": 0,
         }
         node_touches = 0
+        # (closed_turn_id, boundary_seq, before_seq) for every turn this
+        # flush observed transition away from (a fresh TYPED_PROMPT row
+        # opened while a DIFFERENT turn_id was current) — that transition
+        # is itself the fact that the previous turn is now structurally
+        # immutable. Folded into chat_index AFTER `state.lock` is released
+        # below (see the loop's `prev_boundary_seq` capture) — chat_index's
+        # own bounded read/build/write must never run while holding a lock
+        # shared with the hot broadcast path.
+        closed_turns: list[tuple[str, int, int]] = []
         with state.lock:
             state.prompt_meta.update(_collect_prompt_meta(rows))
             turn_id = state.current_turn_id
@@ -928,8 +1124,11 @@ class ChatSurfaceAdapter(ChatSurface):
             for row in rows:
                 max_seq = max(max_seq, _row_seq(row))
                 prior_turn_id = turn_id
+                prior_boundary_seq = state.current_turn_boundary_seq
                 turn_id, touches = self._process_row(state, row, turn_id, surface_id, coalesced, drop_counts)
                 node_touches += touches
+                if turn_id != prior_turn_id and prior_turn_id is not None and prior_boundary_seq is not None:
+                    closed_turns.append((prior_turn_id, prior_boundary_seq, _row_seq(row)))
                 if (
                     turn_id is not None and prior_turn_id is None
                     and state.pre_anchor_watermark is not None
@@ -956,6 +1155,9 @@ class ChatSurfaceAdapter(ChatSurface):
             # whole batch's growth, not one per row.
             outbound = [self._to_outbound(state, n) for n in coalesced.values()]
             snapshot = state.projection.snapshot()
+
+        for closed_turn_id, boundary_seq, before_seq in closed_turns:
+            self._fold_turn_into_index(surface_id, closed_turn_id, boundary_seq, before_seq)
 
         # A node_id touched more than once in this batch nets out to one
         # `coalesced` entry (latest-wins) — every touch beyond the first
@@ -1033,6 +1235,7 @@ class ChatSurfaceAdapter(ChatSurface):
             turn_id = prompt_node.node_id
             state.pending_tool_uses = {}
             state.current_prompt_row = row
+            state.current_turn_boundary_seq = _row_seq(row)
         if turn_id is None:
             drop_counts["turn_id_none"] += 1
             row_seq = _row_seq(row)
@@ -1099,6 +1302,44 @@ class ChatSurfaceAdapter(ChatSurface):
         if rows:
             perf.record_count("chat_adapter.flush.pre_anchor_caught_up", len(rows))
         return touches
+
+    def _fold_turn_into_index(
+        self, surface_id: SurfaceId, turn_id: str, boundary_seq: int, before_seq: int | None,
+    ) -> None:
+        """Build `turn_id`'s full `_TurnView` (chat-panel.md's Explanation/
+        subagent-partitioned tree — the SAME pure pipeline `open_session`/
+        `children` already use) over a BOUNDED read of just that one
+        turn's rows (`[boundary_seq, before_seq)`, or open-ended when
+        `before_seq` is None) and persist it into `chat_index` as a
+        settled turn. Called once a turn is known to be structurally
+        final (see chat_index.py's module docstring: a newer turn opened,
+        or a terminal lifecycle fact fired for it) — never on every
+        journal write, which would cost O(rows-so-far) per flush instead
+        of O(rows-in-this-turn) total.
+
+        MUST run OUTSIDE `state.lock` (bounded journal read + sqlite I/O)
+        and must never raise into its caller — chat_index is a disposable
+        best-effort accelerator; any failure here just means this turn
+        stays un-settled a while longer and keeps being served via the
+        existing full-pipeline fallback, never a wrong or missing
+        response."""
+        try:
+            rows = self._read_all_rows(surface_id, after_seq=boundary_seq - 1, before_seq=before_seq)
+            if not rows:
+                return
+            segments = _segment_turns(rows)
+            if not segments or segments[-1][0] != turn_id:
+                return  # a race outran this read (e.g. the turn moved on again) — skip, retried on its own next transition
+            state = self._get_or_create(surface_id)
+            with state.lock:
+                prompt_meta = dict(state.prompt_meta)
+            view = _build_turn_view(surface_id, *segments[-1], prompt_meta)
+            chat_index.merge_settled_turn(
+                surface_id, view.turn_node.node_id, view.boundary_seq, view.index,
+                prompt=view.prompt, results=view.results, runtime_change=view.runtime_change,
+            )
+        except Exception:
+            logger.exception("chat_index: failed to fold turn_id=%s surface_id=%s", turn_id, surface_id)
 
     @staticmethod
     def _to_outbound(
@@ -1226,10 +1467,28 @@ class ChatSurfaceAdapter(ChatSurface):
             or ""
         )
 
+        closing_turn_id: str | None = None
+        closing_boundary_seq: int | None = None
         with state.lock:
             render_rev = state.projection.bump_render()
             state.render_seq_history[render_rev] = state.last_seq
             snapshot = state.projection.snapshot()
+            if (
+                phase != TurnPhase.RUNNING
+                and turn_id == state.current_turn_id
+                and state.current_turn_boundary_seq is not None
+            ):
+                # This IS the still-live trailing turn's own completion —
+                # the ONE case `_flush_event_written`'s "a newer turn
+                # opened" transition-fold can never observe on its own
+                # (no successor row exists yet to trigger it). Guarded on
+                # `turn_id == state.current_turn_id`: a stale/reordered
+                # lifecycle fact for an ALREADY-superseded turn is simply
+                # skipped — that turn was (or will be) folded via the
+                # transition path instead; folding the WRONG (still-open)
+                # turn here would prematurely mark live content settled.
+                closing_turn_id = turn_id
+                closing_boundary_seq = state.current_turn_boundary_seq
 
         state.projection.broadcast(
             TurnLifecycle(
@@ -1237,6 +1496,8 @@ class ChatSurfaceAdapter(ChatSurface):
                 turn_id=turn_id, phase=phase, reason=reason,
             )
         )
+        if closing_turn_id is not None and closing_boundary_seq is not None:
+            self._fold_turn_into_index(surface_id, closing_turn_id, closing_boundary_seq, before_seq=None)
 
     async def _on_user_message_failed(self, event: BusEvent) -> None:
         """`user_message_failed` (backend/user_msg_lifecycle.py `emit_failed`,

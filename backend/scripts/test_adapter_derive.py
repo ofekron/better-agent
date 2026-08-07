@@ -274,6 +274,30 @@ def test_build_subagent_turns_segregates_simple_sidechain():
     assert subagent_node.child_manifest == child_manifest([explanation])
 
 
+def test_build_subagent_turns_extra_index_never_contains_the_subagent_node_itself():
+    """Regression: `extra_index` used to ALSO carry the subagent turn's
+    own node (unstamped, `parent_id=None`) under the same key `kept`
+    already has it under, correctly stamped. Any caller that merges a
+    combined index as `{**stamped_from_kept_via_caller, **extra_index}`
+    (chat_adapter._build_turn_view does exactly this: `index.update(body_
+    index)` — which stamps the subagent node's parent_id via `attach_
+    body_items` — THEN `index.update(subagent_index)`) would have the
+    correctly-stamped copy silently clobbered back to `parent_id=None`,
+    corrupting `children(turn)` for any turn whose trailing body item is
+    a subagent turn. `extra_index` must contain ONLY the subtree's
+    descendants (reachable via the subagent node once IT is correctly
+    parented by its caller) — never the anchor node itself."""
+    task_tool = _tool("task1", 1.0, 1, name="Task")
+    side_text = _text("s1", 2.0, 2, "subagent thinking", parent_id="task1")
+    nodes = [task_tool, side_text]
+    is_sidechain = {"task1": False, "s1": True}
+
+    kept, extra = build_subagent_turns(nodes, is_sidechain, surface_id=SURFACE, turn_id=TURN, cv=1)
+
+    assert "subagent:task1" not in extra
+    assert any(n.node_id == "subagent:task1" for n in kept)
+
+
 def test_build_subagent_turns_multiple_anchors_each_get_their_own_turn():
     task1 = _tool("task1", 1.0, 1, name="Task")
     s1 = _text("s1", 2.0, 2, "first subagent", parent_id="task1")

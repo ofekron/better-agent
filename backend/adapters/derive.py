@@ -313,15 +313,14 @@ def build_subagent_turns(
         # Recurse: `subtree` may itself contain a deeper-nested sidechain
         # — peel it off before deriving THIS level's body, so it nests as
         # its own NATIVE_SUBAGENT_TURN one level down rather than being
-        # flattened into this level's Explanation partitioning.
+        # flattened into this level's Explanation partitioning. The
+        # recursive call's own subagent-turn node (if any) is in ITS
+        # `inner_kept`, not `inner_extra` (same "kept, not extra_index"
+        # rule this level's own `subagent_node` follows below) — merging
+        # `inner_extra` here is purely its DEEPER descendants.
         inner_kept, inner_extra = build_subagent_turns(
             subtree, is_sidechain, surface_id=surface_id, turn_id=turn_id, cv=cv,
         )
-        # Merge the recursive call's index FIRST: any nested subagent-turn
-        # node it returned is still parent_id-unstamped at this point
-        # (same "caller stamps it" convention `kept` uses) — the per-item
-        # loop below overwrites it with the correctly-parented version
-        # once it's discovered again as a `body.items` entry.
         extra_index.update(inner_extra)
         subagent_node_id = f"subagent:{anchor}"
         body = derive_body(inner_kept, surface_id=surface_id, turn_id=turn_id, cv=cv)
@@ -336,7 +335,19 @@ def build_subagent_turns(
             child_manifest=child_manifest(final_items),
         )
         subagent_nodes.append(subagent_node)
-        extra_index[subagent_node_id] = subagent_node
+        # `subagent_node` belongs in `kept` ONLY (per this function's own
+        # "extra_index — every node NOT in kept" contract, see docstring
+        # above) — its `parent_id` is stamped by the CALLER once it's
+        # attached as a body item (`attach_body_items`/`derive_body`),
+        # matching every other preserved-in-place item. Putting it in
+        # `extra_index` too used to silently reintroduce this UNSTAMPED
+        # (parent_id=None) copy whenever a caller merged `extra_index`
+        # into a combined index AFTER already stamping the real one from
+        # `kept` (`chat_adapter._build_turn_view` does exactly that) —
+        # corrupting `children(turn)` for any turn whose trailing body
+        # item is a subagent turn (masked until a test exercised
+        # `children()` on such a turn specifically, rather than only the
+        # separately-computed, differently-ordered `live_nodes` bound).
 
     kept = [n for n in nodes if n.node_id not in sidechain_node_ids] + subagent_nodes
     return kept, extra_index
