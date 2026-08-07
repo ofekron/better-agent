@@ -6,6 +6,9 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
@@ -213,9 +216,79 @@ def test_wiring_orders_startup_after_extension_reconcile_and_shutdown_before_tea
     assert shutdown < teardown
 
 
+def test_invoke_contract_handling_and_reconcile_gates() -> None:
+    async def scenario() -> None:
+        original = reconciler.extension_backend_loader.invoke_core_backend_contract
+        captured: dict = {}
+
+        async def fake_invoke(action, *, body_bytes=None):
+            captured["action"] = action
+            captured["body"] = body_bytes
+            return fake_invoke.response
+
+        reconciler.extension_backend_loader.invoke_core_backend_contract = fake_invoke
+        reconciler._reconcile_lock = None
+        try:
+            fake_invoke.response = SimpleNamespace(  # type: ignore[attr-defined]
+                status_code=200, body=b'{"status":"starting"}',
+            )
+            assert await reconciler._invoke("startup") == {"status": "starting"}
+            assert captured["action"] == "requirements.reconcile"
+            assert json.loads(bytes(captured["body"])) == {"reason": "startup"}
+
+            fake_invoke.response = SimpleNamespace(status_code=200, body=b"not-json")
+            with pytest.raises(RuntimeError, match="invalid JSON"):
+                await reconciler._invoke("startup")
+
+            fake_invoke.response = SimpleNamespace(status_code=500, body=b"{}")
+            with pytest.raises(RuntimeError, match="status 500"):
+                await reconciler._invoke("startup")
+
+            fake_invoke.response = SimpleNamespace(status_code=200, body=b"[1, 2]")
+            with pytest.raises(RuntimeError, match="invalid result"):
+                await reconciler._invoke("startup")
+
+            fake_invoke.response = SimpleNamespace(status_code=200, body=b'{"status": 5}')
+            with pytest.raises(RuntimeError, match="invalid result"):
+                await reconciler._invoke("startup")
+
+            with pytest.raises(ValueError, match="unsupported"):
+                await reconciler.reconcile("bogus")
+
+            reconciler._shutting_down = True
+            assert await reconciler.reconcile("startup") == {"status": "shutting_down"}
+        finally:
+            reconciler.extension_backend_loader.invoke_core_backend_contract = original
+            reconciler._shutting_down = True
+            reconciler._reconcile_lock = None
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_skips_lock_and_eviction_when_neither_exists() -> None:
+    async def scenario() -> None:
+        original_owner = reconciler.extension_store.extension_id_for_role
+        reconciler._shutting_down = False
+        reconciler._reconcile_lock = None
+        reconciler.extension_store.extension_id_for_role = lambda _role: None
+        try:
+            # No lock was ever created and no requirements extension is
+            # installed: shutdown must still complete cleanly.
+            await reconciler.shutdown()
+            assert reconciler._reconcile_lock is None
+        finally:
+            reconciler.extension_store.extension_id_for_role = original_owner
+            reconciler._shutting_down = True
+            reconciler._reconcile_lock = None
+
+    asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     test_startup_runtime_and_shutdown_lifecycle()
     test_core_contract_route_and_public_header_filter()
     test_shutdown_waits_for_inflight_reconcile_and_drops_new_facts()
     test_wiring_orders_startup_after_extension_reconcile_and_shutdown_before_teardown()
+    test_invoke_contract_handling_and_reconcile_gates()
+    test_shutdown_skips_lock_and_eviction_when_neither_exists()
     print("OK: requirements extension reconciler")

@@ -25,9 +25,11 @@ from provider_family_runtime_capabilities import (  # noqa: E402
     cleanup_installed_family_runtime_capabilities,
     cleanup_staged_family_runtime_capabilities,
     clone_family_runtime_capabilities,
+    family_runtime_capability_payload,
     hydrate_spawn_capabilities,
     install_staged_family_runtime_capabilities,
     resolve_run_local_capabilities,
+    runtime_capability_manifest_from_payload,
     snapshot_family_runtime_capabilities,
     stage_family_runtime_capabilities,
 )
@@ -1112,6 +1114,29 @@ def test_snapshot_rejects_oversize_payload() -> None:
     )
 
 
+def test_payload_roundtrip_and_contract_errors() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        prepared, _sources = _snapshot(Path(raw))
+
+        payload = family_runtime_capability_payload(prepared)
+        assert payload == {"runtime_capabilities": prepared.manifest}
+        # A valid payload round-trips through manifest validation.
+        expected = validate_runtime_capability_manifest(prepared.manifest)
+        assert runtime_capability_manifest_from_payload(payload) == expected
+
+        # Only a real PreparedRuntimeCapabilities is accepted for minting.
+        _expect_reject(family_runtime_capability_payload, "not-prepared")
+        _expect_reject(family_runtime_capability_payload, {"runtime_capabilities": {}})
+
+        # Manifest extraction rejects non-dict payloads and missing keys.
+        _expect_reject(runtime_capability_manifest_from_payload, "not-a-dict")
+        _expect_reject(runtime_capability_manifest_from_payload, {})
+        _expect_reject(
+            runtime_capability_manifest_from_payload,
+            {"runtime_capabilities": "not-a-dict"},
+        )
+
+
 TESTS = (
     test_snapshot_is_immutable_across_every_authority_drift,
     test_artifact_manifest_and_hydration_are_secret_free,
@@ -1125,6 +1150,7 @@ TESTS = (
     test_private_root_creation_and_nested_tree_security,
     test_provider_secures_run_directory_before_use,
     test_legacy_staging_root_migrates_only_on_write,
+    test_payload_roundtrip_and_contract_errors,
 )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,3 +138,90 @@ def test_backend_startup_preserves_private_token(monkeypatch, tmp_path):
     )
 
     assert orchestrator._load_or_create_internal_token() == ROTATED_TOKEN
+
+
+def _private(root: Path, name: str, body: bytes | str) -> Path:
+    token_file = root / name
+    if isinstance(body, str):
+        token_file.write_text(body, encoding="utf-8")
+    else:
+        token_file.write_bytes(body)
+    token_file.chmod(0o600)
+    return token_file
+
+
+def test_reader_rejects_non_regular_lstat(tmp_path):
+    # A symlink is rejected by the lstat shape check before it is ever opened.
+    target = write_token(tmp_path, SPAWN_TOKEN)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    assert internal_token_file.read_private_token(link) is None
+
+
+def test_reader_rejects_wrong_size_tokens(tmp_path):
+    empty = _private(tmp_path, "empty", "")
+    assert internal_token_file.read_private_token(empty) is None
+
+    oversize = _private(tmp_path, "oversize", "x" * (internal_token_file._MAX_TOKEN_BYTES + 1))
+    assert internal_token_file.read_private_token(oversize) is None
+
+
+def test_reader_rejects_non_ascii_token(tmp_path):
+    binary = _private(tmp_path, "binary", b"\xff" * 43)
+    assert internal_token_file.read_private_token(binary) is None
+
+
+def test_reader_rejects_short_token(tmp_path):
+    short = _private(tmp_path, "short", "abc")
+    assert internal_token_file.read_private_token(short) is None
+
+
+def test_write_rejects_invalid_token_shape(tmp_path):
+    with pytest.raises(ValueError, match="invalid shape"):
+        internal_token_file.write_private_token(tmp_path / "token", "bad token!")
+
+
+def test_reader_rejects_toctou_non_regular_after_open(monkeypatch, tmp_path):
+    token_file = write_token(tmp_path, SPAWN_TOKEN)
+    monkeypatch.setattr(
+        internal_token_file.os,
+        "fstat",
+        lambda fd: os.stat_result((stat.S_IFCHR | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0)),
+    )
+
+    assert internal_token_file.read_private_token(token_file) is None
+
+
+def test_reader_rejects_toctou_identity_swap(monkeypatch, tmp_path):
+    token_file = write_token(tmp_path, SPAWN_TOKEN)
+    real = os.stat(token_file)
+    swapped = os.stat_result(
+        (stat.S_IFREG | 0o600, real.st_ino + 1, real.st_dev + 1,
+         real.st_nlink, os.getuid(), os.getgid(), len(SPAWN_TOKEN),
+         real.st_atime, real.st_mtime, real.st_ctime),
+    )
+    monkeypatch.setattr(internal_token_file.os, "fstat", lambda fd: swapped)
+
+    assert internal_token_file.read_private_token(token_file) is None
+
+
+def test_reader_returns_none_on_read_oserror(monkeypatch, tmp_path):
+    token_file = write_token(tmp_path, SPAWN_TOKEN)
+
+    def _boom(fd, n):
+        raise OSError("io error")
+
+    monkeypatch.setattr(internal_token_file.os, "read", _boom)
+    assert internal_token_file.read_private_token(token_file) is None
+
+
+def test_reader_rejects_oversize_chunk_growth(monkeypatch, tmp_path):
+    token_file = write_token(tmp_path, SPAWN_TOKEN)
+    monkeypatch.setattr(
+        internal_token_file.os,
+        "read",
+        lambda fd, n: b"x" * (internal_token_file._MAX_TOKEN_BYTES + 1),
+    )
+
+    assert internal_token_file.read_private_token(token_file) is None

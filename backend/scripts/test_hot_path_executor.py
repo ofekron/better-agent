@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-hot-path-executor-")
 
@@ -97,6 +99,65 @@ async def _run() -> bool:
         perf.record = original_record
         busy.shutdown()
         idle.shutdown()
+
+
+def test_name_and_run_return_value() -> None:
+    from hot_path_executor import HotPathExecutor
+
+    pool = HotPathExecutor("unit-name", 2)
+    try:
+        assert pool.name == "unit-name"
+        assert asyncio.run(pool.run("unit.add", lambda a, b: a + b, 3, 4)) == 7
+    finally:
+        pool.shutdown()
+
+
+def test_run_carries_context_records_metrics_and_propagates_errors() -> None:
+    import perf
+    from hot_path_executor import HotPathExecutor
+
+    recorded: list[tuple[str, float]] = []
+    original_record = perf.record
+    perf.record = lambda name, value: recorded.append((name, value))
+    tag: contextvars.ContextVar[str] = contextvars.ContextVar("unit-tag")
+    pool = HotPathExecutor("unit-ctx", 2)
+    try:
+        async def scenario() -> None:
+            tag.set("req-7")
+            seen = await pool.run("unit.see", tag.get)
+            assert seen == "req-7"
+
+            recorded.clear()
+
+            def _boom() -> None:
+                raise ValueError("boom")
+
+            with pytest.raises(ValueError, match="boom"):
+                await pool.run("unit.boom", _boom)
+            names = [name for name, _ in recorded]
+            assert "unit.boom.queue_wait" in names, f"missing queue_wait metric: {names}"
+            assert "unit.boom" in names, f"a failing call must still record duration: {names}"
+
+        asyncio.run(scenario())
+    finally:
+        perf.record = original_record
+        pool.shutdown()
+
+
+def test_shutdown_all_drains_every_pool() -> None:
+    import hot_path_executor
+    from hot_path_executor import HotPathExecutor
+
+    fakes = [HotPathExecutor("drain-a", 1), HotPathExecutor("drain-b", 1)]
+    original = hot_path_executor._ALL
+    hot_path_executor._ALL = tuple(fakes)
+    try:
+        hot_path_executor.shutdown_all()
+        for pool in fakes:
+            with pytest.raises(RuntimeError):
+                pool._executor.submit(int)
+    finally:
+        hot_path_executor._ALL = original
 
 
 if __name__ == "__main__":

@@ -197,11 +197,43 @@ def test_sdk_builders_match_core() -> None:
     print("  SDK builders ok")
 
 
+def test_section_projection_edge_cases() -> None:
+    # _section_items short-circuits to {} when no sections are declared or
+    # the manifest carries no extension id.
+    assert extension_app_settings._section_items({"manifest": {"id": "x"}}) == {}
+    assert extension_app_settings._section_items({"manifest": {}}) == {}
+
+    # sections() defends against malformed stored section entries (non-dict)
+    # and skips declared sections that no setting is bound to.
+    original_records = extension_store._active_records
+    original_settings = extension_store.get_extension_settings
+    extension_store._active_records = lambda: [
+        {
+            "manifest": {
+                "id": "edge",
+                "name": "Edge",
+                "entrypoints": {
+                    "settings_sections": ["not-a-dict", {"id": "lonely", "label": "Lonely"}],
+                },
+            },
+        },
+    ]
+    extension_store.get_extension_settings = lambda _ext_id: {"values": {}, "schema": []}
+    try:
+        assert extension_app_settings.sections() == []
+    finally:
+        extension_store._active_records = original_records
+        extension_store.get_extension_settings = original_settings
+
+    print("  section projection edge cases ok")
+
+
 def main() -> int:
     tests = [
         ("manifest validation", test_manifest_validation),
         ("projection and scope", test_projection_and_scope),
         ("sdk builders match core", test_sdk_builders_match_core),
+        ("section projection edge cases", test_section_projection_edge_cases),
     ]
     failed = 0
     try:
