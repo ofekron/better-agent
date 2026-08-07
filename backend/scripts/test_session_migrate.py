@@ -30,10 +30,26 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-import paths  # noqa: E402  (safe to import before engage; does not resolve home)
+import _test_home  # noqa: E402
 
+# Register a per-module home so the shared conftest autouse fixture
+# (_ensure_ba_home_dirs) re-engages THIS home per test instead of falling back
+# to the shared _SESSION_ROOT. Without registration, sibling tests populate the
+# shared sessions/ dir and this module's _wipe_sessions rmtree collides with it.
 _TMP = tempfile.mkdtemp(prefix="ba_test_migrate_")
-paths.engage_test_home(_TMP)
+_test_home.engage(_TMP)
+import paths  # noqa: E402  (bc_home() returns the engaged home)
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _engage_migrate_home():
+    # Re-engage this module's isolated home before every test. Heavy sibling
+    # imports (e.g. orchestrator) can leave bc_home() repointed at the shared
+    # root, which would make _wipe_sessions rmtree the shared sessions/ dir and
+    # collide with siblings. Pinning the home per test keeps this hermetic.
+    _test_home.engage(_TMP)
+    yield
 
 import session_migrate  # noqa: E402
 
@@ -57,9 +73,17 @@ def _read(sid: str, name: str) -> str:
 
 
 def _wipe_sessions() -> None:
+    # Remove only this test's own session dirs. A blanket rmtree of the whole
+    # sessions/ tree races with background persistence threads (loaded via
+    # sibling imports like orchestrator) that concurrently flush into
+    # bc_home()/sessions, hitting "Directory not empty" mid-rmtree. The test
+    # owns only SRC/DST (fixed UUIDs no background thread writes), so targeted
+    # removal is both sufficient for a clean slate and race-free.
     sd = _sessions_dir()
-    if sd.exists():
-        shutil.rmtree(sd)
+    for sid in (SRC, DST):
+        d = sd / sid
+        if d.exists():
+            shutil.rmtree(d)
 
 
 def _setup_source() -> None:

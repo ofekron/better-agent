@@ -150,6 +150,12 @@ def _private(root: Path, name: str, body: bytes | str) -> Path:
     return token_file
 
 
+def test_reader_returns_none_when_token_file_missing(tmp_path):
+    # A missing token file makes os.lstat raise OSError (FileNotFoundError);
+    # the open/lstat guard fails closed to None before any read is attempted.
+    assert internal_token_file.read_private_token(tmp_path / "absent") is None
+
+
 def test_reader_rejects_non_regular_lstat(tmp_path):
     # A symlink is rejected by the lstat shape check before it is ever opened.
     target = write_token(tmp_path, SPAWN_TOKEN)
