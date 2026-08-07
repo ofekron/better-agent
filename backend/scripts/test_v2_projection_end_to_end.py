@@ -267,6 +267,114 @@ def test_real_dispatch_through_turn_manager_run_turn_journals_prompt() -> None:
     assert turn.prompt.payload.text == prompt_text
 
 
+def test_prompt_journal_write_races_provider_burst_and_still_wins_seq_order() -> None:
+    """Write-lane ordering (session 881c2082, decisive-trace.json):
+    `_publish_typed_prompt_journal` (`event_journal.publish_event`) and
+    provider-stream content — BOTH `_publish_provider_stream_event`'s SAME
+    `publish_event` lane AND `OwnedClaudeJsonlTailer`'s backup
+    `ingest_orphan` lane (`publish_event_sync(timeout=0)`, dispatched off
+    a worker thread exactly like the real `asyncio.to_thread(session_
+    manager.run_if_owner, ...)` call site) — must never let a provider
+    row of a turn get a lower journal seq than that turn's own prompt
+    row; chat_adapter's `_segment_turns`/`_flush_event_written` turn-
+    boundary segmentation depends on it (a self-healing catch-up now
+    covers an inversion when it happens — see
+    test_chat_adapter.py::test_live_path_recovers_content_journaled_
+    before_its_own_anchor — but this test verifies the write lane itself
+    doesn't INVITE one).
+
+    Fires the prompt dispatch and an 8-row provider burst (4 via each
+    lane) via `asyncio.gather` — genuinely concurrent, no sequencing
+    imposed by the test — through the REAL `event_journal_writer`/
+    `_KeyedSerialExecutor`, across many trials, to give a submission-order
+    race a real chance to surface if the two lanes are NOT actually
+    unified at the executor level."""
+    import loop_affinity
+    from event_journal import (
+        bind_event_journal_loop,
+        event_journal_reader,
+        event_journal_writer,
+        publish_event,
+        publish_event_sync,
+    )
+
+    async def _one_trial(trial: int) -> None:
+        root_id = f"root-lane-{trial}-{uuid.uuid4().hex}"
+        assistant_msg_id = f"asst-{uuid.uuid4().hex}"
+        user_msg_id = str(uuid.uuid4())
+
+        async def dispatch_prompt() -> int:
+            # EXACT shape/call `TurnManager._publish_typed_prompt_journal`
+            # uses.
+            written = await publish_event(
+                session_id=root_id, context_id=root_id, event_type="agent_message",
+                data={
+                    "type": "user", "uuid": user_msg_id,
+                    "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                    "origin": "user",
+                },
+                source="turn_manager.prompt_journal", message_id=assistant_msg_id,
+            )
+            return written.seq
+
+        def sync_provider_row(i: int) -> None:
+            # EXACT shape `orchs/base.py::OrchestrationStrategy.
+            # ingest_orphan`/`_publish_provider_event` uses: fire-and-
+            # forget (timeout=0), called from a plain worker thread —
+            # matches the real `asyncio.to_thread(session_manager.
+            # run_if_owner, token, lambda: strategy.ingest_orphan(...))`
+            # call site in jsonl_tailer.py's `OwnedClaudeJsonlTailer.
+            # _dispatch`.
+            publish_event_sync(
+                session_id=root_id, context_id=root_id, event_type="agent_message",
+                data={"type": "assistant", "message": {"content": [{"type": "text", "text": f"orphan{i}"}]}},
+                source="apply_event", message_id=assistant_msg_id, cwd_override="", timeout=0,
+            )
+
+        async def async_provider_row(i: int) -> int:
+            # EXACT shape `TurnManager._publish_provider_stream_event`
+            # uses.
+            written = await publish_event(
+                session_id=root_id, context_id=root_id, event_type="agent_message",
+                data={"type": "assistant", "message": {"content": [{"type": "text", "text": f"stream{i}"}]}},
+                source="provider_stream", message_id=assistant_msg_id,
+            )
+            return written.seq
+
+        prompt_seq, *_ = await asyncio.gather(
+            dispatch_prompt(),
+            *(asyncio.to_thread(sync_provider_row, i) for i in range(4)),
+            *(async_provider_row(i) for i in range(4)),
+        )
+        # Fire-and-forget rows aren't necessarily durable the instant
+        # gather() returns (their ack happens on a done-callback) — the
+        # writer's own barrier is the event-driven settle point (not a
+        # sleep): it's queued onto the SAME per-root FIFO executor, so it
+        # only resolves once every write submitted before it (including
+        # every fire-and-forget submit() call above, which happens
+        # synchronously the instant `publish_event_sync` is called) has
+        # actually landed.
+        await event_journal_writer.barrier(root_id)
+
+        rows, _total, _has_more = event_journal_reader.read_events(root_id, after_seq=0, limit=100)
+        other_seqs = [r.get("seq") for r in rows if r.get("seq") != prompt_seq]
+        assert len(other_seqs) == 8, rows
+        assert prompt_seq < min(other_seqs), (
+            f"trial {trial}: prompt seq {prompt_seq} did not precede every "
+            f"provider row's seq {sorted(other_seqs)} — write-lane inversion reproduced"
+        )
+
+    async def _drive() -> None:
+        loop = asyncio.get_running_loop()
+        bind_event_journal_loop(loop)
+        loop_affinity.bind_main_loop(loop)
+        event_journal_writer.register(bus)
+        for trial in range(25):
+            await _one_trial(trial)
+
+    asyncio.run(_drive())
+
+
 def test_real_turn_write_path_renders_after_prompt_journaling_fix() -> None:
     """Asserts the CORRECT behavior of a completed turn (a live NodeUpsert
     broadcast during the turn, and a non-empty `turns` tuple on replay)
@@ -524,6 +632,7 @@ def test_live_only_and_live_plus_echo_and_cold_reload_agree_byte_identical() -> 
 
 _TESTS = [
     test_real_dispatch_through_turn_manager_run_turn_journals_prompt,
+    test_prompt_journal_write_races_provider_burst_and_still_wins_seq_order,
     test_real_turn_write_path_renders_after_prompt_journaling_fix,
     test_journaling_the_user_prompt_row_fixes_the_projection,
     test_echo_row_live_does_not_open_a_second_turn,

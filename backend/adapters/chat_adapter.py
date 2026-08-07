@@ -224,6 +224,14 @@ class _SurfaceState:
     # is already pending; the pending flush's `read_events(after_seq=...)`
     # picks up that write too once it runs.
     flush_scheduled: bool = False
+    # Lowest seq ever seen with no owning turn yet (a journal-ordering
+    # inversion: provider-stream rows racing the dispatch-time canonical
+    # prompt row into the journal — see `ChatSurfaceAdapter._process_row`).
+    # None when there is no unresolved backlog. `_catch_up_pre_anchor_rows`
+    # re-reads from here once the next anchor resolves `current_turn_id`,
+    # so those rows are recovered instead of staying forever behind
+    # `last_seq`.
+    pre_anchor_watermark: int | None = None
 
 
 _TurnSegment = tuple[str, list[dict], list[list[Node]]]
@@ -231,8 +239,22 @@ _TurnSegment = tuple[str, list[dict], list[list[Node]]]
 
 def _segment_turns(rows: list[dict]) -> list[_TurnSegment]:
     """Group ordered rows into (turn_id, rows, produced_by_row) segments. A
-    row is a turn boundary iff it normalizes to a TYPED_PROMPT node; rows
-    before the first boundary are dropped (no anchoring turn).
+    row is a turn boundary iff it normalizes to a TYPED_PROMPT node.
+
+    Rows seen before ANY turn has ever been anchored are BUFFERED, not
+    dropped — a journal-ordering inversion (provider-stream rows racing
+    the dispatch-time canonical prompt row into the journal; see
+    `ChatSurfaceAdapter._flush_event_written`'s matching live-path
+    recovery) means a turn's own content can carry a LOWER seq than its
+    own anchor. The first anchor to arrive claims the whole buffered
+    backlog — logically correct (nothing else could own that content: no
+    turn was open yet) and the ONLY information available to attribute
+    it, since chat-panel.md turns have no dedicated journal `turn_id`
+    field (see this module's docstring). The anchor row is kept as
+    `current_rows[0]` (buffered rows appended AFTER it) so `boundary_seq`/
+    `prompt_row` — both `rows[0]`-derived — stay correct regardless of the
+    backlog's actual (lower) seqs, and downstream tool_use/tool_result
+    pairing still sees the backlog in its own original relative order.
 
     Each row is normalized EXACTLY ONCE here (with placeholder surface_id/
     turn_id="_", since node_id derivation never depends on either — only
@@ -262,6 +284,8 @@ def _segment_turns(rows: list[dict]) -> list[_TurnSegment]:
     current_produced: list[list[Node]] | None = None
     current_turn_id: str | None = None
     current_prompt_row: dict | None = None
+    pending_pre_anchor_rows: list[dict] = []
+    pending_pre_anchor_produced: list[list[Node]] = []
     for row in rows:
         produced = normalize_journal_row(row, surface_id="_", turn_id="_", cv=CONTRACT_VERSION)
         prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
@@ -277,11 +301,16 @@ def _segment_turns(rows: list[dict]) -> list[_TurnSegment]:
                 segments.append((current_turn_id, current_rows, current_produced))
             current_turn_id = prompt_node.node_id
             current_prompt_row = row
-            current_rows = [row]
-            current_produced = [produced]
+            current_rows = [row, *pending_pre_anchor_rows]
+            current_produced = [produced, *pending_pre_anchor_produced]
+            pending_pre_anchor_rows = []
+            pending_pre_anchor_produced = []
         elif current_rows is not None:
             current_rows.append(row)
             current_produced.append(produced)
+        else:
+            pending_pre_anchor_rows.append(row)
+            pending_pre_anchor_produced.append(produced)
     if current_rows is not None:
         segments.append((current_turn_id, current_rows, current_produced))
     return segments
@@ -749,14 +778,30 @@ class ChatSurfaceAdapter(ChatSurface):
         return self._build_turns(surface_id, segments, prompt_meta)
 
     @staticmethod
-    def _read_all_rows(root_id: str) -> list[dict]:
+    def _read_all_rows(
+        root_id: str, *, after_seq: int = 0, before_seq: int | None = None,
+    ) -> list[dict]:
+        """Paginated read of every row with `after_seq < seq` (and, when
+        given, `seq < before_seq`). The bounded form is
+        `_catch_up_pre_anchor_rows`'s supplementary read for a backlog
+        that's behind `state.last_seq` (already consumed by an earlier
+        `after_seq=state.last_seq` flush read) but still below the
+        anchor row that just resolved its turn — the unbounded form
+        (`before_seq=None`, the original signature every other caller
+        still uses) is unaffected."""
         rows: list[dict] = []
-        after = 0
+        after = after_seq
         while True:
             batch, _total, has_more = event_journal_reader.read_events(root_id, after_seq=after, limit=1000)
             if not batch:
                 break
-            rows.extend(batch)
+            if before_seq is None:
+                rows.extend(batch)
+            else:
+                in_range = [r for r in batch if _row_seq(r) < before_seq]
+                rows.extend(in_range)
+                if len(in_range) < len(batch):
+                    break  # hit a row >= before_seq: the rest belongs to a later read
             next_after = _row_seq(batch[-1])
             if next_after <= after:
                 break
@@ -882,52 +927,22 @@ class ChatSurfaceAdapter(ChatSurface):
             max_seq = state.last_seq
             for row in rows:
                 max_seq = max(max_seq, _row_seq(row))
-                if row.get("type") == "prompt_meta":
-                    for n in self._late_prompt_meta_frames(state, row, turn_id, surface_id):
-                        node_touches += 1
-                        coalesced[n.node_id] = n
-                    continue
-                produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
-                prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
+                prior_turn_id = turn_id
+                turn_id, touches = self._process_row(state, row, turn_id, surface_id, coalesced, drop_counts)
+                node_touches += touches
                 if (
-                    prompt_node is not None
-                    and state.current_prompt_row is not None
-                    and is_canonical_prompt_row(state.current_prompt_row)
-                    and not is_canonical_prompt_row(row)
+                    turn_id is not None and prior_turn_id is None
+                    and state.pre_anchor_watermark is not None
                 ):
-                    drop_counts["echo_dedup"] += 1
-                    continue  # echo of the currently-open canonical turn's own prompt
-                if prompt_node is not None:
-                    turn_id = prompt_node.node_id
-                    state.pending_tool_uses = {}
-                    state.current_prompt_row = row
-                if turn_id is None:
-                    drop_counts["turn_id_none"] += 1
-                    continue  # pre-anchor row (no prompt seen yet): dropped
-                if not produced:
-                    if is_dropped_control_row_type(row.get("type")):
-                        drop_counts["control_row_excluded"] += 1
-                    else:
-                        drop_counts["empty_after_normalize"] += 1
-                    continue
-                row_data = row.get("data")
-                row_data = row_data if isinstance(row_data, dict) else {}
-                row_msg_id = row.get("msg_id")
-                meta = state.prompt_meta.get(row_msg_id) if isinstance(row_msg_id, str) else None
-                for n in produced:
-                    n = replace(n, turn_id=turn_id)
-                    if n.kind == NodeKind.TYPED_PROMPT:
-                        n = enrich_typed_prompt_node(n, row_data=row_data, meta=meta)
-                    elif n.kind == NodeKind.FAILURE:
-                        # Attach directly to the turn (never Explanation-
-                        # wrapped) — matches `_on_user_message_failed`'s
-                        # live broadcast AND `_build_turn_view`'s replay
-                        # attachment below, so this row's node_id resolves
-                        # to the identical Node wherever it's observed.
-                        n = replace(n, parent_id=_turn_node_id(turn_id))
-                    merged = self._merge_live_node(state, n)
-                    node_touches += 1
-                    coalesced[merged.node_id] = merged
+                    # This row just resolved the turn a backlog of earlier-
+                    # seq, no-owner-yet rows was waiting on (a journal-
+                    # ordering inversion — see `_process_row`'s `turn_id is
+                    # None` branch) — recover them NOW, in this same flush
+                    # cycle, before they fall permanently behind `last_seq`.
+                    node_touches += self._catch_up_pre_anchor_rows(
+                        state, surface_id, turn_id, before_seq=_row_seq(row),
+                        coalesced=coalesced, drop_counts=drop_counts,
+                    )
             state.current_turn_id = turn_id
             state.last_seq = max_seq
             render_rev = state.projection.bump_render()
@@ -980,6 +995,110 @@ class ChatSurfaceAdapter(ChatSurface):
                 state.projection.broadcast(
                     NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=n)
                 )
+
+    def _process_row(
+        self, state: _SurfaceState, row: dict, turn_id: str | None, surface_id: SurfaceId,
+        coalesced: dict[NodeId, Node], drop_counts: dict[str, int],
+    ) -> tuple[str | None, int]:
+        """Process one journal row against the CURRENTLY KNOWN `turn_id`,
+        merging any produced node(s) into `coalesced` and returning the
+        (possibly newly-opened) `turn_id` plus how many node_ids this row
+        touched. MUST run under `state.lock` — mutates `state.pending_
+        tool_uses`/`state.current_prompt_row`/`state.pre_anchor_
+        watermark`.
+
+        Shared by `_flush_event_written`'s main row loop and
+        `_catch_up_pre_anchor_rows`: a pre-anchor row (dropped as
+        `turn_id_none` at first sighting) is reprocessed through this
+        EXACT same logic once its turn's anchor is known, so echo-dedup/
+        control-row/empty-normalize classification is identical either
+        way — there is only one place that decides what a row means."""
+        if row.get("type") == "prompt_meta":
+            touches = 0
+            for n in self._late_prompt_meta_frames(state, row, turn_id, surface_id):
+                touches += 1
+                coalesced[n.node_id] = n
+            return turn_id, touches
+        produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
+        prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
+        if (
+            prompt_node is not None
+            and state.current_prompt_row is not None
+            and is_canonical_prompt_row(state.current_prompt_row)
+            and not is_canonical_prompt_row(row)
+        ):
+            drop_counts["echo_dedup"] += 1
+            return turn_id, 0  # echo of the currently-open canonical turn's own prompt
+        if prompt_node is not None:
+            turn_id = prompt_node.node_id
+            state.pending_tool_uses = {}
+            state.current_prompt_row = row
+        if turn_id is None:
+            drop_counts["turn_id_none"] += 1
+            row_seq = _row_seq(row)
+            if state.pre_anchor_watermark is None or row_seq < state.pre_anchor_watermark:
+                state.pre_anchor_watermark = row_seq
+            return turn_id, 0  # pre-anchor row: buffered via the watermark, recovered once anchored
+        if not produced:
+            if is_dropped_control_row_type(row.get("type")):
+                drop_counts["control_row_excluded"] += 1
+            else:
+                drop_counts["empty_after_normalize"] += 1
+            return turn_id, 0
+        row_data = row.get("data")
+        row_data = row_data if isinstance(row_data, dict) else {}
+        row_msg_id = row.get("msg_id")
+        meta = state.prompt_meta.get(row_msg_id) if isinstance(row_msg_id, str) else None
+        touches = 0
+        for n in produced:
+            n = replace(n, turn_id=turn_id)
+            if n.kind == NodeKind.TYPED_PROMPT:
+                n = enrich_typed_prompt_node(n, row_data=row_data, meta=meta)
+            elif n.kind == NodeKind.FAILURE:
+                # Attach directly to the turn (never Explanation-wrapped)
+                # — matches `_on_user_message_failed`'s live broadcast AND
+                # `_build_turn_view`'s replay attachment, so this row's
+                # node_id resolves to the identical Node wherever it's
+                # observed.
+                n = replace(n, parent_id=_turn_node_id(turn_id))
+            merged = self._merge_live_node(state, n)
+            touches += 1
+            coalesced[merged.node_id] = merged
+        return turn_id, touches
+
+    def _catch_up_pre_anchor_rows(
+        self, state: _SurfaceState, surface_id: SurfaceId, turn_id: str, before_seq: int,
+        coalesced: dict[NodeId, Node], drop_counts: dict[str, int],
+    ) -> int:
+        """Re-reads every row from `state.pre_anchor_watermark` (inclusive)
+        up to (not including) `before_seq` — the anchor row that just
+        resolved `turn_id` — and reprocesses each through `_process_row`
+        now that a turn exists to own them.
+
+        Recovers a live-path journal-ordering inversion: provider-stream
+        rows racing the dispatch-time canonical prompt row into the
+        journal, so the turn's own content carries a LOWER seq than its
+        anchor. Those rows were durably journaled and already read (and
+        dropped as `turn_id_none`) by an earlier flush — or earlier in
+        THIS same flush — so they are behind `state.last_seq` and would
+        never be read again by the normal `after_seq=state.last_seq`
+        pagination. Recovering them HERE, in the SAME flush cycle that
+        resolves their anchor, is purely event-driven off the anchor's
+        own arrival — no sleep/timer/poll. MUST run under `state.lock`
+        (via `_process_row`). Returns how many node_ids the recovered
+        rows touched (folded into the caller's own `node_touches`)."""
+        watermark = state.pre_anchor_watermark
+        if watermark is None:
+            return 0
+        rows = self._read_all_rows(surface_id, after_seq=watermark - 1, before_seq=before_seq)
+        touches = 0
+        for row in rows:
+            _, row_touches = self._process_row(state, row, turn_id, surface_id, coalesced, drop_counts)
+            touches += row_touches
+        state.pre_anchor_watermark = None
+        if rows:
+            perf.record_count("chat_adapter.flush.pre_anchor_caught_up", len(rows))
+        return touches
 
     @staticmethod
     def _to_outbound(

@@ -978,6 +978,79 @@ def test_flush_drop_reasons_recorded_for_known_cases() -> None:
     assert total("chat_adapter.on_event_written.entries") >= 2, counts
 
 
+def test_live_path_recovers_content_journaled_before_its_own_anchor() -> None:
+    """The field-evidenced journal-ordering inversion (session 881c2082,
+    decisive-trace.json): provider-stream rows race the dispatch-time
+    canonical prompt row into the journal, so a turn's own content
+    carries a LOWER seq than its anchor. Before the fix,
+    `_flush_event_written` permanently dropped those rows as
+    `turn_id_none` — behind `state.last_seq` forever the instant the
+    flush that saw them advanced past their seq, with the anchor's own
+    later flush having no way back to them.
+
+    This locks the self-healing catch-up: the SAME content recovers,
+    correctly turn-attributed, the instant the anchor arrives — in the
+    anchor's OWN flush cycle (event-driven off its arrival, no sleep/
+    poll/timer) — even though the content was dropped in an EARLIER,
+    now-closed flush. Also asserts cold-reload convergence: reopening the
+    same (still journal-inverted on disk) root shows the identical
+    turn-attributed content, proving `_segment_turns`'s matching
+    pre-anchor buffering (not just the live path) resolved it too."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    text_uuid = str(uuid.uuid4())
+    user_msg_id = str(uuid.uuid4())
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)  # live BEFORE the turn exists, matching the field WS-subscribe timing
+    assert isinstance(opened, Ok), opened
+    identity = opened.snapshot
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        # Field ordering: assistant content journaled FIRST, flushed on
+        # its OWN (no turn open yet — dropped as turn_id_none, watermark
+        # set).
+        content_seq = _ingest_assistant_text_uuid(root_id, "PONG", text_uuid)
+        _publish_written(root_id, content_seq)
+        assert not [f for f in received if isinstance(f, NodeUpsert)], received
+
+        # The canonical prompt row arrives LATER, in a SEPARATE flush —
+        # exactly the "anchor rows only flushed at turn end" field shape.
+        prompt_seq = event_ingester.ingest(
+            root_id, root_id, "agent_message",
+            {
+                "type": "user", "uuid": user_msg_id,
+                "message": {"role": "user", "content": [{"type": "text", "text": "Reply PONG"}]},
+                "origin": "user",
+            },
+            source="test", msg_id=f"asst-{uuid.uuid4().hex}",
+        )
+        _publish_written(root_id, prompt_seq)
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert)]
+        prompt_upsert = next((f for f in upserts if f.node.node_id == user_msg_id), None)
+        assert prompt_upsert is not None, upserts
+        content_upsert = next((f for f in upserts if f.node.kind == NodeKind.ASSISTANT_TEXT), None)
+        assert content_upsert is not None, upserts  # recovered, not lost forever
+        assert content_upsert.node.payload.text == "PONG"
+        assert content_upsert.node.turn_id == prompt_upsert.node.node_id  # correct turn attribution
+    finally:
+        sub.close()
+
+    # Cold-reload convergence: the SAME (still journal-inverted) root,
+    # read fresh, shows the identical content under the same turn.
+    reopened = adapter.open_session(root_id)
+    assert isinstance(reopened, Ok), reopened
+    assert reopened.value.turns != (), "expected a non-empty turns tuple on cold reload"
+    turn = reopened.value.turns[-1]
+    assert turn.prompt is not None
+    assert turn.prompt.node_id == user_msg_id
+    live_kinds = {n.kind for n in reopened.value.live_turn_nodes}
+    assert NodeKind.ASSISTANT_TEXT in live_kinds, reopened.value.live_turn_nodes
+
+
 _TESTS = [
     test_open_session_single_turn,
     test_subscribe_emits_node_upsert_with_bumped_render_rev,
@@ -1006,6 +1079,7 @@ _TESTS = [
     test_open_session_perf_smoke_bounded_wall_time,
     test_open_session_perf_smoke_monster_sidechain_turn_bounded_response,
     test_flush_drop_reasons_recorded_for_known_cases,
+    test_live_path_recovers_content_journaled_before_its_own_anchor,
 ]
 
 

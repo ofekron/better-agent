@@ -21,9 +21,19 @@ backend gets its own freshly created isolated home (`mkdtempSync`), this is a
 real, correctly scoped reservation for that home, not a stub.
 
 Invoked as: python3 reserve_and_launch_backend.py --host H --port P
+  [--debug-logger NAME ...]
 Must run with the same env `harness/process-utils.ts::buildBackendEnv`
 already builds for the real backend (BETTER_AGENT_HOME et al.), so
 `bc_home()` resolves to the isolated per-test home.
+
+`--debug-logger NAME` (repeatable) sets that named logger to DEBUG before
+`main:app` is imported, for investigations that need per-flush debug lines
+(e.g. `backend.adapters`, `jsonl_tailer`) without touching backend source —
+`main.py` sets the ROOT logger to INFO, but a named logger with its own
+explicit level takes precedence over inherited root level regardless of
+import order, and uvicorn's default log_config doesn't disable existing
+loggers. No behavior change when this flag is omitted (falls back to the
+plain `-m uvicorn` invocation, byte-identical to before this option existed).
 """
 
 from __future__ import annotations
@@ -54,6 +64,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True)
+    parser.add_argument("--debug-logger", action="append", default=[])
     args = parser.parse_args()
 
     lease = PrimaryLauncherLease.acquire(bc_home(), checkout=_REPO_ROOT)
@@ -79,18 +90,31 @@ def main() -> int:
                 backend_reservation=reservation,
             ),
         }
+        if args.debug_logger:
+            setup = "; ".join(
+                f"logging.getLogger({name!r}).setLevel(logging.DEBUG)"
+                for name in args.debug_logger
+            )
+            argv = [
+                sys.executable,
+                "-c",
+                f"import logging; {setup}; import uvicorn; "
+                f"uvicorn.run('main:app', host={args.host!r}, port={int(args.port)!r})",
+            ]
+        else:
+            argv = [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "main:app",
+                "--host",
+                args.host,
+                "--port",
+                args.port,
+            ]
         with reservation.child_spawn_kwargs() as inheritance_kwargs:
             process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "main:app",
-                    "--host",
-                    args.host,
-                    "--port",
-                    args.port,
-                ],
+                argv,
                 cwd=_BACKEND_DIR,
                 env=env,
                 **inheritance_kwargs,

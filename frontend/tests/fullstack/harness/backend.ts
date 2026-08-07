@@ -133,6 +133,16 @@ export async function startFullStackBackend(
   // execs uvicorn as its child and forwards signals/exit code — so `proc`
   // below still behaves like "the backend process" for every purpose this
   // harness cares about (stdout/stderr, exit code, process-group kill).
+  // Opt-in, off by default for every other fullstack spec: comma-separated
+  // logger names (e.g. "backend.adapters,jsonl_tailer") to force to DEBUG
+  // in the spawned backend, for investigations that need per-flush debug
+  // lines without touching backend source.
+  const debugLoggerArgs = (process.env.FULLSTACK_DEBUG_LOGGERS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .flatMap((name) => ["--debug-logger", name]);
+
   const proc: ChildProcess = spawn(
     python,
     [
@@ -141,6 +151,7 @@ export async function startFullStackBackend(
       "127.0.0.1",
       "--port",
       String(port),
+      ...debugLoggerArgs,
     ],
     // detached so the launcher-lease bridge (and the uvicorn child it spawns
     // in the same group) leads its own process group: real turns spawn real
