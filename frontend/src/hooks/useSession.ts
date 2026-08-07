@@ -21,6 +21,7 @@ import {
 
 import { API } from "../api";
 import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
+import { readNativeSurfaceFlag } from "../surface/flag";
 import { useSurfaceSession } from "../adapter/useSurfaceSession";
 import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
@@ -493,6 +494,25 @@ function preserveSurfaceOwnedMessages(
   return updateNodeById(tree, sessionId, (node) =>
     node.messages === preservedMessages ? node : { ...node, messages: preservedMessages }
   );
+}
+
+/** Whether `useSurfaceSession` (the ChatMessage-shaped down-map thin
+ * client) should own a session's content plane. False whenever the native
+ * Contract-Node renderer (`ba.surface_native`, surface/ChatSurfaceView.tsx)
+ * is enabled: Chat.tsx's branch selection never shows the down-map's
+ * TurnGroup render tree while native is on (see Chat.tsx's ternary — it
+ * picks ChatSurfaceView/NativeForkSplitView instead), so running the
+ * down-map hook at the same time would only be a second, redundant
+ * `/ws/v2/surface` subscriber for the same content the native SurfaceStore
+ * already owns — not a fallback, just wasted REST/WS traffic and an extra
+ * (unnecessary) hydrate/resync cycle racing the native store's own. Pure
+ * so the gate is unit-testable without mounting the full hook. */
+export function resolveSurfaceSessionId(
+  wsTargetSessionId: string | null,
+  surfaceV2Enabled: boolean,
+  nativeSurfaceEnabled: boolean,
+): string | null {
+  return surfaceV2Enabled && !nativeSurfaceEnabled ? wsTargetSessionId : null;
 }
 
 /** Resolve which existing assistant message a live WS turn-event should
@@ -3206,7 +3226,17 @@ export function useSession(authStatus?: string) {
   // legacy messages_replay/agent_message WS ingestion; every other event
   // type (run_state, worker_*, session_metadata_updated, ...) and all
   // commands stay on the legacy `/ws/chat` path untouched.
-  const surfaceSessionId = readSurfaceV2Flag() ? wsTargetSessionId : null;
+  //
+  // Also OFF whenever `ba.surface_native` is on (see resolveSurfaceSessionId)
+  // — the native Contract-Node renderer owns the content plane directly
+  // through its own SurfaceStore/`/ws/v2/surface` subscription in that case,
+  // and running this hook alongside it would just be a second, redundant
+  // subscriber for the same surface_id.
+  const surfaceSessionId = resolveSurfaceSessionId(
+    wsTargetSessionId,
+    readSurfaceV2Flag(),
+    readNativeSurfaceFlag(),
+  );
 
   const applySurfaceUpsert = useCallback(
     (sid: string, message: ChatMessage) => applyMessagesReplay(sid, [message]),
