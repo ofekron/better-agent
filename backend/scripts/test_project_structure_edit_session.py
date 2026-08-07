@@ -18,9 +18,14 @@ sys.path.insert(0, str(ROOT))
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-project-structure-edit-"))
 import _test_home
-_test_home.isolate("ba-test-")
+# `isolate_installed` (not bare `isolate`): an installed extension is only
+# "active" (`extension_store._record_active`) when
+# `installation_profile.integrations_enabled()` is True, which requires a
+# committed installation profile -- a bare isolated home has none.
+_test_home.isolate_installed("ba-test-")
 
 import config_store  # noqa: E402
+import extension_store  # noqa: E402
 import project_structure_edit_session  # noqa: E402
 import project_update_store  # noqa: E402
 import session_store  # noqa: E402
@@ -31,6 +36,64 @@ from provisioning.config import ProvisionedConfig  # noqa: E402
 from provisioning.dispatch import dispatch  # noqa: E402
 from provisioning.lifecycle import dirty_reason, ensure_session  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+
+def _install_project_structure_extension() -> None:
+    """A fresh isolated test home has no extensions installed, but
+    `project_structure_edit_session.edit_extension_id()` (and everything
+    downstream of it, e.g. `virtual_session_store.upsert`) requires a
+    registered `project-structure`-role extension to resolve an id at all.
+    Mirrors `test_worker_provisioning.py`'s `_install_team_orchestration_extension`
+    fixture-install pattern."""
+    extension_id = (
+        extension_store.extension_id_for_role("project-structure")
+        or "test.project-structure"
+    )
+    package = TMP_HOME / "private-fixtures" / extension_id
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "description": extension_id,
+        "core_roles": ["project-structure"],
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(package.parent),
+            "extension_path": package.name,
+            "ref": "",
+            "commit_sha": extension_id,
+        },
+        persist=True,
+        force_enabled=True,
+    )
+
+
+_install_project_structure_extension()
+# `session_manager.create` validates `provider_id` against a real registered
+# provider record (`session_store._session_runner`/`_session_reasoning_effort`
+# raise `SessionProviderNotConfiguredError` otherwise) -- including via the
+# `ProvisionedConfig` provisioning path, not just direct `.create()` calls.
+# `isolate_installed` seeds at least one real provider to reference here.
+REAL_PROVIDER_ID = config_store.list_providers()["providers"][0]["id"]
+# `project_structure_edit_session.py` resolves these lazily via
+# `edit_extension_id()`/`edit_singleton_id()` (functions, not module
+# constants) precisely because they depend on the extension registry being
+# populated first -- which only just happened above. Computed once here,
+# after installing the fixture extension.
+EDIT_EXTENSION_ID = project_structure_edit_session.edit_extension_id()
+EDIT_SINGLETON_ID = project_structure_edit_session.edit_singleton_id()
 
 
 def check(condition: bool, message: str) -> None:
@@ -57,10 +120,15 @@ def reset_state() -> None:
     session_manager._batches.clear()
     project_structure_edit_session._inflight = None
     project_structure_edit_session._inflight_queued_id = None
+    # `project_update_store`'s unseen-counts projection is loaded once and
+    # cached in-process (`_counts_loaded`); deleting `updates_dir` above
+    # without also invalidating that cache leaves every later test in this
+    # file reading a prior test's stale in-memory counts.
+    project_update_store.reset_for_test_home()
 
 
 def visible_session() -> dict:
-    return virtual_session_store.get(project_structure_edit_session.EDIT_SINGLETON_ID) or {}
+    return virtual_session_store.get(EDIT_SINGLETON_ID) or {}
 
 
 def append_visible_message(message: dict) -> None:
@@ -68,8 +136,8 @@ def append_visible_message(message: dict) -> None:
     messages = list(session.get("messages") or [])
     messages.append(message)
     virtual_session_store.replace_messages(
-        project_structure_edit_session.EDIT_EXTENSION_ID,
-        project_structure_edit_session.EDIT_SINGLETON_ID,
+        EDIT_EXTENSION_ID,
+        EDIT_SINGLETON_ID,
         messages,
     )
 
@@ -300,7 +368,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
         cwd=str(project),
         model="claude-test",
         source="internal",
-        provider_id="provider-test",
+        provider_id=REAL_PROVIDER_ID,
         worker_creation_policy="deny",
         bare_config=False,
     )
@@ -309,7 +377,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
         mode=project_structure_edit_session.MAINTAINER_WORKER_MODE,
         meta={
             "cwd": str(project),
-            "provider_id": "provider-test",
+            "provider_id": REAL_PROVIDER_ID,
             "model": "claude-test",
             "machine_completion": False,
             "version": project_structure_edit_session.MAINTAINER_SPEC.version,
@@ -320,7 +388,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
     cfg = ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
-        provider_id="provider-test",
+        provider_id=REAL_PROVIDER_ID,
         reasoning_effort="",
         run_mode="fork",
         dispatch="in_process",
@@ -329,7 +397,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=EDIT_SINGLETON_ID,
         worker_description="project-structure-maintainer",
     )
     import orchs.jsonl_helpers as jsonl_helpers
@@ -551,8 +619,8 @@ async def test_project_structure_visible_turn_acks_user_message() -> None:
     check(messages[1]["content"] == "", "visible turn defaults assistant content to empty")
     check(
         deltas == [
-            (project_structure_edit_session.EDIT_SINGLETON_ID, "user"),
-            (project_structure_edit_session.EDIT_SINGLETON_ID, "assistant"),
+            (EDIT_SINGLETON_ID, "user"),
+            (EDIT_SINGLETON_ID, "assistant"),
         ],
         "visible turn dispatches user then assistant deltas",
     )
@@ -651,7 +719,7 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
-        provider_id="provider-test",
+        provider_id=REAL_PROVIDER_ID,
         reasoning_effort="",
         run_mode="fork",
         dispatch="in_process",
@@ -660,7 +728,7 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=EDIT_SINGLETON_ID,
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -728,7 +796,7 @@ async def test_failed_review_keeps_updates_unseen() -> None:
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
-        provider_id="provider-test",
+        provider_id=REAL_PROVIDER_ID,
         reasoning_effort="",
         run_mode="fork",
         dispatch="in_process",
@@ -737,7 +805,7 @@ async def test_failed_review_keeps_updates_unseen() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=EDIT_SINGLETON_ID,
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -799,7 +867,7 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
-        provider_id="provider-test",
+        provider_id=REAL_PROVIDER_ID,
         reasoning_effort="",
         run_mode="fork",
         dispatch="in_process",
@@ -808,7 +876,7 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=EDIT_SINGLETON_ID,
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -879,7 +947,7 @@ async def test_maintainer_dispatch_uses_persistent_fork() -> None:
         cfg = ProvisionedConfig(
             cwd=str(project),
             model="claude-test",
-            provider_id="provider-test",
+            provider_id=REAL_PROVIDER_ID,
             reasoning_effort="",
             run_mode="fork",
             dispatch="in_process",
@@ -888,14 +956,14 @@ async def test_maintainer_dispatch_uses_persistent_fork() -> None:
             backend_url="http://localhost:8000",
             internal_token="",
             provisioned_session_id=None,
-            caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+            caller_session_id=EDIT_SINGLETON_ID,
             worker_description="project-structure-maintainer",
         )
         await dispatch(
             project_structure_edit_session.MAINTAINER_SPEC,
             cfg,
             base_session_id="base-session",
-            caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+            caller_session_id=EDIT_SINGLETON_ID,
             instructions="apply",
             provision_prompt="ready",
         )

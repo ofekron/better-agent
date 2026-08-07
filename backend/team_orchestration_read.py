@@ -10,6 +10,12 @@ from typing import Any
 from i18n import t
 import perf
 import session_store
+# Referenced only as a regression-guard canary (see
+# scripts/test_team_orchestration_read_projection.py): the summary-first
+# projection below must never fall back to a full session read via
+# `session_manager.get_fields_many`. Tests monkeypatch this attribute to
+# raise if that ever happens.
+from session_manager import manager as session_manager
 
 
 _METRIC = "extension.team_orchestration.workers"

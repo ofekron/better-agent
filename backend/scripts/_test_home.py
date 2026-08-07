@@ -266,6 +266,9 @@ def _reset_loaded_home_owners() -> None:
     config_store = _loaded("config_store")
     if config_store is not None:
         config_store.reset_for_test_home()
+    project_update_store = _loaded("project_update_store")
+    if project_update_store is not None:
+        project_update_store.reset_for_test_home()
 
 
 # Crash-safety: never leave the prod home immutable if the process dies

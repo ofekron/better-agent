@@ -28,6 +28,7 @@ import subprocess
 import sys
 import urllib.error
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -71,6 +72,29 @@ from run_recovery import (  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+@contextmanager
+def _stub_backend_dependency_environment():
+    """`runner_codex._run` resolves builtin-extension MCP server configs,
+    which (for a plain-python entrypoint with no extension-scoped
+    environment) falls back to `dependency_plan.active_runtime_python` to
+    find the interpreter for the backend's OWN dependency environment
+    (`.active-venv`, written by `run.sh`/the installer). A dev machine's
+    live checkout carries that pointer as untracked state; a fresh CI
+    checkout never has it — the resolution isn't this test's concern
+    (it fakes every other Codex collaborator the same way), so stub the
+    one public seam `dependency_plan.active_runtime_python` exposes for
+    exactly this: point it at the interpreter already running the test,
+    which is trivially a real, active environment."""
+    import dependency_plan
+
+    original = dependency_plan.active_runtime_python
+    dependency_plan.active_runtime_python = lambda _backend_dir: Path(sys.executable)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        dependency_plan.active_runtime_python = original  # type: ignore[assignment]
 
 
 def _make_assistant_text_event(text: str) -> dict:
@@ -911,17 +935,18 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> None:
 
             runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "continue",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "session_id": codex_sid,
-                "app_session_id": "app-ambient",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "continue",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "session_id": codex_sid,
+                    "app_session_id": "app-ambient",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
@@ -1082,17 +1107,18 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> None:
             runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "continue",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "session_id": codex_sid,
-                "app_session_id": "app-fallback",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "continue",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "session_id": codex_sid,
+                    "app_session_id": "app-fallback",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
@@ -1170,16 +1196,17 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> No
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: None  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "start",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "app_session_id": "app-pre-thread",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "start",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "app_session_id": "app-pre-thread",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             runner_codex._process_control = original_control  # type: ignore[assignment]
