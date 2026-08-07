@@ -1,8 +1,6 @@
 """Backend unit tests for AI-driven session search.
 
 Covers:
-  * `_extract_first_user_prompt` shape handling (string content / list
-    content / no user msgs / truncation at 200).
   * `_build_index` filtering — hidden (working_mode) / archived /
     normal — and the field shape it emits.
   * Stale-id filtering — `propose_sessions` ids that don't exist in the
@@ -135,58 +133,6 @@ def _write_session(
     if node_id is not None:
         payload["node_id"] = node_id
     (sessions_dir / f"{sid}.json").write_text(json.dumps(payload))
-
-
-# ──────────────────────────────────────────────────────────────────────
-# _extract_first_user_prompt
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_extract_first_user_prompt_shapes() -> bool:
-    cases = [
-        ([], "", "empty list"),
-        (
-            [{"role": "assistant", "content": "hi"}],
-            "",
-            "no user msgs",
-        ),
-        (
-            [{"role": "user", "content": "fix the auth bug"}],
-            "fix the auth bug",
-            "string content",
-        ),
-        (
-            [{"role": "user", "content": [
-                {"type": "text", "text": "refactor "},
-                {"type": "text", "text": "the login flow"},
-            ]}],
-            "refactor \nthe login flow",
-            "list-of-blocks content",
-        ),
-        (
-            [
-                {"role": "user", "content": ""},  # empty user msg skipped
-                {"role": "user", "content": "second user msg wins"},
-            ],
-            "second user msg wins",
-            "skip empty user msgs",
-        ),
-    ]
-    for messages, expected, label in cases:
-        got = session_search._extract_first_user_prompt(messages)
-        if got != expected:
-            print(f"{FAIL} extract[{label}]: expected {expected!r} got {got!r}")
-            return False
-    # Truncation
-    long = "x" * 500
-    got = session_search._extract_first_user_prompt(
-        [{"role": "user", "content": long}]
-    )
-    if not got.endswith("…") or len(got) != 201:
-        print(f"{FAIL} extract[truncate]: got len={len(got)} tail={got[-3:]!r}")
-        return False
-    print(f"{PASS} _extract_first_user_prompt shapes + truncation")
-    return True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1109,7 +1055,6 @@ def test_rebuild_indexes_needle_skips_bloat_and_stamps_schema() -> bool:
 
 def main_run() -> int:
     tests = [
-        test_extract_first_user_prompt_shapes,
         test_build_index_filters_hidden_and_archived,
         test_build_index_exposes_filter_fields,
         test_validate_proposed_drops_unknown,

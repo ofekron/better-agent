@@ -46,8 +46,12 @@ _SENTINEL = object()
 
 
 def _seed_extension(extension_id: str, *, spawn_runs: bool, ai_rank_kinds: dict | None = None) -> None:
+    # `internal_loopback` gates ALL /api/internal/* traffic in main.py's
+    # auth_gate middleware, before any route-specific check runs -- every
+    # extension here needs it so each test isolates the ONE permission
+    # dimension it actually means to exercise (spawn_runs / ai_rank_kinds).
+    permissions: dict = {"internal_loopback": True}
     data = extension_store._load()
-    permissions: dict = {}
     if spawn_runs:
         permissions["spawn_runs"] = True
     if ai_rank_kinds is not None:
@@ -94,6 +98,7 @@ def _mock_provisioning_run(monkeypatch):
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)

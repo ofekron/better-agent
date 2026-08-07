@@ -170,6 +170,7 @@ def test_rank_fail_closed_drops_ids_outside_candidate_set(monkeypatch) -> None:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)
@@ -192,6 +193,7 @@ def test_rank_dedups_and_truncates_to_max_results(monkeypatch) -> None:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)
@@ -239,6 +241,7 @@ def test_rank_parse_failed_when_worker_reply_has_no_json(monkeypatch) -> None:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)
@@ -259,6 +262,7 @@ def test_rank_parse_failed_when_ids_field_is_not_a_list(monkeypatch) -> None:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)
@@ -279,6 +283,7 @@ def test_rank_include_worker_events(monkeypatch) -> None:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": [{"type": "agent_message", "data": {"text": "x"}}]},
+            timings_ms={},
         )
 
     monkeypatch.setattr(ai_rank.provisioning, "run", _fake_run)
