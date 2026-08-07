@@ -266,8 +266,11 @@ async def websocket_chat(websocket: WebSocket):
                 # sockets, WiFi<->cellular handoff, carrier NAT idle-drop)
                 # would otherwise sit open on both ends forever. The
                 # client's heartbeat watchdog (useWebSocket.ts) uses the
-                # absence of this reply to detect and repair that.
-                await _send_prepared({"type": "pong"})
+                # absence of this reply to detect and repair that. The
+                # ingress validator requires every frame to carry a data
+                # record — a data-less pong fails invalid_envelope and the
+                # watchdog self-closes at timeout.
+                await _send_prepared({"type": "pong", "data": {}})
                 continue
             if msg_type == "snapshot_ack":
                 await snapshot_transport.acknowledge(msg)

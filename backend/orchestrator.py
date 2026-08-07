@@ -450,6 +450,17 @@ class Coordinator:
         # (app_session_id, _cb_token(ws_callback)) → _Subscriber, so unregister
         # can find and remove the right subscriber from its tailer.
         self._subscriber_index: dict[tuple, "_Subscriber"] = {}
+        # root_ids whose wire-tailer stop `_maybe_stop_wire_tailer` deferred
+        # because a turn was still in flight when demand hit zero (see
+        # there). `_on_session_running_changed` re-invokes the stop once
+        # the run actually ends, so a root whose WS never reconnects still
+        # gets swept instead of leaking the tailer open forever.
+        self._deferred_wire_tailer_stops: set[str] = set()
+        bus.unsubscribe("coordinator_wire_tailer_running_changed")
+        bus.subscribe(
+            "session.running_changed", self._on_session_running_changed,
+            name="coordinator_wire_tailer_running_changed",
+        )
         # Native-CLI-jsonl tailing (the OwnedClaudeJsonlTailers) is owned
         # entirely by `native_files_manager.native_files`. The orchestrator
         # only publishes demand (`native_files.demand`) on WS subscribe /
@@ -4421,9 +4432,31 @@ class Coordinator:
             )
         return root_ids
 
+    async def _on_session_running_changed(self, event: BusEvent) -> None:
+        """A session's active-run state flipped. Only a transition to NOT
+        running can newly satisfy a wire-tailer stop that
+        `_maybe_stop_wire_tailer` deferred while the run was in flight;
+        re-invoke the stop for that root now instead of leaking the
+        tailer open until some unrelated subscriber event happens to
+        touch it again."""
+        payload = event.payload or {}
+        if payload.get("value") is not False:
+            return
+        root_id = event.root_id
+        if not root_id or root_id not in self._deferred_wire_tailer_stops:
+            return
+        self._maybe_stop_wire_tailer(root_id, app_session_id="")
+
     def _maybe_stop_wire_tailer(self, root_id: str, app_session_id: str) -> None:
         """If no remaining WS subscribers exist for any session in the
-        root, stop its tailer."""
+        root, stop its tailer -- unless a turn is actively running for
+        the root. An in-flight turn's tailer must survive transient WS
+        churn (a reconnect loop briefly dropping every subscriber);
+        stopping it mid-turn is what starves the journal that
+        /ws/v2/surface reads from for the remainder of the turn. The stop
+        is deferred, not skipped: `_on_session_running_changed` re-invokes
+        this the instant the run ends, so a root whose WS never comes
+        back still gets swept."""
         subs = self._wire_tailer_subs.get(root_id)
         if subs is None:
             return
@@ -4434,6 +4467,10 @@ class Coordinator:
             subs.discard(sid)
         if subs:
             return
+        if self.turn_manager.has_active_runs(root_id):
+            self._deferred_wire_tailer_stops.add(root_id)
+            return
+        self._deferred_wire_tailer_stops.discard(root_id)
         self._wire_tailer_subs.pop(root_id, None)
         tailer = self._wire_tailers.pop(root_id, None)
         task = self._wire_tailer_tasks.pop(root_id, None)

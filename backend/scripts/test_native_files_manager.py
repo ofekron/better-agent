@@ -2596,6 +2596,72 @@ async def test_native_fact_rejects_mismatched_root_provenance() -> None:
     print("PASS test_native_fact_rejects_mismatched_root_provenance")
 
 
+async def test_reconcile_defers_close_for_in_flight_turn() -> None:
+    """Lifecycle-churn fix: a tailer whose demand hits zero must NOT be
+    closed while `session_manager.is_running(owning)` is True -- closing
+    mid-turn starves the events.jsonl journal that /ws/v2/surface reads
+    from for the rest of the turn. The stop is deferred, not skipped: a
+    `session.running_changed(value=False)` fact re-triggers reconcile so
+    the tailer still closes once the run actually ends, even if demand
+    never comes back (e.g. the tab stayed closed)."""
+    _patch()
+    nfm = nfm_mod.NativeFilesManager()
+    nfm.bind()
+    sess = session_manager.create(
+        name="inflight", cwd="/tmp/inflight", orchestration_mode="manager",
+    )
+    owning = sess["id"]
+    root_id = session_manager._root_id_for(owning)
+    agent_sid = "INFLIGHT-SID"
+    nfm._demand[owning] = {"token"}
+    nfm._targets.setdefault(owning, {})[agent_sid] = nfm_mod._Target(
+        owning=owning,
+        root_id=root_id,
+        agent_sid=agent_sid,
+        jsonl_path=nfm_mod.Path(f"/tmp/{agent_sid}.jsonl"),
+        start_offset=0,
+    )
+    await nfm._reconcile()
+    key = (root_id, agent_sid)
+    assert key in nfm._tailers, "setup: tailer should have opened"
+    tailer = nfm._tailers[key]
+
+    original_compute = session_manager._compute_is_running
+    session_manager._compute_is_running = lambda sid: sid == owning
+    try:
+        # Demand drops to zero (a WS reconnect-churn disconnect) while the
+        # turn is still "running" -- the tailer must survive, not restart
+        # at offset 0 on the next demand.
+        nfm._demand.pop(owning, None)
+        await nfm._reconcile()
+        assert key in nfm._tailers, (
+            "in-flight turn's tailer was stopped by transient demand loss"
+        )
+        assert tailer.alive, "tailer instance was released while the turn was active"
+
+        # The run ends -- session.running_changed(value=False) must sweep
+        # the deferred close even though demand never came back.
+        session_manager._compute_is_running = lambda sid: False
+        await bus.publish(BusEvent(
+            type="session.running_changed",
+            root_id=root_id,
+            sid=owning,
+            payload={"value": False},
+            persist=False,
+        ))
+        assert key not in nfm._tailers, (
+            "tailer was not swept after run completion despite demand=0"
+        )
+        assert tailer.released == 1
+    finally:
+        session_manager._compute_is_running = original_compute
+        for t in list(nfm._tailers.values()):
+            if t.alive:
+                t.release()
+        nfm._tailers.clear()
+    print("PASS test_reconcile_defers_close_for_in_flight_turn")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
@@ -2664,3 +2730,4 @@ if __name__ == "__main__":
     asyncio.run(test_reconcile_serializes_close_transitions())
     asyncio.run(test_reconcile_serializes_open_transitions())
     asyncio.run(test_native_fact_rejects_mismatched_root_provenance())
+    asyncio.run(test_reconcile_defers_close_for_in_flight_turn())
