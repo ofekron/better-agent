@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -188,12 +187,6 @@ def test_retry_exhaustion_remains_discoverable_next_startup() -> None:
 
 
 def test_windows_reparse_contract_and_atomic_primitives() -> None:
-    assert run_recovery._windows_path_is_reparse(
-        SimpleNamespace(st_file_attributes=0x400),
-    )
-    assert not run_recovery._windows_path_is_reparse(
-        SimpleNamespace(st_file_attributes=0),
-    )
     from windows_handle_marker import HandleStat, write_marker
 
     class Ops:

@@ -3,7 +3,7 @@ message_event_summaries (+ _public_*/_summary_matches_filter), latest_render_eve
 worker_event_rows, ownership_resolutions[_range], and the machinery behind them
 (_summaries_state, _seq_byte_range, _fold_resolutions, _update_summary_line,
 _summary_render_event, _summary_preview_events, _append_summaries,
-_rebuild_seq_offsets_locked, _scan_summaries).
+_scan_summaries).
 
 Run with:
     cd backend && .venv/bin/python scripts/test_event_ingester_summaries_ownership.py
@@ -429,7 +429,7 @@ def test_incremental_summaries_append() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Cold scan + _rebuild_seq_offsets_locked (no sidecar, fresh ingester)
+# Cold scan + _scan_summaries offset rebuild (no sidecar, fresh ingester)
 # --------------------------------------------------------------------------- #
 def test_cold_scan_summaries_and_rebuild_offsets() -> None:
     root, sid = "summ-cold", "sid-A"
@@ -447,9 +447,11 @@ def test_cold_scan_summaries_and_rebuild_offsets() -> None:
     assert ing._seq_offsets.get(root) is not None \
         and len(ing._seq_offsets[root]) == 2, "cold scan populated _seq_offsets"
 
-    # _rebuild_seq_offsets_locked re-derives offsets from disk and resets _seq.
+    # _scan_summaries re-derives offsets from disk and resets _seq (the
+    # standalone rebuild-only helper this once exercised was folded into
+    # _scan_summaries, which now (re)populates _seq_offsets/_seq itself).
     ing._seq_offsets[root] = [999]                                  # corrupt
-    ing._rebuild_seq_offsets_locked(pathlib.Path(_events_path(root)), root)
+    ing._scan_summaries(pathlib.Path(_events_path(root)), root, 25)
     assert len(ing._seq_offsets[root]) == 2, \
         f"rebuild_offsets restored 2 offsets -- {len(ing._seq_offsets[root])}"
     assert ing._seq[root] == 2, "rebuild_offsets reset _seq count"
