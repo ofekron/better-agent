@@ -4,6 +4,9 @@ import asyncio
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
@@ -176,9 +179,144 @@ def test_auth_fact_only_follows_fingerprint_guarded_commit() -> None:
     asyncio.run(scenario())
 
 
+def test_double_bind_to_a_second_live_loop_raises() -> None:
+    """bind_loop must fail closed when a different still-open loop is bound."""
+    loop_a = asyncio.new_event_loop()
+    provider_runtime_facts._loop = loop_a
+
+    async def bind_on_second_loop() -> None:
+        with pytest.raises(RuntimeError):
+            provider_runtime_facts.bind_loop()
+
+    try:
+        asyncio.run(bind_on_second_loop())
+    finally:
+        provider_runtime_facts._loop = None
+        loop_a.close()
+
+
+def test_schedule_flush_resets_loop_when_call_soon_fails() -> None:
+    """A closed-after-check loop makes call_soon_threadsafe raise; the module
+    must clear the dead loop rather than leave a flush scheduled forever."""
+    class DeadLoop:
+        def is_closed(self) -> bool:
+            return False
+
+        def call_soon_threadsafe(self, *_a: object, **_k: object) -> None:
+            raise RuntimeError("loop closed mid-schedule")
+
+    provider_runtime_facts._loop = DeadLoop()
+    provider_runtime_facts._flush_scheduled = False
+    provider_runtime_facts._pending_causes.add("config")
+    try:
+        provider_runtime_facts._schedule_flush_locked()
+        assert provider_runtime_facts._loop is None
+        assert provider_runtime_facts._flush_scheduled is False
+    finally:
+        provider_runtime_facts._pending_causes.clear()
+
+
+def test_launch_flush_is_noop_on_a_foreign_loop() -> None:
+    """If _loop no longer matches the loop _launch_flush runs on, it must not
+    create a flush task on the wrong loop."""
+
+    async def scenario() -> None:
+        provider_runtime_facts._loop = object()  # not this running loop
+        provider_runtime_facts._flush_scheduled = True
+        provider_runtime_facts._launch_flush()
+        assert provider_runtime_facts._flush_scheduled is False
+        assert provider_runtime_facts._flush_task is None
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        provider_runtime_facts._loop = None
+
+
+def test_launch_flush_does_not_clobber_running_flush() -> None:
+    """A second _launch_flush while a flush is already in flight must not
+    replace or double-schedule it."""
+
+    async def scenario() -> None:
+        provider_runtime_facts._loop = asyncio.get_running_loop()
+        release = asyncio.Event()
+
+        async def hanging_flush() -> None:
+            await release.wait()
+
+        running = asyncio.ensure_future(hanging_flush())
+        provider_runtime_facts._flush_task = running
+        provider_runtime_facts._flush_scheduled = True
+        provider_runtime_facts._launch_flush()
+        # The in-flight task is untouched.
+        assert provider_runtime_facts._flush_task is running
+        assert not running.done()
+        release.set()
+        await running
+        provider_runtime_facts._flush_task = None
+        provider_runtime_facts._loop = None
+
+    asyncio.run(scenario())
+
+
+def test_flush_swallows_publish_failure_and_reschedules() -> None:
+    """A bus.publish failure must be swallowed (logged) and must not strand
+    the fact-delivery pipeline in a broken state."""
+
+    async def scenario() -> None:
+        async def boom(_event: BusEvent) -> None:
+            raise RuntimeError("publish failed")
+
+        original_bus = provider_runtime_facts.bus
+        provider_runtime_facts.bus = SimpleNamespace(publish=boom)
+        provider_runtime_facts._loop = asyncio.get_running_loop()
+        provider_runtime_facts._pending_causes.add("config")
+        try:
+            await provider_runtime_facts._flush()
+            assert provider_runtime_facts._flush_task is None
+            assert provider_runtime_facts._flush_scheduled is False
+            assert provider_runtime_facts._pending_causes == set()
+        finally:
+            provider_runtime_facts.bus = original_bus
+            await provider_runtime_facts.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_cancels_inflight_flush() -> None:
+    """shutdown must cancel a flush task that has not completed, rather than
+    await it forever."""
+
+    async def scenario() -> None:
+        async def hanging_publish(_event: BusEvent) -> None:
+            await asyncio.Event().wait()
+
+        original_bus = provider_runtime_facts.bus
+        provider_runtime_facts.bus = SimpleNamespace(publish=hanging_publish)
+        provider_runtime_facts._loop = asyncio.get_running_loop()
+        provider_runtime_facts._pending_causes.add("config")
+        try:
+            provider_runtime_facts._launch_flush()
+            await asyncio.sleep(0)
+            assert provider_runtime_facts._flush_task is not None
+            assert not provider_runtime_facts._flush_task.done()
+            await provider_runtime_facts.shutdown()
+            assert provider_runtime_facts._loop is None
+        finally:
+            provider_runtime_facts.bus = original_bus
+
+    asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     test_fact_fanout_coalesces_without_runtime_details()
     test_closed_loop_rebind_flushes_queued_fact()
     test_only_durable_config_commit_notifies_runtime_fact()
     test_auth_fact_only_follows_fingerprint_guarded_commit()
+    test_double_bind_to_a_second_live_loop_raises()
+    test_schedule_flush_resets_loop_when_call_soon_fails()
+    test_launch_flush_is_noop_on_a_foreign_loop()
+    test_launch_flush_does_not_clobber_running_flush()
+    test_flush_swallows_publish_failure_and_reschedules()
+    test_shutdown_cancels_inflight_flush()
     print("OK: provider runtime facts")
