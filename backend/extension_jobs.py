@@ -284,6 +284,25 @@ def mark_delivered(owner: str, operation: str, job_id: str) -> dict[str, Any] | 
         return record
 
 
+def mark_background_work_dismissed(owner: str, operation: str, job_id: str) -> bool:
+    """Stamp a durable job record as user-dismissed so
+    `seed_background_work_after_recovery` never resurrects it as an
+    `unknown` background-work card on a later restart. Independent of
+    `status` — a record can be dismissed whether it's stuck `running` or
+    already terminal. False if the record (or its identity) doesn't
+    exist; callers treat that as nothing to stamp, not an error."""
+    try:
+        with _RECORD_LOCK:
+            record = read_record_strict(owner, operation, job_id)
+            if record is None:
+                return False
+            record["background_work_dismissed"] = True
+            _write_record(owner, operation, job_id, record)
+            return True
+    except (RuntimeError, ValueError):
+        return False
+
+
 def persist_complete(owner: str, operation: str, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
     with _RECORD_LOCK:
         record = read_record_strict(owner, operation, job_id) or {

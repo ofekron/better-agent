@@ -132,14 +132,25 @@ export function useBackgroundWork(): BackgroundWorkState {
     return () => window.clearInterval(interval);
   }, []);
 
-  // Local-only removal. The row is gone from this client's view; the backend
-  // remains the owner and will re-announce if the work changes again.
+  // Optimistic local removal for immediate feedback, backed by a real
+  // backend dismiss call queued through the durable write backlog. The
+  // backend owns durability: for a row seeded from a stuck extension_jobs
+  // record it stamps that record so recovery never re-seeds it on a later
+  // restart. Queuing (rather than a bare fetch) means a dismiss clicked
+  // while offline still lands once the backend is reachable again, instead
+  // of only surviving as long as this tab's local state does.
   const dismiss = useCallback((id: string) => {
     setItems((prev) => {
       if (!(id in prev)) return prev;
       const next = { ...prev };
       delete next[id];
       return next;
+    });
+    queueWrite({
+      method: "POST",
+      url: "/api/background-work/dismiss",
+      body: { id },
+      key: `background-work-dismiss:${id}`,
     });
   }, []);
 
