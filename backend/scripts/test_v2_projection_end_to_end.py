@@ -167,6 +167,106 @@ def _ingest_provider_echo_row(root_id: str, *, echo_uuid: str, text: str) -> int
     )
 
 
+class _CaptureWS:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    async def __call__(self, frame: dict) -> None:
+        self.frames.append(frame)
+
+
+def test_real_dispatch_through_turn_manager_run_turn_journals_prompt() -> None:
+    """Defect-2 regression: proves `_publish_typed_prompt_journal`'s call
+    site actually FIRES on the REAL dispatch path the running app uses —
+    `Coordinator.turn_manager.run_turn` (the exact method `orchs/base.py`
+    `OrchestrationStrategy.run_primary` calls, itself invoked by
+    `orchs/native/handle_turn` <- `Coordinator.handle_prompt` <- the WS
+    `send_prompt` -> admission -> queue-processor chain the field
+    evidence's `surface_commands: Received message` log line came from)
+    — every OTHER test above in this module only proves the READ side
+    (chat_adapter/normalize) given a row someone ELSE constructed by hand
+    (`_ingest_typed_prompt_journal_row`), which is exactly why the fix
+    passed in CI but the live-validation snapshot still came back
+    `turns: []`: nothing ever exercised the WRITE call site itself.
+
+    Only the actual provider-subprocess I/O boundary (`_drive_cli_run`)
+    is stubbed; every other step of `run_turn` — session persistence via
+    `_init_turn_messages`, `_publish_prompt_meta`, and the
+    `_publish_typed_prompt_journal` call site under test — runs for
+    real, unmodified, through the production `TurnManager` instance a
+    real `Coordinator()` builds."""
+    import orchestrator
+    from lifecycle_command_model import UserTurnIdentity
+    from session_manager import manager as session_manager
+
+    coordinator = orchestrator.Coordinator()
+    tm = coordinator.turn_manager
+
+    sess = session_manager.create(
+        name="v2-real-dispatch", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+
+    async def _fake_drive_cli_run(**_kwargs: object) -> dict:
+        # The only stub in this test: real provider I/O never runs, but
+        # everything BEFORE this call in `run_turn` — including the
+        # prompt-journal call site under test — already ran for real.
+        return {"session_id": None, "events": [], "success": True, "error": None}
+
+    tm._drive_cli_run = _fake_drive_cli_run  # type: ignore[method-assign]
+
+    ws = _CaptureWS()
+    prompt_text = "hello from the real dispatch path"
+    lifecycle_msg_id = f"lifecycle-{uuid.uuid4().hex}"
+
+    async def _drive() -> None:
+        # Mirrors EXACTLY what `Coordinator`'s prompt-processor queue
+        # loop does before calling `handle_prompt` (orchestrator.py
+        # ~3847-3913): stash the in-flight lifecycle id, then open the
+        # logical user-turn lifecycle command — `run_turn`'s
+        # `lifecycle_commands.start_execution` call (right before the
+        # prompt-journal call site) requires this identity to exist.
+        coordinator.user_prompt_manager.set_in_flight_lifecycle_msg_id(
+            sid, lifecycle_msg_id,
+        )
+        await coordinator.lifecycle_commands.begin_turn(
+            request_id=f"user-turn:{lifecycle_msg_id}:0:begin",
+            session_id=sid,
+            identity=UserTurnIdentity(
+                user_turn_id=lifecycle_msg_id, lifecycle_message_id=lifecycle_msg_id,
+            ),
+            execution_policy="single",
+        )
+        await tm.run_turn(
+            session=session_manager.get_ref(sid),
+            prompt=prompt_text,
+            cli_prompt=prompt_text,
+            app_session_id=sid,
+            model="sonnet",
+            cwd="/tmp",
+            ws_callback=ws,
+            images=None,
+            trace_step_name="native",
+            session_id_field="agent_session_id",
+            mode="native",
+        )
+
+    asyncio.run(_drive())
+
+    root_id = session_manager._root_id_for(sid) or sid
+    adapter = ChatSurfaceAdapter()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok), opened
+    assert opened.value.turns != (), (
+        "expected the REAL run_turn dispatch to journal a TYPED_PROMPT "
+        "row — got an empty turns tuple, reproducing the field defect"
+    )
+    turn = opened.value.turns[0]
+    assert turn.prompt is not None
+    assert turn.prompt.payload.text == prompt_text
+
+
 def test_real_turn_write_path_renders_after_prompt_journaling_fix() -> None:
     """Asserts the CORRECT behavior of a completed turn (a live NodeUpsert
     broadcast during the turn, and a non-empty `turns` tuple on replay)
@@ -423,6 +523,7 @@ def test_live_only_and_live_plus_echo_and_cold_reload_agree_byte_identical() -> 
 
 
 _TESTS = [
+    test_real_dispatch_through_turn_manager_run_turn_journals_prompt,
     test_real_turn_write_path_renders_after_prompt_journaling_fix,
     test_journaling_the_user_prompt_row_fixes_the_projection,
     test_echo_row_live_does_not_open_a_second_turn,

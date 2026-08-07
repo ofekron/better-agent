@@ -62,6 +62,58 @@ _DROPPED_ENVELOPE_TYPES = frozenset(
     {"response_item", "event_msg", "session_meta", "turn_context", "compacted", "thread.started"}
 )
 
+# Backend-authored control/telemetry TOP-LEVEL row types (turn dispatch
+# bookkeeping, provider-stream lifecycle framing, WS delta plumbing) —
+# never chat content, must not enter the render tree. Mirrors the same
+# write-time/read-time judgment already codified for the legacy v1
+# consumer: `event_journal.EventJournalReader._to_frontend_events`'s
+# docstring names `turn_start`/`turn_started`/`turn_complete`/
+# `trace_step` as "framing/control rows ... stamped with a msg_id in
+# events.jsonl for ownership/recovery but MUST NOT surface as renderable
+# events"; `user_msg_lifecycle.py`'s `emit_requested/queued/sent/
+# received/done` are pure ownership/audit facts with no chat content of
+# their own (unlike its sibling `emit_failed`, which DOES carry a
+# user-facing reason and maps to a FAILURE node via `_handle_user_
+# message_failed` below); `command_received`/`run_state`/`session_
+# discovered`/`complete`/`messages_delta` are dispatch/reconcile
+# bookkeeping from `main.py`/`cli.py`/`turn_manager.py`/`node_rpc_
+# handlers.py`/`session_ws_broadcaster.py`.
+#
+# Test-locked in test_adapter_normalize.py against `event_shape.
+# RENDER_EVENT_TYPES` (the write-path render allowlist): every entry
+# here is asserted ABSENT from that set, so this list can never silently
+# swallow a real render type. Distinct from a genuinely unrecognized row
+# type — anything NOT in this set still falls through to the catch-all
+# `NodeKind.UNKNOWN` below (the never-drop rule for provider payloads
+# this module hasn't classified yet — e.g. `subagent_unmatched`,
+# run_recovery.py's own diagnostic for an unmatched sidecar transcript,
+# stays UNKNOWN deliberately: it signals a real recovery anomaly, not
+# routine bookkeeping, so it must stay visible).
+_DROPPED_CONTROL_ROW_TYPES = frozenset({
+    "command_received",
+    "run_state",
+    "user_message_requested",
+    "user_message_queued",
+    "user_message_sent",
+    "user_message_received",
+    "user_message_done",
+    "session_discovered",
+    "complete",
+    "trace_step",
+    "turn_start",
+    "turn_started",
+    "turn_complete",
+    "turn_stopped",
+    "turn_detached",
+    "messages_delta",
+    # Journal's own ownership-resolution bookkeeping row
+    # (event_journal.py's `_record_resolved_event`/`_resolve_pending_
+    # events`, written back into events.jsonl to persist which message
+    # owns which earlier-ambiguous row) — an internal journal-consistency
+    # fact, never a chat event.
+    "event_ownership_resolved",
+})
+
 _WORKER_FACT_TYPES = frozenset({"worker_start", "worker_event", "worker_complete"})
 _TODO_TOOL_NAMES = frozenset({"TodoWrite", "TaskCreate", "TaskUpdate"})
 _LIFECYCLE_KIND_VALUES = {k.value for k in LifecycleNoticeKind}
@@ -213,11 +265,28 @@ _SEND_MODE_VALUES = {s.value for s in SendMode}
 
 
 def parse_prompt_origin(value: object) -> PromptOrigin:
-    return PromptOrigin(value) if value in _PROMPT_ORIGIN_VALUES else PromptOrigin.USER
+    """`data.origin` on a real CLI-authored row is not always a bare
+    string — task-notification/peer-relayed prompts stamp it as a dict
+    (e.g. `{"kind": "task-notification"}`, `{"kind": "peer", ...}`). The
+    `in <set>` membership check requires a hashable value, so a dict (or
+    any other non-str) must be screened out BEFORE the check, not left to
+    raise — any non-str value falls back to the same PromptOrigin.USER
+    default an unrecognized string already gets."""
+    return (
+        PromptOrigin(value)
+        if isinstance(value, str) and value in _PROMPT_ORIGIN_VALUES
+        else PromptOrigin.USER
+    )
 
 
 def parse_send_mode(value: object) -> SendMode:
-    return SendMode(value) if value in _SEND_MODE_VALUES else SendMode.QUEUE
+    """See `parse_prompt_origin` — same dict-shaped-value guard, same
+    non-str -> default fallback (SendMode.QUEUE)."""
+    return (
+        SendMode(value)
+        if isinstance(value, str) and value in _SEND_MODE_VALUES
+        else SendMode.QUEUE
+    )
 
 
 def _fill_image_attachment_refs(
@@ -427,6 +496,10 @@ def normalize_journal_row(
         # Backend-authored provenance fact (turn_manager.py) joined onto
         # the matching TYPED_PROMPT node by msg_id in chat_adapter.py —
         # never a node of its own (chat-panel.md "Metadata events").
+        return []
+    if row_type in _DROPPED_CONTROL_ROW_TYPES:
+        # Recognized-and-excluded backend control/telemetry row — distinct
+        # from an unrecognized row type, which stays UNKNOWN below.
         return []
     if row_type == "agent_message":
         return _handle_agent_message(row, data, node)

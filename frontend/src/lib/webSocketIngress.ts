@@ -372,6 +372,11 @@ const UNPROJECTED_WIRE_EVENT_TYPES = [
   "tool_result",
   "pr_link",
   "command_received",
+  // Chat Surface Contract v2 FAILURE node, frontend-synthesized by
+  // mapToRenderModel.ts from a backend Node — never a raw WS wire frame
+  // (no backend WS emit site produces `{"type": "failure", ...}`), same
+  // as "diagnostic" above.
+  "failure",
 ] as const satisfies readonly WSEventType[];
 
 type ValidatedCoreEventType = Exclude<

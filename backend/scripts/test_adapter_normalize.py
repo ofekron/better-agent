@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 
 from backend.adapters.normalize import (
+    _DROPPED_CONTROL_ROW_TYPES,
     derive_link,
     enrich_typed_prompt_node,
     failure_payload_for_reason,
@@ -191,6 +192,33 @@ def test_totally_unrecognized_row_type_maps_to_unknown():
     nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
     assert nodes[0].kind == NodeKind.UNKNOWN
     assert nodes[0].payload.payload == row
+
+
+def test_backend_control_telemetry_row_types_are_dropped_not_unknown():
+    """Defect: control/telemetry rows (turn dispatch bookkeeping, provider
+    stream framing, WS delta plumbing) were falling through to the
+    catch-all and rendering as bogus UNKNOWN nodes — 28 of them in one
+    live-validation turn, and a 26-65% unknown-node ratio on real
+    sessions (Gate-3 finding). None of these carry chat content; every
+    one must normalize to zero nodes, same as prompt_meta."""
+    for row_type in _DROPPED_CONTROL_ROW_TYPES:
+        row = {
+            "type": row_type, "seq": 1, "ts": "2026-01-01T00:00:00+00:00",
+            "data": {"some": "payload"},
+        }
+        assert normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN) == [], (
+            f"{row_type!r} row produced a node instead of being dropped"
+        )
+
+
+def test_dropped_control_row_types_never_overlap_render_event_types():
+    """Test-lock: the control-row exclusion set must stay disjoint from
+    `event_shape.RENDER_EVENT_TYPES` (the write-path render allowlist),
+    so it can never accidentally swallow a real render type. This is the
+    single source of truth this list mirrors."""
+    from event_shape import RENDER_EVENT_TYPES
+
+    assert _DROPPED_CONTROL_ROW_TYPES.isdisjoint(RENDER_EVENT_TYPES)
 
 
 def test_worker_facts_map_to_worker_interaction():
@@ -425,6 +453,51 @@ def test_user_prompt_origin_mapping_queued_and_offline():
     }
     nodes2 = normalize_journal_row(row_offline, surface_id=SURFACE, turn_id=TURN)
     assert nodes2[0].payload.origin == PromptOrigin.OFFLINE_SYNC
+
+
+def test_parse_prompt_origin_dict_shaped_value_does_not_crash():
+    """Real CLI rows carry `origin={"kind": "task-notification"}` /
+    `{"kind": "peer", ...}` — an unguarded `value in <set>` raises
+    TypeError: unhashable type: 'dict'. A non-str value must default to
+    PromptOrigin.USER, never raise."""
+    from backend.adapters.normalize import parse_prompt_origin
+
+    assert parse_prompt_origin({"kind": "task-notification"}) == PromptOrigin.USER
+    assert parse_prompt_origin({"kind": "peer", "peer_id": "x"}) == PromptOrigin.USER
+    assert parse_prompt_origin(None) == PromptOrigin.USER
+    assert parse_prompt_origin(["queued"]) == PromptOrigin.USER
+    assert parse_prompt_origin(42) == PromptOrigin.USER
+
+
+def test_parse_send_mode_dict_shaped_value_does_not_crash():
+    from backend.adapters.normalize import parse_send_mode
+
+    assert parse_send_mode({"kind": "task-notification"}) == SendMode.QUEUE
+    assert parse_send_mode({"kind": "peer", "peer_id": "x"}) == SendMode.QUEUE
+    assert parse_send_mode(None) == SendMode.QUEUE
+    assert parse_send_mode(["queue"]) == SendMode.QUEUE
+    assert parse_send_mode(42) == SendMode.QUEUE
+
+
+def test_user_row_with_dict_shaped_origin_and_send_mode_normalizes_with_defaults():
+    """End-to-end: normalize_journal_row must not crash on a real
+    monster-session row shape (dict-valued origin/send_mode), and must
+    fall back to prompt defaults instead."""
+    row = {
+        "type": "agent_message",
+        "seq": 1,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "type": "user", "uuid": "p3",
+            "origin": {"kind": "task-notification"},
+            "send_mode": {"kind": "peer", "peer_id": "abc"},
+            "message": {"content": "hello"},
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].kind == NodeKind.TYPED_PROMPT
+    assert nodes[0].payload.origin == PromptOrigin.USER
+    assert nodes[0].payload.send_mode == SendMode.QUEUE
 
 
 def test_resolve_parents_uses_parent_tool_use_id():

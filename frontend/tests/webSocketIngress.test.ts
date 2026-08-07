@@ -525,6 +525,20 @@ describe("parseWireEvent", () => {
     );
   });
 
+  it("treats the frontend-synthesized failure type as unprojected/opaque", () => {
+    // Chat Surface Contract v2 FAILURE node (mapToRenderModel.ts) —
+    // no backend WS emit site ever produces a raw `{"type":"failure"}`
+    // wire frame, so it must never require a payload validator (same
+    // category as "diagnostic"/"lifecycle_notice"/"tool_result"/
+    // "pr_link"). Regression guard for TS2741/TS1360: knownCoreEvent
+    // Validators missing the "failure" key after WSEventType grew it.
+    expect(knownCoreEventValidators).not.toHaveProperty("failure");
+    expect(parseWireEvent({ type: "failure", data: { anything: "goes" } })).toEqual({
+      ok: true,
+      event: { type: "failure", data: { anything: "goes" } },
+    });
+  });
+
   it.each(CORE_PAYLOAD_CASES)("accepts a valid $type core payload", ({ type, valid }) => {
     expect(parseWireEvent({ type, data: valid })).toEqual({
       ok: true,
