@@ -167,6 +167,77 @@ def test_change_kind_is_broadcast() -> None:
     )
 
 
+def test_state_of_absent_inputs() -> None:
+    check(session_readiness.state_of(None) is None, "no session record -> no pending state")
+    check(session_readiness.state_of({}) is None, "empty record -> no pending state")
+
+
+def test_falsy_sid_is_not_gated() -> None:
+    """An empty sid has nothing to gate, so every read short-circuits to the
+    not-pending outcome rather than hitting the store."""
+    check(session_readiness._state_for_sid("") is None, "empty sid short-circuits before reading the store")
+    check(
+        session_readiness.gate_state("") == session_readiness.RESOLVED_READY,
+        "empty sid reads as ready (nothing to gate)",
+    )
+    check(session_readiness.failure_reason("") is None, "empty sid has no failure reason")
+
+
+async def test_failure_reason_surfaces_sanitized_reason() -> None:
+    sid = _new_session(pending=True)
+    await session_readiness.mark_failed(sid, RuntimeError("provider CLI never returned a sid"))
+    reason = session_readiness.failure_reason(sid)
+    check(
+        reason is not None and "RuntimeError" in reason and "never returned a sid" in reason,
+        "a failed session surfaces its sanitized reason for the UI",
+    )
+    ready = _new_session(pending=True)
+    await session_readiness.mark_ready(ready)
+    check(
+        session_readiness.failure_reason(ready) is None,
+        "a resolved session carries no failure reason",
+    )
+    plain = _new_session(pending=False)
+    check(
+        session_readiness.failure_reason(plain) is None,
+        "an ordinary session carries no failure reason",
+    )
+
+
+async def test_mark_pending_re_arms_without_waking() -> None:
+    """Re-arming for a fresh attempt writes the pending fact back but must NOT
+    wake waiters — a fresh attempt is exactly what they are waiting for."""
+    sid = _new_session(pending=True)
+    task = await _assert_blocks_then(sid)
+    await session_readiness.mark_pending(sid)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    check(not task.done(), "mark_pending does not wake waiters (fresh attempt is what they wait for)")
+    check(
+        session_readiness.is_awaiting_fork_provisioning(sid),
+        "the durable record is re-armed to pending",
+    )
+    # Release the parked waiter so the task cannot linger past the test.
+    await session_readiness.mark_ready(sid)
+    outcome = await asyncio.wait_for(task, timeout=5)
+    check(outcome == session_readiness.RESOLVED_READY, "waiter resolves as ready after the eventual binding")
+
+
+def test_one_event_per_sid_then_forget() -> None:
+    """One resolution event per sid is reused across lookups until the session
+    goes away, at which point forget drops it and a later lookup rebuilds."""
+    sid = "evt-reuse-sid"
+    try:
+        first = session_readiness._event_for(sid)
+        second = session_readiness._event_for(sid)
+        check(first is second, "one resolution event per sid is reused, not replaced")
+        session_readiness.forget(sid)
+        third = session_readiness._event_for(sid)
+        check(third is not first, "forget drops the event so a later lookup builds a fresh one")
+    finally:
+        session_readiness.forget(sid)
+
+
 def main_run() -> int:
     try:
         test_presence_is_the_gate()
@@ -176,6 +247,11 @@ def main_run() -> int:
         asyncio.run(test_resolution_before_wait_is_not_missed())
         test_error_is_sanitized()
         test_change_kind_is_broadcast()
+        test_state_of_absent_inputs()
+        test_falsy_sid_is_not_gated()
+        asyncio.run(test_failure_reason_surfaces_sanitized_reason())
+        asyncio.run(test_mark_pending_re_arms_without_waking())
+        test_one_event_per_sid_then_forget()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     print("PASS session readiness gate")
