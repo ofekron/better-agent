@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -91,8 +92,58 @@ def _publish_written(root_id: str, seq: int) -> None:
 
 
 def test_aliasing_unifies_bare_and_dotted_event_bus() -> None:
+    """Process-order independent: explicitly (re-)triggers canonicalization
+    (idempotent — safe even though module-level imports above already did
+    it) instead of assuming some earlier import in this process already
+    put `backend.adapters` first, then proves identity through BOTH dotted
+    import forms. `from backend.event_bus import bus` re-resolves via a
+    `sys.modules["backend.event_bus"]` dict lookup by fully-qualified name
+    every time, so it would pass even if canonicalization only patched
+    `sys.modules`. `import backend.event_bus as x` compiles to an
+    IMPORT_FROM opcode that resolves via `getattr(sys.modules["backend"],
+    "event_bus")` FIRST and only falls back to the dict lookup if that
+    attribute is unset — so it is the one that actually catches a
+    canonicalization which patched `sys.modules` but left the `backend`
+    package's own attribute stale (see backend/adapters/__init__.py's
+    docstring). Covering both forms is what makes this order-independent
+    rather than order-lucky."""
+    import backend.adapters  # noqa: F401  (idempotent; triggers canonicalization)
     import backend.event_bus as dotted_event_bus
+    from backend.event_bus import bus as from_import_bus
+
     assert dotted_event_bus.bus is event_bus.bus
+    assert from_import_bus is event_bus.bus
+
+
+def test_aliasing_survives_real_dotted_import_before_canonicalization() -> None:
+    """Regression for the actual order hazard: if ANYTHING does a real
+    (non-canonicalization) `import backend.event_bus as x` BEFORE
+    `backend.adapters` is first imported in the process, Python's import
+    machinery sets `sys.modules["backend"].event_bus` to that real module.
+    `backend/adapters/__init__.py`'s canonicalization must overwrite that
+    package attribute too, not just the `sys.modules["backend.event_bus"]`
+    dict entry — otherwise every later `import backend.event_bus as y`
+    keeps resolving to the pre-canonicalization module forever, because the
+    IMPORT_FROM opcode's `getattr` fast path never falls through to the
+    dict lookup once the attribute exists (see backend/adapters/__init__.py
+    docstring). Runs in a subprocess with a virgin sys.modules so it can
+    force this exact hazardous ordering without poisoning the shared
+    pytest process's global module state for other tests in this file/run."""
+    backend_dir = str(Path(__file__).resolve().parents[1])
+    repo_root = str(Path(backend_dir).parent)
+    script = (
+        "import sys; "
+        f"sys.path.insert(0, {backend_dir!r}); sys.path.insert(0, {repo_root!r}); "
+        "import backend.event_bus as poisoned_before_canonicalization; "
+        "import event_bus as bare; "
+        "import backend.adapters; "
+        "import backend.event_bus as healed_after_canonicalization; "
+        "assert healed_after_canonicalization is bare, "
+        "'attribute-walk import stayed poisoned after canonicalization'; "
+        "assert healed_after_canonicalization.bus is bare.bus"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
 def test_snapshot_ok_envelope() -> None:
@@ -319,6 +370,7 @@ def test_ws_subscribe_receives_node_upsert_and_intent_is_rejected() -> None:
 
 _TESTS = [
     test_aliasing_unifies_bare_and_dotted_event_bus,
+    test_aliasing_survives_real_dotted_import_before_canonicalization,
     test_snapshot_ok_envelope,
     test_snapshot_splits_image_content_block_into_attachment,
     test_fetch_sidecar_maps_to_rebuilding_envelope,

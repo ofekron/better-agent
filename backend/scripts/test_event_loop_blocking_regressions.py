@@ -25,6 +25,7 @@ ROOT = Path(__file__).parents[1]
 _API_MODULES = (
     "main.py",
     "ws_chat.py",
+    "surface_commands.py",
     "machine_nodes_api.py",
     "user_prefs_api.py",
     "projects_api.py",
@@ -1903,7 +1904,7 @@ def test_extension_projection_routes_cache_json_bytes() -> None:
 
 def test_startup_reenqueue_reads_sessions_off_loop() -> None:
     source = _api_source()
-    assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
+    assert "await asyncio.to_thread(session_manager.get_lite, app_session_id)" in source
 
 
 def test_queue_projection_scans_user_messages_once() -> None:

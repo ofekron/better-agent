@@ -43,6 +43,19 @@ protected callers that ran AFTER that function — any earlier import of
 backend.adapters (e.g. a test importing it directly, as several
 backend/scripts/test_*.py already do) got unaliased, disconnected
 singletons. Moving it here removes that import-order hazard entirely.
+
+Both `sys.modules[...]` AND the `backend` package's own attribute must be
+repointed: `import backend.x as y` compiles to an IMPORT_FROM opcode,
+which resolves via `getattr(sys.modules["backend"], "x")` FIRST and only
+falls back to a `sys.modules["backend.x"]` lookup if that attribute is
+absent (see CPython's `import_from` in ceval.c). `from backend.x import y`
+is immune (it always re-checks `sys.modules` by fully-qualified name), but
+if anything anywhere does a real dotted-attribute-style `import backend.x`
+BEFORE this package is first imported, `sys.modules["backend"].x` gets set
+to that real module and a `sys.modules` dict-only reassignment can never
+override it again — the getattr fast path keeps winning. Setting the
+attribute here too closes that gap for every `import backend.x as y` site,
+not only the `sys.modules` dict lookups.
 """
 
 import sys as _sys
@@ -53,6 +66,7 @@ import event_journal as _event_journal
 import paths as _paths
 import scheme_migrations as _scheme_migrations
 
+_backend_pkg = _sys.modules["backend"]
 for _bare_name, _module in (
     ("event_bus", _event_bus),
     ("event_ingester", _event_ingester),
@@ -61,7 +75,8 @@ for _bare_name, _module in (
     ("scheme_migrations", _scheme_migrations),
 ):
     _sys.modules[f"backend.{_bare_name}"] = _module
-del _bare_name, _module, _sys, _event_bus, _event_ingester, _event_journal, _paths, _scheme_migrations
+    setattr(_backend_pkg, _bare_name, _module)
+del _bare_name, _module, _sys, _backend_pkg, _event_bus, _event_ingester, _event_journal, _paths, _scheme_migrations
 
 from backend.adapters.chat_adapter import ChatSurfaceAdapter
 from backend.adapters.projection import BusBoundProjection, SurfaceProjection
