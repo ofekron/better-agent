@@ -118,10 +118,6 @@ def reset_requirements_attribution(token: contextvars.Token[RequirementsQueryAtt
     _QUERY_ATTRIBUTION.reset(token)
 
 
-def current_requirements_attribution() -> RequirementsQueryAttribution:
-    return _QUERY_ATTRIBUTION.get()
-
-
 class RequirementsQueryTimeout(TimeoutError):
     code = "requirements_timeout"
 
