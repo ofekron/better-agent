@@ -1266,10 +1266,9 @@ TIMER_TOOLS = (
     "ScheduleWakeup",
 )
 
-# Background execution is forbidden across ALL claude runs: the runner
-# process must be able to die at turn end without orphaning or killing
-# user work, so claude must never start work that outlives the turn.
-# Enforced in layers (all fail-closed):
+# Bash/subagent background execution is forbidden across ALL claude
+# runs: the runner must never orphan detached shells or subagents when
+# it exits. Enforced in layers (all fail-closed):
 #   1. `BACKGROUND_TASKS_DISABLE_ENV=1` in the CLI env — the CLI's native
 #      master switch: strips `run_in_background` from the Bash/Task tool
 #      schemas, ignores a smuggled param at runtime, disables
@@ -1280,6 +1279,13 @@ TIMER_TOOLS = (
 #   3. A PreToolUse hook in runner.py denying any tool input that still
 #      carries `run_in_background` / remote isolation (future-proofing
 #      against CLI schema changes).
+# CLI-internal background TASKS (the Workflow tool's `local_workflow`
+# tasks) are the deliberate exception: the CLI runs them in-process and
+# auto-delivers their task-notification turn on the same stream, and the
+# runner drains until every live task reaches a terminal state before it
+# finalizes the turn and exits (see runner._run_one_turn), so nothing
+# outlives the runner. TASK_INTERACTION_TOOLS therefore stays allowed —
+# the model needs TaskOutput/TaskStop to read and stop those tasks.
 # Single source of truth for both sides of the contract: provider_claude
 # appends the tools to input.json's disallowed_tools and sets the env
 # vars in build_env; runner.py refuses to spawn if any tool strip is
@@ -1287,9 +1293,11 @@ TIMER_TOOLS = (
 BACKGROUND_WORK_TOOLS = (
     "BashOutput",
     "KillShell",
+    "Monitor",
+)
+TASK_INTERACTION_TOOLS = (
     "TaskOutput",
     "TaskStop",
-    "Monitor",
 )
 BACKGROUND_TASKS_DISABLE_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
 BG_EXIT_HANDOFF_DISABLE_ENV = "CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF"

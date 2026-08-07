@@ -22,8 +22,12 @@ Life of a run:
   4. On `SystemMessage(subtype="init")`, captures the claude session_id,
      computes `jsonl_path`, and writes `state.json` atomically. The
      backend polls `state.json` to start its FileTailer.
-  5. Iterates `client.receive_response()` until `ResultMessage` arrives
-     (or cancel sentinel triggers `client.interrupt()`).
+  5. Iterates `client.receive_response()` until a `ResultMessage`
+     arrives with no live CLI background task (a Workflow tool run keeps
+     the stream open past its launching turn's result — the CLI
+     auto-delivers the task-notification turn on the same stream and the
+     runner drains until every task is terminal), or the cancel sentinel
+     triggers `client.interrupt()`.
   6. Writes `complete.json` with success/error/session_id/token_usage
      and sets `state.json.complete = true`. Exits.
 
@@ -119,7 +123,7 @@ from provider_completion import classify_completion_after_progress
 from process_identity import process_identity_to_dict
 from runner_operation_host import internal_token_lease
 from runner_exit import hard_exit
-from trace_collector import aggregate_claude_turn_usage
+from trace_collector import aggregate_claude_turn_usage, merge_token_usages
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
@@ -323,8 +327,10 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     SystemMessage,
+    TERMINAL_TASK_STATUSES,
     TaskNotificationMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     UserMessage,
     create_sdk_mcp_server,
     tool,
@@ -340,12 +346,14 @@ logger = logging.getLogger(__name__)
 
 
 async def _deny_background_tool_use(hook_input, tool_use_id, context):
-    """PreToolUse backstop for the no-background policy (see
-    runs_dir.BACKGROUND_WORK_TOOLS): deny any tool input that still
+    """PreToolUse backstop for the no-bash/subagent-background policy
+    (see runs_dir.BACKGROUND_WORK_TOOLS): deny any tool input that still
     requests background execution or a remote (inherently background)
     sandbox, whatever the tool. The CLI's native
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS switch already strips these from
-    the tool schemas — this hook covers future CLI schema changes."""
+    the tool schemas — this hook covers future CLI schema changes. The
+    Workflow tool is unaffected (its input carries no such params); its
+    in-process background tasks are drained by `_run_one_turn`."""
     tool_input = (hook_input or {}).get("tool_input") or {}
     wants_bg = bool(tool_input.get("run_in_background"))
     wants_remote = str(tool_input.get("isolation") or "") == "remote"
@@ -2598,10 +2606,19 @@ async def _heartbeat_writer(
 
 
 def _apply_task_message(msg: object, tasks: set[str]) -> None:
-    """Fold one SDK message into the in-flight background-subagent set.
+    """Fold one SDK message into the in-flight background-task set.
 
-    `TaskStartedMessage` adds the task; a terminal `TaskNotificationMessage`
-    (completed/failed/stopped) removes it. Anything else is ignored."""
+    The set is the runner's drain authority: `_run_one_turn` keeps the
+    SDK client connected past a ResultMessage while it is non-empty (a
+    live Workflow task's notification turn arrives on the same stream).
+
+    `TaskStartedMessage` adds the task. Terminal transitions clear it via
+    EITHER lifecycle vocabulary — a `TaskNotificationMessage` (all its
+    statuses are terminal) or a `TaskUpdatedMessage` whose patch status is
+    terminal (a TaskStop'd task reports `killed` here and its notification
+    is sometimes suppressed — see SDK `TERMINAL_TASK_STATUSES`). A
+    `background_tasks_changed` roster is authoritative: it replaces the
+    set wholesale, healing any drift from missed lifecycle frames."""
     if isinstance(msg, TaskStartedMessage):
         tid = getattr(msg, "task_id", None)
         if tid:
@@ -2610,6 +2627,20 @@ def _apply_task_message(msg: object, tasks: set[str]) -> None:
         tid = getattr(msg, "task_id", None)
         if tid:
             tasks.discard(tid)
+    elif isinstance(msg, TaskUpdatedMessage):
+        tid = getattr(msg, "task_id", None)
+        if tid and getattr(msg, "status", None) in TERMINAL_TASK_STATUSES:
+            tasks.discard(tid)
+    elif isinstance(msg, SystemMessage):
+        data = getattr(msg, "data", None) or {}
+        if data.get("subtype") == "background_tasks_changed":
+            roster = data.get("tasks")
+            if isinstance(roster, list):
+                tasks.clear()
+                tasks.update(
+                    t["task_id"] for t in roster
+                    if isinstance(t, dict) and t.get("task_id")
+                )
 
 
 async def _background_response_activity_active(
@@ -2676,48 +2707,68 @@ async def _drain_until_result(
             return True
 
 
+class ResponseCancelSeenError(Exception):
+    """Raised by `_receive_response_message` when the turn's cancel event
+    fires while the receive is idle-waiting. Without it a cancel during
+    the background-task drain (no model turn in flight → no frames
+    arriving) would hang until the next frame; the caller breaks straight
+    to the completion path and `client.disconnect()` tears the CLI (and
+    its live tasks) down."""
+
+
 async def _receive_response_message(
     resp_iter,
     *,
     timeout_s: float,
     activity: Optional[_RunnerActivity] = None,
     background_activity: Optional[_BackgroundActivityProbe] = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> object:
-    if timeout_s <= 0:
+    if timeout_s <= 0 and cancel_event is None:
         return await resp_iter.__anext__()
 
     receive_task = asyncio.create_task(resp_iter.__anext__())
+    cancel_task = (
+        asyncio.create_task(cancel_event.wait())
+        if cancel_event is not None else None
+    )
+    wait_set = {receive_task} if cancel_task is None else {receive_task, cancel_task}
     static_started_at = time.monotonic()
     try:
         while True:
-            if background_activity is not None and await background_activity():
-                if activity is not None:
-                    activity.mark()
-                else:
-                    static_started_at = time.monotonic()
-            last_progress_at = (
-                activity.last_progress_at() if activity is not None else static_started_at
-            )
-            remaining = timeout_s - (time.monotonic() - last_progress_at)
-            if remaining <= 0:
-                raise ResponseNoProgressError(
-                    f"Claude runner made no response progress for {timeout_s:.0f}s"
+            poll_s: Optional[float] = _RESPONSE_ACTIVITY_POLL_S
+            if timeout_s > 0:
+                if background_activity is not None and await background_activity():
+                    if activity is not None:
+                        activity.mark()
+                    else:
+                        static_started_at = time.monotonic()
+                last_progress_at = (
+                    activity.last_progress_at() if activity is not None else static_started_at
                 )
+                remaining = timeout_s - (time.monotonic() - last_progress_at)
+                if remaining <= 0:
+                    raise ResponseNoProgressError(
+                        f"Claude runner made no response progress for {timeout_s:.0f}s"
+                    )
+                poll_s = min(_RESPONSE_ACTIVITY_POLL_S, remaining)
             done, _pending = await asyncio.wait(
-                {receive_task},
-                timeout=min(_RESPONSE_ACTIVITY_POLL_S, remaining),
+                wait_set,
+                timeout=poll_s if timeout_s > 0 else None,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if receive_task in done:
                 if activity is not None:
                     activity.mark()
                 return receive_task.result()
-    except BaseException:
-        if not receive_task.done():
-            receive_task.cancel()
-            with suppress(BaseException):
-                await receive_task
-        raise
+            if cancel_task is not None and cancel_task in done:
+                raise ResponseCancelSeenError()
+    finally:
+        for task in wait_set:
+            if not task.done():
+                task.cancel()
+                with suppress(BaseException):
+                    await task
 
 
 def _jsonl_byte_offset_after_lines(path: Path, line_count: int) -> Optional[int]:
@@ -2823,7 +2874,10 @@ async def _run_one_turn(
     discovered_sid: Optional[str] = None
     total_usage: dict = {}
     assistant_usage_snapshots: list[tuple[Optional[str], object]] = []
-    result_usage: object = None
+    # One entry per ResultMessage: a drained run has one result per model
+    # turn (launching turn + each notification turn) and the turn's total
+    # is their merged sum — keeping only the last would under-report.
+    result_usages: list[object] = []
     success = False
     error: Optional[str] = None
     cancelled = False
@@ -2950,8 +3004,15 @@ async def _run_one_turn(
                     timeout_s=no_progress_timeout_s,
                     activity=activity,
                     background_activity=_background_activity_probe,
+                    cancel_event=cancel_seen,
                 )
             except StopAsyncIteration:
+                break
+            except ResponseCancelSeenError:
+                # Cancel fired while no frame was in flight (typically
+                # during the background-task drain). The watcher already
+                # called interrupt(); skip the settle barrier — the
+                # completion path's disconnect() tears everything down.
                 break
             outstanding_tool_calls.apply(msg)
             if cancelled_cell[0]:
@@ -3081,7 +3142,7 @@ async def _run_one_turn(
                         error = "timeout"
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    result_usage = usage
+                    result_usages.append(usage)
                 # Extract context window from model usage metadata.
                 # model_usage is {"model_name": {contextWindow, ...}, ...}
                 mu = getattr(msg, "model_usage", None)
@@ -3091,6 +3152,26 @@ async def _run_one_turn(
                         if cw:
                             context_window = cw
                             break
+                if outstanding_tasks:
+                    # Drain-until-idle: a live CLI background task (a
+                    # Workflow tool run) survives this ResultMessage. The
+                    # CLI keeps it running in-process and, on completion,
+                    # auto-starts the task-notification turn on this same
+                    # stream (init → assistant → result). Exiting now
+                    # would kill it mid-flight, so keep consuming — the
+                    # spent receive_response() iterator terminated at the
+                    # ResultMessage it just yielded, so start a fresh one
+                    # over the same underlying message stream. The turn
+                    # finalizes at the first ResultMessage with an empty
+                    # task set.
+                    log.info(
+                        "result received with %d live background task(s) %s "
+                        "— draining until idle",
+                        len(outstanding_tasks),
+                        sorted(outstanding_tasks),
+                    )
+                    resp_iter = client.receive_response()
+                    continue
                 break
 
         if result_seen:
@@ -3137,7 +3218,12 @@ async def _run_one_turn(
         error = t("runner.cancelled")
 
     total_usage = (
-        aggregate_claude_turn_usage(assistant_usage_snapshots, result_usage)
+        aggregate_claude_turn_usage(
+            assistant_usage_snapshots,
+            merge_token_usages(
+                [u for u in result_usages if isinstance(u, dict)],
+            ),
+        )
         or {}
     )
 
@@ -3474,11 +3560,13 @@ async def _run(
             f"{_missing_timer_strips} — refusing to spawn",
         )
         return 1
-    # Fail closed: background execution is forbidden on every run (see
-    # runs_dir.BACKGROUND_WORK_TOOLS). Refuse to spawn if the backend
-    # didn't strip the background-interaction tools, and re-assert the
-    # CLI's native disable switches regardless of the spawner's env so a
-    # misconfigured caller can't re-enable backgrounding.
+    # Fail closed: bash/subagent background execution is forbidden on
+    # every run (see runs_dir.BACKGROUND_WORK_TOOLS; CLI-internal
+    # Workflow tasks are the drained exception). Refuse to spawn if the
+    # backend didn't strip the background-interaction tools, and
+    # re-assert the CLI's native disable switches regardless of the
+    # spawner's env so a misconfigured caller can't re-enable
+    # backgrounding.
     from runs_dir import (
         AUTO_BACKGROUND_ENV as _AUTO_BG_ENV,
         BACKGROUND_TASKS_DISABLE_ENV as _BG_DISABLE_ENV,
@@ -4034,9 +4122,11 @@ async def _run(
 
         # Success — reset backoff for future transient errors.
         # Disconnect happens right after the completion artifacts are
-        # durable below — the runner is strictly per-turn (background
-        # execution is disabled on every run, see runs_dir
-        # BACKGROUND_TASKS_DISABLE_ENV), so nothing outlives the turn.
+        # durable below — the runner is strictly per-turn and
+        # `_run_one_turn` has already drained every CLI background task
+        # to a terminal state (bash/subagent backgrounding is disabled
+        # outright, see runs_dir BACKGROUND_TASKS_DISABLE_ENV), so
+        # nothing outlives the turn.
         _retry_backoff = 2.0
         break
 
@@ -4093,8 +4183,10 @@ async def _run(
         logger.exception("failed to finalize state.json")
 
     # Per-turn process: the turn is finalized (complete.json + state.json
-    # durable) — close the CLI and exit. Background execution is disabled
-    # on every run, so no work can outlive this process.
+    # durable) — close the CLI and exit. Bash/subagent backgrounding is
+    # disabled and every CLI background task was drained to a terminal
+    # state before the result landed, so no work can outlive this
+    # process. (On cancel the teardown IS the task stop.)
     try:
         # Bounded: a hung disconnect must not pin this process. The
         # hard exit below is the guarantee; this timeout just keeps the

@@ -1,8 +1,9 @@
-"""Regression tests: background execution is forbidden on every claude run.
+"""Regression tests: bash/subagent background execution is forbidden on
+every claude run.
 
 The per-turn runner process must be able to die at turn end without
-orphaning or killing user work, so claude must never start work that
-outlives the turn. Three fail-closed layers (single source:
+orphaning or killing user work, so claude must never start bash/subagent
+work that outlives the turn. Three fail-closed layers (single source:
 runs_dir.BACKGROUND_WORK_TOOLS and the *_ENV names):
   1. build_env sets the CLI's native master switch
      (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1), disables cross-exit bg
@@ -11,6 +12,11 @@ runs_dir.BACKGROUND_WORK_TOOLS and the *_ENV names):
      tools (plus timer tools), including under a session-level override.
   3. the runner's PreToolUse hook denies any tool input that still
      requests run_in_background / remote isolation.
+
+CLI-internal Workflow tasks are the deliberate exception (the runner
+drains them before finalizing — see test_runner_workflow_drain.py), so
+the model-facing task tools (runs_dir.TASK_INTERACTION_TOOLS) must NOT
+be stripped.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_no_background_policy.py
@@ -34,6 +40,7 @@ from runs_dir import (  # noqa: E402
     BACKGROUND_TASKS_DISABLE_ENV,
     BACKGROUND_WORK_TOOLS,
     BG_EXIT_HANDOFF_DISABLE_ENV,
+    TASK_INTERACTION_TOOLS,
     TIMER_TOOLS,
 )
 
@@ -106,6 +113,26 @@ def test_payload_always_strips_bg_tools() -> bool:
     return ok
 
 
+def test_payload_keeps_task_interaction_tools() -> bool:
+    """Workflow support: the model must keep TaskOutput/TaskStop so it
+    can read and stop the CLI's background Workflow tasks. The provider
+    must never strip them on its own — under any override."""
+    provider = _mk_provider()
+    ok = True
+    for label, override in (
+        ("default", None),
+        ("session-override", ["SomeCustomTool"]),
+    ):
+        tools = _payload_disallowed(provider, override)
+        stripped = [n for n in TASK_INTERACTION_TOOLS if n in tools]
+        if stripped:
+            print(f"{FAIL} {label} payload must not strip {stripped}")
+            ok = False
+    if ok:
+        print(f"{PASS} input.json keeps task-interaction tools available")
+    return ok
+
+
 def test_hook_denies_background_input() -> bool:
     from runner import _deny_background_tool_use
 
@@ -159,6 +186,7 @@ def main() -> int:
     results = [
         test_build_env_disables_background(),
         test_payload_always_strips_bg_tools(),
+        test_payload_keeps_task_interaction_tools(),
         test_hook_denies_background_input(),
         test_hooks_wired_into_options(),
     ]

@@ -645,12 +645,14 @@ class ClaudeProvider(Provider):
         # Enable file checkpointing for SDK/stream-json mode sessions so
         # --rewind-files works (required for retry/rewind functionality).
         env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "1"
-        # Background execution is forbidden on every claude run (see
-        # runs_dir.BACKGROUND_WORK_TOOLS): the CLI's native master switch
-        # strips run_in_background from tool schemas, ignores a smuggled
-        # param, disables timeout-auto-backgrounding, and forces
-        # subagents synchronous. Also disable cross-exit bg adoption and
-        # opt-in auto-backgrounding.
+        # Bash/subagent background execution is forbidden on every claude
+        # run (see runs_dir.BACKGROUND_WORK_TOOLS): the CLI's native
+        # master switch strips run_in_background from tool schemas,
+        # ignores a smuggled param, disables timeout-auto-backgrounding,
+        # and forces subagents synchronous. Also disable cross-exit bg
+        # adoption and opt-in auto-backgrounding. CLI-internal Workflow
+        # tasks are unaffected by this switch and deliberately allowed —
+        # the runner drains them before finalizing (see runs_dir).
         env[BACKGROUND_TASKS_DISABLE_ENV] = "1"
         env[BG_EXIT_HANDOFF_DISABLE_ENV] = "1"
         env.pop(AUTO_BACKGROUND_ENV, None)
