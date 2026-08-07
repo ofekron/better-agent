@@ -131,8 +131,8 @@ def request_tool_approval(
             if not _is_transient_approval_error(exc):
                 logger.exception("tool-approval request unexpected error (denying): %s", exc)
                 return False
-            if remaining <= 0:
-                logger.warning("tool-approval request retry deadline expired (denying): %s", exc)
-                return False
+            # The loop-top deadline check above is the single fail-closed
+            # authority: every retry re-enters the while head and re-reads the
+            # clock, so a transient failure can never outrun the deadline.
             logger.info("tool-approval request transient failure; retrying: %s", exc)
             time.sleep(_TRANSIENT_RETRY_SLEEP_S)
