@@ -114,6 +114,41 @@ def test_snapshot_ok_envelope() -> None:
     assert body["snapshot_identity"]["render_rev"] >= 0
 
 
+def test_snapshot_splits_image_content_block_into_attachment() -> None:
+    """Regression: an Anthropic-shaped image content block (the exact
+    shape runner.py's `_multimodal_msg` sends and the CLI/SDK echoes back
+    into its own transcript) must become a TYPED_PROMPT `attachments`
+    entry, never get JSON-dumped into `payload.text` alongside the prompt."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    bare_event_ingester.event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "ZmFrZQ=="},
+                    },
+                    {"type": "text", "text": "check this out"},
+                ],
+            },
+        },
+        source="test",
+    )
+    adapter = ChatSurfaceAdapter()
+    adapter_api.configure(chat=adapter)
+
+    client = TestClient(_build_app())
+    resp = client.get(f"/api/v2/surface/sessions/{root_id}/snapshot")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()["turns"][0]["prompt"]["payload"]
+    assert payload["text"] == "check this out"
+    assert "ZmFrZQ==" not in payload["text"]
+    assert len(payload["attachments"]) == 1
+    assert payload["attachments"][0]["media_type"] == "image/png"
+
+
 def test_fetch_sidecar_maps_to_rebuilding_envelope() -> None:
     """No REST endpoint exposes fetch_sidecar (out of scope this phase) —
     exercise the real adapter method + the real envelope mapper directly,
@@ -178,6 +213,54 @@ def test_invalid_session_id_rejected_400() -> None:
     assert resp2.status_code == 400
 
 
+def test_attachment_route_serves_seeded_blob() -> None:
+    """Seeds a file the SAME way `_save_message_images` (orchestrator.py)
+    does — writing under `<ba_home>/sessions/images/<session_id>/` — and
+    confirms the v2 route resolves it via the identical storage helper
+    `session_detail_api.get_session_image` uses."""
+    session_id = f"session-{uuid.uuid4().hex}"
+    filename = "image_0.png"
+    image_dir = paths.ba_home() / "sessions" / "images" / session_id
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / filename).write_bytes(b"\x89PNG\r\n fake bytes")
+
+    client = TestClient(_build_app())
+    resp = client.get(f"/api/v2/surface/sessions/{session_id}/attachments/{filename}")
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"\x89PNG\r\n fake bytes"
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.headers["content-length"] == str(len(b"\x89PNG\r\n fake bytes"))
+
+
+def test_attachment_route_rejects_foreign_session_ref() -> None:
+    owner_session = f"session-{uuid.uuid4().hex}"
+    other_session = f"session-{uuid.uuid4().hex}"
+    filename = "image_0.png"
+    image_dir = paths.ba_home() / "sessions" / "images" / owner_session
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / filename).write_bytes(b"only-in-owner-session")
+
+    client = TestClient(_build_app())
+    resp = client.get(f"/api/v2/surface/sessions/{other_session}/attachments/{filename}")
+    assert resp.status_code == 404, resp.text
+
+
+def test_attachment_route_rejects_malformed_ref() -> None:
+    session_id = f"session-{uuid.uuid4().hex}"
+    client = TestClient(_build_app())
+
+    # Disallowed character (outside _ID_RE's [A-Za-z0-9_.:-]).
+    resp = client.get(f"/api/v2/surface/sessions/{session_id}/attachments/bad%21name.png")
+    assert resp.status_code == 400, resp.text
+
+    # Explicit ".." rejection (_validate_id), independent of route matching.
+    resp2 = client.get(f"/api/v2/surface/sessions/{session_id}/attachments/a..b.png")
+    assert resp2.status_code == 400, resp2.text
+
+    resp3 = client.get(f"/api/v2/surface/sessions/{session_id}/attachments/{'a' * 300}")
+    assert resp3.status_code == 400, resp3.text
+
+
 def test_ws_subscribe_receives_node_upsert_and_intent_is_rejected() -> None:
     root_id = f"root-{uuid.uuid4().hex}"
     _ingest_prompt(root_id, "hello")
@@ -237,10 +320,14 @@ def test_ws_subscribe_receives_node_upsert_and_intent_is_rejected() -> None:
 _TESTS = [
     test_aliasing_unifies_bare_and_dotted_event_bus,
     test_snapshot_ok_envelope,
+    test_snapshot_splits_image_content_block_into_attachment,
     test_fetch_sidecar_maps_to_rebuilding_envelope,
     test_children_stale_cursor_envelope,
     test_older_cursor_round_trips_through_opaque_token,
     test_invalid_session_id_rejected_400,
+    test_attachment_route_serves_seeded_blob,
+    test_attachment_route_rejects_foreign_session_ref,
+    test_attachment_route_rejects_malformed_ref,
     test_ws_subscribe_receives_node_upsert_and_intent_is_rejected,
 ]
 

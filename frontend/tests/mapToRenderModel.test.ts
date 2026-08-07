@@ -420,8 +420,8 @@ describe("mapPromptToUserMessage", () => {
         text: "hi", send_mode: "queue", origin: "user", source_session_ref: null,
         sent_text: null, intent_id: null,
         attachments: [
-          { name: "pic.png", media_type: "image/png", ref: "ref1" },
-          { name: "doc.pdf", media_type: "application/pdf", ref: "ref2" },
+          { name: "pic.png", media_type: "image/png", ref: "ref1", size: 1024 },
+          { name: "doc.pdf", media_type: "application/pdf", ref: "ref2", size: 2048 },
         ],
       },
     });
@@ -429,7 +429,35 @@ describe("mapPromptToUserMessage", () => {
     expect(msg.id).toBe(surfaceUserMessageId(TURN));
     expect(msg.role).toBe("user");
     expect(msg.content).toBe("hi");
-    expect(msg.images).toEqual([{ filename: "pic.png", media_type: "image/png" }]);
+    // `filename` is the resolvable `ref`, not the display `name` — it feeds
+    // MessageBubble's buildMessageImageUrl(sessionId, filename) directly.
+    expect(msg.images).toEqual([{ filename: "ref1", media_type: "image/png" }]);
+    expect(msg.files).toEqual([{ name: "doc.pdf", media_type: "application/pdf", size: 2048 }]);
+  });
+
+  it("omits filename (never a broken src) when an image attachment has no resolvable ref", () => {
+    const prompt = node({
+      node_id: "prompt-uuid-2", kind: "typed_prompt",
+      payload: {
+        text: "look", send_mode: "queue", origin: "user", source_session_ref: null,
+        sent_text: null, intent_id: null,
+        attachments: [{ name: "image_0.png", media_type: "image/png", ref: "", size: 512 }],
+      },
+    });
+    const msg = mapPromptToUserMessage(prompt);
+    expect(msg.images).toEqual([{ filename: undefined, media_type: "image/png" }]);
+  });
+
+  it("falls back to size 0 for a file attachment whose size the backend could not derive", () => {
+    const prompt = node({
+      node_id: "prompt-uuid-3", kind: "typed_prompt",
+      payload: {
+        text: "attached", send_mode: "queue", origin: "user", source_session_ref: null,
+        sent_text: null, intent_id: null,
+        attachments: [{ name: "doc.pdf", media_type: "application/pdf", ref: "ref3", size: null }],
+      },
+    });
+    const msg = mapPromptToUserMessage(prompt);
     expect(msg.files).toEqual([{ name: "doc.pdf", media_type: "application/pdf", size: 0 }]);
   });
 });

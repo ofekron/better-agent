@@ -124,14 +124,29 @@ export async function startFullStackBackend(
     throw new Error(`scripts/install.py failed:\n${install.stdout}\n${install.stderr}`);
   }
 
+  // `backend/app_lifecycle.py::on_startup()` requires a primary-backend
+  // launcher-lease reservation (backend_instance_lock.py) before uvicorn
+  // will boot — a raw `uvicorn main:app` spawn fails startup with
+  // "backend reservation environment is missing". reserve_and_launch_backend.py
+  // performs that same reservation dance (mirroring
+  // docker_backend_supervisor.py) scoped to this run's isolated homeDir, then
+  // execs uvicorn as its child and forwards signals/exit code — so `proc`
+  // below still behaves like "the backend process" for every purpose this
+  // harness cares about (stdout/stderr, exit code, process-group kill).
   const proc: ChildProcess = spawn(
     python,
-    ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(port)],
-    // detached so uvicorn leads its own process group: real turns spawn
-    // real provider CLI subprocesses (and those spawn further children).
-    // Killing only the uvicorn PID on stop() would orphan them instead of
-    // terminating the turn; killing the negative PID signals the whole
-    // group.
+    [
+      path.join(REPO_ROOT, "frontend", "tests", "fullstack", "harness", "reserve_and_launch_backend.py"),
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+    ],
+    // detached so the launcher-lease bridge (and the uvicorn child it spawns
+    // in the same group) leads its own process group: real turns spawn real
+    // provider CLI subprocesses (and those spawn further children). Killing
+    // only the top PID on stop() would orphan them instead of terminating
+    // the turn; killing the negative PID signals the whole group.
     { cwd: BACKEND_DIR, env, stdio: ["ignore", "pipe", "pipe"], detached: true },
   );
 

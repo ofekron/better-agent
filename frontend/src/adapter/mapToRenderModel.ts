@@ -365,11 +365,25 @@ export function mapPromptToUserMessage(prompt: NodeWire): ChatMessage {
   const files: MessageFile[] = [];
   for (const a of p.attachments) {
     if (a.media_type.startsWith("image/")) {
-      images.push({ filename: a.name, media_type: a.media_type });
+      // `ref` (not `name`) is the resolvable key: adapter_api.py's
+      // GET /attachments/{ref} and the legacy GET /sessions/{id}/images/{filename}
+      // route both key off it, and MessageBubble's buildMessageImageUrl
+      // already resolves MessageImage.filename via the legacy route. Empty
+      // when normalize.py couldn't derive a servable location for this
+      // image (backend/adapters/normalize.py::_split_image_attachments —
+      // the journal row carries the raw bytes but no persisted copy this
+      // pure mapping module can point at); buildMessageImageUrl no-ops on
+      // an empty filename, so this degrades to no image, never a broken src.
+      images.push({ filename: a.ref || undefined, media_type: a.media_type });
     } else {
-      // GAP: Attachment{name, media_type, ref} carries no byte size — the
-      // v2 REST surface has no blob-metadata/resolve endpoint yet.
-      files.push({ name: a.name, media_type: a.media_type, size: 0 });
+      // GAP: no write path ever populates a non-empty `ref` for a
+      // non-image attachment — file bytes are inlined into the prompt
+      // text and discarded (backend/file_attachment_prompt.py), never
+      // persisted anywhere a ref could name. `size` is carried through
+      // when the backend could derive it; MessageFile.size is non-optional
+      // so an undetermined size falls back to 0 rather than widening the
+      // type just for this still-unreachable branch.
+      files.push({ name: a.name, media_type: a.media_type, size: a.size ?? 0 });
     }
   }
   return {

@@ -26,6 +26,16 @@ import type {
 
 const _REST_PREFIX = "/api/v2/surface";
 
+/** URL for one `Attachment.ref`'s bytes (adapter_api.py's
+ * `/attachments/{ref}` route). Plain string, no fetch — callers hand it
+ * straight to `<img src>` / lazy `fetch`, same as the legacy
+ * `buildMessageImageUrl` (frontend/src/utils/messageImages.ts): same-origin
+ * cookie auth covers it, so no bearer token is appended here either. */
+export function attachmentUrl(sessionId: string, ref: string): string {
+  if (!sessionId || !ref) return "";
+  return `${API}${_REST_PREFIX}/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(ref)}`;
+}
+
 function _wsBase(): string {
   return API
     ? API.replace(/^http/, "ws")

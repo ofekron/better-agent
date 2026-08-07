@@ -5,6 +5,8 @@ Run: PYTHONPATH=. python3 -m pytest backend/scripts/test_adapter_normalize.py -q
 
 from __future__ import annotations
 
+import base64
+
 from backend.adapters.normalize import (
     derive_link,
     enrich_typed_prompt_node,
@@ -537,8 +539,8 @@ def test_prompt_meta_row_normalizes_to_no_nodes():
     assert normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN) == []
 
 
-def _typed_prompt_node(*, uuid="p1", origin=None, send_mode=None):
-    data = {"type": "user", "uuid": uuid, "message": {"content": "hi"}}
+def _typed_prompt_node(*, uuid="p1", origin=None, send_mode=None, content="hi"):
+    data = {"type": "user", "uuid": uuid, "message": {"content": content}}
     if origin is not None:
         data["origin"] = origin
     if send_mode is not None:
@@ -547,6 +549,127 @@ def _typed_prompt_node(*, uuid="p1", origin=None, send_mode=None):
     nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
     assert nodes[0].kind == NodeKind.TYPED_PROMPT
     return row, nodes[0]
+
+
+def _image_block(raw: bytes, *, media_type="image/png"):
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64", "media_type": media_type,
+            "data": base64.b64encode(raw).decode(),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# _split_image_attachments — image blocks -> Attachment(ref="", size=...).
+# ---------------------------------------------------------------------------
+def test_user_row_image_block_splits_to_attachment_with_decoded_size():
+    row, node = _typed_prompt_node(content=[
+        {"type": "text", "text": "look at this"},
+        _image_block(b"hello world"),
+    ])
+    assert node.payload.text == "look at this"
+    assert len(node.payload.attachments) == 1
+    att = node.payload.attachments[0]
+    assert att.media_type == "image/png"
+    assert att.ref == ""
+    assert att.size == len(b"hello world")
+
+
+def test_user_row_image_block_malformed_base64_size_is_none():
+    row, node = _typed_prompt_node(content=[
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "not-base64!!"}},
+    ])
+    assert node.payload.attachments[0].size is None
+
+
+def test_user_row_multiple_image_blocks_preserve_order_and_size():
+    row, node = _typed_prompt_node(content=[
+        _image_block(b"aa", media_type="image/png"),
+        _image_block(b"bbbb", media_type="image/jpeg"),
+    ])
+    atts = node.payload.attachments
+    assert [a.media_type for a in atts] == ["image/png", "image/jpeg"]
+    assert [a.size for a in atts] == [2, 4]
+    assert [a.ref for a in atts] == ["", ""]
+
+
+# ---------------------------------------------------------------------------
+# enrich_typed_prompt_node — image ref fill from prompt_meta.image_filenames.
+# ---------------------------------------------------------------------------
+def test_enrich_typed_prompt_node_fills_image_ref_from_meta_positionally():
+    row, node = _typed_prompt_node(content=[_image_block(b"x"), _image_block(b"yy")])
+    enriched = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"image_filenames": ["user-1_0.png", "user-1_1.png"]},
+    )
+    assert [a.ref for a in enriched.payload.attachments] == ["user-1_0.png", "user-1_1.png"]
+    # size survives the ref fill untouched.
+    assert [a.size for a in enriched.payload.attachments] == [1, 2]
+
+
+def test_enrich_typed_prompt_node_image_ref_fill_partial_when_counts_mismatch():
+    row, node = _typed_prompt_node(content=[_image_block(b"x"), _image_block(b"yy")])
+    enriched = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"image_filenames": ["only-one.png"]},
+    )
+    refs = [a.ref for a in enriched.payload.attachments]
+    assert refs == ["only-one.png", ""]
+
+
+def test_enrich_typed_prompt_node_never_overwrites_existing_ref():
+    row, node = _typed_prompt_node(content=[_image_block(b"x")])
+    once = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"image_filenames": ["first.png"]},
+    )
+    twice = enrich_typed_prompt_node(
+        once, row_data=row["data"], meta={"image_filenames": ["second.png"]},
+    )
+    assert twice.payload.attachments[0].ref == "first.png"
+
+
+def test_enrich_typed_prompt_node_image_ref_fill_is_idempotent():
+    row, node = _typed_prompt_node(content=[_image_block(b"x")])
+    once = enrich_typed_prompt_node(
+        node, row_data=row["data"], meta={"image_filenames": ["first.png"]},
+    )
+    twice = enrich_typed_prompt_node(
+        once, row_data=row["data"], meta={"image_filenames": ["first.png"]},
+    )
+    assert twice is once  # true no-op: origin/send_mode/attachments already match
+
+
+def test_enrich_typed_prompt_node_no_images_in_meta_is_noop_on_attachments():
+    row, node = _typed_prompt_node(content=[_image_block(b"x")])
+    enriched = enrich_typed_prompt_node(node, row_data=row["data"], meta={"origin": "supervisor"})
+    assert enriched.payload.attachments[0].ref == ""
+
+
+# ---------------------------------------------------------------------------
+# Explicit typed-attachment size passthrough (data.attachments[i].size).
+# ---------------------------------------------------------------------------
+def test_user_row_explicit_attachment_carries_size_through():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "type": "user", "uuid": "p-explicit", "message": {"content": "hi"},
+            "attachments": [{"name": "doc.txt", "media_type": "text/plain", "ref": "r1", "size": 42}],
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.attachments[0].size == 42
+
+
+def test_user_row_explicit_attachment_missing_size_defaults_to_none():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "type": "user", "uuid": "p-explicit-2", "message": {"content": "hi"},
+            "attachments": [{"name": "doc.txt", "media_type": "text/plain", "ref": "r1"}],
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.attachments[0].size is None
 
 
 def test_enrich_typed_prompt_node_fills_origin_from_meta_when_row_silent():

@@ -10,6 +10,8 @@ explicitly handled becomes NodeKind.UNKNOWN with the raw payload preserved.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import replace
 from datetime import datetime
@@ -186,17 +188,49 @@ def parse_send_mode(value: object) -> SendMode:
     return SendMode(value) if value in _SEND_MODE_VALUES else SendMode.QUEUE
 
 
+def _fill_image_attachment_refs(
+    attachments: tuple[Attachment, ...], image_filenames: object,
+) -> tuple[Attachment, ...]:
+    """Fill `ref` on image-typed attachments that don't have one yet,
+    positionally, from `prompt_meta`'s `image_filenames`
+    (`turn_manager.TurnManager._image_filenames`) — same per-message
+    ordering `_save_message_images` (orchestrator.py) used to name the
+    saved files, and the same order `_split_image_attachments` produced
+    them in. Only touches image/* attachments with an empty `ref`, so an
+    already-filled attachment (idempotent re-application, or a future
+    direct-attachment write path that supplies its own `ref`) is never
+    overwritten. Extra/missing filenames (count mismatch) fill as many as
+    line up positionally and leave the rest untouched — never a guessed
+    mapping."""
+    if not isinstance(image_filenames, list) or not image_filenames:
+        return attachments
+    filenames = iter(
+        fname for fname in image_filenames if isinstance(fname, str) and fname
+    )
+    out: list[Attachment] = []
+    changed = False
+    for att in attachments:
+        if att.media_type.startswith("image/") and not att.ref:
+            fname = next(filenames, None)
+            if fname is not None:
+                att = replace(att, ref=fname)
+                changed = True
+        out.append(att)
+    return tuple(out) if changed else attachments
+
+
 def enrich_typed_prompt_node(node: Node, *, row_data: dict, meta: dict | None) -> Node:
     """Fold a joined `prompt_meta` fact (backend.turn_manager, ADR Phase C)
-    onto a TYPED_PROMPT node's origin/send_mode.
+    onto a TYPED_PROMPT node's origin/send_mode/attachment refs.
 
     The CLI-authored row's OWN `data.origin`/`data.send_mode` (if a future
     write path ever stamps them directly) always wins over the
     backend-authored meta fact — meta only fills in fields the row itself
     is silent on. Idempotent: re-applying to an already-enriched node is a
-    no-op (`origin`/`send_mode` already match, so the identity check below
-    skips the `replace`), so callers may re-run this on every observation
-    of the same row (seed + live upsert) without accumulating drift.
+    no-op (`origin`/`send_mode` already match and every image attachment
+    already has a `ref`, so the identity check below skips the
+    `replace`), so callers may re-run this on every observation of the
+    same row (seed + live upsert) without accumulating drift.
     """
     if node.kind != NodeKind.TYPED_PROMPT or not isinstance(node.payload, TypedPromptPayload):
         return node
@@ -212,9 +246,19 @@ def enrich_typed_prompt_node(node: Node, *, row_data: dict, meta: dict | None) -
         else parse_send_mode(meta.get("send_mode")) if meta and meta.get("send_mode") is not None
         else node.payload.send_mode
     )
-    if origin == node.payload.origin and send_mode == node.payload.send_mode:
+    attachments = (
+        _fill_image_attachment_refs(node.payload.attachments, meta.get("image_filenames"))
+        if meta else node.payload.attachments
+    )
+    if (
+        origin == node.payload.origin
+        and send_mode == node.payload.send_mode
+        and attachments is node.payload.attachments
+    ):
         return node
-    return replace(node, payload=replace(node.payload, origin=origin, send_mode=send_mode))
+    return replace(
+        node, payload=replace(node.payload, origin=origin, send_mode=send_mode, attachments=attachments),
+    )
 
 
 def _tool_node_id(tool_use_id: str) -> str:
@@ -233,6 +277,75 @@ def _normalize_tool_name(name: str) -> str:
     if name.startswith("mcp__") and name.endswith("__delegate"):
         return "delegate"
     return name
+
+
+# Anthropic-API `source.media_type` -> file extension, for synthesizing a
+# display name on an image content block (which carries no filename of its
+# own — only better_agent's OWN send path names saved files, and that
+# happens in a wholly separate store this pure module has no reach into;
+# see _split_image_attachments's docstring).
+_IMAGE_EXT_BY_MEDIA_TYPE = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+
+
+def _split_image_attachments(content: object) -> tuple[object, tuple[Attachment, ...]]:
+    """Pull `{"type":"image","source":{"type":"base64","media_type":...,
+    "data":...}}` blocks (the shape runner.py's `_multimodal_msg` sends,
+    which the CLI/SDK echoes back verbatim into its own transcript — the
+    row this module reads) out of a user row's `content` list, returning
+    the remaining blocks (for `_content_to_text`) plus one `Attachment`
+    per image found.
+
+    `ref` is deliberately empty here: the base64 bytes live ONLY in this
+    journal row. `_save_message_images` (orchestrator.py) persists a
+    served copy under `<ba_home>/sessions/images/<session_id>/`, keyed by
+    session_manager's OWN generated message id — a value this module
+    (journal-row-scoped, no I/O, no store access; see module docstring)
+    has no way to learn on its own. `enrich_typed_prompt_node` fills it in
+    afterward from the joined `prompt_meta` fact's `image_filenames`
+    (`turn_manager.py`'s `TurnManager._image_filenames`), positionally, by
+    the same per-message ordering `_save_message_images` used to name the
+    files. Until that join runs, an empty `ref` degrades to a
+    nameless/unresolvable badge client-side — never a wrong or
+    synthesized location.
+
+    `size` is the decoded byte length — cheap (small images, pure CPU, no
+    I/O) and always derivable from the block itself. Malformed base64
+    degrades to `size=None` rather than raising: a display nicety, never
+    worth failing normalization over.
+
+    Non-list `content` (plain string / None) has no blocks to split;
+    returned unchanged with zero attachments.
+    """
+    if not isinstance(content, list):
+        return content, ()
+    remaining: list[object] = []
+    attachments: list[Attachment] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            source = block.get("source")
+            media_type = source.get("media_type", "") if isinstance(source, dict) else ""
+            ext = _IMAGE_EXT_BY_MEDIA_TYPE.get(media_type, "bin")
+            data = source.get("data") if isinstance(source, dict) else None
+            size: int | None = None
+            if isinstance(data, str):
+                try:
+                    size = len(base64.b64decode(data, validate=True))
+                except (binascii.Error, ValueError):
+                    size = None
+            attachments.append(
+                Attachment(
+                    name=f"image_{len(attachments)}.{ext}", media_type=media_type,
+                    ref="", size=size,
+                )
+            )
+            continue
+        remaining.append(block)
+    return remaining, tuple(attachments)
 
 
 def _content_to_text(content: object) -> str:
@@ -500,14 +613,22 @@ def _handle_user(row: dict, data: dict, node: partial) -> list[Node]:
             )
         return nodes
 
-    text = _content_to_text(content if content is not None else inner)
+    text_content, image_attachments = _split_image_attachments(content)
+    text = _content_to_text(text_content if content is not None else inner)
     origin = parse_prompt_origin(data.get("origin"))
     send_mode = parse_send_mode(data.get("send_mode"))
+    # Direct typed attachments (not-yet-implemented write path — see
+    # surface_commands.send_prompt's "unsupported_attachments" rejection)
+    # merged with image blocks split out of the row's own content above,
+    # so either source populates the same TypedPromptPayload.attachments.
     attachments = tuple(
-        Attachment(name=a.get("name", ""), media_type=a.get("media_type", ""), ref=a.get("ref", ""))
+        Attachment(
+            name=a.get("name", ""), media_type=a.get("media_type", ""), ref=a.get("ref", ""),
+            size=a.get("size") if isinstance(a.get("size"), int) else None,
+        )
         for a in data.get("attachments", [])
         if isinstance(a, dict)
-    )
+    ) + image_attachments
     status = ContentStatus.QUEUED if origin == PromptOrigin.QUEUED else ContentStatus.COMPLETE
     uuid = typed_prompt_node_id(_uuid_of(row)) or _fallback_id(row, "typed_prompt")
     return [

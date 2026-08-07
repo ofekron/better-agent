@@ -126,6 +126,7 @@ export interface AttachmentWire {
   name: string;
   media_type: string;
   ref: string;
+  size: number | null;
 }
 
 export interface TypedPromptPayloadWire {

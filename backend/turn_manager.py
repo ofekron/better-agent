@@ -406,11 +406,31 @@ class TurnManager:
     # the contract default "user" rather than a guessed origin.
     _PROMPT_ORIGIN_SIGNALS: dict[str, str] = {"supervisor": "supervisor"}
 
+    @staticmethod
+    def _image_filenames(user_msg: dict) -> list[str]:
+        """Filenames `orchestrator._save_message_images` persisted for this
+        prompt's image blocks, in the SAME order the images were sent —
+        `user_msg["images"]` is `_init_turn_messages`'s own return value
+        from `_save_message_images` (`[{"filename", "media_type"}, ...]`),
+        keyed by `owner_id=user_msg["id"]` and index. `normalize.py`'s
+        `_split_image_attachments` derives its `Attachment`s from the
+        provider-echoed row in the SAME per-message order, so a positional
+        join (`enrich_typed_prompt_node`) is safe. Non-string/missing
+        entries are dropped rather than guessed."""
+        images = user_msg.get("images")
+        if not isinstance(images, list):
+            return []
+        return [
+            img["filename"] for img in images
+            if isinstance(img, dict) and isinstance(img.get("filename"), str)
+        ]
+
     async def _publish_prompt_meta(
         self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
     ) -> None:
         """Backend-authored persisted journal fact carrying this prompt's
-        origin/send_mode, published alongside `lifecycle.turn_start`.
+        origin/send_mode/image_filenames, published alongside
+        `lifecycle.turn_start`.
 
         Kept as its OWN journal row (never mutating the CLI-authored user
         row) so `backend.adapters.chat_adapter` can join it onto the
@@ -431,6 +451,10 @@ class TurnManager:
         payload `data` — it identifies WHICH prompt this describes,
         distinct from the journal-ownership key used to find it.
 
+        `image_filenames` (see `_image_filenames`) is omitted from the
+        payload entirely when this prompt carried no images — closed-set
+        payload discipline, never an empty-list placeholder key.
+
         `send_mode` is omitted: no send-mode context reaches `run_turn`
         yet (tracked as follow-up work).
         """
@@ -440,6 +464,10 @@ class TurnManager:
         if not isinstance(assistant_message_id, str) or not assistant_message_id:
             return
         origin = self._PROMPT_ORIGIN_SIGNALS.get(user_msg.get("source"), "user")
+        payload: dict = {"msg_id": prompt_msg_id, "origin": origin}
+        image_filenames = self._image_filenames(user_msg)
+        if image_filenames:
+            payload["image_filenames"] = image_filenames
         try:
             root_id = (
                 session_manager._root_id_for(app_session_id)
@@ -449,7 +477,7 @@ class TurnManager:
                 type="prompt_meta",
                 root_id=root_id,
                 sid=app_session_id,
-                payload={"msg_id": prompt_msg_id, "origin": origin},
+                payload=payload,
                 msg_id=assistant_message_id,
                 persist=True,
             ))

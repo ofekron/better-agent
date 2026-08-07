@@ -431,6 +431,57 @@ def test_publish_prompt_meta_unverified_source_still_defaults_to_user() -> None:
         bare_event_bus.bus.unsubscribe(sub_name)
 
 
+def test_publish_prompt_meta_includes_image_filenames_when_present() -> None:
+    """`user_msg["images"]` (orchestrator._save_message_images's own return
+    shape, set by `_init_turn_messages` before the persisted user_msg
+    reaches `run_turn`) surfaces as `image_filenames` on the prompt_meta
+    payload, in the same order."""
+    sid = f"sid-meta-images-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-images-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid,
+            user_msg={
+                "id": "user-msg-img",
+                "images": [
+                    {"filename": "user-msg-img_0.png", "media_type": "image/png"},
+                    {"filename": "user-msg-img_1.jpg", "media_type": "image/jpeg"},
+                ],
+            },
+            assistant_message_id="asst-msg-img",
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert len(events) == 1
+        assert events[0].payload == {
+            "msg_id": "user-msg-img",
+            "origin": "user",
+            "image_filenames": ["user-msg-img_0.png", "user-msg-img_1.jpg"],
+        }
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
+def test_publish_prompt_meta_omits_image_filenames_key_when_no_images() -> None:
+    """Closed-set payload discipline: no images -> no `image_filenames`
+    key at all, never an empty-list placeholder."""
+    sid = f"sid-meta-noimages-{uuid.uuid4().hex}"
+    sub_name = f"test-owner-facts-meta-noimages-{uuid.uuid4().hex}"
+    captured = _subscribe_capture("prompt_meta", sub_name)
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_prompt_meta(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-noimg", "images": []},
+            assistant_message_id="asst-msg-noimg",
+        ))
+        events = [e for e in captured if e.sid == sid]
+        assert "image_filenames" not in events[0].payload
+    finally:
+        bare_event_bus.bus.unsubscribe(sub_name)
+
+
 def test_publish_prompt_meta_noop_without_user_msg_id() -> None:
     sid = f"sid-meta-noid-{uuid.uuid4().hex}"
     sub_name = f"test-owner-facts-meta-noid-{uuid.uuid4().hex}"

@@ -9,6 +9,13 @@ export interface CreateSessionOptions {
    * When omitted the backend's default runtime profile (pre-selected by the
    * modal) is used. */
   profilePattern?: RegExp;
+  /** When set, the model actually selected (by DOM option text) must match
+   * this pattern or session creation throws before the primary button is
+   * ever clicked — no session is created and no turn is spent. Use this for
+   * any spec whose real-money real-turn cost depends on the model
+   * selection actually taking (belt-and-suspenders on top of
+   * `modelPattern`, which only requests a match — this confirms it landed). */
+  assertSelectedModelMatches?: RegExp;
 }
 
 /** The session record POST /api/sessions returns (subset the specs assert). */
@@ -115,6 +122,20 @@ async function openConfiguredNewSessionModal(page: Page, options: CreateSessionO
 
     try {
       await configureSessionSelectors(page, options);
+      if (options.assertSelectedModelMatches) {
+        const selected = await page.evaluate(() => {
+          const el = document.querySelector<HTMLSelectElement>(
+            '[data-testid="new-session-model-select"]',
+          );
+          return el?.selectedOptions[0]?.textContent ?? "";
+        });
+        const pattern = options.assertSelectedModelMatches;
+        if (!new RegExp(pattern.source, pattern.flags).test(selected)) {
+          throw new Error(
+            `refusing to create a session: model select shows "${selected}", expected to match ${pattern}`,
+          );
+        }
+      }
       await primaryButton.waitFor({ state: "visible", timeout: 5_000 });
       await page.waitForFunction(
         () => {

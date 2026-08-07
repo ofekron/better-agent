@@ -113,6 +113,10 @@ class Attachment:
     name: str
     media_type: str
     ref: str
+    # Byte size when cheaply derivable at normalize time (file_attachment
+    # metadata rows carry it directly; decoded image-block length otherwise).
+    # None when not derivable — never a guessed/zero placeholder.
+    size: int | None = None
 
 
 # Always the originator's verbatim text — never backend-synthesized fixed

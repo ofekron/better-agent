@@ -18,10 +18,12 @@ import logging
 import re
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import auth
 import browser_trust
+import file_delivery
+from session_detail_api import resolve_session_image_path
 from backend.adapters.serialize import to_wire
 from backend.surface_contract.adapter import BetterAgentAdapter
 from backend.surface_contract.chat_surface import ChatSurface
@@ -243,6 +245,21 @@ async def get_search(session_id: str, q: str = "") -> JSONResponse:
     session_id = _validate_id(session_id, field="session_id")
     result = _require_chat().search(session_id, q)
     return JSONResponse(_result_body(result))
+
+
+@router.get(f"{_REST_PREFIX}/sessions/{{session_id}}/attachments/{{ref}}")
+async def get_attachment(session_id: str, ref: str) -> FileResponse:
+    """Streams one `Attachment.ref`'s bytes, confined to `session_id`'s own
+    blob directory — the SAME storage helper (and fail-closed traversal
+    confinement) `session_detail_api.get_session_image` uses, so a ref
+    from a different session or a malformed ref both 4xx exactly like that
+    route does; no separate resolve/validation path to drift out of sync."""
+    session_id = _validate_id(session_id, field="session_id")
+    ref = _validate_id(ref, field="ref")
+    path = resolve_session_image_path(session_id, ref)
+    if not await file_delivery.host.exists(path):
+        raise HTTPException(status_code=404, detail="attachment not found")
+    return FileResponse(path)
 
 
 # ---- REST read plane: session/project/provider/runs surfaces -------------
