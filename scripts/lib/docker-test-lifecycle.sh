@@ -63,11 +63,19 @@ docker_test_owner_is_alive() {
 }
 
 docker_test_reap_orphans() {
-  local container_id owner host_pid owner_start
-  for container_id in $(docker ps \
+  local container_id owner host_pid owner_start containers
+  # `for x in $(cmd)` discards cmd's own exit status (set -e does not check
+  # command substitutions used as a word-list source) — capture explicitly
+  # so a transient daemon error here is reported instead of silently
+  # skipping orphan reaping.
+  if ! containers="$(docker ps \
     --filter "label=${DOCKER_TEST_LABEL_PREFIX}.owner=true" \
     --filter "label=${DOCKER_TEST_LABEL_PREFIX}.host=${DOCKER_TEST_HOST}" \
-    --format '{{.ID}}'); do
+    --format '{{.ID}}')"; then
+    echo "docker-test-lifecycle: could not list containers for orphan reaping (daemon busy?) — skipping this pass" >&2
+    return 0
+  fi
+  for container_id in $containers; do
     owner="$(docker inspect --format \
       "{{index .Config.Labels \"${DOCKER_TEST_LABEL_PREFIX}.host\"}}|{{index .Config.Labels \"${DOCKER_TEST_LABEL_PREFIX}.owner-pid\"}}|{{index .Config.Labels \"${DOCKER_TEST_LABEL_PREFIX}.owner-start\"}}" \
       "$container_id" 2>/dev/null || true)"
