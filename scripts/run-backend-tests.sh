@@ -62,6 +62,22 @@
 # (its /repo is a frozen `git archive` snapshot baked into the image), so
 # --junitxml there would be written inside the --rm container and lost;
 # nothing in this repo currently combines --ref with --junitxml.
+#
+# Per-test timeout (BETTER_AGENT_TEST_TIMEOUT, seconds): forwarded as
+# `--timeout=<value> --timeout-method=signal` (pytest-timeout, see
+# backend/requirements-test.txt) ahead of any user-supplied pytest args, so
+# an explicit `-- --timeout=...` still wins. Unset by default — local runs
+# keep today's no-timeout behavior; CI sets it to 120s via
+# .github/workflows/backend-tests-selfhosted.yml's job env, not hardcoded
+# here, so this script's own default never changes for local dev. signal
+# over thread: the test image is always Linux, and pytest-timeout's thread
+# method can't safely interrupt a hung test at all (its own docs: on
+# timeout it dumps thread stacks and hard-kills the whole pytest process,
+# losing every remaining test in the run) — signal fails just the one
+# hung test via SIGALRM and lets the suite continue, which is what we
+# want. This was the exact gap in the 2026-08-07 incident: a single hung
+# test burned the full ~100-minute runner budget with zero diagnostic
+# because nothing bounded it.
 
 set -euo pipefail
 
@@ -207,6 +223,20 @@ else
   RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
 fi
 
+# Per-test timeout: kept in its own array (populated only via +=, never by
+# reading PYTEST_ARGS — empty-array reads trip set -u on bash 3.2, see the
+# coverage block below) and placed ahead of PYTEST_ARGS at the docker_test_run
+# call so an explicit `-- --timeout=...` from the caller still wins (pytest
+# keeps the last occurrence of a repeated flag). See the header comment for
+# the signal-vs-thread method rationale.
+TIMEOUT_PYTEST_ARGS=()
+if [ -n "${BETTER_AGENT_TEST_TIMEOUT:-}" ]; then
+  TIMEOUT_PYTEST_ARGS+=(
+    "--timeout=${BETTER_AGENT_TEST_TIMEOUT}"
+    --timeout-method=signal
+  )
+fi
+
 # Coverage: mount the output dir (the container runs --rm, so reports written
 # to its layer would be discarded) and append pytest-cov args. Scope/omit is
 # driven by backend/pyproject.toml, so --cov needs no explicit source.
@@ -237,6 +267,6 @@ fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 TEST_STATUS=0
-docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}" || TEST_STATUS=$?
+docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${TIMEOUT_PYTEST_ARGS[@]}" "${PYTEST_ARGS[@]}" || TEST_STATUS=$?
 docker_test_cleanup
 exit "$TEST_STATUS"
