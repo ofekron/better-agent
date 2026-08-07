@@ -34,6 +34,7 @@ from backend.adapters.normalize import (
     derive_link,
     enrich_typed_prompt_node,
     failure_payload_for_reason,
+    is_canonical_prompt_row,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
@@ -189,17 +190,41 @@ class _SurfaceState:
 def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     """Group ordered rows into (turn_id, rows) segments. A row is a turn
     boundary iff it normalizes to a TYPED_PROMPT node; rows before the
-    first boundary are dropped (no anchoring turn)."""
+    first boundary are dropped (no anchoring turn).
+
+    A TYPED_PROMPT-producing row is instead treated as the CURRENTLY OPEN
+    turn's own echo (dropped, not a boundary) only when BOTH: (1) that
+    turn's own anchor row (the row that opened it) `is_canonical_prompt_
+    row`, AND (2) this new row is NOT `is_canonical_prompt_row` — i.e. a
+    raw provider-transcript echo of the SAME prompt (see that function's
+    docstring). The `is_canonical_prompt_row` gate on the anchor itself
+    is required, not optional: pre-fix journaled data and bare test
+    fixtures with MULTIPLE real, separate turns never stamp `origin` on
+    ANY of their rows, so without this gate every row after the first
+    would be misrecognized as an echo and collapsed into one turn — a
+    real backward-compatibility regression. Once a turn IS anchored by a
+    canonical row, a second GENUINE canonical row (e.g. an interrupt)
+    still opens a new turn correctly, since it satisfies neither
+    condition (its own `is_canonical_prompt_row` is True)."""
     segments: list[tuple[str, list[dict]]] = []
     current_rows: list[dict] | None = None
     current_turn_id: str | None = None
+    current_prompt_row: dict | None = None
     for row in rows:
         provisional = normalize_journal_row(row, surface_id="_", turn_id="_", cv=CONTRACT_VERSION)
         prompt_node = next((n for n in provisional if n.kind == NodeKind.TYPED_PROMPT), None)
+        if (
+            prompt_node is not None
+            and current_prompt_row is not None
+            and is_canonical_prompt_row(current_prompt_row)
+            and not is_canonical_prompt_row(row)
+        ):
+            continue  # echo of the currently-open canonical turn's own prompt
         if prompt_node is not None:
             if current_rows is not None:
                 segments.append((current_turn_id, current_rows))
             current_turn_id = prompt_node.node_id
+            current_prompt_row = row
             current_rows = [row]
         elif current_rows is not None:
             current_rows.append(row)
@@ -684,6 +709,13 @@ class ChatSurfaceAdapter(ChatSurface):
                     continue
                 produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
                 prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
+                if (
+                    prompt_node is not None
+                    and state.current_prompt_row is not None
+                    and is_canonical_prompt_row(state.current_prompt_row)
+                    and not is_canonical_prompt_row(row)
+                ):
+                    continue  # echo of the currently-open canonical turn's own prompt
                 if prompt_node is not None:
                     turn_id = prompt_node.node_id
                     state.pending_tool_uses = {}

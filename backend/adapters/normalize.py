@@ -176,6 +176,38 @@ def typed_prompt_node_id(uuid_value: str | None) -> str | None:
     return uuid_value if isinstance(uuid_value, str) and uuid_value else None
 
 
+def is_canonical_prompt_row(row: dict) -> bool:
+    """True iff `row` is the backend-authored canonical TYPED_PROMPT row
+    (`turn_manager.TurnManager._publish_typed_prompt_journal`, journaled at
+    turn dispatch, `data["uuid"] == user_msg["id"]`) rather than a raw
+    provider-transcript ECHO of the same prompt — the CLI/SDK session
+    jsonl's own `type: "user"` line, tailed into the journal via
+    `jsonl_tailer.OwnedClaudeJsonlTailer`/`ingest_orphan` with a DIFFERENT
+    uuid and no ownership `msg_id` of its own (native-mode turns: the
+    SDK's live response stream never yields this line at all — only the
+    backup file-tailer's orphan path ever journals it, always
+    `msg_id=None`, on an unpredictable schedule — so `msg_id`/ownership
+    equality can never be used to recognize it).
+
+    The backend writer ALWAYS stamps `data["origin"]`; a raw provider
+    transcript line never carries that field (verified: `_split_image_
+    attachments`/`_content_to_text` are the only producers of a raw `type:
+    "user"` row's `data`, from `orchs.base._normalize_for_render`'s
+    pass-through of the provider's own line, which has no `origin` key).
+    Presence of `origin` is therefore a purely structural discriminator —
+    derivable from the row alone, independent of ingestion path or
+    ownership-resolution timing — used by `chat_adapter._segment_turns`/
+    `_on_event_written` to recognize an echo of the CURRENTLY OPEN turn's
+    own prompt and drop it rather than misfile it as a new turn boundary.
+    """
+    data = row.get("data")
+    return (
+        isinstance(data, dict)
+        and data.get("type") == "user"
+        and data.get("origin") is not None
+    )
+
+
 _PROMPT_ORIGIN_VALUES = {o.value for o in PromptOrigin}
 _SEND_MODE_VALUES = {s.value for s in SendMode}
 

@@ -459,6 +459,23 @@ function findNode(tree: Session, sessionId: string): Session | null {
   return null;
 }
 
+/** Surface v2 kill-the-flash: when the flag is ON, strip `sessionId`'s
+ * `messages` out of a legacy-sourced tree (REST select fetch, or a legacy
+ * reconcile fetch) before it lands in state. useSurfaceSession's onSnapshot
+ * (replaceMessages) exclusively owns that node's messages once its own
+ * hydration resolves — applying legacy messages on top would either cause
+ * a legacy-then-v2 flash (selectSession) or silently clobber v2-rendered
+ * content with stale legacy content (applySessionReconciled). Every other
+ * field on the node, and every other node in the tree, still reconciles
+ * normally — only this one node's `messages` are excluded. */
+function stripSurfaceOwnedMessages(tree: Session, sessionId: string): Session {
+  return readSurfaceV2Flag()
+    ? updateNodeById(tree, sessionId, (node) =>
+        !node.messages || node.messages.length === 0 ? node : { ...node, messages: [] }
+      )
+    : tree;
+}
+
 /** Resolve which existing assistant message a live WS turn-event should
  * be applied to, or -1 if none matches (caller then spawns a streaming
  * placeholder). Pure so the routing rule is unit-testable.
@@ -1983,22 +2000,17 @@ export function useSession(authStatus?: string) {
       // useSurfaceSession's onSnapshot (replaceMessages) exclusively owns
       // that node's messages once its own hydration resolves — applying
       // the legacy REST messages here first would cause exactly the
-      // legacy-then-v2 flash this is meant to avoid.
-      const stripSurfaceOwnedMessages = (t: Session): Session =>
-        readSurfaceV2Flag()
-          ? updateNodeById(t, id, (node) =>
-              !node.messages || node.messages.length === 0 ? node : { ...node, messages: [] }
-            )
-          : t;
+      // legacy-then-v2 flash this is meant to avoid. See
+      // `stripSurfaceOwnedMessages` (also reused by applySessionReconciled).
       setCurrentSession((prev) => {
         if (!prev || prev.id !== treeWithOpenedAt.id) {
-          return stripSurfaceOwnedMessages(treeWithOpenedAt);
+          return stripSurfaceOwnedMessages(treeWithOpenedAt, id);
         }
         const carried = carryDrafts(prev, treeWithOpenedAt);
         const reconciled = reconcilingCachedTree
           ? carried
           : preservePostRequestMessages(carried, prev, messageBaseline);
-        return stripSurfaceOwnedMessages(reconciled);
+        return stripSurfaceOwnedMessages(reconciled, id);
       });
       // Seed the seq cursor for the root AND every embedded fork —
       // each pane's WS subscribe sends its own since_seq.
@@ -3104,7 +3116,14 @@ export function useSession(authStatus?: string) {
               prev,
               messageBaseline,
             );
-            return applyReconcilePreserves(carried);
+            // Surface v2: this is the shared safety-net reconcile — it
+            // still applies for every non-content field (run state,
+            // metadata, forks, ...) on a v2-owned session, but must not
+            // let this legacy REST fetch's `messages` clobber the content
+            // useSurfaceSession already owns for `rootId`. Same strip as
+            // selectSession's kill-the-flash gating, keyed on the node
+            // this reconcile targets rather than the tree root.
+            return stripSurfaceOwnedMessages(applyReconcilePreserves(carried), rootId);
           });
           return undefined;
         });

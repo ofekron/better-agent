@@ -586,6 +586,184 @@ def test_publish_turn_error_meta_noop_without_user_msg_id():
         bare_event_bus.bus.unsubscribe(sub_name)
 
 
+# ---------------------------------------------------------------------------
+# P0 write-path fix: TurnManager._publish_typed_prompt_journal — the
+# backend-authored canonical TYPED_PROMPT row journaled at turn dispatch.
+# Published via `event_journal.publish_event` directly (not `bus.publish`),
+# so captured here by monkeypatching that call site rather than
+# subscribing to a bus pattern.
+# ---------------------------------------------------------------------------
+def _capture_publish_event():
+    """Monkeypatches `event_journal.publish_event` (the module-level
+    function `TurnManager._publish_typed_prompt_journal` resolves via its
+    own local `from event_journal import publish_event`, so patching the
+    module attribute is picked up at call time) and returns
+    (captured_kwargs, restore_fn)."""
+    import event_journal
+
+    captured: dict = {}
+    real_publish_event = event_journal.publish_event
+
+    async def _fake_publish_event(**kwargs):
+        captured.update(kwargs)
+
+        class _StubEventWritten:
+            pass
+
+        return _StubEventWritten()
+
+    event_journal.publish_event = _fake_publish_event
+
+    def _restore() -> None:
+        event_journal.publish_event = real_publish_event
+
+    return captured, _restore
+
+
+def test_publish_typed_prompt_journal_writes_canonical_agent_message_row() -> None:
+    sid = f"sid-typed-prompt-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-tp-1", "content": "hello there"},
+            assistant_message_id="asst-tp-1",
+        ))
+    finally:
+        restore()
+
+    assert captured["event_type"] == "agent_message"
+    assert captured["message_id"] == "asst-tp-1"
+    assert captured["context_id"] == sid
+    assert captured["data"] == {
+        "type": "user",
+        "uuid": "user-msg-tp-1",
+        "message": {"role": "user", "content": [{"type": "text", "text": "hello there"}]},
+        "origin": "user",
+    }
+
+
+def test_publish_typed_prompt_journal_maps_supervisor_source_to_supervisor_origin() -> None:
+    sid = f"sid-typed-prompt-supervisor-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-tp-2", "content": "do it", "source": "supervisor"},
+            assistant_message_id="asst-tp-2",
+        ))
+    finally:
+        restore()
+    assert captured["data"]["origin"] == "supervisor"
+
+
+def test_publish_typed_prompt_journal_includes_placeholder_attachments_for_images() -> None:
+    """Placeholder attachments (name/media_type only, ref='', size=None) —
+    `enrich_typed_prompt_node` fills `ref` positionally later from the
+    already-published `prompt_meta` fact's `image_filenames`, unchanged."""
+    sid = f"sid-typed-prompt-images-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid,
+            user_msg={
+                "id": "user-msg-tp-img",
+                "content": "look",
+                "images": [
+                    {"filename": "user-msg-tp-img_0.png", "media_type": "image/png"},
+                    {"filename": "user-msg-tp-img_1.jpg", "media_type": "image/jpeg"},
+                ],
+            },
+            assistant_message_id="asst-tp-img",
+        ))
+    finally:
+        restore()
+    assert captured["data"]["attachments"] == [
+        {"name": "user-msg-tp-img_0.png", "media_type": "image/png", "ref": "", "size": None},
+        {"name": "user-msg-tp-img_1.jpg", "media_type": "image/jpeg", "ref": "", "size": None},
+    ]
+
+
+def test_publish_typed_prompt_journal_omits_attachments_key_when_no_images() -> None:
+    sid = f"sid-typed-prompt-noimg-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-tp-noimg", "content": "hi", "images": []},
+            assistant_message_id="asst-tp-noimg",
+        ))
+    finally:
+        restore()
+    assert "attachments" not in captured["data"]
+
+
+def test_publish_typed_prompt_journal_noop_without_user_msg_id() -> None:
+    sid = f"sid-typed-prompt-noid-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid, user_msg={"content": "hi"}, assistant_message_id="asst-x",
+        ))
+    finally:
+        restore()
+    assert captured == {}
+
+
+def test_publish_typed_prompt_journal_noop_without_assistant_message_id() -> None:
+    sid = f"sid-typed-prompt-noasst-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid, user_msg={"id": "user-msg-x", "content": "hi"}, assistant_message_id="",
+        ))
+    finally:
+        restore()
+    assert captured == {}
+
+
+def test_publish_typed_prompt_journal_defaults_non_string_content_to_empty_text() -> None:
+    sid = f"sid-typed-prompt-badcontent-{uuid.uuid4().hex}"
+    captured, restore = _capture_publish_event()
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(
+            app_session_id=sid,
+            user_msg={"id": "user-msg-tp-bad", "content": None},
+            assistant_message_id="asst-tp-bad",
+        ))
+    finally:
+        restore()
+    assert captured["data"]["message"]["content"] == [{"type": "text", "text": ""}]
+
+
+def test_publish_typed_prompt_journal_noop_swallows_publish_exception() -> None:
+    """Must never raise even if the journal publish blows up — matches
+    `_publish_prompt_meta`'s own swallow-and-log convention."""
+    import event_journal
+    real_publish_event = event_journal.publish_event
+
+    async def _boom(**kwargs):
+        raise RuntimeError("journal is on fire")
+
+    event_journal.publish_event = _boom
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_typed_prompt_journal(  # must not raise
+            app_session_id=f"sid-typed-prompt-boom-{uuid.uuid4().hex}",
+            user_msg={"id": "user-msg-tp-boom", "content": "hi"},
+            assistant_message_id="asst-tp-boom",
+        ))
+    finally:
+        event_journal.publish_event = real_publish_event
+
+
 def test_publish_turn_error_meta_noop_without_assistant_message_id():
     sid = f"sid-err-meta-noasst-{uuid.uuid4().hex}"
     sub_name = f"test-owner-facts-err-meta-noasst-{uuid.uuid4().hex}"

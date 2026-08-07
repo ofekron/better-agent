@@ -407,23 +407,29 @@ class TurnManager:
     _PROMPT_ORIGIN_SIGNALS: dict[str, str] = {"supervisor": "supervisor"}
 
     @staticmethod
-    def _image_filenames(user_msg: dict) -> list[str]:
-        """Filenames `orchestrator._save_message_images` persisted for this
-        prompt's image blocks, in the SAME order the images were sent —
-        `user_msg["images"]` is `_init_turn_messages`'s own return value
-        from `_save_message_images` (`[{"filename", "media_type"}, ...]`),
-        keyed by `owner_id=user_msg["id"]` and index. `normalize.py`'s
-        `_split_image_attachments` derives its `Attachment`s from the
-        provider-echoed row in the SAME per-message order, so a positional
-        join (`enrich_typed_prompt_node`) is safe. Non-string/missing
-        entries are dropped rather than guessed."""
+    def _image_filename_records(user_msg: dict) -> list[dict]:
+        """`user_msg["images"]` entries with a valid `filename`, in the
+        SAME order the images were sent — `user_msg["images"]` is
+        `_init_turn_messages`'s own return value from `_save_message_
+        images` (`[{"filename", "media_type"}, ...]`), keyed by
+        `owner_id=user_msg["id"]` and index. `normalize.py`'s `_split_
+        image_attachments` derives its `Attachment`s from the provider-
+        echoed row in the SAME per-message order, so a positional join
+        (`enrich_typed_prompt_node`) is safe. Non-string/missing filenames
+        are dropped rather than guessed. Single source for BOTH
+        `_image_filenames` (prompt_meta's filename list) and
+        `_publish_typed_prompt_journal`'s placeholder attachments."""
         images = user_msg.get("images")
         if not isinstance(images, list):
             return []
         return [
-            img["filename"] for img in images
+            img for img in images
             if isinstance(img, dict) and isinstance(img.get("filename"), str)
         ]
+
+    @classmethod
+    def _image_filenames(cls, user_msg: dict) -> list[str]:
+        return [img["filename"] for img in cls._image_filename_records(user_msg)]
 
     async def _publish_prompt_meta(
         self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
@@ -484,6 +490,111 @@ class TurnManager:
         except Exception:
             logger.exception(
                 "prompt_meta bus publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
+            )
+
+    async def _publish_typed_prompt_journal(
+        self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
+    ) -> None:
+        """Backend-authored, persisted TYPED_PROMPT-shaped journal row for
+        the user's own prompt — closes the P0 gap: native-mode turns never
+        journal the user's prompt (`runner.py`'s SDK `receive_response()`
+        stream never yields a `type: "user"` event, so `_publish_provider_
+        stream_event` never sees one to journal), so `chat_adapter.
+        _segment_turns` finds no turn boundary and the v2 read plane
+        renders nothing for the turn even though `render_rev` still
+        advances on every provider-stream row.
+
+        Journaled as `type: "agent_message"`, `data: {"type": "user",
+        ...}` — the SAME shape `normalize._handle_user` already maps to a
+        TYPED_PROMPT node (mirroring the shape the CLI's own echoed `type:
+        "user"` transcript line would carry, had the SDK ever streamed
+        one) — no new normalize.py row-type branch is needed.
+
+        `data["uuid"]` is `user_msg["id"]` itself (never a fresh uuid):
+        deterministic and durable, so live and any later cold reload
+        derive the identical TYPED_PROMPT `node_id`
+        (`normalize.typed_prompt_node_id`) — the "canonical = f(user_msg
+        id)" identity this turn's prompt keeps forever.
+
+        `data["origin"]` is ALWAYS stamped (reusing `_PROMPT_ORIGIN_
+        SIGNALS`, identically to `_publish_prompt_meta`, so the two facts
+        about the same prompt never disagree) — this is deliberate: it is
+        what lets `backend.adapters.normalize.is_canonical_prompt_row`
+        tell this row apart from a LATER raw provider-transcript echo of
+        the SAME prompt (the CLI/SDK session jsonl's own `type: "user"`
+        line, orphan-tailed into the journal by `jsonl_tailer.
+        OwnedClaudeJsonlTailer` with a DIFFERENT uuid and — for native
+        mode — always `msg_id=None`, so ownership/msg_id equality can
+        never be used for this). `chat_adapter._segment_turns`/
+        `_on_event_written` use that discriminator to drop the echo
+        rather than misfile it as a second turn boundary — see
+        `is_canonical_prompt_row`'s docstring for the full convergence
+        argument (live, reconnect, and cold-reload all resolve to the
+        SAME single TYPED_PROMPT node).
+
+        `send_mode` is omitted for the same not-yet-reachable reason
+        `_publish_prompt_meta` omits it (see that method's docstring).
+
+        Images: `user_msg["images"]` filenames are known here, but the
+        actual bytes live only in `_save_message_images`'s on-disk copy
+        (never inlined into this row). This row stamps PLACEHOLDER
+        `data["attachments"]` entries (name/media_type only, `ref=""`,
+        `size=None`) so `normalize._handle_user`'s existing explicit-
+        attachment path produces one `Attachment` per image; the already-
+        published `prompt_meta` fact's `image_filenames` then fills `ref`
+        positionally via `enrich_typed_prompt_node`, completely
+        unchanged — the join itself is untouched by this method.
+
+        Ownership `msg_id` is `assistant_message_id` — the SAME convention
+        `_publish_prompt_meta` uses (see that method's docstring for the
+        verification trail) — so every render row of this turn shares one
+        ownership id, even though nothing currently joins on this row's
+        own ownership key.
+
+        Published via `event_journal.publish_event` directly — the same
+        funnel `_publish_provider_stream_event`/the `turn_started` fact
+        use, not the bus-publish helper `_publish_prompt_meta` uses — so
+        this addition needs no bump to `test_turn_manager_lifecycle_emit.
+        py`'s per-file emit-site funnel-count lock.
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        text = user_msg.get("content")
+        text = text if isinstance(text, str) else ""
+        origin = self._PROMPT_ORIGIN_SIGNALS.get(user_msg.get("source"), "user")
+        data: dict = {
+            "type": "user",
+            "uuid": prompt_msg_id,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            "origin": origin,
+        }
+        attachments = [
+            {"name": img["filename"], "media_type": img.get("media_type") or "", "ref": "", "size": None}
+            for img in self._image_filename_records(user_msg)
+        ]
+        if attachments:
+            data["attachments"] = attachments
+        try:
+            from event_journal import publish_event
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await publish_event(
+                session_id=root_id,
+                context_id=app_session_id,
+                event_type="agent_message",
+                data=data,
+                source="turn_manager.prompt_journal",
+                message_id=assistant_message_id,
+            )
+        except Exception:
+            logger.exception(
+                "typed prompt journal publish failed sid=%s msg_id=%s",
                 app_session_id, prompt_msg_id,
             )
 
@@ -2439,6 +2550,11 @@ class TurnManager:
                 prompt_uuid=self._resolve_prompt_uuid(user_msg),
             )
             await self._publish_prompt_meta(
+                app_session_id=app_session_id,
+                user_msg=user_msg,
+                assistant_message_id=new_msg["id"],
+            )
+            await self._publish_typed_prompt_journal(
                 app_session_id=app_session_id,
                 user_msg=user_msg,
                 assistant_message_id=new_msg["id"],

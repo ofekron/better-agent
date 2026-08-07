@@ -11,6 +11,7 @@ from backend.adapters.normalize import (
     derive_link,
     enrich_typed_prompt_node,
     failure_payload_for_reason,
+    is_canonical_prompt_row,
     normalize_journal_row,
     pair_tool_results,
     resolve_parents,
@@ -716,6 +717,50 @@ def test_enrich_typed_prompt_node_ignores_non_typed_prompt_nodes():
     assert nodes[0].kind == NodeKind.ASSISTANT_TEXT
     enriched = enrich_typed_prompt_node(nodes[0], row_data=row["data"], meta={"origin": "supervisor"})
     assert enriched is nodes[0]
+
+
+# ---------------------------------------------------------------------------
+# is_canonical_prompt_row — echo-dedup discriminator (P0 write-path fix).
+# ---------------------------------------------------------------------------
+def test_is_canonical_prompt_row_true_for_backend_authored_row():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "x",
+        "data": {
+            "type": "user", "uuid": "user-msg-1",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            "origin": "user",
+        },
+    }
+    assert is_canonical_prompt_row(row) is True
+
+
+def test_is_canonical_prompt_row_false_for_raw_provider_echo():
+    """A raw CLI/SDK session-jsonl `type: "user"` line never carries
+    `origin` — it is never backend-authored."""
+    row = {
+        "type": "agent_message", "seq": 2, "ts": "x",
+        "data": {
+            "type": "user", "uuid": "echo-uuid-1",
+            "message": {"role": "user", "content": "hi"},
+        },
+    }
+    assert is_canonical_prompt_row(row) is False
+
+
+def test_is_canonical_prompt_row_false_for_non_user_rows():
+    assistant_row = {
+        "type": "agent_message", "seq": 3, "ts": "x",
+        "data": {"type": "assistant", "uuid": "a1", "message": {"content": [{"type": "text", "text": "hi"}]}},
+    }
+    assert is_canonical_prompt_row(assistant_row) is False
+    assert is_canonical_prompt_row({"type": "prompt_meta", "data": {"origin": "user"}}) is False
+    assert is_canonical_prompt_row({"type": "agent_message", "data": None}) is False
+    assert is_canonical_prompt_row({"type": "agent_message"}) is False
+
+
+def test_is_canonical_prompt_row_false_when_origin_key_missing_even_if_empty_message():
+    row = {"type": "agent_message", "data": {"type": "user", "uuid": "u1", "message": {}}}
+    assert is_canonical_prompt_row(row) is False
 
 
 if __name__ == "__main__":

@@ -902,8 +902,11 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
         # `event.payload` is the enriched change dict that
         # `session_manager._fire` published. Same shape the legacy
         # `add_listener` callers received.
+        change = _session_change_from_event(event)
+        if change is None:
+            return
         try:
-            broadcaster.on_change(event.sid, _session_change_from_event(event))
+            broadcaster.on_change(event.sid, change)
         except Exception:
             logger.exception(
                 "bind_session_ws_broadcaster: on_change raised "
@@ -928,7 +931,21 @@ def unbind_session_ws_broadcaster() -> None:
     bus.unsubscribe("session_ws_broadcaster_on_change")
 
 
-def _session_change_from_event(event: BusEvent) -> dict:
+def _session_change_from_event(event: BusEvent) -> dict | None:
+    """Map a `session.*` BusEvent to the legacy `on_change(sid, change)`
+    shape the WS broadcaster expects.
+
+    `session_manager._fire` dual-publishes every mutation: `session.<kind>`
+    (this mapper's input) and, separately, `session.fire.<kind>` — an
+    additive owner-side fact namespace consumed by adapters (see
+    `adapters/session_adapter.py`'s own `session.fire.*` subscription), not
+    by the legacy broadcaster. Both match the `session.*` wildcard this
+    mapper's caller subscribes with, so `session.fire.*` facts must be
+    skipped here cleanly rather than mis-parsed as a `session.<kind>` event
+    (which would strip only the `session.` prefix, leaving a bogus
+    `fire.<kind>` kind that never matches the payload's real kind)."""
+    if event.type.startswith("session.fire."):
+        return None
     event_kind = event.type.removeprefix("session.")
     change = dict(event.payload)
     payload_kind = change.get("kind")
