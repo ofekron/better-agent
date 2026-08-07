@@ -432,6 +432,55 @@ docker_test_remove_current_container() {
   fi
 }
 
+# Resource caps/priority for the pytest-running container (NOT the
+# builder/registry infra, which is out of scope). Opt-in via env so local
+# dev keeps today's behavior when a knob is unset. Prints one docker flag
+# per line so callers can populate a plain bash array without namerefs or
+# eval (this repo also targets bash 3.2 — macOS's default /bin/bash).
+#
+#   BETTER_AGENT_TEST_CPUS       -> --cpus=<value>
+#                                    default "2", matching the cap this
+#                                    container has always run under
+#                                    (see ffc1caeea) — unset changes nothing.
+#   BETTER_AGENT_TEST_MEMORY     -> --memory=<value> and
+#                                    --memory-swap=<value> (same value, so a
+#                                    capped container can't spill onto swap
+#                                    and thrash instead of failing cleanly)
+#                                    default unset (no flag), matching the
+#                                    uncapped memory this container has
+#                                    always run under.
+#   BETTER_AGENT_TEST_CPU_SHARES -> --cpu-shares=<value>
+#                                    default unset (no flag; docker's own
+#                                    default weight of 1024 applies).
+#                                    Deliberately relative-weight, not a
+#                                    second hard ceiling: a lowered share
+#                                    only costs the container CPU when
+#                                    something else on the host is actually
+#                                    contending for it. On an idle host it
+#                                    can still burst up to its --cpus
+#                                    ceiling, so this is what buys "fast
+#                                    when idle, invisible when the user is
+#                                    working" without a fixed low --cpus
+#                                    value hurting cold-cache runs on an
+#                                    otherwise-idle machine.
+docker_test_resource_cap_args() {
+  local cpus="${BETTER_AGENT_TEST_CPUS:-2}"
+  local memory="${BETTER_AGENT_TEST_MEMORY:-}"
+  local shares="${BETTER_AGENT_TEST_CPU_SHARES:-}"
+  [ -n "$cpus" ] && printf -- '--cpus=%s\n' "$cpus"
+  if [ -n "$memory" ]; then
+    printf -- '--memory=%s\n' "$memory"
+    printf -- '--memory-swap=%s\n' "$memory"
+  fi
+  [ -n "$shares" ] && printf -- '--cpu-shares=%s\n' "$shares"
+  # Explicit: without this, the function's own exit status is that of the
+  # `shares` test above, which is false (1) whenever the shares knob is
+  # unset — under `set -e`, `x="$(docker_test_resource_cap_args)"` at a
+  # caller's top level would then abort the whole script even though
+  # nothing here failed.
+  return 0
+}
+
 docker_test_run() {
   local status
   DOCKER_TEST_CURRENT_CONTAINER="$DOCKER_TEST_CONTAINER_NAME"

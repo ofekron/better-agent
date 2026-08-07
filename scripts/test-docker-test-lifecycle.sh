@@ -155,6 +155,33 @@ assert_logged "run --name better-agent-test-backend-"
 assert_logged "--label com.better-agent.test.run="
 assert_not_logged "volume rm"
 
+# Resource caps: unset env preserves the long-standing --cpus=2 default and
+# emits neither --memory nor --cpu-shares (both previously absent).
+unset BETTER_AGENT_TEST_CPUS BETTER_AGENT_TEST_MEMORY BETTER_AGENT_TEST_CPU_SHARES
+default_cap_args="$(docker_test_resource_cap_args)"
+[ "$default_cap_args" = "--cpus=2" ] \
+  || fail "default resource cap args changed local behavior: $default_cap_args"
+
+# Setting the knobs must reach the actual docker invocation, memory paired
+# with a matching --memory-swap (no swap thrash), unset shares still absent.
+RUN_ARGS_UNDER_TEST=()
+while IFS= read -r cap_arg; do
+  RUN_ARGS_UNDER_TEST+=("$cap_arg")
+done < <(BETTER_AGENT_TEST_CPUS=4 BETTER_AGENT_TEST_MEMORY=2g docker_test_resource_cap_args)
+[ "${RUN_ARGS_UNDER_TEST[*]}" = "--cpus=4 --memory=2g --memory-swap=2g" ] \
+  || fail "set BETTER_AGENT_TEST_CPUS/_MEMORY did not produce expected docker flags: ${RUN_ARGS_UNDER_TEST[*]}"
+
+: > "$LOG"
+docker_test_run "${RUN_ARGS_UNDER_TEST[@]}" example -k smoke
+assert_logged "run --name better-agent-test-backend-"
+assert_logged "--cpus=4 --memory=2g --memory-swap=2g example -k smoke"
+
+# CPU shares is an independent, still-optional knob (relative weight, not a
+# hard ceiling) — absent unless explicitly set.
+shares_cap_args="$(BETTER_AGENT_TEST_CPU_SHARES=512 docker_test_resource_cap_args)"
+[ "$shares_cap_args" = "$(printf '%s\n%s' '--cpus=2' '--cpu-shares=512')" ] \
+  || fail "set BETTER_AGENT_TEST_CPU_SHARES did not produce expected docker flag: $shares_cap_args"
+
 for runner in "$HERE/run-backend-tests.sh" "$HERE/run-fullstack-tests.sh"; do
   grep -F 'source "$HERE/lib/docker-test-lifecycle.sh"' "$runner" >/dev/null \
     || fail "$runner does not source the shared lifecycle"

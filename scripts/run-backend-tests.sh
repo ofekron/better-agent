@@ -45,6 +45,23 @@
 # though only the pytest run itself needed the fresh code. The --ref path
 # still builds the `full` target (deps + COPY) from a `git archive` of the
 # pinned commit, since that path must test a frozen tree, not a live mount.
+#
+# Resource caps on the test container itself (docker_test_resource_cap_args
+# in lib/docker-test-lifecycle.sh): BETTER_AGENT_TEST_CPUS (default 2, same
+# as always), BETTER_AGENT_TEST_MEMORY (+ matching --memory-swap; default
+# unset/uncapped, same as always), BETTER_AGENT_TEST_CPU_SHARES (default
+# unset — docker's normal 1024 weight). All are no-ops for local dev unless
+# set; CI sets them per self-hosted runner in
+# .github/workflows/backend-tests-selfhosted.yml.
+#
+# Per-test-file timing telemetry: pass `-- --junitxml=<path>` (plain pytest
+# passthrough, no dedicated flag). For the default working-tree path above,
+# /repo is a live bind-mount of this repo, so a relative --junitxml path
+# lands directly on the host under backend/ once the container exits — no
+# extra mount needed. The --ref path's `full` image has no such bind mount
+# (its /repo is a frozen `git archive` snapshot baked into the image), so
+# --junitxml there would be written inside the --rm container and lost;
+# nothing in this repo currently combines --ref with --junitxml.
 
 set -euo pipefail
 
@@ -162,7 +179,13 @@ else
     -f "$SNAPSHOT_PATH/docker/Dockerfile.test" --target deps -t "$IMAGE_TAG" "$SNAPSHOT_PATH"
 fi
 
-RUN_ARGS=(--rm --cpus=2)
+RUN_ARGS=(--rm)
+# BETTER_AGENT_TEST_CPUS / _MEMORY / _CPU_SHARES (see
+# docker_test_resource_cap_args in lib/docker-test-lifecycle.sh) — unset
+# leaves this identical to the long-standing --cpus=2 default.
+while IFS= read -r resource_cap_arg; do
+  RUN_ARGS+=("$resource_cap_arg")
+done < <(docker_test_resource_cap_args)
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
