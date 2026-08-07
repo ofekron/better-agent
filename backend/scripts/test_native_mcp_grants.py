@@ -16,8 +16,10 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
+from contextlib import contextmanager
 
 import pytest
 
@@ -35,6 +37,27 @@ import native_mcp_grants as g  # noqa: E402
 
 def _decl(command="python3", args=("server.py",), env_keys=(), scopes=("global", "project"), package_fingerprint="fp-1"):
     return g.ServerDeclaration(command=command, args=args, env_keys=env_keys, scopes=scopes, package_fingerprint=package_fingerprint)
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextmanager
+def _captured_warnings():
+    """Single owner of the 'assert this store logged a warning' pattern."""
+    handler = _ListHandler()
+    g.logger.addHandler(handler)
+    g.logger.setLevel(logging.WARNING)
+    try:
+        yield handler.records
+    finally:
+        g.logger.removeHandler(handler)
 
 
 def test_global_grant_resolves_everywhere():
@@ -201,7 +224,6 @@ def test_schema_version_mismatch_is_treated_as_empty_not_raised():
     # taking down the whole extension-reconcile path over an optional
     # enhancement-layer store. Locking the actual behavior AND that the
     # degradation is loud (logged), not a silent "no grants".
-    import logging
     from json_store import write_json_durable
 
     decl = _decl()
@@ -211,22 +233,9 @@ def test_schema_version_mismatch_is_treated_as_empty_not_raised():
         "grants": [{"extension_id": "ext-w", "server_id": "a", "scope": "global", "target": "", "digest": decl.digest(), "created_at": "t"}],
     })
 
-    class _CaptureHandler(logging.Handler):
-        def __init__(self) -> None:
-            super().__init__()
-            self.records: list[logging.LogRecord] = []
-
-        def emit(self, record: logging.LogRecord) -> None:
-            self.records.append(record)
-
-    capture = _CaptureHandler()
-    g.logger.addHandler(capture)
-    g.logger.setLevel(logging.WARNING)
-    try:
+    with _captured_warnings() as records:
         grants = g.list_grants()
-    finally:
-        g.logger.removeHandler(capture)
-    warned = any("schema_version mismatch" in r.getMessage() for r in capture.records)
+    warned = any("schema_version mismatch" in r.getMessage() for r in records)
     assert grants == []
     assert warned, "an unrecognized schema_version must log a warning, not pass silently"
     write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
@@ -298,29 +307,259 @@ def test_add_grant_enforces_scope_target_invariants():
 def test_unparseable_grant_row_is_logged_not_silently_dropped():
     # M1: a malformed row is destroyed by the next unrelated write with no
     # signal unless the drop is logged.
-    import logging
     from json_store import write_json_durable
-
-    class _CaptureHandler(logging.Handler):
-        def __init__(self) -> None:
-            super().__init__()
-            self.records: list[logging.LogRecord] = []
-
-        def emit(self, record: logging.LogRecord) -> None:
-            self.records.append(record)
 
     write_json_durable(g._store_path(), {
         "schema_version": g.SCHEMA_VERSION,
         "grants": [{"extension_id": "ext-mal", "server_id": "a", "scope": "not-a-real-scope", "target": "", "digest": "d", "created_at": "t"}],
     })
-    capture = _CaptureHandler()
-    g.logger.addHandler(capture)
-    g.logger.setLevel(logging.WARNING)
-    try:
+    with _captured_warnings() as records:
         grants = g.list_grants()
-    finally:
-        g.logger.removeHandler(capture)
-    warned = any("dropping" in r.getMessage() for r in capture.records)
+    warned = any("dropping" in r.getMessage() for r in records)
     assert grants == []
     assert warned, "an unparseable grant row must be logged, not silently dropped"
     write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
+
+
+# --------------------------------------------------------------------------- #
+# Fail-closed corruption branches + the untested query/mutation surface.
+# Every branch below is security-relevant: this store persists grants that
+# gate native MCP server launches, so a corrupted file or a forgotten guard
+# must fail CLOSED (no grant resolves) and be loud about it.
+# --------------------------------------------------------------------------- #
+
+def test_read_non_list_grants_field_treated_as_empty_and_warned():
+    from json_store import write_json_durable
+
+    write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": "not-a-list"})
+    with _captured_warnings() as records:
+        grants = g.list_grants()
+    assert grants == []
+    assert any("non-list" in r.getMessage() for r in records), \
+        "a non-list grants field must warn, not silently resolve to empty"
+    write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
+
+
+def test_parse_grant_drops_rows_with_missing_keys_or_wrong_type():
+    # The except (KeyError, TypeError) arm: a row missing a required key, and
+    # a row that isn't a dict at all, are both dropped with a warning rather
+    # than crashing the whole reconcile. The next write rewrites only what
+    # parsed, so the malformed rows are permanently gone unless this logs.
+    from json_store import write_json_durable
+
+    write_json_durable(g._store_path(), {
+        "schema_version": g.SCHEMA_VERSION,
+        "grants": [
+            {"extension_id": "ext-miss", "server_id": "a", "scope": "global", "target": "", "created_at": "t"},  # missing digest -> KeyError
+            ["not", "a", "dict"],  # raw["scope"] -> TypeError
+        ],
+    })
+    with _captured_warnings() as records:
+        grants = g.list_grants()
+    assert grants == []
+    assert len(records) >= 2, f"each unparseable row should warn once: {len(records)}"
+    write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
+
+
+def test_list_grants_filters_by_scope_and_target():
+    decl = _decl()
+    g.add_grant(extension_id="ext-f", server_id="a", scope="global", target="", digest=decl.digest(), created_at="t")
+    sess_target = "sess-1"
+    g.add_grant(extension_id="ext-f", server_id="b", scope="session", target=sess_target, digest=decl.digest(), created_at="t")
+
+    assert [gr.server_id for gr in g.list_grants(extension_id="ext-f", scope="global")] == ["a"]
+    assert [gr.server_id for gr in g.list_grants(extension_id="ext-f", target=sess_target)] == ["b"]
+    assert [gr.server_id for gr in g.list_grants(scope="session", target=sess_target)] == ["b"]
+    g.remove_grants_for_extension("ext-f")
+
+
+def test_add_grant_rejects_invalid_scope():
+    decl = _decl()
+    with pytest.raises(ValueError):
+        g.add_grant(extension_id="ext-bad", server_id="a", scope="galaxy", target="", digest=decl.digest(), created_at="t")
+    assert g.list_grants(extension_id="ext-bad") == []
+
+
+def test_remove_grant_returns_false_when_absent():
+    # The not-found arm must NOT write the store and must report False.
+    decl = _decl()
+    g.add_grant(extension_id="ext-rm", server_id="a", scope="global", target="", digest=decl.digest(), created_at="t")
+    assert g.remove_grant(extension_id="ext-rm", server_id="a", scope="global", target="") is True
+    # Second removal of the same key: nothing to remove.
+    assert g.remove_grant(extension_id="ext-rm", server_id="a", scope="global", target="") is False
+    assert g.remove_grant(extension_id="ext-rm", server_id="missing", scope="global", target="") is False
+    assert g.list_grants(extension_id="ext-rm") == []
+
+
+def test_remove_grants_for_target_noop_when_none_match():
+    decl = _decl()
+    g.add_grant(extension_id="ext-nt", server_id="a", scope="global", target="", digest=decl.digest(), created_at="t")
+    # No grant has scope=session target=sess-x -> removed==0, store NOT rewritten.
+    assert g.remove_grants_for_target("session", "sess-x") == 0
+    assert len(g.list_grants(extension_id="ext-nt")) == 1
+    g.remove_grants_for_extension("ext-nt")
+
+
+def test_resolve_session_scope_matches_only_own_session():
+    decl = _decl()
+    g.add_grant(extension_id="ext-se", server_id="a", scope="session", target="sess-1", digest=decl.digest(), created_at="t")
+    declarations = {("ext-se", "a"): decl}
+
+    own = g.resolve_native_mcp_servers(active_declarations=declarations, session_id="sess-1")
+    other = g.resolve_native_mcp_servers(active_declarations=declarations, session_id="sess-2")
+    no_session = g.resolve_native_mcp_servers(active_declarations=declarations)
+    assert "ext-se:a" in own
+    assert "ext-se:a" not in other
+    assert "ext-se:a" not in no_session
+    g.remove_grants_for_extension("ext-se")
+
+
+def test_resolve_turn_scope_matches_only_own_turn():
+    decl = _decl()
+    target = g.turn_target("root-1", "turn-1")
+    assert target is not None
+    g.add_grant(extension_id="ext-tu", server_id="a", scope="turn", target=target, digest=decl.digest(), created_at="t")
+    declarations = {("ext-tu", "a"): decl}
+
+    own = g.resolve_native_mcp_servers(active_declarations=declarations, root_id="root-1", turn_id="turn-1")
+    other = g.resolve_native_mcp_servers(active_declarations=declarations, root_id="root-1", turn_id="turn-9")
+    assert "ext-tu:a" in own
+    assert "ext-tu:a" not in other
+    g.remove_grants_for_extension("ext-tu")
+
+
+def test_resolve_corrupted_scope_row_never_matches():
+    # A scope outside VALID_SCOPES can only enter the store by direct file
+    # corruption (add_grant rejects it). _parse_grant must drop it on read so
+    # the resolver never sees it -- pin that drop: a bogus-scope row resolves
+    # to nothing even when its declaration is active.
+    from json_store import write_json_durable
+
+    decl = _decl()
+    write_json_durable(g._store_path(), {
+        "schema_version": g.SCHEMA_VERSION,
+        "grants": [{
+            "extension_id": "ext-co", "server_id": "a", "scope": "galaxy", "target": "",
+            "digest": decl.digest(), "created_at": "t",
+        }],
+    })
+    resolved = g.resolve_native_mcp_servers(
+        active_declarations={("ext-co", "a"): decl},
+        session_id="sess-1", root_id="r1", turn_id="t1", project_path="/tmp/x",
+    )
+    assert resolved == {}
+    write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
+
+
+def test_project_target_separator_guard_fires_even_when_normalize_lets_sep_through():
+    # project_target's separator guard is defense-in-depth: it must reject a
+    # forgeable key even if project_store._normalize happened to preserve the
+    # separator char. _normalize normally rejects these paths, which would
+    # leave this guard unexercised; pin it directly so a future relaxation
+    # of _normalize can't silently re-open the forgeable-key path.
+    import project_store
+
+    sep = g._TARGET_SEP
+    real_normalize = project_store._normalize
+
+    def _leak_sep(path, node_id="primary"):
+        if sep in str(path):
+            return f"leaked{sep}normalized"
+        return real_normalize(path, node_id)
+
+    project_store._normalize = _leak_sep
+    try:
+        # Sep reaches the guard via the normalized component.
+        assert g.project_target("primary", f"/tmp/x{sep}evil") is None
+        # Sep reaches the guard via the resolved_node_id component.
+        assert g.project_target(f"evil{sep}node", "/tmp/x") is None
+    finally:
+        project_store._normalize = real_normalize
+
+
+def test_rewrite_project_paths_repairs_matching_targets_and_skips_the_rest():
+    import project_store
+
+    decl = _decl()
+    old_path = "/tmp/proj-old"
+    new_path = "/tmp/proj-new"
+    old_norm = project_store._normalize(old_path, "primary")
+    new_norm = project_store._normalize(new_path, "primary")
+    assert old_norm is not None and new_norm is not None
+
+    target = g.project_target("primary", old_path)
+    assert target == f"primary{g._TARGET_SEP}{old_norm}"
+    g.add_grant(extension_id="ext-rw", server_id="match", scope="project", target=target, digest=decl.digest(), created_at="t")
+    # An unrelated global grant and an unrelated project grant on another node
+    # must both be left untouched.
+    g.add_grant(extension_id="ext-rw", server_id="glob", scope="global", target="", digest=decl.digest(), created_at="t")
+    other_target = f"other-node{g._TARGET_SEP}{old_norm}"
+    g.add_grant(extension_id="ext-rw", server_id="other", scope="project", target=other_target, digest=decl.digest(), created_at="t")
+
+    g.rewrite_project_paths({("primary", old_norm): new_norm})
+
+    grants = {gr.server_id: gr.target for gr in g.list_grants(extension_id="ext-rw")}
+    assert grants["match"] == f"primary{g._TARGET_SEP}{new_norm}"
+    assert grants["glob"] == ""
+    assert grants["other"] == other_target  # different node, untouched
+    g.remove_grants_for_extension("ext-rw")
+
+
+def test_rewrite_project_paths_skips_identity_and_empty_rewrites():
+    decl = _decl()
+    target = g.project_target("primary", "/tmp/proj-stable")
+    g.add_grant(extension_id="ext-id", server_id="a", scope="project", target=target, digest=decl.digest(), created_at="t")
+
+    # Empty rewrites map -> early return, no write.
+    g.rewrite_project_paths({})
+    assert [gr.target for gr in g.list_grants(extension_id="ext-id")] == [target]
+    # A rewrite that maps old->same is not a change; target stays.
+    import project_store
+    norm = project_store._normalize("/tmp/proj-stable", "primary")
+    g.rewrite_project_paths({("primary", norm): norm})
+    assert [gr.target for gr in g.list_grants(extension_id="ext-id")] == [target]
+    g.remove_grants_for_extension("ext-id")
+
+
+def test_rewrite_project_paths_skips_project_rows_with_malformed_targets():
+    # A project-scope row whose target isn't a valid "node\x1fpath" string
+    # (only reachable via direct file corruption) must be skipped, not crash
+    # the repair pass. Pins the continue at the malformed-target guard.
+    from json_store import write_json_durable
+
+    decl = _decl()
+    write_json_durable(g._store_path(), {
+        "schema_version": g.SCHEMA_VERSION,
+        "grants": [
+            {"extension_id": "ext-mf", "server_id": "ok", "scope": "project",
+             "target": f"primary{g._TARGET_SEP}/tmp/old", "digest": decl.digest(), "created_at": "t"},
+            # malformed: project scope but target has no separator -> skipped
+            {"extension_id": "ext-mf", "server_id": "bad", "scope": "project",
+             "target": "no-separator-here", "digest": decl.digest(), "created_at": "t"},
+        ],
+    })
+    g.rewrite_project_paths({("primary", "/tmp/old"): "/tmp/new"})
+    grants = {gr.server_id: gr.target for gr in g.list_grants(extension_id="ext-mf")}
+    assert grants["ok"] == f"primary{g._TARGET_SEP}/tmp/new"
+    assert grants["bad"] == "no-separator-here"  # untouched
+    write_json_durable(g._store_path(), {"schema_version": g.SCHEMA_VERSION, "grants": []})
+
+
+def test_project_target_returns_none_when_project_store_rejects_path():
+    # project_target delegates normalization to project_store and fails closed
+    # (None) when that normalization itself rejects the path -- e.g. an empty
+    # path. This is the fail-closed arm separate from the separator guard.
+    assert g.project_target("primary", "") is None
+
+
+def test_validate_scope_target_is_noop_for_unknown_scope():
+    # _validate_scope_target enforces scope<->target shape for the four valid
+    # scopes; an unknown scope is a no-op here (no raise) because scope
+    # validity is gated upstream in add_grant. Pin that contract: an unknown
+    # scope must not raise a misleading error out of this helper.
+    g._validate_scope_target("galaxy", "anything")  # no raise
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-v"]))

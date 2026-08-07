@@ -424,7 +424,7 @@ def resolve_native_mcp_servers(
             matched = session_id is not None and grant.target == session_id
         elif grant.scope == "turn":
             matched = want_turn_target is not None and grant.target == want_turn_target
-        else:
+        else:  # pragma: no cover - no out-of-scope grant reaches here: add_grant rejects unknown scopes and _parse_grant drops them on read
             matched = False
         if not matched:
             continue
