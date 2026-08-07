@@ -3600,12 +3600,20 @@ def test_summary_index_cache_is_sidecar() -> None:
 def test_session_store_sessions_dir_is_env_aware_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
     assert "_SESSIONS_DIR: Path | None = None" in source
+    assert "_SESSIONS_DIR_RAW: Path | None = None" in source
     assert "_SESSIONS_DIR_READY = False" in source
     assert "_SESSIONS_DIR_READY_LOCK = threading.Lock()" in source
     sessions_dir_start = source.index("def _sessions_dir()")
     sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
     sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
-    assert 'resolved = _STORAGE_IDENTITY.get() or (ba_home() / "sessions")' in sessions_dir_source
+    assert 'raw = ba_home() / "sessions" if identity is None else identity' in sessions_dir_source
+    # The no-scope default path must canonicalize the same way
+    # `_storage_identity_scope` does (`.resolve()`), or a symlinked home
+    # compares unequal to a lease taken on its real path. That resolve is
+    # memoized on `raw` so the hot no-scope request path only pays the
+    # realpath syscall when `ba_home()` itself changes.
+    assert "elif _SESSIONS_DIR_RAW == raw and _SESSIONS_DIR is not None:" in sessions_dir_source
+    assert "resolved = raw.resolve()" in sessions_dir_source
     assert "_active_storage_identity != resolved" in sessions_dir_source
     assert "if _SESSIONS_DIR == resolved:" in sessions_dir_source
     assert "_reset_home_scoped_caches()" in sessions_dir_source

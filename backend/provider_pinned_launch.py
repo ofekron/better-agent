@@ -606,6 +606,15 @@ def sdk_launch_cache_root() -> Path:
     entry lives under — the additional trusted prefix a hydrated
     `MaterializedSdkLaunch` may resolve into, alongside `run_dir` and
     `trusted_system_interpreter_path`.
+
+    Returned fully resolved (`.resolve(strict=True)`, symlinks stripped) so
+    every caller that compares an already-resolved path (e.g. runner.py's
+    pinned-launch check, which resolves the launched executable before
+    comparing) shares the identical symlink-free identity. `ba_home()`
+    itself is allowed to return an unresolved path — e.g. the
+    `~/.better-agent` alias `paths._ensure_default_alias` creates pointing
+    at the real `~/.better-claude` — and without resolving here too, a
+    genuinely-pinned CLI would compare unequal to its own trusted root.
     """
     try:
         ancestor = ba_home()
@@ -613,6 +622,7 @@ def sdk_launch_cache_root() -> Path:
             ancestor = ancestor / name
             ancestor.mkdir(mode=0o700, exist_ok=True)
             make_private_directory(ancestor)
+        ancestor = ancestor.resolve(strict=True)
     except (OSError, PermissionError) as exc:
         raise ExecutionContractError(
             "SDK launch cache is unavailable",
