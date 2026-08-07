@@ -17,7 +17,6 @@ from codex_execution_common import (
     ExecutionContractError,
     SHA256_RE,
     canonical_json,
-    parallel_map,
     required_integer,
     required_string,
     timed_contract_step,

@@ -50,7 +50,7 @@ from communication_modes import (
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     append_ask_response_contract,
 )
-from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
+from provider import ProviderSuspendedError, default_provider, get_provider, known_providers
 from trace_collector import (
     extract_provider_result_token_usage,
     merge_token_usages,
