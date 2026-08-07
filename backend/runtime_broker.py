@@ -69,7 +69,7 @@ class RuntimeBroker:
         self._directory.mkdir(parents=True, exist_ok=True)
         if self._directory.is_symlink() or not self._directory.is_dir():
             raise RuntimeError("runtime broker directory is invalid")
-        if os.name == "nt":
+        if os.name == "nt":  # pragma: no cover - Windows named-pipe broker
             self.address = rf"pipe:\\.\pipe\better-agent-{secrets.token_hex(16)}"
             target = self._serve_pipe
         else:
@@ -87,7 +87,7 @@ class RuntimeBroker:
             target = self._serve_unix
         self._thread = threading.Thread(target=target, name="runtime-broker", daemon=True)
         self._thread.start()
-        if not self._ready.wait(timeout=5):
+        if not self._ready.wait(timeout=5):  # pragma: no cover - serve thread always sets _ready in success and bind-failure paths; the deadline only fires on a non-deterministic thread hang
             self.stop()
             raise RuntimeError("runtime broker did not start")
         if self._start_error is not None:
@@ -101,12 +101,12 @@ class RuntimeBroker:
         listener = self._listener
         if isinstance(listener, socket.socket):
             listener.close()
-        elif listener is not None:
+        elif listener is not None:  # pragma: no cover - Windows multiprocessing.connection.Listener teardown
             try:
                 listener.close()
             except OSError:
                 pass
-        if self.address.startswith("pipe:"):
+        if self.address.startswith("pipe:"):  # pragma: no cover - Windows named-pipe teardown
             try:
                 from multiprocessing.connection import Client
 
@@ -116,7 +116,7 @@ class RuntimeBroker:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=5)
-            if thread.is_alive():
+            if thread.is_alive():  # pragma: no cover - requires a serve thread that ignores _stop past the join deadline; not deterministically reproducible
                 raise RuntimeError("runtime broker did not stop")
         if self.address.startswith("unix:"):
             try:
@@ -146,7 +146,10 @@ class RuntimeBroker:
             return
         self._ready.set()
         listener.settimeout(0.5)
-        while not self._stop.is_set():
+        # The loop has two exits (flag check at the top, OSError break when
+        # stop() closes the listener); which one fires is a thread-timing race,
+        # so don't enforce both arcs in a single run.
+        while not self._stop.is_set():  # pragma: no branch
             try:
                 connection, _ = listener.accept()
             except TimeoutError:
@@ -161,7 +164,7 @@ class RuntimeBroker:
                 except Exception as exc:
                     _reply_error(lambda payload: _send_frame(connection, payload), exc)
 
-    def _serve_pipe(self) -> None:
+    def _serve_pipe(self) -> None:  # pragma: no cover - Windows named-pipe server
         address = self.address.removeprefix("pipe:")
         try:
             listener = Listener(address, family="AF_PIPE", authkey=None)
@@ -198,12 +201,12 @@ def _require_posix_peer(connection: socket.socket) -> None:
     if sys.platform.startswith("linux"):
         raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         _pid, uid, _gid = struct.unpack("3i", raw)
-    elif sys.platform == "darwin" and hasattr(socket, "LOCAL_PEERCRED"):
+    elif sys.platform == "darwin" and hasattr(socket, "LOCAL_PEERCRED"):  # pragma: no cover - macOS peer-cred
         raw = connection.getsockopt(0, socket.LOCAL_PEERCRED, 8)
         _version, uid = struct.unpack("II", raw)
-    elif hasattr(connection, "getpeereid"):
+    elif hasattr(connection, "getpeereid"):  # pragma: no cover - BSD getpeereid
         uid, _gid = connection.getpeereid()
-    else:
+    else:  # pragma: no cover - no peer-cred implementation
         raise PermissionError("runtime broker cannot verify the local peer")
     if uid != expected_uid:
         raise PermissionError("runtime broker peer belongs to a different user")
@@ -213,7 +216,7 @@ _win32_prototypes_declared = False
 _WIN32_PROTOTYPE_LOCK = threading.Lock()
 
 
-def _declare_win32_prototypes() -> None:
+def _declare_win32_prototypes() -> None:  # pragma: no cover - Windows ctypes prototypes
     """Give every Win32 call below an explicit signature, once.
 
     Without argtypes/restype ctypes marshals a Python int as a 32-bit C
@@ -265,7 +268,7 @@ def _declare_win32_prototypes() -> None:
         _win32_prototypes_declared = True
 
 
-def _require_windows_peer(pipe_handle: int) -> None:
+def _require_windows_peer(pipe_handle: int) -> None:  # pragma: no cover - Windows peer validation
     if os.name != "nt":
         raise PermissionError("Windows peer validation is unavailable")
     _declare_win32_prototypes()
@@ -281,7 +284,7 @@ def _require_windows_peer(pipe_handle: int) -> None:
         raise PermissionError("runtime broker peer belongs to a different user")
 
 
-def _windows_process_sid(pid: int) -> str:
+def _windows_process_sid(pid: int) -> str:  # pragma: no cover - Windows SID resolution
     from ctypes import wintypes
 
     _declare_win32_prototypes()
