@@ -92,7 +92,9 @@ function frame(node: NodeWire, render_rev: number): NodeUpsertFrame {
 const TYPED_PROMPT_FRAME = frame(
   {
     cv: 1,
-    node_id: TURN_ID,
+    // Real wire shape: the prompt node's id is distinct from its turn_id
+    // (see the live-turn-birth suite's captured frames).
+    node_id: `prompt:${TURN_ID}`,
     parent_id: null,
     turn_id: TURN_ID,
     surface_id: SURFACE_ID,
@@ -236,9 +238,26 @@ describe("ChatSurfaceView native rendering (component tier)", () => {
     const root = await screen.findByTestId("surface-chat-view");
     // Assert on the assistant node specifically — the prompt fixture also
     // contains the literal "PONG", so a whole-view text match is vacuous.
-    await waitFor(() => {
-      const assistant = root.querySelector('[data-testid="surface-assistant-text"]');
-      expect(assistant?.textContent).toContain("PONG");
-    });
-  });
+    //
+    // Diagnosed: with the strengthened assertion this element was found but
+    // EMPTY on the first pass, even though ThinkingView (also attached via
+    // the exact same null-parent_id -> entry.turn.node_id container path in
+    // state.ts) rendered its full text immediately — proving the store/view
+    // wiring for null-parent live nodes under a freshly-born turn is
+    // correct. The gap is test-infrastructure only: AssistantTextView's
+    // MessageBox is a SEPARATE React.lazy-loaded module
+    // (components/MessageBubble.tsx, distinct from ThinkingBlock's own lazy
+    // chunk) whose first cold dynamic import in a given test FILE can
+    // outrun waitFor's default 1000ms timeout — the exact pattern already
+    // documented/guarded in tests/surface/render.test.tsx ("the first
+    // dynamic import of that (large) module in a test run can take longer
+    // than waitFor's default timeout").
+    await waitFor(
+      () => {
+        const assistant = root.querySelector('[data-testid="surface-assistant-text"]');
+        expect(assistant?.textContent).toContain("PONG");
+      },
+      { timeout: 8000 },
+    );
+  }, 10000);
 });
